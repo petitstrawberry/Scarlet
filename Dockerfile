@@ -15,6 +15,7 @@ RUN apt install -y qemu-system-riscv64
 
 # Install Rust and RISC-V target
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
+    rustup default nightly && \
     rustup install nightly && \
     rustup component add rust-src --toolchain nightly && \
     rustup target add riscv64gc-unknown-none-elf
