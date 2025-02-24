@@ -1,5 +1,5 @@
 # Scarlet
-Minimal OS written in Rust
+Minimal OS written in Rust [WIP]
 
 ## Build and run
 
