@@ -1,0 +1,11 @@
+[package]
+name = "Scarlet"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "kernel"
+path = "kernel/src/main.rs"
+
+[dependencies]
+slab_allocator_rs = "1.0.2"
