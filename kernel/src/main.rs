@@ -14,6 +14,7 @@ pub mod earlycon;
 use core::panic::PanicInfo;
 use arch::get_arch;
 use sched::scheduler::Scheduler;
+use sched::scheduler::get_scheduler;
 use traits::arch::Arch;
 use mem::allocator::init_heap;
 
@@ -36,7 +37,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
     /* After this point, we can use the heap */
     /* Serial console also works */
     println!("[Scarlet Kernel] Initializing scheduler...");
-    let mut scheduler = Scheduler::new();
+    let scheduler = get_scheduler();
     println!("[Scarlet Kernel] Scheduler will start...");
     scheduler.schedule();
     loop {} 

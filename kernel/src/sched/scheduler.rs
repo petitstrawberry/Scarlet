@@ -13,13 +13,27 @@ use super::{dispatcher::Dispatcher, task::Task};
 
 const NUM_OF_CPUS: usize = 8;
 
+static mut SCHEDULER: Option<Scheduler> = None;
+
+pub fn get_scheduler() -> &'static mut Scheduler {
+    unsafe {
+        match SCHEDULER {
+            Some(ref mut s) => s,
+            None => {
+                SCHEDULER = Some(Scheduler::new());
+                get_scheduler()
+            }
+        }
+    }
+}
+
 pub struct Scheduler {
     task_queue: [Vec<Task>; NUM_OF_CPUS],
     dispatcher: [Dispatcher; NUM_OF_CPUS],
 }
 
 impl Scheduler {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Scheduler {
             task_queue: [const { Vec::new() }; NUM_OF_CPUS],
             dispatcher: [const { Dispatcher::new() }; NUM_OF_CPUS],
