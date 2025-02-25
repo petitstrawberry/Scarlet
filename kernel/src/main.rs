@@ -13,7 +13,6 @@ pub mod earlycon;
 
 use core::panic::PanicInfo;
 use arch::get_arch;
-use sched::scheduler::Scheduler;
 use sched::scheduler::get_scheduler;
 use traits::arch::Arch;
 use mem::allocator::init_heap;
