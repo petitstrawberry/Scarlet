@@ -12,9 +12,8 @@ pub mod sched;
 pub mod earlycon;
 
 use core::panic::PanicInfo;
-use arch::get_arch;
 use sched::scheduler::get_scheduler;
-use traits::arch::Arch;
+use arch::Arch;
 use mem::allocator::init_heap;
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
@@ -29,7 +28,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
     early_println!("Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Initializing arch...");
-    let mut arch = get_arch(cpu_id);
+    let mut arch = Arch::new(cpu_id);
     arch.init(cpu_id);
     early_println!("[Scarlet Kernel] Initializing heap...");
     init_heap();
@@ -46,7 +45,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
-    let mut arch = get_arch(cpu_id);
+    let mut arch = Arch::new(cpu_id);
     arch.init(cpu_id);
     loop {}
 }

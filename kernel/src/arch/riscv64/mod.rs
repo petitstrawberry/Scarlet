@@ -2,7 +2,6 @@ use core::arch::asm;
 use core::mem::transmute;
 use trap::_trap_entry;
 
-use crate::traits::arch::Arch;
 use crate::early_println;
 use crate::early_print;
 
@@ -15,9 +14,7 @@ pub mod earlycon;
 
 pub use earlycon::*;
 
-pub fn get_arch(cpu_id: usize) -> Riscv64 {
-    Riscv64::new(cpu_id)
-}
+pub type Arch = Riscv64;
 
 #[repr(align(4))]
 pub struct Riscv64 {
@@ -30,10 +27,8 @@ impl Riscv64 {
     pub fn new(cpu_id: usize) -> Self {
         Riscv64 { hartid: cpu_id as u64, epc: 0, regs: [0; 32] }
     }
-}
 
-impl Arch for Riscv64 {
-    fn init(&mut self, cpu_id: usize) {
+    pub fn init(&mut self, cpu_id: usize) {
         early_println!("[riscv64] Hart {}: Initializing core....", cpu_id);
         trap_init(self);
     }
