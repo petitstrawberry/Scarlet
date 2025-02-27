@@ -63,12 +63,13 @@ impl Scheduler {
         let cpu_id = 0;
 
         let timer = get_kernel_timer();
+        timer.stop(cpu_id);
         timer.set_interval_us(cpu_id, self.interval);
+        enable_interrupt();
 
-        while !self.task_queue[cpu_id].is_empty() {
+        if !self.task_queue[cpu_id].is_empty() {
             timer.start(cpu_id);
             self.run();
-            timer.stop(cpu_id);
         }
         idle();
     }
