@@ -70,3 +70,19 @@ fn trap_init(riscv: &mut Riscv64) {
         );
     }
 }
+
+pub fn enable_interrupt() {
+    unsafe {
+        asm!("
+        csrsi sstatus, 0x2
+        ");
+    }
+}
+
+pub fn disable_interrupt() {
+    unsafe {
+        asm!("
+        csrci sstatus, 0x2
+        ");
+    }
+}
