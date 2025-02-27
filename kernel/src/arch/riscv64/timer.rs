@@ -26,11 +26,37 @@ impl Stimer {
     pub fn start(&mut self) {
         self.running = true;
         sbi_set_timer(self.next_event);
+        let mut sie: usize;
+        unsafe {
+            asm!(
+                "csrr {0}, sie",
+                out(reg) sie,
+            );
+            /* Enable timer interrupt */
+            sie |= 1 << 5;
+            asm!(
+                "csrw sie, {0}",
+                in(reg) sie,
+            );
+        }
     }
 
     pub fn stop(&mut self) {
         self.running = false;
         sbi_set_timer(0xffffffff_ffffffff);
+        let mut sie: usize;
+        unsafe {
+            asm!(
+                "csrr {0}, sie",
+                out(reg) sie,
+            );
+            /* Disable timer interrupt */
+            sie &= !(1 << 5);
+            asm!(
+                "csrw sie, {0}",
+                in(reg) sie,
+            );
+        }
     }
 
     pub fn is_running(&self) -> bool {
