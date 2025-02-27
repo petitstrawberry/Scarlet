@@ -10,11 +10,13 @@ pub mod mem;
 pub mod traits;
 pub mod sched;
 pub mod earlycon;
+pub mod environment;
 
 use core::panic::PanicInfo;
 use sched::scheduler::get_scheduler;
 use arch::Arch;
 use mem::allocator::init_heap;
+use timer::get_kernel_timer;
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[panic_handler]
@@ -34,6 +36,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
     init_heap();
     /* After this point, we can use the heap */
     /* Serial console also works */
+    println!("[Scarlet Kernel] Initializing timer...");
+    get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
     println!("[Scarlet Kernel] Scheduler will start...");

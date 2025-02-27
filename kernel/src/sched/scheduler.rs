@@ -6,12 +6,13 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use alloc::string::String;
 
-use crate::arch::instruction::idle;
+use crate::{arch::instruction::idle, environment::NUM_OF_CPUS, timer::get_kernel_timer};
 
 use super::{dispatcher::Dispatcher, task::Task};
 
-const NUM_OF_CPUS: usize = 8;
+
 
 static mut SCHEDULER: Option<Scheduler> = None;
 
@@ -30,6 +31,7 @@ pub fn get_scheduler() -> &'static mut Scheduler {
 pub struct Scheduler {
     task_queue: [Vec<Task>; NUM_OF_CPUS],
     dispatcher: [Dispatcher; NUM_OF_CPUS],
+    interval: u64, /* in microseconds */
 }
 
 impl Scheduler {
@@ -37,6 +39,10 @@ impl Scheduler {
         Scheduler {
             task_queue: [const { Vec::new() }; NUM_OF_CPUS],
             dispatcher: [const { Dispatcher::new() }; NUM_OF_CPUS],
+            interval: 1000, /* 1ms */
+        }
+    }
+
         }
     }
 
@@ -44,7 +50,7 @@ impl Scheduler {
         self.task_queue[cpu_id].push(task);
     }
 
-    pub fn run(&mut self) {
+    fn run(&mut self) {
         let cpu_id = 0;
         let task = self.task_queue[cpu_id].pop();
         match task {
@@ -55,9 +61,14 @@ impl Scheduler {
 
     pub fn schedule(&mut self) {
         let cpu_id = 0;
-        
+
+        let timer = get_kernel_timer();
+        timer.set_interval_us(cpu_id, self.interval);
+
         while !self.task_queue[cpu_id].is_empty() {
+            timer.start(cpu_id);
             self.run();
+            timer.stop(cpu_id);
         }
         idle();
     }
