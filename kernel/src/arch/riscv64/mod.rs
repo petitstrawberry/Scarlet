@@ -11,6 +11,8 @@ pub mod kernel;
 pub mod trap;
 pub mod csr;
 pub mod earlycon;
+pub mod vcpu;
+pub mod timer;
 
 pub use earlycon::*;
 
