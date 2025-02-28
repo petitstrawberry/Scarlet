@@ -1,10 +1,12 @@
+pub mod interrupt;
+pub mod exception;
+
 use core::arch::asm;
 use core::arch::naked_asm;
 use core::mem::transmute;
 
-use crate::arch::instruction::sbi::sbi_set_timer;
-use crate::println;
-use crate::print;
+use exception::arch_exception_handler;
+use interrupt::arch_interrupt_handler;
 
 use super::Riscv64;
 
@@ -57,7 +59,7 @@ pub extern "C" fn _trap_entry() {
                 sd      t0, 256(sp)
                 mv      a0, sp
 
-                call    trap_handler
+                call    arch_trap_handler
 
                 /* Restore the context of the current hart */
                 ld     t0, 256(sp)
@@ -105,14 +107,12 @@ pub extern "C" fn _trap_entry() {
     }
 }
 
-#[unsafe(export_name = "trap_handler")]
-pub extern "C" fn trap_handler(addr: usize) {
+#[unsafe(export_name = "arch_trap_handler")]
+pub extern "C" fn arch_trap_handler(addr: usize) {
     let riscv: &mut Riscv64 = unsafe { transmute(addr) };
     let sp: usize;
     unsafe { asm!("csrr {0}, sscratch", out(reg) sp) }; 
-    riscv.regs[2] = sp as u64;
-
-    println!("[riscv64] Hart {}: Trap handler called", riscv.hartid);
+    riscv.regs.reg[2] = sp as usize;
 
     let cause: usize;
     unsafe {
@@ -121,23 +121,11 @@ pub extern "C" fn trap_handler(addr: usize) {
             out(reg) cause,
         );
     }
-    println!("cause: {:#x}", cause);
-    println!("epc: {:#x}", riscv.epc);
 
-    match cause {
-        0x8000000000000005 => {
-            println!("[riscv64] Hart {}: timer interrupt", riscv.hartid);
-            sbi_set_timer(usize::MAX as u64);
-        }
-        _ => {        
-            // print regs
-            for i in 0..32 {
-                print!("x{}: {:#x} ", i, riscv.regs[i]);
-                if i % 4 == 3 {
-                    println!("");
-                }
-            }
-            panic!("Unknown trap cause");
-        }
+    let interrupt = cause & 0x8000000000000000 != 0;
+    if interrupt {
+        arch_interrupt_handler(riscv, cause & !0x8000000000000000);
+    } else {
+        arch_exception_handler(riscv, cause);
     }
 }
