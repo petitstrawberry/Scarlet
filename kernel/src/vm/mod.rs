@@ -22,6 +22,18 @@ unsafe extern "C" {
     static __KERNEL_SPACE_END: usize;
 }
 
+static mut MANAGER: Option<VirtualMemoryManager> = None;
+
+pub fn get_kernel_virtual_memory_manager() -> &'static mut VirtualMemoryManager {
+    unsafe
+    {
+        match MANAGER {
+            Some(ref mut m) => m,
+            None => panic!("Virtual memory manager is not initialized"),
+        }
+    }
+}
+
 /* Initialize MMU and enable paging */
 pub fn kernel_vm_init() {
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
@@ -47,6 +59,9 @@ pub fn kernel_vm_init() {
     println!("Kernel space: {:#x} - {:#x}", kernel_start, kernel_end);
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(memmap);
+    unsafe {
+        MANAGER = Some(manager);
+    }
 
     /* Switch to the new page table */
     root_page_table.switch(asid);
