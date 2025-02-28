@@ -43,6 +43,8 @@ pub use riscv64::*;
 - `arch::mmu_init()` - initialize MMU and enable paging
 - `arch::enable_interrupts()` - enable interrupts
 - `arch::disable_interrupts()` - disable interrupts
+- `arch::earlycon::early_putc()` - early console output (before serial device is initialized)
+- `arch::Registers` - architecture specific register set
 - `arch::ArchTimer` - architecture specific timer
     - `arch::ArchTimer::init()` - initialize timer
     - `arch::ArchTimer::start()` - start timer
