@@ -13,6 +13,7 @@ pub mod csr;
 pub mod earlycon;
 pub mod vcpu;
 pub mod timer;
+pub mod vm;
 pub mod registers;
 
 pub use earlycon::*;
