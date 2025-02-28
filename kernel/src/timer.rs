@@ -52,8 +52,8 @@ impl KernelTimer {
         self.core_local_timer[cpu_id].set_interval_us(interval);
     }
 
-    pub fn get_time(&self, cpu_id: usize) -> u64 {
-        self.core_local_timer[cpu_id].get_time()
+    pub fn get_time_us(&self, cpu_id: usize) -> u64 {
+        self.core_local_timer[cpu_id].get_time_us()
     }
 }
 
