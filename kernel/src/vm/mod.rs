@@ -56,9 +56,27 @@ pub fn kernel_vm_init() {
         }
     };
     manager.add_memory_map(memmap);
-    println!("Kernel space: {:#x} - {:#x}", kernel_start, kernel_end);
+    println!("Kernel space:");
+    println!("(vaddr) {:#016x} - {:#016x}", memmap.vmarea.start, memmap.vmarea.end);
+    println!("(paddr) {:#016x} - {:#016x}", memmap.pmarea.start, memmap.pmarea.end);
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(memmap);
+
+    let devmap = VirtualMemoryMap {
+        vmarea: MemoryArea {
+            start: 0x0,
+            end: 0x8000_0000,
+        },
+        pmarea: MemoryArea {
+            start: 0x0,
+            end: 0x8000_0000,
+        }
+    };
+    manager.add_memory_map(devmap);
+    println!("Device space:");
+    println!("(vaddr) {:#016x} - {:#016x}", devmap.vmarea.start, devmap.vmarea.end);
+    println!("(paddr) {:#016x} - {:#016x}", devmap.pmarea.start, devmap.pmarea.end);
+
     unsafe {
         MANAGER = Some(manager);
     }
@@ -66,6 +84,5 @@ pub fn kernel_vm_init() {
     /* Switch to the new page table */
     root_page_table.switch(asid);
 
-    println!("Kernel VM initialized\n");
     println!("Now, we are in the virtual memory mode");
 }
