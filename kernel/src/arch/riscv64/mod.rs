@@ -13,21 +13,23 @@ pub mod csr;
 pub mod earlycon;
 pub mod vcpu;
 pub mod timer;
+pub mod registers;
 
 pub use earlycon::*;
+pub use registers::Registers;
 
 pub type Arch = Riscv64;
 
 #[repr(align(4))]
 pub struct Riscv64 {
-    regs: [u64; 32],
+    regs: Registers,
     epc: u64,
     hartid: u64,
 }
 
 impl Riscv64 {
     pub fn new(cpu_id: usize) -> Self {
-        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: [0; 32] }
+        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new() }
     }
 
     pub fn init(&mut self, cpu_id: usize) {
