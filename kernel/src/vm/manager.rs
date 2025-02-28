@@ -1,6 +1,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::arch::vm::{get_page_table, mmu::PageTable};
+
 use super::vmem::VirtualMemoryMap;
 
 pub struct VirtualMemoryManager {
@@ -44,5 +46,9 @@ impl VirtualMemoryManager {
             }
         }
         ret
+    }
+
+    pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
+        get_page_table(self.asid)
     }
 }
