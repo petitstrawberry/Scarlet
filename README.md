@@ -47,8 +47,8 @@ pub use riscv64::*;
     - `arch::ArchTimer::init()` - initialize timer
     - `arch::ArchTimer::start()` - start timer
     - `arch::ArchTimer::stop()` - stop timer
-    - `arch::is_running()` - check if timer is running
-    - `arch::get_time_us()` - get current time in microseconds
+    - `arch::ArchTimer::is_running()` - check if timer is running
+    - `arch::ArchTimer::get_time_us()` - get current time in microseconds
     - `arch::ArchTimer::set_interval_us()` - set timer interval in microseconds
 
 ## License
