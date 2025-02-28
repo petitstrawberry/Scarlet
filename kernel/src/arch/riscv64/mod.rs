@@ -22,6 +22,7 @@ pub use registers::Registers;
 pub type Arch = Riscv64;
 
 #[repr(align(4))]
+#[derive(Debug)]
 pub struct Riscv64 {
     regs: Registers,
     epc: u64,
