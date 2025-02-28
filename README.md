@@ -40,7 +40,6 @@ pub use riscv64::*;
 #### Required
 
 - `arch::init()` - initialize architecture specific code
-- `arch::trap_init()` - initialize traps
 - `arch::mmu_init()` - initialize MMU and enable paging
 - `arch::enable_interrupts()` - enable interrupts
 - `arch::disable_interrupts()` - disable interrupts
