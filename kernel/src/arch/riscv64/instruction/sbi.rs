@@ -1,9 +1,5 @@
 use core::arch::asm;
 
-use crate::println;
-
-use super::ecall::ecall;
-
 pub enum Extension {
     Base = 0x10,
     SetTimer = 0x00,
