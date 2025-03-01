@@ -31,7 +31,7 @@ pub fn arch_exception_handler(arch: &mut Arch, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let manager = get_kernel_virtual_memory_manager();
+            let manager = get_kernel_vm_manager();
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => {
                     match manager.get_root_page_table() {
