@@ -9,7 +9,6 @@ pub mod boot;
 pub mod instruction;
 pub mod kernel;
 pub mod trap;
-pub mod csr;
 pub mod earlycon;
 pub mod vcpu;
 pub mod timer;

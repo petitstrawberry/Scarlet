@@ -48,6 +48,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
+    scheduler.init_test_tasks();
     println!("[Scarlet Kernel] Scheduler will start...");
     scheduler.kernel_schedule(cpu_id);
     loop {} 

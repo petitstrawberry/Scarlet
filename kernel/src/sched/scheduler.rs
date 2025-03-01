@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::string::String;
 
-use crate::{arch::{enable_interrupt, instruction::idle, Arch}, environment::NUM_OF_CPUS, library::syscall::schedule, task::TaskState, timer::get_kernel_timer};
+use crate::{arch::{enable_interrupt, instruction::idle, Arch}, environment::NUM_OF_CPUS, task::TaskState, timer::get_kernel_timer};
 
 use super::dispatcher::Dispatcher;
 use crate::task::{Task, TaskType};
