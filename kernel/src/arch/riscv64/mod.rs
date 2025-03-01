@@ -38,6 +38,10 @@ impl Riscv64 {
         early_println!("[riscv64] Hart {}: Initializing core....", cpu_id);
         trap_init(self);
     }
+
+    pub fn get_cpuid(&self) -> usize {
+        self.hartid as usize
+    }
 }
 
 fn trap_init(riscv: &mut Riscv64) {
@@ -89,4 +93,17 @@ pub fn disable_interrupt() {
         csrci sstatus, 0x2
         ");
     }
+}
+
+pub fn get_cpu() -> &'static mut Riscv64 {
+    let scratch: usize;
+
+    unsafe {
+        asm!("
+        csrr {0}, sscratch
+        ",
+        out(reg) scratch,
+        );
+    }
+    unsafe { transmute(scratch) }
 }
