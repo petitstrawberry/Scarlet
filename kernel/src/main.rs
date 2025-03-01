@@ -12,6 +12,7 @@ pub mod sched;
 pub mod earlycon;
 pub mod environment;
 pub mod vm;
+pub mod task;
 
 
 use core::panic::PanicInfo;
