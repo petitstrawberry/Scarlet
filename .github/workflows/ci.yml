@@ -15,6 +15,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag scarlet-dev:$(date +%s)
+      run: docker build . --file Dockerfile --tag scarlet-dev
     - name: Build scarlet kernel 
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev:$(date +%s) cargo build
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo build
