@@ -37,7 +37,8 @@ impl Vcpu {
         switch_page_table(self.asid);
     }
 
-    pub fn jump(&self) {
-        switch_page_table(self.asid);
+    pub fn jump(&mut self, riscv64: &mut Riscv64, pc: u64) {
+        self.pc = pc;
+        self.switch(riscv64);
     }
 }
