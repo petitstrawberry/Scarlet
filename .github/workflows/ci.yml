@@ -1,0 +1,20 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ "dev", "main" ]
+  pull_request:
+    branches: [ "dev" ]
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build the Docker image
+      run: docker build . --file Dockerfile --tag scarlet-dev:$(date +%s)
+    - name: Build scarlet kernel 
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev:$(date +%s) cargo build
