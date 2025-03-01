@@ -2,6 +2,8 @@ use core::arch::asm;
 use core::panic;
 
 use crate::arch::Arch;
+use crate::println;
+use crate::print;
 use crate::vm::get_kernel_virtual_memory_manager;
 
 pub fn arch_exception_handler(arch: &mut Arch, cause: usize) {
@@ -44,6 +46,8 @@ pub fn arch_exception_handler(arch: &mut Arch, cause: usize) {
             }
         },
         _ => {
+            println!("(Trapframe)\n{:#x?}", arch);
+            panic!("Unhandled exception: {}", cause);
         }
     }
 }
