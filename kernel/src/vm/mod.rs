@@ -11,8 +11,6 @@ use vmem::VirtualMemoryMap;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_page_table;
 use crate::arch::vm::get_root_page_table_idx;
-use crate::print;
-use crate::println;
 
 pub mod manager;
 pub mod vmem;
@@ -22,29 +20,33 @@ unsafe extern "C" {
     static __KERNEL_SPACE_END: usize;
 }
 
-static mut MANAGER: Option<VirtualMemoryManager> = None;
+static mut KERNEL_VM_MANAGER: Option<VirtualMemoryManager> = None;
 
-pub fn get_kernel_virtual_memory_manager() -> &'static mut VirtualMemoryManager {
+pub fn get_kernel_vm_manager() -> &'static mut VirtualMemoryManager {
     unsafe
     {
-        match MANAGER {
+        match KERNEL_VM_MANAGER {
             Some(ref mut m) => m,
-            None => panic!("Virtual memory manager is not initialized"),
+            None => {
+                kernel_vm_manager_init();
+                get_kernel_vm_manager()
+            }
         }
     }
 }
 
-/* Initialize MMU and enable paging */
-pub fn kernel_vm_init() {
+fn kernel_vm_manager_init() {
+    let mut manager = VirtualMemoryManager::new();
+
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
     let root_page_table_idx = get_root_page_table_idx(asid).unwrap();
     let root_page_table = get_page_table(root_page_table_idx).unwrap();
-    let mut manager = VirtualMemoryManager::new();
     manager.set_asid(asid);
 
     /* Map kernel space */
     let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
+
     let memmap = VirtualMemoryMap {
         vmarea: MemoryArea {
             start: kernel_start,
@@ -56,9 +58,6 @@ pub fn kernel_vm_init() {
         }
     };
     manager.add_memory_map(memmap);
-    println!("Kernel space:");
-    println!("(vaddr) {:#016x} - {:#016x}", memmap.vmarea.start, memmap.vmarea.end);
-    println!("(paddr) {:#016x} - {:#016x}", memmap.pmarea.start, memmap.pmarea.end);
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(memmap);
 
@@ -73,16 +72,16 @@ pub fn kernel_vm_init() {
         }
     };
     manager.add_memory_map(devmap);
-    println!("Device space:");
-    println!("(vaddr) {:#016x} - {:#016x}", devmap.vmarea.start, devmap.vmarea.end);
-    println!("(paddr) {:#016x} - {:#016x}", devmap.pmarea.start, devmap.pmarea.end);
 
     unsafe {
-        MANAGER = Some(manager);
+        KERNEL_VM_MANAGER = Some(manager);
     }
-
-    /* Switch to the new page table */
-    root_page_table.switch(asid);
-
-    println!("Now, we are in the virtual memory mode");
 }
+
+/* Initialize MMU and enable paging */
+pub fn kernel_vm_init() {
+    let manager = get_kernel_vm_manager();
+    let root_page_table = manager.get_root_page_table().unwrap();
+    root_page_table.switch(manager.get_asid());
+}
+
