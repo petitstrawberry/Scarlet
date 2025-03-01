@@ -22,6 +22,10 @@ impl VirtualMemoryManager {
         self.asid = asid;
     }
 
+    pub fn get_asid(&self) -> usize {
+        self.asid
+    }
+
     pub fn add_memory_map(&mut self, map: VirtualMemoryMap) {
         self.memmap.push(map);
     }
