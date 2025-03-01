@@ -62,7 +62,8 @@ fn trap_init(riscv: &mut Riscv64) {
 
     // Setup for Scratch space for Riscv64 struct
     early_println!("[riscv64] Hart {}: Setting up scratch space....", riscv.hartid);
-    let scratch: &mut Riscv64 = unsafe { transmute(trap_stack - 272) };
+    let scratch_addr = trap_stack - 272;
+    let scratch = unsafe { &mut *(scratch_addr as *mut Riscv64) };
     scratch.hartid = riscv.hartid;
     let sie: usize = 0x20;
     unsafe {
