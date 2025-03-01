@@ -12,7 +12,7 @@ SECTIONS {
     __HEAP_SIZE = 0x800000; /* 8MB heap size */
 
     . = ORIGIN(RAM);
-    .init : { *(.init) } > RAM 
+    __KERNEL_SPACE_START = .;
     .init : { *(.init .init.*) } > RAM 
     .text : { *(.text .text.*) } > RAM 
     .rodata : { *(.rodata .rodata.*) } > RAM 
@@ -39,4 +39,5 @@ SECTIONS {
         __KERNEL_TRAP_STACK_BOTTOM = .;
     } > RAM
     . = ALIGN(4);
+    __KERNEL_SPACE_END = .;
 }
