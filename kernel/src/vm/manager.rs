@@ -1,7 +1,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::arch::vm::{get_page_table, mmu::PageTable};
+use crate::arch::vm::{alloc_virtual_address_space, get_page_table, mmu::PageTable};
 
 use super::vmem::VirtualMemoryMap;
 
@@ -55,4 +55,62 @@ impl VirtualMemoryManager {
     pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
         get_page_table(self.asid)
     }
+}
+
+#[cfg(test)]
+use crate::vm::vmem::MemoryArea;
+
+#[test_case]
+fn test_new_virtual_memory_manager() {
+    let vmm = VirtualMemoryManager::new();
+    assert_eq!(vmm.get_asid(), 0);
+}
+
+#[test_case]
+fn test_set_and_get_asid() {
+    let mut vmm = VirtualMemoryManager::new();
+    vmm.set_asid(42);
+    assert_eq!(vmm.get_asid(), 42);
+}
+
+#[test_case]
+fn test_add_and_get_memory_map() {
+    let mut vmm = VirtualMemoryManager::new();
+    let vma = MemoryArea { start: 0x1000, end: 0x2000 };
+    let map = VirtualMemoryMap { vmarea: vma, pmarea: vma };
+    vmm.add_memory_map(map);
+    assert_eq!(vmm.get_memory_map(0).unwrap().vmarea.start, 0x1000);
+}
+
+#[test_case]
+fn test_remove_memory_map() {
+    let mut vmm = VirtualMemoryManager::new();
+    let vma = MemoryArea { start: 0x1000, end: 0x2000 };
+    let map = VirtualMemoryMap { vmarea: vma, pmarea: vma };
+    vmm.add_memory_map(map);
+    let removed_map = vmm.remove_memory_map(0).unwrap();
+    assert_eq!(removed_map.vmarea.start, 0x1000);
+    assert!(vmm.get_memory_map(0).is_none());
+}
+
+#[test_case]
+fn test_search_memory_map() {
+    let mut vmm = VirtualMemoryManager::new();
+    let vma1 = MemoryArea { start: 0x1000, end: 0x2000 };
+    let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1 };
+    let vma2 = MemoryArea { start: 0x3000, end: 0x4000 };
+    let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2 };
+    vmm.add_memory_map(map1);
+    vmm.add_memory_map(map2);
+    let found_map = vmm.search_memory_map(0x3500).unwrap();
+    assert_eq!(found_map.vmarea.start, 0x3000);
+}
+
+#[test_case]
+fn test_get_root_page_table() {
+    let mut vmm = VirtualMemoryManager::new();
+    let asid = alloc_virtual_address_space();
+    vmm.set_asid(asid);
+    let page_table = vmm.get_root_page_table();
+    assert!(page_table.is_some());
 }
