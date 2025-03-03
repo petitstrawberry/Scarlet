@@ -13,8 +13,6 @@ use crate::{arch::{enable_interrupt, instruction::idle, Arch}, environment::NUM_
 use super::dispatcher::Dispatcher;
 use crate::task::{Task, TaskType};
 
-
-
 static mut SCHEDULER: Option<Scheduler> = None;
 
 pub fn get_scheduler() -> &'static mut Scheduler {
@@ -92,5 +90,17 @@ impl Scheduler {
             timer.start(cpu_id);
         }
         idle();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_add_task() {
+        let mut scheduler = Scheduler::new();
+        let task = Task::new(String::from("TestTask"), 1, TaskType::Kernel);
+        scheduler.add_task(task, 0);
+        assert_eq!(scheduler.task_queue[0].len(), 1);
     }
 }
