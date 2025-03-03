@@ -1,5 +1,6 @@
 use core::arch::asm;
 use core::mem::transmute;
+use instruction::sbi::sbi_system_reset;
 use trap::_trap_entry;
 
 use crate::early_println;
@@ -106,4 +107,12 @@ pub fn get_cpu() -> &'static mut Riscv64 {
         );
     }
     unsafe { transmute(scratch) }
+}
+
+pub fn shutdown() -> ! {
+    sbi_system_reset(0, 0);
+}
+
+pub fn reboot() -> ! {
+    sbi_system_reset(1, 0);
 }

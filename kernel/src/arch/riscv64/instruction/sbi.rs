@@ -86,3 +86,8 @@ pub fn sbi_console_getchar() -> char {
 pub fn sbi_set_timer(stime_value: u64) {
     let _ = sbi_call(Extension::Timer, 0, stime_value as usize, 0);
 }
+
+pub fn sbi_system_reset(reset_type: u32, reset_reason: u32) -> ! {
+    let _ = sbi_call(Extension::Srst, 0, reset_type as usize, reset_reason as usize);
+    loop {}
+}
