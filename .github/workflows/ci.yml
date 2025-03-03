@@ -18,3 +18,5 @@ jobs:
       run: docker build . --file Dockerfile --tag scarlet-dev
     - name: Build scarlet kernel 
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo build
+    - name: Test scarlet kernel
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev bash /workspaces/Scarlet/tools/test.sh
