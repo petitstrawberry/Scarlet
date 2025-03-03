@@ -70,3 +70,21 @@ pub fn switch_page_table(index: usize) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_get_page_table() {
+        let idx = new_page_table_idx();
+        let page_table = get_page_table(idx);
+        assert!(page_table.is_some());
+    }
+    
+    #[test_case]
+    fn test_get_root_page_table_idx() {
+        let asid = alloc_virtual_address_space();
+        let root_page_table_idx = get_root_page_table_idx(asid);
+        assert!(root_page_table_idx.is_some());
+    }
+}
