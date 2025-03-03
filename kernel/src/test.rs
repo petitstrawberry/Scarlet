@@ -24,4 +24,5 @@ pub fn test_runner(tests: &[&dyn Fn()]) {
     }
 
     println!("[Test Runner] All tests passed");
+    arch::shutdown();
 }
