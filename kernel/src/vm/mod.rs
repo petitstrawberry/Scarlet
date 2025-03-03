@@ -1,8 +1,7 @@
 //! Virtual memory module.
 //! 
 //! This module provides the virtual memory abstraction for the kernel. It
-//! includes functions for initializing the memory management unit (MMU) and
-//! managing virtual address spaces.
+//! includes functions for managing virtual address spaces.
 
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
