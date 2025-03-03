@@ -22,7 +22,7 @@ pub fn arch_exception_handler(arch: &mut Arch, cause: usize) {
                         None => panic!("Root page table is not found"),
                     }
                 }
-                None => (),
+                None => panic!("Not found memory map matched with vaddr: {:#x}", vaddr),
             }
         }
         /* Load/Store page fault */
