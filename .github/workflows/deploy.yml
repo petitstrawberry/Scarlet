@@ -37,7 +37,7 @@ jobs:
     - name: Remove lock file
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev rm target/riscv64gc-unknown-none-elf/doc/.lock
     - name: Add CNAME file
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev echo "docs.scarlet.ichigo.dev" > target/riscv64gc-unknown-none-elf/doc/CNAME
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev /bin/sh -c "echo 'docs.scarlet.ichigo.dev' > target/riscv64gc-unknown-none-elf/doc/CNAME"
     - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:
