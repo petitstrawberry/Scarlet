@@ -1,5 +1,6 @@
 use core::arch::asm;
 use core::mem::transmute;
+use instruction::sbi::sbi_system_reset;
 use trap::_trap_entry;
 
 use crate::early_println;
@@ -9,30 +10,37 @@ pub mod boot;
 pub mod instruction;
 pub mod kernel;
 pub mod trap;
-pub mod csr;
 pub mod earlycon;
 pub mod vcpu;
 pub mod timer;
+pub mod vm;
+pub mod registers;
 
 pub use earlycon::*;
+pub use registers::Registers;
 
 pub type Arch = Riscv64;
 
 #[repr(align(4))]
+#[derive(Debug)]
 pub struct Riscv64 {
-    regs: [u64; 32],
+    regs: Registers,
     epc: u64,
     hartid: u64,
 }
 
 impl Riscv64 {
     pub fn new(cpu_id: usize) -> Self {
-        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: [0; 32] }
+        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new() }
     }
 
     pub fn init(&mut self, cpu_id: usize) {
         early_println!("[riscv64] Hart {}: Initializing core....", cpu_id);
         trap_init(self);
+    }
+
+    pub fn get_cpuid(&self) -> usize {
+        self.hartid as usize
     }
 }
 
@@ -54,7 +62,8 @@ fn trap_init(riscv: &mut Riscv64) {
 
     // Setup for Scratch space for Riscv64 struct
     early_println!("[riscv64] Hart {}: Setting up scratch space....", riscv.hartid);
-    let scratch: &mut Riscv64 = unsafe { transmute(trap_stack - 272) };
+    let scratch_addr = trap_stack - 272;
+    let scratch = unsafe { &mut *(scratch_addr as *mut Riscv64) };
     scratch.hartid = riscv.hartid;
     let sie: usize = 0x20;
     unsafe {
@@ -85,4 +94,25 @@ pub fn disable_interrupt() {
         csrci sstatus, 0x2
         ");
     }
+}
+
+pub fn get_cpu() -> &'static mut Riscv64 {
+    let scratch: usize;
+
+    unsafe {
+        asm!("
+        csrr {0}, sscratch
+        ",
+        out(reg) scratch,
+        );
+    }
+    unsafe { transmute(scratch) }
+}
+
+pub fn shutdown() -> ! {
+    sbi_system_reset(0, 0);
+}
+
+pub fn reboot() -> ! {
+    sbi_system_reset(1, 0);
 }

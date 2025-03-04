@@ -1,0 +1,56 @@
+name: Docker Image CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    # Dockerfile と関連ファイルのハッシュを計算
+    - name: Generate Docker cache key
+      id: docker-cache-key
+      run: echo "key=docker-cache-${{ hashFiles('Dockerfile') }}" >> $GITHUB_OUTPUT
+    # Docker キャッシュを復元
+    - name: Cache Docker image
+      id: docker-cache
+      uses: actions/cache@v3
+      with:
+        path: /tmp/docker-image
+        key: ${{ steps.docker-cache-key.outputs.key }}
+    # キャッシュがない場合のみビルド
+    - name: Build the Docker image
+      if: steps.docker-cache.outputs.cache-hit != 'true'
+      run: |
+        docker build . --file Dockerfile --tag scarlet-main
+        docker save scarlet-main > /tmp/docker-image
+    # キャッシュがある場合はロード
+    - name: Load cached Docker image
+      if: steps.docker-cache.outputs.cache-hit == 'true'
+      run: docker load < /tmp/docker-image
+    - name: Build scarlet kernel 
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-main cargo build
+    - name: Test scarlet kernel
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-main bash /workspaces/Scarlet/tools/test.sh
+    - name: Build documentation
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-main cargo doc --no-deps
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@v1
+      with:
+        path: target/riscv64gc-unknown-none-elf/doc
+  
+  deploy-doc:
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Deploy documentation

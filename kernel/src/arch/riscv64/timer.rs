@@ -63,11 +63,15 @@ impl Stimer {
         self.running
     }
 
-    pub fn get_next_event(&self) -> u64 {
+    fn get_next_event(&self) -> u64 {
         self.next_event
     }
 
-    pub fn get_time(&self) -> u64 {
+    pub fn get_time_us(&self) -> u64 {
+        self.get_time() / RISCV_STIMER_FREQ
+    }
+
+    fn get_time(&self) -> u64 {
         let time: u64;
         unsafe {
             asm!(

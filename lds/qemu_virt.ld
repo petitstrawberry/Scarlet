@@ -12,14 +12,15 @@ SECTIONS {
     __HEAP_SIZE = 0x800000; /* 8MB heap size */
 
     . = ORIGIN(RAM);
-    .init : { *(.init) } > RAM 
+    __KERNEL_SPACE_START = .;
+    .init : { *(.init .init.*) } > RAM 
     .text : { *(.text .text.*) } > RAM 
-    .rodata : { *(.rodata) } > RAM 
-    .data : { *(.data) } > RAM 
-    .bss : { *(.bss) } > RAM
+    .rodata : { *(.rodata .rodata.*) } > RAM 
+    .data : { *(.data .data.*) } > RAM 
+    .bss : { *(.bss .bss.*) } > RAM
     .heap :
     {
-      *(.heap)       
+      *(.heap .heap.*)       
       . = ALIGN(0x1000);
       __HEAP_START = .;
       . += __HEAP_SIZE;
@@ -38,4 +39,5 @@ SECTIONS {
         __KERNEL_TRAP_STACK_BOTTOM = .;
     } > RAM
     . = ALIGN(4);
+    __KERNEL_SPACE_END = .;
 }
