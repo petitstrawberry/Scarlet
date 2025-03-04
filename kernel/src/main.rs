@@ -39,7 +39,7 @@
 //! - `earlycon`: Early boot console output
 //! - `environment`: Environment settings and parameters
 //! - `vm`: Virtual memory management
-//! - `task`: Task and process abstractions
+//! - `task`: Task abstractions
 //! - `test`: Testing framework (only in test builds)
 //!
 //! ## Development Notes
