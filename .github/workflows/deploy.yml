@@ -26,14 +26,14 @@ jobs:
     - name: Build the Docker image
       if: steps.docker-cache.outputs.cache-hit != 'true'
       run: |
-        docker build . --file Dockerfile --tag scarlet-main
-        docker save scarlet-main > /tmp/docker-image
+        docker build . --file Dockerfile --tag scarlet-dev
+        docker save scarlet-dev > /tmp/docker-image
     # キャッシュがある場合はロード
     - name: Load cached Docker image
       if: steps.docker-cache.outputs.cache-hit == 'true'
       run: docker load < /tmp/docker-image
     - name: Build documentation
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-main cargo doc --no-deps
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo doc --no-deps
     - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:
