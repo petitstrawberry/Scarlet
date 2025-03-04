@@ -32,19 +32,16 @@ jobs:
     - name: Load cached Docker image
       if: steps.docker-cache.outputs.cache-hit == 'true'
       run: docker load < /tmp/docker-image
-    - name: Build scarlet kernel 
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-main cargo build
-    - name: Test scarlet kernel
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-main bash /workspaces/Scarlet/tools/test.sh
     - name: Build documentation
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-main cargo doc --no-deps
     - name: Upload artifact
-      uses: actions/upload-pages-artifact@v1
+      uses: actions/upload-pages-artifact@v3
       with:
         path: target/riscv64gc-unknown-none-elf/doc
   
   deploy-doc:
     needs: build
+    runs-on: ubuntu-latest
     permissions:
       pages: write
       id-token: write
@@ -53,4 +50,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
     - uses: actions/checkout@v4
-    - name: Deploy documentation
+      name: Deploy documentation
