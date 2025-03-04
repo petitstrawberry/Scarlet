@@ -1,7 +1,44 @@
+//! Virtual Memory Manager module.
+//! 
+//! This module provides the core functionality for managing virtual memory in the kernel.
+//! It handles address space management, memory mappings, and page table operations.
+//!
+//! # Key Components
+//!
+//! - `VirtualMemoryManager`: Main structure for managing virtual memory mappings and address spaces
+//! - Memory maps: Track mappings between virtual and physical memory areas
+//! - ASID (Address Space ID): Identifies different address spaces
+//!
+//! # Functionality
+//!
+//! The manager enables:
+//! - Creating and tracking virtual to physical memory mappings
+//! - Managing different address spaces via ASIDs
+//! - Searching for memory mappings by virtual address
+//! - Accessing the root page table for the current address space
+//!
+//! # Examples
+//!
+//! ```
+//! let mut manager = VirtualMemoryManager::new();
+//! manager.set_asid(42);
+//! 
+//! // Add a memory mapping
+//! let vma = MemoryArea { start: 0x0, end: 0x1000 };
+//! let pma = MemoryArea { start: 0x80000000, end: 0x80001000 };
+//! let map = VirtualMemoryMap { vmarea: vma, pmarea: pma };
+//! manager.add_memory_map(map);
+//! 
+//! // Search for a memory mapping
+//! if let Some(found_map) = manager.search_memory_map(0x500) {
+//!     // Found the mapping
+//! }
+//!
+
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::arch::vm::{alloc_virtual_address_space, get_page_table, mmu::PageTable};
+use crate::arch::vm::{get_page_table, mmu::PageTable};
 
 use super::vmem::VirtualMemoryMap;
 
@@ -11,6 +48,10 @@ pub struct VirtualMemoryManager {
 }
 
 impl VirtualMemoryManager {
+    /// Creates a new virtual memory manager.
+    /// 
+    /// # Returns
+    /// A new virtual memory manager with default values.
     pub fn new() -> Self {
         VirtualMemoryManager {
             memmap: Vec::new(),
@@ -18,22 +59,48 @@ impl VirtualMemoryManager {
         }
     }
 
+    /// Sets the ASID (Address Space ID) for the virtual memory manager.
+    /// 
+    /// # Arguments
+    /// * `asid` - The ASID to set
     pub fn set_asid(&mut self, asid: usize) {
         self.asid = asid;
     }
 
+    /// Returns the ASID (Address Space ID) for the virtual memory manager.
+    /// 
+    /// # Returns
+    /// The ASID for the virtual memory manager.
     pub fn get_asid(&self) -> usize {
         self.asid
     }
 
+    /// Adds a memory map to the virtual memory manager.
+    /// 
+    /// # Arguments
+    /// * `map` - The memory map to add
     pub fn add_memory_map(&mut self, map: VirtualMemoryMap) {
         self.memmap.push(map);
     }
 
+    /// Returns the memory map at the given index.
+    /// 
+    /// # Arguments
+    /// * `idx` - The index of the memory map to retrieve
+    /// 
+    /// # Returns
+    /// The memory map at the given index, if it exists.
     pub fn get_memory_map(&self, idx: usize) -> Option<&VirtualMemoryMap> {
         self.memmap.get(idx)
     }
 
+    /// Removes the memory map at the given index.
+    /// 
+    /// # Arguments
+    /// * `idx` - The index of the memory map to remove
+    /// 
+    /// # Returns
+    /// The removed memory map, if it exists.
     pub fn remove_memory_map(&mut self, idx: usize) -> Option<VirtualMemoryMap> {
         if idx < self.memmap.len() {
             Some(self.memmap.remove(idx))
@@ -42,6 +109,13 @@ impl VirtualMemoryManager {
         }
     }
 
+    /// Searches for a memory map containing the given virtual address.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to search for
+    /// 
+    /// # Returns
+    /// The memory map containing the given virtual address, if it exists.
     pub fn search_memory_map(&self, vaddr: usize) -> Option<&VirtualMemoryMap> {
         let mut ret = None;
         for map in self.memmap.iter() {
@@ -52,6 +126,10 @@ impl VirtualMemoryManager {
         ret
     }
 
+    /// Returns the root page table for the current address space.
+    /// 
+    /// # Returns
+    /// The root page table for the current address space, if it exists.
     pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
         get_page_table(self.asid)
     }
