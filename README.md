@@ -59,6 +59,10 @@ pub use riscv64::*;
     - `arch::ArchTimer.get_time_us()` - get current time in microseconds
     - `arch::ArchTimer.set_interval_us()` - set timer interval in microseconds
 
+## Documentation
+
+More information can be found at [here](https://docs.scarlet.ichigo.dev/kernel)
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
