@@ -34,6 +34,8 @@ jobs:
       run: docker load < /tmp/docker-image
     - name: Build documentation
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo doc --no-deps
+    - name: Remove lock file
+      run: rm target/riscv64gc-unknown-none-elf/doc/.lock
     - name: Upload artifact
       uses: actions/upload-pages-artifact@v3
       with:
