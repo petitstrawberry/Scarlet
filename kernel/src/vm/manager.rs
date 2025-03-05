@@ -38,7 +38,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::arch::vm::{get_page_table, mmu::PageTable};
+use crate::arch::vm::{get_page_table, get_root_page_table_idx, mmu::PageTable};
 
 use super::vmem::VirtualMemoryMap;
 
@@ -131,7 +131,12 @@ impl VirtualMemoryManager {
     /// # Returns
     /// The root page table for the current address space, if it exists.
     pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
-        get_page_table(self.asid)
+        let idx = get_root_page_table_idx(self.asid);
+        if let Some(root_page_table_idx) = idx {
+            get_page_table(root_page_table_idx)
+        } else {
+            None
+        }
     }
 }
 
