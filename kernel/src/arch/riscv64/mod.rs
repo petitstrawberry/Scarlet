@@ -23,7 +23,7 @@ pub use earlycon::*;
 pub use registers::Registers;
 
 pub type Arch = Riscv64;
-pub type TrapFrame = Riscv64;
+pub type Trapframe = Riscv64;
 
 #[unsafe(link_section = ".trampoline.data")]
 static mut TRAP_FRAME: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
@@ -58,7 +58,7 @@ impl Riscv64 {
         self as *const _ as usize
     }
 
-    pub fn get_user_trap_entry_paddr(&self) -> usize {
+    pub fn get_user_trapvector_paddr(&self) -> usize {
         _user_trap_entry as usize
     }
 }

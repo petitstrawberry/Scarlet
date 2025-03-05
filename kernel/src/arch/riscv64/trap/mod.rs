@@ -3,7 +3,7 @@ use core::{arch::asm, mem::transmute};
 use exception::arch_exception_handler;
 use interrupt::arch_interrupt_handler;
 
-use super::TrapFrame;
+use super::Trapframe;
 
 pub mod interrupt;
 pub mod exception;
@@ -12,7 +12,7 @@ pub mod user;
 
 #[unsafe(export_name = "arch_trap_handler")]
 pub extern "C" fn arch_trap_handler(addr: usize) -> usize {
-    let trapframe: &mut TrapFrame = unsafe { transmute(addr) };
+    let trapframe: &mut Trapframe = unsafe { transmute(addr) };
 
     let cause: usize;
     unsafe {

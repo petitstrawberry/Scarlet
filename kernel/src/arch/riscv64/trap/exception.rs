@@ -1,12 +1,12 @@
 use core::arch::asm;
 use core::panic;
 
-use crate::arch::TrapFrame;
+use crate::arch::Trapframe;
 use crate::println;
 use crate::print;
 use crate::vm::get_kernel_vm_manager;
 
-pub fn arch_exception_handler(trapframe: &mut TrapFrame, cause: usize) {
+pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Instruction page fault */
         12 => {

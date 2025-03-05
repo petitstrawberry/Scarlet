@@ -105,7 +105,7 @@ fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trampoline_vaddr_start = VMMAX - trampoline_size;
     let trampoline_vaddr_end = VMMAX;
 
-    let trap_entry_paddr = arch.get_user_trap_entry_paddr();
+    let trap_entry_paddr = arch.get_user_trapvector_paddr();
     let trapframe_paddr = arch.get_trapframe_paddr();
     let trap_entry_offset = trap_entry_paddr - trampoline_start;
     let trapframe_offset = trapframe_paddr - trampoline_start;
