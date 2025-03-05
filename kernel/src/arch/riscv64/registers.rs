@@ -4,13 +4,13 @@
 //! The register file is responsible for storing the general-purpose registers
 //! of the CPU.
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Registers {
     pub reg: [usize; 32],
 }
 
 impl Registers {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Registers { reg: [0; 32] }
     }
 }
