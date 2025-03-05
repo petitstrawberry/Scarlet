@@ -8,8 +8,9 @@ use core::mem::transmute;
 use exception::arch_exception_handler;
 use interrupt::arch_interrupt_handler;
 
-use super::Riscv64;
+use super::TrapFrame;
 
+#[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_trap_entry")]
 #[naked]
 pub extern "C" fn _trap_entry() {
@@ -18,88 +19,91 @@ pub extern "C" fn _trap_entry() {
         .option norvc
         .option norelax
         .align 8
-                /* Save the context of the current hart */
-                /* Save the current sp to sscratch and load the trap stack pointer */
+                /* Disable the interrupt */
                 csrci   sstatus, 0x2
-                csrrw   sp, sscratch, sp
-                addi    sp, sp, -272
-                sd      x0, 0(sp)
-                sd      x1, 8(sp)
-                // sd      x2, 16(sp)
-                sd      x3, 24(sp)
-                sd      x4, 32(sp)
-                sd      x5, 40(sp)
-                sd      x6, 48(sp)
-                sd      x7, 56(sp)
-                sd      x8, 64(sp)
-                sd      x9, 72(sp)
-                sd      x10, 80(sp)
-                sd      x11, 88(sp)
-                sd      x12, 96(sp)
-                sd      x13, 104(sp)
-                sd      x14, 112(sp)
-                sd      x15, 120(sp)
-                sd      x16, 128(sp)
-                sd      x17, 136(sp)
-                sd      x18, 144(sp)
-                sd      x19, 152(sp)
-                sd      x20, 160(sp)
-                sd      x21, 168(sp)
-                sd      x22, 176(sp)
-                sd      x23, 184(sp)
-                sd      x24, 192(sp)
-                sd      x25, 200(sp)
-                sd      x26, 208(sp)
-                sd      x27, 216(sp)
-                sd      x28, 224(sp)
-                sd      x29, 232(sp)
-                sd      x30, 240(sp)
-                sd      x31, 248(sp)
+                /* Save the current a0 to sscratch and load the trapframe pointer */
+                csrrw   a0, sscratch, a0
+                /* Save the context of the current hart */
+                sd      x0, 0(a0)
+                sd      x1, 8(a0)
+                sd      x2, 16(a0)
+                sd      x3, 24(a0)
+                sd      x4, 32(a0)
+                sd      x5, 40(a0)
+                sd      x6, 48(a0)
+                sd      x7, 56(a0)
+                sd      x8, 64(a0)
+                sd      x9, 72(a0)
+                // sd      x10, 80(a0)
+                sd      x11, 88(a0)
+                sd      x12, 96(a0)
+                sd      x13, 104(a0)
+                sd      x14, 112(a0)
+                sd      x15, 120(a0)
+                sd      x16, 128(a0)
+                sd      x17, 136(a0)
+                sd      x18, 144(a0)
+                sd      x19, 152(a0)
+                sd      x20, 160(a0)
+                sd      x21, 168(a0)
+                sd      x22, 176(a0)
+                sd      x23, 184(a0)
+                sd      x24, 192(a0)
+                sd      x25, 200(a0)
+                sd      x26, 208(a0)
+                sd      x27, 216(a0)
+                sd      x28, 224(a0)
+                sd      x29, 232(a0)
+                sd      x30, 240(a0)
+                sd      x31, 248(a0)
                 csrr    t0, sepc
-                sd      t0, 256(sp)
-                mv      a0, sp
+                sd      t0, 256(a0)
+
+                // Load kernel stack pointer
+                ld      sp, 272(a0)
 
                 call    arch_trap_handler
 
-                /* Restore the context of the current hart */
-                ld     t0, 256(sp)
-                csrw    sepc, t0                
-                ld     x0, 0(sp)
-                ld     x1, 8(sp)
-                // ld     x2, 16(sp)
-                ld     x3, 24(sp)
-                ld     x4, 32(sp)
-                ld     x5, 40(sp)
-                ld     x6, 48(sp)
-                ld     x7, 56(sp)
-                ld     x8, 64(sp)
-                ld     x9, 72(sp)
-                ld     x10, 80(sp)
-                ld     x11, 88(sp)
-                ld     x12, 96(sp)
-                ld     x13, 104(sp)
-                ld     x14, 112(sp)
-                ld     x15, 120(sp)
-                ld     x16, 128(sp)
-                ld     x17, 136(sp)
-                ld     x18, 144(sp)
-                ld     x19, 152(sp)
-                ld     x20, 160(sp)
-                ld     x21, 168(sp)
-                ld     x22, 176(sp)
-                ld     x23, 184(sp)
-                ld     x24, 192(sp)
-                ld     x25, 200(sp)
-                ld     x26, 208(sp)
-                ld     x27, 216(sp)
-                ld     x28, 224(sp)
-                ld     x29, 232(sp)
-                ld     x30, 240(sp)
-                ld     x31, 248(sp)
-                addi   sp, sp, 272
+                /* Restore the context of the current hart */ 
+                /* epc */
+                ld     t0, 256(a0)
+                csrw   sepc, t0
+                /* Register */
+                ld     x0, 0(a0)
+                ld     x1, 8(a0)
+                ld     x2, 16(a0)
+                ld     x3, 24(a0)
+                ld     x4, 32(a0)
+                ld     x5, 40(a0)
+                ld     x6, 48(a0)
+                ld     x7, 56(a0)
+                ld     x8, 64(a0)
+                ld     x9, 72(a0)
+                // ld     x10, 80(a0)
+                ld     x11, 88(a0)
+                ld     x12, 96(a0)
+                ld     x13, 104(a0)
+                ld     x14, 112(a0)
+                ld     x15, 120(a0)
+                ld     x16, 128(a0)
+                ld     x17, 136(a0)
+                ld     x18, 144(a0)
+                ld     x19, 152(a0)
+                ld     x20, 160(a0)
+                ld     x21, 168(a0)
+                ld     x22, 176(a0)
+                ld     x23, 184(a0)
+                ld     x24, 192(a0)
+                ld     x25, 200(a0)
+                ld     x26, 208(a0)
+                ld     x27, 216(a0)
+                ld     x28, 224(a0)
+                ld     x29, 232(a0)
+                ld     x30, 240(a0)
+                ld     x31, 248(a0)
 
-                /* restore the sp to the previous value */
-                csrrw   sp, sscratch, sp
+                /* Restore the a0 and kernel stack pointer */
+                csrrw  a0, sscratch, a0
 
                 sret
             "
@@ -108,11 +112,8 @@ pub extern "C" fn _trap_entry() {
 }
 
 #[unsafe(export_name = "arch_trap_handler")]
-pub extern "C" fn arch_trap_handler(addr: usize) {
-    let riscv: &mut Riscv64 = unsafe { transmute(addr) };
-    let sp: usize;
-    unsafe { asm!("csrr {0}, sscratch", out(reg) sp) }; 
-    riscv.regs.reg[2] = sp as usize;
+pub extern "C" fn arch_trap_handler(addr: usize) -> usize {
+    let trapframe: &mut TrapFrame = unsafe { transmute(addr) };
 
     let cause: usize;
     unsafe {
@@ -124,8 +125,9 @@ pub extern "C" fn arch_trap_handler(addr: usize) {
 
     let interrupt = cause & 0x8000000000000000 != 0;
     if interrupt {
-        arch_interrupt_handler(riscv, cause & !0x8000000000000000);
+        arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
-        arch_exception_handler(riscv, cause);
+        arch_exception_handler(trapframe, cause);
     }
+    addr
 }

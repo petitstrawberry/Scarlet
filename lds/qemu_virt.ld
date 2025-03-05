@@ -14,11 +14,18 @@ SECTIONS {
     . = ORIGIN(RAM);
     __KERNEL_SPACE_START = .;
     .init : { *(.init .init.*) } > RAM 
-    .text : { *(.text .text.*) } > RAM 
+    .text : { *(.text .text.*) } > RAM
+    .trampoline :
+    {
+      . = ALIGN(0x1000);
+      __TRAMPOLINE_START = .;
+      *(.trampoline .trampoline.*)
+      __TRAMPOLINE_END = .;
+    } > RAM
     .rodata : { *(.rodata .rodata.*) } > RAM 
     .data : { *(.data .data.*) } > RAM 
-    .bss : { *(.bss .bss.*) } > RAM
-    .heap :
+    .bss (NOLOAD) : { *(.bss .bss.*) } > RAM
+    .heap (NOLOAD) :
     {
       *(.heap .heap.*)       
       . = ALIGN(0x1000);
@@ -26,7 +33,7 @@ SECTIONS {
       . += __HEAP_SIZE;
       __HEAP_END = .;
     } > RAM
-    .stack :
+    .stack (NOLOAD) :
     {
         *(.stack .stack.*)
         . = ALIGN(0x1000);
@@ -38,6 +45,6 @@ SECTIONS {
         . += __STACK_SIZE*4;
         __KERNEL_TRAP_STACK_BOTTOM = .;
     } > RAM
-    . = ALIGN(4);
+    . = ALIGN(0x1000);
     __KERNEL_SPACE_END = .;
 }

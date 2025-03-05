@@ -1,16 +1,16 @@
 use core::arch::asm;
 use core::panic;
 
-use crate::arch::Arch;
+use crate::arch::TrapFrame;
 use crate::println;
 use crate::print;
 use crate::vm::get_kernel_vm_manager;
 
-pub fn arch_exception_handler(arch: &mut Arch, cause: usize) {
+pub fn arch_exception_handler(trapframe: &mut TrapFrame, cause: usize) {
     match cause {
         /* Instruction page fault */
         12 => {
-            let vaddr = arch.epc as usize;
+            let vaddr = trapframe.epc as usize;
             let manager = get_kernel_vm_manager();
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => {
@@ -42,11 +42,11 @@ pub fn arch_exception_handler(arch: &mut Arch, cause: usize) {
                         None => panic!("Root page table is not found"),
                     }
                 }
-                None => (),
+                None => panic!("Not found memory map matched with vaddr: {:#x}", vaddr),
             }
         },
         _ => {
-            println!("(Trapframe)\n{:#x?}", arch);
+            println!("(Trapframe)\n{:#x?}", trapframe);
             panic!("Unhandled exception: {}", cause);
         }
     }

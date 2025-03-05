@@ -73,7 +73,7 @@ pub mod test;
 
 use core::panic::PanicInfo;
 
-use arch::Arch;
+use arch::arch_init;
 use vm::kernel_vm_init;
 use sched::scheduler::get_scheduler;
 use mem::allocator::init_heap;
@@ -93,8 +93,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
     early_println!("Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Initializing arch...");
-    let mut arch = Arch::new(cpu_id);
-    arch.init(cpu_id);
+    arch_init(cpu_id);
     early_println!("[Scarlet Kernel] Initializing heap...");
     init_heap();
     /* After this point, we can use the heap */
@@ -119,7 +118,6 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
-    let mut arch = Arch::new(cpu_id);
-    arch.init(cpu_id);
+    arch_init(cpu_id);
     loop {}
 }
