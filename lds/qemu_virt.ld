@@ -20,6 +20,7 @@ SECTIONS {
       . = ALIGN(0x1000);
       __TRAMPOLINE_START = .;
       *(.trampoline .trampoline.*)
+      . = ALIGN(0x1000);
       __TRAMPOLINE_END = .;
     } > RAM
     .rodata : { *(.rodata .rodata.*) } > RAM 

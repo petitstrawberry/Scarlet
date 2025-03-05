@@ -1,7 +1,9 @@
 use core::arch::asm;
 use core::mem::transmute;
 use instruction::sbi::sbi_system_reset;
-use trap::_trap_entry;
+use trap::arch_trap_handler;
+use trap::kernel::_trap_entry;
+use trap::user::_user_trap_entry;
 
 use crate::early_println;
 use crate::early_print;
@@ -33,6 +35,7 @@ pub struct Riscv64 {
     epc: u64,
     hartid: u64,
     kernel_stack: u64,
+    kernel_trap: u64,
 }
 
 pub fn arch_init(cpu_id: usize) {
@@ -44,7 +47,7 @@ pub fn arch_init(cpu_id: usize) {
 
 impl Riscv64 {
     pub const fn new(cpu_id: usize) -> Self {
-        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new(), kernel_stack: 0 }
+        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new(), kernel_stack: 0, kernel_trap: 0 }
     }
 
     pub fn get_cpuid(&self) -> usize {
@@ -55,8 +58,8 @@ impl Riscv64 {
         self as *const _ as usize
     }
 
-    pub fn get_trap_entry_paddr(&self) -> usize {
-        _trap_entry as usize
+    pub fn get_user_trap_entry_paddr(&self) -> usize {
+        _user_trap_entry as usize
     }
 }
 
@@ -79,6 +82,7 @@ fn trap_init(riscv: &mut Riscv64) {
     // Setup for Scratch space for Riscv64 struct
     early_println!("[riscv64] Hart {}: Setting up scratch space....", riscv.hartid);
     riscv.kernel_stack = trap_stack as u64;
+    riscv.kernel_trap = arch_trap_handler as u64;
     
     let scratch_addr = riscv as *const _ as usize;
     early_println!("[riscv64] Hart {}: Scratch address    : {:#x}", riscv.hartid, scratch_addr);
@@ -93,6 +97,26 @@ fn trap_init(riscv: &mut Riscv64) {
         in(reg) sie,
         in(reg) _trap_entry as usize,
         in(reg) scratch_addr,
+        );
+    }
+}
+
+pub fn set_trap_vector(addr: usize) {
+    unsafe {
+        asm!("
+        csrw stvec, {0}
+        ",
+        in(reg) addr,
+        );
+    }
+}
+
+pub fn set_trap_frame(addr: usize) {
+    unsafe {
+        asm!("
+        csrw sscratch, {0}
+        ",
+        in(reg) addr,
         );
     }
 }
