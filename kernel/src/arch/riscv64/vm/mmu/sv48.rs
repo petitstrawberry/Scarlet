@@ -42,17 +42,20 @@ impl PageTableEntry {
     }
 
     pub fn set_ppn(&mut self, ppn: usize) -> &mut Self {
+        let mask = 0xFFFFFFFFFFF;
+        self.entry &= !(mask << 10);
         self.entry |= (ppn as u64) << 10;
         self
     }
 
     pub fn set_flags(&mut self, flags: u64) -> &mut Self {
-        self.entry |= flags;
+        let mask = 0xff;
+        self.entry |= flags & mask;
         self
     }
 
     pub fn clear_flags(&mut self) -> &mut Self {
-        self.entry &= !0xfff;
+        self.entry &= !0xff;
         self
     }
 
@@ -108,10 +111,16 @@ impl PageTable {
     pub fn map_memory_area(&mut self, mmap: VirtualMemoryMap) {
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
-        while vaddr + 4096 <= mmap.vmarea.end {
+        while vaddr + 0xfff <= mmap.vmarea.end {
             self.map(vaddr, paddr);
-            vaddr += 4096;
-            paddr += 4096;
+            match vaddr.checked_add(0x1000) {
+                Some(addr) => vaddr = addr,
+                None => break,
+            }
+            match paddr.checked_add(0x1000) {
+                Some(addr) => paddr = addr,
+                None => break,
+            }
         }
     }
 
@@ -122,8 +131,8 @@ impl PageTable {
             match pagetable {
                 Ok((pagetable, level)) => {
                     let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
-                    let ppn = paddr >> 12;
-                    let entry = &mut pagetable.entries[vpn & 0x1ff];
+                    let ppn = (paddr >> 12) & 0xfffffffffff;
+                    let entry = &mut pagetable.entries[vpn];
                     entry
                         .set_ppn(ppn)
                         .writable()
