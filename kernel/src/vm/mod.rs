@@ -79,15 +79,18 @@ pub fn kernel_vm_init() {
 
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
-            start: 0x0,
+            start: 0x00,
             end: 0x8000_0000,
         },
         pmarea: MemoryArea {
-            start: 0x0,
+            start: 0x00,
             end: 0x8000_0000,
         }
     };
     manager.add_memory_map(dev_map);
+
+    println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
+    println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
 
     setup_trampoline(manager);
 
@@ -113,12 +116,13 @@ fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
     let trapframe_vaddr = trampoline_vaddr_start + trapframe_offset;
     
-    println!("Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
-    println!("Trap entry paddr  : {:#x}", trap_entry_paddr);
-    println!("Trap frame paddr  : {:#x}", trapframe_paddr);
-    println!("Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    println!("Trap entry vaddr  : {:#x}", trap_entry_vaddr);
-    println!("Trap frame vaddr  : {:#x}", trapframe_vaddr);
+    println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
+    println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
+    println!("  Trap frame paddr  : {:#x}", trapframe_paddr);
+    println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
+    println!("  Trap frame vaddr  : {:#x}", trapframe_vaddr);
     
     let trampoline_map = VirtualMemoryMap {
         vmarea: MemoryArea {
