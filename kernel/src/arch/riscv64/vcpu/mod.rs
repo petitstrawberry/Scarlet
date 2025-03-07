@@ -7,6 +7,7 @@
 use super::{vm::switch_page_table, Registers, Riscv64};
 
 
+#[derive(Debug, Clone)]
 pub struct Vcpu {
     regs: Registers,
     pc: u64,

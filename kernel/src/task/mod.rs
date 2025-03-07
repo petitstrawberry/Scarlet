@@ -21,11 +21,13 @@ pub enum TaskState {
     Terminated,
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskType {
     Kernel,
     User,
 }
 
+#[derive(Debug, Clone)]
 pub struct Task {
     id: usize,
     pub name: String,
@@ -37,6 +39,7 @@ pub struct Task {
 }
 
 static TASK_ID: Mutex<usize> = Mutex::new(0);
+
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
@@ -50,9 +53,10 @@ impl Task {
     }
 }
 
-pub fn new_kernel_task(name: String, priority: u32, func: usize) -> Task {
+
+pub fn new_kernel_task(name: String, priority: u32, func: fn()) -> Task {
     let mut task = Task::new(name, priority, TaskType::Kernel);
-    task.entry = func;
+    task.entry = func as usize;
     task
 }
 
