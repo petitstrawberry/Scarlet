@@ -34,18 +34,6 @@ SECTIONS {
       . += __HEAP_SIZE;
       __HEAP_END = .;
     } > RAM
-    .stack (NOLOAD) :
-    {
-        *(.stack .stack.*)
-        . = ALIGN(0x1000);
-        __KERNEL_STACK_TOP = .;
-        . += __STACK_SIZE*4;
-        __KERNEL_STACK_BOTTOM = .;
-        . = ALIGN(0x1000);
-        __KERNEL_TRAP_STACK_TOP = .;
-        . += __STACK_SIZE*4;
-        __KERNEL_TRAP_STACK_BOTTOM = .;
-    } > RAM
     . = ALIGN(0x1000);
     __KERNEL_SPACE_END = .;
 }

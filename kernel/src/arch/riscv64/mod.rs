@@ -2,12 +2,14 @@ use core::arch::asm;
 use core::mem::transmute;
 use instruction::sbi::sbi_system_reset;
 use trap::arch_trap_handler;
-use trap::kernel::_trap_entry;
+use trap::kernel::_kernel_trap_entry;
 use trap::user::_user_trap_entry;
 
 use crate::early_println;
 use crate::early_print;
 use crate::environment::NUM_OF_CPUS;
+use crate::environment::STACK_SIZE;
+use crate::mem::KERNEL_STACK;
 
 pub mod boot;
 pub mod instruction;
@@ -63,20 +65,17 @@ impl Riscv64 {
     }
 }
 
+#[allow(static_mut_refs)]
 fn trap_init(riscv: &mut Riscv64) {
     early_println!("[riscv64] Hart {}: Initializing trap....", riscv.hartid);
-    let trap_stack_bottom: usize;
-    let stack_size = 0x4000;
-    unsafe {
-        asm!("
-        la      {0}, __KERNEL_TRAP_STACK_BOTTOM
-        ",
-        out(reg) trap_stack_bottom,
-        );
-    }
+    
+    let trap_stack_top = unsafe { KERNEL_STACK.top() };
+    let stack_size =  STACK_SIZE;
 
-    let trap_stack = trap_stack_bottom - stack_size * (riscv.hartid) as usize;
-    early_println!("[riscv64] Hart {}: Trap stack bottom  : {:#x}", riscv.hartid, trap_stack_bottom);
+    let trap_stack = trap_stack_top + stack_size * (riscv.hartid + 1) as usize;
+    early_println!("[riscv64] Hart {}: Trap stack top     : {:#x}", riscv.hartid, trap_stack_top);
+    early_println!("[riscv64] Hart {}: Trap stack bottom  : {:#x}", riscv.hartid, trap_stack);
+
     early_println!("[riscv64] Hart {}: Trap stack size    : {:#x}", riscv.hartid, stack_size);
 
     // Setup for Scratch space for Riscv64 struct
@@ -95,7 +94,7 @@ fn trap_init(riscv: &mut Riscv64) {
         csrw  sscratch, {2}
         ",
         in(reg) sie,
-        in(reg) _trap_entry as usize,
+        in(reg) _kernel_trap_entry as usize,
         in(reg) scratch_addr,
         );
     }

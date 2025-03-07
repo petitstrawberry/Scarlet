@@ -1,8 +1,8 @@
 use core::arch::naked_asm;
 
-#[unsafe(export_name = "_trap_entry")]
+#[unsafe(export_name = "_kernel_trap_entry")]
 #[naked]
-pub extern "C" fn _trap_entry() {
+pub extern "C" fn _kernel_trap_entry() {
     unsafe {
         naked_asm!("
         .option norvc
