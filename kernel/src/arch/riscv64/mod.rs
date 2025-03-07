@@ -1,7 +1,7 @@
 use core::arch::asm;
 use core::mem::transmute;
 use instruction::sbi::sbi_system_reset;
-use trap::arch_trap_handler;
+use trap::kernel::arch_kernel_trap_handler;
 use trap::kernel::_kernel_trap_entry;
 use trap::user::_user_trap_entry;
 
@@ -33,9 +33,9 @@ static mut TRAP_FRAME: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_
 #[repr(align(4))]
 #[derive(Debug)]
 pub struct Riscv64 {
-    regs: Registers,
-    epc: u64,
-    hartid: u64,
+    pub regs: Registers,
+    pub epc: u64,
+    pub hartid: u64,
     kernel_stack: u64,
     kernel_trap: u64,
 }

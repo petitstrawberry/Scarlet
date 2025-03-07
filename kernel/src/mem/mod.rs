@@ -2,7 +2,7 @@ pub mod allocator;
 
 use crate::environment::{NUM_OF_CPUS, STACK_SIZE};
 
-#[repr(C, align(16))]
+#[repr(C, align(4096))]
 pub struct Stack {
     pub data: [u8; STACK_SIZE * NUM_OF_CPUS],
 }
