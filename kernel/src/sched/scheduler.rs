@@ -8,12 +8,12 @@ extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::string::String;
 
-use crate::{arch::{enable_interrupt, instruction::idle, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer};
+use crate::{arch::{enable_interrupt, get_cpu, instruction::idle, get_user_trap_handler, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe, set_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
 use super::dispatcher::Dispatcher;
-use crate::task::{Task, TaskType};
+use crate::task::Task;
 
 static mut SCHEDULER: Option<Scheduler> = None;
 
@@ -114,21 +114,34 @@ impl Scheduler {
         }
     }
 
-    pub fn kernel_schedule(&mut self, cpu_id: usize) {
+    /* MUST NOT raise any exception in this function before the idle loop */
+    pub fn start_scheduler(&mut self) {
+        let cpu = get_cpu();
+        let cpu_id = cpu.get_cpuid();
         let timer = get_kernel_timer();
         timer.stop(cpu_id);
+
+        let trap_vector = get_trampoline_trap_vector();
+        let trapframe = get_trampoline_trapframe(cpu_id);
+        set_trapvector(trap_vector);
+        set_trampoline_trapframe(cpu_id, trapframe);
+        cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
+
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);
         enable_interrupt();
         
+        // kernel_vm_switch(); /* After this point, the kernel is running in virtual memory */
         if !self.task_queue[cpu_id].is_empty() {
             timer.start(cpu_id);
         }
-        idle();
+        idle(); /* idle loop */
     }
 }
 #[cfg(test)]
 mod tests {
+    use crate::task::TaskType;
+
     use super::*;
 
     #[test_case]
