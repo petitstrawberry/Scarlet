@@ -81,7 +81,7 @@ fn trap_init(riscv: &mut Riscv64) {
     // Setup for Scratch space for Riscv64 struct
     early_println!("[riscv64] Hart {}: Setting up scratch space....", riscv.hartid);
     riscv.kernel_stack = trap_stack as u64;
-    riscv.kernel_trap = arch_trap_handler as u64;
+    riscv.kernel_trap = arch_kernel_trap_handler as u64;
     
     let scratch_addr = riscv as *const _ as usize;
     early_println!("[riscv64] Hart {}: Scratch address    : {:#x}", riscv.hartid, scratch_addr);
