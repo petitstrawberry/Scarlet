@@ -44,12 +44,20 @@ pub use riscv64::*;
     - `arch::Arch::new()` - create object`
     - `arch::Arch.get_cpuid()` - get CPU ID
     - `arch::Arch.get_trapframe_paddr()` - get physical address of trap frame
-    - `arch::Arch.get_user_trapvector_paddr()` - get physical address of user trap vector
+    - `arch::Arch.get_trapframe()` - get trap frame
+    - `arch::Arch.set_trap_handler()` - set trap handler
 - `arch::Trapframe` - Trapframe struct for sharing context between kernel and user space
 - `arch::arch_init()` - initialize architecture specific code
 - `arch::enable_interrupts()` - enable interrupts
 - `arch::disable_interrupts()` - disable interrupts
 - `arch::earlycon::early_putc()` - early console output (before serial device is initialized)
+- `arch::get_cpu()` - get `Arch` struct of current CPU core
+- `arch::get_user_trapvector_paddr()` - get physical address of user trap vector
+- `arch::get_kernel_trapvector_paddr()` - get physical address of kernel trap vector
+- `arch::get_kernel_trap_handler()` - get physical address of kernel trap handler
+- `arch::get_user_trap_handler()` - get physical address of user trap handler
+- `arch::set_trapvector()` - set trap vector for current cpu core
+- `arch::set_trapframe()` - set trap frame for current cpu core
 - `arch::Vcpu` - architecture specific vCPU data structure
     - `arch::Vcpu::new()` - create new vCPU
     - `arch::Vcpu.switch()` - switch context to vCPU (Trap context will be replaced with vCPU context)
