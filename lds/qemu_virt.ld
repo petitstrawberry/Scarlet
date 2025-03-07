@@ -7,8 +7,6 @@ MEMORY {
 
 /* Define sections */
 SECTIONS {
-    __STACK_SHIFT = 14; /* 0x4000 per core */
-    __STACK_SIZE = (1 << __STACK_SHIFT); /* Size of stack per core */
     __HEAP_SIZE = 0x800000; /* 8MB heap size */
 
     . = ORIGIN(RAM);
