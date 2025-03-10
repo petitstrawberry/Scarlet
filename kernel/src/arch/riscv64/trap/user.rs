@@ -5,6 +5,7 @@ use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
 use crate::arch::Trapframe;
+use crate::vm::{switch_to_kernel_vm, switch_to_user_vm};
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
@@ -55,6 +56,10 @@ pub extern "C" fn _user_trap_entry() {
                 csrr    t0, sepc
                 sd      t0, 256(a0)
 
+                // Load and store a0 to trapframe
+                csrr    t0, sscratch
+                sd      t0, 80(a0)
+
                 // Load kernel stack pointer
                 ld      sp, 272(a0)
 
@@ -101,8 +106,9 @@ pub extern "C" fn _user_trap_entry() {
                 ld     x30, 240(a0)
                 ld     x31, 248(a0)
 
-                /* Restore the a0 and kernel stack pointer */
-                csrrw  a0, sscratch, a0
+                /* Restore a0 from trapframe */
+                csrrw  zero, sscratch, a0
+                ld     a0, 80(a0)
 
                 sret
             "
@@ -123,11 +129,18 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> usize {
         );
     }
 
+    /* Switch to kernel memory space */
+    switch_to_kernel_vm();
+
     let interrupt = cause & 0x8000000000000000 != 0;
     if interrupt {
         arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
         arch_exception_handler(trapframe, cause);
     }
+
+    /* Switch to user memory space */
+    switch_to_user_vm(trapframe);
+
     addr
 }

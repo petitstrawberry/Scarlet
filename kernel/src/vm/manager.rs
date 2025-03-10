@@ -42,6 +42,7 @@ use crate::arch::vm::{get_page_table, get_root_page_table_idx, mmu::PageTable};
 
 use super::vmem::VirtualMemoryMap;
 
+#[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
     memmap: Vec<VirtualMemoryMap>,
     asid: usize,

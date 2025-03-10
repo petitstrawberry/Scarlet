@@ -126,6 +126,8 @@ impl PageTable {
 
     /* Only for root page table */
     pub fn map(&mut self, vaddr: usize, paddr: usize) {
+        let vaddr = vaddr & 0xffff_ffff_ffff_f000;
+        let paddr = paddr & 0xffff_ffff_ffff_f000;
         for i in (0..=MAX_PAGING_LEVEL).rev() {
             let pagetable = self.walk(vaddr, MAX_PAGING_LEVEL);
             match pagetable {
@@ -139,6 +141,8 @@ impl PageTable {
                         .readable()
                         .executable()
                         .validate();
+
+                    unsafe { asm!("sfence.vma") };
                     break;
                 }
                 Err(t) => {

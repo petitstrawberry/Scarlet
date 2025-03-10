@@ -64,12 +64,6 @@ pub fn get_root_page_table_idx(asid: usize) -> Option<usize> {
     }
 }
 
-pub fn switch_page_table(index: usize) {
-    if let Some(root_page_table) = get_page_table(index) {
-        root_page_table.switch(index);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

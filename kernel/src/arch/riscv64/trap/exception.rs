@@ -1,17 +1,17 @@
 use core::arch::asm;
 use core::panic;
 
+use crate::arch::trap::print_traplog;
 use crate::arch::Trapframe;
-use crate::println;
-use crate::print;
-use crate::vm::get_kernel_vm_manager;
+use crate::sched::scheduler::get_scheduler;
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Instruction page fault */
         12 => {
             let vaddr = trapframe.epc as usize;
-            let manager = get_kernel_vm_manager();
+            let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
+            let manager = &task.vm_manager;
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => {
                     match manager.get_root_page_table() {
@@ -31,7 +31,8 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let manager = get_kernel_vm_manager();
+            let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
+            let manager = &task.vm_manager;
             match manager.search_memory_map(vaddr) {
                 Some(mmap) => {
                     match manager.get_root_page_table() {
@@ -42,12 +43,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                         None => panic!("Root page table is not found"),
                     }
                 }
-                None => panic!("Not found memory map matched with vaddr: {:#x}", vaddr),
+                None => {
+                    print_traplog(trapframe);
+                    panic!("Not found memory map matched with vaddr: {:#x}", vaddr);
+                }
             }
         },
         _ => {
-            println!("(Trapframe)\n{:#x?}", trapframe);
+            print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);
+            
         }
     }
 }
