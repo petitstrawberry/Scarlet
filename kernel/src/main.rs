@@ -70,11 +70,14 @@ pub mod task;
 #[cfg(test)]
 pub mod test;
 
+extern crate alloc;
+use alloc::string::String;
 
 use core::panic::PanicInfo;
 
-use arch::arch_init;
+use arch::{arch_init, instruction::idle};
 use library::std::print;
+use task::new_kernel_task;
 use vm::kernel_vm_init;
 use sched::scheduler::get_scheduler;
 use mem::allocator::init_heap;
@@ -109,7 +112,11 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
-    scheduler.init_test_tasks();
+    /* Make idle task as initial task */
+    println!("[Scarlet Kernel] Creating initial kernel task...");
+    let mut task = new_kernel_task(String::from("Idle"), 0, idle);
+    task.init();
+    scheduler.add_task(task, cpu_id);
     println!("[Scarlet Kernel] Scheduler will start...");
     scheduler.start_scheduler();
     loop {} 

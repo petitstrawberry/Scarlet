@@ -46,56 +46,6 @@ impl Scheduler {
         }
     }
 
-    pub fn init_test_tasks(&mut self) {
-        let mut task0 = new_kernel_task(String::from("Task0"), 0, || {
-            println!("Task0");
-            let mut counter: usize = 0;
-            loop {
-                if counter % 500000 == 0 {
-                    print!("\nTask0: ");
-                }
-
-                if counter % 10000 == 0 {
-                    print!(".");
-                }
-
-                counter += 1;
-
-                if counter >= 100000000 {
-                    break;
-                }
-            }
-            println!("");
-            println!("Task0: Done");
-            idle();
-        });
-        task0.init();
-        self.add_task(task0, 0);
-
-        let mut task1 = new_kernel_task(String::from("Task1"), 0, || {
-            println!("Task1");
-            let mut counter: usize = 0;
-            loop {
-                if counter % 500000 == 0 {
-                    print!("\nTask1: {} %", counter / 1000000);
-                }
-
-                counter += 1;
-
-                if counter >= 100000000 {
-                    break;
-                }
-            }
-            println!("\nTask1: 100 %");
-            println!("Task1: Completed");
-            idle();
-        });
-        task1.init();
-        self.add_task(task1, 0);
-
-
-    }
-
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
         self.task_queue[cpu_id].push_back(task);
     }
@@ -164,21 +114,8 @@ impl Scheduler {
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);
         enable_interrupt();
-
-        // let mut idle_task = new_kernel_task(String::from("Idle"), 0, idle);
-        // idle_task.init();
-        // idle_task.state = TaskState::Running;
-        // idle_task.vcpu.regs.reg[2] = 0xfffffffffffff000; /* Set sp to the top of the kernel stack */
-        
-        // self.task_queue[cpu_id].push_front(idle_task);
         timer.start(cpu_id);
-
-
         idle();
-
-        fn idle() {
-            arch::instruction::idle();
-        }
     }
 
     pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
@@ -188,6 +125,50 @@ impl Scheduler {
         }
     }
 }
+
+// pub fn make_test_tasks(sched: &mut Scheduler) {
+//     let mut task0 = new_kernel_task(String::from("Task0"), 0, || {
+//         println!("Task0");
+//         let mut counter: usize = 0;
+//         loop {
+//             if counter % 500000 == 0 {
+//                 print!("\nTask0: ");
+//             }
+//             if counter % 10000 == 0 {
+//                 print!(".");
+//             }
+//             counter += 1;
+//             if counter >= 100000000 {
+//                 break;
+//             }
+//         }
+//         println!("");
+//         println!("Task0: Done");
+//         idle();
+//     });
+//     task0.init();
+//     sched.add_task(task0, 0);
+
+//     let mut task1 = new_kernel_task(String::from("Task1"), 0, || {
+//         println!("Task1");
+//         let mut counter: usize = 0;
+//         loop {
+//             if counter % 500000 == 0 {
+//                 print!("\nTask1: {} %", counter / 1000000);
+//             }
+//             counter += 1;
+//             if counter >= 100000000 {
+//                 break;
+//             }
+//         }
+//         println!("\nTask1: 100 %");
+//         println!("Task1: Completed");
+//         idle();
+//     });
+//     task1.init();
+//     sched.add_task(task1, 0);
+// }
+
 #[cfg(test)]
 mod tests {
     use crate::task::TaskType;
