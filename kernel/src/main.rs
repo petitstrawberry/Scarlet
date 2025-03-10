@@ -74,6 +74,7 @@ pub mod test;
 use core::panic::PanicInfo;
 
 use arch::arch_init;
+use library::std::print;
 use vm::kernel_vm_init;
 use sched::scheduler::get_scheduler;
 use mem::allocator::init_heap;
@@ -89,7 +90,7 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn start_kernel(cpu_id: usize) {
+pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Initializing arch...");
@@ -103,7 +104,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) {
     test_main();
 
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    kernel_vm_init(); /* After this point, the kernel is running in virtual memory */
+    kernel_vm_init();
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");

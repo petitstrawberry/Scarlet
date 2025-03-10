@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::string::String;
 
-use crate::{arch::{enable_interrupt, get_cpu, instruction::idle, get_user_trap_handler, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe, set_trampoline_trapframe}};
+use crate::{arch::{self, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -33,7 +33,7 @@ pub struct Scheduler {
     task_queue: [VecDeque<Task>; NUM_OF_CPUS],
     dispatcher: [Dispatcher; NUM_OF_CPUS],
     interval: u64, /* in microseconds */
-    current_task: Option<usize>,
+    current_task_id: [Option<usize>; NUM_OF_CPUS],
 }
 
 impl Scheduler {
@@ -41,31 +41,56 @@ impl Scheduler {
         Scheduler {
             task_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             dispatcher: [const { Dispatcher::new() }; NUM_OF_CPUS],
-            interval: 1000, /* 1ms */
-            current_task: None,
+            interval: 10000, /* 1ms */
+            current_task_id: [const { None }; NUM_OF_CPUS],
         }
     }
 
     pub fn init_test_tasks(&mut self) {
-        let task0 = new_kernel_task(String::from("Task0"), 0, || {
+        let mut task0 = new_kernel_task(String::from("Task0"), 0, || {
             println!("Task0");
-            let mut counter = 0;
+            let mut counter: usize = 0;
             loop {
-                // println!("Task0: {}", counter);
-                // counter += 1;
+                if counter % 500000 == 0 {
+                    print!("\nTask0: ");
+                }
+
+                if counter % 10000 == 0 {
+                    print!(".");
+                }
+
+                counter += 1;
+
+                if counter >= 100000000 {
+                    break;
+                }
             }
+            println!("");
+            println!("Task0: Done");
+            idle();
         });
+        task0.init();
         self.add_task(task0, 0);
 
-        let task1 = new_kernel_task(String::from("Task1"), 0, || {
+        let mut task1 = new_kernel_task(String::from("Task1"), 0, || {
             println!("Task1");
-            // let mut counter = 0;
+            let mut counter: usize = 0;
             loop {
-                // println!("Task1: {}", counter);
-                // counter += 1;
-            }
-        });
+                if counter % 500000 == 0 {
+                    print!("\nTask1: {} %", counter / 1000000);
+                }
 
+                counter += 1;
+
+                if counter >= 100000000 {
+                    break;
+                }
+            }
+            println!("\nTask1: 100 %");
+            println!("Task1: Completed");
+            idle();
+        });
+        task1.init();
         self.add_task(task1, 0);
 
 
@@ -78,26 +103,35 @@ impl Scheduler {
     fn run(&mut self, cpu: &mut Arch) {
         let cpu_id = cpu.get_cpuid();
 
-        if let Some(mut t) = self.task_queue[cpu_id].pop_front() {
+        let task = self.task_queue[cpu_id].pop_front();
 
-            // currentt_taskのidxに対応するtaskを取得
-            let prev_task = match self.current_task {
-                Some(id) => {
-                    let idx = self.task_queue[cpu_id].iter().position(|t| t.get_id() == id);
-                    match idx {
-                        Some(i) => Some(self.task_queue[cpu_id].get_mut(i).unwrap()),
-                        None => None,
+        if self.task_queue[cpu_id].is_empty() {
+            match task {
+                Some(mut t) => {
+                    if self.current_task_id[cpu_id].is_none() {
+                        self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
                     }
-                },
-                None => None,
-            };
 
-            self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+                    self.current_task_id[cpu_id] = Some(t.get_id());
+                    self.task_queue[cpu_id].push_back(t);
+                    return;
+                }
+                None => return
+            }
+        }
 
-            self.current_task = Some(t.get_id());
-            if t.state != TaskState::Terminated {
+        match task {
+            Some(mut t) => {
+                let prev_task = match self.current_task_id[cpu_id] {
+                    Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
+                    None => None
+                };
+
+                self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+                self.current_task_id[cpu_id] = Some(t.get_id());
                 self.task_queue[cpu_id].push_back(t);
             }
+            None => {}
         }
     }
 
@@ -124,18 +158,34 @@ impl Scheduler {
         let trap_vector = get_trampoline_trap_vector();
         let trapframe = get_trampoline_trapframe(cpu_id);
         set_trapvector(trap_vector);
-        set_trampoline_trapframe(cpu_id, trapframe);
+        set_trapframe(trapframe);
         cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
 
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);
         enable_interrupt();
+
+        // let mut idle_task = new_kernel_task(String::from("Idle"), 0, idle);
+        // idle_task.init();
+        // idle_task.state = TaskState::Running;
+        // idle_task.vcpu.regs.reg[2] = 0xfffffffffffff000; /* Set sp to the top of the kernel stack */
         
-        // kernel_vm_switch(); /* After this point, the kernel is running in virtual memory */
-        if !self.task_queue[cpu_id].is_empty() {
-            timer.start(cpu_id);
+        // self.task_queue[cpu_id].push_front(idle_task);
+        timer.start(cpu_id);
+
+
+        idle();
+
+        fn idle() {
+            arch::instruction::idle();
         }
-        idle(); /* idle loop */
+    }
+
+    pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
+        match self.current_task_id[cpu_id] {
+            Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
+            None => None
+        }
     }
 }
 #[cfg(test)]

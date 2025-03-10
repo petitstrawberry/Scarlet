@@ -1,7 +1,10 @@
 use slab_allocator_rs::LockedHeap;
 
+use crate::early_println;
+use crate::early_print;
+
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 unsafe extern "C" {
     static __HEAP_START: usize;
@@ -16,4 +19,6 @@ pub fn init_heap() {
     unsafe {
         ALLOCATOR.init(heap_start, heap_size);
     }
+
+    early_println!("Heap initialized: {:#x} - {:#x}", heap_start, heap_end);
 }

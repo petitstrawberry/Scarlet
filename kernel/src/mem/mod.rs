@@ -1,4 +1,5 @@
 pub mod allocator;
+pub mod page;
 
 use crate::environment::{NUM_OF_CPUS, STACK_SIZE};
 

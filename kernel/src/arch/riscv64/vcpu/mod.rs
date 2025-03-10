@@ -4,12 +4,12 @@
 //! architecture. The VCPU is responsible for executing instructions and managing
 //! the state of the CPU.
 
-use super::{vm::switch_page_table, Registers, Riscv64};
+use super::{Registers, Riscv64};
 
 
 #[derive(Debug, Clone)]
 pub struct Vcpu {
-    regs: Registers,
+    pub regs: Registers,
     pc: u64,
     asid: usize,
 }
@@ -27,6 +27,10 @@ impl Vcpu {
         self.asid = asid;
     }
 
+    pub fn set_pc(&mut self, pc: u64) {
+        self.pc = pc;
+    }
+
     pub fn store(&mut self, riscv64: &Riscv64) {
         self.regs = riscv64.regs;
         self.pc = riscv64.epc;
@@ -35,11 +39,5 @@ impl Vcpu {
     pub fn switch(&mut self, riscv64: &mut Riscv64) {
         riscv64.regs = self.regs;
         riscv64.epc = self.pc;
-        switch_page_table(self.asid);
-    }
-
-    pub fn jump(&mut self, riscv64: &mut Riscv64, pc: u64) {
-        self.pc = pc;
-        self.switch(riscv64);
     }
 }
