@@ -15,7 +15,11 @@ use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_page_table;
 use crate::arch::vm::get_root_page_table_idx;
 use crate::arch::Arch;
+use crate::environment::KERNEL_VM_STACK_END;
+use crate::environment::KERNEL_VM_STACK_SIZE;
+use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
+use crate::environment::PAGE_SIZE;
 use crate::environment::VMMAX;
 use crate::mem::page::allocate_pages;
 use crate::println;
@@ -174,11 +178,11 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(kernel_map);
 
-    let stack_page = allocate_pages(1);
+    let stack_page = allocate_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
     let stack_map = VirtualMemoryMap {
         vmarea: MemoryArea {
-            start: 0xffffffffffffe000,
-            end: 0xffffffffffffefff,
+            start: KERNEL_VM_STACK_START,
+            end: KERNEL_VM_STACK_END,
         },
         pmarea: MemoryArea {
             start: stack_page as usize,
@@ -204,7 +208,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
 
     println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
     println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
-    println!("Kernel stack mapped       : {:#018x} - {:#018x}", 0xffffffffffffe000 as usize, 0xffffffffffffefff as usize);
+    println!("Kernel stack mapped       : {:#018x} - {:#018x}", KERNEL_VM_STACK_START as usize, KERNEL_VM_STACK_END as usize);
     println!("(Stack page)              : {:#018x}", stack_page as usize);
 
     setup_trampoline(manager);

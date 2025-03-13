@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::string::String;
 use spin::Mutex;
 
-use crate::{arch::vcpu::Vcpu, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init}};
+use crate::{arch::vcpu::Vcpu, environment::KERNEL_VM_STACK_END, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init}};
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -55,7 +55,7 @@ impl Task {
             TaskType::Kernel => {
                 user_kernel_vm_init(self);
                 /* Set sp to the top of the kernel stack */
-                self.vcpu.regs.reg[2] = 0xfffffffffffff000;
+                self.vcpu.regs.reg[2] = KERNEL_VM_STACK_END + 1;
             },
             TaskType::User => user_vm_init(self),
         }
