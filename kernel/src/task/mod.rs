@@ -98,7 +98,7 @@ impl Task {
     }
 
     /* Allocate a page for the task */
-    pub fn allocate_page(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) {
+    pub fn allocate_page(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = segment.get_permissions();
         let pages = allocate_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
@@ -121,6 +121,7 @@ impl Task {
             VirtualMemorySegment::Text => self.text_size += size,
             VirtualMemorySegment::Data => self.data_size += size,
         }
+        Ok(mmap)
     }
 }
 

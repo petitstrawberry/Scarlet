@@ -192,25 +192,25 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(kernel_map);
 
-    let stack_page = allocate_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
+    let stack_pages = allocate_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
     let stack_map = VirtualMemoryMap {
         vmarea: MemoryArea {
             start: KERNEL_VM_STACK_START,
             end: KERNEL_VM_STACK_END,
         },
         pmarea: MemoryArea {
-            start: stack_page as usize,
-            end: stack_page as usize + 0xfff,
+            start: stack_pages as usize,
+            end: stack_pages as usize + KERNEL_VM_STACK_SIZE - 1,
         },
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
     };
     manager.add_memory_map(stack_map);
+    task.stack_size = KERNEL_VM_STACK_SIZE;
     /* Pre-map the kernel stack */
     root_page_table.map_memory_area(stack_map);
 
-    
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
             start: 0x00,
@@ -228,8 +228,8 @@ pub fn user_kernel_vm_init(task: &mut Task) {
 
     println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
     println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
-    println!("Kernel stack mapped       : {:#018x} - {:#018x}", KERNEL_VM_STACK_START as usize, KERNEL_VM_STACK_END as usize);
-    println!("(Stack page)              : {:#018x}", stack_page as usize);
+    println!("Kernel stack mapped       : {:#018x} - {:#018x}", stack_map.vmarea.start as usize, stack_map.vmarea.end as usize);
+    println!("(Stack page)              : {:#018x}", stack_pages as usize);
 
     setup_trampoline(manager);
 }
