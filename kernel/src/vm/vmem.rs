@@ -78,3 +78,21 @@ impl VirtualMemoryPermission {
         permissions & (*self as usize) != 0
     }
 }
+
+pub enum VirtualMemorySegment {
+    Text,
+    Data,
+    Stack,
+    Heap,
+}
+
+impl VirtualMemorySegment {
+    pub fn get_permissions(&self) -> usize {
+        match self {
+            VirtualMemorySegment::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize,
+            VirtualMemorySegment::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+        }
+    }
+}
