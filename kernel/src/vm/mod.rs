@@ -6,6 +6,7 @@
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
+use vmem::VirtualMemoryPermission;
 
 use crate::arch::get_cpu;
 use crate::arch::get_kernel_trapvector_paddr;
@@ -84,7 +85,11 @@ pub fn kernel_vm_init() {
         pmarea: MemoryArea {
             start: kernel_start,
             end: kernel_end,
-        }
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize |
+            VirtualMemoryPermission::Execute as usize,
     };
     manager.add_memory_map(kernel_map);
     /* Pre-map the kernel space */
@@ -98,7 +103,10 @@ pub fn kernel_vm_init() {
         pmarea: MemoryArea {
             start: 0x00,
             end: 0x8000_0000,
-        }
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize,
     };
     manager.add_memory_map(dev_map);
 
@@ -128,8 +136,6 @@ pub fn user_vm_init(task: &mut Task) {
     let manager = &mut task.vm_manager;
 
     let asid = alloc_virtual_address_space();
-    let root_page_table_idx = get_root_page_table_idx(asid).unwrap();
-    let root_page_table = get_page_table(root_page_table_idx).unwrap();
     manager.set_asid(asid);
 
     let first_page = allocate_pages(1);
@@ -143,7 +149,11 @@ pub fn user_vm_init(task: &mut Task) {
             pmarea: MemoryArea {
                 start: first_page as usize,
                 end: first_page as usize + 0xfff,
-            }
+            },
+            permissions: 
+                VirtualMemoryPermission::Read as usize |
+                VirtualMemoryPermission::Write as usize |
+                VirtualMemoryPermission::Execute as usize,
         }
     );
 
@@ -172,7 +182,11 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         pmarea: MemoryArea {
             start: kernel_start,
             end: kernel_end,
-        }
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize |
+            VirtualMemoryPermission::Execute as usize,
     };
     manager.add_memory_map(kernel_map);
     /* Pre-map the kernel space */
@@ -187,7 +201,10 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         pmarea: MemoryArea {
             start: stack_page as usize,
             end: stack_page as usize + 0xfff,
-        }
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize,
     };
     manager.add_memory_map(stack_map);
     /* Pre-map the kernel stack */
@@ -202,7 +219,10 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         pmarea: MemoryArea {
             start: 0x00,
             end: 0x7fff_ffff,
-        }
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize,
     };
     manager.add_memory_map(dev_map);
 
@@ -250,7 +270,11 @@ fn setup_trampoline(manager: &mut VirtualMemoryManager) {
         pmarea: MemoryArea {
             start: trampoline_start,
             end: trampoline_end,
-        }
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize |
+            VirtualMemoryPermission::Execute as usize,
     };
 
     manager.add_memory_map(trampoline_map);

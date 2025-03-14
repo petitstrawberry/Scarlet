@@ -1,6 +1,7 @@
 use core::{arch::asm, mem::transmute};
 use core::result::Result;
 
+use crate::vm::vmem::VirtualMemoryPermission;
 use crate::{arch::vm::{get_page_table, new_page_table_idx}, vm::vmem::VirtualMemoryMap};
 
 const MAX_PAGING_LEVEL: usize = 3;
@@ -112,7 +113,7 @@ impl PageTable {
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         while vaddr + 0xfff <= mmap.vmarea.end {
-            self.map(vaddr, paddr);
+            self.map(vaddr, paddr, mmap.permissions);
             match vaddr.checked_add(0x1000) {
                 Some(addr) => vaddr = addr,
                 None => break,
@@ -125,7 +126,7 @@ impl PageTable {
     }
 
     /* Only for root page table */
-    pub fn map(&mut self, vaddr: usize, paddr: usize) {
+    pub fn map(&mut self, vaddr: usize, paddr: usize, permissions: usize) {
         let vaddr = vaddr & 0xffff_ffff_ffff_f000;
         let paddr = paddr & 0xffff_ffff_ffff_f000;
         for i in (0..=MAX_PAGING_LEVEL).rev() {
@@ -135,13 +136,18 @@ impl PageTable {
                     let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
                     let ppn = (paddr >> 12) & 0xfffffffffff;
                     let entry = &mut pagetable.entries[vpn];
+                    if VirtualMemoryPermission::Read.contained_in(permissions) {
+                        entry.readable();
+                    }
+                    if VirtualMemoryPermission::Write.contained_in(permissions) {
+                        entry.writable();
+                    }
+                    if VirtualMemoryPermission::Execute.contained_in(permissions) {
+                        entry.executable();
+                    }
                     entry
                         .set_ppn(ppn)
-                        .writable()
-                        .readable()
-                        .executable()
                         .validate();
-
                     unsafe { asm!("sfence.vma") };
                     break;
                 }
