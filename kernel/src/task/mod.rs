@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::string::String;
 use spin::Mutex;
 
-use crate::{arch::vcpu::Vcpu, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_HEAP_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::allocate_pages, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::vcpu::Vcpu, environment::{DEAFAULT_MAX_TASK_BSS_SIZE, DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_HEAP_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::allocate_pages, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -36,14 +36,17 @@ pub struct Task {
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
+    pub brk: usize, /* Heap break (NOT work in Kernel task) */
     pub stack_size: usize, /* Size of the stack in bytes */
-    pub heap_size: usize, /* Size of the heap in bytes */
-    pub text_size: usize, /* Size of the text segment in bytes */
-    pub data_size: usize, /* Size of the data segment in bytes */
+    pub heap_size: usize, /* Size of the heap in bytes (NOT work in Kernel task) */
+    pub bss_size: usize, /* Size of the bss segment in bytes (NOT work in Kernel task) */
+    pub data_size: usize, /* Size of the data segment in bytes (NOT work in Kernel task) */
+    pub text_size: usize, /* Size of the text segment in bytes (NOT work in Kernel task) */
     pub max_stack_size: usize, /* Maximum size of the stack in bytes */
     pub max_heap_size: usize, /* Maximum size of the heap in bytes */
-    pub max_text_size: usize, /* Maximum size of the text segment in bytes */
+    pub max_bss_size: usize, /* Maximum size of the bss segment in bytes */
     pub max_data_size: usize, /* Maximum size of the data segment in bytes */
+    pub max_text_size: usize, /* Maximum size of the text segment in bytes */
     pub vm_manager: VirtualMemoryManager,
 }
 
@@ -60,14 +63,17 @@ impl Task {
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
+            brk: 0,
             stack_size: 0,
             heap_size: 0,
-            text_size: 0,
+            bss_size: 0,
             data_size: 0,
+            text_size: 0,
             max_stack_size: DEAFAULT_MAX_TASK_STACK_SIZE,
             max_heap_size: DEAFAULT_MAX_TASK_HEAP_SIZE,
-            max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
+            max_bss_size: DEAFAULT_MAX_TASK_BSS_SIZE,
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
+            max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
             vm_manager: VirtualMemoryManager::new(),
         };
         *taskid += 1;
@@ -118,8 +124,9 @@ impl Task {
         match segment {
             VirtualMemorySegment::Stack => self.stack_size += size,
             VirtualMemorySegment::Heap => self.heap_size += size,
-            VirtualMemorySegment::Text => self.text_size += size,
+            VirtualMemorySegment::Bss => self.bss_size += size,
             VirtualMemorySegment::Data => self.data_size += size,
+            VirtualMemorySegment::Text => self.text_size += size,
         }
         Ok(mmap)
     }

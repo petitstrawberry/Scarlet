@@ -82,8 +82,9 @@ impl VirtualMemoryPermission {
 pub enum VirtualMemorySegment {
     Text,
     Data,
-    Stack,
+    Bss,
     Heap,
+    Stack,
 }
 
 impl VirtualMemorySegment {
@@ -91,8 +92,9 @@ impl VirtualMemorySegment {
         match self {
             VirtualMemorySegment::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize,
             VirtualMemorySegment::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
-            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             VirtualMemorySegment::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
         }
     }
 }
