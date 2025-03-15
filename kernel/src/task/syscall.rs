@@ -15,7 +15,7 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(1);
     let brk = task.get_brk();
-    match task.set_brk(brk + increment) {
+    match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
         Ok(_) => brk,
         Err(_) => usize::MAX,
     }
