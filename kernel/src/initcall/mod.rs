@@ -1,6 +1,7 @@
-use crate::arch::instruction::idle;
-use crate::println;
-use crate::print;
+use crate::{arch::instruction::idle, println, print};
+
+pub mod early;
+pub mod late;
 
 #[allow(improper_ctypes)]
 unsafe extern "C" {
@@ -25,13 +26,4 @@ pub fn initcall_task() {
     }
 
     idle();
-}
-
-#[macro_export]
-macro_rules! initcall {
-    ($func:ident) => {
-        #[unsafe(link_section = ".initcall")]
-        #[used(linker)]
-        static __INITCALL__ : fn() = $func;
-    };
 }
