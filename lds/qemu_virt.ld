@@ -16,6 +16,7 @@ SECTIONS {
     .initcall : { 
       __INITCALL_START = .;
       *(.initcall.early)
+      *(.initcall.driver)
       *(.initcall.late)
       __INITCALL_END = .;
     } > RAM
