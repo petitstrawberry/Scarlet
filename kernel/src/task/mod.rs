@@ -89,17 +89,29 @@ impl Task {
         self.id
     }
 
-    /* Get total size of allocated memory */
+   /// Get the size of the task.
+   /// 
+   /// # Returns
+   /// The size of the task in bytes.
     pub fn get_size(&self) -> usize {
         self.stack_size + self.text_size + self.data_size
     }
 
-    /* Get the program break (NOT work in Kernel task) */
+    /// Get the program break (NOT work in Kernel task)
+    /// 
+    /// # Returns
+    /// The program break address
     pub fn get_brk(&self) -> usize {
         self.text_size + self.data_size
     }
 
-    /* Set the program break (NOT work in Kernel task) */
+    /// Set the program break (NOT work in Kernel task)
+    /// 
+    /// # Arguments
+    /// * `brk` - The new program break address
+    /// 
+    /// # Returns
+    /// If successful, returns Ok(()), otherwise returns an error.
     pub fn set_brk(&mut self, brk: usize) -> Result<(), &'static str> {
         // println!("New brk: {:#x}", brk);
         if brk < self.text_size {
@@ -140,8 +152,24 @@ impl Task {
         Ok(())
     }
 
-    /* Allocate a page for the task */
+    /// Allocate pages for the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// * `segment` - The segment type to allocate pages
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
     pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
+
+        if vaddr % PAGE_SIZE != 0 {
+            return Err("Address is not page aligned");
+        }
+        
         let permissions = segment.get_permissions();
         let pages = allocate_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
@@ -169,6 +197,11 @@ impl Task {
         Ok(mmap)
     }
 
+    /// Free pages for the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to free
     pub fn free_pages(&mut self, vaddr: usize, num_of_pages: usize) {
         let page = vaddr / PAGE_SIZE;
         for p in 0..num_of_pages {
@@ -230,17 +263,37 @@ impl Task {
     }
 }
 
-
+/// Create a new kernel task.
+/// 
+/// # Arguments
+/// * `name` - The name of the task
+/// * `priority` - The priority of the task
+/// * `func` - The function to run in the task
+/// 
+/// # Returns
+/// The new task.
 pub fn new_kernel_task(name: String, priority: u32, func: fn()) -> Task {
     let mut task = Task::new(name, priority, TaskType::Kernel);
     task.entry = func as usize;
     task
 }
 
+/// Create a new user task.
+/// 
+/// # Arguments
+/// * `name` - The name of the task
+/// * `priority` - The priority of the task
+/// 
+/// # Returns
+/// The new task.
 pub fn new_user_task(name: String, priority: u32) -> Task {
     Task::new(name, priority, TaskType::User)
 }
 
+/// Get the current task.
+/// 
+/// # Returns
+/// The current task if it exists.
 pub fn mytask() -> Option<&'static mut Task> {
     let cpu = get_cpu();
     get_scheduler().get_current_task(cpu.get_cpuid())
