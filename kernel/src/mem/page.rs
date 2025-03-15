@@ -20,3 +20,9 @@ pub fn allocate_pages(num_of_pages: usize) -> *mut Page {
     let boxed_pages = alloc::vec![Page::new(); num_of_pages].into_boxed_slice();
     Box::into_raw(boxed_pages) as *mut Page
 }
+
+pub fn free_pages(pages: *mut Page, num_of_pages: usize) {
+    unsafe {
+        let _ = Box::from_raw(core::slice::from_raw_parts_mut(pages, num_of_pages));
+    }
+}
