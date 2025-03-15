@@ -76,6 +76,10 @@ impl VirtualMemoryManager {
         self.asid
     }
 
+    pub fn get_memmap(&self) -> &Vec<VirtualMemoryMap> {
+        &self.memmap
+    }
+
     /// Adds a memory map to the virtual memory manager.
     /// 
     /// # Arguments
