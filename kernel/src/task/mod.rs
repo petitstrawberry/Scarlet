@@ -102,12 +102,32 @@ impl Task {
         if brk < self.text_size {
             return Err("Invalid address");
         }
+        let prev_brk = self.get_brk();
+        let prev_page = prev_brk / PAGE_SIZE;
+        let page = brk / PAGE_SIZE;
+
+        if page < prev_page {
+            /* Free pages */
+            let num_of_pages = prev_page - page;
+            self.free_pages(page * PAGE_SIZE, num_of_pages);
+            
+        } else {
+            /* Allocate pages */
+            let num_of_pages = page - prev_page;
+            match self.allocate_pages(prev_page * PAGE_SIZE, num_of_pages, VirtualMemorySegment::Data) {
+                Ok(mmap) => {
+                    println!("Allocated pages {}", mmap.vmarea.start);
+                },
+                Err(_) => return Err("Failed to allocate pages"),
+            }
+        }
+
         self.data_size = brk - self.text_size;
         Ok(())
     }
 
     /* Allocate a page for the task */
-    pub fn allocate_page(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
+    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = segment.get_permissions();
         let pages = allocate_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
@@ -132,6 +152,26 @@ impl Task {
             VirtualMemorySegment::Text => self.text_size += size,
         }
         Ok(mmap)
+    }
+
+    pub fn free_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        let page = vaddr / PAGE_SIZE;
+        for p in 0..num_of_pages {
+            let vaddr = (page + p) * PAGE_SIZE;
+            match self.vm_manager.search_memory_map_idx(vaddr) {
+                Some(idx) => {
+                    self.vm_manager.remove_memory_map(idx);
+                },
+                None => {},
+            }
+        }
+        free_pages((page * PAGE_SIZE) as *mut Page, num_of_pages);
+        /* Unmap pages */
+        let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
+        for p in 0..num_of_pages {
+            let vaddr = (page + p) * PAGE_SIZE;
+            root_pagetable.unmap(vaddr);
+        }
     }
 }
 
