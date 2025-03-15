@@ -11,7 +11,14 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Environment call from U-mode */
         8 => {
             /* Execute SystemCall */
-            let _ = syscall_handler(trapframe);
+            match syscall_handler(trapframe) {
+                Ok(ret) => {
+                    trapframe.set_arg(0, ret);
+                }
+                Err(msg) => {
+                    panic!("Syscall error: {}", msg);
+                }
+            }
         }
         /* Instruction page fault */
         12 => {
