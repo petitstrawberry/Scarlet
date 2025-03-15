@@ -72,6 +72,16 @@ impl Riscv64 {
     }
 }
 
+impl Trapframe {
+    pub fn get_arg(&self, index: usize) -> usize {
+        self.regs.reg[index]
+    }
+
+    pub fn set_arg(&mut self, index: usize, value: usize) {
+        self.regs.reg[index] = value;
+    }
+}
+
 pub fn get_user_trapvector_paddr() -> usize {
     _user_trap_entry as usize
 }
