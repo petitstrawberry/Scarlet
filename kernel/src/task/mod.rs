@@ -98,6 +98,14 @@ impl Task {
         self.text_size + self.data_size
     }
 
+    /* Set the program break */
+    pub fn set_brk(&mut self, brk: usize) {
+        if brk < self.text_size {
+            return;
+        }
+        self.data_size = brk - self.text_size;
+    }
+
     /* Allocate a page for the task */
     pub fn allocate_page(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = segment.get_permissions();
