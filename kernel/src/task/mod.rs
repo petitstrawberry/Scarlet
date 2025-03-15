@@ -2,15 +2,14 @@
 //!
 //! The task module defines the structure and behavior of tasks in the system.
 
-// pub mod kernel;
-// pub mod user;
+pub mod syscall;
 
 extern crate alloc;
 
 use alloc::string::String;
 use spin::Mutex;
 
-use crate::{arch::vcpu::Vcpu, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::allocate_pages, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::allocate_pages, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -99,11 +98,12 @@ impl Task {
     }
 
     /* Set the program break */
-    pub fn set_brk(&mut self, brk: usize) {
+    pub fn set_brk(&mut self, brk: usize) -> Result<(), &'static str> {
         if brk < self.text_size {
-            return;
+            return Err("Invalid address");
         }
         self.data_size = brk - self.text_size;
+        Ok(())
     }
 
     /* Allocate a page for the task */
@@ -144,4 +144,9 @@ pub fn new_kernel_task(name: String, priority: u32, func: fn()) -> Task {
 
 pub fn new_user_task(name: String, priority: u32) -> Task {
     Task::new(name, priority, TaskType::User)
+}
+
+pub fn mytask() -> Option<&'static mut Task> {
+    let cpu = get_cpu();
+    get_scheduler().get_current_task(cpu.get_cpuid())
 }
