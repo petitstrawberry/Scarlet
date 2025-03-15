@@ -7,14 +7,15 @@ macro_rules! syscall_table {
             )*
         }
 
-        pub fn syscall_handler(syscall_number: usize) -> Result<usize, &'static str> {
+        pub fn syscall_handler(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+            let syscall_number = trapframe.get_arg(0);
             if syscall_number == 0 {
                 return Err("Invalid syscall number");
             }
             match syscall_number {
                 $(
                     $num => {
-                        Ok($func())
+                        Ok($func(trapframe))
                     }
                 )*
                 _ => {
