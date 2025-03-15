@@ -101,6 +101,7 @@ impl Task {
 
     /* Set the program break (NOT work in Kernel task) */
     pub fn set_brk(&mut self, brk: usize) -> Result<(), &'static str> {
+        // println!("New brk: {:#x}", brk);
         if brk < self.text_size {
             return Err("Invalid address");
         }
@@ -135,6 +136,7 @@ impl Task {
         }
 
         self.data_size = brk - self.text_size;
+        // println!("Brk: {:#x}", self.get_brk());
         Ok(())
     }
 
@@ -174,7 +176,7 @@ impl Task {
             match self.vm_manager.search_memory_map_idx(vaddr) {
                 Some(idx) => {
                     let mmap = self.vm_manager.remove_memory_map(idx).unwrap();
-                    if mmap.vmarea.start < vaddr {
+                    if p == 0 && mmap.vmarea.start < vaddr {
                         /* Re add the first part of the memory map */
                         let size = vaddr - mmap.vmarea.start;
                         let paddr = mmap.pmarea.start;
@@ -193,7 +195,7 @@ impl Task {
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
                     }
-                    if mmap.vmarea.end > vaddr + PAGE_SIZE - 1{
+                    if p == num_of_pages - 1 && mmap.vmarea.end > vaddr + PAGE_SIZE - 1 {
                         /* Re add the second part of the memory map */
                         let size = mmap.vmarea.end - (vaddr + PAGE_SIZE) + 1;
                         let paddr = mmap.pmarea.start + (vaddr + PAGE_SIZE - mmap.vmarea.start);
