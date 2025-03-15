@@ -7,15 +7,18 @@ macro_rules! syscall_table {
             )*
         }
 
-        pub fn syscall_handler(syscall_number: usize) -> Result<usize, isize> {
+        pub fn syscall_handler(syscall_number: usize) -> Result<isize, &'static str> {
+            if syscall_number == 0 {
+                return Err("Invalid syscall number");
+            }
             match syscall_number {
                 $(
                     $num => {
-                        $func()
+                        Ok($func())
                     }
                 )*
                 _ => {
-                    Err(-2) /* Unknown syscall error */
+                    Err("Invalid syscall number")
                 }
             }
         }

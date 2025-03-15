@@ -2,7 +2,5 @@
 mod macros;
 
 syscall_table! {
-    Invalid = 0 => || {
-        Err(-1) /* Invalid syscall number */
-    },
+    Invalid = 0 => || 0,
 }
