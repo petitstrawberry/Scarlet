@@ -4,9 +4,22 @@ use core::panic;
 use crate::arch::trap::print_traplog;
 use crate::arch::Trapframe;
 use crate::sched::scheduler::get_scheduler;
+use crate::syscall::syscall_handler;
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
+        /* Environment call from U-mode */
+        8 => {
+            /* Execute SystemCall */
+            match syscall_handler(trapframe) {
+                Ok(ret) => {
+                    trapframe.set_arg(0, ret);
+                }
+                Err(msg) => {
+                    panic!("Syscall error: {}", msg);
+                }
+            }
+        }
         /* Instruction page fault */
         12 => {
             let vaddr = trapframe.epc as usize;

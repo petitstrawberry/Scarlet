@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::string::String;
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, initcall, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, late_initcall, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -195,7 +195,7 @@ pub fn make_test_tasks() {
     sched.add_task(task2, 0);
 }
 
-initcall!(make_test_tasks);
+late_initcall!(make_test_tasks);
 
 #[cfg(test)]
 mod tests {

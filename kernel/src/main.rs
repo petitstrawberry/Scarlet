@@ -69,6 +69,7 @@ pub mod environment;
 pub mod vm;
 pub mod task;
 pub mod initcall;
+pub mod syscall;
 #[cfg(test)]
 pub mod test;
 

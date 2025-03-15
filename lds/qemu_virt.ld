@@ -15,7 +15,8 @@ SECTIONS {
     .text : { *(.text .text.*) } > RAM
     .initcall : { 
       __INITCALL_START = .;
-      *(.initcall .initcall.*)
+      *(.initcall.early)
+      *(.initcall.late)
       __INITCALL_END = .;
     } > RAM
     .trampoline :

@@ -191,6 +191,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     manager.add_memory_map(kernel_map);
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(kernel_map);
+    task.data_size = kernel_end + 1;
 
     let stack_pages = allocate_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
     let stack_map = VirtualMemoryMap {
