@@ -113,7 +113,7 @@ impl Task {
             let num_of_pages = prev_page - page;
             self.free_pages(page * PAGE_SIZE, num_of_pages);
             
-        } else {
+        } else if page > prev_page {
             /* Allocate pages */
             let num_of_pages = page - prev_page;
             match self.allocate_pages(page * PAGE_SIZE, num_of_pages, VirtualMemorySegment::Data) {
@@ -122,7 +122,7 @@ impl Task {
                 },
                 Err(_) => return Err("Failed to allocate pages"),
             }
-        }
+        } /* If page == prev_page, do nothing */
 
         self.data_size = brk - self.text_size;
         Ok(())
