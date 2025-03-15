@@ -4,9 +4,22 @@ use core::panic;
 use crate::arch::trap::print_traplog;
 use crate::arch::Trapframe;
 use crate::sched::scheduler::get_scheduler;
+use crate::syscall::syscall_handler;
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
+        /* Environment call from U-mode */
+        8 => {
+            /* Execute SystemCall */
+            match syscall_handler(trapframe) {
+                Ok(ret) => {
+                    trapframe.set_arg(0, ret);
+                }
+                Err(msg) => {
+                    panic!("Syscall error: {}", msg);
+                }
+            }
+        }
         /* Instruction page fault */
         12 => {
             let vaddr = trapframe.epc as usize;
@@ -17,7 +30,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     match manager.get_root_page_table() {
                         Some(root_page_table) => {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(vaddr, paddr);
+                            root_page_table.map(vaddr, paddr, mmap.permissions);
                         }
                         None => panic!("Root page table is not found"),
                     }
@@ -38,7 +51,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     match manager.get_root_page_table() {
                         Some(root_page_table) => {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(vaddr, paddr);
+                            root_page_table.map(vaddr, paddr, mmap.permissions);
                         }
                         None => panic!("Root page table is not found"),
                     }

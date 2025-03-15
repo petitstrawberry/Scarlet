@@ -13,6 +13,12 @@ SECTIONS {
     __KERNEL_SPACE_START = .;
     .init : { *(.init .init.*) } > RAM 
     .text : { *(.text .text.*) } > RAM
+    .initcall : { 
+      __INITCALL_START = .;
+      *(.initcall.early)
+      *(.initcall.late)
+      __INITCALL_END = .;
+    } > RAM
     .trampoline :
     {
       . = ALIGN(0x1000);

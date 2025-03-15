@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::string::String;
 
-use crate::{arch::{self, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, late_initcall, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -126,48 +126,76 @@ impl Scheduler {
     }
 }
 
-// pub fn make_test_tasks(sched: &mut Scheduler) {
-//     let mut task0 = new_kernel_task(String::from("Task0"), 0, || {
-//         println!("Task0");
-//         let mut counter: usize = 0;
-//         loop {
-//             if counter % 500000 == 0 {
-//                 print!("\nTask0: ");
-//             }
-//             if counter % 10000 == 0 {
-//                 print!(".");
-//             }
-//             counter += 1;
-//             if counter >= 100000000 {
-//                 break;
-//             }
-//         }
-//         println!("");
-//         println!("Task0: Done");
-//         idle();
-//     });
-//     task0.init();
-//     sched.add_task(task0, 0);
+pub fn make_test_tasks() {
+    println!("Making test tasks...");
+    let sched = get_scheduler();
+    let mut task0 = new_kernel_task(String::from("Task0"), 0, || {
+        println!("Task0");
+        let mut counter: usize = 0;
+        loop {
+            if counter % 500000 == 0 {
+                print!("\nTask0: ");
+            }
+            if counter % 10000 == 0 {
+                print!(".");
+            }
+            counter += 1;
+            if counter >= 100000000 {
+                break;
+            }
+        }
+        println!("");
+        println!("Task0: Done");
+        idle();
+    });
+    task0.init();
+    sched.add_task(task0, 0);
 
-//     let mut task1 = new_kernel_task(String::from("Task1"), 0, || {
-//         println!("Task1");
-//         let mut counter: usize = 0;
-//         loop {
-//             if counter % 500000 == 0 {
-//                 print!("\nTask1: {} %", counter / 1000000);
-//             }
-//             counter += 1;
-//             if counter >= 100000000 {
-//                 break;
-//             }
-//         }
-//         println!("\nTask1: 100 %");
-//         println!("Task1: Completed");
-//         idle();
-//     });
-//     task1.init();
-//     sched.add_task(task1, 0);
-// }
+    let mut task1 = new_kernel_task(String::from("Task1"), 0, || {
+        println!("Task1");
+        let mut counter: usize = 0;
+        loop {
+            if counter % 500000 == 0 {
+                print!("\nTask1: {} %", counter / 1000000);
+            }
+            counter += 1;
+            if counter >= 100000000 {
+                break;
+            }
+        }
+        println!("\nTask1: 100 %");
+        println!("Task1: Completed");
+        idle();
+    });
+    task1.init();
+    sched.add_task(task1, 0);
+
+    let mut task2 = new_kernel_task(String::from("Task2"), 0, || {
+        println!("Task2");
+        /* Fizz Buzz */
+        for i in 1..=1000000 {
+            if i % 1000 > 0 {
+                continue;
+            }
+            let c = i / 1000;
+            if c % 15 == 0 {
+                println!("FizzBuzz");
+            } else if c % 3 == 0 {
+                println!("Fizz");
+            } else if c % 5 == 0 {
+                println!("Buzz");
+            } else {
+                println!("{}", c);
+            }
+        }
+        println!("Task2: Done");
+        idle();
+    });
+    task2.init();
+    sched.add_task(task2, 0);
+}
+
+late_initcall!(make_test_tasks);
 
 #[cfg(test)]
 mod tests {

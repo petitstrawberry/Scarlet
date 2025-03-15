@@ -11,6 +11,7 @@
 pub struct VirtualMemoryMap {
     pub pmarea: MemoryArea,
     pub vmarea: MemoryArea,
+    pub permissions: usize,
 }
 
 impl VirtualMemoryMap {
@@ -19,13 +20,15 @@ impl VirtualMemoryMap {
     /// # Arguments
     /// * `pmarea` - The physical memory area to map
     /// * `vmarea` - The virtual memory area to map to
+    /// * `permissions` - The permissions to set for the virtual memory area
     /// 
     /// # Returns
     /// A new virtual memory map with the given physical and virtual memory areas.
-    pub fn new(pmarea: MemoryArea, vmarea: MemoryArea) -> Self {
+    pub fn new(pmarea: MemoryArea, vmarea: MemoryArea, permissions: usize) -> Self {
         VirtualMemoryMap {
             pmarea,
             vmarea,
+            permissions,
         }
     }
 
@@ -52,4 +55,46 @@ pub struct MemoryArea {
     pub end: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum VirtualMemoryPermission {
+    Read = 0x01,
+    Write = 0x02,
+    Execute = 0x04,
+}
 
+impl From<usize> for VirtualMemoryPermission {
+    fn from(value: usize) -> Self {
+        match value {
+            0x01 => VirtualMemoryPermission::Read,
+            0x02 => VirtualMemoryPermission::Write,
+            0x04 => VirtualMemoryPermission::Execute,
+            _ => panic!("Invalid permission value: {}", value),
+        }
+    }
+}
+
+impl VirtualMemoryPermission {
+    pub fn contained_in(&self, permissions: usize) -> bool {
+        permissions & (*self as usize) != 0
+    }
+}
+
+pub enum VirtualMemorySegment {
+    Text,
+    Data,
+    Bss,
+    Heap,
+    Stack,
+}
+
+impl VirtualMemorySegment {
+    pub fn get_permissions(&self) -> usize {
+        match self {
+            VirtualMemorySegment::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize,
+            VirtualMemorySegment::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+        }
+    }
+}

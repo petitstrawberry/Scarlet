@@ -51,6 +51,7 @@
 #![no_std]
 #![no_main]
 #![feature(naked_functions)]
+#![feature(used_with_arg)]
 
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]
@@ -67,15 +68,18 @@ pub mod earlycon;
 pub mod environment;
 pub mod vm;
 pub mod task;
+pub mod initcall;
+pub mod syscall;
 #[cfg(test)]
 pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
+use initcall::initcall_task;
 
 use core::panic::PanicInfo;
 
-use arch::{arch_init, instruction::idle};
+use arch::arch_init;
 use library::std::print;
 use task::new_kernel_task;
 use vm::kernel_vm_init;
@@ -88,8 +92,12 @@ use timer::get_kernel_timer;
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    use arch::instruction::idle;
+
     println!("[Scarlet Kernel] panic: {}", info);
-    loop {}
+    loop {
+        idle();
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -114,7 +122,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let scheduler = get_scheduler();
     /* Make idle task as initial task */
     println!("[Scarlet Kernel] Creating initial kernel task...");
-    let mut task = new_kernel_task(String::from("Idle"), 0, idle);
+    let mut task = new_kernel_task(String::from("Initcall"), 0, initcall_task);
     task.init();
     scheduler.add_task(task, cpu_id);
     println!("[Scarlet Kernel] Scheduler will start...");
