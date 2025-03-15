@@ -7,7 +7,7 @@ macro_rules! syscall_table {
             )*
         }
 
-        pub fn syscall_handler(syscall_number: usize) -> Result<isize, &'static str> {
+        pub fn syscall_handler(syscall_number: usize) -> Result<usize, &'static str> {
             if syscall_number == 0 {
                 return Err("Invalid syscall number");
             }
