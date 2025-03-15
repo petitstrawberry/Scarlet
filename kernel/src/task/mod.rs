@@ -94,12 +94,12 @@ impl Task {
         self.stack_size + self.text_size + self.data_size
     }
 
-    /* Get the program break */
+    /* Get the program break (NOT work in Kernel task) */
     pub fn get_brk(&self) -> usize {
         self.text_size + self.data_size
     }
 
-    /* Set the program break */
+    /* Set the program break (NOT work in Kernel task) */
     pub fn set_brk(&mut self, brk: usize) -> Result<(), &'static str> {
         if brk < self.text_size {
             return Err("Invalid address");
