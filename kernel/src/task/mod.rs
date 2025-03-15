@@ -245,3 +245,28 @@ pub fn mytask() -> Option<&'static mut Task> {
     let cpu = get_cpu();
     get_scheduler().get_current_task(cpu.get_cpuid())
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+    use crate::println;
+    use crate::print;
+
+    #[test_case]
+    fn test_set_brk() {
+        let mut task = super::new_user_task(String::from("Task0"), 0);
+        task.init();
+        assert_eq!(task.get_brk(), 0);
+        task.set_brk(0x1000).unwrap();
+        assert_eq!(task.get_brk(), 0x1000);
+        task.set_brk(0x2000).unwrap();
+        assert_eq!(task.get_brk(), 0x2000);
+        task.set_brk(0x1008).unwrap();
+        assert_eq!(task.get_brk(), 0x1008);
+        task.set_brk(0x1000).unwrap();
+        assert_eq!(task.get_brk(), 0x1000);
+        for memmap in task.vm_manager.get_memmap() {
+            println!("Memory map: {:#x} - {:#x}", memmap.vmarea.start, memmap.vmarea.end);
+        }
+    }
+}
