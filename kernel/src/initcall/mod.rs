@@ -1,6 +1,7 @@
 use crate::{arch::instruction::idle, println, print};
 
 pub mod early;
+pub mod driver;
 pub mod late;
 
 #[allow(improper_ctypes)]
