@@ -76,6 +76,10 @@ impl VirtualMemoryManager {
         self.asid
     }
 
+    pub fn get_memmap(&self) -> &Vec<VirtualMemoryMap> {
+        &self.memmap
+    }
+
     /// Adds a memory map to the virtual memory manager.
     /// 
     /// # Arguments
@@ -122,6 +126,23 @@ impl VirtualMemoryManager {
         for map in self.memmap.iter() {
             if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
                 ret = Some(map);
+            }
+        }
+        ret
+    }
+
+    /// Searches for the index of a memory map containing the given virtual address.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to search for
+    /// 
+    /// # Returns
+    /// The index of the memory map containing the given virtual address, if it exists.
+    pub fn search_memory_map_idx(&self, vaddr: usize) -> Option<usize> {
+        let mut ret = None;
+        for (i, map) in self.memmap.iter().enumerate() {
+            if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
+                ret = Some(i);
             }
         }
         ret
