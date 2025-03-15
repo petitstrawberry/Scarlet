@@ -179,4 +179,18 @@ impl PageTable {
         let next_level_table = self.get_next_level_table(vpn);
         next_level_table.walk(vaddr, level - 1)
     }
+
+    pub fn unmap(&mut self, vaddr: usize) {
+        let vaddr = vaddr & 0xffff_ffff_ffff_f000;
+        let pagetable = self.walk(vaddr, MAX_PAGING_LEVEL);
+        match pagetable {
+            Ok((pagetable, level)) => {
+                let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
+                let entry = &mut pagetable.entries[vpn];
+                entry.invalidate();
+                unsafe { asm!("sfence.vma") };
+            }
+            Err(_) => {}
+        }
+    }
 }

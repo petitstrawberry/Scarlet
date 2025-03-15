@@ -127,6 +127,23 @@ impl VirtualMemoryManager {
         ret
     }
 
+    /// Searches for the index of a memory map containing the given virtual address.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to search for
+    /// 
+    /// # Returns
+    /// The index of the memory map containing the given virtual address, if it exists.
+    pub fn search_memory_map_idx(&self, vaddr: usize) -> Option<usize> {
+        let mut ret = None;
+        for (i, map) in self.memmap.iter().enumerate() {
+            if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
+                ret = Some(i);
+            }
+        }
+        ret
+    }
+
     /// Returns the root page table for the current address space.
     /// 
     /// # Returns
