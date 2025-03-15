@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::string::String;
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, instruction::idle, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, late_initcall, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
 use crate::println;
 use crate::print;
 
@@ -105,24 +105,34 @@ impl Task {
             return Err("Invalid address");
         }
         let prev_brk = self.get_brk();
-        let prev_page = prev_brk / PAGE_SIZE;
-        let page = brk / PAGE_SIZE;
-
-        if page < prev_page {
+        if brk < prev_brk {
             /* Free pages */
-            let num_of_pages = prev_page - page;
-            self.free_pages(page * PAGE_SIZE, num_of_pages);
+            /* Round address to the page boundary */
+            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let num_of_pages = (prev_addr - addr) / PAGE_SIZE;
             
-        } else if page > prev_page {
+            self.free_pages(addr, num_of_pages);
+            
+        } else if brk > prev_brk {
             /* Allocate pages */
-            let num_of_pages = page - prev_page;
-            match self.allocate_pages(page * PAGE_SIZE, num_of_pages, VirtualMemorySegment::Data) {
-                Ok(mmap) => {
-                    println!("Allocated pages {}", mmap.vmarea.start);
-                },
-                Err(_) => return Err("Failed to allocate pages"),
+            /* Round address to the page boundary */
+            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let num_of_pages = (addr - prev_addr) / PAGE_SIZE;
+
+            if num_of_pages > 0 {
+                match self.vm_manager.search_memory_map(prev_addr) {
+                    Some(_) => {},
+                    None => {
+                        match self.allocate_pages(prev_addr, num_of_pages, VirtualMemorySegment::Data) {
+                            Ok(_) => {},
+                            Err(_) => return Err("Failed to allocate pages"),
+                        }
+                    },
+                }
             }
-        } /* If page == prev_page, do nothing */
+        }
 
         self.data_size = brk - self.text_size;
         Ok(())
@@ -153,6 +163,7 @@ impl Task {
             VirtualMemorySegment::Data => self.data_size += size,
             VirtualMemorySegment::Text => self.text_size += size,
         }
+        // println!("Allocated pages: {:#x} - {:#x}", vaddr, vaddr + size - 1);
         Ok(mmap)
     }
 
@@ -162,12 +173,52 @@ impl Task {
             let vaddr = (page + p) * PAGE_SIZE;
             match self.vm_manager.search_memory_map_idx(vaddr) {
                 Some(idx) => {
-                    self.vm_manager.remove_memory_map(idx);
+                    let mmap = self.vm_manager.remove_memory_map(idx).unwrap();
+                    if mmap.vmarea.start < vaddr {
+                        /* Re add the first part of the memory map */
+                        let size = vaddr - mmap.vmarea.start;
+                        let paddr = mmap.pmarea.start;
+                        let mmap1 = VirtualMemoryMap {
+                            pmarea: MemoryArea {
+                                start: paddr,
+                                end: paddr + size - 1,
+                            },
+                            vmarea: MemoryArea {
+                                start: mmap.vmarea.start,
+                                end: vaddr - 1,
+                            },
+                            permissions: mmap.permissions,
+                        };
+                        self.vm_manager.add_memory_map(mmap1);
+                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
+                        // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
+                    }
+                    if mmap.vmarea.end > vaddr + PAGE_SIZE - 1{
+                        /* Re add the second part of the memory map */
+                        let size = mmap.vmarea.end - (vaddr + PAGE_SIZE) + 1;
+                        let paddr = mmap.pmarea.start + (vaddr + PAGE_SIZE - mmap.vmarea.start);
+                        let mmap2 = VirtualMemoryMap {
+                            pmarea: MemoryArea {
+                                start: paddr,
+                                end: paddr + size - 1,
+                            },
+                            vmarea: MemoryArea {
+                                start: vaddr + PAGE_SIZE,
+                                end: mmap.vmarea.end,
+                            },
+                            permissions: mmap.permissions,
+                        };
+                        self.vm_manager.add_memory_map(mmap2);
+                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
+                        // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
+                    }
+                    let offset = vaddr - mmap.vmarea.start;
+                    free_pages((mmap.pmarea.start + offset) as *mut Page, 1);
+                    // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
                 },
                 None => {},
             }
         }
-        free_pages((page * PAGE_SIZE) as *mut Page, num_of_pages);
         /* Unmap pages */
         let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
         for p in 0..num_of_pages {
