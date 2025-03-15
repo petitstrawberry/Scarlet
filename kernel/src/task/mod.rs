@@ -9,7 +9,9 @@ extern crate alloc;
 use alloc::string::String;
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::allocate_pages, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, instruction::idle, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, late_initcall, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::println;
+use crate::print;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -92,22 +94,54 @@ impl Task {
         self.stack_size + self.text_size + self.data_size
     }
 
-    /* Get the program break */
+    /* Get the program break (NOT work in Kernel task) */
     pub fn get_brk(&self) -> usize {
         self.text_size + self.data_size
     }
 
-    /* Set the program break */
+    /* Set the program break (NOT work in Kernel task) */
     pub fn set_brk(&mut self, brk: usize) -> Result<(), &'static str> {
+        // println!("New brk: {:#x}", brk);
         if brk < self.text_size {
             return Err("Invalid address");
         }
+        let prev_brk = self.get_brk();
+        if brk < prev_brk {
+            /* Free pages */
+            /* Round address to the page boundary */
+            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let num_of_pages = (prev_addr - addr) / PAGE_SIZE;
+            
+            self.free_pages(addr, num_of_pages);
+            
+        } else if brk > prev_brk {
+            /* Allocate pages */
+            /* Round address to the page boundary */
+            let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            let num_of_pages = (addr - prev_addr) / PAGE_SIZE;
+
+            if num_of_pages > 0 {
+                match self.vm_manager.search_memory_map(prev_addr) {
+                    Some(_) => {},
+                    None => {
+                        match self.allocate_pages(prev_addr, num_of_pages, VirtualMemorySegment::Data) {
+                            Ok(_) => {},
+                            Err(_) => return Err("Failed to allocate pages"),
+                        }
+                    },
+                }
+            }
+        }
+
         self.data_size = brk - self.text_size;
+        // println!("Brk: {:#x}", self.get_brk());
         Ok(())
     }
 
     /* Allocate a page for the task */
-    pub fn allocate_page(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
+    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
         let permissions = segment.get_permissions();
         let pages = allocate_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
@@ -131,7 +165,68 @@ impl Task {
             VirtualMemorySegment::Data => self.data_size += size,
             VirtualMemorySegment::Text => self.text_size += size,
         }
+        // println!("Allocated pages: {:#x} - {:#x}", vaddr, vaddr + size - 1);
         Ok(mmap)
+    }
+
+    pub fn free_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        let page = vaddr / PAGE_SIZE;
+        for p in 0..num_of_pages {
+            let vaddr = (page + p) * PAGE_SIZE;
+            match self.vm_manager.search_memory_map_idx(vaddr) {
+                Some(idx) => {
+                    let mmap = self.vm_manager.remove_memory_map(idx).unwrap();
+                    if p == 0 && mmap.vmarea.start < vaddr {
+                        /* Re add the first part of the memory map */
+                        let size = vaddr - mmap.vmarea.start;
+                        let paddr = mmap.pmarea.start;
+                        let mmap1 = VirtualMemoryMap {
+                            pmarea: MemoryArea {
+                                start: paddr,
+                                end: paddr + size - 1,
+                            },
+                            vmarea: MemoryArea {
+                                start: mmap.vmarea.start,
+                                end: vaddr - 1,
+                            },
+                            permissions: mmap.permissions,
+                        };
+                        self.vm_manager.add_memory_map(mmap1);
+                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
+                        // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
+                    }
+                    if p == num_of_pages - 1 && mmap.vmarea.end > vaddr + PAGE_SIZE - 1 {
+                        /* Re add the second part of the memory map */
+                        let size = mmap.vmarea.end - (vaddr + PAGE_SIZE) + 1;
+                        let paddr = mmap.pmarea.start + (vaddr + PAGE_SIZE - mmap.vmarea.start);
+                        let mmap2 = VirtualMemoryMap {
+                            pmarea: MemoryArea {
+                                start: paddr,
+                                end: paddr + size - 1,
+                            },
+                            vmarea: MemoryArea {
+                                start: vaddr + PAGE_SIZE,
+                                end: mmap.vmarea.end,
+                            },
+                            permissions: mmap.permissions,
+                        };
+                        self.vm_manager.add_memory_map(mmap2);
+                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
+                        // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
+                    }
+                    let offset = vaddr - mmap.vmarea.start;
+                    free_pages((mmap.pmarea.start + offset) as *mut Page, 1);
+                    // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
+                },
+                None => {},
+            }
+        }
+        /* Unmap pages */
+        let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
+        for p in 0..num_of_pages {
+            let vaddr = (page + p) * PAGE_SIZE;
+            root_pagetable.unmap(vaddr);
+        }
     }
 }
 
