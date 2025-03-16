@@ -104,6 +104,8 @@ fn panic(info: &PanicInfo) -> ! {
 pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    early_println!("[Scarlet Kernel] Initializing .bss section...");
+    init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
     arch_init(cpu_id);
     early_println!("[Scarlet Kernel] Initializing heap...");
@@ -136,4 +138,18 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] Initializing arch...");
     arch_init(cpu_id);
     loop {}
+}
+
+fn init_bss() {
+    unsafe extern "C" {
+        static mut __BSS_START: u8;
+        static mut __BSS_END: u8;
+    }
+
+    unsafe {
+        let bss_start = &raw mut __BSS_START as *mut u8;
+        let bss_end = &raw mut __BSS_END as *mut u8;
+        let bss_size = bss_end as usize - bss_start as usize;
+        core::ptr::write_bytes(bss_start, 0, bss_size);
+    }
 }
