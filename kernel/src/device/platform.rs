@@ -21,6 +21,20 @@ pub struct PlatformDeviceDriver {
     probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
 }
 
+impl PlatformDeviceDriver {
+    pub fn new(
+        name: &'static str,
+        match_fn: fn(&dyn Device) -> bool,
+        probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
+    ) -> Self {
+        Self {
+            name,
+            match_fn,
+            probe_fn,
+        }
+    }
+}
+
 impl DeviceDriver for PlatformDeviceDriver {
     fn name(&self) -> &'static str {
         self.name
@@ -35,21 +49,3 @@ impl DeviceDriver for PlatformDeviceDriver {
     }
 }
 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    #[allow(static_mut_refs)]
-    fn test_driver_register() {
-        let len = unsafe { DRIVER_TABLE.len() };
-        let driver = Box::new(PlatformDeviceDriver {
-            name: "test",
-            match_fn: |_device| _device.name() == "test",
-            probe_fn: |_device| Ok(()),
-        });
-        driver_register(driver);
-        assert_eq!(unsafe { DRIVER_TABLE.len() }, len + 1);
-    }
-}

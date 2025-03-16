@@ -24,3 +24,23 @@ pub fn driver_register(driver: Box<dyn DeviceDriver>) {
         DRIVER_TABLE.push(driver);
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::platform::*;
+
+    #[test_case]
+    #[allow(static_mut_refs)]
+    fn test_driver_register() {
+        let len = unsafe { DRIVER_TABLE.len() };
+        let driver = Box::new(PlatformDeviceDriver::new(
+            "test",
+            |device| device.name() == "test",
+            |_device| Ok(()),
+        ));
+        driver_register(driver);
+        assert_eq!(unsafe { DRIVER_TABLE.len() }, len + 1);
+    }
+}
