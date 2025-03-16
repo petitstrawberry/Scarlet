@@ -29,15 +29,20 @@ SECTIONS {
     } > RAM
     .rodata : { *(.rodata .rodata.*) } > RAM 
     .data : { *(.data .data.*) } > RAM 
-    .bss (NOLOAD) : { *(.bss .bss.*) } > RAM
+    .bss (NOLOAD) : {
+      __BSS_START = .;
+      *(.bss .bss.*)
+      . = ALIGN(0x1000);
+      __BSS_END = .;
+    } > RAM
     .heap (NOLOAD) :
     {
-      *(.heap .heap.*)       
       . = ALIGN(0x1000);
       __HEAP_START = .;
+      *(.heap .heap.*)
       . += __HEAP_SIZE;
+    . = ALIGN(0x1000);
       __HEAP_END = .;
     } > RAM
-    . = ALIGN(0x1000);
     __KERNEL_SPACE_END = .;
 }
