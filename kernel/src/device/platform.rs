@@ -1,7 +1,16 @@
 use super::Device;
 
 pub struct PlatformDevice {
-    pub device: Device,
-    pub mmio_base: usize,
-    pub mmio_size: usize,
+    name: &'static str,
+    id: usize,
+}
+
+impl Device for PlatformDevice {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn id(&self) -> usize {
+        self.id
+    }
 }

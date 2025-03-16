@@ -4,18 +4,20 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use crate::device::Device;
+
 pub static mut DRIVER_TABLE: Vec<Box<dyn DeviceDriver>> = Vec::new();
 
 pub trait DeviceDriver {
     fn name(&self) -> &'static str;
-    fn match_device(&self, name: &str) -> bool;
-    fn probe(&self, name: &str) -> Result<(), &'static str>;
+    fn match_device(&self, device: &dyn Device) -> bool;
+    fn probe(&self, device: &dyn Device) -> Result<(), &'static str>;
 }
 
 pub struct PlatformDeviceDriver {
     name: &'static str,
-    match_fn: fn(&str) -> bool,
-    probe_fn: fn(&str) -> Result<(), &'static str>,
+    match_fn: fn(&dyn Device) -> bool,
+    probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
 }
 
 impl DeviceDriver for PlatformDeviceDriver {
@@ -23,12 +25,12 @@ impl DeviceDriver for PlatformDeviceDriver {
         self.name
     }
 
-    fn match_device(&self, name: &str) -> bool {
-        (self.match_fn)(name)
+    fn match_device(&self, device: &dyn Device) -> bool {
+        (self.match_fn)(device)
     }
 
-    fn probe(&self, name: &str) -> Result<(), &'static str> {
-        (self.probe_fn)(name)
+    fn probe(&self, device: &dyn Device) -> Result<(), &'static str> {
+        (self.probe_fn)(device)
     }
 }
 
@@ -49,8 +51,8 @@ mod tests {
         let len = unsafe { DRIVER_TABLE.len() };
         let driver = Box::new(PlatformDeviceDriver {
             name: "test",
-            match_fn: |name| name == "test",
-            probe_fn: |_name| Ok(()),
+            match_fn: |_device| _device.name() == "test",
+            probe_fn: |_device| Ok(()),
         });
         driver_register(driver);
         assert_eq!(unsafe { DRIVER_TABLE.len() }, len + 1);

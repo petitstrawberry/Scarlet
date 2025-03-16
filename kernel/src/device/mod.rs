@@ -1,5 +1,6 @@
 pub mod platform;
 
-pub struct Device {
-    name: &'static str,
+pub trait Device {
+    fn name(&self) -> &'static str;
+    fn id(&self) -> usize;
 }
