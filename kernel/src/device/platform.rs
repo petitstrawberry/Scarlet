@@ -38,11 +38,11 @@ impl DeviceDriver for PlatformDeviceDriver {
 
 #[cfg(test)]
 mod tests {
-    
+    use super::*;
+
     #[test_case]
     #[allow(static_mut_refs)]
     fn test_driver_register() {
-        use super::*;
         let len = unsafe { DRIVER_TABLE.len() };
         let driver = Box::new(PlatformDeviceDriver {
             name: "test",
