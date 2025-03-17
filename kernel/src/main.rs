@@ -77,7 +77,7 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
-use initcall::initcall_task;
+use initcall::{early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
 
@@ -113,6 +113,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("[Scarlet Kernel] Initializing heap...");
     init_heap();
     /* After this point, we can use the heap */
+    early_initcall_call();
     /* Serial console also works */
 
     #[cfg(test)]
