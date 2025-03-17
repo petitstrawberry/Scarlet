@@ -57,6 +57,11 @@ impl DeviceManager {
     }
 }
 
+pub fn register_serial(serial: Box<dyn Serial>) {
+    let mut manager = DeviceManager::locked();
+    manager.basic.register_serial(serial);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
