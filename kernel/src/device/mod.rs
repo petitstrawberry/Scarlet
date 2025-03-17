@@ -4,13 +4,14 @@ pub mod resource;
 extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use spin::mutex::Mutex;
 
 pub trait Device {
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;
 }
 
-pub static mut DRIVER_TABLE: Vec<Box<dyn DeviceDriver>> = Vec::new();
+pub static mut DRIVER_TABLE: Mutex<Vec<Box<dyn DeviceDriver>>> = Mutex::new(Vec::new());
 
 pub trait DeviceDriver {
     fn name(&self) -> &'static str;
@@ -23,7 +24,7 @@ pub trait DeviceDriver {
 #[allow(static_mut_refs)]
 pub fn driver_register(driver: Box<dyn DeviceDriver>) {
     unsafe {
-        DRIVER_TABLE.push(driver);
+        DRIVER_TABLE.lock().push(driver);
     }
 }
 
@@ -36,7 +37,7 @@ mod tests {
     #[test_case]
     #[allow(static_mut_refs)]
     fn test_driver_register() {
-        let len = unsafe { DRIVER_TABLE.len() };
+        let len = unsafe { DRIVER_TABLE.lock().len() };
         let driver = Box::new(PlatformDeviceDriver::new(
             "test",
             Vec::new(),
@@ -45,6 +46,8 @@ mod tests {
             |_device| Ok(()),
         ));
         driver_register(driver);
-        assert_eq!(unsafe { DRIVER_TABLE.len() }, len + 1);
+
+        let registered_driver = unsafe { &DRIVER_TABLE.lock()[len] };
+        assert_eq!(registered_driver.name(), "test");
     }
 }
