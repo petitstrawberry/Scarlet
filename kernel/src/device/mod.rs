@@ -1,5 +1,4 @@
 pub mod platform;
-pub mod resource;
 
 extern crate alloc;
 use alloc::boxed::Box;
