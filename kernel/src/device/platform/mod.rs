@@ -23,23 +23,26 @@ impl Device for PlatformDevice {
 
 pub struct PlatformDeviceDriver {
     name: &'static str,
+    resources: Vec<PlatformDeviceResource>,
     match_fn: fn(&dyn Device) -> bool,
     probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
-    resources: Vec<PlatformDeviceResource>,
+    remove_fn: fn(&dyn Device) -> Result<(), &'static str>,    
 }
 
 impl PlatformDeviceDriver {
     pub fn new(
         name: &'static str,
+        resources: Vec<PlatformDeviceResource>,
         match_fn: fn(&dyn Device) -> bool,
         probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
-        resources: Vec<PlatformDeviceResource>,
+        remove_fn: fn(&dyn Device) -> Result<(), &'static str>,
     ) -> Self {
         Self {
             name,
-            match_fn,
-            probe_fn,            
             resources,
+            match_fn,
+            probe_fn,           
+            remove_fn,
         }
     }
 }
@@ -55,6 +58,10 @@ impl DeviceDriver for PlatformDeviceDriver {
 
     fn probe(&self, device: &dyn Device) -> Result<(), &'static str> {
         (self.probe_fn)(device)
+    }
+
+    fn remove(&self, _device: &dyn Device) -> Result<(), &'static str> {
+        Ok(())
     }
 }
 

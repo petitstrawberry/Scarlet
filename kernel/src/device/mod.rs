@@ -16,6 +16,7 @@ pub trait DeviceDriver {
     fn name(&self) -> &'static str;
     fn match_device(&self, device: &dyn Device) -> bool;
     fn probe(&self, device: &dyn Device) -> Result<(), &'static str>;
+    fn remove(&self, device: &dyn Device) -> Result<(), &'static str>;
 }
 
 
@@ -38,9 +39,10 @@ mod tests {
         let len = unsafe { DRIVER_TABLE.len() };
         let driver = Box::new(PlatformDeviceDriver::new(
             "test",
+            Vec::new(),
             |device| device.name() == "test",
             |_device| Ok(()),
-            Vec::new(),
+            |_device| Ok(()),
         ));
         driver_register(driver);
         assert_eq!(unsafe { DRIVER_TABLE.len() }, len + 1);
