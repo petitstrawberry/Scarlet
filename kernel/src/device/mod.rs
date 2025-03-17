@@ -40,6 +40,7 @@ mod tests {
             "test",
             |device| device.name() == "test",
             |_device| Ok(()),
+            Vec::new(),
         ));
         driver_register(driver);
         assert_eq!(unsafe { DRIVER_TABLE.len() }, len + 1);

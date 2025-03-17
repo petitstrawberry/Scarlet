@@ -33,12 +33,13 @@ impl PlatformDeviceDriver {
         name: &'static str,
         match_fn: fn(&dyn Device) -> bool,
         probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
+        resources: Vec<PlatformDeviceResource>,
     ) -> Self {
         Self {
             name,
             match_fn,
             probe_fn,            
-            resources: Vec::new(),
+            resources,
         }
     }
 }
