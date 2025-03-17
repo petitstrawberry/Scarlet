@@ -1,8 +1,10 @@
 // UART driver for QEMU virt machine
 
-use core::ptr::{read_volatile, write_volatile};
+use core::{fmt, ptr::{read_volatile, write_volatile}};
+use core::fmt::Write;
+use alloc::boxed::Box;
 
-use crate::traits::serial::Serial;
+use crate::{early_initcall, traits::serial::Serial};
 
 
 #[derive(Clone)]
@@ -34,7 +36,7 @@ impl Uart {
         let addr = self.base + offset;
         unsafe { read_volatile(addr as *const u8) }
     }
-       
+
 }
 
 impl Serial for Uart {
@@ -51,4 +53,29 @@ impl Serial for Uart {
         while self.reg_read(LSR_OFFSET) & LSR_DR == 0 {}
         self.reg_read(RHR_OFFSET)
     }
+
+
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for c in s.bytes() {
+            if c == b'\n' {
+                self.write_byte(b'\r');
+            }
+            self.write_byte(c);
+        }
+        Ok(())
+    }
+
 }
+
+impl Write for Uart {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        Serial::write_str(self, s)
+    }
+}
+
+fn register_uart() {
+    let uart = Uart::new(0x1000_0000);
+    crate::device::manager::register_serial(Box::new(uart));
+}
+
+early_initcall!(register_uart);
