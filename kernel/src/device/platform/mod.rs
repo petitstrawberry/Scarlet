@@ -11,6 +11,15 @@ pub struct PlatformDevice {
     id: usize,
 }
 
+impl PlatformDevice {
+    pub fn new(name: &'static str, id: usize) -> Self {
+        Self {
+            name,
+            id,
+        }
+    }
+}
+
 impl Device for PlatformDevice {
     fn name(&self) -> &'static str {
         self.name

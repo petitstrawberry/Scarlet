@@ -1,3 +1,4 @@
+pub mod manager;
 pub mod platform;
 
 extern crate alloc;
