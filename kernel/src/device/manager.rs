@@ -14,18 +14,34 @@ use super::Device;
 
 pub struct BasicDeviceManager {
     /* Basic I/O */
-    pub serial: Vec<Box<dyn Serial>>,
+    serials: Vec<Box<dyn Serial>>,
 }
 
 impl BasicDeviceManager {
     pub fn new() -> Self {
         BasicDeviceManager {
-            serial: Vec::new(),
+            serials: Vec::new(),
         }
     }
 
     pub fn register_serial(&mut self, serial: Box<dyn Serial>) {
-        self.serial.push(serial);
+        self.serials.push(serial);
+    }
+
+    pub fn borrow_serial(&self, idx: usize) -> Option<&Box<dyn Serial>> {
+        self.serials.get(idx)
+    }
+
+    pub fn borrow_mut_serial(&mut self, idx: usize) -> Option<&mut Box<dyn Serial>> {
+        self.serials.get_mut(idx)
+    }
+
+    pub fn borrow_serials(&self) -> &Vec<Box<dyn Serial>> {
+        &self.serials
+    }
+
+    pub fn borrow_mut_serials(&mut self) -> &mut Vec<Box<dyn Serial>> {
+        &mut self.serials
     }
 }
 
@@ -33,14 +49,14 @@ pub struct DeviceManager {
     /* Manager for basic devices */
     pub basic: BasicDeviceManager,
     /* Other devices */
-    pub devices: Vec<Box<dyn Device>>,
+    devices: Vec<Box<dyn Device>>,
 }
 
 impl DeviceManager {
     const fn new() -> Self {
         DeviceManager {
             basic: BasicDeviceManager {
-                serial: Vec::new(),
+                serials: Vec::new(),
             },
             devices: Vec::new(),
         }
@@ -54,6 +70,14 @@ impl DeviceManager {
 
     pub fn register_device(&mut self, device: Box<dyn Device>) {
         self.devices.push(device);
+    }
+
+    pub fn borrow_devices(&self) -> &Vec<Box<dyn Device>> {
+        &self.devices
+    }
+
+    pub fn borrow_mut_devices(&mut self) -> &mut Vec<Box<dyn Device>> {
+        &mut self.devices
     }
 }
 
