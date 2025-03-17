@@ -70,6 +70,8 @@ pub mod vm;
 pub mod task;
 pub mod initcall;
 pub mod syscall;
+pub mod device;
+
 #[cfg(test)]
 pub mod test;
 

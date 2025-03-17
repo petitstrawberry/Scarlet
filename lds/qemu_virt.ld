@@ -18,6 +18,7 @@ SECTIONS {
       __INITCALL_EARLY_START = .;
       *(.initcall.early)
       __INITCALL_EARLY_END = .;
+      *(.initcall.driver)
       *(.initcall.late)
       __INITCALL_END = .;
     } > RAM
