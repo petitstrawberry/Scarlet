@@ -8,6 +8,8 @@ use alloc::boxed::Box;
 use spin::mutex::Mutex;
 use spin::MutexGuard;
 
+use crate::early_println;
+use crate::early_print;
 use crate::traits::serial::Serial;
 
 use super::Device;
@@ -26,6 +28,15 @@ impl BasicDeviceManager {
 
     pub fn register_serial(&mut self, serial: Box<dyn Serial>) {
         self.serials.push(serial);
+        early_println!("Registered serial device");
+    }
+
+    pub fn register_serials(&mut self, serias: Vec<Box<dyn Serial>>) {
+        let len = serias.len();
+        for serial in serias {
+            self.serials.push(serial);
+        }
+        early_println!("Registered serial devices: {}", len);
     }
 
     pub fn borrow_serial(&self, idx: usize) -> Option<&Box<dyn Serial>> {
