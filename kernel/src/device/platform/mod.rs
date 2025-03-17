@@ -1,4 +1,10 @@
+pub mod resource;
+
+extern crate alloc;
+use alloc::vec::Vec;
+
 use super::*;
+use resource::*;
 
 pub struct PlatformDevice {
     name: &'static str,
@@ -19,6 +25,7 @@ pub struct PlatformDeviceDriver {
     name: &'static str,
     match_fn: fn(&dyn Device) -> bool,
     probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
+    resources: Vec<PlatformDeviceResource>,
 }
 
 impl PlatformDeviceDriver {
@@ -30,7 +37,8 @@ impl PlatformDeviceDriver {
         Self {
             name,
             match_fn,
-            probe_fn,
+            probe_fn,            
+            resources: Vec::new(),
         }
     }
 }
