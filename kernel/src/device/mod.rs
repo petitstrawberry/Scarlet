@@ -1,4 +1,5 @@
 pub mod manager;
+pub mod fdt;
 pub mod platform;
 
 extern crate alloc;

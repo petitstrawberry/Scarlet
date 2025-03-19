@@ -12,6 +12,7 @@ use crate::early_println;
 use crate::early_print;
 use crate::traits::serial::Serial;
 
+use super::fdt::FdtManager;
 use super::Device;
 
 pub struct BasicDeviceManager {
@@ -57,6 +58,8 @@ impl BasicDeviceManager {
 }
 
 pub struct DeviceManager {
+    /* Fdt Manager */
+    fdt: FdtManager,
     /* Manager for basic devices */
     pub basic: BasicDeviceManager,
     /* Other devices */
@@ -66,6 +69,7 @@ pub struct DeviceManager {
 impl DeviceManager {
     const fn new() -> Self {
         DeviceManager {
+            fdt: FdtManager::new(),
             basic: BasicDeviceManager {
                 serials: Vec::new(),
             },
