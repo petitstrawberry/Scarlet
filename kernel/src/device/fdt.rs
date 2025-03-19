@@ -1,21 +1,32 @@
 use fdt::{Fdt, FdtError};
 
-pub struct FdtManager {
-    fdt_bytes: &'static[u8],
+#[unsafe(link_section = ".data")]
+static mut FDT_ADDR: usize = 0;
+
+pub struct FdtManager<'a> {
+    fdt: Option<Fdt<'a>>,
 }
 
-impl FdtManager {
+impl<'a> FdtManager<'a> {
     pub const fn new() -> Self {
         FdtManager {
-            fdt_bytes: &[],
+            fdt: None,
         }
     }
 
-    pub fn load_fdt(&mut self, data: &'static [u8]) {
-        self.fdt_bytes = data
+    pub fn init(&mut self) -> Result<(), FdtError> {
+        match unsafe { Fdt::from_ptr(FDT_ADDR as *const u8) } {
+            Ok(fdt) => {
+                self.fdt = Some(fdt);
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(())
     }
 
-    pub fn parse_fdt(&self) -> Result<Fdt, FdtError> {
-        Fdt::new(self.fdt_bytes)
+    pub fn set_fdt_addr(addr: usize) {
+        unsafe {
+            FDT_ADDR = addr;
+        }
     }
 }
