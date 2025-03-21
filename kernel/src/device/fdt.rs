@@ -29,4 +29,8 @@ impl<'a> FdtManager<'a> {
             FDT_ADDR = addr;
         }
     }
+    
+    pub fn get_fdt(&self) -> Option<&Fdt<'a>> {
+        self.fdt.as_ref()
+    }
 }
