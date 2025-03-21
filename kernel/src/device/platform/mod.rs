@@ -6,21 +6,23 @@ use alloc::vec::Vec;
 use super::*;
 use resource::*;
 
-pub struct PlatformDevice {
+pub struct PlatformDeviceInfo {
     name: &'static str,
     id: usize,
+    compatible: &'static[&'static str],
 }
 
-impl PlatformDevice {
-    pub fn new(name: &'static str, id: usize) -> Self {
+impl PlatformDeviceInfo {
+    pub fn new(name: &'static str, id: usize, compatible: &'static [&'static str]) -> Self {
         Self {
             name,
             id,
+            compatible,
         }
     }
 }
 
-impl Device for PlatformDevice {
+impl DeviceInfo for PlatformDeviceInfo {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -28,30 +30,34 @@ impl Device for PlatformDevice {
     fn id(&self) -> usize {
         self.id
     }
+
+    fn compatible(&self) -> &'static [&'static str] {
+        self.compatible
+    }
 }
 
 pub struct PlatformDeviceDriver {
     name: &'static str,
     resources: Vec<PlatformDeviceResource>,
-    match_fn: fn(&dyn Device) -> bool,
-    probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
-    remove_fn: fn(&dyn Device) -> Result<(), &'static str>,    
+    probe_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
+    remove_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
+    compatible: &'static [&'static str], 
 }
 
 impl PlatformDeviceDriver {
     pub fn new(
         name: &'static str,
         resources: Vec<PlatformDeviceResource>,
-        match_fn: fn(&dyn Device) -> bool,
-        probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
-        remove_fn: fn(&dyn Device) -> Result<(), &'static str>,
+        probe_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
+        remove_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
+        compatible: &'static [&'static str],
     ) -> Self {
         Self {
             name,
             resources,
-            match_fn,
             probe_fn,           
             remove_fn,
+            compatible,
         }
     }
 }
@@ -61,15 +67,15 @@ impl DeviceDriver for PlatformDeviceDriver {
         self.name
     }
 
-    fn match_device(&self, device: &dyn Device) -> bool {
-        (self.match_fn)(device)
+    fn match_table(&self) -> &'static[&'static str] {
+        self.compatible
     }
 
-    fn probe(&self, device: &dyn Device) -> Result<(), &'static str> {
+    fn probe(&self, device: &dyn DeviceInfo) -> Result<(), &'static str> {
         (self.probe_fn)(device)
     }
 
-    fn remove(&self, _device: &dyn Device) -> Result<(), &'static str> {
+    fn remove(&self, _device: &dyn DeviceInfo) -> Result<(), &'static str> {
         Ok(())
     }
 }

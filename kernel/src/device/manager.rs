@@ -12,7 +12,7 @@ use crate::early_println;
 use crate::early_print;
 use crate::traits::serial::Serial;
 
-use super::Device;
+use super::DeviceInfo;
 
 pub struct BasicDeviceManager {
     /* Basic I/O */
@@ -60,7 +60,7 @@ pub struct DeviceManager {
     /* Manager for basic devices */
     pub basic: BasicDeviceManager,
     /* Other devices */
-    devices: Vec<Box<dyn Device>>,
+    devices: Vec<Box<dyn DeviceInfo>>,
 }
 
 impl DeviceManager {
@@ -79,15 +79,15 @@ impl DeviceManager {
         unsafe { MANAGER.lock() }
     }
 
-    pub fn register_device(&mut self, device: Box<dyn Device>) {
+    pub fn register_device(&mut self, device: Box<dyn DeviceInfo>) {
         self.devices.push(device);
     }
 
-    pub fn borrow_devices(&self) -> &Vec<Box<dyn Device>> {
+    pub fn borrow_devices(&self) -> &Vec<Box<dyn DeviceInfo>> {
         &self.devices
     }
 
-    pub fn borrow_mut_devices(&mut self) -> &mut Vec<Box<dyn Device>> {
+    pub fn borrow_mut_devices(&mut self) -> &mut Vec<Box<dyn DeviceInfo>> {
         &mut self.devices
     }
 }
@@ -104,7 +104,7 @@ mod tests {
 
     #[test_case]
     fn test_device_manager() {
-        let device = Box::new(PlatformDevice::new("test", 0));
+        let device = Box::new(PlatformDeviceInfo::new("test", 0, &["test,device"]));
         let mut manager = DeviceManager::locked();
         manager.register_device(device);
         let len = manager.devices.len();

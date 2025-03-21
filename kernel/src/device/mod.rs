@@ -7,18 +7,19 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use spin::mutex::Mutex;
 
-pub trait Device {
+pub trait DeviceInfo {
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;
+    fn compatible(&self) -> &'static [&'static str];
 }
 
 pub static mut DRIVER_TABLE: Mutex<Vec<Box<dyn DeviceDriver>>> = Mutex::new(Vec::new());
 
 pub trait DeviceDriver {
     fn name(&self) -> &'static str;
-    fn match_device(&self, device: &dyn Device) -> bool;
-    fn probe(&self, device: &dyn Device) -> Result<(), &'static str>;
-    fn remove(&self, device: &dyn Device) -> Result<(), &'static str>;
+    fn match_table(&self) -> &'static [&'static str];
+    fn probe(&self, info: &dyn DeviceInfo) -> Result<(), &'static str>;
+    fn remove(&self, info: &dyn DeviceInfo) -> Result<(), &'static str>;
 }
 
 
@@ -42,9 +43,9 @@ mod tests {
         let driver = Box::new(PlatformDeviceDriver::new(
             "test",
             Vec::new(),
-            |device| device.name() == "test",
             |_device| Ok(()),
             |_device| Ok(()),
+            &["test,device"],
         ));
         driver_register(driver);
 
