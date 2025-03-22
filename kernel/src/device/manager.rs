@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use spin::mutex::Mutex;
 
-use crate::device::platform::PlatformDeviceInfo;
+use crate::device::platform::PlatformDevice;
 use crate::println;
 use crate::print;
 
@@ -54,7 +54,7 @@ use crate::traits::serial::Serial;
 
 use super::fdt::FdtManager;
 use super::DeviceDriver;
-use super::DeviceInfo;
+use super::Device;
 
 /// BasicDeviceManager
 ///
@@ -118,7 +118,7 @@ pub struct DeviceManager {
     /* Manager for basic devices */
     pub basic: BasicDeviceManager,
     /* Other devices */
-    devices: Mutex<Vec<Box<dyn DeviceInfo>>>,
+    devices: Mutex<Vec<Box<dyn Device>>>,
     /* Device drivers */
     drivers: Mutex<Vec<Box<dyn DeviceDriver>>>,
 }
@@ -144,15 +144,15 @@ impl DeviceManager {
         unsafe { &mut MANAGER }
     }
 
-    pub fn register_device(&mut self, device: Box<dyn DeviceInfo>) {
+    pub fn register_device(&mut self, device: Box<dyn Device>) {
         self.devices.lock().push(device);
     }
 
-    pub fn borrow_devices(&self) -> &Mutex<Vec<Box<dyn DeviceInfo>>> {
+    pub fn borrow_devices(&self) -> &Mutex<Vec<Box<dyn Device>>> {
         &self.devices
     }
 
-    pub fn borrow_mut_devices(&mut self) -> &mut Mutex<Vec<Box<dyn DeviceInfo>>> {
+    pub fn borrow_mut_devices(&mut self) -> &mut Mutex<Vec<Box<dyn Device>>> {
         &mut self.devices
     }
     pub fn borrow_drivers(&self) -> &Mutex<Vec<Box<dyn DeviceDriver>>> {
@@ -198,7 +198,7 @@ impl DeviceManager {
             for driver in self.drivers.lock().iter() {
                 if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
                     println!("Found matching driver for {}", driver.name());
-                    let device = Box::new(PlatformDeviceInfo::new(
+                    let device = Box::new(PlatformDevice::new(
                         child.name,
                         idx,
                         compatible.clone(),
@@ -261,7 +261,7 @@ mod tests {
 
     #[test_case]
     fn test_device_manager() {
-        let device = Box::new(PlatformDeviceInfo::new("test", 0, vec!["test,device"]));
+        let device = Box::new(PlatformDevice::new("test", 0, vec!["test,device"]));
         let manager = DeviceManager::get_mut_manager();
         manager.register_device(device);
         let len = manager.devices.lock().len();
@@ -272,7 +272,7 @@ mod tests {
     #[test_case]
     fn test_populate_driver() {
         static mut TEST_RESULT: bool = false;
-        fn probe_fn(_device: &dyn DeviceInfo) -> Result<(), &'static str> {      
+        fn probe_fn(_device: &dyn Device) -> Result<(), &'static str> {      
             unsafe {
                 TEST_RESULT = true;
             }  

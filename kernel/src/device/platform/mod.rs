@@ -1,16 +1,16 @@
 //! Platform device driver module.
 //! 
 //! This module provides the implementation of platform device drivers, including
-//! device information and driver management. It defines the `PlatformDeviceInfo` and
+//! device information and driver management. It defines the `PlatformDevice` and
 //! `PlatformDeviceDriver` structs, which represent the device information and driver
 //! respectively.
 //! 
-//! The module implements the `DeviceInfo` and `DeviceDriver` traits for platform devices,
+//! The module implements the `Device` and `DeviceDriver` traits for platform devices,
 //! allowing them to be integrated into the device management system.
 //!
 //! # Components
 //!
-//! - `PlatformDeviceInfo`: Stores information about a platform device, including its name,
+//! - `PlatformDevice`: Stores information about a platform device, including its name,
 //!   ID, and compatible device strings.
 //!
 //! - `PlatformDeviceDriver`: Implements a driver for platform devices, containing resources,
@@ -24,7 +24,7 @@
 //!
 //! ```rust
 //! // Creating a platform device info
-//! let device_info = PlatformDeviceInfo::new(
+//! let device_info = PlatformDevice::new(
 //!     "example_device",
 //!     1,
 //!     vec!["example,device-v1", "example,device-v2"]
@@ -48,7 +48,7 @@
 //!
 //! The driver model allows for dynamic matching between devices and their drivers
 //! based on the compatible strings, enabling a flexible plug-and-play architecture.
-//! respectively. The module also includes the `DeviceInfo` and `DeviceDriver` traits,
+//! respectively. The module also includes the `Device` and `DeviceDriver` traits,
 //! which define the interface for device information and drivers.
 //!
 
@@ -62,7 +62,7 @@ use super::*;
 use resource::*;
 
 /// Struct representing platform device information.
-pub struct PlatformDeviceInfo {
+pub struct PlatformDevice {
     name: &'static str,
     id: usize,
     compatible: Vec<&'static str>,
@@ -81,14 +81,14 @@ pub struct PlatformDeviceInfo {
 /// # Examples
 ///
 /// ```
-/// let device_info = PlatformDeviceInfo::new(
+/// let device_info = PlatformDevice::new(
 ///     "uart0",
 ///     0,
 ///     vec!["ns16550a", "uart"]
 /// );
 /// ```
-impl PlatformDeviceInfo {
-    /// Creates a new `PlatformDeviceInfo` instance.
+impl PlatformDevice {
+    /// Creates a new `PlatformDevice` instance.
     ///
     /// # Arguments
     ///
@@ -98,7 +98,7 @@ impl PlatformDeviceInfo {
     ///
     /// # Returns
     ///
-    /// A new `PlatformDeviceInfo` instance with the provided values.
+    /// A new `PlatformDevice` instance with the provided values.
     pub fn new(name: &'static str, id: usize, compatible: Vec<&'static str>) -> Self {
         Self {
             name,
@@ -108,7 +108,7 @@ impl PlatformDeviceInfo {
     }
 }
 
-impl DeviceInfo for PlatformDeviceInfo {
+impl Device for PlatformDevice {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -125,8 +125,8 @@ impl DeviceInfo for PlatformDeviceInfo {
 pub struct PlatformDeviceDriver {
     name: &'static str,
     resources: Vec<PlatformDeviceResource>,
-    probe_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
-    remove_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
+    probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
+    remove_fn: fn(&dyn Device) -> Result<(), &'static str>,
     compatible: Vec<&'static str>, // Change to Vec<&'static str>
 }
 
@@ -134,8 +134,8 @@ impl PlatformDeviceDriver {
     pub fn new(
         name: &'static str,
         resources: Vec<PlatformDeviceResource>,
-        probe_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
-        remove_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
+        probe_fn: fn(&dyn Device) -> Result<(), &'static str>,
+        remove_fn: fn(&dyn Device) -> Result<(), &'static str>,
         compatible: Vec<&'static str>,
     ) -> Self {
         Self {
@@ -157,11 +157,11 @@ impl DeviceDriver for PlatformDeviceDriver {
         self.compatible.clone()
     }
 
-    fn probe(&self, device: &dyn DeviceInfo) -> Result<(), &'static str> {
+    fn probe(&self, device: &dyn Device) -> Result<(), &'static str> {
         (self.probe_fn)(device)
     }
 
-    fn remove(&self, _device: &dyn DeviceInfo) -> Result<(), &'static str> {
+    fn remove(&self, _device: &dyn Device) -> Result<(), &'static str> {
         Ok(())
     }
 }

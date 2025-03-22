@@ -12,7 +12,7 @@ pub mod platform;
 extern crate alloc;
 use alloc::vec::Vec;
 
-pub trait DeviceInfo {
+pub trait Device {
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;
     fn compatible(&self) -> Vec<&'static str>;
@@ -26,6 +26,6 @@ pub trait DeviceInfo {
 pub trait DeviceDriver {
     fn name(&self) -> &'static str;
     fn match_table(&self) -> Vec<&'static str>; // Change to Vec<&'static str>
-    fn probe(&self, info: &dyn DeviceInfo) -> Result<(), &'static str>;
-    fn remove(&self, info: &dyn DeviceInfo) -> Result<(), &'static str>;
+    fn probe(&self, info: &dyn Device) -> Result<(), &'static str>;
+    fn remove(&self, info: &dyn Device) -> Result<(), &'static str>;
 }
