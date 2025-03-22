@@ -10,4 +10,5 @@ pub struct VirtQueue {
     pub descriptor_table: DescriptorTable,
     pub available_ring: AvailableRing,
     pub used_ring: UsedRing,
+    pub last_used_index: u16,
 }
