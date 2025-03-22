@@ -116,6 +116,14 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     match fdt_manager.init() {
         Ok(_) => {
             early_println!("[Scarlet Kernel] FDT initialized");
+            let fdt =  fdt_manager.get_fdt().unwrap();
+            
+            match fdt.chosen().bootargs() {
+                Some(bootargs) => early_println!("Bootargs: {}", bootargs),
+                None => early_println!("No bootargs found"),
+            }
+            let model = fdt.root().model();
+            early_println!("Model: {}", model);
         }
         Err(e) => {
             early_println!("[Scarlet Kernel] FDT error: {:?}", e);
