@@ -1,6 +1,7 @@
 use alloc::vec::Vec;
 
 pub mod request;
+pub mod manager;
 
 extern crate alloc;
 
