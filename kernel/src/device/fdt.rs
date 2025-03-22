@@ -1,5 +1,8 @@
 use fdt::{Fdt, FdtError};
 
+use crate::early_println;
+use crate::early_print;
+
 #[unsafe(link_section = ".data")]
 static mut FDT_ADDR: usize = 0;
 
@@ -45,5 +48,25 @@ impl<'a> FdtManager<'a> {
     #[allow(static_mut_refs)]
     pub fn get_manager() -> &'static FdtManager<'a> {
         unsafe { &MANAGER }
+    }
+}
+
+pub fn init_fdt() {
+    let fdt_manager = FdtManager::get_mut_manager();
+    match fdt_manager.init() {
+        Ok(_) => {
+            early_println!("FDT initialized");
+            let fdt =  fdt_manager.get_fdt().unwrap();
+            
+            match fdt.chosen().bootargs() {
+                Some(bootargs) => early_println!("Bootargs: {}", bootargs),
+                None => early_println!("No bootargs found"),
+            }
+            let model = fdt.root().model();
+            early_println!("Model: {}", model);
+        }
+        Err(e) => {
+            early_println!("FDT error: {:?}", e);
+        }
     }
 }

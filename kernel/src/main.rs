@@ -77,7 +77,7 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
-use device::{fdt::FdtManager, manager::DeviceManager};
+use device::{fdt::{init_fdt, FdtManager}, manager::DeviceManager};
 use initcall::{early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
@@ -111,24 +111,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
     arch_init(cpu_id);
-    let fdt_manager = FdtManager::get_mut_manager();
     early_println!("[Scarlet Kernel] Initializing FDT...");
-    match fdt_manager.init() {
-        Ok(_) => {
-            early_println!("[Scarlet Kernel] FDT initialized");
-            let fdt =  fdt_manager.get_fdt().unwrap();
-            
-            match fdt.chosen().bootargs() {
-                Some(bootargs) => early_println!("Bootargs: {}", bootargs),
-                None => early_println!("No bootargs found"),
-            }
-            let model = fdt.root().model();
-            early_println!("Model: {}", model);
-        }
-        Err(e) => {
-            early_println!("[Scarlet Kernel] FDT error: {:?}", e);
-        }
-    }
+    init_fdt();
     early_println!("[Scarlet Kernel] Initializing heap...");
     init_heap();
     /* After this point, we can use the heap */
