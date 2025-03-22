@@ -58,7 +58,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 pub mod arch;
-pub mod driver;
+pub mod drivers;
 pub mod timer;
 pub mod library;
 pub mod mem;
