@@ -9,11 +9,11 @@ use resource::*;
 pub struct PlatformDeviceInfo {
     name: &'static str,
     id: usize,
-    compatible: &'static[&'static str],
+    compatible: Vec<&'static str>,
 }
 
 impl PlatformDeviceInfo {
-    pub fn new(name: &'static str, id: usize, compatible: &'static [&'static str]) -> Self {
+    pub fn new(name: &'static str, id: usize, compatible: Vec<&'static str>) -> Self {
         Self {
             name,
             id,
@@ -31,8 +31,8 @@ impl DeviceInfo for PlatformDeviceInfo {
         self.id
     }
 
-    fn compatible(&self) -> &'static [&'static str] {
-        self.compatible
+    fn compatible(&self) -> Vec<&'static str> {
+        self.compatible.clone()
     }
 }
 
@@ -41,7 +41,7 @@ pub struct PlatformDeviceDriver {
     resources: Vec<PlatformDeviceResource>,
     probe_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
     remove_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
-    compatible: &'static [&'static str], 
+    compatible: Vec<&'static str>, // Change to Vec<&'static str>
 }
 
 impl PlatformDeviceDriver {
@@ -50,7 +50,7 @@ impl PlatformDeviceDriver {
         resources: Vec<PlatformDeviceResource>,
         probe_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
         remove_fn: fn(&dyn DeviceInfo) -> Result<(), &'static str>,
-        compatible: &'static [&'static str],
+        compatible: Vec<&'static str>,
     ) -> Self {
         Self {
             name,
@@ -67,8 +67,8 @@ impl DeviceDriver for PlatformDeviceDriver {
         self.name
     }
 
-    fn match_table(&self) -> &'static[&'static str] {
-        self.compatible
+    fn match_table(&self) -> Vec<&'static str> {
+        self.compatible.clone()
     }
 
     fn probe(&self, device: &dyn DeviceInfo) -> Result<(), &'static str> {
