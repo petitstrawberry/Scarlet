@@ -27,6 +27,15 @@ impl DescriptorTable {
         self.descriptors[self.size - 1].next = 0;
         self.free_head = 0;
     }
+
+    pub fn alloc(&mut self) -> Option<u16> {
+        if self.free_head == 0 {
+            return None;
+        }
+        let index = self.free_head;
+        self.free_head = self.descriptors[index as usize].next;
+        Some(index)
+    }
 }
 
 #[repr(C)]
