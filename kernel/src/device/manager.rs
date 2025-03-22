@@ -111,7 +111,7 @@ impl DeviceManager {
     }
 
     pub fn populate_devices(&mut self) {
-        let fdt_manager = FdtManager::get_mut_manager();
+        let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
             println!("FDT not initialized");

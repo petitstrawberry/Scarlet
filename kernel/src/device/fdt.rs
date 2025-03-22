@@ -41,7 +41,7 @@ impl<'a> FdtManager<'a> {
     }
 
     #[allow(static_mut_refs)]
-    pub fn get_mut_manager() -> &'static mut FdtManager<'a> {
+    pub unsafe fn get_mut_manager() -> &'static mut FdtManager<'a> {
         unsafe { &mut MANAGER }
     }
 
@@ -52,7 +52,7 @@ impl<'a> FdtManager<'a> {
 }
 
 pub fn init_fdt() {
-    let fdt_manager = FdtManager::get_mut_manager();
+    let fdt_manager = unsafe { FdtManager::get_mut_manager() };
     match fdt_manager.init() {
         Ok(_) => {
             early_println!("FDT initialized");
