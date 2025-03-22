@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 
 pub struct BlockIORequest {
     pub request_type: BlockIORequestType,
@@ -12,4 +12,9 @@ pub struct BlockIORequest {
 pub enum BlockIORequestType {
     Read,
     Write,
+}
+
+pub struct BlockIOResult {
+    pub request: Box<BlockIORequest>,
+    pub result: Result<(), &'static str>,
 }
