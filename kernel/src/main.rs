@@ -111,7 +111,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
     arch_init(cpu_id);
-    let mut fdt_manager = FdtManager::new();
+    let fdt_manager = FdtManager::get_mut_manager();
     early_println!("[Scarlet Kernel] Initializing FDT...");
     match fdt_manager.init() {
         Ok(_) => {
