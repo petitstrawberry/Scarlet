@@ -4,12 +4,12 @@ use alloc::vec::Vec;
 pub struct UsedRing {
     pub flags: u16,
     pub index: u16,
-    pub ring: Vec<UsedElement>,
+    pub ring: Vec<UsedRingEntry>,
     pub avail_event: u16,
 }
 
 #[repr(C)]
-pub struct UsedElement {
+pub struct UsedRingEntry {
     pub id: u32,
     pub len: u32,
 }
