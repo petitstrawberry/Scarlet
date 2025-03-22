@@ -28,13 +28,10 @@ impl DescriptorTable {
         self.free_head = 0;
     }
 
-    pub fn alloc(&mut self) -> Option<u16> {
-        if self.free_head == 0 {
-            return None;
-        }
+    pub fn alloc(&mut self) -> u16 {
         let index = self.free_head;
         self.free_head = self.descriptors[index as usize].next;
-        Some(index)
+        index
     }
 }
 
@@ -55,5 +52,28 @@ impl Default for Descriptor {
             flags: 0x1,
             next: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_descriptor_table() {
+        let mut table = DescriptorTable::new(10);
+        table.init();
+        assert_eq!(table.free_head, 0);
+        assert_eq!(table.descriptors[0].next, 1);
+        assert_eq!(table.descriptors[9].next, 0);
+    }
+
+    #[test_case]
+    fn test_alloc() {
+        let mut table = DescriptorTable::new(10);
+        table.init();
+        let index = table.alloc();
+        assert_eq!(index, 0);
+        assert_eq!(table.free_head, 1);
     }
 }
