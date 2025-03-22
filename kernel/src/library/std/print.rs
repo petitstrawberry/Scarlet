@@ -52,7 +52,7 @@ macro_rules! println {
 }
 
 pub fn _print(args: fmt::Arguments) {
-    let mut manager = DeviceManager::locked();
+    let manager = DeviceManager::get_mut_manager();
     let serial = manager.basic.borrow_mut_serial(0);
     match serial {
         Some(serial) => {
