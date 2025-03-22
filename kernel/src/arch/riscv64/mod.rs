@@ -41,7 +41,7 @@ pub struct Riscv64 {
     kernel_trap: u64,
 }
 
-pub fn arch_init(cpu_id: usize) {
+pub fn init_arch(cpu_id: usize) {
     early_println!("[riscv64] Hart {}: Initializing core....", cpu_id);
     // Get raw Riscv64 struct
     let riscv: &mut Riscv64 = unsafe { transmute(&TRAPFRAME[cpu_id] as *const _ as usize ) };
