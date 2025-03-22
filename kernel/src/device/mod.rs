@@ -8,6 +8,7 @@
 pub mod manager;
 pub mod fdt;
 pub mod platform;
+pub mod block;
 
 extern crate alloc;
 use alloc::vec::Vec;
