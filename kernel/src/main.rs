@@ -82,7 +82,7 @@ use initcall::{early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
 
-use arch::arch_init;
+use arch::init_arch;
 use library::std::print;
 use task::new_kernel_task;
 use vm::kernel_vm_init;
@@ -110,7 +110,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("[Scarlet Kernel] Initializing .bss section...");
     init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
-    arch_init(cpu_id);
+    init_arch(cpu_id);
     early_println!("[Scarlet Kernel] Initializing FDT...");
     init_fdt();
     early_println!("[Scarlet Kernel] Initializing heap...");
@@ -145,7 +145,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
-    arch_init(cpu_id);
+    init_arch(cpu_id);
     loop {}
 }
 
