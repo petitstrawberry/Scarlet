@@ -70,11 +70,14 @@ pub mod vm;
 pub mod task;
 pub mod initcall;
 pub mod syscall;
+pub mod device;
+
 #[cfg(test)]
 pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
+use device::{fdt::{init_fdt, FdtManager}, manager::DeviceManager};
 use initcall::{early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
@@ -108,6 +111,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
     arch_init(cpu_id);
+    early_println!("[Scarlet Kernel] Initializing FDT...");
+    init_fdt();
     early_println!("[Scarlet Kernel] Initializing heap...");
     init_heap();
     /* After this point, we can use the heap */
@@ -119,6 +124,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init();
+    /* Initialize (populate) devices */
+    println!("[Scarlet Kernel] Initializing devices...");
+    DeviceManager::get_mut_manager().populate_devices();
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");

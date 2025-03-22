@@ -1,6 +1,6 @@
 use core::arch::naked_asm;
 
-use crate::environment::STACK_SIZE;
+use crate::{device::fdt::FdtManager, environment::STACK_SIZE, start_kernel};
 
 /// Entry point for the primary core
 #[unsafe(link_section = ".init")]
@@ -20,7 +20,7 @@ pub extern "C" fn _entry() {
                 la      sp, KERNEL_STACK
                 add     sp, sp, t0
 
-                j       start_kernel
+                j       arch_start_kernel
         ", const STACK_SIZE
         );
     }
@@ -48,4 +48,11 @@ pub extern "C" fn _entry_ap() {
         ", const STACK_SIZE
         );
     }
+}
+
+
+#[unsafe(no_mangle)]
+pub extern "C" fn arch_start_kernel(hartid: usize, fdt_ptr: usize) {
+    FdtManager::set_fdt_addr(fdt_ptr);
+    start_kernel(hartid);
 }
