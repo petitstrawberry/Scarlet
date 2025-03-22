@@ -1,6 +1,44 @@
-//! Device Manager module.
+//! # Device Manager Module
+//!
+//! This module provides functionality for managing hardware devices in the kernel.
+//!
+//! ## Overview
+//!
+//! The device manager is responsible for:
+//! - Registering and managing serial devices
+//! - Tracking available device drivers
+//! - Device discovery and initialization
+//! - Managing device information
+//!
+//! ## Key Components
+//!
+//! - `BasicDeviceManager`: Manages fundamental I/O devices like serial ports
+//! - `DeviceManager`: The main device management system that handles all devices and drivers
+//!
+//! ## Device Discovery
+//!
+//! Devices are discovered through the Flattened Device Tree (FDT). The manager:
+//! 1. Parses the device tree
+//! 2. Matches compatible devices with registered drivers
+//! 3. Probes devices with appropriate drivers
+//!
+//! ## Usage
+//!
+//! The device manager is implemented as a global singleton that can be accessed via:
+//! - `DeviceManager::get_manager()` - Immutable access
+//! - `DeviceManager::get_mut_manager()` - Mutable access
+//!
+//! ### Example: Registering a serial device
+//!
+//! ```
+//! use crate::device::manager::register_serial;
 //! 
+//! // Create a new serial device
+//! let my_serial = Box::new(MySerialImplementation::new());
 //! 
+//! // Register with the device manager
+//! register_serial(my_serial);
+//! ```
 
 extern crate alloc;
 
@@ -18,18 +56,21 @@ use super::fdt::FdtManager;
 use super::DeviceDriver;
 use super::DeviceInfo;
 
+/// BasicDeviceManager
+///
+/// This struct manages basic I/O devices, such as serial ports.
+/// It provides methods to register, borrow, and manage serial devices.
+/// It is a part of the DeviceManager, which handles all devices and drivers.
+///
+/// # Fields
+/// - `serials`: A vector of serial devices managed by this manager.
+/// 
 pub struct BasicDeviceManager {
     /* Basic I/O */
     serials: Vec<Box<dyn Serial>>,
 }
 
 impl BasicDeviceManager {
-    pub fn new() -> Self {
-        BasicDeviceManager {
-            serials: Vec::new(),
-        }
-    }
-
     pub fn register_serial(&mut self, serial: Box<dyn Serial>) {
         self.serials.push(serial);
         println!("Registered serial device");
@@ -61,6 +102,18 @@ impl BasicDeviceManager {
 }
 
 static mut MANAGER: DeviceManager = DeviceManager::new();
+
+/// DeviceManager
+/// 
+/// This struct is the main device management system.
+/// It handles all devices and drivers, including basic I/O devices.
+/// It provides methods to register devices, populate devices from the FDT,
+/// and manage device drivers.
+/// 
+/// # Fields
+/// - `basic`: An instance of `BasicDeviceManager` for managing basic I/O devices.
+/// - `devices`: A mutex-protected vector of all registered devices.
+/// - `drivers`: A mutex-protected vector of all registered device drivers.
 pub struct DeviceManager {
     /* Manager for basic devices */
     pub basic: BasicDeviceManager,
@@ -110,8 +163,14 @@ impl DeviceManager {
         &mut self.drivers
     }
 
+    /// Populates devices from the FDT (Flattened Device Tree).
+    /// 
+    /// This function searches for the `/soc` node in the FDT and iterates through its children.
+    /// For each child node, it checks if there is a compatible driver registered.
+    /// If a matching driver is found, it probes the device using the driver's `probe` method.
+    /// If the probe is successful, the device is registered with the driver.
     pub fn populate_devices(&mut self) {
-        let fdt_manager = FdtManager::get_mut_manager();
+        let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
             println!("FDT not initialized");
@@ -154,11 +213,41 @@ impl DeviceManager {
         }
     }
 
+    /// Registers a device driver with the device manager.
+    /// 
+    /// This function takes a boxed device driver and adds it to the list of registered drivers.
+    /// It is used to register drivers that can be used to probe and manage devices.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// let driver = Box::new(MyDeviceDriver::new());
+    /// DeviceManager::get_mut_manager().register_driver(driver);
+    /// ```
     pub fn register_driver(&mut self, driver: Box<dyn DeviceDriver>) {
         self.drivers.lock().push(driver);
     }
 }
 
+/// Registers a serial device with the device manager.
+/// 
+/// This function takes a boxed serial device and adds it to the list of registered serial devices.
+/// It is used to register serial devices that can be used for I/O operations.
+/// 
+/// # Arguments
+/// 
+/// * `serial` - A boxed serial device that implements the `Serial` trait.
+/// 
+/// # Example
+/// 
+/// ```rust
+/// let serial = Box::new(MySerialDevice::new());
+/// register_serial(serial);
+/// ```
 pub fn register_serial(serial: Box<dyn Serial>) {
     let manager = DeviceManager::get_mut_manager();
     manager.basic.register_serial(serial);
