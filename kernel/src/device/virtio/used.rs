@@ -5,6 +5,7 @@ pub struct UsedRing {
     pub flags: u16,
     pub index: u16,
     pub ring: Vec<UsedElement>,
+    pub avail_event: u16,
 }
 
 #[repr(C)]
