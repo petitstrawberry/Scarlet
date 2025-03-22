@@ -77,7 +77,7 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
-use device::fdt::FdtManager;
+use device::{fdt::FdtManager, manager::DeviceManager};
 use initcall::{early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
@@ -132,6 +132,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init();
+    /* Initialize (populate) devices */
+    println!("[Scarlet Kernel] Initializing devices...");
+    DeviceManager::get_mut_manager().populate_devices();
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
