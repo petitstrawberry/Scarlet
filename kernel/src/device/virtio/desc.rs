@@ -1,12 +1,11 @@
 use alloc::vec::Vec;
 
+#[repr(C)]
 pub struct DescriptorTable {
     pub descriptors: Vec<Descriptor>,
-    pub free_list: Vec<u16>,
-    pub used_idx: u16,
-    pub next_avail_idx: u16,
 }
 
+#[repr(C)]
 pub struct Descriptor {
     pub addr: u64,
     pub len: u32,

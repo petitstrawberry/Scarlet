@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+#[repr(C)]
 pub struct AvailableRing {
     pub flags: u16,
     pub idx: u16,
