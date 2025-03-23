@@ -1,28 +1,9 @@
-use alloc::vec;
-use alloc::vec::Vec;
 #[repr(C)]
 pub struct UsedRing {
     pub flags: u16,
     pub index: u16,
-    pub ring: Vec<UsedRingEntry>,
+    pub ring: [UsedRingEntry; 0], /* Flexible array member */
     pub avail_event: u16,
-}
-
-impl UsedRing {
-    pub fn new(size: usize) -> Self {
-        Self {
-            flags: 0,
-            index: 0,
-            ring: vec![UsedRingEntry::default(); size],
-            avail_event: 0,
-        }
-    }
-
-    pub fn init(&mut self) {
-        self.flags = 0;
-        self.index = 0;
-        self.avail_event = 0;
-    }
 }
 
 #[repr(C)]
