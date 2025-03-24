@@ -1,4 +1,4 @@
-use alloc::vec::{self, Vec};
+use alloc::vec::Vec;
 use crate::device::block::request::BlockIORequestType;
 
 use super::*;
