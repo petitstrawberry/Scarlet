@@ -2,6 +2,8 @@ pub mod avail;
 pub mod used;
 pub mod desc;
 
+pub mod register;
+
 use core::{alloc::Layout, mem};
 
 use alloc::alloc::alloc_zeroed;
