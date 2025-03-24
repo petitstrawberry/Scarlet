@@ -108,8 +108,10 @@ impl<'a> VirtQueue<'a> {
         let desc_size = self.desc.len() * mem::size_of::<Descriptor>();
         let avail_size = mem::size_of::<RawAvailableRing>() + self.desc.len() * mem::size_of::<u16>();
         let used_size = mem::size_of::<RawUsedRing>() + self.desc.len() * mem::size_of::<RawUsedRingEntry>();
-
-        desc_size + avail_size + used_size
+        let floor_size = (desc_size + avail_size + 3) & !3;
+        let align_size = (floor_size + 3) & !3;
+        let padding_size = align_size - (desc_size + avail_size);
+        desc_size + avail_size + used_size + padding_size
     }
 }
 
@@ -128,13 +130,11 @@ mod tests {
 
     #[test_case]
     fn test_initialize_virtqueue() {
-        let queue_size = 16;
+        let queue_size = 2;
         let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
 
-        let total_size = mem::size_of::<Descriptor>() * queue_size
-            + mem::size_of::<RawAvailableRing>() + queue_size * mem::size_of::<u16>()
-            + mem::size_of::<RawUsedRing>() + queue_size * mem::size_of::<RawUsedRingEntry>();
+        let total = 68;
 
         assert_eq!(virtqueue.desc.len(), queue_size);
         assert_eq!(*virtqueue.avail.index, 0);
@@ -142,7 +142,7 @@ mod tests {
 
         // Check the size of the allocated memory
         let allocated_size = virtqueue.get_raw_size();
-        assert_eq!(allocated_size, total_size);
+        assert_eq!(allocated_size, total);
 
         // Check the next index of each descriptor
         for i in 0..queue_size {
