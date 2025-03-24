@@ -27,7 +27,6 @@ impl Default for RawUsedRingEntry {
 /// This structure is wrapped around the `RawUsedRing` structure.
 /// It provides a safe interface to access the used ring entries.
 pub struct UsedRing<'a> {
-    size: usize,
     pub flags: &'a mut u16,
     pub index: &'a mut u16,
     pub ring: &'a mut [RawUsedRingEntry],
@@ -61,7 +60,6 @@ impl<'a> UsedRing<'a> {
         let avail_event = unsafe { &mut *((*ptr).ring.as_mut_ptr().add(size) as *mut u16) };
 
         Self {
-            size,
             flags,
             index,
             ring,
