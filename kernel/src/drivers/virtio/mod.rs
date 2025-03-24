@@ -2,7 +2,7 @@ pub mod avail;
 pub mod used;
 pub mod desc;
 
-pub mod register;
+pub mod device;
 
 use core::{alloc::Layout, mem};
 
@@ -115,15 +115,6 @@ impl<'a> VirtQueue<'a> {
         let padding_size = align_size - (desc_size + avail_size);
         desc_size + avail_size + used_size + padding_size
     }
-}
-
-pub trait VirtioDevice {
-    fn init(&mut self);
-    fn reset(&mut self);
-    fn read32_register(&self, offset: usize) -> u32;
-    fn write32_register(&mut self, offset: usize, value: u32);
-    fn read64_register(&self, offset: usize) -> u64;
-    fn write64_register(&mut self, offset: usize, value: u64);
 }
 
 #[cfg(test)]
