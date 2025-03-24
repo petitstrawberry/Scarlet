@@ -2,7 +2,7 @@
 
 pub struct RawAvailableRing {
     pub flags: u16,
-    pub index: u16,
+    pub idx: u16,
     pub ring: [u16; 0], /* Flexible array member */
     pub used_event: u16, /* Locate after ring */
 }
@@ -11,7 +11,7 @@ pub struct RawAvailableRing {
 pub struct AvailableRing<'a> {
     size: usize,
     pub flags: &'a mut u16,
-    pub index: &'a mut u16,
+    pub idx: &'a mut u16,
     pub ring: &'a mut [u16],
     pub used_event: &'a mut u16,
 }
@@ -36,14 +36,14 @@ impl<'a> AvailableRing<'a> {
     /// `AvailableRing` - A new `AvailableRing` instance.
     pub unsafe fn new(size: usize, ptr: *mut RawAvailableRing) -> Self {
         let flags = unsafe { &mut (*ptr).flags };
-        let index = unsafe { &mut (*ptr).index };
+        let idx = unsafe { &mut (*ptr).idx };
         let ring = unsafe { core::slice::from_raw_parts_mut((*ptr).ring.as_mut_ptr(), size) };
         let used_event = unsafe { &mut *((*ptr).ring.as_mut_ptr().add(size) as *mut u16) };
 
         Self {
             size,
             flags,
-            index,
+            idx,
             ring,
             used_event,
         }

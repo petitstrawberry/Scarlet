@@ -81,9 +81,9 @@ impl<'a> VirtQueue<'a> {
         }
 
         *(self.avail.flags) = 0;
-        *(self.avail.index) = 0;
+        *(self.avail.idx) = 0;
         *(self.used.flags) = 0;
-        *(self.used.index) = 0;
+        *(self.used.idx) = 0;
     }
 
     /// Get the raw pointer to the virtqueue
@@ -139,8 +139,8 @@ mod tests {
         let total = 68;
 
         assert_eq!(virtqueue.desc.len(), queue_size);
-        assert_eq!(*virtqueue.avail.index, 0);
-        assert_eq!(*virtqueue.used.index, 0);
+        assert_eq!(*virtqueue.avail.idx, 0);
+        assert_eq!(*virtqueue.used.idx, 0);
 
         // Check the size of the allocated memory
         let allocated_size = virtqueue.get_raw_size();
