@@ -47,7 +47,7 @@ pub use riscv64::*;
     - `arch::Arch.get_trapframe()` - get trap frame
     - `arch::Arch.set_trap_handler()` - set trap handler
 - `arch::Trapframe` - Trapframe struct for sharing context between kernel and user space
-- `arch::arch_init()` - initialize architecture specific code
+- `arch::init_arch()` - initialize architecture specific code
 - `arch::enable_interrupts()` - enable interrupts
 - `arch::disable_interrupts()` - disable interrupts
 - `arch::earlycon::early_putc()` - early console output (before serial device is initialized)

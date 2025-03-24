@@ -34,10 +34,11 @@
 /// Wraps a UART device to implement the `core::fmt::Write` trait.
 ///
 /// This allows the UART to be used with the standard formatting macros.
-use core::fmt::{self, Write};
+use core::fmt;
 
-use crate::driver::uart::virt::Uart;
-use crate::traits::serial::Serial;
+use crate::device::manager::DeviceManager;
+use crate::early_println;
+use crate::early_print;
 
 #[macro_export]
 macro_rules! print {
@@ -51,38 +52,14 @@ macro_rules! println {
 }
 
 pub fn _print(args: fmt::Arguments) {
-    unsafe {
-        match UART_WRITER {
-            Some(ref mut writer) => writer.write_fmt(args).unwrap(),
-            None => {
-                UART_WRITER = Some(UartWriter {
-                    serial: Uart::new(0x1000_0000),
-                });
-                if let Some(ref mut writer) = UART_WRITER {
-                    writer.serial.init();
-                }
-                _print(args);
-            }
-            
+    let manager = DeviceManager::get_mut_manager();
+    let serial = manager.basic.borrow_mut_serial(0);
+    match serial {
+        Some(serial) => {
+            serial.write_fmt(args).unwrap();
         }
-    }
-}
-
-static mut UART_WRITER: Option<UartWriter> = None;
-
-#[derive(Clone)]
-struct UartWriter {
-    serial: Uart,
-}
-
-impl Write for UartWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.bytes() {
-            if c == b'\n' {
-                self.serial.write_byte(b'\r');
-            }
-            self.serial.write_byte(c);
+        None => {
+            early_println!("[print] No serial device found!");
         }
-        Ok(())
-    }
+    }    
 }

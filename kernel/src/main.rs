@@ -58,7 +58,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 pub mod arch;
-pub mod driver;
+pub mod drivers;
 pub mod timer;
 pub mod library;
 pub mod mem;
@@ -70,16 +70,19 @@ pub mod vm;
 pub mod task;
 pub mod initcall;
 pub mod syscall;
+pub mod device;
+
 #[cfg(test)]
 pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
-use initcall::initcall_task;
+use device::{fdt::{init_fdt, FdtManager}, manager::DeviceManager};
+use initcall::{early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
 
-use arch::arch_init;
+use arch::init_arch;
 use library::std::print;
 use task::new_kernel_task;
 use vm::kernel_vm_init;
@@ -104,11 +107,16 @@ fn panic(info: &PanicInfo) -> ! {
 pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("Hello, I'm Scarlet kernel!");
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    early_println!("[Scarlet Kernel] Initializing .bss section...");
+    init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
-    arch_init(cpu_id);
+    init_arch(cpu_id);
+    early_println!("[Scarlet Kernel] Initializing FDT...");
+    init_fdt();
     early_println!("[Scarlet Kernel] Initializing heap...");
     init_heap();
     /* After this point, we can use the heap */
+    early_initcall_call();
     /* Serial console also works */
 
     #[cfg(test)]
@@ -116,6 +124,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init();
+    /* Initialize (populate) devices */
+    println!("[Scarlet Kernel] Initializing devices...");
+    DeviceManager::get_mut_manager().populate_devices();
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
@@ -134,6 +145,20 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
-    arch_init(cpu_id);
+    init_arch(cpu_id);
     loop {}
+}
+
+fn init_bss() {
+    unsafe extern "C" {
+        static mut __BSS_START: u8;
+        static mut __BSS_END: u8;
+    }
+
+    unsafe {
+        let bss_start = &raw mut __BSS_START as *mut u8;
+        let bss_end = &raw mut __BSS_END as *mut u8;
+        let bss_size = bss_end as usize - bss_start as usize;
+        core::ptr::write_bytes(bss_start, 0, bss_size);
+    }
 }

@@ -15,7 +15,10 @@ SECTIONS {
     .text : { *(.text .text.*) } > RAM
     .initcall : { 
       __INITCALL_START = .;
+      __INITCALL_EARLY_START = .;
       *(.initcall.early)
+      __INITCALL_EARLY_END = .;
+      *(.initcall.driver)
       *(.initcall.late)
       __INITCALL_END = .;
     } > RAM
@@ -29,15 +32,20 @@ SECTIONS {
     } > RAM
     .rodata : { *(.rodata .rodata.*) } > RAM 
     .data : { *(.data .data.*) } > RAM 
-    .bss (NOLOAD) : { *(.bss .bss.*) } > RAM
+    .bss (NOLOAD) : {
+      __BSS_START = .;
+      *(.bss .bss.*)
+      . = ALIGN(0x1000);
+      __BSS_END = .;
+    } > RAM
     .heap (NOLOAD) :
     {
-      *(.heap .heap.*)       
       . = ALIGN(0x1000);
       __HEAP_START = .;
+      *(.heap .heap.*)
       . += __HEAP_SIZE;
+    . = ALIGN(0x1000);
       __HEAP_END = .;
     } > RAM
-    . = ALIGN(0x1000);
     __KERNEL_SPACE_END = .;
 }
