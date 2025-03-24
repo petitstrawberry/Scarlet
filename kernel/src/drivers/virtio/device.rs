@@ -1,5 +1,3 @@
-use super::VirtQueue;
-
 #[derive(Debug, Clone, Copy)]
 pub enum Register {
     MagicValue = 0x00,
@@ -135,7 +133,7 @@ pub trait VirtioDevice {
 
 #[cfg(test)]
 mod tests {
-    use crate::{mem::page::allocate_pages};
+    use crate::mem::page::allocate_pages;
 
     use super::*;
 
