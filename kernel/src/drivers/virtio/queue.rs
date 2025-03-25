@@ -243,6 +243,53 @@ impl<'a> VirtQueue<'a> {
     pub fn is_busy(&self) -> bool {
         self.last_used_idx != *self.used.idx as usize
     }
+
+    /// Push a descriptor index to the available ring
+    /// 
+    /// This function pushes a descriptor index to the available ring.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `desc_idx` - The index of the descriptor to push. 
+    /// If you want to push a chain of descriptors, you should pass the first descriptor index.
+    /// 
+    /// # Returns
+    /// 
+    /// Result<(), &'static str>: Ok if the push was successful, or an error message if it failed.
+    pub fn push(&mut self, desc_idx: usize) -> Result<(), &'static str> {
+        if desc_idx >= self.desc.len() {
+            return Err("Invalid descriptor index");
+        }
+        self.avail.ring[*self.avail.idx as usize] = desc_idx as u16;
+        *self.avail.idx = (*self.avail.idx + 1) % self.avail.size as u16;
+        Ok(())
+    }
+
+    /// Pop a buffer from the used ring
+    /// 
+    /// This function retrieves a buffer from the used ring when the device has finished processing it.
+    /// The caller is responsible for freeing the descriptor when it's done with the buffer.
+    /// 
+    /// # Returns
+    /// 
+    /// Option<usize>: The index of the descriptor that was used, or None if no descriptors are available.
+    ///
+    pub fn pop(&mut self) -> Option<usize> {
+        // Check if there are any used buffers available
+        if self.last_used_idx == *self.used.idx as usize {
+            return None;
+        }
+        
+        // Calculate the index in the used ring
+        let used_idx = self.last_used_idx % self.desc.len();
+        
+        // Retrieve the descriptor index from the used ring
+        let desc_idx = self.used.ring[used_idx].id as usize;
+        // Update the last used index
+        self.last_used_idx = (self.last_used_idx + 1) % self.used.ring.len();
+
+        Some(desc_idx)
+    }
 }
 
 /// Descriptor structure
@@ -530,6 +577,93 @@ mod tests {
         // Allocate a chain of descriptors that is too long
         let desc_idx = virtqueue.alloc_desc_chain(3);
         assert!(desc_idx.is_none());
+    }
+
+    #[test_case]
+    fn test_push_pop() {
+        let queue_size = 2;
+        let mut virtqueue = VirtQueue::new(queue_size);
+        virtqueue.init();
+        
+        // 1. Allocate and configure a descriptor
+        let desc_idx = virtqueue.alloc_desc().unwrap();
+        virtqueue.desc[desc_idx].addr = 0x1000;
+        virtqueue.desc[desc_idx].len = 100;
+        
+        // 2. Push to the queue
+        assert!(virtqueue.push(desc_idx).is_ok());
+        
+        // 3. Simulate device processing the buffer
+        *virtqueue.used.idx = 1;
+        virtqueue.used.ring[0].id = desc_idx as u32;
+        
+        // 4. Pop the buffer
+        let popped = virtqueue.pop();
+        assert!(popped.is_some());
+        assert_eq!(popped.unwrap(), desc_idx);
+        
+        // 5. Verify no more buffers are available
+        assert!(virtqueue.pop().is_none());
+    }
+
+    #[test_case]
+    fn test_push_pop_chain() {
+        let queue_size = 4;
+        let mut virtqueue = VirtQueue::new(queue_size);
+        virtqueue.init();
+        
+        // 1. Allocate a chain of descriptors
+        let chain_len = 3;
+        let desc_idx = virtqueue.alloc_desc_chain(chain_len).unwrap();
+        
+        // 2. Configure the descriptors in the chain
+        let mut current_idx = desc_idx;
+        for i in 0..chain_len {
+            virtqueue.desc[current_idx].addr = 0x1000 + (i * 0x100) as u64;
+            virtqueue.desc[current_idx].len = 100;
+            
+            // Set appropriate flags (except for the last one)
+            if i < chain_len - 1 {
+                DescriptorFlag::Next.set(&mut virtqueue.desc[current_idx].flags);
+                current_idx = virtqueue.desc[current_idx].next as usize;
+            }
+        }
+        
+        // 3. Push the chain to the queue
+        assert!(virtqueue.push(desc_idx).is_ok());
+        
+        // 4. Simulate device processing the chain
+        *virtqueue.used.idx = 1;
+        virtqueue.used.ring[0].id = desc_idx as u32;
+        virtqueue.used.ring[0].len = 300; // Total bytes processed (100 per descriptor)
+        
+        // 5. Pop the buffer
+        let popped = virtqueue.pop();
+        assert!(popped.is_some());
+        assert_eq!(popped.unwrap(), desc_idx);
+        
+        // 6. Verify the chain is intact
+        let mut current_idx = desc_idx;
+        for i in 0..chain_len {
+            // Check each descriptor in the chain
+            assert_eq!(virtqueue.desc[current_idx].addr, 0x1000 + (i * 0x100) as u64);
+            assert_eq!(virtqueue.desc[current_idx].len, 100);
+            
+            if i < chain_len - 1 {
+                assert!(DescriptorFlag::Next.is_set(virtqueue.desc[current_idx].flags));
+                current_idx = virtqueue.desc[current_idx].next as usize;
+            } else {
+                // Last descriptor should not have NEXT flag
+                assert!(!DescriptorFlag::Next.is_set(virtqueue.desc[current_idx].flags));
+            }
+        }
+        
+        // 7. Free the chain after processing
+        virtqueue.free_desc_chain(desc_idx);
+        assert_eq!(virtqueue.free_descriptors.len(), queue_size);
+        
+        // 8. Verify no more buffers are available
+        assert!(virtqueue.pop().is_none());
     }
 }
 
