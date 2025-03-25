@@ -176,55 +176,315 @@ impl DeviceStatus {
 
 /// VirtioDevice trait
 /// 
-/// This trait defines the interface for Virtio devices.
+/// This trait defines the interface for VirtIO devices.
 /// It provides methods for initializing the device, accessing registers,
-/// and reading/writing data to/from the device.
-/// 
+/// and performing device operations according to the VirtIO specification.
 pub trait VirtioDevice {
+    /// Initialize the device
+    ///
+    /// This method performs the standard VirtIO initialization sequence:
+    /// 1. Reset the device
+    /// 2. Acknowledge the device
+    /// 3. Set driver status
+    /// 4. Negotiate features
+    /// 5. Set up virtqueues
+    /// 6. Set driver OK status
     fn init(&mut self) {
-        unimplemented!()
+        // Reset device
+        self.reset();
+
+        // Verify device (Magic Value should be "virt")
+        if self.read32_register(Register::MagicValue) != 0x74726976 {
+            self.set_failed();
+            return;
+        }
+
+        // Acknowledge device
+        self.acknowledge();
+
+        // Set driver status
+        self.driver();
+
+        // Negotiate features
+        if !self.negotiate_features() {
+            self.set_failed();
+            return;
+        }
+
+        // Set up virtqueues
+        for i in 0..self.get_virtqueue_count() {
+            if !self.setup_queue(i) {
+                self.set_failed();
+                return;
+            }
+        }
+
+        // Mark driver OK
+        self.driver_ok();
     }
 
-    fn get_base_addr(&self) -> usize;
-    fn get_virtqueue_count(&self) -> usize;
+    /// Reset the device by writing 0 to the Status register
+    fn reset(&mut self) {
+        self.write32_register(Register::Status, 0);
+    }
+
+    /// Set ACKNOWLEDGE status bit
+    fn acknowledge(&mut self) {
+        let mut status = self.read32_register(Register::Status);
+        DeviceStatus::Acknowledge.set(&mut status);
+        self.write32_register(Register::Status, status);
+    }
+
+    /// Set DRIVER status bit
+    fn driver(&mut self) {
+        let mut status = self.read32_register(Register::Status);
+        DeviceStatus::Driver.set(&mut status);
+        self.write32_register(Register::Status, status);
+    }
+
+    /// Set DRIVER_OK status bit
+    fn driver_ok(&mut self) {
+        let mut status = self.read32_register(Register::Status);
+        DeviceStatus::DriverOK.set(&mut status);
+        self.write32_register(Register::Status, status);
+    }
+
+    /// Set FAILED status bit
+    fn set_failed(&mut self) {
+        let mut status = self.read32_register(Register::Status);
+        DeviceStatus::Failed.set(&mut status);
+        self.write32_register(Register::Status, status);
+    }
+
+    /// Negotiate device features
+    ///
+    /// This method reads device features, selects supported features, 
+    /// sets driver features, and verifies features OK status.
+    ///
+    /// # Returns
+    ///
+    /// Returns true if feature negotiation was successful, false otherwise
+    fn negotiate_features(&mut self) -> bool {
+        // Read device features
+        let device_features = self.read32_register(Register::DeviceFeatures);
+        
+        // Select supported features
+        let driver_features = self.get_supported_features(device_features);
+        
+        // Write driver features
+        self.write32_register(Register::DriverFeatures, driver_features);
+        
+        // Set FEATURES_OK status bit
+        let mut status = self.read32_register(Register::Status);
+        DeviceStatus::FeaturesOK.set(&mut status);
+        self.write32_register(Register::Status, status);
+        
+        // Verify FEATURES_OK status bit
+        let status = self.read32_register(Register::Status);
+        DeviceStatus::FeaturesOK.is_set(status)
+    }
     
-    /// Notify the device about new buffers in the specified virtqueue
-    /// 
+    /// Get device features supported by this driver
+    ///
+    /// This method can be overridden by specific device implementations
+    /// to select which features to support.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_features` - The features offered by the device
+    ///
+    /// # Returns
+    ///
+    /// The features supported by the driver
+    fn get_supported_features(&self, device_features: u32) -> u32 {
+        // By default, accept all device features
+        // Device-specific implementations should override this
+        device_features
+    }
+    
+    /// Set up a virtqueue
+    ///
+    /// This method configures a virtqueue by setting the queue selection,
+    /// size, alignment, and ready status.
+    ///
+    /// # Arguments
+    ///
+    /// * `queue_idx` - The index of the queue to set up
+    ///
+    /// # Returns
+    ///
+    /// Returns true if queue setup was successful, false otherwise
+    fn setup_queue(&mut self, queue_idx: usize) -> bool {
+        if queue_idx >= self.get_virtqueue_count() {
+            return false;
+        }
+        
+        // Select the queue
+        self.write32_register(Register::QueueSel, queue_idx as u32);
+        
+        // Get maximum queue size
+        let queue_size = self.read32_register(Register::QueueNumMax);
+        if queue_size == 0 {
+            return false; // Queue not available
+        }
+        
+        // Set queue size
+        self.write32_register(Register::QueueNum, queue_size);
+        
+        // Set alignment (typically page size)
+        self.write32_register(Register::QueueAlign, 0x1000); // 4KB alignment
+        
+        // Mark queue as ready
+        self.write32_register(Register::QueueReady, 1);
+        
+        true
+    }
+    
+    /// Read device-specific configuration
+    ///
+    /// This method reads configuration data from the device-specific configuration space.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The offset within the configuration space
+    ///
+    /// # Returns
+    ///
+    /// The configuration value of type T
+    fn read_config<T: Sized>(&self, offset: usize) -> T {
+        let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
+        unsafe { core::ptr::read_volatile(addr as *const T) }
+    }
+    
+    /// Write device-specific configuration
+    ///
+    /// This method writes configuration data to the device-specific configuration space.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - The offset within the configuration space
+    /// * `value` - The value to write
+    fn write_config<T: Sized>(&self, offset: usize, value: T) {
+        let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
+        unsafe { core::ptr::write_volatile(addr as *mut T, value) }
+    }
+    
+    /// Get device and vendor IDs
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing (device_id, vendor_id)
+    fn get_device_info(&self) -> (u32, u32) {
+        let device_id = self.read32_register(Register::DeviceId);
+        let vendor_id = self.read32_register(Register::VendorId);
+        (device_id, vendor_id)
+    }
+    
+    /// Get interrupt status
+    ///
+    /// # Returns
+    ///
+    /// The interrupt status register value
+    fn get_interrupt_status(&self) -> u32 {
+        self.read32_register(Register::InterruptStatus)
+    }
+    
+    /// Process interrupts (polling method)
+    ///
+    /// This method checks for interrupts and acknowledges them.
+    ///
+    /// # Returns
+    ///
+    /// The interrupt status before acknowledgment
+    fn process_interrupts(&mut self) -> u32 {
+        let status = self.get_interrupt_status();
+        if status != 0 {
+            self.write32_register(Register::InterruptAck, status);
+        }
+        status
+    }
+    
+    /// Memory barrier for ensuring memory operations ordering
+    fn memory_barrier(&self) {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+    
+    /// Notify the device about new buffers in a specified virtqueue
+    ///
     /// This method notifies the device that new buffers are available in the specified virtqueue.
     /// It selects the queue using the QueueSel register and then writes to the QueueNotify register.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `virtqueue_idx` - The index of the virtqueue to notify
     /// * `desc_idx` - The index of the descriptor to notify
+    ///
+    /// # Panics
+    ///
+    /// Panics if the virtqueue index is invalid
     fn notify(&mut self, virtqueue_idx: usize, desc_idx: usize) {
         if virtqueue_idx >= self.get_virtqueue_count() {
             panic!("Invalid virtqueue index");
         }
-        /* Maybe Fence at this point */
+        // Insert memory barrier before notification
+        self.memory_barrier();
         self.write32_register(Register::QueueSel, virtqueue_idx as u32);
         self.write32_register(Register::QueueNotify, desc_idx as u32);
     }
 
+    /// Read a 32-bit value from a device register
+    ///
+    /// # Arguments
+    ///
+    /// * `register` - The register to read from
+    ///
+    /// # Returns
+    ///
+    /// The 32-bit value read from the register
     fn read32_register(&self, register: Register) -> u32 {
         let addr = self.get_base_addr() + register.offset();
         unsafe { core::ptr::read_volatile(addr as *const u32) }
     }
 
+    /// Write a 32-bit value to a device register
+    ///
+    /// # Arguments
+    ///
+    /// * `register` - The register to write to
+    /// * `value` - The 32-bit value to write
     fn write32_register(&self, register: Register, value: u32) {
         let addr = self.get_base_addr() + register.offset();
         unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
     }
 
+    /// Read a 64-bit value from a device register
+    ///
+    /// # Arguments
+    ///
+    /// * `register` - The register to read from
+    ///
+    /// # Returns
+    ///
+    /// The 64-bit value read from the register
     fn read64_register(&self, register: Register) -> u64 {
         let addr = self.get_base_addr() + register.offset();
         unsafe { core::ptr::read_volatile(addr as *const u64) }
     }
 
+    /// Write a 64-bit value to a device register
+    ///
+    /// # Arguments
+    ///
+    /// * `register` - The register to write to
+    /// * `value` - The 64-bit value to write
     fn write64_register(&self, register: Register, value: u64) {
         let addr = self.get_base_addr() + register.offset();
         unsafe { core::ptr::write_volatile(addr as *mut u64, value) }
     }
+
+    // Required methods to be implemented by specific device types
+    fn get_base_addr(&self) -> usize;
+    fn get_virtqueue_count(&self) -> usize;
 }
 
 #[cfg(test)]
