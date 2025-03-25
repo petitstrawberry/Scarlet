@@ -28,7 +28,6 @@ use alloc::{alloc::alloc_zeroed, vec::Vec};
 /// * `free_head`: The index of the next free descriptor.
 /// * `last_used_idx`: The index of the last used descriptor.
 pub struct VirtQueue<'a> {
-    pub index: usize,
     pub desc: &'a mut [Descriptor],
     pub avail: AvailableRing<'a>,
     pub used: UsedRing<'a>,
@@ -37,7 +36,7 @@ pub struct VirtQueue<'a> {
 }
 
 impl<'a> VirtQueue<'a> {
-    pub fn new(index: usize, queue_size: usize) -> Self {
+    pub fn new(queue_size: usize) -> Self {
         /* Calculate the size of each ring */
         let desc_size = queue_size * mem::size_of::<Descriptor>();
         let avail_size = mem::size_of::<RawAvailableRing>() + queue_size * mem::size_of::<u16>();
@@ -82,7 +81,7 @@ impl<'a> VirtQueue<'a> {
             free_descriptors.push(i);
         }
         let last_used_idx = 0;
-        Self { index, desc, avail, used, free_descriptors, last_used_idx }
+        Self { desc, avail, used, free_descriptors, last_used_idx }
     }
 
     /// Initialize the virtqueue
@@ -461,7 +460,7 @@ mod tests {
     #[test_case]
     fn test_initialize_virtqueue() {
         let queue_size = 2;
-        let mut virtqueue = VirtQueue::new(0, queue_size);
+        let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
 
         let total = 68;
@@ -485,7 +484,7 @@ mod tests {
     #[test_case]
     fn test_alloc_free_desc() {
         let queue_size = 1;
-        let mut virtqueue = VirtQueue::new(0, queue_size);
+        let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
 
         // Allocate a descriptor
@@ -500,7 +499,7 @@ mod tests {
     #[test_case]
     fn test_alloc_free_desc_chain() {
         let queue_size = 2;
-        let mut virtqueue = VirtQueue::new(0, queue_size);
+        let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
 
         // Allocate a chain of descriptors
@@ -514,7 +513,7 @@ mod tests {
     #[test_case]
     fn test_alloc_desc_chain_too_long() {
         let queue_size = 2;
-        let mut virtqueue = VirtQueue::new(0, queue_size);
+        let mut virtqueue = VirtQueue::new(queue_size);
         virtqueue.init();
 
         // Allocate a chain of descriptors that is too long
