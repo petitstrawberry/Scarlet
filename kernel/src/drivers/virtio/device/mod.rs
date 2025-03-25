@@ -181,10 +181,29 @@ impl DeviceStatus {
 /// and reading/writing data to/from the device.
 /// 
 pub trait VirtioDevice {
-    fn get_base_addr(&self) -> usize;
-    
-    fn kick(&mut self, virtqueue_idx: usize, desc_idx: usize) {
+    fn init(&mut self) {
         unimplemented!()
+    }
+
+    fn get_base_addr(&self) -> usize;
+    fn get_virtqueue_count(&self) -> usize;
+    
+    /// Notify the device about new buffers in the specified virtqueue
+    /// 
+    /// This method notifies the device that new buffers are available in the specified virtqueue.
+    /// It selects the queue using the QueueSel register and then writes to the QueueNotify register.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `virtqueue_idx` - The index of the virtqueue to notify
+    /// * `desc_idx` - The index of the descriptor to notify
+    fn notify(&mut self, virtqueue_idx: usize, desc_idx: usize) {
+        if virtqueue_idx >= self.get_virtqueue_count() {
+            panic!("Invalid virtqueue index");
+        }
+        /* Maybe Fence at this point */
+        self.write32_register(Register::QueueSel, virtqueue_idx as u32);
+        self.write32_register(Register::QueueNotify, desc_idx as u32);
     }
 
     fn read32_register(&self, register: Register) -> u32 {
@@ -236,17 +255,8 @@ mod tests {
             self.base_addr
         }
         
-        fn kick(&mut self, virtqueue_idx: usize, desc_idx: usize) {
-            if virtqueue_idx >= self.virtqueues.len() {
-                panic!("Invalid virtqueue index");
-            }
-            let vq = &mut self.virtqueues[virtqueue_idx];
-            vq.avail.ring[*vq.avail.idx as usize] = desc_idx as u16;
-            *vq.avail.idx = vq.avail.idx.wrapping_add(1) % vq.avail.ring.len() as u16;
-            vq.last_used_idx = (vq.last_used_idx + 1) % vq.used.ring.len() as usize;
-            /* Maybe Fence at this point */
-            self.write32_register(Register::QueueSel, virtqueue_idx as u32);
-            self.write32_register(Register::QueueNotify, desc_idx as u32);
+        fn get_virtqueue_count(&self) -> usize {
+            self.virtqueues.len()
         }
     }
 
