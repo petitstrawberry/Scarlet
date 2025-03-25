@@ -1,6 +1,8 @@
 //! Virtio device driver interface module.
 //! 
 
+use super::queue::VirtQueue;
+
 /// Register enum for Virtio devices
 /// 
 /// This enum represents the registers of the Virtio device.
@@ -18,8 +20,6 @@ pub enum Register {
     QueueSel = 0x30,
     QueueNumMax = 0x34,
     QueueNum = 0x38,
-    QueueAlign = 0x3c,
-    QueuePfn = 0x40,
     QueueReady = 0x44,
     QueueNotify = 0x50,
     InterruptStatus = 0x60,
@@ -50,8 +50,6 @@ impl Register {
             0x30 => Register::QueueSel,
             0x34 => Register::QueueNumMax,
             0x38 => Register::QueueNum,
-            0x3c => Register::QueueAlign,
-            0x40 => Register::QueuePfn,
             0x44 => Register::QueueReady,
             0x50 => Register::QueueNotify,
             0x60 => Register::InterruptStatus,
@@ -331,8 +329,28 @@ pub trait VirtioDevice {
         // Set queue size
         self.write32_register(Register::QueueNum, queue_size);
         
-        // Set alignment (typically page size)
-        self.write32_register(Register::QueueAlign, 0x1000); // 4KB alignment
+        let virtqueue = self.get_virtqueue(queue_idx);
+
+        // Set the queue descriptor address
+        let desc_addr = virtqueue.get_raw_ptr() as u64;
+        let desc_addr_low = (desc_addr & 0xffffffff) as u32;
+        let desc_addr_high = (desc_addr >> 32) as u32;
+        self.write32_register(Register::QueueDescLow, desc_addr_low);
+        self.write32_register(Register::QueueDescHigh, desc_addr_high);
+
+        // Set the driver area (available ring)  address
+        let driver_addr = virtqueue.avail.ring.as_ptr() as u64;
+        let driver_addr_low = (driver_addr & 0xffffffff) as u32;
+        let driver_addr_high = (driver_addr >> 32) as u32;
+        self.write32_register(Register::DriverDescLow, driver_addr_low);
+        self.write32_register(Register::DriverDescHigh, driver_addr_high);
+
+        // Set the device area (used ring) address
+        let device_addr = virtqueue.used.ring.as_ptr() as u64;
+        let device_addr_low = (device_addr & 0xffffffff) as u32;
+        let device_addr_high = (device_addr >> 32) as u32;
+        self.write32_register(Register::DeviceDescLow, device_addr_low);
+        self.write32_register(Register::DeviceDescHigh, device_addr_high);
         
         // Mark queue as ready
         self.write32_register(Register::QueueReady, 1);
@@ -417,19 +435,17 @@ pub trait VirtioDevice {
     /// # Arguments
     ///
     /// * `virtqueue_idx` - The index of the virtqueue to notify
-    /// * `desc_idx` - The index of the descriptor to notify
     ///
     /// # Panics
     ///
     /// Panics if the virtqueue index is invalid
-    fn notify(&mut self, virtqueue_idx: usize, desc_idx: usize) {
+    fn notify(&mut self, virtqueue_idx: usize) {
         if virtqueue_idx >= self.get_virtqueue_count() {
             panic!("Invalid virtqueue index");
         }
         // Insert memory barrier before notification
         self.memory_barrier();
-        self.write32_register(Register::QueueSel, virtqueue_idx as u32);
-        self.write32_register(Register::QueueNotify, desc_idx as u32);
+        self.write32_register(Register::QueueNotify, virtqueue_idx as u32);
     }
 
     /// Read a 32-bit value from a device register
@@ -483,8 +499,10 @@ pub trait VirtioDevice {
     }
 
     // Required methods to be implemented by specific device types
+
     fn get_base_addr(&self) -> usize;
     fn get_virtqueue_count(&self) -> usize;
+    fn get_virtqueue(&self, queue_idx: usize) -> &VirtQueue;
 }
 
 #[cfg(test)]
