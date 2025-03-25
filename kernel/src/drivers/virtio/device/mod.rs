@@ -7,7 +7,7 @@
 /// Each variant corresponds to a specific register offset.
 /// The offsets are defined in the Virtio specification.
 /// The register offsets are used to access the device's configuration and status.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Register {
     MagicValue = 0x00,
     Version = 0x04,
@@ -488,66 +488,4 @@ pub trait VirtioDevice {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{drivers::virtio::queue::VirtQueue, mem::page::allocate_pages};
-
-    use super::*;
-
-    struct TestVirtioDevice {
-        base_addr: usize,
-        virtqueues: [VirtQueue<'static>; 2],
-    }
-
-    impl TestVirtioDevice {
-        fn new(base_addr: usize, queue_size: usize) -> Self {
-            Self {
-                base_addr,
-                virtqueues: [
-                    VirtQueue::new(queue_size),
-                    VirtQueue::new(queue_size),
-                ],
-            }
-        }
-    }
-
-    impl VirtioDevice for TestVirtioDevice {
-        fn get_base_addr(&self) -> usize {
-            self.base_addr
-        }
-        
-        fn get_virtqueue_count(&self) -> usize {
-            self.virtqueues.len()
-        }
-    }
-
-    #[test_case]
-    fn read_write_register() {
-        let page = allocate_pages(1);
-        let base_addr = page as usize;
-        let register = Register::MagicValue;
-        let value = 0x12345678;
-
-        let device = TestVirtioDevice::new(base_addr, 2);
-        device.write32_register(register, value);
-
-        let read_value = device.read32_register(register);
-        assert_eq!(read_value, value);
-    }
-
-    #[test_case]
-    fn test_device_status() {
-        let mut status = 0;
-        DeviceStatus::DriverOK.set(&mut status);
-        assert!(DeviceStatus::DriverOK.is_set(status));
-
-        DeviceStatus::DriverOK.clear(&mut status);
-        assert!(!DeviceStatus::DriverOK.is_set(status));
-
-        DeviceStatus::DriverOK.toggle(&mut status);
-        assert!(DeviceStatus::DriverOK.is_set(status));
-
-        DeviceStatus::FeaturesOK.set(&mut status);
-        assert!(DeviceStatus::FeaturesOK.is_set(status));
-        assert!(DeviceStatus::DriverOK.is_set(status));
-    }
-}
+mod tests;
