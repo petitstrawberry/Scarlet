@@ -181,10 +181,12 @@ impl DeviceStatus {
 /// and reading/writing data to/from the device.
 /// 
 pub trait VirtioDevice {
-    fn init(&mut self, base_addr: usize, queue_size: usize) -> Result<(), &'static str>;
     fn get_base_addr(&self) -> usize;
-    fn get_queue_size(&self) -> usize;
     
+    fn kick(&mut self, virtqueue_idx: usize, desc_idx: usize) {
+        unimplemented!()
+    }
+
     fn read32_register(&self, register: Register) -> u32 {
         let addr = self.get_base_addr() + register.offset();
         unsafe { core::ptr::read_volatile(addr as *const u32) }
@@ -208,28 +210,40 @@ pub trait VirtioDevice {
 
 #[cfg(test)]
 mod tests {
-    use crate::mem::page::allocate_pages;
+    use crate::{drivers::virtio::queue::VirtQueue, mem::page::allocate_pages};
 
     use super::*;
 
     struct TestVirtioDevice {
         base_addr: usize,
-        queue_size: usize,
+        virtqueues: [VirtQueue<'static>; 2],
+    }
+
+    impl TestVirtioDevice {
+        fn new(base_addr: usize, queue_size: usize) -> Self {
+            Self {
+                base_addr,
+                virtqueues: [
+                    VirtQueue::new(queue_size),
+                    VirtQueue::new(queue_size),
+                ],
+            }
+        }
     }
 
     impl VirtioDevice for TestVirtioDevice {
-        fn init(&mut self, base_addr: usize, queue_size: usize) -> Result<(), &'static str> {
-            self.base_addr = base_addr;
-            self.queue_size = queue_size;
-            Ok(())
-        }
-
         fn get_base_addr(&self) -> usize {
             self.base_addr
         }
-
-        fn get_queue_size(&self) -> usize {
-            self.queue_size
+        
+        fn kick(&mut self, virtqueue_idx: usize, desc_idx: usize) {
+            if virtqueue_idx >= self.virtqueues.len() {
+                panic!("Invalid virtqueue index");
+            }
+            let vq = &mut self.virtqueues[virtqueue_idx];
+            vq.avail.ring[*vq.avail.idx as usize] = desc_idx as u16;
+            self.write32_register(Register::QueueSel, virtqueue_idx as u32);
+            self.write32_register(Register::QueueNotify, desc_idx as u32);
         }
     }
 
@@ -240,11 +254,7 @@ mod tests {
         let register = Register::MagicValue;
         let value = 0x12345678;
 
-        let mut device = TestVirtioDevice {
-            base_addr,
-            queue_size: 0,
-        };
-        device.init(base_addr, 0).unwrap();
+        let device = TestVirtioDevice::new(base_addr, 2);
         device.write32_register(register, value);
 
         let read_value = device.read32_register(register);
