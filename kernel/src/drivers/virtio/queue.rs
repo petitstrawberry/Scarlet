@@ -5,7 +5,7 @@
 //! 
 
 use core::{alloc::Layout, mem};
-use alloc::alloc::alloc_zeroed;
+use alloc::{alloc::alloc_zeroed, vec::Vec};
 
 // struct RawVirtQueue {
 //     pub desc: [Descriptor; 0], /* Flexible array member */
@@ -21,17 +21,23 @@ use alloc::alloc::alloc_zeroed;
 ///
 /// # Fields
 /// 
+/// * `index`: The ID of the virtqueue.
 /// * `desc`: A mutable slice of descriptors.
 /// * `avail`: The available ring.
 /// * `used`: The used ring.
+/// * `free_head`: The index of the next free descriptor.
+/// * `last_used_idx`: The index of the last used descriptor.
 pub struct VirtQueue<'a> {
+    pub index: usize,
     pub desc: &'a mut [Descriptor],
     pub avail: AvailableRing<'a>,
     pub used: UsedRing<'a>,
+    pub free_descriptors: Vec<usize>,
+    pub last_used_idx: usize,
 }
 
 impl<'a> VirtQueue<'a> {
-    pub fn new(queue_size: usize) -> Self {
+    pub fn new(index: usize, queue_size: usize) -> Self {
         /* Calculate the size of each ring */
         let desc_size = queue_size * mem::size_of::<Descriptor>();
         let avail_size = mem::size_of::<RawAvailableRing>() + queue_size * mem::size_of::<u16>();
@@ -70,7 +76,13 @@ impl<'a> VirtQueue<'a> {
         };
         let used = unsafe { UsedRing::new(queue_size, used_ptr) };
 
-        Self { desc, avail, used }
+        /* Create the virtqueue */
+        let mut free_descriptors = Vec::new();
+        for i in 0..queue_size {
+            free_descriptors.push(i);
+        }
+        let last_used_idx = 0;
+        Self { index, desc, avail, used, free_descriptors, last_used_idx }
     }
 
     /// Initialize the virtqueue
@@ -81,13 +93,18 @@ impl<'a> VirtQueue<'a> {
     pub fn init(&mut self) {
         // Initialize the descriptor table
         for i in 0..self.desc.len() {
+            self.desc[i].addr = 0;
+            self.desc[i].len = 0;
+            self.desc[i].flags = 0;
             self.desc[i].next = (i as u16 + 1) % self.desc.len() as u16;
         }
 
         *(self.avail.flags) = 0;
         *(self.avail.idx) = 0;
+        *(self.avail.used_event) = 0;
         *(self.used.flags) = 0;
         *(self.used.idx) = 0;
+        *(self.used.avail_event) = 0;
     }
 
     /// Get the raw pointer to the virtqueue
@@ -118,6 +135,68 @@ impl<'a> VirtQueue<'a> {
         let padding_size = align_size - (desc_size + avail_size);
         desc_size + avail_size + used_size + padding_size
     }
+
+    /// Allocate a descriptor
+    ///
+    /// This function allocates a descriptor from the free list.
+    /// 
+    /// # Returns
+    /// 
+    /// Option<usize>: The index of the allocated descriptor, or None if no descriptors are available.
+    /// 
+    pub fn alloc_desc(&mut self) -> Option<usize> {
+        let desc = self.free_descriptors.pop();
+        if let Some(desc_idx) = desc {
+            self.desc[desc_idx].next = 0;
+            self.desc[desc_idx].addr = 0;
+            self.desc[desc_idx].len = 0;
+            self.desc[desc_idx].flags = 0;
+            Some(desc_idx)
+        } else {
+            None
+        }
+    }
+
+    /// Free a descriptor
+    /// 
+    /// This function frees a descriptor and adds it back to the free list.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `desc_idx` - The index of the descriptor to free.
+    /// 
+    pub fn free_desc(&mut self, desc_idx: usize) {
+        if desc_idx < self.desc.len() {
+            self.desc[desc_idx].next = 0;
+            self.free_descriptors.push(desc_idx);
+        } else {
+            panic!("Invalid descriptor index");
+        }
+    }
+
+    /// Free a chain of descriptors
+    /// 
+    /// This function frees a chain of descriptors starting from the given index.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `desc_idx` - The index of the first descriptor in the chain.
+    /// 
+    pub fn free_desc_chain(&mut self, desc_idx: usize) {
+        let mut idx = desc_idx;
+        loop {
+            if idx >= self.desc.len() {
+                break;
+            }
+            if DescriptorFlag::Next.is_set(self.desc[idx].flags) {
+                break;
+            }
+            let next = self.desc[idx].next;
+            self.free_desc(idx);
+            
+            idx = next as usize;
+        }
+    }
 }
 
 /// Descriptor structure
@@ -131,6 +210,71 @@ pub struct Descriptor {
     pub len: u32,
     pub flags: u16,
     pub next: u16,
+}
+
+/// Descriptor flags
+/// 
+/// This enum represents the flags that can be set for a descriptor.
+/// It includes flags for indicating the next descriptor, write operation, and indirect descriptor.
+#[derive(Clone, Copy)]
+pub enum DescriptorFlag {
+    Next = 0x1,
+    Write = 0x2,
+    Indirect = 0x4,
+}
+
+impl DescriptorFlag {
+    /// Check if the flag is set
+    /// 
+    /// This method checks if the specified flag is set in the given flags.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `flags` - The flags to check.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns true if the flag is set, false otherwise.
+    ///
+    pub fn is_set(&self, flags: u16) -> bool {
+        (flags & *self as u16) != 0
+    }
+
+    /// Set the flag
+    /// 
+    /// This method sets the specified flag in the given flags.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `flags` - A mutable reference to the flags to modify.
+    /// 
+    pub fn set(&self, flags: &mut u16) {
+        (*flags) |= *self as u16;
+    }
+
+    /// Clear the flag
+    /// 
+    /// This method clears the specified flag in the given flags.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `flags` - A mutable reference to the flags to modify.
+    /// 
+    pub fn clear(&self, flags: &mut u16) {
+        (*flags) &= !(*self as u16);
+    }
+
+    /// Toggle the flag
+    /// 
+    /// This method toggles the specified flag in the given flags.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `flags` - A mutable reference to the flags to modify.
+    /// 
+    pub fn toggle(&self, flags: &mut u16) {
+        (*flags) ^= *self as u16;
+    }
 }
 
 /// Raw available ring structure
@@ -281,7 +425,7 @@ mod tests {
     #[test_case]
     fn test_initialize_virtqueue() {
         let queue_size = 2;
-        let mut virtqueue = VirtQueue::new(queue_size);
+        let mut virtqueue = VirtQueue::new(0, queue_size);
         virtqueue.init();
 
         let total = 68;
