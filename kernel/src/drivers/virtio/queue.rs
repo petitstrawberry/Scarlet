@@ -232,6 +232,17 @@ impl<'a> VirtQueue<'a> {
             idx = next as usize;
         }
     }
+
+    /// Check if the virtqueue is busy
+    /// 
+    /// This function checks if the virtqueue is busy by comparing the last used index with the current index.
+    /// 
+    /// # Returns
+    /// 
+    /// bool: True if the virtqueue is busy, false otherwise.
+    pub fn is_busy(&self) -> bool {
+        self.last_used_idx != *self.used.idx as usize
+    }
 }
 
 /// Descriptor structure
