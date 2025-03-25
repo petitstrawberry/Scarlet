@@ -174,6 +174,42 @@ impl<'a> VirtQueue<'a> {
         }
     }
 
+    /// Allocate a chain of descriptors
+    /// 
+    /// This function allocates a chain of descriptors of the specified length.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `length` - The length of the chain to allocate.
+    /// 
+    /// # Returns
+    /// 
+    /// Option<usize>: The index of the first descriptor in the chain, or None if no descriptors are available.
+    /// 
+    pub fn alloc_desc_chain(&mut self, length: usize) -> Option<usize> {
+        let desc_idx = self.alloc_desc();
+        if desc_idx.is_none() {
+            return None;
+        }
+        let desc_idx = desc_idx.unwrap();
+        let mut prev_idx = desc_idx;
+
+        for _ in 1..length {
+            let next_idx = self.alloc_desc();
+            if next_idx.is_none() {
+                self.free_desc_chain(desc_idx);
+                return None;
+            }
+            let next_idx = next_idx.unwrap();
+            self.desc[prev_idx].next = next_idx as u16;
+            self.desc[prev_idx].flags = DescriptorFlag::Next as u16;
+            prev_idx = next_idx;
+        }
+
+        self.desc[prev_idx].next = 0;
+        Some(desc_idx)
+    }
+
     /// Free a chain of descriptors
     /// 
     /// This function frees a chain of descriptors starting from the given index.
