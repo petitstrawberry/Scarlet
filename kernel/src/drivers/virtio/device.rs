@@ -1,3 +1,12 @@
+//! Virtio device driver interface module.
+//! 
+
+/// Register enum for Virtio devices
+/// 
+/// This enum represents the registers of the Virtio device.
+/// Each variant corresponds to a specific register offset.
+/// The offsets are defined in the Virtio specification.
+/// The register offsets are used to access the device's configuration and status.
 #[derive(Debug, Clone, Copy)]
 pub enum Register {
     MagicValue = 0x00,
@@ -59,6 +68,11 @@ impl Register {
     }
 }
 
+/// DeviceStatus enum for Virtio devices
+/// 
+/// This enum represents the status of the Virtio device.
+/// Each variant corresponds to a specific status bit.
+/// The status bits are defined in the Virtio specification.
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceStatus {
     Reset = 0x00,
@@ -71,22 +85,69 @@ pub enum DeviceStatus {
 }
 
 impl DeviceStatus {
+    /// Check if the status is set
+    /// 
+    /// This method checks if the specified status bit is set in the given status.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `status` - The status to check.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns true if the status bit is set, false otherwise.
     pub fn is_set(&self, status: u32) -> bool {
         (status & *self as u32) != 0
     }
 
+    /// Set the status bit
+    /// 
+    /// This method sets the specified status bit in the given status.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `status` - A mutable reference to the status to modify.
+    /// 
     pub fn set(&self, status: &mut u32) {
         *status |= *self as u32;
     }
 
+    /// Clear the status bit
+    /// 
+    /// This method clears the specified status bit in the given status.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `status` - A mutable reference to the status to modify.
+    /// 
     pub fn clear(&self, status: &mut u32) {
         *status &= !(*self as u32);
     }
 
+    /// Toggle the status bit
+    /// 
+    /// This method toggles the specified status bit in the given status.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `status` - A mutable reference to the status to modify.
+    /// 
     pub fn toggle(&self, status: &mut u32) {
         *status ^= *self as u32;
     }
 
+    /// Convert from u32 to DeviceStatus
+    /// 
+    /// This method converts a u32 value to the corresponding DeviceStatus variant.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `status` - The u32 value to convert.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the corresponding DeviceStatus variant.
+    ///
     pub fn from_u32(status: u32) -> Self {
         match status {
             0x00 => DeviceStatus::Reset,
@@ -100,11 +161,25 @@ impl DeviceStatus {
         }
     }
     
+    /// Convert DeviceStatus to u32
+    /// 
+    /// This method converts the DeviceStatus variant to its corresponding u32 value.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the u32 value corresponding to the DeviceStatus variant.
+    /// 
     pub fn to_u32(&self) -> u32 {
         *self as u32
     }
 }
 
+/// VirtioDevice trait
+/// 
+/// This trait defines the interface for Virtio devices.
+/// It provides methods for initializing the device, accessing registers,
+/// and reading/writing data to/from the device.
+/// 
 pub trait VirtioDevice {
     fn init(&mut self, base_addr: usize, queue_size: usize) -> Result<(), &'static str>;
     fn get_base_addr(&self) -> usize;

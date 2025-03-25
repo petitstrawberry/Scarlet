@@ -19,6 +19,11 @@ use alloc::alloc::alloc_zeroed;
 /// This structure represents the wrapper of the virtqueue.
 /// It contains the descriptor table, available ring, and used ring.
 ///
+/// # Fields
+/// 
+/// * `desc`: A mutable slice of descriptors.
+/// * `avail`: The available ring.
+/// * `used`: The used ring.
 pub struct VirtQueue<'a> {
     pub desc: &'a mut [Descriptor],
     pub avail: AvailableRing<'a>,
