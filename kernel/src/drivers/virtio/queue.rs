@@ -81,7 +81,7 @@ impl<'a> VirtQueue<'a> {
     /// It sets the next pointer of each descriptor to point to the next descriptor in the table.
     /// 
     pub fn init(&mut self) {
-        // DescriptorTable の初期化
+        // Initialize the descriptor table
         for i in 0..self.desc.len() {
             self.desc[i].next = (i as u16 + 1) % self.desc.len() as u16;
         }
