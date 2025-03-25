@@ -242,6 +242,9 @@ mod tests {
             }
             let vq = &mut self.virtqueues[virtqueue_idx];
             vq.avail.ring[*vq.avail.idx as usize] = desc_idx as u16;
+            *vq.avail.idx = vq.avail.idx.wrapping_add(1) % vq.avail.ring.len() as u16;
+            vq.last_used_idx = (vq.last_used_idx + 1) % vq.used.ring.len() as usize;
+            /* Maybe Fence at this point */
             self.write32_register(Register::QueueSel, virtqueue_idx as u32);
             self.write32_register(Register::QueueNotify, desc_idx as u32);
         }
