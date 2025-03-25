@@ -38,9 +38,7 @@ impl<'a> VirtQueue<'a> {
         let used_size = mem::size_of::<RawUsedRing>() + queue_size * mem::size_of::<RawUsedRingEntry>();
 
         /* Floor the sum of desc_size, avail_size to the nearest multiple of 4 */
-        let floor_size = (desc_size + avail_size + 3) & !3;
-        /* Align the size to the nearest multiple of 4 */
-        let align_size = (floor_size + 3) & !3;
+        let align_size = (desc_size + avail_size + 3) & !3;
         /* Calculate the size of the padding for the used ring */
         let padding_size = align_size - (desc_size + avail_size);
 
@@ -116,8 +114,7 @@ impl<'a> VirtQueue<'a> {
         let desc_size = self.desc.len() * mem::size_of::<Descriptor>();
         let avail_size = mem::size_of::<RawAvailableRing>() + self.desc.len() * mem::size_of::<u16>();
         let used_size = mem::size_of::<RawUsedRing>() + self.desc.len() * mem::size_of::<RawUsedRingEntry>();
-        let floor_size = (desc_size + avail_size + 3) & !3;
-        let align_size = (floor_size + 3) & !3;
+        let align_size = (desc_size + avail_size + 3) & !3;
         let padding_size = align_size - (desc_size + avail_size);
         desc_size + avail_size + used_size + padding_size
     }
