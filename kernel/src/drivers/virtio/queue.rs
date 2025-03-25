@@ -188,12 +188,12 @@ impl<'a> VirtQueue<'a> {
             if idx >= self.desc.len() {
                 break;
             }
-            if DescriptorFlag::Next.is_set(self.desc[idx].flags) {
-                break;
-            }
             let next = self.desc[idx].next;
             self.free_desc(idx);
-            
+
+            if !DescriptorFlag::Next.is_set(self.desc[idx].flags) {
+                break;
+            }
             idx = next as usize;
         }
     }
@@ -420,6 +420,9 @@ impl<'a> UsedRing<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::println;
+    use crate::print;
+
     use super::*;
 
     #[test_case]
@@ -444,6 +447,45 @@ mod tests {
             assert_eq!(virtqueue.avail.ring[i], 0);
             assert_eq!(virtqueue.used.ring[i].len, 0);
         }
+    }
+
+    #[test_case]
+    fn test_alloc_free_desc() {
+        let queue_size = 1;
+        let mut virtqueue = VirtQueue::new(0, queue_size);
+        virtqueue.init();
+
+        // Allocate a descriptor
+        let desc_idx = virtqueue.alloc_desc().unwrap();
+        assert_eq!(desc_idx, 0);
+
+        // Free the descriptor
+        virtqueue.free_desc(desc_idx);
+        assert_eq!(virtqueue.free_descriptors.len(), 1);
+    }
+
+    #[test_case]
+    fn test_free_desc_chain() {
+        let queue_size = 2;
+        let mut virtqueue = VirtQueue::new(0, queue_size);
+        virtqueue.init();
+
+        // Allocate two descriptors
+        let desc_idx1 = virtqueue.alloc_desc().unwrap();
+        let desc_idx2 = virtqueue.alloc_desc().unwrap();
+
+        // // Set the next pointer of the first descriptor to point to the second descriptor
+        virtqueue.desc[desc_idx1].next = desc_idx2 as u16;
+        // Set the flags of the first descriptor to indicate that it is the last descriptor in the chain
+        DescriptorFlag::Next.set(&mut virtqueue.desc[desc_idx1].flags);
+
+        // Free the chain starting from the first descriptor
+        virtqueue.free_desc_chain(desc_idx1);
+
+        println!("Free descriptors: {:?}", virtqueue.free_descriptors);
+
+        // // Check that both descriptors are free
+        assert_eq!(virtqueue.free_descriptors.len(), 2);
     }
 }
 
