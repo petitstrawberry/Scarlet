@@ -501,27 +501,28 @@ mod tests {
     }
 
     #[test_case]
-    fn test_free_desc_chain() {
+    fn test_alloc_free_desc_chain() {
         let queue_size = 2;
         let mut virtqueue = VirtQueue::new(0, queue_size);
         virtqueue.init();
 
-        // Allocate two descriptors
-        let desc_idx1 = virtqueue.alloc_desc().unwrap();
-        let desc_idx2 = virtqueue.alloc_desc().unwrap();
+        // Allocate a chain of descriptors
+        let desc_idx = virtqueue.alloc_desc_chain(2).unwrap();
 
-        // // Set the next pointer of the first descriptor to point to the second descriptor
-        virtqueue.desc[desc_idx1].next = desc_idx2 as u16;
-        // Set the flags of the first descriptor to indicate that it is the last descriptor in the chain
-        DescriptorFlag::Next.set(&mut virtqueue.desc[desc_idx1].flags);
-
-        // Free the chain starting from the first descriptor
-        virtqueue.free_desc_chain(desc_idx1);
-
-        println!("Free descriptors: {:?}", virtqueue.free_descriptors);
-
-        // // Check that both descriptors are free
+        // Free the chain of descriptors
+        virtqueue.free_desc_chain(desc_idx);
         assert_eq!(virtqueue.free_descriptors.len(), 2);
+    }
+
+    #[test_case]
+    fn test_alloc_desc_chain_too_long() {
+        let queue_size = 2;
+        let mut virtqueue = VirtQueue::new(0, queue_size);
+        virtqueue.init();
+
+        // Allocate a chain of descriptors that is too long
+        let desc_idx = virtqueue.alloc_desc_chain(3);
+        assert!(desc_idx.is_none());
     }
 }
 
