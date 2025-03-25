@@ -27,20 +27,6 @@ impl VirtioDevice for TestVirtioDevice {
     fn get_virtqueue_count(&self) -> usize {
         self.virtqueues.len()
     }
-
-    // Overriding the register write method to add special behavior
-    fn write32_register(&self, register: Register, value: u32) {
-        let addr = self.get_base_addr() + register.offset();
-        
-        // Simulate special behavior for certain registers
-        if register == Register::InterruptAck {
-            let current_status = self.read32_register(Register::InterruptStatus);
-            let new_status = current_status & !value;  // Clear the bits being acknowledged
-            unsafe { core::ptr::write_volatile((self.get_base_addr() + Register::InterruptStatus.offset()) as *mut u32, new_status) };
-        }
-        
-        unsafe { core::ptr::write_volatile(addr as *mut u32, value) };
-    }
 }
 
 #[test_case]
@@ -176,6 +162,11 @@ fn test_interrupt_handling() {
     // Process the interrupt
     let processed = device.process_interrupts();
     assert_eq!(processed, 0x3);
+
+    // Simulate acknowledging the interrupt
+    let current_status = device.read32_register(Register::InterruptStatus);
+    let new_status = current_status & !0x3;  // Clear the bits being acknowledged
+    unsafe { core::ptr::write_volatile((device.get_base_addr() + Register::InterruptStatus.offset()) as *mut u32, new_status) };
     
     // Verify that the interrupt is cleared
     let status_after = device.get_interrupt_status();
