@@ -456,9 +456,6 @@ impl<'a> UsedRing<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::println;
-    use crate::print;
-
     use super::*;
 
     #[test_case]
