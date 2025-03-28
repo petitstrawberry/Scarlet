@@ -1,12 +1,10 @@
 use alloc::{boxed::Box, vec::Vec};
 use alloc::vec;
 
-use core::sync::atomic::Ordering;
 use core::{mem, ptr};
 
-use crate::arch::enable_interrupt;
 use crate::{
-    device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice, GenericBlockDevice}, drivers::virtio::{device::{DeviceStatus, Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}, mem::page::{allocate_pages, Page}, print, println
+    device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice, GenericBlockDevice}, drivers::virtio::{device::{DeviceStatus, Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}, mem::page::{allocate_pages, Page}
 };
 
 // VirtIO Block Request Type
@@ -97,18 +95,24 @@ impl VirtioBlockDevice {
         };
         
         // Initialize the device
-        device.init();
+        if device.init().is_err() {
+            panic!("Failed to initialize Virtio Block Device");
+        }
 
-        // // Read device configuration
-        // device.capacity = device.read_config::<u64>(0); // Capacity at offset 0
+        // Read device configuration
+        device.capacity = device.read_config::<u64>(0); // Capacity at offset 0
+
+        // Read device features
+        device.features = device.read32_register(Register::DeviceFeatures);
+        device.sector_size = 0;
         
-        // // Check if block size feature is supported
-        // if device.features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
-        //     device.sector_size = device.read_config::<u32>(20); // blk_size at offset 20
-        // }
+        // Check if block size feature is supported
+        if device.features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
+            device.sector_size = device.read_config::<u32>(20); // blk_size at offset 20
+        }
         
-        // // Check if device is read-only
-        // device.read_only = device.features & (1 << VIRTIO_BLK_F_RO) != 0;
+        // Check if device is read-only
+        device.read_only = device.features & (1 << VIRTIO_BLK_F_RO) != 0;
 
         device
     }
@@ -125,16 +129,12 @@ impl VirtioBlockDevice {
         });
         let data = vec![Page::new(); (req.buffer.len() + 4095) / 4096].into_boxed_slice();
         let status = Box::new(0u8);
-
-        // println!("Allocated pages: header: {:#x}, data: {:#x}, status: {:#x}", header_page as usize, data_page as usize, status_page as usize);
-        
+                
         // Cast pages to appropriate types
         let header_ptr = Box::into_raw(header);
         let data_ptr = Box::into_raw(data) as *mut u8;
         let status_ptr = Box::into_raw(status);
 
-        println!("Header pointer: {:#x}, Data pointer: {:#x}, Status pointer: {:#x}", header_ptr as usize, data_ptr as usize, status_ptr as usize);  
-        
         // Set up request header
         unsafe {
             // Copy data for write requests
@@ -181,42 +181,23 @@ impl VirtioBlockDevice {
         // Set up status descriptor
         self.virtqueues[0].desc[status_desc].addr = (status_ptr as usize) as u64;
         self.virtqueues[0].desc[status_desc].len = 1;
-        self.virtqueues[0].desc[status_desc].flags = DescriptorFlag::Write as u16;
+        self.virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
         
         // Submit the request to the queue
         self.virtqueues[0].push(header_desc)?;
 
-        enable_interrupt();
         // Notify the device
         self.notify(0);
         
         // Wait for the response (polling)
-        while self.virtqueues[0].pop().is_none() {
-            // self.process_interrupts();
-        }
-        // while *self.virtqueues[0].used.idx as usize == self.virtqueues[0].last_used_idx {
-        //     // Wait for the device to process the request
-        // }
-
-        for i in 0..self.virtqueues[0].used.ring.len() {
-            let used = &self.virtqueues[0].used.ring[i];
-            println!("Used index {}: id: {}, len: {}", i, used.id, used.len);
-        }
-        
-        for i in 0..self.virtqueues[0].desc.len() {
-            let desc = &self.virtqueues[0].desc[i];
-            println!("Descriptor {}: addr: {:#x}, len: {}, flags: {:#x}, next: {}", i, desc.addr, desc.len, desc.flags, desc.next);
-        }
+        while *self.virtqueues[0].used.idx as usize != self.virtqueues[0].last_used_idx {}
+        while self.virtqueues[0].is_busy() {}
 
         // Process completed request
         let desc_idx = self.virtqueues[0].pop().ok_or("No response from device")?;
-
-
-
-        let avail_idx = *self.virtqueues[0].avail.idx as usize;
-        println!("Available index: {}", avail_idx);
-
-        assert_eq!(desc_idx, header_desc);
+        if desc_idx != header_desc {
+            return Err("Invalid descriptor index");
+        }
         
         // Check status
         let status_val = unsafe { *status_ptr };
@@ -296,38 +277,38 @@ impl BlockDevice for VirtioBlockDevice {
     
     fn process_requests(&mut self) -> Vec<BlockIOResult> {
         let mut results = Vec::new();
-
-        println!("Processing requests...: {:?}", self.request_queue.len());
-        
         while let Some(mut request) = self.request_queue.pop() {
             let result = self.process_request(&mut *request);
             results.push(BlockIOResult { request, result });
-            println!("Processed request: {:?}", result);
         }
         
         results
     }
 }
 
-// #[cfg(test)]
+#[cfg(test)]
 pub mod tests {
+    use super::*;
     use alloc::vec;
 
-    use crate::println;
-    use crate::print;
-
-    use super::*;
+    #[test_case]
+    fn test_virtio_block_device_init() {
+        let base_addr = 0x10001000; // Example base address
+        let device = VirtioBlockDevice::new(base_addr);
+        
+        assert_eq!(device.get_id(), base_addr);
+        assert_eq!(device.get_disk_name(), "virtio-blk");
+        assert_eq!(device.get_disk_size(), (device.capacity * device.sector_size as u64) as usize);
+    }
     
-    // #[test_case]
-    pub fn test_virtio_block_device() {
+    #[test_case]
+    fn test_virtio_block_device() {
         let base_addr = 0x10001000; // Example base address
         let mut device = VirtioBlockDevice::new(base_addr);
         
         assert_eq!(device.get_id(), base_addr);
         assert_eq!(device.get_disk_name(), "virtio-blk");
         assert_eq!(device.get_disk_size(), (device.capacity * device.sector_size as u64) as usize);
-
-        println!("Virtio Block Device initialized with capacity: {} and sector size: {}", device.capacity, device.sector_size);
         
         // Test enqueue and process requests
         let request = BlockIORequest {
@@ -343,8 +324,12 @@ pub mod tests {
         let results = device.process_requests();
         assert_eq!(results.len(), 1);
 
-
         let result = &results[0];
         assert!(result.result.is_ok());
+
+        // str from buffer (trim \0)
+        let buffer = &result.request.buffer;
+        let buffer_str = core::str::from_utf8(buffer).unwrap_or("Invalid UTF-8").trim_matches(char::from(0));
+        assert_eq!(buffer_str, "Hello, world!");
     }
 }

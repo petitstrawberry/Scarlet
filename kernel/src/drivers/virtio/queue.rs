@@ -81,6 +81,7 @@ impl<'a> VirtQueue<'a> {
             free_descriptors.push(i);
         }
         let last_used_idx = 0;
+        
         Self { desc, avail, used, free_descriptors, last_used_idx }
     }
 
@@ -241,7 +242,7 @@ impl<'a> VirtQueue<'a> {
     /// 
     /// bool: True if the virtqueue is busy, false otherwise.
     pub fn is_busy(&self) -> bool {
-        self.last_used_idx != *self.used.idx as usize
+        self.last_used_idx == *self.used.idx as usize
     }
 
     /// Push a descriptor index to the available ring
@@ -260,6 +261,7 @@ impl<'a> VirtQueue<'a> {
         if desc_idx >= self.desc.len() {
             return Err("Invalid descriptor index");
         }
+        
         self.avail.ring[*self.avail.idx as usize] = desc_idx as u16;
         *self.avail.idx = (*self.avail.idx + 1) % self.avail.size as u16;
         Ok(())
@@ -514,6 +516,96 @@ impl<'a> UsedRing<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn test_used_ring_flags_update() {
+        let mut raw = RawUsedRing {
+            flags: 0,
+            idx: 0,
+            ring: [RawUsedRingEntry { id: 0, len: 0 }; 0],
+            avail_event: 0,
+        };
+    
+        let used_ring = unsafe { UsedRing::new(0, &mut raw) };
+    
+        // Verify initial values
+        assert_eq!(raw.flags, 0);
+        assert_eq!(*used_ring.flags, 0);
+    
+        // Modify flags
+        *used_ring.flags = 42;
+    
+        // Verify the modification is reflected
+        assert_eq!(raw.flags, 42);
+        assert_eq!(*used_ring.flags, 42);
+    }
+
+    #[test_case]
+    fn test_raw_used_ring_direct_access() {
+        let queue_size = 2;
+        let mut virtqueue = VirtQueue::new(queue_size);
+        virtqueue.init();
+    
+        // 1. Write values to UsedRing via VirtQueue
+        *virtqueue.used.flags = 42;
+        *virtqueue.used.idx = 1;
+        for i in 0..queue_size {
+            virtqueue.used.ring[i].id = i as u32;
+            virtqueue.used.ring[i].len = 456;
+        }
+    
+        // 2. Get a pointer to RawUsedRing
+        let raw_used_ptr = virtqueue.used.flags as *mut u16 as *mut RawUsedRing;
+    
+        // 3. Directly access RawUsedRing and verify values
+        let raw_used = unsafe { &*raw_used_ptr };
+        assert_eq!(raw_used.flags, 42, "flags mismatch");
+        assert_eq!(raw_used.idx, 1, "idx mismatch");
+    
+        // 4. Verify the contents of the ring
+        unsafe {
+            let used_ring = &mut *virtqueue.used.ring.as_mut_ptr();
+            let ring = core::slice::from_raw_parts_mut(used_ring, queue_size);
+            
+            for i in 0..queue_size {
+                assert_eq!(ring[i].id, i as u32, "ring[{}].id mismatch", i);
+                assert_eq!(ring[i].len, 456, "ring[{}].len mismatch", i);
+            }
+        }
+    }
+
+    #[test_case]
+    fn test_raw_available_ring_direct_access() {
+        let queue_size = 16;
+        let mut virtqueue = VirtQueue::new(queue_size);
+        virtqueue.init();
+
+        // 1. Write values to AvailableRing via VirtQueue
+        *virtqueue.avail.flags = 24;
+        *virtqueue.avail.idx = 1;
+        for i in 0..queue_size {
+            virtqueue.avail.ring[i] = i as u16;
+        }
+
+        // 2. Get a pointer to RawAvailableRing
+        let raw_avail_ptr = virtqueue.avail.flags as *mut u16 as *mut RawAvailableRing;
+
+        // 3. Directly access RawAvailableRing and verify values
+        let raw_avail = unsafe { &*raw_avail_ptr };
+        assert_eq!(raw_avail.flags, 24, "flags mismatch");
+        assert_eq!(raw_avail.idx, 1, "idx mismatch");
+
+        // 4. Verify the contents of the ring
+        unsafe {
+            let avail_ring = &mut *virtqueue.avail.ring.as_mut_ptr();
+            let ring = core::slice::from_raw_parts_mut(avail_ring, queue_size);
+            
+            for i in 0..queue_size {
+                assert_eq!(ring[i], i as u16, "ring[{}] mismatch", i);
+            }
+
+        }
+    }
 
     #[test_case]
     fn test_initialize_virtqueue() {
