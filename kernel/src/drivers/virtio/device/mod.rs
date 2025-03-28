@@ -1,6 +1,8 @@
 //! Virtio device driver interface module.
 //! 
 
+use core::result::Result;
+
 use super::queue::VirtQueue;
 
 /// Register enum for Virtio devices
@@ -197,16 +199,23 @@ pub trait VirtioDevice {
     /// 4. Negotiate features
     /// 5. Set up virtqueues
     /// 6. Set driver OK status
-    fn init(&mut self) {
-        // Reset device
-        self.reset();
-
+    fn init(&mut self) -> Result<(), &'static str> {
         // Verify device (Magic Value should be "virt")
         if self.read32_register(Register::MagicValue) != 0x74726976 {
             self.set_failed();
-            return;
+            return Err("Invalid Magic Value");
         }
 
+        // Check device version
+        let version = self.read32_register(Register::Version);
+        if version != 2 {
+            self.set_failed();
+            return Err("Invalid Version");
+        }
+
+        // Reset device
+        self.reset();
+        
         // Acknowledge device
         self.acknowledge();
 
@@ -216,19 +225,20 @@ pub trait VirtioDevice {
         // Negotiate features
         if !self.negotiate_features() {
             self.set_failed();
-            return;
+            return Err("Feature negotiation failed");
         }
 
         // Set up virtqueues
         for i in 0..self.get_virtqueue_count() {
             if !self.setup_queue(i) {
                 self.set_failed();
-                return;
+                return Err("Failed to set up virtqueue");
             }
         }
 
         // Mark driver OK
         self.driver_ok();
+        Ok(())
     }
 
     /// Reset the device by writing 0 to the Status register
@@ -275,10 +285,8 @@ pub trait VirtioDevice {
     fn negotiate_features(&mut self) -> bool {
         // Read device features
         let device_features = self.read32_register(Register::DeviceFeatures);
-        
         // Select supported features
         let driver_features = self.get_supported_features(device_features);
-        
         // Write driver features
         self.write32_register(Register::DriverFeatures, driver_features);
         
@@ -329,6 +337,11 @@ pub trait VirtioDevice {
         
         // Select the queue
         self.write32_register(Register::QueueSel, queue_idx as u32);
+        // Check if the queue is ready
+        let ready = self.read32_register(Register::QueueReady);
+        if ready != 0 {
+            return false; // Queue already set up
+        }
         
         // Get maximum queue size
         let queue_size = self.read32_register(Register::QueueNumMax);
@@ -349,21 +362,33 @@ pub trait VirtioDevice {
         self.write32_register(Register::QueueDescHigh, desc_addr_high);
 
         // Set the driver area (available ring)  address
-        let driver_addr = virtqueue.avail.ring.as_ptr() as u64;
+        let driver_addr = virtqueue.avail.flags as *const _ as u64;
         let driver_addr_low = (driver_addr & 0xffffffff) as u32;
         let driver_addr_high = (driver_addr >> 32) as u32;
         self.write32_register(Register::DriverDescLow, driver_addr_low);
         self.write32_register(Register::DriverDescHigh, driver_addr_high);
 
         // Set the device area (used ring) address
-        let device_addr = virtqueue.used.ring.as_ptr() as u64;
+        let device_addr = virtqueue.used.flags as *const _ as u64;
         let device_addr_low = (device_addr & 0xffffffff) as u32;
         let device_addr_high = (device_addr >> 32) as u32;
         self.write32_register(Register::DeviceDescLow, device_addr_low);
         self.write32_register(Register::DeviceDescHigh, device_addr_high);
+
+        // Check the status of the queue
+        let status = self.read32_register(Register::Status);
+        if DeviceStatus::Failed.is_set(status) {
+            return false; // Queue setup failed
+        }
         
         // Mark queue as ready
         self.write32_register(Register::QueueReady, 1);
+
+        // Check the status of the queue
+        let status = self.read32_register(Register::Status);
+        if DeviceStatus::Failed.is_set(status) {
+            return false; // Queue setup failed
+        }
         
         true
     }
@@ -427,7 +452,7 @@ pub trait VirtioDevice {
     fn process_interrupts(&mut self) -> u32 {
         let status = self.get_interrupt_status();
         if status != 0 {
-            self.write32_register(Register::InterruptAck, status);
+            self.write32_register(Register::InterruptAck, status & 0x03);
         }
         status
     }
