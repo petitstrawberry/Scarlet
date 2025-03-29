@@ -308,7 +308,6 @@ mod tests {
 
         let driver = Box::new(PlatformDeviceDriver::new(
             "test",
-            Vec::new(),
             probe_fn,
             |_device| Ok(()),
             vec!["sifive,test0"]

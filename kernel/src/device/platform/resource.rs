@@ -20,6 +20,7 @@ pub struct PlatformDeviceResource {
 /// This enum defines the types of resources that can be associated with a platform device.
 /// The types include memory (MEM), I/O (IO), interrupt request (IRQ), and direct memory access (DMA).
 /// Each type is represented as a variant of the enum.
+#[derive(PartialEq, Eq)]
 pub enum PlatformDeviceResourceType {
     MEM,
     IO,

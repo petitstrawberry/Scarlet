@@ -110,6 +110,16 @@ impl PlatformDevice {
             resources,
         }
     }
+
+    /// Get the PlatformDeviceResource associated with the device.
+    /// 
+    /// # Returns
+    /// 
+    /// A reference to a vector of `PlatformDeviceResource` objects.
+    /// 
+    pub fn get_resources(&self) -> &Vec<PlatformDeviceResource> {
+        &self.resources
+    }
 }
 
 impl Device for PlatformDevice {
@@ -132,7 +142,6 @@ impl Device for PlatformDevice {
 
 pub struct PlatformDeviceDriver {
     name: &'static str,
-    resources: Vec<PlatformDeviceResource>,
     probe_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
     remove_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
     compatible: Vec<&'static str>, // Change to Vec<&'static str>
@@ -141,14 +150,12 @@ pub struct PlatformDeviceDriver {
 impl PlatformDeviceDriver {
     pub fn new(
         name: &'static str,
-        resources: Vec<PlatformDeviceResource>,
         probe_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
         remove_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
         compatible: Vec<&'static str>,
     ) -> Self {
         Self {
             name,
-            resources,
             probe_fn,           
             remove_fn,
             compatible,
@@ -191,7 +198,6 @@ mod tests {
         let device = PlatformDevice::new("test_device", 1, vec!["test,compatible"], vec![]);
         let driver = PlatformDeviceDriver::new(
             "test_driver",
-            vec![],
             |device| {
                 assert_eq!(device.name(), "test_device");
                 Ok(())
@@ -217,7 +223,6 @@ mod tests {
         let device = DummyDevice;
         let driver = PlatformDeviceDriver::new(
             "test_driver",
-            vec![],
             |_device| Ok(()),
             |_device| Ok(()),
             vec!["test,compatible"],
