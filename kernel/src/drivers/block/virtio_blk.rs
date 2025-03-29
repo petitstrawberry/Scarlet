@@ -1,3 +1,28 @@
+//! # VirtIO Block Device Driver
+//! 
+//! This module provides a driver for VirtIO block devices, implementing the
+//! BlockDevice trait for integration with the kernel's block device subsystem.
+//!
+//! The driver supports basic block operations (read/write) and handles the VirtIO
+//! queue management for block device requests.
+//!
+//! ## Features Support
+//! 
+//! The driver checks for and handles the following VirtIO block device features:
+//! - `VIRTIO_BLK_F_BLK_SIZE`: Custom sector size
+//! - `VIRTIO_BLK_F_RO`: Read-only device detection
+//!
+//! ## Implementation Details
+//!
+//! The driver uses a single virtqueue for processing block I/O requests. Each request
+//! consists of three parts:
+//! 1. Request header (specifying operation type and sector)
+//! 2. Data buffer (for read/write content)
+//! 3. Status byte (for operation result)
+//!
+//! Requests are processed through the VirtIO descriptor chain mechanism, with proper
+//! memory management using Box allocations to ensure data remains valid during transfers.
+
 use alloc::{boxed::Box, vec::Vec};
 use alloc::vec;
 
@@ -11,7 +36,7 @@ use crate::{
 // VirtIO Block Request Type
 const VIRTIO_BLK_T_IN: u32 = 0;     // Read
 const VIRTIO_BLK_T_OUT: u32 = 1;    // Write
-const VIRTIO_BLK_T_FLUSH: u32 = 4;  // Flush
+// const VIRTIO_BLK_T_FLUSH: u32 = 4;  // Flush
 
 // VirtIO Block Status Codes
 const VIRTIO_BLK_S_OK: u8 = 0;
@@ -19,13 +44,13 @@ const VIRTIO_BLK_S_IOERR: u8 = 1;
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
 // Device Feature bits
-const VIRTIO_BLK_F_SIZE_MAX: u32 = 1;
-const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
-const VIRTIO_BLK_F_GEOMETRY: u32 = 4;
+// const VIRTIO_BLK_F_SIZE_MAX: u32 = 1;
+// const VIRTIO_BLK_F_SEG_MAX: u32 = 2;
+// const VIRTIO_BLK_F_GEOMETRY: u32 = 4;
 const VIRTIO_BLK_F_RO: u32 = 5;
 const VIRTIO_BLK_F_BLK_SIZE: u32 = 6;
 const VIRTIO_BLK_F_SCSI: u32 = 7;
-const VIRTIO_BLK_F_FLUSH: u32 = 9;
+// const VIRTIO_BLK_F_FLUSH: u32 = 9;
 const VIRTIO_BLK_F_CONFIG_WCE: u32 = 11;
 const VIRTIO_BLK_F_MQ: u32 = 12;
 const VIRTIO_F_ANY_LAYOUT: u32 = 27;
