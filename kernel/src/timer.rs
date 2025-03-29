@@ -1,3 +1,9 @@
+//! Kernel timer module.
+//! 
+//! This module provides the kernel timer functionality, which is responsible for
+//! managing the system timer and scheduling tasks based on time intervals.
+//! 
+
 use crate::arch::timer::ArchTimer;
 use crate::environment::NUM_OF_CPUS;
 
