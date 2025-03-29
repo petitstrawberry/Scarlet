@@ -35,10 +35,14 @@
 //! is stored in a static variable that must be set before initialization.
 
 
+use core::panic;
+use core::result::Result;
+
 use fdt::{Fdt, FdtError};
 
 use crate::early_println;
 use crate::early_print;
+use crate::mem::kmalloc;
 
 #[unsafe(link_section = ".data")]
 static mut FDT_ADDR: usize = 0;
@@ -48,17 +52,19 @@ static mut MANAGER: FdtManager = FdtManager::new();
 
 pub struct FdtManager<'a> {
     fdt: Option<Fdt<'a>>,
+    relocated: bool,
 }
 
 impl<'a> FdtManager<'a> {
     const fn new() -> Self {
         FdtManager {
             fdt: None,
+            relocated: false,
         }
     }
 
-    pub fn init(&mut self) -> Result<(), FdtError> {
-        match unsafe { Fdt::from_ptr(FDT_ADDR as *const u8) } {
+    pub fn init(&mut self, ptr: *const u8) -> Result<(), FdtError> {
+        match unsafe { Fdt::from_ptr(ptr) } {
             Ok(fdt) => {
                 self.fdt = Some(fdt);
             }
@@ -67,7 +73,23 @@ impl<'a> FdtManager<'a> {
         Ok(())
     }
 
-    pub fn set_fdt_addr(addr: usize) {
+    /// Sets the FDT address.
+    /// 
+    /// # Safety
+    /// This function modifies a static variable that holds the FDT address.
+    /// Ensure that this function is called before any other FDT-related functions
+    /// to avoid undefined behavior.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `addr`: The address of the FDT.
+    /// 
+    /// # Notes
+    /// 
+    /// This function must be called before initializing the FDT manager.
+    /// After once FdtManager is initialized, you cannot change the address.
+    /// 
+    pub unsafe fn set_fdt_addr(addr: usize) {
         unsafe {
             FDT_ADDR = addr;
         }
@@ -100,12 +122,48 @@ impl<'a> FdtManager<'a> {
     pub fn get_manager() -> &'static FdtManager<'a> {
         unsafe { &MANAGER }
     }
+
+    /// Relocates the FDT to a new address.
+    /// 
+    /// # Safety
+    /// This function modifies the static FDT address and reinitializes the FdtManager.
+    /// Ensure that the new address is valid
+    /// and does not cause memory corruption.
+    ///
+    /// # Parameters
+    /// - `ptr`: The pointer to the new FDT address.
+    ///
+    /// # Panics
+    /// 
+    /// This function will panic if the FDT has already been relocated.
+    /// 
+    unsafe fn relocate_fdt(&mut self, ptr: *mut u8) {
+        if self.relocated {
+            panic!("FDT already relocated");
+        }
+        // Copy the FDT to the new address
+        let size = self.get_fdt().unwrap().total_size();
+        let old_ptr = unsafe { FDT_ADDR } as *const u8;
+        unsafe { core::ptr::copy_nonoverlapping(old_ptr, ptr, size) };
+
+        // Reinitialize the FDT with the new address
+        match self.init(ptr) {
+            Ok(_) => {
+                self.relocated = true;
+                early_println!("FDT relocated to address: {:#x}", ptr as usize);
+            }
+            Err(e) => {
+                panic!("Failed to relocate FDT: {:?}", e);
+            }
+        }
+    }
 }
 
 /// Initializes the FDT subsystem.
 pub fn init_fdt() {
     let fdt_manager = unsafe { FdtManager::get_mut_manager() };
-    match fdt_manager.init() {
+    let fdt_ptr = unsafe { FDT_ADDR as *const u8 };
+    match fdt_manager.init(fdt_ptr) {
         Ok(_) => {
             early_println!("FDT initialized");
             let fdt =  fdt_manager.get_fdt().unwrap();
@@ -121,4 +179,26 @@ pub fn init_fdt() {
             early_println!("FDT error: {:?}", e);
         }
     }
+}
+
+/// Relocates the FDT to safe memory.
+/// 
+/// This function allocates memory for the FDT and relocates it to that address.
+/// 
+/// # Panic
+/// 
+/// This function will panic if the FDT has already been relocated or if
+/// the memory allocation fails.
+/// 
+pub fn relocate_fdt() {
+    let fdt_manager = unsafe { FdtManager::get_mut_manager() };
+    if fdt_manager.relocated {
+        panic!("FDT already relocated");
+    }
+    let size = fdt_manager.get_fdt().unwrap().total_size();
+    let ptr = kmalloc(size);
+    if ptr.is_null() {
+        panic!("Failed to allocate memory for FDT relocation");
+    }
+    unsafe { fdt_manager.relocate_fdt(ptr) };
 }
