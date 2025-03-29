@@ -2,8 +2,6 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString
 use alloc::vec;
 use core::fmt;
 use crate::device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice};
-use crate::println;
-use crate::print;
 
 use spin::Mutex;
 
@@ -447,7 +445,6 @@ impl VfsManager {
         
         self.mount_points.insert(mount_point.to_string(), mount_point_entry);
         
-        println!("Mounted {} at {}", fs_name, mount_point);
         Ok(())
     }
     
@@ -465,7 +462,6 @@ impl VfsManager {
         // Return the file system to the registration list
         self.filesystems.push(mp.fs);
         
-        println!("Unmounted {}", mount_point);
         Ok(())
     }
     
