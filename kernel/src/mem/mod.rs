@@ -1,3 +1,8 @@
+//! Memory management module.
+//!
+//! This module provides functionality for memory allocation, stack management, 
+//! and other memory-related operations needed by the kernel.
+
 pub mod allocator;
 pub mod page;
 

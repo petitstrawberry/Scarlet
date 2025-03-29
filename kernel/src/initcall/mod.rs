@@ -1,3 +1,25 @@
+//! # Initcall System
+//! 
+//! The initcall module manages the kernel's initialization sequence by providing
+//! a structured way to execute initialization functions at different stages of boot.
+//! 
+//! ## Submodules
+//! 
+//! - `early`: Initialization functions that need to run early in the boot process
+//! - `driver`: Driver initialization routines
+//! - `late`: Initialization functions that should run late in the boot process
+//! 
+//! ## Initcall Mechanism
+//! 
+//! The initcall system works by collecting function pointers between special linker
+//! sections (`__INITCALL_START` and `__INITCALL_END`). Each function pointer
+//! represents an initialization function that needs to be called during boot.
+//! 
+//! The `initcall_task()` function iterates through these function pointers and
+//! executes each initialization routine in sequence, providing progress updates
+//! to the console. After all initialization routines have been executed, the
+//! processor enters an idle state.
+
 use crate::{arch::instruction::idle, println, print};
 
 pub mod early;
