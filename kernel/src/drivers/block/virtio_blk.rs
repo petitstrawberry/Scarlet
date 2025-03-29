@@ -3,8 +3,9 @@ use alloc::vec;
 
 use core::{mem, ptr};
 
+use crate::defer;
 use crate::{
-    device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice, GenericBlockDevice}, drivers::virtio::{device::{DeviceStatus, Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}, mem::page::{allocate_pages, Page}
+    device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
 };
 
 // VirtIO Block Request Type
@@ -127,13 +128,22 @@ impl VirtioBlockDevice {
             reserved: 0,
             sector: req.sector as u64,
         });
-        let data = vec![Page::new(); (req.buffer.len() + 4095) / 4096].into_boxed_slice();
+        let data = vec![0u8; req.buffer.len()].into_boxed_slice();
         let status = Box::new(0u8);
                 
         // Cast pages to appropriate types
         let header_ptr = Box::into_raw(header);
-        let data_ptr = Box::into_raw(data) as *mut u8;
+        let data_ptr = Box::into_raw(data) as *mut [u8];
         let status_ptr = Box::into_raw(status);
+
+        defer! {
+            // Deallocate memory after use
+            unsafe {
+                drop(Box::from_raw(header_ptr));
+                drop(Box::from_raw(data_ptr));
+                drop(Box::from_raw(status_ptr));
+            }
+        }
 
         // Set up request header
         unsafe {
@@ -141,7 +151,7 @@ impl VirtioBlockDevice {
             if let BlockIORequestType::Write = req.request_type {
                 ptr::copy_nonoverlapping(
                     req.buffer.as_ptr(),
-                    data_ptr,
+                    data_ptr as *mut u8,
                     req.buffer.len()
                 );
             }
@@ -159,7 +169,7 @@ impl VirtioBlockDevice {
         self.virtqueues[0].desc[header_desc].next = data_desc as u16;
         
         // Set up data descriptor
-        self.virtqueues[0].desc[data_desc].addr = (data_ptr as usize) as u64;
+        self.virtqueues[0].desc[data_desc].addr = (data_ptr as *mut u8 as usize) as u64;
         self.virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
         
         // Set flags based on request type
@@ -208,7 +218,7 @@ impl VirtioBlockDevice {
                     unsafe {
                         req.buffer.clear();
                         req.buffer.extend_from_slice(core::slice::from_raw_parts(
-                            data_ptr,
+                            data_ptr as *const u8,
                             self.virtqueues[0].desc[data_desc].len as usize
                         ));
                     }
