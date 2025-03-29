@@ -53,6 +53,8 @@ pub extern "C" fn _entry_ap() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_start_kernel(hartid: usize, fdt_ptr: usize) {
-    FdtManager::set_fdt_addr(fdt_ptr);
+    unsafe { 
+        FdtManager::set_fdt_addr(fdt_ptr);
+    }
     start_kernel(hartid);
 }

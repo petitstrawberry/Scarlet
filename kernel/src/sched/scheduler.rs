@@ -195,7 +195,7 @@ pub fn make_test_tasks() {
     sched.add_task(task2, 0);
 }
 
-late_initcall!(make_test_tasks);
+// late_initcall!(make_test_tasks);
 
 #[cfg(test)]
 mod tests {

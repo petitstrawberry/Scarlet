@@ -12,6 +12,7 @@
 //! - Task scheduling
 //! - Early console for boot-time logging
 //! - Timer and driver subsystems
+//! - Device management and initialization
 //!
 //! ## Boot Process
 //!
@@ -22,25 +23,12 @@
 //! The initialization sequence for the bootstrap processor includes:
 //! 1. Architecture-specific initialization
 //! 2. Heap initialization
-//! 3. Virtual memory setup
-//! 4. Timer initialization
-//! 5. Scheduler initialization and task creation
-//! 6. Task scheduling
-//!
-//! ## Modules
-//!
-//! - `arch`: Architecture-specific code
-//! - `driver`: Device drivers
-//! - `timer`: System timing facilities
-//! - `library`: General utilities and common functions
-//! - `mem`: Memory management subsystems
-//! - `traits`: Common traits used across the kernel
-//! - `sched`: Task scheduling
-//! - `earlycon`: Early boot console output
-//! - `environment`: Environment settings and parameters
-//! - `vm`: Virtual memory management
-//! - `task`: Task abstractions
-//! - `test`: Testing framework (only in test builds)
+//! 3. Early driver initialization
+//! 4. Virtual memory setup
+//! 5. Device population and initialization
+//! 6. Timer initialization
+//! 7. Scheduler initialization and task creation
+//! 8. Task scheduling
 //!
 //! ## Development Notes
 //!
@@ -77,8 +65,8 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
-use device::{fdt::{init_fdt, FdtManager}, manager::DeviceManager};
-use initcall::{early::early_initcall_call, initcall_task};
+use device::{fdt::{init_fdt, relocate_fdt}, manager::DeviceManager};
+use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
 
@@ -117,16 +105,21 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     init_heap();
     /* After this point, we can use the heap */
     early_initcall_call();
+    driver_initcall_call();
     /* Serial console also works */
 
     #[cfg(test)]
     test_main();
 
+    /* Relocate FDT */
+    println!("[Scarlet Kernel] Relocating FDT...");
+    relocate_fdt();
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init();
     /* Initialize (populate) devices */
     println!("[Scarlet Kernel] Initializing devices...");
     DeviceManager::get_mut_manager().populate_devices();
+    
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");

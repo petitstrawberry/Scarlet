@@ -1,5 +1,12 @@
+//! Memory management module.
+//!
+//! This module provides functionality for memory allocation, stack management, 
+//! and other memory-related operations needed by the kernel.
+
 pub mod allocator;
 pub mod page;
+
+use alloc::{boxed::Box, vec};
 
 use crate::environment::{NUM_OF_CPUS, STACK_SIZE};
 
@@ -24,3 +31,13 @@ impl Stack {
 
 #[unsafe(no_mangle)]
 pub static mut KERNEL_STACK: Stack = Stack { data: [0; STACK_SIZE * NUM_OF_CPUS] };
+
+pub fn kmalloc(size: usize) -> *mut u8 {
+    Box::into_raw(vec![0u8; size].into_boxed_slice()) as *mut u8
+}
+
+pub fn kfree(ptr: *mut u8) {
+    unsafe {
+        let _ = Box::from_raw(ptr);
+    }
+}
