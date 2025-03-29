@@ -11,12 +11,15 @@ pub mod platform;
 pub mod block;
 
 extern crate alloc;
+use core::any::Any;
+
 use alloc::vec::Vec;
 
 pub trait Device {
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;
     fn compatible(&self) -> Vec<&'static str>;
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Device driver trait.
@@ -26,7 +29,7 @@ pub trait Device {
 /// matching the driver to devices, and handling device probing and removal.
 pub trait DeviceDriver {
     fn name(&self) -> &'static str;
-    fn match_table(&self) -> Vec<&'static str>; // Change to Vec<&'static str>
-    fn probe(&self, info: &dyn Device) -> Result<(), &'static str>;
-    fn remove(&self, info: &dyn Device) -> Result<(), &'static str>;
+    fn match_table(&self) -> Vec<&'static str>;
+    fn probe(&self, device: &dyn Device) -> Result<(), &'static str>;
+    fn remove(&self, device: &dyn Device) -> Result<(), &'static str>;
 }
