@@ -225,8 +225,8 @@ impl VirtioBlockDevice {
         self.notify(0);
         
         // Wait for the response (polling)
-        while *self.virtqueues[0].used.idx as usize != self.virtqueues[0].last_used_idx {}
         while self.virtqueues[0].is_busy() {}
+        while *self.virtqueues[0].used.idx as usize == self.virtqueues[0].last_used_idx {}
 
         // Process completed request
         let desc_idx = self.virtqueues[0].pop().ok_or("No response from device")?;

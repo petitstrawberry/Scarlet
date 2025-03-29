@@ -242,7 +242,7 @@ impl<'a> VirtQueue<'a> {
     /// 
     /// bool: True if the virtqueue is busy, false otherwise.
     pub fn is_busy(&self) -> bool {
-        self.last_used_idx == *self.used.idx as usize
+        self.last_used_idx != *self.used.idx as usize
     }
 
     /// Push a descriptor index to the available ring
