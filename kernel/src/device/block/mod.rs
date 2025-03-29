@@ -10,7 +10,7 @@ extern crate alloc;
 /// 
 /// This trait defines the interface for block devices.
 /// It provides methods for querying device information and handling I/O requests.
-pub trait BlockDevice {
+pub trait BlockDevice: Send + Sync {
     /// Get the device identifier
     fn get_id(&self) -> usize;
     
