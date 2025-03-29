@@ -77,8 +77,8 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::String;
-use device::{fdt::{init_fdt, FdtManager}, manager::DeviceManager};
-use initcall::{early::early_initcall_call, initcall_task};
+use device::{fdt::{init_fdt, relocate_fdt}, manager::DeviceManager};
+use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
 
@@ -117,16 +117,21 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     init_heap();
     /* After this point, we can use the heap */
     early_initcall_call();
+    driver_initcall_call();
     /* Serial console also works */
 
     #[cfg(test)]
     test_main();
 
+    /* Relocate FDT */
+    println!("[Scarlet Kernel] Relocating FDT...");
+    relocate_fdt();
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init();
     /* Initialize (populate) devices */
     println!("[Scarlet Kernel] Initializing devices...");
     DeviceManager::get_mut_manager().populate_devices();
+    
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");

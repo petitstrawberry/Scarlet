@@ -6,7 +6,7 @@ pub mod late;
 
 #[allow(improper_ctypes)]
 unsafe extern "C" {
-    static mut __INITCALL_EARLY_END: usize;
+    static mut __INITCALL_DRIVER_END: usize;
     static mut __INITCALL_END: usize;
 }
 
@@ -15,7 +15,7 @@ pub fn initcall_task() {
     let size = core::mem::size_of::<fn()>();
 
     println!("Running initcalls... ");
-    let mut func = unsafe { &__INITCALL_EARLY_END as *const usize as usize };
+    let mut func = unsafe { &__INITCALL_DRIVER_END as *const usize as usize };
     let end = unsafe { &__INITCALL_END as *const usize as usize };
     let num = (end - func) / size;
 

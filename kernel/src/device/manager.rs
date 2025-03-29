@@ -46,6 +46,8 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use spin::mutex::Mutex;
 
+use crate::device::platform::resource::PlatformDeviceResource;
+use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::PlatformDevice;
 use crate::println;
 use crate::print;
@@ -188,20 +190,45 @@ impl DeviceManager {
         let soc = soc.unwrap();
         let mut idx = 0;
         for child in soc.children() {
-            // println!("Found child node: {}", child.name);
             let compatible = child.compatible();
             if compatible.is_none() {
                 continue;
             }
             let compatible = compatible.unwrap().all().collect::<Vec<_>>();
-
+            
             for driver in self.drivers.lock().iter() {
                 if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
-                    println!("Found matching driver for {}", driver.name());
-                    let device = Box::new(PlatformDevice::new(
+                    let mut resources = Vec::new();
+                    
+                    // Memory regions
+                    if let Some(regions) = child.reg() {
+                        for region in regions {
+                            let res = PlatformDeviceResource {
+                                res_type: PlatformDeviceResourceType::MEM,
+                                start: region.starting_address as usize,
+                                end: region.starting_address as usize + region.size.unwrap() - 1,
+                            };
+                            resources.push(res);
+                        }
+                    }
+
+                    // IRQs
+                    if let Some(irqs) = child.interrupts() {
+                        for irq in irqs {
+                            let res = PlatformDeviceResource {
+                                res_type: PlatformDeviceResourceType::IRQ,
+                                start: irq,
+                                end: irq,
+                            };
+                            resources.push(res);
+                        }
+                    }
+
+                    let device: Box<dyn Device> = Box::new(PlatformDevice::new(
                         child.name,
                         idx,
                         compatible.clone(),
+                        resources,
                     ));
                     if let Err(e) = driver.probe(&*device) {
                         println!("Failed to probe device {}: {}", device.name(), e);
@@ -261,7 +288,7 @@ mod tests {
 
     #[test_case]
     fn test_device_manager() {
-        let device = Box::new(PlatformDevice::new("test", 0, vec!["test,device"]));
+        let device = Box::new(PlatformDevice::new("test", 0, vec!["test,device"], vec![]));
         let manager = DeviceManager::get_mut_manager();
         manager.register_device(device);
         let len = manager.devices.lock().len();
@@ -272,7 +299,7 @@ mod tests {
     #[test_case]
     fn test_populate_driver() {
         static mut TEST_RESULT: bool = false;
-        fn probe_fn(_device: &dyn Device) -> Result<(), &'static str> {      
+        fn probe_fn(_device: &PlatformDevice) -> Result<(), &'static str> {      
             unsafe {
                 TEST_RESULT = true;
             }  
@@ -281,7 +308,6 @@ mod tests {
 
         let driver = Box::new(PlatformDeviceDriver::new(
             "test",
-            Vec::new(),
             probe_fn,
             |_device| Ok(()),
             vec!["sifive,test0"]

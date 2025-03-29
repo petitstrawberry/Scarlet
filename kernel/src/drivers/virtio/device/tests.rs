@@ -27,6 +27,10 @@ impl VirtioDevice for TestVirtioDevice {
     fn get_virtqueue_count(&self) -> usize {
         self.virtqueues.len()
     }
+    
+    fn get_virtqueue(&self, queue_idx: usize) -> &VirtQueue {
+        &self.virtqueues[queue_idx]
+    }
 }
 
 #[test_case]

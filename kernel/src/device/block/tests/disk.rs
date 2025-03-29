@@ -42,7 +42,7 @@ impl TestDisk {
     }
 
     #[allow(static_mut_refs)]
-    pub fn get_device() -> BlockDevice {
+    pub fn get_device() -> GenericBlockDevice {
 
         unsafe {
             if TEST_DISK.is_none() {
@@ -50,7 +50,7 @@ impl TestDisk {
             }
         }
 
-        BlockDevice::new(1, "test_disk", 1024, |request| {
+        GenericBlockDevice::new(1, "test_disk", 1024, |request| {
             let sector = request.sector;
             let count = request.sector_count;
             let disk = unsafe { TEST_DISK.as_mut().unwrap() };
