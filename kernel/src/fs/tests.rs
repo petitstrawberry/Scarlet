@@ -1072,8 +1072,8 @@ fn test_directory_create_file() {
     
     // Try opening the file
     let mut file = File::with_manager("/mnt/newfile.txt".to_string(), 0, &mut manager);
-    let file_result = file.open(0).unwrap();
-    
+    let file_result = file.open(0);
+    assert!(file_result.is_ok());
 }
 
 #[test_case]
