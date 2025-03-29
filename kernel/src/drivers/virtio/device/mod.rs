@@ -3,6 +3,9 @@
 
 use core::result::Result;
 
+use alloc::{boxed::Box, vec};
+
+use crate::{device::{block::manager::BlockDeviceManager, manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDevice, PlatformDeviceDriver}}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
 use super::queue::VirtQueue;
 
 /// Register enum for Virtio devices
@@ -539,6 +542,138 @@ pub trait VirtioDevice {
     fn get_virtqueue_count(&self) -> usize;
     fn get_virtqueue(&self, queue_idx: usize) -> &VirtQueue;
 }
+
+
+/// Device type enum for Virtio devices
+/// 
+/// This enum represents the different types of Virtio devices.
+/// Each variant corresponds to a specific device type.
+/// The types are defined in the Virtio specification.
+pub enum VirtioDeviceType {
+    Invalid = 0,
+    Net = 1,
+    Block = 2,
+    Console = 3,
+    Rng = 4,
+}
+
+impl VirtioDeviceType {
+    /// Convert from u32 to VirtioDeviceType
+    /// 
+    /// This method converts a u32 value to the corresponding VirtioDeviceType variant.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `device_type` - The u32 value to convert.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the corresponding VirtioDeviceType variant.
+    pub fn from_u32(device_type: u32) -> Self {
+        match device_type {
+            0 => VirtioDeviceType::Invalid,
+            1 => VirtioDeviceType::Net,
+            2 => VirtioDeviceType::Block,
+            3 => VirtioDeviceType::Console,
+            4 => VirtioDeviceType::Rng,
+            _ => panic!("Not supported device type"),
+        }
+    }
+}
+
+/// Virtio Common Device
+/// 
+/// Only use this struct for checking the device info.
+/// It should not be used for actual device operations.
+/// 
+struct VirtioDeviceCommon {
+    base_addr: usize,
+}
+
+impl VirtioDeviceCommon {
+    /// Create a new Virtio device
+    ///
+    /// # Arguments
+    ///
+    /// * `base_addr` - The base address of the device
+    ///
+    /// # Returns
+    ///
+    /// A new instance of `VirtioDeviceCommon`
+    pub fn new(base_addr: usize) -> Self {
+        Self { base_addr }
+    }
+}
+
+impl VirtioDevice for VirtioDeviceCommon {
+    fn init(&mut self) -> Result<(), &'static str> {
+        // Initialization is not required for the common device
+        Ok(())
+    }
+
+    fn get_base_addr(&self) -> usize {
+        self.base_addr
+    }
+
+    fn get_virtqueue_count(&self) -> usize {
+        // This should be overridden by specific device implementations
+        0
+    }
+
+    fn get_virtqueue(&self, _queue_idx: usize) -> &VirtQueue {
+        // This should be overridden by specific device implementations
+        unimplemented!()
+    }
+}
+
+fn probe_fn(device: &PlatformDevice) -> Result<(), &'static str> {
+    let res = device.get_resources();
+    if res.is_empty() {
+        return Err("No resources found");
+    }
+
+    // Get memory region resource (res_type == PlatformDeviceResourceType::MEM)
+    let mem_res = res.iter()
+        .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
+        .ok_or("Memory resource not found")?;
+    
+    let base_addr = mem_res.start as usize;
+
+    // Create a new Virtio device
+    let virtio_device = VirtioDeviceCommon::new(base_addr);
+    // Check device type
+    let device_type = VirtioDeviceType::from_u32(virtio_device.get_device_info().0);
+    
+    match device_type {
+        VirtioDeviceType::Block => {
+            let dev = Box::new(VirtioBlockDevice::new(base_addr));
+            BlockDeviceManager::get_mut_manager().register_device(dev);
+        }
+        _ => {
+            // Unsupported device type
+            return Err("Unsupported device type");
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_fn(device: &PlatformDevice) -> Result<(), &'static str> {
+    Ok(())
+}
+
+fn register_driver() {
+    let driver = PlatformDeviceDriver::new(
+        "virtio-mmio",
+        probe_fn,
+        remove_fn,
+        vec!["virtio,mmio"],
+    );
+    // Register the driver with the kernel
+    DeviceManager::get_mut_manager().register_driver(Box::new(driver))
+}
+
+driver_initcall!(register_driver);
 
 #[cfg(test)]
 mod tests;
