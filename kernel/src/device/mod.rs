@@ -15,7 +15,7 @@ use core::any::Any;
 
 use alloc::vec::Vec;
 
-pub trait Device {
+pub trait DeviceInfo {
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;
     fn compatible(&self) -> Vec<&'static str>;
@@ -30,6 +30,6 @@ pub trait Device {
 pub trait DeviceDriver {
     fn name(&self) -> &'static str;
     fn match_table(&self) -> Vec<&'static str>;
-    fn probe(&self, device: &dyn Device) -> Result<(), &'static str>;
-    fn remove(&self, device: &dyn Device) -> Result<(), &'static str>;
+    fn probe(&self, device: &dyn DeviceInfo) -> Result<(), &'static str>;
+    fn remove(&self, device: &dyn DeviceInfo) -> Result<(), &'static str>;
 }

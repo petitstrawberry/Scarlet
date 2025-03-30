@@ -1,7 +1,7 @@
 //! Platform device driver module.
 //! 
 //! This module provides the implementation of platform device drivers, including
-//! device information and driver management. It defines the `PlatformDevice` and
+//! device information and driver management. It defines the `PlatformDeviceInfo` and
 //! `PlatformDeviceDriver` structs, which represent the device information and driver
 //! respectively.
 //! 
@@ -10,7 +10,7 @@
 //!
 //! # Components
 //!
-//! - `PlatformDevice`: Stores information about a platform device, including its name,
+//! - `PlatformDeviceInfo`: Stores information about a platform device, including its name,
 //!   ID, and compatible device strings.
 //!
 //! - `PlatformDeviceDriver`: Implements a driver for platform devices, containing resources,
@@ -24,18 +24,18 @@
 //!
 //! ```rust
 //! // Creating a platform device info
-//! let device_info = PlatformDevice::new(
+//! let device_info = PlatformDeviceInfo::new(
 //!     "example_device",
 //!     1,
-//!     vec!["example,device-v1", "example,device-v2"]
+//!     vec!["example,device-v1", "example,device-v2"],
+//!     Vec::new() // Add resources as an empty vector
 //! );
 //!
 //! // Creating a platform device driver
 //! let driver = PlatformDeviceDriver::new(
 //!     "example_driver",
-//!     vec![],
-//!     |device| { /* probe implementation */ Ok(()) },
-//!     |device| { /* remove implementation */ Ok(()) },
+//!     |device_info| { /* probe implementation */ Ok(()) },
+//!     |device_info| { /* remove implementation */ Ok(()) },
 //!     vec!["example,device-v1", "example,device-v2"]
 //! );
 //! ```
@@ -62,7 +62,7 @@ use super::*;
 use resource::*;
 
 /// Struct representing platform device information.
-pub struct PlatformDevice {
+pub struct PlatformDeviceInfo {
     name: &'static str,
     id: usize,
     compatible: Vec<&'static str>,
@@ -83,15 +83,15 @@ pub struct PlatformDevice {
 /// # Examples
 ///
 /// ```
-/// let device_info = PlatformDevice::new(
+/// let device_info = PlatformDeviceInfo::new(
 ///     "uart0",
 ///     0,
 ///     vec!["ns16550a", "uart"],
 ///     Vec::new() // Add resources as an empty vector
 /// );
 ///
-impl PlatformDevice {
-    /// Creates a new `PlatformDevice` instance.
+impl PlatformDeviceInfo {
+    /// Creates a new `PlatformDeviceInfo` instance.
     ///
     /// # Arguments
     ///
@@ -101,7 +101,7 @@ impl PlatformDevice {
     ///
     /// # Returns
     ///
-    /// A new `PlatformDevice` instance with the provided values.
+    /// A new `PlatformDeviceInfo` instance with the provided values.
     pub fn new(name: &'static str, id: usize, compatible: Vec<&'static str>, resources: Vec<PlatformDeviceResource>) -> Self {
         Self {
             name,
@@ -111,7 +111,7 @@ impl PlatformDevice {
         }
     }
 
-    /// Get the PlatformDeviceResource associated with the device.
+    /// Get the `PlatformDeviceResource` associated with the device.
     /// 
     /// # Returns
     /// 
@@ -122,7 +122,7 @@ impl PlatformDevice {
     }
 }
 
-impl Device for PlatformDevice {
+impl DeviceInfo for PlatformDeviceInfo {
     fn name(&self) -> &'static str {
         self.name
     }
@@ -142,16 +142,16 @@ impl Device for PlatformDevice {
 
 pub struct PlatformDeviceDriver {
     name: &'static str,
-    probe_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
-    remove_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
+    probe_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
+    remove_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
     compatible: Vec<&'static str>, // Change to Vec<&'static str>
 }
 
 impl PlatformDeviceDriver {
     pub fn new(
         name: &'static str,
-        probe_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
-        remove_fn: fn(&PlatformDevice) -> Result<(), &'static str>,
+        probe_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
+        remove_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
         compatible: Vec<&'static str>,
     ) -> Self {
         Self {
@@ -172,16 +172,16 @@ impl DeviceDriver for PlatformDeviceDriver {
         self.compatible.clone()
     }
 
-    fn probe(&self, device: &dyn Device) -> Result<(), &'static str> {
-        // Downcast the device to a PlatformDevice
-        let platform_device = device.as_any()
-            .downcast_ref::<PlatformDevice>()
-            .ok_or("Failed to downcast to PlatformDevice")?;
+    fn probe(&self, device: &dyn DeviceInfo) -> Result<(), &'static str> {
+        // Downcast the device to a `PlatformDeviceInfo`
+        let platform_device_info = device.as_any()
+            .downcast_ref::<PlatformDeviceInfo>()
+            .ok_or("Failed to downcast to PlatformDeviceInfo")?;
         // Call the probe function
-        (self.probe_fn)(platform_device)
+        (self.probe_fn)(platform_device_info)
     }
 
-    fn remove(&self, _device: &dyn Device) -> Result<(), &'static str> {
+    fn remove(&self, _device: &dyn DeviceInfo) -> Result<(), &'static str> {
         Ok(())
     }
 }
@@ -195,11 +195,11 @@ mod tests {
 
     #[test_case]
     fn test_probe_success() {
-        let device = PlatformDevice::new("test_device", 1, vec!["test,compatible"], vec![]);
+        let device = PlatformDeviceInfo::new("test_device", 1, vec!["test,compatible"], vec![]);
         let driver = PlatformDeviceDriver::new(
             "test_driver",
-            |device| {
-                assert_eq!(device.name(), "test_device");
+            |device_info| {
+                assert_eq!(device_info.name(), "test_device");
                 Ok(())
             },
             |_device| Ok(()),
@@ -213,7 +213,7 @@ mod tests {
     #[test_case]
     fn test_probe_failure() {
         struct DummyDevice;
-        impl Device for DummyDevice {
+        impl DeviceInfo for DummyDevice {
             fn name(&self) -> &'static str { "dummy" }
             fn id(&self) -> usize { 0 }
             fn compatible(&self) -> Vec<&'static str> { vec![] }
