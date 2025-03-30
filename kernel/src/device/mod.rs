@@ -54,7 +54,7 @@ pub enum DeviceType {
 /// 
 /// This trait defines the interface for devices in the kernel.
 /// 
-pub trait Device {
+pub trait Device: Send + Sync {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;

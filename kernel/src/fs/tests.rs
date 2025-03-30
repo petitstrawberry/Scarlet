@@ -1,3 +1,5 @@
+use core::any::Any;
+
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
@@ -6,6 +8,7 @@ use spin::Mutex;
 
 use super::*;
 use crate::device::block::request::BlockIOResult;
+use crate::device::{Device, DeviceType};
 
 
 // Mock block device
@@ -31,6 +34,24 @@ impl MockBlockDevice {
             data: Mutex::new(data),
             request_queue: Mutex::new(Vec::new()),
         }
+    }
+}
+
+impl Device for MockBlockDevice {
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Block
+    }
+
+    fn name(&self) -> &'static str {
+        "MockBlockDevice"
+    }
+
+    fn id(&self) -> usize {
+        0 // 適切なIDを返す
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
