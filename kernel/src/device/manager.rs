@@ -261,7 +261,7 @@ impl DeviceManager {
     pub fn register_device(&self, device: Box<dyn Device>) {
         let device_type = device.device_type();
         let mut devices = self.devices.lock();
-        let device = RwLock::new(device).into();
+        let device = Arc::new(RwLock::new(device));
         let handle = DeviceHandle::new(device).into();
         devices.entry(device_type).or_default().push(handle);
     }
