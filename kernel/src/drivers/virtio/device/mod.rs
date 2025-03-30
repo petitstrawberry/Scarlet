@@ -5,7 +5,7 @@ use core::result::Result;
 
 use alloc::{boxed::Box, vec};
 
-use crate::{device::{block::manager::BlockDeviceManager, manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDeviceInfo, PlatformDeviceDriver}}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
+use crate::{device::{manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
 use super::queue::VirtQueue;
 
 /// Register enum for Virtio devices
@@ -646,8 +646,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     
     match device_type {
         VirtioDeviceType::Block => {
-            let dev = Box::new(VirtioBlockDevice::new(base_addr));
-            BlockDeviceManager::get_mut_manager().register_device(dev);
+            let dev: Box<dyn Device> = Box::new(VirtioBlockDevice::new(base_addr));
+            DeviceManager::get_mut_manager().register_device(dev);
         }
         _ => {
             // Unsupported device type

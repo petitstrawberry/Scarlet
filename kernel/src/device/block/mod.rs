@@ -6,7 +6,6 @@ use request::{BlockIORequest, BlockIOResult};
 use super::Device;
 
 pub mod request;
-pub mod manager;
 
 extern crate alloc;
 
