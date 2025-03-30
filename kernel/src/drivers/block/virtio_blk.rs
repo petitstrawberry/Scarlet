@@ -29,6 +29,7 @@ use alloc::vec;
 use core::{mem, ptr};
 
 use crate::defer;
+use crate::device::{Device, DeviceType};
 use crate::{
     device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
 };
@@ -254,6 +255,24 @@ impl VirtioBlockDevice {
             VIRTIO_BLK_S_UNSUPP => Err("Unsupported request"),
             _ => Err("Unknown error"),
         }
+    }
+}
+
+impl Device for VirtioBlockDevice {
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Block
+    }
+    
+    fn name(&self) -> &'static str {
+        "virtio-blk"
+    }
+    
+    fn id(&self) -> usize {
+        self.base_addr
+    }
+    
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 
