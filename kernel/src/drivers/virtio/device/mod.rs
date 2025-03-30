@@ -5,7 +5,7 @@ use core::result::Result;
 
 use alloc::{boxed::Box, vec};
 
-use crate::{device::{block::manager::BlockDeviceManager, manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDevice, PlatformDeviceDriver}}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
+use crate::{device::{block::manager::BlockDeviceManager, manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDeviceInfo, PlatformDeviceDriver}}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
 use super::queue::VirtQueue;
 
 /// Register enum for Virtio devices
@@ -626,7 +626,7 @@ impl VirtioDevice for VirtioDeviceCommon {
     }
 }
 
-fn probe_fn(device: &PlatformDevice) -> Result<(), &'static str> {
+fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let res = device.get_resources();
     if res.is_empty() {
         return Err("No resources found");
@@ -658,7 +658,7 @@ fn probe_fn(device: &PlatformDevice) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn remove_fn(device: &PlatformDevice) -> Result<(), &'static str> {
+fn remove_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     Ok(())
 }
 

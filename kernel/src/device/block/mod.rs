@@ -1,5 +1,9 @@
+use core::any::Any;
+
 use alloc::{boxed::Box, vec::Vec};
 use request::{BlockIORequest, BlockIOResult};
+
+use super::Device;
 
 pub mod request;
 pub mod manager;
@@ -10,7 +14,7 @@ extern crate alloc;
 /// 
 /// This trait defines the interface for block devices.
 /// It provides methods for querying device information and handling I/O requests.
-pub trait BlockDevice: Send + Sync {
+pub trait BlockDevice: Device {
     /// Get the device identifier
     fn get_id(&self) -> usize;
     
@@ -43,6 +47,24 @@ pub struct GenericBlockDevice {
 impl GenericBlockDevice {
     pub fn new(id: usize, disk_name: &'static str, disk_size: usize, request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>) -> Self {
         Self { id, disk_name, disk_size, request_fn, request_queue: Vec::new() }
+    }
+}
+
+impl Device for GenericBlockDevice {
+    fn device_type(&self) -> super::DeviceType {
+        super::DeviceType::Block
+    }
+
+    fn name(&self) -> &'static str {
+        self.disk_name
+    }
+
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
