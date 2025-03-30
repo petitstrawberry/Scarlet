@@ -190,7 +190,6 @@ impl BorrowedDeviceGuard {
 
 impl Drop for BorrowedDeviceGuard {
     fn drop(&mut self) {
-        println!("Dropping borrowed device");
         self.handle.decrement_borrow_count();
         if self.handle.get_borrow_count() == 0 {
             if self.handle.is_in_use_exclusive() {

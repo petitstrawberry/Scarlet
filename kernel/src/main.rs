@@ -59,6 +59,7 @@ pub mod task;
 pub mod initcall;
 pub mod syscall;
 pub mod device;
+pub mod fs;
 
 #[cfg(test)]
 pub mod test;
