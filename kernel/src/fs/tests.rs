@@ -658,6 +658,19 @@ impl FileOperations for TestFileSystem {
     }
 }
 
+// モックのファイルシステムドライバを作成
+struct TestFileSystemDriver;
+
+impl FileSystemDriver for TestFileSystemDriver {
+    fn name(&self) -> &'static str {
+        "testfs"
+    }
+
+    fn create(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Box<dyn VirtualFileSystem> {
+        Box::new(TestFileSystem::new(0, "testfs", block_device, block_size))
+    }
+}
+
 // Test cases
 #[test_case]
 fn test_vfs_manager_creation() {
@@ -1204,3 +1217,31 @@ fn test_directory_with_global_manager() {
     let _ = global_manager.unmount("/mnt");
 }
 
+#[test_case]
+fn test_filesystem_driver_and_create_register_fs() {
+    // Initialize VfsManager
+    let mut manager = VfsManager::new();
+
+    // Register a mock driver
+    manager.register_fs_driver(Box::new(TestFileSystemDriver));
+
+    // Create a block device
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+
+    // Use create_and_register_fs to generate and register a file system
+    let fs_id = manager.create_and_register_fs("testfs", device, 512).unwrap();
+
+    // Verify that the file system is correctly registered
+    assert_eq!(fs_id, 0); // The first registration should have ID 0
+    assert_eq!(manager.filesystems.len(), 1);
+
+    // Check the name of the registered file system
+    let registered_fs = &manager.filesystems[0];
+    assert_eq!(registered_fs.name(), "testfs");
+
+    // Mount and verify functionality
+    let result = manager.mount(fs_id, "/mnt");
+    assert!(result.is_ok());
+    assert_eq!(manager.mount_points.len(), 1);
+    assert!(manager.mount_points.contains_key("/mnt"));
+}

@@ -397,6 +397,18 @@ pub trait VirtualFileSystem: FileSystem + FileOperations {}
 // Automatically implement VirtualFileSystem if both FileSystem and FileOperations are implemented
 impl<T: FileSystem + FileOperations> VirtualFileSystem for T {}
 
+/// Trait for file system drivers
+/// 
+/// This trait is used to create file systems from block devices.
+/// It is not intended to be used directly by the VFS manager.
+/// Instead, the VFS manager will use the `create` method to create a file system
+/// from a block device.
+/// 
+pub trait FileSystemDriver: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn create(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Box<dyn VirtualFileSystem>;
+}
+
 /// Mount point information
 pub struct MountPoint {
     pub path: String,
@@ -412,6 +424,7 @@ pub enum ManagerRef<'a> {
 pub struct VfsManager {
     filesystems: Vec<Box<dyn VirtualFileSystem>>,
     mount_points: BTreeMap<String, MountPoint>,
+    drivers: BTreeMap<String, Box<dyn FileSystemDriver>>,
     next_fs_id: usize,
 }
 
@@ -420,11 +433,16 @@ impl VfsManager {
         Self {
             filesystems: Vec::new(),
             mount_points: BTreeMap::new(),
+            drivers: BTreeMap::new(),
             next_fs_id: 0,
         }
     }
 
-    pub fn register_fs(&mut self, fs: Box<dyn VirtualFileSystem>) {
+    /// Register a file system driver
+    pub fn register_fs_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
+        self.drivers.insert(driver.name().to_string(), driver);
+    }
+    
     /// Register a file system
     /// 
     /// # Arguments
@@ -443,11 +461,40 @@ impl VfsManager {
         // Return the ID
         self.next_fs_id - 1
     }
+
+    /// Create and register a file system by specifying the driver name
+    /// 
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The name of the file system driver
+    /// * `block_device` - The block device to use
+    /// * `block_size` - The block size of the device
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<usize>` - The ID of the registered file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or if the file system cannot be created
+    /// 
+    pub fn create_and_register_fs(
+        &mut self,
+        driver_name: &str,
+        block_device: Box<dyn BlockDevice>,
+        block_size: usize,
+    ) -> Result<usize> {
+        let driver = self.drivers.get(driver_name).ok_or(FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: "File system driver not found",
+        })?;
+
+        // Create the file system using the driver
+        let fs = driver.create(block_device, block_size);
+
+        Ok(self.register_fs(fs))
     }
-    
-    pub fn mount(&mut self, fs_name: &str, mount_point: &str) -> Result<()> {
-        // Search for the specified file system by name
-        let fs_idx = self.filesystems.iter().position(|fs| fs.name() == fs_name)
     
     pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
         // Search for the specified file system by ID
