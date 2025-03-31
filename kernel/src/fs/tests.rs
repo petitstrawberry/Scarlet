@@ -222,6 +222,10 @@ impl FileSystem for TestFileSystem {
     fn name(&self) -> &str {
         self.name
     }
+
+    fn set_id(&mut self, id: usize) {
+        self.id = id;
+    }
     
     fn get_id(&self) -> usize {
         self.id

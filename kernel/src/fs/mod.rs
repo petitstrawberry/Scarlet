@@ -351,6 +351,9 @@ pub trait FileSystem: Send + Sync {
     /// Get the name of the file system
     fn name(&self) -> &str;
 
+    /// Set the ID of the file system
+    fn set_id(&mut self, id: usize);
+
     /// Get the identifier of the file system
     fn get_id(&self) -> usize;
 
@@ -656,6 +659,10 @@ impl FileSystem for GenericFileSystem {
     
     fn name(&self) -> &str {
         self.name
+    }
+
+    fn set_id(&mut self, id: usize) {
+        self.id = id;
     }
     
     fn get_id(&self) -> usize {
