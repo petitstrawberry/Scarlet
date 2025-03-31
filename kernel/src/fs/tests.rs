@@ -672,10 +672,10 @@ fn test_fs_registration_and_mount() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
+    let fs_id = manager.register_fs(fs); // fs_idを取得
     assert_eq!(manager.filesystems.len(), 1);
     
-    let result = manager.mount("testfs", "/mnt");
+    let result = manager.mount(fs_id, "/mnt"); // fs_idを使用
     assert!(result.is_ok());
     assert_eq!(manager.filesystems.len(), 0);
     assert_eq!(manager.mount_points.len(), 1);
@@ -687,8 +687,8 @@ fn test_path_resolution() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Resolve valid path
     let result = manager.resolve_path("/mnt/test.txt");
@@ -715,8 +715,8 @@ fn test_file_operations() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Open file
     let mut file = manager.open("/mnt/test.txt", 0).unwrap();
@@ -746,8 +746,8 @@ fn test_directory_operations() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Get directory entries
     let entries = manager.read_dir("/mnt").unwrap();
@@ -811,8 +811,8 @@ fn test_unmount() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     assert_eq!(manager.mount_points.len(), 1);
     
     // Unmount
@@ -836,8 +836,8 @@ fn test_file_creation() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
 
 
     // Create an instance of the file structure
@@ -854,8 +854,8 @@ fn test_file_open_close() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create and open a file object
     let mut file = File::with_manager("/mnt/test.txt".to_string(), 0, &mut manager);
@@ -889,8 +889,8 @@ fn test_file_read_write() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     let mut file = File::with_manager("/mnt/test.txt".to_string(), 0, &mut manager);
     
@@ -933,8 +933,8 @@ fn test_file_seek() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     let mut file = File::with_manager("/mnt/test.txt".to_string(), 0, &mut manager);
     file.open(0).unwrap();
@@ -963,8 +963,8 @@ fn test_file_metadata_and_size() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     let mut file = File::with_manager("/mnt/test.txt".to_string(), 0, &mut manager);
     
@@ -988,8 +988,8 @@ fn test_file_read_all() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // let mut file = File::new("/mnt/test.txt".to_string(), 0);
     let mut file = File::with_manager("/mnt/test.txt".to_string(), 0, &mut manager);
@@ -1020,8 +1020,8 @@ fn test_file_auto_close() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Open a file within a scope
     {
@@ -1046,8 +1046,8 @@ fn test_directory_creation() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create an instance of the directory structure
     let dir = Directory::with_manager("/mnt".to_string(), 0, &mut manager);
@@ -1062,8 +1062,8 @@ fn test_directory_read_entries() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Read directory entries
     let dir = Directory::with_manager("/mnt".to_string(), 0, &mut manager);
@@ -1083,8 +1083,8 @@ fn test_directory_create_file() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create a file in the directory
     let dir = Directory::with_manager("/mnt".to_string(), 0, &mut manager);
@@ -1108,8 +1108,8 @@ fn test_directory_create_subdirectory() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create a subdirectory
     let dir = Directory::with_manager("/mnt".to_string(), 0, &mut manager);
@@ -1133,8 +1133,8 @@ fn test_directory_nested_operations() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Nested operations
     let root_dir = Directory::with_manager("/mnt".to_string(), 0, &mut manager);
@@ -1164,8 +1164,8 @@ fn test_directory_error_handling() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    manager.register_fs(fs);
-    let _ = manager.mount("testfs", "/mnt");
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Non-existent directory
     let nonexistent_dir = Directory::with_manager("/mnt/nonexistent".to_string(), 0, &mut manager);
@@ -1192,8 +1192,8 @@ fn test_directory_with_global_manager() {
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
     let global_manager = get_vfs_manager();
-    global_manager.register_fs(fs);
-    let _ = global_manager.mount("testfs", "/mnt");
+    let fs_id = global_manager.register_fs(fs);
+    let _ = global_manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Directory operations using the global manager
     let dir = Directory::new("/mnt".to_string(), 0);
@@ -1203,3 +1203,4 @@ fn test_directory_with_global_manager() {
     // Cleanup
     let _ = global_manager.unmount("/mnt");
 }
+

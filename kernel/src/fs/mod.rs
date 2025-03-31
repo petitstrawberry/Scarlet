@@ -412,6 +412,7 @@ pub enum ManagerRef<'a> {
 pub struct VfsManager {
     filesystems: Vec<Box<dyn VirtualFileSystem>>,
     mount_points: BTreeMap<String, MountPoint>,
+    next_fs_id: usize,
 }
 
 impl VfsManager {
@@ -419,16 +420,38 @@ impl VfsManager {
         Self {
             filesystems: Vec::new(),
             mount_points: BTreeMap::new(),
+            next_fs_id: 0,
         }
     }
-    
+
     pub fn register_fs(&mut self, fs: Box<dyn VirtualFileSystem>) {
+    /// Register a file system
+    /// 
+    /// # Arguments
+    /// 
+    /// * `fs` - The file system to register
+    /// 
+    /// # Returns
+    /// 
+    /// * `usize` - The ID of the registered file system
+    /// 
+    pub fn register_fs(&mut self, mut fs: Box<dyn VirtualFileSystem>) -> usize {
+        // Assign a unique ID to the file system
+        fs.set_id(self.next_fs_id);
+        self.next_fs_id += 1;
         self.filesystems.push(fs);
+        // Return the ID
+        self.next_fs_id - 1
+    }
     }
     
     pub fn mount(&mut self, fs_name: &str, mount_point: &str) -> Result<()> {
         // Search for the specified file system by name
         let fs_idx = self.filesystems.iter().position(|fs| fs.name() == fs_name)
+    
+    pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
+        // Search for the specified file system by ID
+        let fs_idx = self.filesystems.iter().position(|fs| fs.get_id() == fs_id)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: "File system not found",
