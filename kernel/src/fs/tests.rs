@@ -9,6 +9,8 @@ use spin::Mutex;
 use super::*;
 use crate::device::block::request::BlockIOResult;
 use crate::device::{Device, DeviceType};
+use crate::println;
+use crate::print;
 
 
 // Mock block device
@@ -47,7 +49,7 @@ impl Device for MockBlockDevice {
     }
 
     fn id(&self) -> usize {
-        0 // 適切なIDを返す
+        0 // Return an appropriate ID
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -658,7 +660,7 @@ impl FileOperations for TestFileSystem {
     }
 }
 
-// モックのファイルシステムドライバを作成
+// Create a mock file system driver
 struct TestFileSystemDriver;
 
 impl FileSystemDriver for TestFileSystemDriver {
@@ -675,8 +677,8 @@ impl FileSystemDriver for TestFileSystemDriver {
 #[test_case]
 fn test_vfs_manager_creation() {
     let manager = VfsManager::new();
-    assert_eq!(manager.filesystems.len(), 0);
-    assert_eq!(manager.mount_points.len(), 0);
+    assert_eq!(manager.filesystems.read().len(), 0);
+    assert_eq!(manager.mount_points.read().len(), 0);
 }
 
 #[test_case]
@@ -686,12 +688,12 @@ fn test_fs_registration_and_mount() {
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // fs_idを取得
-    assert_eq!(manager.filesystems.len(), 1);
+    assert_eq!(manager.filesystems.read().len(), 1);
     
     let result = manager.mount(fs_id, "/mnt"); // fs_idを使用
     assert!(result.is_ok());
-    assert_eq!(manager.filesystems.len(), 0);
-    assert_eq!(manager.mount_points.len(), 1);
+    assert_eq!(manager.filesystems.read().len(), 0);
+    assert_eq!(manager.mount_points.read().len(), 1);
 }
 
 #[test_case]
@@ -704,21 +706,37 @@ fn test_path_resolution() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Resolve valid path
-    let result = manager.resolve_path("/mnt/test.txt");
-    assert!(result.is_ok());
+    match manager.with_resolve_path("/mnt/test.txt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "testfs");
+        assert_eq!(relative_path, "/test.txt");
+        Ok(())
+    }) {
+        Ok(_) => {},
+        Err(e) => panic!("Failed to resolve path: {:?}", e),
+    }
     
-    let (_, relative_path) = result.unwrap();
-    assert_eq!(relative_path, "/test.txt");
+    // // Another valid path
+    // let result = manager.resolve_path("/mnt");
+    // assert!(result.is_ok());
     
-    // Another valid path
-    let result = manager.resolve_path("/mnt");
-    assert!(result.is_ok());
-    
-    let (_, relative_path) = result.unwrap();
-    assert_eq!(relative_path, "/");
+    // let (_, relative_path) = result.unwrap();
+    // assert_eq!(relative_path, "/");
+
+    match manager.with_resolve_path("/mnt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "testfs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }) {
+        Ok(_) => {},
+        Err(e) => panic!("Failed to resolve path: {:?}", e),
+    }
     
     // Resolve invalid path
-    let result = manager.resolve_path("/invalid/path");
+    // let result = manager.resolve_path("/invalid/path");
+    let result = manager.with_resolve_path("/invalid/path", |fs, relative_path| {
+        Ok(())
+    });
+
     assert!(result.is_err());
 }
 
@@ -826,13 +844,13 @@ fn test_unmount() {
     
     let fs_id = manager.register_fs(fs); // fs_idを取得
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
-    assert_eq!(manager.mount_points.len(), 1);
+    assert_eq!(manager.mount_points.read().len(), 1);
     
     // Unmount
     let result = manager.unmount("/mnt");
     assert!(result.is_ok());
-    assert_eq!(manager.mount_points.len(), 0);
-    assert_eq!(manager.filesystems.len(), 1); // The file system should be returned
+    assert_eq!(manager.mount_points.read().len(), 0);
+    assert_eq!(manager.filesystems.read().len(), 1); // The file system should be returned
     
     // Attempt to unmount an invalid mount point
     let result = manager.unmount("/invalid");
@@ -1233,15 +1251,269 @@ fn test_filesystem_driver_and_create_register_fs() {
 
     // Verify that the file system is correctly registered
     assert_eq!(fs_id, 0); // The first registration should have ID 0
-    assert_eq!(manager.filesystems.len(), 1);
+    assert_eq!(manager.filesystems.read().len(), 1);
 
     // Check the name of the registered file system
-    let registered_fs = &manager.filesystems[0];
-    assert_eq!(registered_fs.name(), "testfs");
+    let registered_fs = manager.filesystems.read()[0].clone();
+    assert_eq!(registered_fs.read().name(), "testfs");
 
     // Mount and verify functionality
     let result = manager.mount(fs_id, "/mnt");
     assert!(result.is_ok());
-    assert_eq!(manager.mount_points.len(), 1);
-    assert!(manager.mount_points.contains_key("/mnt"));
+    assert_eq!(manager.mount_points.read().len(), 1);
+    assert!(manager.mount_points.read().contains_key("/mnt"));
+}
+
+#[test_case]
+fn test_nested_mount_points() {
+    // Setup: Create 3 different file systems
+    let mut manager = VfsManager::new();
+    
+    // Root file system
+    let root_device = Box::new(MockBlockDevice::new(1, "root_disk", 512, 100));
+    let root_fs = Box::new(TestFileSystem::new(0, "rootfs", root_device, 512));
+    let root_fs_id = manager.register_fs(root_fs);
+    
+    // File system for /mnt
+    let mnt_device = Box::new(MockBlockDevice::new(2, "mnt_disk", 512, 100));
+    let mnt_fs = Box::new(TestFileSystem::new(0, "mntfs", mnt_device, 512));
+    let mnt_fs_id = manager.register_fs(mnt_fs);
+    
+    // File system for /mnt/usb
+    let usb_device = Box::new(MockBlockDevice::new(3, "usb_disk", 512, 100));
+
+    let usb_fs = Box::new(TestFileSystem::new(0, "usbfs", usb_device, 512));
+    let usb_fs_id = manager.register_fs(usb_fs);
+
+    
+    // Execute mounts (create hierarchical structure)
+    manager.mount(root_fs_id, "/").unwrap();
+    manager.mount(mnt_fs_id, "/mnt").unwrap();
+    manager.mount(usb_fs_id, "/mnt/usb").unwrap();
+
+    
+    // 1. Test path resolution - Ensure each mount point references the correct file system
+    manager.with_resolve_path("/", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "rootfs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/test.txt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "rootfs");
+        assert_eq!(relative_path, "/test.txt");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/mnt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mntfs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/mnt/test.txt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mntfs");
+        assert_eq!(relative_path, "/test.txt");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/mnt/usb", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "usbfs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/mnt/usb/test.txt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "usbfs");
+        assert_eq!(relative_path, "/test.txt");
+        Ok(())
+    }).unwrap();
+    
+    // 2. Test file operations - Operations on nested mount points
+    // Create file in root
+    manager.create_file("/rootfile.txt").unwrap();
+    
+    // Create file in /mnt
+    manager.create_file("/mnt/mntfile.txt").unwrap();
+    
+    // Create file in /mnt/usb
+    manager.create_file("/mnt/usb/usbfile.txt").unwrap();
+    
+    // Verify directory listings at each mount point
+    let root_entries = manager.read_dir("/").unwrap();
+    let mnt_entries = manager.read_dir("/mnt").unwrap();
+    let usb_entries = manager.read_dir("/mnt/usb").unwrap();
+    
+    // Ensure "rootfile.txt" is in root entries
+    assert!(root_entries.iter().any(|e| e.name == "rootfile.txt"));
+    
+    // Ensure "mntfile.txt" is in /mnt entries
+    assert!(mnt_entries.iter().any(|e| e.name == "mntfile.txt"));
+    
+    // Ensure "usbfile.txt" is in /mnt/usb entries
+    assert!(usb_entries.iter().any(|e| e.name == "usbfile.txt"));
+    
+    // 3. Test unmounting and its effects
+    // Test behavior when unmounting intermediate file system
+    manager.unmount("/mnt/usb").unwrap();
+    
+    // Accessing /mnt/usb should result in an error
+    let result = manager.with_resolve_path("/mnt/usb", |fs, relative_path| { 
+        // mntfs should be resolved
+        assert_eq!(fs.read().name(), "mntfs");
+        // Relative path should be "/usb"
+        assert_eq!(relative_path, "/usb");
+        Ok(())
+    });
+    assert!(result.is_ok());
+    
+    // However, /mnt should still be accessible
+    manager.with_resolve_path("/mnt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mntfs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }).unwrap();
+    
+    // Finally, unmount the remaining file systems
+    manager.unmount("/mnt").unwrap();
+    manager.unmount("/").unwrap();
+    
+    // Ensure all mount points are unmounted
+    assert_eq!(manager.mount_points.read().len(), 0);
+    // Ensure all file systems are returned to the registration list
+    assert_eq!(manager.filesystems.read().len(), 3);
+}
+
+#[test_case]
+fn test_directory_boundary_handling() {
+    // Setup: Create similar mount points
+    let mut manager = VfsManager::new();
+    
+    // Create 4 different file systems
+    let root_fs = Box::new(TestFileSystem::new(0, "rootfs", 
+        Box::new(MockBlockDevice::new(1, "root_disk", 512, 100)), 512));
+    let mnt_fs = Box::new(TestFileSystem::new(0, "mntfs", 
+        Box::new(MockBlockDevice::new(2, "mnt_disk", 512, 100)), 512));
+    let mnt_data_fs = Box::new(TestFileSystem::new(0, "mnt_datafs", 
+        Box::new(MockBlockDevice::new(3, "mnt_data_disk", 512, 100)), 512));
+    let mnt_sub_fs = Box::new(TestFileSystem::new(0, "mnt_subfs", 
+        Box::new(MockBlockDevice::new(4, "mnt_sub_disk", 512, 100)), 512));
+    
+    // Register file systems
+    let root_id = manager.register_fs(root_fs);
+    let mnt_id = manager.register_fs(mnt_fs);
+    let mnt_data_id = manager.register_fs(mnt_data_fs);
+    let mnt_sub_id = manager.register_fs(mnt_sub_fs);
+    
+    // Mount with confusing patterns
+    manager.mount(root_id, "/").unwrap();
+    manager.mount(mnt_id, "/mnt").unwrap();
+    manager.mount(mnt_data_id, "/mnt_data").unwrap();
+    manager.mount(mnt_sub_id, "/mnt/sub").unwrap();
+    
+    // Test case 1: Distinguish similar prefixes
+    // Ensure distinction between "/mnt" and "/mnt_data"
+    manager.with_resolve_path("/mnt_data/test.txt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mnt_datafs");
+        assert_eq!(relative_path, "/test.txt");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/mnt/test.txt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mntfs");
+        assert_eq!(relative_path, "/test.txt");
+        Ok(())
+    }).unwrap();
+    
+    // Test case 2: Handling trailing slashes
+    manager.with_resolve_path("/mnt/", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mntfs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }).unwrap();
+    
+    // Test case 3: Normalizing multiple slashes
+    manager.with_resolve_path("/mnt///sub///test.txt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mnt_subfs");
+        assert_eq!(relative_path, "/test.txt");
+        Ok(())
+    }).unwrap();
+    
+    // Test case 4: Edge case - Distinguish exact match and partial match
+    manager.with_resolve_path("/mnt", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mntfs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/mnt_data", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mnt_datafs");
+        assert_eq!(relative_path, "/");
+        Ok(())
+    }).unwrap();
+    
+    // Test case 5: Boundary condition - When other text follows the mount point
+    manager.with_resolve_path("/mnt_extra", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "rootfs");
+        assert_eq!(relative_path, "/mnt_extra");
+        Ok(())
+    }).unwrap();
+    
+    // Test case 6: Nested boundary conditions
+    manager.with_resolve_path("/mnt/subextra", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mntfs");
+        assert_eq!(relative_path, "/subextra");
+        Ok(())
+    }).unwrap();
+    
+    manager.with_resolve_path("/mnt/sub/test", |fs, relative_path| {
+        assert_eq!(fs.read().name(), "mnt_subfs");
+        assert_eq!(relative_path, "/test");
+        Ok(())
+    }).unwrap();
+
+    // Test case 7: Boundary check for file operations
+    // Create file in /mnt_data
+    manager.create_file("/mnt_data/testfile.txt").unwrap();
+    
+    // Create file in /mnt/sub
+    manager.create_file("/mnt/sub/testfile.txt").unwrap();
+    
+    // Ensure files are correctly created in each file system
+    let mnt_data_entries = manager.read_dir("/mnt_data").unwrap();
+    assert!(mnt_data_entries.iter().any(|e| e.name == "testfile.txt"));
+    
+    let mnt_sub_entries = manager.read_dir("/mnt/sub").unwrap();
+    assert!(mnt_sub_entries.iter().any(|e| e.name == "testfile.txt"));
+    
+    // Ensure delete operations work correctly
+    manager.remove("/mnt_data/testfile.txt").unwrap();
+    let mnt_data_entries = manager.read_dir("/mnt_data").unwrap();
+    assert!(!mnt_data_entries.iter().any(|e| e.name == "testfile.txt"));
+}
+
+#[test_case]
+fn test_path_normalization() {
+    // Normalize absolute paths
+    assert_eq!(VfsManager::normalize_path("/a/b/../c"), "/a/c");
+    assert_eq!(VfsManager::normalize_path("/a/./b/./c"), "/a/b/c");
+    assert_eq!(VfsManager::normalize_path("/a/b/../../c"), "/c");
+    assert_eq!(VfsManager::normalize_path("/a/b/c/.."), "/a/b");
+    assert_eq!(VfsManager::normalize_path("/../a/b/c"), "/a/b/c");  // Cannot go above root
+    
+    // Normalize multiple slashes
+    assert_eq!(VfsManager::normalize_path("/a//b///c"), "/a/b/c");
+    
+    // Edge cases
+    assert_eq!(VfsManager::normalize_path("/"), "/");
+    assert_eq!(VfsManager::normalize_path("//"), "/");
+    assert_eq!(VfsManager::normalize_path("/."), "/");
+    assert_eq!(VfsManager::normalize_path("/.."), "/");
+    
+    // Normalize relative paths (optional - if VfsManager supports relative paths)
+    assert_eq!(VfsManager::normalize_path("a/b/../c"), "a/c");
+    assert_eq!(VfsManager::normalize_path("./a/b/c"), "a/b/c");
+    assert_eq!(VfsManager::normalize_path("../a/b/c"), "../a/b/c");
+    assert_eq!(VfsManager::normalize_path("a/b/c/.."), "a/b");
+    assert_eq!(VfsManager::normalize_path("a/b/c/../.."), "a");
 }

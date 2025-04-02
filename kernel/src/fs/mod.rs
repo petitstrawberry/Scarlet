@@ -1,9 +1,9 @@
-use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
 use crate::device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice};
 
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 
 extern crate alloc;
 
@@ -33,6 +33,7 @@ pub enum FileSystemErrorKind {
     DeviceError,
     NotSupported,
     BrokenFileSystem,
+    Busy,
 }
 
 pub struct FileSystemError {
@@ -412,7 +413,7 @@ pub trait FileSystemDriver: Send + Sync {
 /// Mount point information
 pub struct MountPoint {
     pub path: String,
-    pub fs: Box<dyn VirtualFileSystem>,
+    pub fs: Arc<RwLock<Box<dyn VirtualFileSystem>>>,
 }
 
 pub enum ManagerRef<'a> {
@@ -422,25 +423,25 @@ pub enum ManagerRef<'a> {
 
 /// VFS manager
 pub struct VfsManager {
-    filesystems: Vec<Box<dyn VirtualFileSystem>>,
-    mount_points: BTreeMap<String, MountPoint>,
-    drivers: BTreeMap<String, Box<dyn FileSystemDriver>>,
-    next_fs_id: usize,
+    filesystems: RwLock<Vec<Arc<RwLock<Box<dyn VirtualFileSystem>>>>>,
+    mount_points: RwLock<BTreeMap<String, MountPoint>>,
+    drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
+    next_fs_id: RwLock<usize>,
 }
 
 impl VfsManager {
     pub fn new() -> Self {
         Self {
-            filesystems: Vec::new(),
-            mount_points: BTreeMap::new(),
-            drivers: BTreeMap::new(),
-            next_fs_id: 0,
+            filesystems: RwLock::new(Vec::new()),
+            mount_points: RwLock::new(BTreeMap::new()),
+            drivers: RwLock::new(BTreeMap::new()),
+            next_fs_id: RwLock::new(0),
         }
     }
 
     /// Register a file system driver
     pub fn register_fs_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
-        self.drivers.insert(driver.name().to_string(), driver);
+        self.drivers.write().insert(driver.name().to_string(), driver);
     }
     
     /// Register a file system
@@ -454,12 +455,16 @@ impl VfsManager {
     /// * `usize` - The ID of the registered file system
     /// 
     pub fn register_fs(&mut self, mut fs: Box<dyn VirtualFileSystem>) -> usize {
+        let mut filesystems = self.filesystems.write();
         // Assign a unique ID to the file system
-        fs.set_id(self.next_fs_id);
-        self.next_fs_id += 1;
-        self.filesystems.push(fs);
+        let mut next_id = self.next_fs_id.write();
+        fs.set_id(*next_id);
+        // Increment the ID for the next file system
+        *next_id += 1;
+        let lock = Arc::new(RwLock::new(fs));
+        filesystems.push(lock);
         // Return the ID
-        self.next_fs_id - 1
+        *next_id - 1
     }
 
     /// Create and register a file system by specifying the driver name
@@ -485,30 +490,37 @@ impl VfsManager {
         block_device: Box<dyn BlockDevice>,
         block_size: usize,
     ) -> Result<usize> {
-        let driver = self.drivers.get(driver_name).ok_or(FileSystemError {
-            kind: FileSystemErrorKind::NotFound,
-            message: "File system driver not found",
-        })?;
-
+        
         // Create the file system using the driver
-        let fs = driver.create(block_device, block_size);
+        let fs = {
+            let binding = self.drivers.read();
+            let driver = binding.get(driver_name).ok_or(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: "File system driver not found",
+            })?;
+            driver.create(block_device, block_size)
+        };
 
         Ok(self.register_fs(fs))
     }
     
     pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
+        let mut filesystems = self.filesystems.write();
         // Search for the specified file system by ID
-        let fs_idx = self.filesystems.iter().position(|fs| fs.get_id() == fs_id)
+        let fs_idx = filesystems.iter().position(|fs| fs.read().get_id() == fs_id)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: "File system not found",
             })?;
             
         // Retrieve the file system (ownership transfer)
-        let mut fs = self.filesystems.remove(fs_idx);
-        
-        // Perform the mount operation
-        fs.mount(mount_point)?;
+        let fs = filesystems.remove(fs_idx);
+        {
+            let mut fs = fs.write();
+            
+            // Perform the mount operation
+            fs.mount(mount_point)?;
+        }
         
         // Register the mount point
         let mount_point_entry = MountPoint {
@@ -516,35 +528,126 @@ impl VfsManager {
             fs,
         };
         
-        self.mount_points.insert(mount_point.to_string(), mount_point_entry);
+        self.mount_points.write().insert(mount_point.to_string(), mount_point_entry);
         
         Ok(())
     }
     
     pub fn unmount(&mut self, mount_point: &str) -> Result<()> {
         // Search for the mount point
-        let mut mp = self.mount_points.remove(mount_point)
+        let mp = self.mount_points.write().remove(mount_point)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: "Mount point not found",
             })?;
-        
-        // Perform the unmount operation
-        mp.fs.unmount()?;
-        
+    
         // Return the file system to the registration list
-        self.filesystems.push(mp.fs);
+        self.filesystems.write().push(mp.fs);
         
         Ok(())
     }
-    
-    // Get the file system from the path
-    pub fn resolve_path(&self, path: &str) -> Result<(&Box<dyn VirtualFileSystem>, String)> {
-        // Find the longest matching mount point
-        let mut best_match = "";
+
+    fn normalize_path(path: &str) -> String {
+        // Remember if the path is absolute
+        let is_absolute = path.starts_with('/');
         
-        for (mp_path, _) in &self.mount_points {
-            if path.starts_with(mp_path) && mp_path.len() > best_match.len() {
+        // Decompose and normalize the path
+        let mut components = Vec::new();
+        
+        // Split the path into components and process them
+        for component in path.split('/') {
+            match component {
+                "" => continue,   // Skip empty components (consecutive slashes)
+                "." => continue,  // Ignore current directory
+                ".." => {
+                    // For parent directory, remove the previous component
+                    // However, cannot go above root for absolute paths
+                    if !components.is_empty() && *components.last().unwrap() != ".." {
+                        components.pop();
+                    } else if !is_absolute {
+                        // Keep '..' for relative paths
+                        components.push("..");
+                    }
+                },
+                _ => components.push(component), // Normal directory name
+            }
+        }
+        
+        // Construct the result
+        let normalized = if is_absolute {
+            // Add / to the beginning for absolute paths
+            format!("/{}", components.join("/"))
+        } else if components.is_empty() {
+            // Current directory if the result is empty for a relative path
+            ".".to_string()
+        } else {
+            // Normal relative path
+            components.join("/")
+        };
+        
+        // Return root for empty path
+        if normalized.is_empty() {
+            "/".to_string()
+        } else {
+            normalized
+        }
+    }
+    
+    /// Execute a function with the resolved file system and path
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to resolve
+    /// * `f` - The function to execute with the resolved file system and path
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<T>` - The result of the function execution
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If no file system is mounted for the specified path
+    /// 
+    fn with_resolve_path<F, T>(&self, path: &str, f: F) -> Result<T>
+    where
+        F: FnOnce(&Arc<RwLock<Box<dyn VirtualFileSystem>>>, &str) -> Result<T>
+    {
+        let (fs, relative_path) = self.resolve_path(path)?;
+        f(&fs, &relative_path)
+    }
+
+    /// Resolve the path to the file system and relative path
+    ///
+    /// # Arguments
+    /// 
+    /// * `path` - The path to resolve
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(Arc<RwLock<Box<dyn VirtualFileSystem>>>, String)>` - The resolved file system and relative path
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If no file system is mounted for the specified path
+    /// 
+    fn resolve_path(&self, path: &str) -> Result<(Arc<RwLock<Box<dyn VirtualFileSystem>>>, String)> {
+        let path = Self::normalize_path(path);
+        let mut best_match = "";
+        let mount_points = self.mount_points.read();
+        
+        // First try exact matching of mount points
+        for (mp_path, _) in mount_points.iter() {
+            // If there's an exact match
+            if path == *mp_path {
+                best_match = mp_path;
+                break; // Exact match has highest priority
+            }
+            
+            // Match at directory boundaries
+            if mp_path == "/" || // Root always matches
+            (path.starts_with(mp_path) && 
+                mp_path.len() > best_match.len() &&
+                (mp_path.len() == path.len() || path.chars().nth(mp_path.len()) == Some('/'))) {
                 best_match = mp_path;
             }
         }
@@ -556,50 +659,48 @@ impl VfsManager {
             });
         }
         
-        // Calculate the relative path
-        let relative_path = if path == best_match {
-            "/"
+        let relative_path = if path == best_match || path.len() == best_match.len() {
+            // If it points to the mount point itself
+            "/".to_string()
         } else {
-            &path[best_match.len()..]
+            // For paths under the mount point, normalize the leading /
+            let suffix = &path[best_match.len()..];
+            format!("/{}", suffix.trim_start_matches('/'))
         };
         
-        Ok((&self.mount_points.get(best_match).unwrap().fs, relative_path.to_string()))
+        let fs = mount_points.get(best_match).unwrap().fs.clone();
+        Ok((fs, relative_path))
     }
+
     
     // Open a file
     pub fn open(&self, path: &str, flags: u32) -> Result<Box<dyn FileHandle>> {
-        let (fs, relative_path) = self.resolve_path(path)?;
-        fs.open(&relative_path, flags)
+        self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))
     }
     
     // Read directory entries
     pub fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
-        let (fs, relative_path) = self.resolve_path(path)?;
-        fs.read_dir(&relative_path)
+        self.with_resolve_path(path, |fs, relative_path| fs.read().read_dir(relative_path))
     }
     
     // Create a file
     pub fn create_file(&self, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path)?;
-        fs.create_file(&relative_path)
+        self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path))
     }
     
     // Create a directory
     pub fn create_dir(&self, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path)?;
-        fs.create_dir(&relative_path)
+        self.with_resolve_path(path, |fs, relative_path| fs.read().create_dir(relative_path))
     }
     
     // Remove a file/directory
     pub fn remove(&self, path: &str) -> Result<()> {
-        let (fs, relative_path) = self.resolve_path(path)?;
-        fs.remove(&relative_path)
+        self.with_resolve_path(path, |fs, relative_path| fs.read().remove(relative_path))
     }
     
     // Get the metadata
     pub fn metadata(&self, path: &str) -> Result<FileMetadata> {
-        let (fs, relative_path) = self.resolve_path(path)?;
-        fs.metadata(&relative_path)
+        self.with_resolve_path(path, |fs, relative_path| fs.read().metadata(relative_path))
     }
 }
 
