@@ -648,9 +648,9 @@ impl VfsManager {
             
             // Match at directory boundaries
             if mp_path == "/" || // Root always matches
-            (path.starts_with(mp_path) && 
+                (path.starts_with(mp_path) && 
                 mp_path.len() > best_match.len() &&
-                (mp_path.len() == path.len() || path.chars().nth(mp_path.len()) == Some('/'))) {
+                (mp_path.len() == path.len() || path.as_bytes().get(mp_path.len()) == Some(&b'/'))) {
                 best_match = mp_path;
             }
         }
