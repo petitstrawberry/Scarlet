@@ -627,13 +627,13 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<(Arc<RwLock<Box<dyn VirtualFileSystem>>>, String)>` - The resolved file system and relative path
+    /// * `Result<(FileSystemRef, String)>` - The resolved file system and relative path
     /// 
     /// # Errors
     /// 
     /// * `FileSystemError` - If no file system is mounted for the specified path
     /// 
-    fn resolve_path(&self, path: &str) -> Result<(Arc<RwLock<Box<dyn VirtualFileSystem>>>, String)> {
+    fn resolve_path(&self, path: &str) -> Result<(FileSystemRef, String)> {
         let path = Self::normalize_path(path);
         let mut best_match = "";
         let mount_points = self.mount_points.read();
