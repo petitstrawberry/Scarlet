@@ -1509,6 +1509,9 @@ fn test_path_normalization() {
     assert_eq!(VfsManager::normalize_path("//"), "/");
     assert_eq!(VfsManager::normalize_path("/."), "/");
     assert_eq!(VfsManager::normalize_path("/.."), "/");
+    assert_eq!(VfsManager::normalize_path(""), ".");
+    assert_eq!(VfsManager::normalize_path(".."), "..");
+
     
     // Normalize relative paths (optional - if VfsManager supports relative paths)
     assert_eq!(VfsManager::normalize_path("a/b/../c"), "a/c");
