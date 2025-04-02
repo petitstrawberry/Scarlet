@@ -507,6 +507,17 @@ impl VfsManager {
         Ok(self.register_fs(fs))
     }
     
+    /// Mount a file system at a specified mount point  
+    /// 
+    /// # Arguments
+    /// 
+    /// * `fs_id` - The ID of the file system to mount
+    /// * `mount_point` - The mount point for the file system
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the mount was successful, Err if there was an error
+    /// 
     pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
         let mut filesystems = self.filesystems.write();
         // Search for the specified file system by ID
@@ -536,6 +547,16 @@ impl VfsManager {
         Ok(())
     }
     
+    /// Unmount a file system from a specified mount point
+    /// 
+    /// # Arguments
+    /// 
+    /// * `mount_point` - The mount point to unmount
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the unmount was successful, Err if there was an error
+    /// 
     pub fn unmount(&mut self, mount_point: &str) -> Result<()> {
         // Search for the mount point
         let mp = self.mount_points.write().remove(mount_point)
@@ -550,6 +571,16 @@ impl VfsManager {
         Ok(())
     }
 
+    /// Normalize a path
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to normalize
+    /// 
+    /// # Returns
+    /// 
+    /// * `String` - The normalized path
+    /// 
     fn normalize_path(path: &str) -> String {
         // Remember if the path is absolute
         let is_absolute = path.starts_with('/');
