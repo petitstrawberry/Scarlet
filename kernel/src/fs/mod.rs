@@ -410,10 +410,12 @@ pub trait FileSystemDriver: Send + Sync {
     fn create(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Box<dyn VirtualFileSystem>;
 }
 
+pub type FileSystemRef = Arc<RwLock<Box<dyn VirtualFileSystem>>>;
+
 /// Mount point information
 pub struct MountPoint {
     pub path: String,
-    pub fs: Arc<RwLock<Box<dyn VirtualFileSystem>>>,
+    pub fs: FileSystemRef,
 }
 
 pub enum ManagerRef<'a> {
@@ -421,9 +423,10 @@ pub enum ManagerRef<'a> {
     Local(&'a mut VfsManager), // Use a specific manager
 }
 
+
 /// VFS manager
 pub struct VfsManager {
-    filesystems: RwLock<Vec<Arc<RwLock<Box<dyn VirtualFileSystem>>>>>,
+    filesystems: RwLock<Vec<FileSystemRef>>,
     mount_points: RwLock<BTreeMap<String, MountPoint>>,
     drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
     next_fs_id: RwLock<usize>,
@@ -610,7 +613,7 @@ impl VfsManager {
     /// 
     fn with_resolve_path<F, T>(&self, path: &str, f: F) -> Result<T>
     where
-        F: FnOnce(&Arc<RwLock<Box<dyn VirtualFileSystem>>>, &str) -> Result<T>
+        F: FnOnce(&FileSystemRef, &str) -> Result<T>
     {
         let (fs, relative_path) = self.resolve_path(path)?;
         f(&fs, &relative_path)
