@@ -38,7 +38,7 @@ pub enum FileSystemErrorKind {
 
 pub struct FileSystemError {
     pub kind: FileSystemErrorKind,
-    pub message: &'static str,
+    pub message: String,
 }
 
 impl fmt::Debug for FileSystemError {
@@ -146,7 +146,7 @@ impl<'a> File<'a> {
         if !self.is_open {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "File not open",
+                message: "File not open".to_string(),
             });
         }
         
@@ -155,7 +155,7 @@ impl<'a> File<'a> {
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle",
+                message: "Invalid file handle".to_string(),
             })
         }
     }
@@ -165,7 +165,7 @@ impl<'a> File<'a> {
         if !self.is_open {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "File not open",
+                message: "File not open".to_string(),
             });
         }
         
@@ -174,7 +174,7 @@ impl<'a> File<'a> {
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle",
+                message: "Invalid file handle".to_string(),
             })
         }
     }
@@ -184,7 +184,7 @@ impl<'a> File<'a> {
         if !self.is_open {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "File not open",
+                message: "File not open".to_string(),
             });
         }
         
@@ -193,7 +193,7 @@ impl<'a> File<'a> {
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle",
+                message: "Invalid file handle".to_string(),
             })
         }
     }
@@ -210,7 +210,7 @@ impl<'a> File<'a> {
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle",
+                message: "Invalid file handle".to_string(),
             })
         }
     }
@@ -493,7 +493,7 @@ impl VfsManager {
             let binding = self.drivers.read();
             let driver = binding.get(driver_name).ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "File system driver not found",
+                message: format!("File system driver '{}' not found", driver_name), // Updated
             })?;
             driver.create(block_device, block_size)
         };
@@ -518,7 +518,7 @@ impl VfsManager {
         let fs_idx = filesystems.iter().position(|fs| fs.read().get_id() == fs_id)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "File system not found",
+                message: "File system not found".to_string(),
             })?;
             
         // Retrieve the file system (ownership transfer)
@@ -556,7 +556,7 @@ impl VfsManager {
         let mp = self.mount_points.write().remove(mount_point)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "Mount point not found",
+                message: "Mount point not found".to_string(),
             })?;
     
         // Return the file system to the registration list
@@ -683,7 +683,7 @@ impl VfsManager {
         if best_match.is_empty() {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "No filesystem mounted for this path",
+                message: format!("No filesystem mounted for path: {}", path),
             });
         }
         
@@ -777,7 +777,7 @@ impl GenericFileSystem {
         if results.len() != 1 {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Failed to process block request",
+                message: format!("Failed to process block request for block index {}", block_idx), // Updated
             });
         }
         
@@ -790,7 +790,7 @@ impl GenericFileSystem {
             },
             Err(msg) => Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: msg,
+                message: msg.to_string(),
             }),
         }
     }
@@ -817,7 +817,7 @@ impl GenericFileSystem {
         if results.len() != 1 {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Failed to process block write request",
+                message: format!("Failed to process block write request for block index {}", block_idx), // Updated
             });
         }
         
@@ -825,7 +825,7 @@ impl GenericFileSystem {
             Ok(_) => Ok(()),
             Err(msg) => Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: msg,
+                message: msg.to_string(),
             }),
         }
     }
@@ -836,7 +836,7 @@ impl FileSystem for GenericFileSystem {
         if self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
-                message: "File system already mounted",
+                message: "File system already mounted".to_string(),
             });
         }
         self.mounted = true;
@@ -848,7 +848,7 @@ impl FileSystem for GenericFileSystem {
         if !self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "File system not mounted",
+                message: "File system not mounted".to_string(),
             });
         }
         self.mounted = false;

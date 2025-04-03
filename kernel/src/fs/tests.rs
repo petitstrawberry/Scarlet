@@ -198,7 +198,7 @@ impl FileSystem for TestFileSystem {
         if self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
-                message: "File system already mounted",
+                message: "File system already mounted".to_string(),
             });
         }
         self.mounted = true;
@@ -210,7 +210,7 @@ impl FileSystem for TestFileSystem {
         if !self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "File system not mounted",
+                message: "File system not mounted".to_string(),
             });
         }
         self.mounted = false;
@@ -252,7 +252,7 @@ impl FileSystem for TestFileSystem {
         if results.len() != 1 {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Failed to process block request",
+                message: "Failed to process block request".to_string(),
             });
         }
         
@@ -265,7 +265,7 @@ impl FileSystem for TestFileSystem {
             },
             Err(msg) => Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: msg,
+                message: msg.to_string(),
             }),
         }
     }
@@ -288,7 +288,7 @@ impl FileSystem for TestFileSystem {
         if results.len() != 1 {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: "Failed to process block request",
+                message: "Failed to process block request".to_string(),
             });
         }
         
@@ -296,7 +296,7 @@ impl FileSystem for TestFileSystem {
             Ok(_) => Ok(()),
             Err(msg) => Err(FileSystemError {
                 kind: FileSystemErrorKind::IoError,
-                message: msg,
+                message: msg.to_string(),
             }),
         }
     }
@@ -416,7 +416,7 @@ impl FileOperations for TestFileSystem {
         
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
-            message: "File not found",
+            message: "File not found".to_string(),
         })
     }
     
@@ -434,7 +434,7 @@ impl FileOperations for TestFileSystem {
                 if let Some(_) = entries.iter().find(|e| e.name == name && e.file_type != FileType::Directory) {
                     return Err(FileSystemError {
                         kind: FileSystemErrorKind::NotADirectory,
-                        message: "Not a directory",
+                        message: "Not a directory".to_string(),
                     });
                 }
             }
@@ -445,7 +445,7 @@ impl FileOperations for TestFileSystem {
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "Directory not found",
+                message: "Directory not found".to_string(),
             })
         }
     }
@@ -464,7 +464,7 @@ impl FileOperations for TestFileSystem {
                 if entries.iter().any(|e| e.name == file_name) {
                     return Err(FileSystemError {
                         kind: FileSystemErrorKind::AlreadyExists,
-                        message: "File already exists",
+                        message: "File already exists".to_string(),
                     });
                 }
                 
@@ -482,7 +482,7 @@ impl FileOperations for TestFileSystem {
         
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
-            message: "Parent directory not found",
+            message: "Parent directory not found".to_string(),
         })
     }
     
@@ -503,7 +503,7 @@ impl FileOperations for TestFileSystem {
                 if entries.iter().any(|e| e.name == dir_name) {
                     return Err(FileSystemError {
                         kind: FileSystemErrorKind::AlreadyExists,
-                        message: "Directory already exists",
+                        message: "Directory already exists".to_string(),
                     });
                 }
                 
@@ -528,7 +528,7 @@ impl FileOperations for TestFileSystem {
 
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
-            message: "Parent directory not found",
+            message: "Parent directory not found".to_string(),
         })
     }
     
@@ -582,7 +582,7 @@ impl FileOperations for TestFileSystem {
                 if !is_empty {
                     return Err(FileSystemError {
                         kind: FileSystemErrorKind::NotSupported,
-                        message: "Cannot remove non-empty directory",
+                        message: "Cannot remove non-empty directory".to_string(),
                     });
                 }
                 
@@ -599,7 +599,7 @@ impl FileOperations for TestFileSystem {
         
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
-            message: "File or directory not found",
+            message: "File or directory not found".to_string(),
         })
     }
     
@@ -648,7 +648,7 @@ impl FileOperations for TestFileSystem {
         
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
-            message: "File or directory not found",
+            message: "File or directory not found".to_string(),
         })
     }
     
@@ -844,8 +844,13 @@ fn test_unmount() {
     
     // Attempt to unmount an invalid mount point
     let result = manager.unmount("/invalid");
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotFound);
+    match result {
+        Ok(_) => panic!("Expected an error, but got Ok"),
+        Err(e) => {
+            assert_eq!(e.kind, FileSystemErrorKind::NotFound);
+            assert_eq!(e.message, "Mount point not found".to_string());
+        }
+    }
 }
 
 // Test file structure
@@ -1189,19 +1194,41 @@ fn test_directory_error_handling() {
     // Non-existent directory
     let nonexistent_dir = Directory::with_manager("/mnt/nonexistent".to_string(), &mut manager);
     let result = nonexistent_dir.read_entries();
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotFound);
+    // assert!(result.is_err());
+    // assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotFound);
+    // assert_eq!(result.unwrap_err().message, "Directory not found".to_string());
+
+    match result {
+        Ok(_) => panic!("Expected an error, but got success"),
+        Err(e) => {
+            assert_eq!(e.kind, FileSystemErrorKind::NotFound);
+            assert_eq!(e.message, "Directory not found".to_string());
+        }
+    }
     
     // Create a file in a non-existent directory
     let result = nonexistent_dir.create_file("test.txt");
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotFound);
+    match result {
+        Ok(_) => panic!("Expected an error, but got success"),
+        Err(e) => {
+            assert_eq!(e.kind, FileSystemErrorKind::NotFound);
+            assert_eq!(e.message, "Parent directory not found".to_string());
+        }
+    }
     
     // Treat a file as a directory
     let file_as_dir = Directory::with_manager("/mnt/test.txt".to_string(), &mut manager);
     let result = file_as_dir.read_entries();
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotADirectory);
+    // assert!(result.is_err());
+    // assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotADirectory);
+    // assert_eq!(result.unwrap_err().message, "Not a directory".to_string());
+    match result {
+        Ok(_) => panic!("Expected an error, but got success"),
+        Err(e) => {
+            assert_eq!(e.kind, FileSystemErrorKind::NotADirectory);
+            assert_eq!(e.message, "Not a directory".to_string());
+        }
+    }
 }
 
 #[test_case]
