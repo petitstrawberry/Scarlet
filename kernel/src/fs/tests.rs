@@ -389,7 +389,7 @@ impl FileOperations for TestFileSystem {
         let normalized = self.normalize_path(path);
         
         // Simple implementation for testing (only check the beginning of the path)
-        if (normalized == "/test.txt") {
+        if normalized == "/test.txt" {
             return Ok(Box::new(TestFileHandle {
                 path: normalized,
                 position: 0,
@@ -404,7 +404,7 @@ impl FileOperations for TestFileSystem {
         
         for (dir_path, entries) in self.directories.lock().iter() {
             if dir_path == parent_path {
-                if let Some(entry) = entries.iter().find(|e| e.name == name && e.file_type == FileType::RegularFile) {
+                if let Some(_) = entries.iter().find(|e| e.name == name && e.file_type == FileType::RegularFile) {
                     return Ok(Box::new(TestFileHandle {
                         path: normalized,
                         position: 0,
@@ -431,7 +431,7 @@ impl FileOperations for TestFileSystem {
         // Check if there is a file with the same name in the parent directory
         for (dir_path, entries) in self.directories.lock().iter() {
             if dir_path == parent_path {
-                if let Some(entry) = entries.iter().find(|e| e.name == name && e.file_type != FileType::Directory) {
+                if let Some(_) = entries.iter().find(|e| e.name == name && e.file_type != FileType::Directory) {
                     return Err(FileSystemError {
                         kind: FileSystemErrorKind::NotADirectory,
                         message: "Not a directory",
@@ -712,13 +712,6 @@ fn test_path_resolution() {
         Err(e) => panic!("Failed to resolve path: {:?}", e),
     }
     
-    // // Another valid path
-    // let result = manager.resolve_path("/mnt");
-    // assert!(result.is_ok());
-    
-    // let (_, relative_path) = result.unwrap();
-    // assert_eq!(relative_path, "/");
-
     match manager.with_resolve_path("/mnt", |fs, relative_path| {
         assert_eq!(fs.read().name(), "testfs");
         assert_eq!(relative_path, "/");
@@ -730,7 +723,7 @@ fn test_path_resolution() {
     
     // Resolve invalid path
     // let result = manager.resolve_path("/invalid/path");
-    let result = manager.with_resolve_path("/invalid/path", |fs, relative_path| {
+    let result = manager.with_resolve_path("/invalid/path", |_, _| {
         Ok(())
     });
 
