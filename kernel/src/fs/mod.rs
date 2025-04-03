@@ -518,7 +518,7 @@ impl VfsManager {
         let fs_idx = filesystems.iter().position(|fs| fs.read().get_id() == fs_id)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "File system not found".to_string(),
+                message: format!("File system with ID {} not found", fs_id),
             })?;
             
         // Retrieve the file system (ownership transfer)
