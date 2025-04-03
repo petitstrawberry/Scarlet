@@ -9,9 +9,6 @@ use spin::Mutex;
 use super::*;
 use crate::device::block::request::BlockIOResult;
 use crate::device::{Device, DeviceType};
-use crate::println;
-use crate::print;
-
 
 // Mock block device
 struct MockBlockDevice {
