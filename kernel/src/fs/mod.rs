@@ -81,17 +81,15 @@ pub struct FileMetadata {
 
 pub struct File<'a> {
     pub path: String,
-    pub fs_id: usize,
     handle: Option<Box<dyn FileHandle>>,
     is_open: bool,
     manager_ref: ManagerRef<'a>,
 }
 impl<'a> File<'a> {
     //// Create a new file object (use the global manager by default)
-    pub fn new(path: String, fs_id: usize) -> Self {
+    pub fn new(path: String) -> Self {
         Self {
             path,
-            fs_id,
             handle: None,
             is_open: false,
             manager_ref: ManagerRef::Global,
@@ -99,10 +97,9 @@ impl<'a> File<'a> {
     }
     
     /// Create a file object that uses a specific manager
-    pub fn with_manager(path: String, fs_id: usize, manager: &'a mut VfsManager) -> Self {
+    pub fn with_manager(path: String, manager: &'a mut VfsManager) -> Self {
         Self {
             path,
-            fs_id,
             handle: None,
             is_open: false,
             manager_ref: ManagerRef::Local(manager),
@@ -265,23 +262,20 @@ pub struct DirectoryEntry {
 /// Structure representing a directory
 pub struct Directory<'a> {
     pub path: String,
-    pub fs_id: usize,
     manager_ref: ManagerRef<'a>,  // Added
 }
 
 impl<'a> Directory<'a> {
-    pub fn new(path: String, fs_id: usize) -> Self {
+    pub fn new(path: String) -> Self {
         Self {
             path,
-            fs_id,
             manager_ref: ManagerRef::Global,
         }
     }
     
-    pub fn with_manager(path: String, fs_id: usize, manager: &'a mut VfsManager) -> Self {
+    pub fn with_manager(path: String, manager: &'a mut VfsManager) -> Self {
         Self {
             path,
-            fs_id,
             manager_ref: ManagerRef::Local(manager),
         }
     }
