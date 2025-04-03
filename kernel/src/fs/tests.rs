@@ -722,10 +722,7 @@ fn test_path_resolution() {
     }
     
     // Resolve invalid path
-    // let result = manager.resolve_path("/invalid/path");
-    let result = manager.with_resolve_path("/invalid/path", |_, _| {
-        Ok(())
-    });
+    let result = manager.resolve_path("/invalid/path");
 
     assert!(result.is_err());
 }
@@ -1194,10 +1191,6 @@ fn test_directory_error_handling() {
     // Non-existent directory
     let nonexistent_dir = Directory::with_manager("/mnt/nonexistent".to_string(), &mut manager);
     let result = nonexistent_dir.read_entries();
-    // assert!(result.is_err());
-    // assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotFound);
-    // assert_eq!(result.unwrap_err().message, "Directory not found".to_string());
-
     match result {
         Ok(_) => panic!("Expected an error, but got success"),
         Err(e) => {
@@ -1219,9 +1212,6 @@ fn test_directory_error_handling() {
     // Treat a file as a directory
     let file_as_dir = Directory::with_manager("/mnt/test.txt".to_string(), &mut manager);
     let result = file_as_dir.read_entries();
-    // assert!(result.is_err());
-    // assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotADirectory);
-    // assert_eq!(result.unwrap_err().message, "Not a directory".to_string());
     match result {
         Ok(_) => panic!("Expected an error, but got success"),
         Err(e) => {
