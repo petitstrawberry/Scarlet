@@ -97,10 +97,6 @@ fn test_initramfs_metadata() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
     let initramfs = Initramfs::new(0, "initramfs", cpio_data).unwrap();
 
-    for entry in initramfs.entries.lock().iter() {
-        println!("Entry: {:?}", entry);
-    }
-
     // Retrieve file metadata
     let metadata = initramfs.metadata("/file1.txt").unwrap();
 
