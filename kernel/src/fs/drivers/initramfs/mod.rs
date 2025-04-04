@@ -11,6 +11,7 @@ pub struct InitramfsEntry {
     pub name: String,
     pub file_type: FileType,
     pub size: usize,
+    pub modified_time: u64,
     pub data: Option<Vec<u8>>, // File data (None for directories)
 }
 
@@ -89,6 +90,11 @@ impl Initramfs {
                 FileType::Unknown
             };
 
+            let modified_time = u64::from_str_radix(
+                core::str::from_utf8(&header[46..54]).unwrap_or("0"),
+                16,
+            ).unwrap_or(0);
+
             // Get the size
             let file_size = usize::from_str_radix(
                 core::str::from_utf8(&header[54..62]).unwrap_or("0"),
@@ -109,6 +115,7 @@ impl Initramfs {
                 name,
                 file_type,
                 size: file_size,
+                modified_time,
                 data,
             });
 
@@ -273,7 +280,7 @@ impl FileOperations for Initramfs {
                     execute: false,
                 },
                 created_time: 0,
-                modified_time: 0,
+                modified_time: entry.modified_time,
                 accessed_time: 0,
             })
         } else {
