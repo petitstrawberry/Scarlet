@@ -26,10 +26,10 @@ pub struct Cpiofs {
 
 impl Cpiofs {
     /// Create a new Initramfs
-    pub fn new(id: usize, name: &'static str, cpio_data: &[u8]) -> Result<Self> {
+    pub fn new(name: &'static str, cpio_data: &[u8]) -> Result<Self> {
         let entries = Self::parse_cpio(cpio_data)?;
         Ok(Self {
-            id,
+            id: 0, // ID is set by the VfsManager
             name,
             entries: Mutex::new(entries),
             mounted: false,
@@ -394,7 +394,7 @@ impl FileSystemDriver for CpioDriver {
         let data = unsafe { memory_area.as_slice() };
         
         // Create the Cpiofs from the memory data
-        match Cpiofs::new(0, "cpiofs", data) {
+        match Cpiofs::new("cpiofs", data) {
             Ok(cpio_fs) => Ok(Box::new(cpio_fs)),
             Err(err) => Err(FileSystemError {
                 kind: FileSystemErrorKind::InvalidData,

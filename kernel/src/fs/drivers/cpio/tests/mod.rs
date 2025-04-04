@@ -9,7 +9,7 @@ use alloc::vec;
 #[test_case]
 fn test_initramfs_mount_and_unmount() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
-    let mut initramfs = Cpiofs::new(0, "initramfs", cpio_data).unwrap();
+    let mut initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Check the state before mounting
     assert_eq!(initramfs.mounted, false);
@@ -28,7 +28,7 @@ fn test_initramfs_mount_and_unmount() {
 #[test_case]
 fn test_initramfs_read_dir() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
-    let initramfs = Cpiofs::new(0, "initramfs", cpio_data).unwrap();
+    let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Read the contents of the root directory
     let entries = initramfs.read_dir("/").unwrap();
@@ -41,7 +41,7 @@ fn test_initramfs_read_dir() {
 #[test_case]
 fn test_initramfs_open_file() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
-    let initramfs = Cpiofs::new(0, "initramfs", cpio_data).unwrap();
+    let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Open a file
     let file_handle = initramfs.open("/file1.txt", 0).unwrap();
@@ -55,7 +55,7 @@ fn test_initramfs_open_file() {
 #[test_case]
 fn test_initramfs_read_file() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
-    let initramfs = Cpiofs::new(0, "initramfs", cpio_data).unwrap();
+    let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Open a file
     let mut file_handle = initramfs.open("/file1.txt", 0).unwrap();
@@ -72,7 +72,7 @@ fn test_initramfs_read_file() {
 #[test_case]
 fn test_initramfs_read_only_operations() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
-    let initramfs = Cpiofs::new(0, "initramfs", cpio_data).unwrap();
+    let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Attempt a write operation
     let result = initramfs.create_file("/new_file.txt");
@@ -93,7 +93,7 @@ fn test_initramfs_read_only_operations() {
 #[test_case]
 fn test_initramfs_metadata() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
-    let initramfs = Cpiofs::new(0, "initramfs", cpio_data).unwrap();
+    let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Retrieve file metadata
     let metadata = initramfs.metadata("/file1.txt").unwrap();
@@ -109,7 +109,7 @@ fn test_initramfs_metadata() {
 #[test_case]
 fn test_read_dir() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
-    let initramfs = Cpiofs::new(0, "initramfs", cpio_data).unwrap();
+    let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Get entries in the root directory
     let root_entries = initramfs.read_dir("/").unwrap();
