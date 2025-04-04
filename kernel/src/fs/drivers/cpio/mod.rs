@@ -36,8 +36,8 @@
 use alloc::{boxed::Box, format, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
-use crate::{fs::{
-    Directory, DirectoryEntry, FileHandle, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, Result, VirtualFileSystem
+use crate::{driver_initcall, fs::{
+    get_vfs_manager, Directory, DirectoryEntry, FileHandle, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, Result, VirtualFileSystem
 }, vm::vmem::MemoryArea};
 
 /// Structure representing an Initramfs entry
@@ -457,6 +457,13 @@ impl FileSystemDriver for CpiofsDriver {
         }
     }
 }
+
+fn register_driver() {
+    let vfs_manager = get_vfs_manager();
+    vfs_manager.register_fs_driver(Box::new(CpiofsDriver));
+}
+
+driver_initcall!(register_driver);
 
 #[cfg(test)]
 mod tests;
