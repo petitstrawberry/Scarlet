@@ -1,8 +1,6 @@
 use crate::fs::{
     FileSystemErrorKind, FileType,
 };
-use crate::println;
-use crate::print;
 
 use super::*;
 
@@ -67,7 +65,7 @@ fn test_initramfs_read_file() {
     let bytes_read = file_handle.read(&mut buffer).unwrap();
 
     // Verify the read data
-    assert_eq!(bytes_read, 13); // Example: Read 512 bytes
+    assert_eq!(bytes_read, 13);
     assert_eq!(&buffer[..bytes_read], b"Hello, world!"); // Example: File content is "Hello, world!"
 }
 
@@ -102,7 +100,7 @@ fn test_initramfs_metadata() {
 
     // Verify the metadata content
     assert_eq!(metadata.file_type, FileType::RegularFile);
-    assert_eq!(metadata.size, 13); // Example: File size is 1024 bytes
+    assert_eq!(metadata.size, 13);
     assert!(metadata.permissions.read);
     assert!(!metadata.permissions.write);
     assert!(!metadata.permissions.execute);
