@@ -1,3 +1,38 @@
+//! CPIO (Copy In/Out) filesystem implementation for the kernel.
+//!
+//! This module provides a read-only implementation of the CPIO archive format,
+//! typically used for the initial ramdisk (initramfs). The CPIO format is a
+//! simple archive format that stores files sequentially with headers containing
+//! metadata.
+//!
+//! # Features
+//! 
+//! - Parsing of CPIO archives in the "new ASCII" format (magic "070701")
+//! - Read-only access to files stored in the archive
+//! - Directory traversal and metadata retrieval
+//! 
+//! # Limitations
+//!
+//! - Write operations are not supported as the filesystem is read-only
+//! - Block operations are not implemented since CPIO is not a block-based filesystem
+//!
+//! # Components
+//!
+//! - `CpiofsEntry`: Represents an individual file or directory within the archive
+//! - `Cpiofs`: The main filesystem implementation handling mounting and file operations
+//! - `CpiofsFileHandle`: Handles file read operations and seeking
+//! - `CpiofsDriver`: Driver that creates CPIO filesystems from memory areas
+//!
+//! # Usage
+//!
+//! The CPIO filesystem is typically created from a memory region containing the
+//! archive data, such as an initramfs loaded by the bootloader:
+//!
+//! ```rust
+//! let cpio_driver = CpiofsDriver;
+//! let fs = cpio_driver.create_from_memory(&initramfs_memory_area)?;
+//! vfs_manager.register_filesystem(fs)?;
+//! ```
 use alloc::{boxed::Box, format, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
@@ -26,6 +61,16 @@ pub struct Cpiofs {
 
 impl Cpiofs {
     /// Create a new Initramfs
+    /// 
+    /// # Arguments
+    /// 
+    /// * `name` - The name of the filesystem
+    /// * `cpio_data` - The CPIO data to parse
+    /// 
+    /// # Returns
+    /// 
+    /// A result containing the created Cpiofs instance or an error
+    /// 
     pub fn new(name: &'static str, cpio_data: &[u8]) -> Result<Self> {
         let entries = Self::parse_cpio(cpio_data)?;
         Ok(Self {
@@ -38,6 +83,15 @@ impl Cpiofs {
     }
 
     /// Parse CPIO data to generate entries
+    /// 
+    /// # Arguments
+    /// 
+    /// * `cpio_data` - The CPIO data to parse
+    /// 
+    /// # Returns
+    /// 
+    /// A result containing a vector of CpiofsEntry or an error
+    /// 
     fn parse_cpio(cpio_data: &[u8]) -> Result<Vec<CpiofsEntry>> {
         let mut entries = Vec::new();
         let mut offset = 0;
