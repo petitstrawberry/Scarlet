@@ -420,7 +420,16 @@ pub trait FileSystemDriver: Send + Sync {
     fn filesystem_type(&self) -> FileSystemType;
     
     /// Create a file system from a block device
-    fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
+    /// 
+    /// When implementing this method, ensure that the file system driver can handle block device-based creation.
+    /// If the driver does not support this, return an appropriate error.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `_block_device` - The block device to use for creating the file system
+    /// * `_block_size` - The block size of the device
+    /// 
+    fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
         if self.filesystem_type() == FileSystemType::Memory || self.filesystem_type() == FileSystemType::Virtual {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
@@ -435,7 +444,24 @@ pub trait FileSystemDriver: Send + Sync {
     }
     
     /// Create a file system from a memory area
-    fn create_from_memory(&self, memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
+    /// 
+    /// When implementing this method, ensure that the file system driver can handle memory-based creation.
+    /// If the driver does not support this, return an appropriate error.
+    /// 
+    /// # Notes
+    /// 
+    /// File system drivers must validate the provided MemoryArea to ensure it is valid.
+    /// If the MemoryArea is invalid, the driver should return an appropriate error.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `_memory_area` - The memory area to use for creating the file system
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// 
+    fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
         if self.filesystem_type() == FileSystemType::Block {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,

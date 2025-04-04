@@ -381,8 +381,17 @@ impl FileSystemDriver for CpioDriver {
     }
     
     /// Create a file system from memory area
+    /// 
+    /// # Arguments
+    /// 
+    /// * `memory_area` - A reference to the memory area containing the CPIO filesystem data
+    /// 
+    /// # Returns
+    /// 
+    /// A result containing a boxed CPIO filesystem or an error
+    /// 
     fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
-        let data = memory_area.as_slice();
+        let data = unsafe { memory_area.as_slice() };
         
         // Create the Cpiofs from the memory data
         match Cpiofs::new(0, "cpiofs", data) {

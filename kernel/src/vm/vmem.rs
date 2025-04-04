@@ -74,12 +74,32 @@ impl MemoryArea {
     }
     
     /// Returns a slice reference to the memory area
-    pub fn as_slice(&self) -> &[u8] {
+    /// 
+    /// # Safety
+    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
+    /// If not, undefined behavior may occur.
+    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    /// 
+    /// # Returns
+    /// 
+    /// A slice reference to the memory area
+    ///
+    pub unsafe fn as_slice(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.start as *const u8, self.size()) }
     }
     
     /// Returns a mutable slice reference to the memory area
-    pub fn as_slice_mut(&self) -> &mut [u8] {
+    /// 
+    /// # Safety
+    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
+    /// If not, undefined behavior may occur.
+    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    ///
+    /// # Returns
+    ///
+    /// A mutable slice reference to the memory area
+    ///
+    pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.start as *mut u8, self.size()) }
     }
 }
