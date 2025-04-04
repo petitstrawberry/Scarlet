@@ -1,18 +1,86 @@
 //! # Scarlet Kernel
 //!
-//! The Scarlet Kernel is a bare metal, `no_std` operating system kernel.
+//! The Scarlet Kernel is a bare metal, `no_std` operating system kernel designed with architecture 
+//! flexibility in mind. It aims to provide a clean, modular design with strong safety guarantees 
+//! through Rust's ownership model.
 //!
 //! ## Core Features
 //!
-//! - Runs without standard library support (`no_std`)
-//! - Custom entry points and initialization sequence
-//! - Architecture-specific abstractions
-//! - Memory management with heap allocation
-//! - Virtual memory support
-//! - Task scheduling
-//! - Early console for boot-time logging
-//! - Timer and driver subsystems
-//! - Device management and initialization
+//! - **No Standard Library**: Built using `#![no_std]` for bare metal environments, implementing only the essential
+//!   functionality needed for kernel operation without relying on OS-specific features
+//! - **Multi-Architecture Design**: Currently implemented for RISC-V 64-bit, with a clean abstraction layer designed
+//!   for supporting multiple architectures in the future
+//! - **Memory Management**: Custom heap allocator with virtual memory support that handles physical and virtual memory
+//!   mapping, page tables, and memory protection
+//! - **Task Scheduling**: Cooperative and preemptive multitasking with priority-based scheduling and support for
+//!   kernel and user tasks
+//! - **Driver Framework**: Modular driver architecture with device discovery through FDT (Flattened Device Tree),
+//!   supporting hot-pluggable and fixed devices
+//! - **Filesystem Support**: Flexible Virtual File System (VFS) layer with support for mounting multiple filesystem
+//!   implementations and unified path handling
+//! - **Hardware Abstraction**: Clean architecture-specific abstractions that isolate architecture-dependent code
+//!   to facilitate porting to different architectures
+//!
+//! ## Resource Management with Rust's Ownership Model
+//!
+//! Scarlet leverages Rust's ownership and borrowing system to provide memory safety without garbage collection:
+//!
+//! - **Zero-Cost Abstractions**: Using Rust's type system for resource management without runtime overhead. For example,
+//!   the device driver system uses traits to define common interfaces while allowing specialized implementations
+//!   with no virtual dispatch cost when statically resolvable.
+//!
+//! - **RAII Resource Management**: Kernel resources are automatically cleaned up when they go out of scope, including:
+//!   - File handles that automatically close when dropped
+//!   - Memory allocations that are properly freed
+//!   - Device resources that are released when no longer needed
+//!
+//! - **Mutex and RwLock**: Thread-safe concurrent access to shared resources using the `spin` crate's lock implementations:
+//!   - The scheduler uses locks to protect its internal state during task switching
+//!   - Device drivers use locks to ensure exclusive access to hardware
+//!   - Filesystem operations use RwLocks to allow concurrent reads but exclusive writes
+//!
+//! - **Arc** (Atomic Reference Counting): Safe sharing of resources between kernel components:
+//!   - Filesystem implementations are shared between multiple mount points
+//!   - Device instances can be referenced by multiple drivers
+//!   - System-wide singletons are managed safely with interior mutability patterns
+//!
+//! - **Memory Safety**: Prevention of use-after-free, double-free, and data races at compile time:
+//!   - The type system ensures resources are not used after being freed
+//!   - Mutable references are exclusive, preventing data races
+//!   - Lifetimes ensure references do not outlive the data they point to
+//!
+//! - **Trait-based Abstractions**: Common interfaces for device drivers and subsystems enabling modularity:
+//!   - The `BlockDevice` trait defines operations for block-based storage
+//!   - The `SerialDevice` trait provides a common interface for UART and console devices
+//!   - The `FileSystem` and `FileOperations` traits allow different filesystem implementations
+//!
+//! ## Virtual File System
+//!
+//! Scarlet implements a flexible Virtual File System (VFS) layer that provides:
+//!
+//! - **Filesystem Abstraction**: Common interface for multiple filesystem implementations through the `VirtualFileSystem` trait
+//!   hierarchy, enabling support for various filesystems like FAT32, ext2, or custom implementations
+//!
+//! - **Mount Point Management**: Support for mounting filesystems at different locations with unified path handling:
+//!   - Hierarchical mount points with proper path resolution
+//!   - Support for mounting the same filesystem at multiple locations
+//!   - Automatic mapping between absolute paths and filesystem-relative paths
+//!
+//! - **Path Resolution**: Normalization and resolution of file paths across different mounted filesystems:
+//!   - Handling of relative paths (with `./` and `../`)
+//!   - Support for absolute paths from root
+//!   - Finding the most specific mount point for any given path
+//!
+//! - **File Operations**: Standard operations with resource safety and RAII:
+//!   - Files automatically close when dropped
+//!   - Buffered read/write operations
+//!   - Seek operations for random file access
+//!   - Directory listing and manipulation
+//!
+//! - **Block Device Interface**: Abstraction layer for interacting with storage devices:
+//!   - Request queue for efficient I/O operations
+//!   - Support for asynchronous operations
+//!   - Error handling and recovery mechanisms
 //!
 //! ## Boot Process
 //!
@@ -21,26 +89,49 @@
 //! - `start_ap`: Entry point for application processors (APs) in multicore systems
 //!
 //! The initialization sequence for the bootstrap processor includes:
-//! 1. Architecture-specific initialization
-//! 2. Heap initialization
-//! 3. Early driver initialization
-//! 4. Virtual memory setup
-//! 5. Device population and initialization
-//! 6. Timer initialization
-//! 7. Scheduler initialization and task creation
-//! 8. Task scheduling
+//! 1. `.bss` section initialization (zeroing)
+//! 2. Architecture-specific initialization (setting up CPU features)
+//! 3. FDT (Flattened Device Tree) parsing for hardware discovery
+//! 4. Heap initialization enabling dynamic memory allocation
+//! 5. Early driver initialization via the initcall mechanism
+//! 6. Driver registration and initialization (serial, block devices, etc.)
+//! 7. Virtual memory setup with kernel page tables
+//! 8. Device discovery and initialization based on FDT data
+//! 9. Timer initialization for scheduling and timeouts
+//! 10. Scheduler initialization and initial task creation
+//! 11. Task scheduling and transition to the kernel main loop
+//!
+//! ## Current Architecture Implementation
+//!
+//! The current RISC-V implementation includes:
+//! - Boot sequence utilizing SBI (Supervisor Binary Interface) for hardware interaction
+//! - Support for both M-mode and S-mode operation
+//! - Interrupt handling through trap frames with proper context saving/restoring
+//! - Memory management with Sv39/Sv48 virtual memory addressing
+//! - Architecture-specific timer implementation
+//! - Support for multiple privilege levels
+//! - Instruction abstractions for atomic operations and privileged instructions
+//!
+//! ## Testing Framework
+//!
+//! Scarlet includes a custom testing framework that allows:
+//! - Unit tests for kernel components
+//! - Integration tests for subsystem interaction
+//! - Boot tests to verify initialization sequence
+//! - Hardware-in-the-loop tests when running on real or emulated hardware
 //!
 //! ## Development Notes
 //!
 //! The kernel uses Rust's advanced features like naked functions and custom test frameworks.
 //! In non-test builds, a simple panic handler is provided that prints the panic information 
-//! and enters an infinite loop.
+//! and enters an infinite loop. The kernel makes extensive use of Rust's unsafe code where
+//! necessary for hardware interaction while maintaining safety guarantees through careful
+//! abstraction boundaries.
 
 #![no_std]
 #![no_main]
 #![feature(naked_functions)]
 #![feature(used_with_arg)]
-
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
