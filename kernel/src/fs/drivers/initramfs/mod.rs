@@ -2,7 +2,7 @@ use alloc::{boxed::Box, format, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
 use crate::fs::{
-    Directory, DirectoryEntry, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemRef, FileType, Result, VirtualFileSystem
+    Directory, DirectoryEntry, FileMetadata, FileOperations, FileSystem, FileSystemError, FileSystemErrorKind, FileType, Result
 };
 
 /// Structure representing an Initramfs entry
