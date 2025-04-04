@@ -2,7 +2,7 @@
 
 <div align="center">
   
-**A minimal, modular operating system written in Rust**
+**A minimal operating system kernel written in Rust**
 
 [![Version](https://img.shields.io/badge/version-0.7.0-blue.svg)](https://github.com/yourusername/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -12,7 +12,7 @@
 
 ## Overview
 
-Scarlet is a bare metal, minimalist operating system kernel written in Rust. The project aims to provide a clean, modular design with strong safety guarantees through Rust's ownership model.
+Scarlet is a bare metal, minimalist operating system kernel written in Rust. The project aims to provide a clean design with strong safety guarantees through Rust's ownership model. While the current implementation focuses on essential kernel functionality, our long-term vision is to develop a fully modular operating system with dynamic component loading and unloading capabilities.
 
 ### Core Features
 
@@ -20,9 +20,10 @@ Scarlet is a bare metal, minimalist operating system kernel written in Rust. The
 - **Architecture Support**: Currently implemented for RISC-V 64-bit with plans for additional architectures
 - **Memory Management**: Custom heap allocator with virtual memory support
 - **Task Scheduling**: Simple but effective task scheduler
-- **Driver Framework**: Modular driver architecture with device discovery
+- **Driver Framework**: Organized device driver architecture with device discovery
 - **Filesystem Support**: Basic filesystem abstractions
 - **Hardware Abstraction**: Clean architecture-specific abstractions for multi-architecture support
+- **Modularity Vision**: Working toward a fully modular OS design where components can be dynamically loaded and unloaded
 
 ## Building and Running
 

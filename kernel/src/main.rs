@@ -1,8 +1,12 @@
 //! # Scarlet Kernel
 //!
 //! The Scarlet Kernel is a bare metal, `no_std` operating system kernel designed with architecture 
-//! flexibility in mind. It aims to provide a clean, modular design with strong safety guarantees 
+//! flexibility in mind. It aims to provide a clean design with strong safety guarantees 
 //! through Rust's ownership model.
+//!
+//! While the current implementation establishes fundamental kernel functionality, our long-term
+//! vision is to develop a fully modular operating system where components can be dynamically
+//! loaded and unloaded at runtime, similar to loadable kernel modules in other systems.
 //!
 //! ## Core Features
 //!
@@ -14,12 +18,13 @@
 //!   mapping, page tables, and memory protection
 //! - **Task Scheduling**: Cooperative and preemptive multitasking with priority-based scheduling and support for
 //!   kernel and user tasks
-//! - **Driver Framework**: Modular driver architecture with device discovery through FDT (Flattened Device Tree),
+//! - **Driver Framework**: Organized driver architecture with device discovery through FDT (Flattened Device Tree),
 //!   supporting hot-pluggable and fixed devices
 //! - **Filesystem Support**: Flexible Virtual File System (VFS) layer with support for mounting multiple filesystem
 //!   implementations and unified path handling
 //! - **Hardware Abstraction**: Clean architecture-specific abstractions that isolate architecture-dependent code
 //!   to facilitate porting to different architectures
+//! - **Future Modularity**: Working toward a fully modular design with runtime-loadable kernel components
 //!
 //! ## Resource Management with Rust's Ownership Model
 //!
