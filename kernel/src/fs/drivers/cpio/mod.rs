@@ -2,7 +2,7 @@ use alloc::{boxed::Box, format, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
 use crate::{fs::{
-    Directory, DirectoryEntry, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, Result, VirtualFileSystem
+    Directory, DirectoryEntry, FileHandle, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, Result, VirtualFileSystem
 }, vm::vmem::MemoryArea};
 
 /// Structure representing an Initramfs entry
@@ -301,7 +301,7 @@ struct CpiofsFileHandle {
     position: usize,
 }
 
-impl crate::fs::FileHandle for CpiofsFileHandle {
+impl FileHandle for CpiofsFileHandle {
     fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
         let available = self.content.len() - self.position;
         let to_read = buffer.len().min(available);
@@ -376,13 +376,8 @@ impl FileSystemDriver for CpioDriver {
     }
     
     /// This filesystem only supports creation from memory
-    fn supports_memory_fs(&self) -> bool {
-        true
-    }
-    
-    /// CPIO doesn't support block devices
-    fn supports_block_fs(&self) -> bool {
-        false
+    fn filesystem_type(&self) -> FileSystemType {
+        FileSystemType::Memory
     }
     
     /// Create a file system from memory area

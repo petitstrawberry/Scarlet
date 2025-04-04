@@ -664,8 +664,8 @@ impl FileSystemDriver for TestFileSystemDriver {
         "testfs"
     }
     
-    fn supports_block_fs(&self) -> bool {
-        true
+    fn filesystem_type(&self) -> FileSystemType {
+        FileSystemType::Block  // このドライバーはブロックデバイスベースのファイルシステム
     }
     
     fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {

@@ -394,6 +394,19 @@ pub trait VirtualFileSystem: FileSystem + FileOperations {}
 // Automatically implement VirtualFileSystem if both FileSystem and FileOperations are implemented
 impl<T: FileSystem + FileOperations> VirtualFileSystem for T {}
 
+/// Enum defining the type of file system
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FileSystemType {
+    /// File system that operates on block devices (disk-based)
+    Block,
+    /// File system that operates on memory regions (RAM-based)
+    Memory,
+    /// File system that can operate on both block devices and memory regions
+    Hybrid,
+    /// Special or virtual file systems (e.g., procfs, sysfs)
+    Virtual,
+}
+
 /// Trait for file system drivers
 /// 
 /// This trait is used to create file systems from block devices or memory areas.
@@ -403,29 +416,36 @@ pub trait FileSystemDriver: Send + Sync {
     /// Get the name of the file system driver
     fn name(&self) -> &'static str;
     
-    /// Check if this filesystem supports creation from memory areas
-    fn supports_memory_fs(&self) -> bool {
-        false
-    }
-    
-    /// Check if this filesystem supports creation from block devices
-    fn supports_block_fs(&self) -> bool {
-        false
-    }
+    /// Get the type of the file system
+    fn filesystem_type(&self) -> FileSystemType;
     
     /// Create a file system from a block device
     fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
+        if self.filesystem_type() == FileSystemType::Memory || self.filesystem_type() == FileSystemType::Virtual {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "This file system driver does not support block device-based creation".to_string(),
+            });
+        }
+        
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotSupported,
-            message: "This file system driver does not support block device-based creation".to_string(),
+            message: "create_from_block() not implemented for this file system driver".to_string(),
         })
     }
     
     /// Create a file system from a memory area
     fn create_from_memory(&self, memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
+        if self.filesystem_type() == FileSystemType::Block {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "This file system driver does not support memory-based creation".to_string(),
+            });
+        }
+        
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotSupported,
-            message: "This file system driver does not support memory-based creation".to_string(),
+            message: "create_from_memory() not implemented for this file system driver".to_string(),
         })
     }
 }
@@ -521,7 +541,7 @@ impl VfsManager {
                 message: format!("File system driver '{}' not found", driver_name),
             })?;
             
-            if !driver.supports_block_fs() {
+            if driver.filesystem_type() == FileSystemType::Memory || driver.filesystem_type() == FileSystemType::Virtual {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::NotSupported,
                     message: format!("File system driver '{}' does not support block devices", driver_name),
@@ -563,7 +583,7 @@ impl VfsManager {
                 message: format!("File system driver '{}' not found", driver_name),
             })?;
             
-            if !driver.supports_memory_fs() {
+            if driver.filesystem_type() == FileSystemType::Block {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::NotSupported,
                     message: format!("File system driver '{}' does not support memory-based filesystems", driver_name),
