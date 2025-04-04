@@ -368,9 +368,9 @@ impl FileHandle for CpiofsFileHandle {
 /// Driver for CPIO-format filesystems (initramfs)
 /// 
 /// This driver creates filesystems from memory areas only.
-pub struct CpioDriver;
+pub struct CpiofsDriver;
 
-impl FileSystemDriver for CpioDriver {
+impl FileSystemDriver for CpiofsDriver {
     fn name(&self) -> &'static str {
         "cpiofs"
     }
