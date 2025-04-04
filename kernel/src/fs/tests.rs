@@ -1255,7 +1255,7 @@ fn test_filesystem_driver_and_create_register_fs() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
 
     // Use create_and_register_fs to generate and register a file system
-    let fs_id = manager.create_and_register_fs("testfs", device, 512).unwrap();
+    let fs_id = manager.create_and_register_block_fs("testfs", device, 512).unwrap();
 
     // Verify that the file system is correctly registered
     assert_eq!(fs_id, 0); // The first registration should have ID 0

@@ -536,7 +536,7 @@ impl VfsManager {
         *next_id - 1
     }
 
-    /// Create and register a file system by specifying the driver name
+    /// Create and register a block-based file system by specifying the driver name
     /// 
     /// # Arguments
     /// 
@@ -552,7 +552,7 @@ impl VfsManager {
     /// 
     /// * `FileSystemError` - If the driver is not found or if the file system cannot be created
     /// 
-    pub fn create_and_register_fs(
+    pub fn create_and_register_block_fs(
         &mut self,
         driver_name: &str,
         block_device: Box<dyn BlockDevice>,
