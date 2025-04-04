@@ -64,7 +64,7 @@ impl MemoryArea {
     /// Creates a new memory area from a pointer and size
     pub fn from_ptr(ptr: *const u8, size: usize) -> Self {
         let start = ptr as usize;
-        let end = start + size - 1;
+        let end = if size > 0 { start + size - 1 } else { start };
         Self { start, end }
     }
     
