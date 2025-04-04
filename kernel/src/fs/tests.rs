@@ -15,8 +15,8 @@ struct MockBlockDevice {
     id: usize,
     disk_name: &'static str,
     disk_size: usize,
-    data: Mutex<Vec<Vec<u8>>>,  // Changed RefCell to Mutex
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,  // Changed RefCell to Mutex
+    data: Mutex<Vec<Vec<u8>>>,
+    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
 }
 
 impl MockBlockDevice {
@@ -46,7 +46,7 @@ impl Device for MockBlockDevice {
     }
 
     fn id(&self) -> usize {
-        0 // Return an appropriate ID
+        self.id
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -68,7 +68,6 @@ impl BlockDevice for MockBlockDevice {
         self.disk_size
     }
     
-    // Update method implementation
     fn enqueue_request(&mut self, request: Box<BlockIORequest>) {
         self.request_queue.lock().push(request);
     }
@@ -664,9 +663,13 @@ impl FileSystemDriver for TestFileSystemDriver {
     fn name(&self) -> &'static str {
         "testfs"
     }
-
-    fn create(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Box<dyn VirtualFileSystem> {
-        Box::new(TestFileSystem::new(0, "testfs", block_device, block_size))
+    
+    fn supports_block_fs(&self) -> bool {
+        true
+    }
+    
+    fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
+        Ok(Box::new(TestFileSystem::new(0, "testfs", block_device, block_size)))
     }
 }
 

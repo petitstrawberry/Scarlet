@@ -55,6 +55,35 @@ pub struct MemoryArea {
     pub end: usize,
 }
 
+impl MemoryArea {
+    /// Creates a new memory area with the given start and end addresses
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+    
+    /// Creates a new memory area from a pointer and size
+    pub fn from_ptr(ptr: *const u8, size: usize) -> Self {
+        let start = ptr as usize;
+        let end = start + size - 1;
+        Self { start, end }
+    }
+    
+    /// Returns the size of the memory area in bytes
+    pub fn size(&self) -> usize {
+        self.end - self.start + 1
+    }
+    
+    /// Returns a slice reference to the memory area
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.start as *const u8, self.size()) }
+    }
+    
+    /// Returns a mutable slice reference to the memory area
+    pub fn as_slice_mut(&self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.start as *mut u8, self.size()) }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum VirtualMemoryPermission {
     Read = 0x01,

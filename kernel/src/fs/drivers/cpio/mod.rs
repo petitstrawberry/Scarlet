@@ -1,9 +1,9 @@
 use alloc::{boxed::Box, format, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
-use crate::{device::block::BlockDevice, fs::{
+use crate::{fs::{
     Directory, DirectoryEntry, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, Result, VirtualFileSystem
-}};
+}, vm::vmem::MemoryArea};
 
 /// Structure representing an Initramfs entry
 #[derive(Debug, Clone)]
@@ -317,11 +317,32 @@ impl crate::fs::FileHandle for CpiofsFileHandle {
         })
     }
 
-    fn seek(&mut self, _whence: crate::fs::SeekFrom) -> Result<u64> {
-        Err(FileSystemError {
-            kind: FileSystemErrorKind::NotSupported,
-            message: "Seek is not supported for Initramfs".to_string(),
-        })
+    fn seek(&mut self, whence: crate::fs::SeekFrom) -> Result<u64> {
+        let new_pos = match whence {
+            crate::fs::SeekFrom::Start(offset) => offset as usize,
+            crate::fs::SeekFrom::Current(offset) => {
+                if offset < 0 && self.position < offset.abs() as usize {
+                    0
+                } else if offset < 0 {
+                    self.position - offset.abs() as usize
+                } else {
+                    self.position + offset as usize
+                }
+            },
+            crate::fs::SeekFrom::End(offset) => {
+                let end = self.content.len();
+                if offset < 0 && end < offset.abs() as usize {
+                    0
+                } else if offset < 0 {
+                    end - offset.abs() as usize
+                } else {
+                    end + offset as usize
+                }
+            },
+        };
+        
+        self.position = new_pos;
+        Ok(self.position as u64)
     }
 
     fn close(&mut self) -> Result<()> {
@@ -344,21 +365,40 @@ impl crate::fs::FileHandle for CpiofsFileHandle {
     }
 }
 
-// struct CpiofsDriver;
+/// Driver for CPIO-format filesystems (initramfs)
+/// 
+/// This driver creates filesystems from memory areas only.
+pub struct CpioDriver;
 
-// impl FileSystemDriver for CpiofsDriver {
-//     fn name(&self) -> &'static str {
-//         "initramfs"
-//     }
-
-//     fn create(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Box<dyn VirtualFileSystem> {
-
-//         let id = 0;
-//         let name = "initramfs";
-//         let cpio_data = vec![];
-//         Box::new(Cpiofs::new(id, name, cpio_data))
-//     }
-// }
+impl FileSystemDriver for CpioDriver {
+    fn name(&self) -> &'static str {
+        "cpiofs"
+    }
+    
+    /// This filesystem only supports creation from memory
+    fn supports_memory_fs(&self) -> bool {
+        true
+    }
+    
+    /// CPIO doesn't support block devices
+    fn supports_block_fs(&self) -> bool {
+        false
+    }
+    
+    /// Create a file system from memory area
+    fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
+        let data = memory_area.as_slice();
+        
+        // Create the Cpiofs from the memory data
+        match Cpiofs::new(0, "cpiofs", data) {
+            Ok(cpio_fs) => Ok(Box::new(cpio_fs)),
+            Err(err) => Err(FileSystemError {
+                kind: FileSystemErrorKind::InvalidData,
+                message: format!("Failed to create CPIO filesystem from memory: {}", err.message),
+            })
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

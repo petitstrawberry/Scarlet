@@ -396,14 +396,38 @@ impl<T: FileSystem + FileOperations> VirtualFileSystem for T {}
 
 /// Trait for file system drivers
 /// 
-/// This trait is used to create file systems from block devices.
+/// This trait is used to create file systems from block devices or memory areas.
 /// It is not intended to be used directly by the VFS manager.
-/// Instead, the VFS manager will use the `create` method to create a file system
-/// from a block device.
-/// 
+/// Instead, the VFS manager will use the appropriate creation method based on the source.
 pub trait FileSystemDriver: Send + Sync {
+    /// Get the name of the file system driver
     fn name(&self) -> &'static str;
-    fn create(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Box<dyn VirtualFileSystem>;
+    
+    /// Check if this filesystem supports creation from memory areas
+    fn supports_memory_fs(&self) -> bool {
+        false
+    }
+    
+    /// Check if this filesystem supports creation from block devices
+    fn supports_block_fs(&self) -> bool {
+        false
+    }
+    
+    /// Create a file system from a block device
+    fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "This file system driver does not support block device-based creation".to_string(),
+        })
+    }
+    
+    /// Create a file system from a memory area
+    fn create_from_memory(&self, memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "This file system driver does not support memory-based creation".to_string(),
+        })
+    }
 }
 
 pub type FileSystemRef = Arc<RwLock<Box<dyn VirtualFileSystem>>>;
@@ -468,7 +492,6 @@ impl VfsManager {
 
     /// Create and register a file system by specifying the driver name
     /// 
-    /// 
     /// # Arguments
     /// 
     /// * `driver_name` - The name of the file system driver
@@ -495,9 +518,59 @@ impl VfsManager {
             let binding = self.drivers.read();
             let driver = binding.get(driver_name).ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: format!("File system driver '{}' not found", driver_name), // Updated
+                message: format!("File system driver '{}' not found", driver_name),
             })?;
-            driver.create(block_device, block_size)
+            
+            if !driver.supports_block_fs() {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: format!("File system driver '{}' does not support block devices", driver_name),
+                });
+            }
+            
+            driver.create_from_block(block_device, block_size)?
+        };
+
+        Ok(self.register_fs(fs))
+    }
+
+    /// Create and register a memory-based file system by specifying the driver name
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The name of the file system driver
+    /// * `memory_area` - The memory area containing the filesystem data
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<usize>` - The ID of the registered file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or if the file system cannot be created
+    /// 
+    pub fn create_and_register_memory_fs(
+        &mut self,
+        driver_name: &str,
+        memory_area: &crate::vm::vmem::MemoryArea,
+    ) -> Result<usize> {
+        
+        // Create the file system using the driver
+        let fs = {
+            let binding = self.drivers.read();
+            let driver = binding.get(driver_name).ok_or(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: format!("File system driver '{}' not found", driver_name),
+            })?;
+            
+            if !driver.supports_memory_fs() {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: format!("File system driver '{}' does not support memory-based filesystems", driver_name),
+                });
+            }
+            
+            driver.create_from_memory(memory_area)?
         };
 
         Ok(self.register_fs(fs))
