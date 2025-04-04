@@ -55,6 +55,55 @@ pub struct MemoryArea {
     pub end: usize,
 }
 
+impl MemoryArea {
+    /// Creates a new memory area with the given start and end addresses
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+    
+    /// Creates a new memory area from a pointer and size
+    pub fn from_ptr(ptr: *const u8, size: usize) -> Self {
+        let start = ptr as usize;
+        let end = if size > 0 { start + size - 1 } else { start };
+        Self { start, end }
+    }
+    
+    /// Returns the size of the memory area in bytes
+    pub fn size(&self) -> usize {
+        self.end - self.start + 1
+    }
+    
+    /// Returns a slice reference to the memory area
+    /// 
+    /// # Safety
+    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
+    /// If not, undefined behavior may occur.
+    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    /// 
+    /// # Returns
+    /// 
+    /// A slice reference to the memory area
+    ///
+    pub unsafe fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.start as *const u8, self.size()) }
+    }
+    
+    /// Returns a mutable slice reference to the memory area
+    /// 
+    /// # Safety
+    /// This function assumes that the start and end of MemoryArea point to valid memory ranges.
+    /// If not, undefined behavior may occur.
+    /// Therefore, make sure that MemoryArea points to a valid range before using this function.
+    ///
+    /// # Returns
+    ///
+    /// A mutable slice reference to the memory area
+    ///
+    pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.start as *mut u8, self.size()) }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum VirtualMemoryPermission {
     Read = 0x01,
