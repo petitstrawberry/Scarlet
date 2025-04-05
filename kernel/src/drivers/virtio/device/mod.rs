@@ -658,7 +658,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn remove_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
+fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     Ok(())
 }
 
