@@ -43,6 +43,7 @@ use fdt::{Fdt, FdtError};
 use crate::early_println;
 use crate::early_print;
 use crate::mem::kmalloc;
+use crate::vm::vmem::MemoryArea;
 
 #[unsafe(link_section = ".data")]
 static mut FDT_ADDR: usize = 0;
@@ -156,6 +157,125 @@ impl<'a> FdtManager<'a> {
                 panic!("Failed to relocate FDT: {:?}", e);
             }
         }
+    }
+
+    /// Get the initramfs memory area from the device tree
+    ///
+    /// This function searches for the initramfs memory region in the device tree.
+    /// It looks for the initrd-start/end or linux,initrd-start/end properties
+    /// in the /chosen node.
+    ///
+    /// # Returns
+    /// Option<MemoryArea>: If the initramfs region is found, returns Some(MemoryArea),
+    /// otherwise returns None.
+    pub fn get_initramfs(&self) -> Option<MemoryArea> {
+        let fdt = self.get_fdt()?;
+        
+        // Find the /chosen node which contains initramfs information
+        let chosen_node = fdt.find_node("/chosen")?;
+        
+        // Try to find initramfs start address
+        // First check for "linux,initrd-start" property
+        let start_addr = if let Some(prop) = chosen_node.property("linux,initrd-start") {
+            if prop.value.len() == 8 {
+                let val = u64::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                    prop.value[4],
+                    prop.value[5],
+                    prop.value[6],
+                    prop.value[7],
+                ]);
+                Some(val as usize)
+            } else if prop.value.len() == 4 {
+                let val = u32::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                ]);
+                Some(val as usize)
+            } else {
+                None
+            }
+        // Then check for "initrd-start" property
+        } else if let Some(prop) = chosen_node.property("initrd-start") {
+            if prop.value.len() >= 4 {
+                let val = u32::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                ]);
+                Some(val as usize)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        // Try to find initramfs end address
+        // First check for "linux,initrd-end" property
+        let end_addr = if let Some(prop) = chosen_node.property("linux,initrd-end") {
+            if prop.value.len() == 8 {
+                let val = u64::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                    prop.value[4],
+                    prop.value[5],
+                    prop.value[6],
+                    prop.value[7],
+                ]);
+                Some(val as usize)
+            } else if prop.value.len() == 4 {
+                let val = u32::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                ]);
+                Some(val as usize)
+            } else {
+                None
+            }
+        // Then check for "initrd-end" property
+        } else if let Some(prop) = chosen_node.property("initrd-end") {
+            if prop.value.len() >= 4 {
+                let val = u32::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                ]);
+                Some(val as usize)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // If we have both start and end addresses, create a memory area
+        if let (Some(start), Some(end)) = (start_addr, end_addr) {
+            if end <= start {
+                return None;
+            }
+            
+            let size = end - start;
+            early_println!("[InitRamFS] Found initramfs: start={:#x}, end={:#x}, size={} bytes", 
+                start, end, size);
+            
+            let memory_area = MemoryArea::new(start, end - 1);
+            return Some(memory_area);
+        }
+        
+        early_println!("[InitRamFS] No initramfs found in device tree");
+        None
     }
 }
 

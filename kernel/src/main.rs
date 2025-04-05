@@ -213,6 +213,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     relocate_fdt();
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
     kernel_vm_init();
+    /* After this point, we can use the heap and virtual memory */
+    /* We will also be restricted to the kernel address space */
+
     /* Initialize (populate) devices */
     println!("[Scarlet Kernel] Initializing devices...");
     DeviceManager::get_mut_manager().populate_devices();

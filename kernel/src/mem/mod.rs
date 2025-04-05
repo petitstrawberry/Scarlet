@@ -36,8 +36,8 @@ pub fn kmalloc(size: usize) -> *mut u8 {
     Box::into_raw(vec![0u8; size].into_boxed_slice()) as *mut u8
 }
 
-pub fn kfree(ptr: *mut u8) {
+pub fn kfree(ptr: *mut u8, size: usize) {
     unsafe {
-        let _ = Box::from_raw(ptr);
+        let _ = Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(ptr, size));
     }
 }
