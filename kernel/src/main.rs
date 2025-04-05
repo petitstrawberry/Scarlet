@@ -112,7 +112,7 @@
 //! - Boot sequence utilizing SBI (Supervisor Binary Interface) for hardware interaction
 //! - Support for S-mode operation
 //! - Interrupt handling through trap frames with proper context saving/restoring
-//! - Memory management with Sv39/Sv48 virtual memory addressing
+//! - Memory management with Sv48 virtual memory addressing
 //! - Architecture-specific timer implementation
 //! - Support for multiple privilege levels
 //! - Instruction abstractions for atomic operations and privileged instructions
