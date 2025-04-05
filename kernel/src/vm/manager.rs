@@ -160,6 +160,29 @@ impl VirtualMemoryManager {
             None
         }
     }
+
+    /// Translate a virtual address to physical address
+    /// 
+    /// # Arguments
+    /// 
+    /// * `vaddr` - The virtual address to translate
+    /// 
+    /// # Returns
+    /// 
+    /// The translated physical address. Returns None if no mapping exists for the address
+    pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
+        // Search memory mapping
+        for map in self.memmap.iter() {
+            if vaddr >= map.vmarea.start && vaddr <= map.vmarea.end {
+                // Calculate offset
+                let offset = vaddr - map.vmarea.start;
+                // Calculate physical address
+                let paddr = map.pmarea.start + offset;
+                return Some(paddr);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
