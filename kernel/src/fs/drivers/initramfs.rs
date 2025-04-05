@@ -124,8 +124,17 @@ fn late_init_initramfs() {
     let initramfs_ptr = INITRAMFS_AREA.load(Ordering::SeqCst);
     if !initramfs_ptr.is_null() {
         let initramfs = unsafe { &*initramfs_ptr };
+        
+        // Mount the initramfs
         if let Err(e) = mount_initramfs(initramfs.clone()) {
             early_println!("[InitRamFS] Warning: Could not mount initramfs: {:?}", e);
+        } else {
+            // Successfully mounted, free the memory
+            early_println!("[InitRamFS] Mounted successfully, freeing initramfs memory");
+            crate::mem::kfree(initramfs.start as *mut u8, initramfs.size());
+            
+            // Set the pointer to null to indicate it's been freed
+            INITRAMFS_AREA.store(core::ptr::null_mut(), Ordering::SeqCst);
         }
     } else {
         early_println!("[InitRamFS] Warning: Initramfs relocation failed, cannot mount");
