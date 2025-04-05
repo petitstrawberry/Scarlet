@@ -177,7 +177,19 @@ impl<'a> FdtManager<'a> {
         // Try to find initramfs start address
         // First check for "linux,initrd-start" property
         let start_addr = if let Some(prop) = chosen_node.property("linux,initrd-start") {
-            if prop.value.len() >= 4 {
+            if prop.value.len() == 8 {
+                let val = u64::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                    prop.value[4],
+                    prop.value[5],
+                    prop.value[6],
+                    prop.value[7],
+                ]);
+                Some(val as usize)
+            } else if prop.value.len() == 4 {
                 let val = u32::from_be_bytes([
                     prop.value[0],
                     prop.value[1],
