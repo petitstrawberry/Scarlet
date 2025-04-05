@@ -231,7 +231,7 @@ impl<'a> File<'a> {
         self.seek(SeekFrom::Start(0))?;
         let read_bytes = self.read(&mut buffer)?;
         
-        if (read_bytes != size) {
+        if read_bytes != size {
             buffer.truncate(read_bytes);
         }
         
