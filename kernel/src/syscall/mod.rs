@@ -13,7 +13,7 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::task::syscall::{sys_brk, sys_sbrk};
+use crate::task::syscall::{sys_brk, sys_sbrk, sys_putchar};
 
 #[macro_use]
 mod macros;
@@ -24,4 +24,5 @@ syscall_table! {
     },
     Brk = 12 => sys_brk,
     Sbrk = 13 => sys_sbrk,
+    Putchar = 16 => sys_putchar,
 }

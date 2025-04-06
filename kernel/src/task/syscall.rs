@@ -1,4 +1,5 @@
 use crate::arch::Trapframe;
+use crate::{print, println};
 
 use super::mytask;
 
@@ -19,4 +20,14 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
         Ok(_) => brk,
         Err(_) => usize::MAX, /* -1 */
     }
+}
+
+pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
+    let c = trapframe.get_arg(0) as u32;
+    if let Some(ch) = char::from_u32(c) {
+        print!("{}", ch);
+    } else {
+        return usize::MAX; // -1
+    }
+    0
 }
