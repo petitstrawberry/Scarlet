@@ -27,7 +27,7 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
     if let Some(ch) = char::from_u32(c) {
         print!("{}", ch);
     } else {
-        println!("[sys_putchar] invalid char: {}", c);
+        return usize::MAX; // -1
     }
     0
 }
