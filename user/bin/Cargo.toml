@@ -8,4 +8,4 @@ name = "init"
 path = "src/init.rs"
 
 [dependencies]
-libscarlet = { path = "../lib" }
+scarlet_std = { path = "../lib" }
