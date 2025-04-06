@@ -13,7 +13,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             /* Execute SystemCall */
             match syscall_handler(trapframe) {
                 Ok(ret) => {
-                    trapframe.set_arg(0, ret);
+                    trapframe.set_return_value(ret);
                 }
                 Err(msg) => {
                     panic!("Syscall error: {}", msg);

@@ -73,12 +73,28 @@ impl Riscv64 {
 }
 
 impl Trapframe {
+    pub fn get_syscall_number(&self) -> usize {
+        self.regs.reg[17] // a7
+    }
+
+    pub fn set_syscall_number(&mut self, syscall_number: usize) {
+        self.regs.reg[17] = syscall_number; // a7
+    }
+
+    pub fn get_return_value(&self) -> usize {
+        self.regs.reg[10] // a0
+    }
+
+    pub fn set_return_value(&mut self, value: usize) {
+        self.regs.reg[10] = value; // a0
+    }
+
     pub fn get_arg(&self, index: usize) -> usize {
-        self.regs.reg[index]
+        self.regs.reg[index + 10] // a0 - a7
     }
 
     pub fn set_arg(&mut self, index: usize, value: usize) {
-        self.regs.reg[index] = value;
+        self.regs.reg[index + 10] = value; // a0 - a7
     }
 }
 
