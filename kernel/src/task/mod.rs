@@ -388,13 +388,13 @@ pub fn mytask() -> Option<&'static mut Task> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::String;
+    use alloc::string::ToString;
     use crate::println;
     use crate::print;
 
     #[test_case]
     fn test_set_brk() {
-        let mut task = super::new_user_task(String::from("Task0"), 0);
+        let mut task = super::new_user_task("Task0".to_string(), 0);
         task.init();
         assert_eq!(task.get_brk(), 0);
         task.set_brk(0x1000).unwrap();

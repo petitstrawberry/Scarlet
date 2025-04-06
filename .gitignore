@@ -1,1 +1,3 @@
-/target
+/kernel/target
+/user/lib/target
+/user/bin/target
