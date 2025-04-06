@@ -1,4 +1,5 @@
 use crate::syscall::{syscall1, Syscall};
+use core::fmt;
 
 // Functions related to character output
 /// Outputs a single character to the console
@@ -34,4 +35,39 @@ pub fn puts(s: &str) -> usize {
 // Wrapper function for character output
 pub fn sys_putchar(c: char) -> usize {
     syscall1(Syscall::Putchar, c as usize)
+}
+
+/// Internal function to handle formatted output
+pub fn _print(args: fmt::Arguments) {
+    use core::fmt::Write;
+    struct Console;
+
+    impl Write for Console {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            puts(s);
+            Ok(())
+        }
+    }
+
+    let _ = Console.write_fmt(args);
+}
+
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::io::_print(format_args!($($arg)*));
+    };
+}
+
+#[macro_export]
+macro_rules! println {
+    () => {
+        $crate::print!("\n");
+    };
+    ($fmt:expr) => {
+        $crate::print!(concat!($fmt, "\n"));
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        $crate::print!(concat!($fmt, "\n"), $($arg)*);
+    };
 }
