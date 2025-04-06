@@ -72,6 +72,8 @@ mod alloc_exports {
 mod arch;
 mod allocator;
 pub mod syscall;
+pub mod io;
+
 pub use core_exports::*;
 pub use alloc_exports::*;
 
