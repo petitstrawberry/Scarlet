@@ -73,3 +73,19 @@ description = "Run the kernel in debug mode"
 cwd = "kernel"
 command = "./tools/debug.sh"
 dependencies = ["build-kernel"]
+
+[tasks.doc]
+description = "Generate documentation for all components"
+dependencies = ["doc-kernel", "doc-userlib"]
+
+[tasks.doc-kernel]
+description = "Generate kernel documentation"
+cwd = "kernel"
+command = "cargo"
+args = ["doc", "--no-deps", "--document-private-items"]
+
+[tasks.doc-userlib]
+description = "Generate user library documentation"
+cwd = "user/lib"
+command = "cargo"
+args = ["doc", "--no-deps"]

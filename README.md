@@ -25,17 +25,22 @@ Scarlet is a bare metal, minimalist operating system kernel written in Rust. The
 - **Hardware Abstraction**: Clean architecture-specific abstractions for multi-architecture support
 - **Modularity Vision**: Working toward a fully modular OS design where components can be dynamically loaded and unloaded
 
-## Building and Running
 
-### Prerequisites
 
-- Rust with nightly features
+
+## Setting Up the Environment
+
+To build and run Scarlet, you need to have the following prerequisites installed:
+- Rust (nightly version)
+- `cargo-make` for build automation
+- `qemu` for emulation
 - Architecture-specific toolchain (currently RISC-V)
-- QEMU for emulation (optional for testing)
 
-### Using Docker (Recommended)
+Also, you can use docker to set up a development environment.
 
-The recommended way to build Scarlet is to use the Docker container provided in the repository:
+#### Using Docker (Recommended)
+
+You can set up a development environment using Docker. This is the recommended way to build and run Scarlet.
 
 ```bash
 # Build the Docker image
@@ -44,14 +49,16 @@ docker build -t scarlet-build .
 # Run the container
 docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-build
 
-# Inside container:
-cargo build
+# Inside the container, you can run the following commands:
+# Build the kernel
+cargo make build
 ```
 
-### Using cargo-make
+## Building and Running
 
-For better build management of the entire project (kernel and user programs), you can use `cargo-make`:
+To build and run Scarlet, you can use the following commands:
 
+```bash
 # Build all components (kernel, userlib, and user programs)
 cargo make build
 
@@ -63,32 +70,23 @@ cargo make build-userbin   # Build only the user programs
 # Clean all build artifacts
 cargo make clean
 
-# Run tests
-cargo make test
-
 # Run the kernel
 cargo make run
-
-# Run the kernel in debug mode
-cargo make debug
 ```
 
-### Running the Kernel
+### Debugging
 
-From the project root directory:
+To debug the kernel, you can use following command:
 
 ```bash
-# Build the kernel
-cargo build
-
-# Run the kernel 
-cargo run
+cargo make debug
 ```
+This will start the kernel in QEMU with GDB support. You can then attach a GDB session to the running kernel.
 
 ### Testing
 
 ```bash
-cargo test
+cargo make test
 ```
 
 ## Project Structure
@@ -111,6 +109,9 @@ kernel/src/           - Kernel source code
 ├── task/             - Task and process management
 ├── traits/           - Shared interfaces
 └── vm/               - Virtual memory management
+user
+├── bin/              - User programs
+└── lib/              - User library code
 ```
 
 ## Architecture Support
@@ -173,6 +174,17 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 For more detailed information about the Scarlet kernel, visit our documentation:
 [Scarlet Documentation](https://docs.scarlet.ichigo.dev/kernel)
+
+### Generating Documentation
+
+To generate the documentation, run:
+
+```bash
+# Generate documentation
+cargo make doc             # Generate docs for all components
+cargo make doc-kernel      # Generate kernel docs only
+cargo make doc-userlib     # Generate user library docs only
+```
 
 ## License
 
