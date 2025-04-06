@@ -157,6 +157,9 @@ pub mod syscall;
 pub mod device;
 pub mod fs;
 
+#[cfg(test)]
+pub mod test;
+
 extern crate alloc;
 use alloc::string::ToString;
 use device::{fdt::{init_fdt, relocate_fdt}, manager::DeviceManager};
@@ -171,8 +174,6 @@ use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss};
 use timer::get_kernel_timer;
 
-#[cfg(test)]
-pub mod test;
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
