@@ -19,7 +19,6 @@ impl Stimer {
 
     pub fn set_interval_us(&mut self, interval: u64) {
         let current = self.get_time();
-        
         self.set_next_event(current + (interval * RISCV_STIMER_FREQ) / 1000000);
     }
 

@@ -4,13 +4,8 @@ opt-level = 0
 [target.riscv64gc-unknown-none-elf]
 runner = "tools/run.sh"
 
-
 [build]
-target = "riscv64gc-unknown-none-elf"
-rustflags = [
-    "-C", "link-arg=-Tlds/qemu_virt.ld", 
-    "-C", "target-feature=-c"
-]
+target = "targets/riscv64gc-unknown-none-elf.json"
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]

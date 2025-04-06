@@ -157,24 +157,22 @@ pub mod syscall;
 pub mod device;
 pub mod fs;
 
-#[cfg(test)]
-pub mod test;
-
 extern crate alloc;
-use alloc::string::String;
+use alloc::string::ToString;
 use device::{fdt::{init_fdt, relocate_fdt}, manager::DeviceManager};
 use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
 
 use arch::init_arch;
-use library::std::print;
 use task::new_kernel_task;
 use vm::kernel_vm_init;
 use sched::scheduler::get_scheduler;
-use mem::allocator::init_heap;
+use mem::{allocator::init_heap, init_bss};
 use timer::get_kernel_timer;
 
+#[cfg(test)]
+pub mod test;
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -226,7 +224,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let scheduler = get_scheduler();
     /* Make idle task as initial task */
     println!("[Scarlet Kernel] Creating initial kernel task...");
-    let mut task = new_kernel_task(String::from("Initcall"), 0, initcall_task);
+    let mut task = new_kernel_task("Initcall".to_string(), 0, initcall_task);
     task.init();
     scheduler.add_task(task, cpu_id);
     println!("[Scarlet Kernel] Scheduler will start...");
@@ -240,18 +238,4 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
     loop {}
-}
-
-fn init_bss() {
-    unsafe extern "C" {
-        static mut __BSS_START: u8;
-        static mut __BSS_END: u8;
-    }
-
-    unsafe {
-        let bss_start = &raw mut __BSS_START as *mut u8;
-        let bss_end = &raw mut __BSS_END as *mut u8;
-        let bss_size = bss_end as usize - bss_start as usize;
-        core::ptr::write_bytes(bss_start, 0, bss_size);
-    }
 }

@@ -1,0 +1,7 @@
+[build]
+target = "../targets/riscv64gc-unknown-scarlet-elf.json"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+unstable-options = true
