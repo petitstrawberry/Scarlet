@@ -1,0 +1,75 @@
+[env]
+# Environment variable settings for build
+CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "user/lib", "user/bin"]
+
+[config]
+default_task = "build"
+skip_core_tasks = true
+
+[tasks.build]
+description = "Build all components"
+dependencies = ["build-kernel", "build-userlib", "build-userbin"]
+
+[tasks.build-kernel]
+description = "Build the kernel"
+cwd = "kernel"
+command = "cargo"
+args = ["build"]
+
+[tasks.build-userlib]
+description = "Build user libraries"
+cwd = "user/lib"
+command = "cargo"
+args = ["build"]
+
+[tasks.build-userbin]
+description = "Build user programs"
+cwd = "user/bin"
+command = "cargo"
+args = ["build"]
+dependencies = ["build-userlib"]
+
+[tasks.clean]
+description = "Clean all build artifacts"
+dependencies = ["clean-kernel", "clean-userlib", "clean-userbin"]
+
+[tasks.clean-kernel]
+description = "Clean kernel build artifacts"
+cwd = "kernel"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-userlib]
+description = "Clean user library build artifacts"
+cwd = "user/lib"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-userbin]
+description = "Clean user program build artifacts"
+cwd = "user/bin"
+command = "cargo"
+args = ["clean"]
+
+[tasks.test]
+description = "Run tests"
+dependencies = ["test-kernel"]
+
+[tasks.test-kernel]
+description = "Run kernel tests"
+cwd = "kernel"
+command = "cargo"
+args = ["test"]
+
+[tasks.run]
+description = "Run the kernel"
+cwd = "kernel"
+command = "cargo"
+args = ["run"]
+
+[tasks.debug]
+description = "Run the kernel in debug mode"
+cwd = "kernel"
+command = "./tools/debug.sh"
+dependencies = ["build-kernel"]

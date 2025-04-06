@@ -48,6 +48,31 @@ docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-build
 cargo build
 ```
 
+### Using cargo-make
+
+For better build management of the entire project (kernel and user programs), you can use `cargo-make`:
+
+# Build all components (kernel, userlib, and user programs)
+cargo make build
+
+# Build only specific components:
+cargo make build-kernel    # Build only the kernel
+cargo make build-userlib   # Build only the user library
+cargo make build-userbin   # Build only the user programs
+
+# Clean all build artifacts
+cargo make clean
+
+# Run tests
+cargo make test
+
+# Run the kernel
+cargo make run
+
+# Run the kernel in debug mode
+cargo make debug
+```
+
 ### Running the Kernel
 
 From the project root directory:
