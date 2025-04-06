@@ -1,0 +1,11 @@
+[package]
+name = "userprogram"
+version = "0.8.1"
+edition = "2024"
+
+[[bin]]
+name = "init"
+path = "src/init.rs"
+
+[dependencies]
+libscarlet = { path = "../lib" }

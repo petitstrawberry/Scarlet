@@ -1,0 +1,11 @@
+[package]
+name = "libscarlet"
+version = "0.8.1"
+edition = "2024"
+
+[lib]
+name = "scarlet"
+path = "src/lib.rs"
+
+[build]
+target = "../../targets/riscv64-unknown-scarlet.json" 
