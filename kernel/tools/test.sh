@@ -3,8 +3,6 @@
 # cd to the directory of the script
 cd "$(dirname "$0")"
 
-cd kernel
-
 cargo test --target riscv64gc-unknown-none-elf | tee /tmp/test_output.log
 
 # Check if the test failed
