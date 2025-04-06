@@ -1,7 +1,7 @@
 //! # Scarlet Standard Library
 //!
 //! This no_std library provides the core functionality for user-space programs 
-//! running on the Scarlet..
+//! running on the Scarlet.
 //!
 //! ## Features
 //!
@@ -10,15 +10,6 @@
 //! - Architecture-specific functionality
 //! - Custom memory allocator implementation
 //!
-//! ## Usage
-//!
-//! This library is automatically linked to user-space programs in the Scarlet.
-//! It provides the essential functionality needed to interact with the kernel
-//! and manage resources in a user-space environment.
-//!
-//! The library is deliberately minimal to ensure small binary sizes and fast
-//! compile times while still providing the necessary functionality for
-//! application development.
 #![no_std]
 #![no_main]
 #![feature(naked_functions)]
