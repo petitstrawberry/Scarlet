@@ -11,7 +11,9 @@ use core::fmt;
 /// * `c` - The character to output
 /// 
 /// # Returns
-/// Always returns 0 (success)
+/// 0: Success
+/// -1: Failure
+/// 
 pub fn putchar(c: char) -> usize {
     sys_putchar(c)
 }
@@ -26,7 +28,9 @@ pub fn putchar(c: char) -> usize {
 pub fn puts(s: &str) -> usize {
     let mut count = 0;
     for c in s.chars() {
-        putchar(c);
+        if putchar(c) != 0 {
+            return count;
+        }
         count += 1;
     }
     count
