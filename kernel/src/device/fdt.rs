@@ -277,6 +277,29 @@ impl<'a> FdtManager<'a> {
         early_println!("[InitRamFS] No initramfs found in device tree");
         None
     }
+
+    pub fn get_memory_size(&self) -> Option<usize> {
+        let fdt = self.get_fdt()?;
+        let memory_node = fdt.find_node("/memory")?;
+        
+        
+        let reg = memory_node.property("reg")?;
+        if reg.value.len() < 16 {
+            return None;
+        }
+        let size = u64::from_be_bytes([
+            reg.value[8],
+            reg.value[9],
+            reg.value[10],
+            reg.value[11],
+            reg.value[12],
+            reg.value[13],
+            reg.value[14],
+            reg.value[15],
+        ]);
+        Some(size as usize)
+    }
+
 }
 
 /// Initializes the FDT subsystem.

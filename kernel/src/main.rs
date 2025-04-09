@@ -162,7 +162,7 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::ToString;
-use device::{fdt::{init_fdt, relocate_fdt}, manager::DeviceManager};
+use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
 
 use core::panic::PanicInfo;
@@ -198,7 +198,13 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("[Scarlet Kernel] Initializing FDT...");
     init_fdt();
     early_println!("[Scarlet Kernel] Initializing heap...");
-    init_heap();
+    if let Some(size) = FdtManager::get_manager().get_memory_size() {
+        early_println!("[Scarlet Kernel] Memory size: {:#x}", size);
+        init_heap(size);
+    } else {
+        early_println!("[Scarlet Kernel] Memory size not found");
+    }
+    
     /* After this point, we can use the heap */
     early_initcall_call();
     driver_initcall_call();

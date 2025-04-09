@@ -8,14 +8,18 @@ pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 unsafe extern "C" {
     static __HEAP_START: usize;
-    static __HEAP_END: usize;
 }
 
-pub fn init_heap() {
-    let heap_start = unsafe { &__HEAP_START as *const usize as usize };
-    let heap_end = unsafe { &__HEAP_END as *const usize as usize };
+pub fn init_heap(size: usize) {
+    if size == 0 {
+        early_println!("Heap size is zero, skipping initialization.");
+        return;
+    }
 
-    let heap_size = heap_end - heap_start;
+    let heap_size = size;
+    let heap_start = unsafe { &__HEAP_START as *const usize as usize };
+    let heap_end = heap_start + heap_size - 1;
+
     unsafe {
         ALLOCATOR.init(heap_start, heap_size);
     }
