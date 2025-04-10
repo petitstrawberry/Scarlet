@@ -49,10 +49,10 @@ fn relocate_initramfs() -> Option<MemoryArea> {
         early_println!("[InitRamFS] Failed to allocate memory for initramfs");
         return None;
     }
-    
+
     // Copy the initramfs data
     unsafe {
-        ptr::copy_nonoverlapping(
+        ptr::copy(
             original_area.start as *const u8,
             new_ptr,
             size
