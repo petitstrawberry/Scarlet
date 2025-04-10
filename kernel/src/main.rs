@@ -163,15 +163,17 @@ pub mod test;
 extern crate alloc;
 use alloc::string::ToString;
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
+use environment::PAGE_SIZE;
 use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
+use slab_allocator_rs::MIN_HEAP_SIZE;
 
 use core::panic::PanicInfo;
 
 use arch::init_arch;
 use task::new_kernel_task;
-use vm::kernel_vm_init;
+use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
-use mem::{allocator::init_heap, init_bss};
+use mem::{allocator::init_heap, init_bss, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 
 
@@ -195,15 +197,26 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
+    /* Initializing FDT subsystem */
     early_println!("[Scarlet Kernel] Initializing FDT...");
     init_fdt();
+    /* Get DRAM area from FDT */
+    let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
+    early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
+    /* Calculate usable memory area */
+    let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
+    let usable_area = MemoryArea::new(kernel_end, dram_area.end);
+    early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
+    /* Relocate FDT to usable memory area */
+    println!("[Scarlet Kernel] Relocating FDT...");
+    let dest_ptr = usable_area.start as *mut u8;
+    let fdt_area = relocate_fdt(dest_ptr);
+    /* Initialize heap with the usable memory area after FDT */
     early_println!("[Scarlet Kernel] Initializing heap...");
-    if let Some(area) = FdtManager::get_manager().get_usable_memoryarea() {
-        init_heap(area);
-    } else {
-        early_println!("[Scarlet Kernel] Memory size not found");
-    }
-    
+    let heap_start = (fdt_area.end + 1 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let heap_size = ((usable_area.end - heap_start + 1) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
+    let heap_end = heap_start + heap_size - 1;
+    init_heap(MemoryArea::new(heap_start, heap_end));
     /* After this point, we can use the heap */
     early_initcall_call();
     driver_initcall_call();
@@ -212,11 +225,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     #[cfg(test)]
     test_main();
 
-    /* Relocate FDT */
-    println!("[Scarlet Kernel] Relocating FDT...");
-    relocate_fdt();
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    kernel_vm_init();
+    let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
+    kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 

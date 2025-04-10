@@ -40,5 +40,4 @@ SECTIONS {
       __BSS_END = .;
     } > RAM
     __KERNEL_SPACE_END = .;
-    __HEAP_START = .;
 }

@@ -72,3 +72,8 @@ pub fn init_bss() {
         core::ptr::write_bytes(bss_start, 0, bss_size);
     }
 }
+
+unsafe extern "C" {
+    pub static __KERNEL_SPACE_START: usize;
+    pub static __KERNEL_SPACE_END: usize;
+}

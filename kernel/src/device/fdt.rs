@@ -39,12 +39,9 @@ use core::panic;
 use core::result::Result;
 
 use fdt::{Fdt, FdtError};
-use slab_allocator_rs::MIN_HEAP_SIZE;
 
 use crate::early_println;
 use crate::early_print;
-use crate::environment::PAGE_SIZE;
-use crate::mem::kmalloc;
 use crate::vm::vmem::MemoryArea;
 
 #[unsafe(link_section = ".data")]
@@ -280,11 +277,7 @@ impl<'a> FdtManager<'a> {
         None
     }
 
-    pub fn get_usable_memoryarea(&self) -> Option<MemoryArea> {
-        unsafe extern "C" {
-            static __HEAP_START: usize;
-        }
-
+    pub fn get_dram_memoryarea(&self) -> Option<MemoryArea> {
         let fdt = self.get_fdt()?;
         let memory_node = fdt.find_node("/memory")?;
         
@@ -303,7 +296,7 @@ impl<'a> FdtManager<'a> {
             reg.value[6],
             reg.value[7],
         ]);
-        let start = unsafe { &__HEAP_START as *const usize as usize };
+        let start = reg_start as usize;
         let size = u64::from_be_bytes([
             reg.value[8],
             reg.value[9],
@@ -314,7 +307,6 @@ impl<'a> FdtManager<'a> {
             reg.value[14],
             reg.value[15],
         ]) as usize;
-        let size = ((size - (start - reg_start as usize)) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
         Some(
             MemoryArea::new(start as usize, start + size - 1) // end is inclusive
         )
@@ -353,15 +345,12 @@ pub fn init_fdt() {
 /// This function will panic if the FDT has already been relocated or if
 /// the memory allocation fails.
 /// 
-pub fn relocate_fdt() {
+pub fn relocate_fdt(dest_ptr: *mut u8) -> MemoryArea {
     let fdt_manager = unsafe { FdtManager::get_mut_manager() };
     if fdt_manager.relocated {
         panic!("FDT already relocated");
     }
     let size = fdt_manager.get_fdt().unwrap().total_size();
-    let ptr = kmalloc(size);
-    if ptr.is_null() {
-        panic!("Failed to allocate memory for FDT relocation");
-    }
-    unsafe { fdt_manager.relocate_fdt(ptr) };
+    unsafe { fdt_manager.relocate_fdt(dest_ptr) };
+    MemoryArea::new(dest_ptr as usize, dest_ptr as usize + size - 1) // return the memory area
 }
