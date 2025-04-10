@@ -173,7 +173,7 @@ use arch::init_arch;
 use task::new_kernel_task;
 use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
-use mem::{allocator::init_heap, init_bss, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
+use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 
 
@@ -203,17 +203,18 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* Get DRAM area from FDT */
     let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
     early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
+    /* Relocate FDT to usable memory area */
+    println!("[Scarlet Kernel] Relocating FDT...");
+    let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
+    let dest_ptr = fdt_reloc_start as *mut u8;
+    relocate_fdt(dest_ptr);
     /* Calculate usable memory area */
     let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
     let usable_area = MemoryArea::new(kernel_end, dram_area.end);
     early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
-    /* Relocate FDT to usable memory area */
-    println!("[Scarlet Kernel] Relocating FDT...");
-    let dest_ptr = usable_area.start as *mut u8;
-    let fdt_area = relocate_fdt(dest_ptr);
     /* Initialize heap with the usable memory area after FDT */
     early_println!("[Scarlet Kernel] Initializing heap...");
-    let heap_start = (fdt_area.end + 1 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let heap_start = (usable_area.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let heap_size = ((usable_area.end - heap_start + 1) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
     let heap_end = heap_start + heap_size - 1;
     init_heap(MemoryArea::new(heap_start, heap_end));

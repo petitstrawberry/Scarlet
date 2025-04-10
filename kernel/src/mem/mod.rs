@@ -76,4 +76,6 @@ pub fn init_bss() {
 unsafe extern "C" {
     pub static __KERNEL_SPACE_START: usize;
     pub static __KERNEL_SPACE_END: usize;
+    pub static __FDT_RESERVED_START: usize;
+    pub static __FDT_RESERVED_END: usize;
 }
