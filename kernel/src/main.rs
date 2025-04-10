@@ -198,9 +198,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("[Scarlet Kernel] Initializing FDT...");
     init_fdt();
     early_println!("[Scarlet Kernel] Initializing heap...");
-    if let Some(size) = FdtManager::get_manager().get_memory_size() {
-        early_println!("[Scarlet Kernel] Memory size: {:#x}", size);
-        init_heap(size);
+    if let Some(area) = FdtManager::get_manager().get_usable_memoryarea() {
+        init_heap(area);
     } else {
         early_println!("[Scarlet Kernel] Memory size not found");
     }

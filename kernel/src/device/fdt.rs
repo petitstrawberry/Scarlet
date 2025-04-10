@@ -39,9 +39,11 @@ use core::panic;
 use core::result::Result;
 
 use fdt::{Fdt, FdtError};
+use slab_allocator_rs::MIN_HEAP_SIZE;
 
 use crate::early_println;
 use crate::early_print;
+use crate::environment::PAGE_SIZE;
 use crate::mem::kmalloc;
 use crate::vm::vmem::MemoryArea;
 
@@ -278,7 +280,11 @@ impl<'a> FdtManager<'a> {
         None
     }
 
-    pub fn get_memory_size(&self) -> Option<usize> {
+    pub fn get_usable_memoryarea(&self) -> Option<MemoryArea> {
+        unsafe extern "C" {
+            static __HEAP_START: usize;
+        }
+
         let fdt = self.get_fdt()?;
         let memory_node = fdt.find_node("/memory")?;
         
@@ -287,6 +293,17 @@ impl<'a> FdtManager<'a> {
         if reg.value.len() < 16 {
             return None;
         }
+        let reg_start = u64::from_be_bytes([
+            reg.value[0],
+            reg.value[1],
+            reg.value[2],
+            reg.value[3],
+            reg.value[4],
+            reg.value[5],
+            reg.value[6],
+            reg.value[7],
+        ]);
+        let start = unsafe { &__HEAP_START as *const usize as usize };
         let size = u64::from_be_bytes([
             reg.value[8],
             reg.value[9],
@@ -296,8 +313,11 @@ impl<'a> FdtManager<'a> {
             reg.value[13],
             reg.value[14],
             reg.value[15],
-        ]);
-        Some(size as usize)
+        ]) as usize;
+        let size = ((size - (start - reg_start as usize)) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
+        Some(
+            MemoryArea::new(start as usize, start + size - 1) // end is inclusive
+        )
     }
 
 }
