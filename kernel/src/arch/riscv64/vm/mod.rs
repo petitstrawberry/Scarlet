@@ -11,7 +11,7 @@ extern crate alloc;
 
 use mmu::PageTable;
 
-const NUM_OF_MAX_PAGE_TABLE: usize = 512;
+const NUM_OF_MAX_PAGE_TABLE: usize = 2048;
 static mut PAGE_TABLES: [PageTable; NUM_OF_MAX_PAGE_TABLE] = [const { PageTable::new() }; NUM_OF_MAX_PAGE_TABLE];
 static mut PAGE_TABLES_USED: [bool; NUM_OF_MAX_PAGE_TABLE] = [false; NUM_OF_MAX_PAGE_TABLE];
 
