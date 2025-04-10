@@ -63,9 +63,10 @@ fn kernel_vm_manager_init() {
     }
 }
 
+static mut KERNEL_AREA: Option<MemoryArea> = None;
 /* Initialize MMU and enable paging */
 #[allow(static_mut_refs)]
-pub fn kernel_vm_init() {
+pub fn kernel_vm_init(kernel_area: MemoryArea) {
     let manager = get_kernel_vm_manager();
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
@@ -74,18 +75,20 @@ pub fn kernel_vm_init() {
     manager.set_asid(asid);
 
     /* Map kernel space */
-    let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
-    let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize };
+    let kernel_start = kernel_area.start;
+    let kernel_end = kernel_area.end;
+
+    let kernel_area = MemoryArea {
+        start: kernel_start,
+        end: kernel_end,
+    };
+    unsafe {
+        KERNEL_AREA = Some(kernel_area);
+    }
 
     let kernel_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: kernel_start,
-            end: kernel_end,
-        },
-        pmarea: MemoryArea {
-            start: kernel_start,
-            end: kernel_end,
-        },
+        vmarea: kernel_area,
+        pmarea: kernel_area,
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
@@ -98,31 +101,17 @@ pub fn kernel_vm_init() {
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
             start: 0x00,
-            end: 0x8000_0000,
+            end: 0x7fff_ffff,
         },
         pmarea: MemoryArea {
             start: 0x00,
-            end: 0x8000_0000,
+            end: 0x7fff_ffff,
         },
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
     };
     manager.add_memory_map(dev_map);
-
-    // let kernel_stack_page: Box<[u8; 4096]> = Box::new([0; 4096]);
-    // let kernel_stack_page_paddr = Box::into_raw(kernel_stack_page) as usize;
-    // let kernel_stack_map = VirtualMemoryMap {
-    //     vmarea: MemoryArea {
-    //         start: unsafe { KERNEL_STACK.top() },
-    //         end: unsafe { KERNEL_STACK.bottom() } - 1,
-    //     },
-    //     pmarea: MemoryArea {
-    //         start: kernel_stack_page_paddr,
-    //         end: kernel_stack_page_paddr + 0xfff,
-    //     }
-    // };
-    // manager.add_memory_map(kernel_stack_map);
 
     println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
     println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
@@ -171,18 +160,11 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     let root_page_table = get_page_table(root_page_table_idx).unwrap();
     manager.set_asid(asid);
 
-    let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
-    let kernel_end = unsafe { &__KERNEL_SPACE_END as *const usize as usize } - 1;
+    let kernel_area = unsafe { KERNEL_AREA.unwrap() };
 
     let kernel_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: kernel_start,
-            end: kernel_end,
-        },
-        pmarea: MemoryArea {
-            start: kernel_start,
-            end: kernel_end,
-        },
+        vmarea: kernel_area,
+        pmarea: kernel_area,
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
@@ -191,7 +173,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     manager.add_memory_map(kernel_map);
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(kernel_map);
-    task.data_size = kernel_end + 1;
+    task.data_size = kernel_area.end + 1;
 
     let stack_pages = allocate_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
     let stack_map = VirtualMemoryMap {
@@ -228,7 +210,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     manager.add_memory_map(dev_map);
 
     println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
-    println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
+    println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
     println!("Kernel stack mapped       : {:#018x} - {:#018x}", stack_map.vmarea.start as usize, stack_map.vmarea.end as usize);
     println!("(Stack page)              : {:#018x}", stack_pages as usize);
 

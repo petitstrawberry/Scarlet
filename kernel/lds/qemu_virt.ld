@@ -7,8 +7,6 @@ MEMORY {
 
 /* Define sections */
 SECTIONS {
-    __HEAP_SIZE = 0x800000; /* 8MB heap size */
-
     . = ORIGIN(RAM);
     __KERNEL_SPACE_START = .;
     .init : { *(.init .init.*) } > RAM 
@@ -41,14 +39,11 @@ SECTIONS {
       . = ALIGN(0x1000);
       __BSS_END = .;
     } > RAM
-    .heap (NOLOAD) :
-    {
+    .fdt_reserved : {
       . = ALIGN(0x1000);
-      __HEAP_START = .;
-      *(.heap .heap.*)
-      . += __HEAP_SIZE;
-    . = ALIGN(0x1000);
-      __HEAP_END = .;
+      __FDT_RESERVED_START = .;
+      . += 256K; /* Reserve 256KiB for FDT relocation */
+      __FDT_RESERVED_END = .;
     } > RAM
     __KERNEL_SPACE_END = .;
 }
