@@ -1,7 +1,7 @@
+use crate::environment::PAGE_SIZE;
 use crate::fs::{File, FileSystemError, Result, SeekFrom};
 use alloc::{format, vec};
 use alloc::string::ToString;
-use alloc::vec::Vec;
 use crate::task::Task;
 
 // ELF Magic Number
@@ -217,9 +217,8 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
         let ph = ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB)?;
         
         let aligned_vaddr = if ph.p_align == 0 {
-            ph.p_vaddr
+            (ph.p_vaddr + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)
         } else {
-            // Align the virtual address to the segment alignment
             (ph.p_vaddr + ph.p_align - 1) & !(ph.p_align - 1)
         };
 
@@ -230,7 +229,10 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
                 Ok(_) => {},
                 Err(e) => return Err(FileSystemError {
                     kind: crate::fs::FileSystemErrorKind::IoError,
-                    message: format!("Failed to map ELF segment to memory: {}, vaddr: {}, size: {}", e, aligned_vaddr, ph.p_memsz),
+                    message: format!(
+                        "Failed to map ELF segment to memory: {}, vaddr: {:#x}, size: {:#x}, align: {:#x}",
+                        e, aligned_vaddr, ph.p_memsz, ph.p_align
+                    ),
                 }),
             }
             
@@ -266,7 +268,7 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
                 },
                 None => return Err(FileSystemError {
                     kind: crate::fs::FileSystemErrorKind::IoError,
-                    message: format!("Failed to translate virtual address: {:#x}", vaddr),
+                    message: format!("Failed to translate virtual address: {:#x} for segment at offset {:#x}", vaddr, ph.p_offset),
                 }),
             }
         }

@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 
-use crate::{device::block::mockblk::MockBlockDevice, fs::{testfs::TestFileSystem, VfsManager}, task::new_user_task};
+use crate::{device::{block::mockblk::MockBlockDevice, manager}, fs::{testfs::TestFileSystem, VfsManager}, task::new_user_task};
 
 use super::*;
 
@@ -128,5 +128,87 @@ fn test_load_elf() {
 
     // Assert that the instruction matches the expected value
     assert_eq!(instruction, expected_instruction, "Entry point instruction does not match expected value");
+}
+
+#[test_case]
+fn test_load_elf_invalid_magic() {
+    use crate::fs::File;
+    use crate::task::elf_loader::load_elf_into_task;
+
+    let mut manager = VfsManager::new();
+    let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
+    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs_id = manager.register_fs(Box::new(fs));
+    manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
+    let file_path = "invalid.elf";
+    manager.create_file(file_path).expect("Failed to create test file");
+
+    // Create a mock ELF file with an invalid magic number
+    let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
+    let mut file = File::with_manager("invalid.elf".to_string(), &mut manager);
+    file.open(0).expect("Failed to open invalid ELF file");
+    file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
+
+    // Create a new task
+    let mut task = new_user_task("test_invalid_magic".to_string(), 0);
+
+    // Attempt to load the invalid ELF file
+    let result = load_elf_into_task(&mut file, &mut task);
+
+    // Assert that the result is an error
+    assert!(result.is_err(), "Expected error when loading ELF with invalid magic number");
+}
+
+#[test_case]
+fn test_load_elf_invalid_alignment() {
+    use crate::fs::File;
+    use crate::task::elf_loader::load_elf_into_task;
+
+    let mut manager = VfsManager::new();
+    let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
+    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs_id = manager.register_fs(Box::new(fs));
+    manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
+    let file_path = "invalid_align.elf";
+    manager.create_file(file_path).expect("Failed to create test file");
+
+    // Create a mock ELF file with an invalid alignment
+    let mut invalid_elf_data = vec![0u8; 64];
+    invalid_elf_data[EI_MAG0] = ELFMAG[0];
+    invalid_elf_data[EI_MAG1] = ELFMAG[1];
+    invalid_elf_data[EI_MAG2] = ELFMAG[2];
+    invalid_elf_data[EI_MAG3] = ELFMAG[3];
+    invalid_elf_data[EI_CLASS] = ELFCLASS64;
+    invalid_elf_data[EI_DATA] = ELFDATA2LSB;
+    invalid_elf_data[16] = 0x2; // e_type
+    invalid_elf_data[18] = 0xF3; // e_machine
+    invalid_elf_data[20] = 0x1; // e_version
+    invalid_elf_data[24] = 0x0; // e_entry
+    invalid_elf_data[32] = 0x40; // e_phoff
+    invalid_elf_data[54] = 0x38; // e_phentsize
+    invalid_elf_data[56] = 0x1; // e_phnum
+
+    // Add a program header with invalid alignment
+    invalid_elf_data.extend_from_slice(&[0x1, 0x0, 0x0, 0x0]); // p_type = PT_LOAD
+    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0]); // p_flags
+    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_offset
+    invalid_elf_data.extend_from_slice(&[0x1, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_vaddr (unaligned)
+    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_paddr
+    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_filesz
+    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_memsz
+    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
+
+    let mut file = File::with_manager("invalid_align.elf".to_string(), &mut manager);
+    file.open(0).expect("Failed to open invalid ELF file");
+    file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
+
+    // Create a new task
+    let mut task = new_user_task("test_invalid_alignment".to_string(), 0);
+
+    // Attempt to load the invalid ELF file
+    let result = load_elf_into_task(&mut file, &mut task);
+
+    // Assert that the result is an error
+    assert!(result.is_err(), "Expected error when loading ELF with invalid alignment");
 }
 

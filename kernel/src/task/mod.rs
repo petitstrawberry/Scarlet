@@ -272,7 +272,11 @@ impl Task {
     // Map an ELF segment into memory
     pub fn map_elf_segment(&mut self, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
         // Check if the address is aligned
-        if vaddr % align != 0 {
+        if align == 0 {
+            if vaddr % PAGE_SIZE != 0 {
+                return Err("Address is not aligned");
+            }
+        } else if vaddr % align != 0 {
             return Err("Address is not aligned");
         }
 
