@@ -270,12 +270,12 @@ impl Task {
     }
     
     // Map an ELF segment into memory
-    pub fn map_elf_segment(&mut self, vaddr: usize, size: usize, flags: u32) -> Result<(), &'static str> {
-        // Check if the size is page-aligned
-        // if size % PAGE_SIZE != 0 {
-        //     return Err("Size is not page aligned");
-        // }
-        
+    pub fn map_elf_segment(&mut self, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
+        // Check if the address is aligned
+        if vaddr % align != 0 {
+            return Err("Address is not aligned");
+        }
+
         // Convert flags to VirtualMemoryPermission
         let mut permissions = 0;
         if flags & PF_R != 0 {
@@ -287,19 +287,19 @@ impl Task {
         if flags & PF_X != 0 {
             permissions |= VirtualMemoryPermission::Execute as usize;
         }
-        
+
         // Create memory area
         let vmarea = MemoryArea {
             start: vaddr,
-            end: vaddr + size,
+            end: vaddr + size - 1,
         };
-        
+
         // Check if the area is already mapped
         if let Some(_) = self.vm_manager.search_memory_map(vaddr) {
             // If already mapped, do nothing
             return Ok(());
         }
-        
+
         // Allocate physical memory
         let ptr = allocate_pages((size + PAGE_SIZE - 1) / PAGE_SIZE);
         if ptr.is_null() {
@@ -309,17 +309,17 @@ impl Task {
             start: ptr as usize,
             end: (ptr as usize) + size - 1,
         };
-        
+
         // Create memory mapping
         let map = VirtualMemoryMap {
             vmarea,
             pmarea,
             permissions,
         };
-        
+
         // Add to VM manager
         self.vm_manager.add_memory_map(map);
-        
+
         Ok(())
     }
 }

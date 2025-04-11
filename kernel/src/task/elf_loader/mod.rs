@@ -216,14 +216,21 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
         
         let ph = ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB)?;
         
+        let aligned_vaddr = if ph.p_align == 0 {
+            ph.p_vaddr
+        } else {
+            // Align the virtual address to the segment alignment
+            (ph.p_vaddr + ph.p_align - 1) & !(ph.p_align - 1)
+        };
+
         // For LOAD segments, load them into memory
         if ph.p_type == PT_LOAD {
             // Allocate memory for the segment
-            match task.map_elf_segment(ph.p_vaddr as usize, ph.p_memsz as usize, ph.p_flags) {
+            match task.map_elf_segment(aligned_vaddr as usize, ph.p_memsz as usize, ph.p_align as usize, ph.p_flags) {
                 Ok(_) => {},
                 Err(e) => return Err(FileSystemError {
                     kind: crate::fs::FileSystemErrorKind::IoError,
-                    message: format!("Failed to map ELF segment to memory: {}, vaddr: {}, size: {}", e, ph.p_vaddr, ph.p_memsz),
+                    message: format!("Failed to map ELF segment to memory: {}, vaddr: {}, size: {}", e, aligned_vaddr, ph.p_memsz),
                 }),
             }
             
@@ -237,7 +244,7 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
             file.read(&mut segment_data)?;
             
             // Copy data to task's memory space
-            let vaddr = ph.p_vaddr as usize;
+            let vaddr = aligned_vaddr as usize;
             match task.vm_manager.translate_vaddr(vaddr) {
                 Some(paddr) => {
                     unsafe {
@@ -259,7 +266,7 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
                 },
                 None => return Err(FileSystemError {
                     kind: crate::fs::FileSystemErrorKind::IoError,
-                    message: "Failed to translate virtual address".to_string(),
+                    message: format!("Failed to translate virtual address: {:#x}", vaddr),
                 }),
             }
         }
