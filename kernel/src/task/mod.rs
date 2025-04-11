@@ -272,9 +272,9 @@ impl Task {
     // Map an ELF segment into memory
     pub fn map_elf_segment(&mut self, vaddr: usize, size: usize, flags: u32) -> Result<(), &'static str> {
         // Check if the size is page-aligned
-        if size % PAGE_SIZE != 0 {
-            return Err("Size is not page aligned");
-        }
+        // if size % PAGE_SIZE != 0 {
+        //     return Err("Size is not page aligned");
+        // }
         
         // Convert flags to VirtualMemoryPermission
         let mut permissions = 0;

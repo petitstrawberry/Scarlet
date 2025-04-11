@@ -98,3 +98,6 @@ impl BlockDevice for GenericBlockDevice {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub mod mockblk;

@@ -1,5 +1,5 @@
 use crate::fs::{File, FileSystemError, Result, SeekFrom};
-use alloc::vec;
+use alloc::{format, vec};
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use crate::task::Task;
@@ -217,13 +217,13 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
         let ph = ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB)?;
         
         // For LOAD segments, load them into memory
-        if (ph.p_type == PT_LOAD) {
+        if ph.p_type == PT_LOAD {
             // Allocate memory for the segment
             match task.map_elf_segment(ph.p_vaddr as usize, ph.p_memsz as usize, ph.p_flags) {
                 Ok(_) => {},
-                Err(_) => return Err(FileSystemError {
+                Err(e) => return Err(FileSystemError {
                     kind: crate::fs::FileSystemErrorKind::IoError,
-                    message: "Failed to map ELF segment to memory".to_string(),
+                    message: format!("Failed to map ELF segment to memory: {}, vaddr: {}, size: {}", e, ph.p_vaddr, ph.p_memsz),
                 }),
             }
             
@@ -268,3 +268,6 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64> {
     // Return the entry point
     Ok(header.e_entry)
 }
+
+#[cfg(test)]
+mod tests;
