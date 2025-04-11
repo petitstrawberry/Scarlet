@@ -95,7 +95,6 @@ fn test_parse_program_headers() {
 #[test_case]
 fn test_load_elf() {
     use crate::fs::File;
-    use crate::task::Task;
     use crate::task::elf_loader::load_elf_into_task;
 
     let mut manager = VfsManager::new();
