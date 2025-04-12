@@ -3,7 +3,7 @@
 //! The dispatcher module is responsible for dispatching tasks to the CPU.
 //! Currently, the dispatcher is a simple dispatcher that runs the task.
 
-use crate::arch::{get_user_trap_handler, set_trapvector, Arch};
+use crate::arch::{get_user_trap_handler, set_next_mode, set_trapvector, Arch};
 
 use crate::task::{Task, TaskState, TaskType};
 use crate::vm::get_trampoline_trap_vector;
@@ -38,11 +38,13 @@ impl Dispatcher {
                 cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
                 task.vcpu.set_pc(task.entry as u64);
                 task.vcpu.switch(cpu);
+                set_next_mode(task.vcpu.get_mode());
             }
             TaskState::Running => {
                 set_trapvector(get_trampoline_trap_vector());
                 cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
                 task.vcpu.switch(cpu);
+                set_next_mode(task.vcpu.get_mode());
             }
             TaskState::Terminated => {
             }

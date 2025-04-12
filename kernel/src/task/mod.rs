@@ -55,7 +55,10 @@ impl Task {
             id: *taskid,
             name,
             priority,
-            vcpu: Vcpu::new(),
+            vcpu: Vcpu::new(match task_type {
+                TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
+                TaskType::User => crate::arch::vcpu::Mode::User,
+            }),
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
@@ -87,6 +90,24 @@ impl Task {
 
     pub fn get_id(&self) -> usize {
         self.id
+    }
+
+    /// Set the task state
+    /// 
+    /// # Arguments
+    /// * `state` - The new task state
+    /// 
+    pub fn set_state(&mut self, state: TaskState) {
+        self.state = state;
+    }
+
+    /// Get the task state
+    /// 
+    /// # Returns
+    /// The task state
+    /// 
+    pub fn get_state(&self) -> TaskState {
+        self.state
     }
 
    /// Get the size of the task.
