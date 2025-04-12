@@ -10,11 +10,8 @@ extern crate alloc;
 use alloc::string::String;
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::{kmalloc, page::{allocate_pages, free_pages, Page}}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
-use crate::vm::vmem::VirtualMemoryPermission;
-use crate::fs::File;
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
 
-use elf_loader::{PF_R, PF_W, PF_X};
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -268,90 +265,6 @@ impl Task {
     pub fn set_entry_point(&mut self, entry: usize) {
         self.vcpu.set_pc(entry as u64);
     }
-    
-    // Map an ELF segment into memory
-    pub fn map_elf_segment(&mut self, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
-        // Check if the address is aligned
-        if align == 0 {
-            if vaddr % PAGE_SIZE != 0 {
-                return Err("Address is not aligned");
-            }
-        } else if vaddr % align != 0 {
-            return Err("Address is not aligned");
-        }
-
-        // Convert flags to VirtualMemoryPermission
-        let mut permissions = 0;
-        if flags & PF_R != 0 {
-            permissions |= VirtualMemoryPermission::Read as usize;
-        }
-        if flags & PF_W != 0 {
-            permissions |= VirtualMemoryPermission::Write as usize;
-        }
-        if flags & PF_X != 0 {
-            permissions |= VirtualMemoryPermission::Execute as usize;
-        }
-
-        // Create memory area
-        let vmarea = MemoryArea {
-            start: vaddr,
-            end: vaddr + size - 1,
-        };
-
-        // Check if the area is already mapped
-        if let Some(_) = self.vm_manager.search_memory_map(vaddr) {
-            // If already mapped, do nothing
-            return Ok(());
-        }
-
-        // Allocate physical memory
-        let ptr = allocate_pages((size + PAGE_SIZE - 1) / PAGE_SIZE);
-        if ptr.is_null() {
-            return Err("Failed to allocate memory");
-        }
-        let pmarea = MemoryArea {
-            start: ptr as usize,
-            end: (ptr as usize) + size - 1,
-        };
-
-        // Create memory mapping
-        let map = VirtualMemoryMap {
-            vmarea,
-            pmarea,
-            permissions,
-        };
-
-        // Add to VM manager
-        self.vm_manager.add_memory_map(map);
-
-        Ok(())
-    }
-}
-
-// Create a task from an ELF file
-pub fn load_elf_file(path: &str) -> Result<Task, &'static str> {
-    // Create a new task
-    let mut task = new_user_task(String::from(path), 0);
-    
-    // Initialize the task
-    task.init();
-    
-    // Open the file
-    let mut file = match File::new(String::from(path)).open(0) {
-        Ok(_) => File::new(String::from(path)),
-        Err(_) => return Err("Failed to open ELF file"),
-    };
-    
-    // Load the ELF file into the task
-    let entry_point = match elf_loader::load_elf_into_task(&mut file, &mut task) {
-        Ok(entry) => entry,
-        Err(_) => return Err("Failed to load ELF file into task"),
-    };
-    
-    // Set the entry point
-    task.set_entry_point(entry_point as usize);
-    
-    Ok(task)
 }
 
 /// Create a new kernel task.

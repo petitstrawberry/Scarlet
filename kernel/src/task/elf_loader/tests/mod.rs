@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 
-use crate::{device::{block::mockblk::MockBlockDevice, manager}, fs::{testfs::TestFileSystem, VfsManager}, task::new_user_task};
+use crate::{device::block::mockblk::MockBlockDevice, fs::{testfs::TestFileSystem, VfsManager}, task::new_user_task};
 
 use super::*;
 
