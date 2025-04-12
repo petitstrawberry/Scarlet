@@ -1,7 +1,6 @@
 use slab_allocator_rs::LockedHeap;
 
 use crate::early_println;
-use crate::early_print;
 use crate::vm::vmem::MemoryArea;
 
 #[global_allocator]

@@ -143,7 +143,6 @@ mod tests {
             let _defer = defer(|| {
                 called = true;
             });
-            return; // Early return
         }
         assert!(called, "Defer function was not called");
     }
@@ -166,6 +165,7 @@ mod tests {
         assert!(called, "Defer function was not called");
     }
 
+    #[test_case]
     fn test_defer_macro() {
         let mut called = false;
         {

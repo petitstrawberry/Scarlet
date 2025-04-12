@@ -17,8 +17,8 @@ macro_rules! early_print {
 
 #[macro_export]
 macro_rules! early_println {
-    ($fmt:expr) => (early_print!(concat!($fmt, "\n")));
-    ($fmt:expr, $($arg:tt)*) => (early_print!(concat!($fmt, "\n"), $($arg)*));
+    ($fmt:expr) => ($crate::early_print!(concat!($fmt, "\n")));
+    ($fmt:expr, $($arg:tt)*) => ($crate::early_print!(concat!($fmt, "\n"), $($arg)*));
 }
 
 pub fn print(args: core::fmt::Arguments) {

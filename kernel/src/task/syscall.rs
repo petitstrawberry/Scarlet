@@ -1,5 +1,5 @@
 use crate::arch::Trapframe;
-use crate::{print, println};
+use crate::print;
 
 use super::mytask;
 

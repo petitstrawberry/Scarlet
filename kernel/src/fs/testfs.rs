@@ -1,5 +1,3 @@
-use core::any::Any;
-
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
@@ -7,8 +5,6 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::*;
-use crate::device::block::request::BlockIOResult;
-use crate::device::{Device, DeviceType};
 
 // Simple file system implementation for testing
 pub struct TestFileSystem {

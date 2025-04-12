@@ -5,12 +5,12 @@
 
 extern crate alloc;
 
-use alloc::collections::vec_deque::VecDeque;
-use alloc::string::String;
+use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
 use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
+
 
 use super::dispatcher::Dispatcher;
 use crate::task::Task;
@@ -129,7 +129,7 @@ impl Scheduler {
 pub fn make_test_tasks() {
     println!("Making test tasks...");
     let sched = get_scheduler();
-    let mut task0 = new_kernel_task(String::from("Task0"), 0, || {
+    let mut task0 = new_kernel_task("Task0".to_string(), 0, || {
         println!("Task0");
         let mut counter: usize = 0;
         loop {
@@ -151,7 +151,7 @@ pub fn make_test_tasks() {
     task0.init();
     sched.add_task(task0, 0);
 
-    let mut task1 = new_kernel_task(String::from("Task1"), 0, || {
+    let mut task1 = new_kernel_task("Task1".to_string(), 0, || {
         println!("Task1");
         let mut counter: usize = 0;
         loop {
@@ -170,7 +170,7 @@ pub fn make_test_tasks() {
     task1.init();
     sched.add_task(task1, 0);
 
-    let mut task2 = new_kernel_task(String::from("Task2"), 0, || {
+    let mut task2 = new_kernel_task("Task2".to_string(), 0, || {
         println!("Task2");
         /* Fizz Buzz */
         for i in 1..=1000000 {
@@ -206,7 +206,7 @@ mod tests {
     #[test_case]
     fn test_add_task() {
         let mut scheduler = Scheduler::new();
-        let task = Task::new(String::from("TestTask"), 1, TaskType::Kernel);
+        let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         scheduler.add_task(task, 0);
         assert_eq!(scheduler.task_queue[0].len(), 1);
     }

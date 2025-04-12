@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 
 use crate::device::fdt::FdtManager;
 use crate::{early_initcall, late_initcall};
-use crate::{early_print, early_println};
+use crate::early_println;
 use crate::fs::{get_vfs_manager, FileSystemError};
 use crate::mem::kmalloc;
 use crate::vm::vmem::MemoryArea;

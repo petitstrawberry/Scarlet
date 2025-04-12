@@ -20,7 +20,7 @@
 //! to the console. After all initialization routines have been executed, the
 //! processor enters an idle state.
 
-use crate::{arch::instruction::idle, println, print};
+use crate::{arch::instruction::idle, println};
 
 pub mod early;
 pub mod driver;

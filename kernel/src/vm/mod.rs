@@ -24,7 +24,6 @@ use crate::environment::PAGE_SIZE;
 use crate::environment::VMMAX;
 use crate::mem::page::allocate_pages;
 use crate::println;
-use crate::print;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;
 

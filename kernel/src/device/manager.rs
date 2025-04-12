@@ -53,7 +53,6 @@ use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::PlatformDeviceInfo;
 use crate::println;
-use crate::print;
 
 use crate::traits::serial::Serial;
 

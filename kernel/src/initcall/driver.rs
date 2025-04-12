@@ -1,5 +1,4 @@
 use crate::early_println;
-use crate::early_print;
 
 /// A macro used to register driver initialization functions to be called during the system boot process.
 ///

@@ -3,7 +3,6 @@ use core::{arch::asm, mem::transmute};
 
 use crate::arch::{get_cpu, Trapframe};
 use crate::println;
-use crate::print;
 use crate::vm::get_kernel_vm_manager;
 
 #[unsafe(export_name = "_kernel_trap_entry")]

@@ -7,7 +7,6 @@ use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
 
 use crate::early_println;
-use crate::early_print;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;

@@ -41,7 +41,6 @@ use core::result::Result;
 use fdt::{Fdt, FdtError};
 
 use crate::early_println;
-use crate::early_print;
 use crate::vm::vmem::MemoryArea;
 
 #[unsafe(link_section = ".data")]

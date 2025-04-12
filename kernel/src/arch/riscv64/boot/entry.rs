@@ -56,5 +56,5 @@ pub extern "C" fn arch_start_kernel(hartid: usize, fdt_ptr: usize) {
     unsafe { 
         FdtManager::set_fdt_addr(fdt_ptr);
     }
-    unsafe { start_kernel(hartid) };
+    start_kernel(hartid);
 }

@@ -306,8 +306,6 @@ pub fn mytask() -> Option<&'static mut Task> {
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
-    use crate::println;
-    use crate::print;
 
     #[test_case]
     fn test_set_brk() {
