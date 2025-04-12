@@ -3,6 +3,7 @@
 //! The task module defines the structure and behavior of tasks in the system.
 
 pub mod syscall;
+pub mod elf_loader;
 
 extern crate alloc;
 
@@ -10,6 +11,7 @@ use alloc::string::String;
 use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -146,7 +148,6 @@ impl Task {
         }
 
         self.data_size = brk - self.text_size;
-        // println!("Brk: {:#x}", self.get_brk());
         Ok(())
     }
 
@@ -258,6 +259,11 @@ impl Task {
             let vaddr = (page + p) * PAGE_SIZE;
             root_pagetable.unmap(vaddr);
         }
+    }
+
+    // Set the entry point
+    pub fn set_entry_point(&mut self, entry: usize) {
+        self.vcpu.set_pc(entry as u64);
     }
 }
 
