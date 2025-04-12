@@ -109,6 +109,7 @@ pub enum VirtualMemoryPermission {
     Read = 0x01,
     Write = 0x02,
     Execute = 0x04,
+    User = 0x08,
 }
 
 impl From<usize> for VirtualMemoryPermission {
@@ -117,6 +118,7 @@ impl From<usize> for VirtualMemoryPermission {
             0x01 => VirtualMemoryPermission::Read,
             0x02 => VirtualMemoryPermission::Write,
             0x04 => VirtualMemoryPermission::Execute,
+            0x08 => VirtualMemoryPermission::User,
             _ => panic!("Invalid permission value: {}", value),
         }
     }

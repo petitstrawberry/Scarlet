@@ -74,6 +74,11 @@ impl PageTableEntry {
         self.entry |= 0x8;
         self
     }
+
+    pub fn accesible_from_user(&mut self) -> &mut Self {
+        self.entry |= 0x10;
+        self
+    }
 }
 
 #[repr(align(4096))]
@@ -89,9 +94,7 @@ impl PageTable {
     }
 
     pub fn switch(&self, asid: usize) {
-        let mode = 9;
-        let ppn = self as *const _ as usize >> 12;
-        let satp = mode << 60 | asid << 44 | ppn;
+        let satp = self.get_val_for_satp(asid);
         unsafe {
             asm!(
                 "
@@ -102,6 +105,17 @@ impl PageTable {
                 in(reg) satp,
             );
         }
+    }
+
+    /// Get the value for the satp register.
+    /// 
+    /// # Note
+    /// 
+    /// Only for RISC-V (Sv48).
+    pub fn get_val_for_satp(&self, asid: usize) -> u64 {
+        let mode = 9;
+        let ppn = self as *const _ as usize >> 12;
+        (mode << 60 | asid << 44 | ppn) as u64
     }
 
     fn get_next_level_table(&self, index: usize) -> &mut PageTable {
@@ -144,6 +158,9 @@ impl PageTable {
                     }
                     if VirtualMemoryPermission::Execute.contained_in(permissions) {
                         entry.executable();
+                    }
+                    if VirtualMemoryPermission::User.contained_in(permissions) {
+                        entry.accesible_from_user();
                     }
                     entry
                         .set_ppn(ppn)

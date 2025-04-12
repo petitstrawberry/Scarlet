@@ -141,7 +141,8 @@ pub fn user_vm_init(task: &mut Task) {
             permissions: 
                 VirtualMemoryPermission::Read as usize |
                 VirtualMemoryPermission::Write as usize |
-                VirtualMemoryPermission::Execute as usize,
+                VirtualMemoryPermission::Execute as usize |
+                VirtualMemoryPermission::User as usize,
         }
     );
 

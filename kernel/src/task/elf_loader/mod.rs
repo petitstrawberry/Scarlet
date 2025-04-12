@@ -37,6 +37,8 @@ use alloc::{format, vec};
 use alloc::string::{String, ToString};
 use crate::task::Task;
 
+use super::TaskType;
+
 // ELF Magic Number
 const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F', ];
 // ELF Class
@@ -387,6 +389,9 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     }
     if flags & PF_X != 0 {
         permissions |= VirtualMemoryPermission::Execute as usize;
+    }
+    if task.task_type == TaskType::User {
+        permissions |= VirtualMemoryPermission::User as usize;
     }
 
     // Create memory area
