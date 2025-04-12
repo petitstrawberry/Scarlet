@@ -322,8 +322,5 @@ mod tests {
         assert_eq!(task.get_brk(), 0x1008);
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
-        for memmap in task.vm_manager.get_memmap() {
-            println!("Memory map: {:#x} - {:#x}", memmap.vmarea.start, memmap.vmarea.end);
-        }
     }
 }
