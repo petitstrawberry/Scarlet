@@ -5,7 +5,6 @@ use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
 use crate::arch::Trapframe;
-use crate::vm::{switch_to_kernel_vm, switch_to_user_vm};
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
@@ -60,13 +59,28 @@ pub extern "C" fn _user_trap_entry() {
                 csrr    t0, sscratch
                 sd      t0, 80(a0)
 
+                /* Load the satp for the kernel space from trapframe */
+                ld      t0, 272(a0)
+                /* Switch to kernel memory space */
+                csrrw   t0, satp, t0
+                sfence.vma zero, zero
+                /* Store the user memory space */
+                sd      t0, 272(a0)
+
                 // Load kernel stack pointer
-                ld      sp, 272(a0)
+                ld      sp, 280(a0)
 
                 /* Call the user trap handler */
                 /* Load the function pointer from the trapframe */
-                ld      ra, 280(a0)
+                ld      ra, 288(a0)
                 jalr    ra, 0(ra)
+
+                /* Restore the user memory space */
+                ld     t0, 272(a0)
+                csrrw  t0, satp, t0
+                sfence.vma zero, zero
+                /* Restore the kernel memory space to the trapframe */
+                sd     t0, 272(a0)
 
                 /* Restore the context of the current hart */ 
                 /* epc */
@@ -130,7 +144,7 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> usize {
     }
 
     /* Switch to kernel memory space */
-    switch_to_kernel_vm();
+    // switch_to_kernel_vm();
 
     let interrupt = cause & 0x8000000000000000 != 0;
     if interrupt {
@@ -138,9 +152,6 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> usize {
     } else {
         arch_exception_handler(trapframe, cause);
     }
-
-    /* Switch to user memory space */
-    switch_to_user_vm(trapframe);
 
     addr
 }

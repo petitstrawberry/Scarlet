@@ -7,7 +7,7 @@ extern crate alloc;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -122,7 +122,10 @@ impl Scheduler {
         let trapframe = get_trampoline_trapframe(cpu_id);
         set_trapvector(trap_vector);
         set_trapframe(trapframe);
-        cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
+        // cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
+        let trapframe = cpu.get_trapframe();
+        trapframe.set_trap_handler(get_user_trap_handler());
+        trapframe.set_next_address_space(get_kernel_vm_manager().get_asid());
 
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);

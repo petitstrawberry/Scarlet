@@ -35,14 +35,18 @@ impl Dispatcher {
             TaskState::Ready => {
                 task.state = TaskState::Running;
                 set_trapvector(get_trampoline_trap_vector());
-                cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
+                let trapframe = cpu.get_trapframe();
+                trapframe.set_trap_handler(get_user_trap_handler());
+                trapframe.set_next_address_space(task.vm_manager.get_asid());
                 task.vcpu.set_pc(task.entry as u64);
                 task.vcpu.switch(cpu);
                 set_next_mode(task.vcpu.get_mode());
             }
             TaskState::Running => {
                 set_trapvector(get_trampoline_trap_vector());
-                cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
+                let trapframe = cpu.get_trapframe();
+                trapframe.set_trap_handler(get_user_trap_handler());
+                trapframe.set_next_address_space(task.vm_manager.get_asid());
                 task.vcpu.switch(cpu);
                 set_next_mode(task.vcpu.get_mode());
             }
