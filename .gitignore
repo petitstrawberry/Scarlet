@@ -3,3 +3,4 @@
 /user/bin/target
 /mkfs/initramfs/bin/*
 /mkfs/*.cpio
+dist/
