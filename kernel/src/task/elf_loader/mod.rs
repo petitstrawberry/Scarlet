@@ -31,11 +31,13 @@
 //! regardless of the endianness used in the file.
 use crate::environment::PAGE_SIZE;
 use crate::fs::{File, SeekFrom};
-use crate::mem::page::allocate_pages;
+use crate::mem::page::{allocate_pages, free_pages};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 use alloc::{format, vec};
 use alloc::string::{String, ToString};
 use crate::task::Task;
+
+use super::TaskType;
 
 // ELF Magic Number
 const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F', ];
@@ -309,16 +311,20 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
             }),
         };
 
-        let aligned_vaddr = if ph.p_align == 0 {
-            (ph.p_vaddr + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1)
-        } else {
-            (ph.p_vaddr + ph.p_align - 1) & !(ph.p_align - 1)
-        };
-
         // For LOAD segments, load them into memory
         if ph.p_type == PT_LOAD {
+            if ph.p_vaddr % PAGE_SIZE as u64 != 0 {
+                return Err(ElfLoaderError {
+                    message: format!("Segment virtual address is not aligned: {:#x}", ph.p_vaddr),
+                });
+            }
+            let aligned_size = if ph.p_memsz % PAGE_SIZE as u64 != 0 {
+                (ph.p_memsz / PAGE_SIZE as u64 + 1) * PAGE_SIZE as u64
+            } else {
+                ph.p_memsz
+            };
             // Allocate memory for the segment
-           map_elf_segment(task, aligned_vaddr as usize, ph.p_memsz as usize, ph.p_align as usize, ph.p_flags).map_err(|e| ElfLoaderError {
+            map_elf_segment(task, ph.p_vaddr as usize, aligned_size as usize, ph.p_align as usize, ph.p_flags).map_err(|e| ElfLoaderError {
                 message: format!("Failed to map ELF segment: {:?}", e),
             })?;
             
@@ -336,7 +342,7 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
             })?;
             
             // Copy data to task's memory space
-            let vaddr = aligned_vaddr as usize;
+            let vaddr = ph.p_vaddr as usize;
             match task.vm_manager.translate_vaddr(vaddr) {
                 Some(paddr) => {
                     unsafe {
@@ -368,12 +374,16 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
 }
 
 fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
-    // Check if the address is aligned
+    // Ensure alignment is greater than zero
     if align == 0 {
-        if vaddr % PAGE_SIZE != 0 {
-            return Err("Address is not aligned");
-        }
-    } else if vaddr % align != 0 {
+        return Err("Alignment must be greater than zero");
+    }
+    // Check if the size is valid
+    if size == 0 || size % align != 0 {
+        return Err("Invalid size");
+    }
+    // Check if the address is aligned
+    if vaddr % align != 0 {
         return Err("Address is not aligned");
     }
 
@@ -388,6 +398,9 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     if flags & PF_X != 0 {
         permissions |= VirtualMemoryPermission::Execute as usize;
     }
+    if task.task_type == TaskType::User {
+        permissions |= VirtualMemoryPermission::User as usize;
+    }
 
     // Create memory area
     let vmarea = MemoryArea {
@@ -395,14 +408,14 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
         end: vaddr + size - 1,
     };
 
-    // Check if the area is already mapped
-    if let Some(_) = task.vm_manager.search_memory_map(vaddr) {
-        // If already mapped, do nothing
-        return Ok(());
+    // Check if the area is overlapping with existing mappings
+    if task.vm_manager.search_memory_map(vaddr).is_some() {
+        return Err("Memory area overlaps with existing mapping");
     }
 
     // Allocate physical memory
-    let ptr = allocate_pages((size + PAGE_SIZE - 1) / PAGE_SIZE);
+    let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let ptr = allocate_pages(num_of_pages);
     if ptr.is_null() {
         return Err("Failed to allocate memory");
     }
@@ -419,7 +432,10 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     };
 
     // Add to VM manager
-    task.vm_manager.add_memory_map(map);
+     if let Err(e) = task.vm_manager.add_memory_map(map) {
+        free_pages(ptr, num_of_pages);
+        return Err(e);
+    }
 
     Ok(())
 }

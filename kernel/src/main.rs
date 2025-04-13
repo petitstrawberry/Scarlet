@@ -164,6 +164,7 @@ extern crate alloc;
 use alloc::string::ToString;
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use environment::PAGE_SIZE;
+use fs::drivers::initramfs::relocate_initramfs;
 use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
@@ -204,14 +205,20 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
     early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
     /* Relocate FDT to usable memory area */
-    println!("[Scarlet Kernel] Relocating FDT...");
+    early_println!("[Scarlet Kernel] Relocating FDT...");
     let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
     let dest_ptr = fdt_reloc_start as *mut u8;
     relocate_fdt(dest_ptr);
     /* Calculate usable memory area */
     let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
-    let usable_area = MemoryArea::new(kernel_end, dram_area.end);
+    let mut usable_area = MemoryArea::new(kernel_end, dram_area.end);
     early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
+    /* Relocate initramfs to usable memory area */
+    early_println!("[Scarlet Kernel] Relocating initramfs...");
+    if let Err(e) = relocate_initramfs(&mut usable_area) {
+        early_println!("[Scarlet Kernel] Failed to relocate initramfs: {}", e);
+    }
+    early_println!("[Scarlet Kernel] Updated Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
     /* Initialize heap with the usable memory area after FDT */
     early_println!("[Scarlet Kernel] Initializing heap...");
     let heap_start = (usable_area.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);

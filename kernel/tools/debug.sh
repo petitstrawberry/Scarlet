@@ -10,4 +10,5 @@ qemu-system-riscv64 \
     -serial mon:stdio \
     --no-reboot \
     -gdb tcp::12345 -S \
+    -initrd /workspaces/Scarlet/mkfs/initramfs.cpio \
     -kernel /workspaces/Scarlet/kernel/target/riscv64gc-unknown-none-elf/debug/kernel

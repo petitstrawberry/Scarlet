@@ -7,7 +7,7 @@ extern crate alloc;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -31,6 +31,7 @@ pub fn get_scheduler() -> &'static mut Scheduler {
 
 pub struct Scheduler {
     task_queue: [VecDeque<Task>; NUM_OF_CPUS],
+    add_req_queue: [VecDeque<Task>; NUM_OF_CPUS],
     dispatcher: [Dispatcher; NUM_OF_CPUS],
     interval: u64, /* in microseconds */
     current_task_id: [Option<usize>; NUM_OF_CPUS],
@@ -40,6 +41,7 @@ impl Scheduler {
     pub const fn new() -> Self {
         Scheduler {
             task_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
+            add_req_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             dispatcher: [const { Dispatcher::new() }; NUM_OF_CPUS],
             interval: 10000, /* 1ms */
             current_task_id: [const { None }; NUM_OF_CPUS],
@@ -47,11 +49,21 @@ impl Scheduler {
     }
 
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
-        self.task_queue[cpu_id].push_back(task);
+        if self.task_queue[cpu_id].is_empty() {
+            self.task_queue[cpu_id].push_back(task);
+            return;
+        }
+        self.add_req_queue[cpu_id].push_back(task);
     }
 
     fn run(&mut self, cpu: &mut Arch) {
         let cpu_id = cpu.get_cpuid();
+
+        if !self.add_req_queue[cpu_id].is_empty() {
+            for task in self.add_req_queue[cpu_id].drain(..) {
+                self.task_queue[cpu_id].push_back(task);
+            }
+        }
 
         let task = self.task_queue[cpu_id].pop_front();
 
@@ -76,8 +88,9 @@ impl Scheduler {
                     Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
                     None => None
                 };
-
-                self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+                if prev_task.is_some() {
+                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+                }
                 self.current_task_id[cpu_id] = Some(t.get_id());
                 self.task_queue[cpu_id].push_back(t);
             }
@@ -109,7 +122,10 @@ impl Scheduler {
         let trapframe = get_trampoline_trapframe(cpu_id);
         set_trapvector(trap_vector);
         set_trapframe(trapframe);
-        cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
+        // cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
+        let trapframe = cpu.get_trapframe();
+        trapframe.set_trap_handler(get_user_trap_handler());
+        trapframe.set_next_address_space(get_kernel_vm_manager().get_asid());
 
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);

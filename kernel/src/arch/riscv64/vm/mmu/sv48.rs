@@ -1,6 +1,7 @@
 use core::{arch::asm, mem::transmute};
 use core::result::Result;
 
+use crate::environment::PAGE_SIZE;
 use crate::vm::vmem::VirtualMemoryPermission;
 use crate::{arch::vm::{get_page_table, new_page_table_idx}, vm::vmem::VirtualMemoryMap};
 
@@ -74,6 +75,11 @@ impl PageTableEntry {
         self.entry |= 0x8;
         self
     }
+
+    pub fn accesible_from_user(&mut self) -> &mut Self {
+        self.entry |= 0x10;
+        self
+    }
 }
 
 #[repr(align(4096))]
@@ -89,9 +95,7 @@ impl PageTable {
     }
 
     pub fn switch(&self, asid: usize) {
-        let mode = 9;
-        let ppn = self as *const _ as usize >> 12;
-        let satp = mode << 60 | asid << 44 | ppn;
+        let satp = self.get_val_for_satp(asid);
         unsafe {
             asm!(
                 "
@@ -104,25 +108,44 @@ impl PageTable {
         }
     }
 
+    /// Get the value for the satp register.
+    /// 
+    /// # Note
+    /// 
+    /// Only for RISC-V (Sv48).
+    pub fn get_val_for_satp(&self, asid: usize) -> u64 {
+        let mode = 9;
+        let ppn = self as *const _ as usize >> 12;
+        (mode << 60 | asid << 44 | ppn) as u64
+    }
+
     fn get_next_level_table(&self, index: usize) -> &mut PageTable {
         let addr = self.entries[index].get_ppn() << 12;
         unsafe { transmute(addr) }
     }
 
-    pub fn map_memory_area(&mut self, mmap: VirtualMemoryMap) {
+    pub fn map_memory_area(&mut self, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
+        // Check if the address and size is aligned to PAGE_SIZE
+        if mmap.vmarea.start % PAGE_SIZE != 0 || mmap.pmarea.start % PAGE_SIZE != 0 ||
+            mmap.vmarea.size() % PAGE_SIZE != 0 || mmap.pmarea.size() % PAGE_SIZE != 0 {
+            return Err("Address is not aligned to PAGE_SIZE");
+        }
+
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
-        while vaddr + 0xfff <= mmap.vmarea.end {
+        while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
             self.map(vaddr, paddr, mmap.permissions);
-            match vaddr.checked_add(0x1000) {
+            match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
                 None => break,
             }
-            match paddr.checked_add(0x1000) {
+            match paddr.checked_add(PAGE_SIZE) {
                 Some(addr) => paddr = addr,
                 None => break,
             }
         }
+
+        Ok(())
     }
 
     /* Only for root page table */
@@ -144,6 +167,9 @@ impl PageTable {
                     }
                     if VirtualMemoryPermission::Execute.contained_in(permissions) {
                         entry.executable();
+                    }
+                    if VirtualMemoryPermission::User.contained_in(permissions) {
+                        entry.accesible_from_user();
                     }
                     entry
                         .set_ppn(ppn)

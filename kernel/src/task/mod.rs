@@ -55,7 +55,10 @@ impl Task {
             id: *taskid,
             name,
             priority,
-            vcpu: Vcpu::new(),
+            vcpu: Vcpu::new(match task_type {
+                TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
+                TaskType::User => crate::arch::vcpu::Mode::User,
+            }),
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
@@ -78,7 +81,11 @@ impl Task {
                 /* Set sp to the top of the kernel stack */
                 self.vcpu.regs.reg[2] = KERNEL_VM_STACK_END + 1;
             },
-            TaskType::User => user_vm_init(self),
+            TaskType::User => { 
+                user_vm_init(self);
+                /* Set sp to the top of the user stack */
+                self.vcpu.regs.reg[2] = 0xffff_ffff_ffff_f000;
+            }
         }
         
         /* Set the task state to Ready */
@@ -87,6 +94,24 @@ impl Task {
 
     pub fn get_id(&self) -> usize {
         self.id
+    }
+
+    /// Set the task state
+    /// 
+    /// # Arguments
+    /// * `state` - The new task state
+    /// 
+    pub fn set_state(&mut self, state: TaskState) {
+        self.state = state;
+    }
+
+    /// Get the task state
+    /// 
+    /// # Returns
+    /// The task state
+    /// 
+    pub fn get_state(&self) -> TaskState {
+        self.state
     }
 
    /// Get the size of the task.
@@ -184,7 +209,7 @@ impl Task {
             },
             permissions,
         };
-        self.vm_manager.add_memory_map(mmap);
+        self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
         match segment {
             VirtualMemorySegment::Stack => self.stack_size += size,
             VirtualMemorySegment::Heap => self.data_size += size,
@@ -223,7 +248,8 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                         };
-                        self.vm_manager.add_memory_map(mmap1);
+                        self.vm_manager.add_memory_map(mmap1)
+                            .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
                     }
@@ -242,7 +268,8 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                         };
-                        self.vm_manager.add_memory_map(mmap2);
+                        self.vm_manager.add_memory_map(mmap2)
+                            .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
                     }

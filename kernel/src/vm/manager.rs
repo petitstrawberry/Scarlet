@@ -38,7 +38,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::arch::vm::{get_page_table, get_root_page_table_idx, mmu::PageTable};
+use crate::{arch::vm::{get_page_table, get_root_page_table_idx, mmu::PageTable}, environment::PAGE_SIZE};
 
 use super::vmem::VirtualMemoryMap;
 
@@ -84,8 +84,19 @@ impl VirtualMemoryManager {
     /// 
     /// # Arguments
     /// * `map` - The memory map to add
-    pub fn add_memory_map(&mut self, map: VirtualMemoryMap) {
+    /// 
+    /// # Returns
+    /// A result indicating success or failure.
+    /// 
+    pub fn add_memory_map(&mut self, map: VirtualMemoryMap) -> Result<(), &'static str> {
+        // Check if the address and size is aligned
+        if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
+            map.vmarea.size() % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0 {
+            return Err("Address or size is not aligned to PAGE_SIZE");
+        }
+
         self.memmap.push(map);
+        Ok(())
     }
 
     /// Returns the memory map at the given index.
@@ -207,18 +218,18 @@ mod tests {
     #[test_case]
     fn test_add_and_get_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
-        let vma = MemoryArea { start: 0x1000, end: 0x2000 };
+        let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0 };
-        vmm.add_memory_map(map);
+        vmm.add_memory_map(map).unwrap();
         assert_eq!(vmm.get_memory_map(0).unwrap().vmarea.start, 0x1000);
     }
 
     #[test_case]
     fn test_remove_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
-        let vma = MemoryArea { start: 0x1000, end: 0x2000 };
+        let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0 };
-        vmm.add_memory_map(map);
+        vmm.add_memory_map(map).unwrap();
         let removed_map = vmm.remove_memory_map(0).unwrap();
         assert_eq!(removed_map.vmarea.start, 0x1000);
         assert!(vmm.get_memory_map(0).is_none());
@@ -227,12 +238,12 @@ mod tests {
     #[test_case]
     fn test_search_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
-        let vma1 = MemoryArea { start: 0x1000, end: 0x2000 };
+        let vma1 = MemoryArea { start: 0x1000, end: 0x1fff };
         let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0 };
-        let vma2 = MemoryArea { start: 0x3000, end: 0x4000 };
+        let vma2 = MemoryArea { start: 0x3000, end: 0x3fff };
         let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2, permissions: 0 };
-        vmm.add_memory_map(map1);
-        vmm.add_memory_map(map2);
+        vmm.add_memory_map(map1).unwrap();
+        vmm.add_memory_map(map2).unwrap();
         let found_map = vmm.search_memory_map(0x3500).unwrap();
         assert_eq!(found_map.vmarea.start, 0x3000);
     }
