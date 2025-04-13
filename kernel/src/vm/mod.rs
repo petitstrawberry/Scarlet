@@ -126,28 +126,46 @@ pub fn user_vm_init(task: &mut Task) {
     let asid = alloc_virtual_address_space();
     manager.set_asid(asid);
 
-    let first_page = allocate_pages(1);
+    /* User stack page */
+    let num_of_stack_page = 2; // 2 pages for user stack
+    let stack_pages = allocate_pages(num_of_stack_page);
+    let stack_start = 0xffff_ffff_ffff_f000 - num_of_stack_page * PAGE_SIZE;
+    let stack_map = VirtualMemoryMap {
+        vmarea: MemoryArea {
+            start: stack_start,
+            end: stack_start + num_of_stack_page * PAGE_SIZE - 1,
+        },
+        pmarea: MemoryArea {
+            start: stack_pages as usize,
+            end: stack_pages as usize + num_of_stack_page * PAGE_SIZE - 1,
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize |
+            VirtualMemoryPermission::User as usize,
+    };
+    manager.add_memory_map(stack_map);
+    println!("User stack mapped         : {:#018x} - {:#018x}", stack_map.vmarea.start, stack_map.vmarea.end);
+    task.stack_size = num_of_stack_page * PAGE_SIZE;
 
-    manager.add_memory_map(
-        VirtualMemoryMap {
-            vmarea: MemoryArea {
-                start: 0x00,
-                end: 0xfff,
-            },
-            pmarea: MemoryArea {
-                start: first_page as usize,
-                end: first_page as usize + 0xfff,
-            },
-            permissions: 
-                VirtualMemoryPermission::Read as usize |
-                VirtualMemoryPermission::Write as usize |
-                VirtualMemoryPermission::Execute as usize |
-                VirtualMemoryPermission::User as usize,
-        }
-    );
-
-    println!("User space mapped         : {:#018x} - {:#018x}", 0x00, 0xfff);
-    println!("(First Page)              : {:#018x}", first_page as usize);
+    /* Guard page */
+    let guard_page = allocate_pages(1);
+    /* User program cannot access this page */
+    let guard_map = VirtualMemoryMap {
+        vmarea: MemoryArea {
+            start: stack_start - PAGE_SIZE,
+            end: stack_start - 1,
+        },
+        pmarea: MemoryArea {
+            start: guard_page as usize,
+            end: guard_page as usize + PAGE_SIZE - 1,
+        },
+        permissions: 
+            VirtualMemoryPermission::Read as usize |
+            VirtualMemoryPermission::Write as usize
+    };
+    manager.add_memory_map(guard_map);
+    println!("Guard page mapped         : {:#018x} - {:#018x}", guard_map.vmarea.start, guard_map.vmarea.end);
 
     setup_trampoline(manager);
 }

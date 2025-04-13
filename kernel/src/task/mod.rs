@@ -81,7 +81,11 @@ impl Task {
                 /* Set sp to the top of the kernel stack */
                 self.vcpu.regs.reg[2] = KERNEL_VM_STACK_END + 1;
             },
-            TaskType::User => user_vm_init(self),
+            TaskType::User => { 
+                user_vm_init(self);
+                /* Set sp to the top of the user stack */
+                self.vcpu.regs.reg[2] = 0xffff_ffff_ffff_f000;
+            }
         }
         
         /* Set the task state to Ready */
