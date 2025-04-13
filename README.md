@@ -4,7 +4,7 @@
   
 **A minimal operating system kernel written in Rust**
 
-[![Version](https://img.shields.io/badge/version-0.8.1-blue.svg)](https://github.com/yourusername/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](https://github.com/yourusername/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 
@@ -66,7 +66,7 @@ cargo make build
 cargo make build-kernel    # Build only the kernel
 cargo make build-userlib   # Build only the user library
 cargo make build-userbin   # Build only the user programs
-cargo make build-initramfs # Build only the initial ramdisk (copies user programs to initramfs)
+cargo make build-initramfs # Build only the initial ramfs (copies user programs to initramfs)
 
 # Clean all build artifacts
 cargo make clean
@@ -102,17 +102,23 @@ kernel/src/           - Kernel source code
 │   ├── uart/         - UART drivers
 │   └── virtio/       - VirtIO device drivers
 ├── fs/               - Filesystem implementations
+│   └── drivers/      - Filesystem drivers
+│       └── cpio/     - CPIO archive filesystem support
 ├── initcall/         - Initialization sequence management
 ├── library/          - Internal library code (std replacement)
 ├── mem/              - Memory management
 ├── sched/            - Scheduler implementation
 ├── syscall/          - System call interface
 ├── task/             - Task and process management
+│   └── elf_loader/   - ELF executable loader
 ├── traits/           - Shared interfaces
 └── vm/               - Virtual memory management
-user
+user/                 - User space code
 ├── bin/              - User programs
 └── lib/              - User library code
+mkfs/                 - Filesystem build tools
+├── initramfs/        - Initial RAM filesystem contents
+└── make_initramfs.sh - Script to build the initial RAM filesystem
 ```
 
 ## Architecture Support
