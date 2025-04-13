@@ -61,6 +61,7 @@ description = "Run kernel tests"
 cwd = "kernel"
 command = "cargo"
 args = ["test"]
+dependencies = ["build-initramfs"]
 
 [tasks.run]
 description = "Run the kernel"
