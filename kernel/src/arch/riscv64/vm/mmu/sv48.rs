@@ -1,6 +1,7 @@
 use core::{arch::asm, mem::transmute};
 use core::result::Result;
 
+use crate::environment::PAGE_SIZE;
 use crate::vm::vmem::VirtualMemoryPermission;
 use crate::{arch::vm::{get_page_table, new_page_table_idx}, vm::vmem::VirtualMemoryMap};
 
@@ -124,15 +125,21 @@ impl PageTable {
     }
 
     pub fn map_memory_area(&mut self, mmap: VirtualMemoryMap) {
+        // Check if the address and size is aligned to PAGE_SIZE
+        if mmap.vmarea.start % PAGE_SIZE != 0 || mmap.pmarea.start % PAGE_SIZE != 0 ||
+            mmap.vmarea.size() % PAGE_SIZE != 0 || mmap.pmarea.size() % PAGE_SIZE != 0 {
+            panic!("Address is not aligned to PAGE_SIZE = {:#x}", PAGE_SIZE);
+        }
+
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
-        while vaddr + 0xfff <= mmap.vmarea.end {
+        while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
             self.map(vaddr, paddr, mmap.permissions);
-            match vaddr.checked_add(0x1000) {
+            match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
                 None => break,
             }
-            match paddr.checked_add(0x1000) {
+            match paddr.checked_add(PAGE_SIZE) {
                 Some(addr) => paddr = addr,
                 None => break,
             }
