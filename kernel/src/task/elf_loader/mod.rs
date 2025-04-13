@@ -374,6 +374,10 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
 }
 
 fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
+    // Ensure alignment is greater than zero
+    if align == 0 {
+        return Err("Alignment must be greater than zero");
+    }
     // Check if the size is valid
     if size == 0 || size % align != 0 {
         return Err("Invalid size");
