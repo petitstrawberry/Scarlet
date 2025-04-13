@@ -383,11 +383,7 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
         return Err("Invalid size");
     }
     // Check if the address is aligned
-    if align == 0 {
-        if vaddr % PAGE_SIZE != 0 {
-            return Err("Address is not aligned");
-        }
-    } else if vaddr % align != 0 {
+    if vaddr % align != 0 {
         return Err("Address is not aligned");
     }
 
