@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
-	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 gdb-multiarch gcc-riscv64-linux-gnu
+	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 gdb-multiarch gcc-riscv64-linux-gnu cpio
 
 # Install QEMU
 RUN apt install -y qemu-system-riscv64

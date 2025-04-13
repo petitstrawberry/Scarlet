@@ -1,3 +1,6 @@
 /kernel/target
 /user/lib/target
 /user/bin/target
+/mkfs/initramfs/bin/*
+/mkfs/*.cpio
+dist/

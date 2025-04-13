@@ -9,7 +9,7 @@ skip_core_tasks = true
 
 [tasks.build]
 description = "Build all components"
-dependencies = ["build-kernel", "build-userlib", "build-userbin"]
+dependencies = ["build-kernel", "build-userlib", "build-userbin", "build-initramfs"]
 
 [tasks.build-kernel]
 description = "Build the kernel"
@@ -27,12 +27,12 @@ args = ["build"]
 description = "Build user programs"
 cwd = "user/bin"
 command = "cargo"
-args = ["build"]
+args = ["build", "--out-dir", "dist"]
 dependencies = ["build-userlib"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
-dependencies = ["clean-kernel", "clean-userlib", "clean-userbin"]
+dependencies = ["clean-kernel", "clean-userlib", "clean-userbin", "clean-initramfs"]
 
 [tasks.clean-kernel]
 description = "Clean kernel build artifacts"
@@ -61,12 +61,14 @@ description = "Run kernel tests"
 cwd = "kernel"
 command = "cargo"
 args = ["test"]
+dependencies = ["build-initramfs"]
 
 [tasks.run]
 description = "Run the kernel"
 cwd = "kernel"
 command = "cargo"
 args = ["run"]
+dependencies = ["build"]
 
 [tasks.debug]
 description = "Run the kernel in debug mode"
@@ -89,3 +91,16 @@ description = "Generate user library documentation"
 cwd = "user/lib"
 command = "cargo"
 args = ["doc", "--no-deps"]
+
+[tasks.build-initramfs]
+description = "Create initramfs archive"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh"]
+dependencies = ["build-userbin"]
+
+[tasks.clean-initramfs]
+description = "Clean initramfs archive"
+cwd = "mkfs"
+command = "sh"
+args = ["clean_initramfs.sh"]

@@ -59,13 +59,14 @@ cargo make build
 To build and run Scarlet, you can use the following commands:
 
 ```bash
-# Build all components (kernel, userlib, and user programs)
+# Build all components (kernel, userlib, user programs, initramfs)
 cargo make build
 
 # Build only specific components:
 cargo make build-kernel    # Build only the kernel
 cargo make build-userlib   # Build only the user library
 cargo make build-userbin   # Build only the user programs
+cargo make build-initramfs # Build only the initial ramdisk (copies user programs to initramfs)
 
 # Clean all build artifacts
 cargo make clean
