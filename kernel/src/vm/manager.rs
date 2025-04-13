@@ -38,7 +38,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::arch::vm::{get_page_table, get_root_page_table_idx, mmu::PageTable};
+use crate::{arch::vm::{get_page_table, get_root_page_table_idx, mmu::PageTable}, environment::PAGE_SIZE};
 
 use super::vmem::VirtualMemoryMap;
 
@@ -85,6 +85,12 @@ impl VirtualMemoryManager {
     /// # Arguments
     /// * `map` - The memory map to add
     pub fn add_memory_map(&mut self, map: VirtualMemoryMap) {
+        // Check if the address and size is aligned
+        if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
+            map.vmarea.size() % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0 {
+            panic!("Address or size is not aligned to PAGE_SIZE = {:#x}: {:#x?}", PAGE_SIZE, map);   
+        }
+
         self.memmap.push(map);
     }
 
@@ -207,7 +213,7 @@ mod tests {
     #[test_case]
     fn test_add_and_get_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
-        let vma = MemoryArea { start: 0x1000, end: 0x2000 };
+        let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0 };
         vmm.add_memory_map(map);
         assert_eq!(vmm.get_memory_map(0).unwrap().vmarea.start, 0x1000);
@@ -216,7 +222,7 @@ mod tests {
     #[test_case]
     fn test_remove_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
-        let vma = MemoryArea { start: 0x1000, end: 0x2000 };
+        let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0 };
         vmm.add_memory_map(map);
         let removed_map = vmm.remove_memory_map(0).unwrap();
@@ -227,9 +233,9 @@ mod tests {
     #[test_case]
     fn test_search_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
-        let vma1 = MemoryArea { start: 0x1000, end: 0x2000 };
+        let vma1 = MemoryArea { start: 0x1000, end: 0x1fff };
         let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0 };
-        let vma2 = MemoryArea { start: 0x3000, end: 0x4000 };
+        let vma2 = MemoryArea { start: 0x3000, end: 0x3fff };
         let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2, permissions: 0 };
         vmm.add_memory_map(map1);
         vmm.add_memory_map(map2);
