@@ -111,7 +111,13 @@ impl Cpiofs {
 
             // Check magic number
             if &header[0..6] != b"070701" {
-                break;
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::InvalidData,
+                    message: format!("Invalid CPIO magic number {:#x} at offset {}", 
+                        u32::from_str_radix(core::str::from_utf8(&header[0..6]).unwrap_or("0"), 16).unwrap_or(0),
+                        offset,
+                    ),
+                });
             }
 
             // Get the file name
@@ -446,7 +452,6 @@ impl FileSystemDriver for CpiofsDriver {
     /// 
     fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
         let data = unsafe { memory_area.as_slice() };
-        
         // Create the Cpiofs from the memory data
         match Cpiofs::new("cpiofs", data) {
             Ok(cpio_fs) => Ok(Box::new(cpio_fs)),

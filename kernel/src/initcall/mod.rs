@@ -20,7 +20,7 @@
 //! to the console. After all initialization routines have been executed, the
 //! processor enters an idle state.
 
-use crate::{arch::instruction::idle, println, print};
+use crate::{arch::instruction::idle, println, task::{mytask, TaskState}};
 
 pub mod early;
 pub mod driver;
@@ -48,5 +48,13 @@ pub fn initcall_task() {
         func += size;
     }
 
-    idle();
+    println!("Initcalls done.");
+
+    mytask().unwrap().set_state(TaskState::Terminated);
+    idle(); 
+    // let mut i = 0;
+    // loop {
+    //     println!("Initcall task: idle: {}", i);
+    //     i += 1;
+    // }
 }

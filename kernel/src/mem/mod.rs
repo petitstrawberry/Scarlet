@@ -58,3 +58,24 @@ pub fn kfree(ptr: *mut u8, size: usize) {
         let _ = Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(ptr, size));
     }
 }
+
+pub fn init_bss() {
+    unsafe extern "C" {
+        static mut __BSS_START: u8;
+        static mut __BSS_END: u8;
+    }
+
+    unsafe {
+        let bss_start = &raw mut __BSS_START as *mut u8;
+        let bss_end = &raw mut __BSS_END as *mut u8;
+        let bss_size = bss_end as usize - bss_start as usize;
+        core::ptr::write_bytes(bss_start, 0, bss_size);
+    }
+}
+
+unsafe extern "C" {
+    pub static __KERNEL_SPACE_START: usize;
+    pub static __KERNEL_SPACE_END: usize;
+    pub static __FDT_RESERVED_START: usize;
+    pub static __FDT_RESERVED_END: usize;
+}

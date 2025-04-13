@@ -3,6 +3,7 @@ use core::panic;
 
 use crate::arch::trap::print_traplog;
 use crate::arch::Trapframe;
+use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::syscall::syscall_handler;
 
@@ -13,10 +14,13 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             /* Execute SystemCall */
             match syscall_handler(trapframe) {
                 Ok(ret) => {
-                    trapframe.set_arg(0, ret);
+                    trapframe.set_return_value(ret);
                 }
                 Err(msg) => {
-                    panic!("Syscall error: {}", msg);
+                    // panic!("Syscall error: {}", msg);
+                    println!("Syscall error: {}", msg);
+                    trapframe.set_return_value(usize::MAX); // Set error code: -1
+                    trapframe.epc += 4;
                 }
             }
         }

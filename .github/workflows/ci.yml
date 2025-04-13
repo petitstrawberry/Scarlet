@@ -41,7 +41,7 @@ jobs:
       run: docker load < /tmp/docker-image
 
     - name: Build scarlet kernel 
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo build
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build
       
     - name: Test scarlet kernel
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev bash /workspaces/Scarlet/tools/test.sh
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test

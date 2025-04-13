@@ -38,7 +38,6 @@ use core::fmt;
 
 use crate::device::manager::DeviceManager;
 use crate::early_println;
-use crate::early_print;
 
 #[macro_export]
 macro_rules! print {
@@ -47,8 +46,8 @@ macro_rules! print {
 
 #[macro_export]
 macro_rules! println {
-    ($fmt:expr) => (print!(concat!($fmt, "\n")));
-    ($fmt:expr, $($arg:tt)*) => (print!(concat!($fmt, "\n"), $($arg)*));
+    ($fmt:expr) => ($crate::print!(concat!($fmt, "\n")));
+    ($fmt:expr, $($arg:tt)*) => ($crate::print!(concat!($fmt, "\n"), $($arg)*));
 }
 
 pub fn _print(args: fmt::Arguments) {

@@ -3,7 +3,7 @@ mod disk;
 use alloc::vec;
 
 use super::*;
-use crate::{device::block::request::BlockIORequest, println, print};
+use crate::{device::block::request::BlockIORequest, println};
 
 fn dummy_request_fn(_request: &mut BlockIORequest) -> Result<(), &'static str> {
     Ok(())

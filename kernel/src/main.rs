@@ -161,18 +161,20 @@ pub mod fs;
 pub mod test;
 
 extern crate alloc;
-use alloc::string::String;
-use device::{fdt::{init_fdt, relocate_fdt}, manager::DeviceManager};
+use alloc::string::ToString;
+use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
+use environment::PAGE_SIZE;
+use fs::drivers::initramfs::relocate_initramfs;
 use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
+use slab_allocator_rs::MIN_HEAP_SIZE;
 
 use core::panic::PanicInfo;
 
 use arch::init_arch;
-use library::std::print;
 use task::new_kernel_task;
-use vm::kernel_vm_init;
+use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
-use mem::allocator::init_heap;
+use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 
 
@@ -196,10 +198,33 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     init_bss();
     early_println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
+    /* Initializing FDT subsystem */
     early_println!("[Scarlet Kernel] Initializing FDT...");
     init_fdt();
+    /* Get DRAM area from FDT */
+    let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
+    early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
+    /* Relocate FDT to usable memory area */
+    early_println!("[Scarlet Kernel] Relocating FDT...");
+    let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
+    let dest_ptr = fdt_reloc_start as *mut u8;
+    relocate_fdt(dest_ptr);
+    /* Calculate usable memory area */
+    let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
+    let mut usable_area = MemoryArea::new(kernel_end, dram_area.end);
+    early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
+    /* Relocate initramfs to usable memory area */
+    early_println!("[Scarlet Kernel] Relocating initramfs...");
+    if let Err(e) = relocate_initramfs(&mut usable_area) {
+        early_println!("[Scarlet Kernel] Failed to relocate initramfs: {}", e);
+    }
+    early_println!("[Scarlet Kernel] Updated Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
+    /* Initialize heap with the usable memory area after FDT */
     early_println!("[Scarlet Kernel] Initializing heap...");
-    init_heap();
+    let heap_start = (usable_area.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let heap_size = ((usable_area.end - heap_start + 1) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
+    let heap_end = heap_start + heap_size - 1;
+    init_heap(MemoryArea::new(heap_start, heap_end));
     /* After this point, we can use the heap */
     early_initcall_call();
     driver_initcall_call();
@@ -208,11 +233,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     #[cfg(test)]
     test_main();
 
-    /* Relocate FDT */
-    println!("[Scarlet Kernel] Relocating FDT...");
-    relocate_fdt();
     println!("[Scarlet Kernel] Initializing Virtual Memory...");
-    kernel_vm_init();
+    let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
+    kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
@@ -226,7 +249,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let scheduler = get_scheduler();
     /* Make idle task as initial task */
     println!("[Scarlet Kernel] Creating initial kernel task...");
-    let mut task = new_kernel_task(String::from("Initcall"), 0, initcall_task);
+    let mut task = new_kernel_task("Initcall".to_string(), 0, initcall_task);
     task.init();
     scheduler.add_task(task, cpu_id);
     println!("[Scarlet Kernel] Scheduler will start...");
@@ -240,18 +263,4 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
     loop {}
-}
-
-fn init_bss() {
-    unsafe extern "C" {
-        static mut __BSS_START: u8;
-        static mut __BSS_END: u8;
-    }
-
-    unsafe {
-        let bss_start = &raw mut __BSS_START as *mut u8;
-        let bss_end = &raw mut __BSS_END as *mut u8;
-        let bss_size = bss_end as usize - bss_start as usize;
-        core::ptr::write_bytes(bss_start, 0, bss_size);
-    }
 }

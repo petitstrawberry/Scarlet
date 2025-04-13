@@ -1,0 +1,15 @@
+[package]
+name = "userprogram"
+version = "0.9.0"
+edition = "2024"
+
+[[bin]]
+name = "init"
+path = "src/init.rs"
+
+[[bin]]
+name = "test"
+path = "src/test.rs"
+
+[dependencies]
+scarlet_std = { path = "../lib" }

@@ -6,20 +6,27 @@
 
 use super::{Registers, Riscv64};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    User,
+    Kernel,
+}
 
 #[derive(Debug, Clone)]
 pub struct Vcpu {
     pub regs: Registers,
     pc: u64,
     asid: usize,
+    mode: Mode,
 }
 
 impl Vcpu {
-    pub fn new() -> Self {
+    pub fn new(mode: Mode) -> Self {
         Vcpu {
             regs: Registers::new(),
             pc: 0,
             asid: 0,
+            mode,
         }
     }
 
@@ -29,6 +36,10 @@ impl Vcpu {
 
     pub fn set_pc(&mut self, pc: u64) {
         self.pc = pc;
+    }
+
+    pub fn get_mode(&self) -> Mode {
+        self.mode
     }
 
     pub fn store(&mut self, riscv64: &Riscv64) {

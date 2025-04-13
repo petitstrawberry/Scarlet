@@ -5,9 +5,11 @@ use trap::kernel::arch_kernel_trap_handler;
 use trap::kernel::_kernel_trap_entry;
 use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
+use vcpu::Mode;
+use vm::get_page_table;
+use vm::get_root_page_table_idx;
 
 use crate::early_println;
-use crate::early_print;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
@@ -37,6 +39,7 @@ pub struct Riscv64 {
     pub regs: Registers,
     pub epc: u64,
     pub hartid: u64,
+    satp: u64,
     kernel_stack: u64,
     kernel_trap: u64,
 }
@@ -50,7 +53,7 @@ pub fn init_arch(cpu_id: usize) {
 
 impl Riscv64 {
     pub const fn new(cpu_id: usize) -> Self {
-        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new(), kernel_stack: 0, kernel_trap: 0 }
+        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new(), kernel_stack: 0, kernel_trap: 0, satp: 0 }
     }
 
     pub fn get_cpuid(&self) -> usize {
@@ -66,19 +69,47 @@ impl Riscv64 {
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
         self
     }
-
-    pub fn set_trap_handler(&mut self, addr: usize) {
-        self.kernel_trap = addr as u64;
-    }
 }
 
 impl Trapframe {
+    pub fn set_trap_handler(&mut self, addr: usize) {
+        self.kernel_trap = addr as u64;
+    }
+
+    pub fn set_next_address_space(&mut self, asid: usize) {
+        let root_page_table_idx = get_root_page_table_idx(asid);
+        if root_page_table_idx.is_none() {
+            panic!("No root page table found for ASID {}", asid);
+        }
+        let root_page_table = get_page_table(root_page_table_idx.unwrap()).unwrap();
+        
+        let satp = root_page_table.get_val_for_satp(asid);
+        self.satp = satp as u64;
+    }
+
+
+    pub fn get_syscall_number(&self) -> usize {
+        self.regs.reg[17] // a7
+    }
+
+    pub fn set_syscall_number(&mut self, syscall_number: usize) {
+        self.regs.reg[17] = syscall_number; // a7
+    }
+
+    pub fn get_return_value(&self) -> usize {
+        self.regs.reg[10] // a0
+    }
+
+    pub fn set_return_value(&mut self, value: usize) {
+        self.regs.reg[10] = value; // a0
+    }
+
     pub fn get_arg(&self, index: usize) -> usize {
-        self.regs.reg[index]
+        self.regs.reg[index + 10] // a0 - a7
     }
 
     pub fn set_arg(&mut self, index: usize, value: usize) {
-        self.regs.reg[index] = value;
+        self.regs.reg[index + 10] = value; // a0 - a7
     }
 }
 
@@ -180,6 +211,41 @@ pub fn get_cpu() -> &'static mut Riscv64 {
         );
     }
     unsafe { transmute(scratch) }
+}
+
+pub fn set_next_mode(mode: Mode) {
+    match mode {
+        Mode::User => {
+            unsafe {
+                // sstatus.spp = 0 (U-mode)
+                let mut sstatus: usize;
+                asm!(
+                    "csrr {sstatus}, sstatus",
+                    sstatus = out(reg) sstatus,
+                );
+                sstatus &= !(1 << 8); // Clear SPP bit
+                asm!(
+                    "csrw sstatus, {sstatus}",
+                    sstatus = in(reg) sstatus,
+                );
+            }
+        },
+        Mode::Kernel => {
+            unsafe {
+                // sstatus.spp = 1 (S-mode)
+                let mut sstatus: usize;
+                asm!(
+                    "csrr {sstatus}, sstatus",
+                    sstatus = out(reg) sstatus,
+                );
+                sstatus |= 1 << 8; // Set SPP bit
+                asm!(
+                    "csrw sstatus, {sstatus}",
+                    sstatus = in(reg) sstatus,
+                );
+            }
+        },
+    }
 }
 
 pub fn shutdown() -> ! {

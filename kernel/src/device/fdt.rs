@@ -41,8 +41,6 @@ use core::result::Result;
 use fdt::{Fdt, FdtError};
 
 use crate::early_println;
-use crate::early_print;
-use crate::mem::kmalloc;
 use crate::vm::vmem::MemoryArea;
 
 #[unsafe(link_section = ".data")]
@@ -277,6 +275,42 @@ impl<'a> FdtManager<'a> {
         early_println!("[InitRamFS] No initramfs found in device tree");
         None
     }
+
+    pub fn get_dram_memoryarea(&self) -> Option<MemoryArea> {
+        let fdt = self.get_fdt()?;
+        let memory_node = fdt.find_node("/memory")?;
+        
+        
+        let reg = memory_node.property("reg")?;
+        if reg.value.len() < 16 {
+            return None;
+        }
+        let reg_start = u64::from_be_bytes([
+            reg.value[0],
+            reg.value[1],
+            reg.value[2],
+            reg.value[3],
+            reg.value[4],
+            reg.value[5],
+            reg.value[6],
+            reg.value[7],
+        ]);
+        let start = reg_start as usize;
+        let size = u64::from_be_bytes([
+            reg.value[8],
+            reg.value[9],
+            reg.value[10],
+            reg.value[11],
+            reg.value[12],
+            reg.value[13],
+            reg.value[14],
+            reg.value[15],
+        ]) as usize;
+        Some(
+            MemoryArea::new(start as usize, start + size - 1) // end is inclusive
+        )
+    }
+
 }
 
 /// Initializes the FDT subsystem.
@@ -310,15 +344,12 @@ pub fn init_fdt() {
 /// This function will panic if the FDT has already been relocated or if
 /// the memory allocation fails.
 /// 
-pub fn relocate_fdt() {
+pub fn relocate_fdt(dest_ptr: *mut u8) -> MemoryArea {
     let fdt_manager = unsafe { FdtManager::get_mut_manager() };
     if fdt_manager.relocated {
         panic!("FDT already relocated");
     }
     let size = fdt_manager.get_fdt().unwrap().total_size();
-    let ptr = kmalloc(size);
-    if ptr.is_null() {
-        panic!("Failed to allocate memory for FDT relocation");
-    }
-    unsafe { fdt_manager.relocate_fdt(ptr) };
+    unsafe { fdt_manager.relocate_fdt(dest_ptr) };
+    MemoryArea::new(dest_ptr as usize, dest_ptr as usize + size - 1) // return the memory area
 }

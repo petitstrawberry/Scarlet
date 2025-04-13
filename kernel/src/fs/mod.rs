@@ -1004,3 +1004,6 @@ impl FileSystem for GenericFileSystem {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub mod testfs;

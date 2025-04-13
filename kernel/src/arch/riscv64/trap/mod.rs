@@ -1,7 +1,6 @@
 use core::arch::asm;
 
 use crate::println;
-use crate::print;
 
 use super::Trapframe;
 

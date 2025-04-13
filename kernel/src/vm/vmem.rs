@@ -7,7 +7,7 @@
 ///
 /// * `pmarea` - The physical memory area that is being mapped
 /// * `vmarea` - The virtual memory area where the physical memory is mapped to
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VirtualMemoryMap {
     pub pmarea: MemoryArea,
     pub vmarea: MemoryArea,
@@ -49,7 +49,7 @@ impl VirtualMemoryMap {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MemoryArea {
     pub start: usize,
     pub end: usize,
@@ -70,6 +70,9 @@ impl MemoryArea {
     
     /// Returns the size of the memory area in bytes
     pub fn size(&self) -> usize {
+        if self.start > self.end {
+            panic!("Invalid memory area: start > end: {:#x} > {:#x}", self.start, self.end);
+        }
         self.end - self.start + 1
     }
     
@@ -109,6 +112,7 @@ pub enum VirtualMemoryPermission {
     Read = 0x01,
     Write = 0x02,
     Execute = 0x04,
+    User = 0x08,
 }
 
 impl From<usize> for VirtualMemoryPermission {
@@ -117,6 +121,7 @@ impl From<usize> for VirtualMemoryPermission {
             0x01 => VirtualMemoryPermission::Read,
             0x02 => VirtualMemoryPermission::Write,
             0x04 => VirtualMemoryPermission::Execute,
+            0x08 => VirtualMemoryPermission::User,
             _ => panic!("Invalid permission value: {}", value),
         }
     }
