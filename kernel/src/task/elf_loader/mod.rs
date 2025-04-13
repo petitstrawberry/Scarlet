@@ -31,7 +31,7 @@
 //! regardless of the endianness used in the file.
 use crate::environment::PAGE_SIZE;
 use crate::fs::{File, SeekFrom};
-use crate::mem::page::allocate_pages;
+use crate::mem::page::{allocate_pages, free_pages};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 use alloc::{format, vec};
 use alloc::string::{String, ToString};
@@ -414,7 +414,8 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     }
 
     // Allocate physical memory
-    let ptr = allocate_pages((size + PAGE_SIZE - 1) / PAGE_SIZE);
+    let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    let ptr = allocate_pages(num_of_pages);
     if ptr.is_null() {
         return Err("Failed to allocate memory");
     }
@@ -431,7 +432,10 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     };
 
     // Add to VM manager
-    task.vm_manager.add_memory_map(map);
+     if let Err(e) = task.vm_manager.add_memory_map(map) {
+        free_pages(ptr, num_of_pages);
+        return Err(e);
+    }
 
     Ok(())
 }
