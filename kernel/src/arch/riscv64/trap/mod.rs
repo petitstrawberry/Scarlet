@@ -16,7 +16,7 @@ pub fn print_traplog(tf: &Trapframe) {
         asm!("csrr {}, scause", out(reg) cause);
         asm!("csrr {}, stval", out(reg) tval);
     }
-    println!("trapframe:\n{:x?}", tf);
+    println!("trapframe:\n{:#x?}", tf);
     println!("cause: {}", cause);
     println!("tval: 0x{:x}", tval);
 }

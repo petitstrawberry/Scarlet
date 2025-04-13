@@ -36,10 +36,16 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
                             root_page_table.map(vaddr, paddr, mmap.permissions);
                         }
-                        None => panic!("Root page table is not found"),
+                        None => {
+                            print_traplog(trapframe);
+                            panic!("Root page table is not found");
+                        }
                     }
                 }
-                None => panic!("Not found memory map matched with vaddr: {:#x}", vaddr),
+                None => {
+                    print_traplog(trapframe);
+                    panic!("Not found memory map matched with vaddr: {:#x}", vaddr);
+                }
             }
         }
         /* Load/Store page fault */
@@ -57,7 +63,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
                             root_page_table.map(vaddr, paddr, mmap.permissions);
                         }
-                        None => panic!("Root page table is not found"),
+                        None => {
+                            print_traplog(trapframe);
+                            panic!("Root page table is not found");
+                        }
                     }
                 }
                 None => {
