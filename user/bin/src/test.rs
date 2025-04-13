@@ -36,6 +36,7 @@ pub extern "C" fn main() {
     for i in 0..a.len() {
         *c = a[i] as usize + b;
     }
+    loop {}
 }
 
 pub static HELLO: &[u8] = b"Hello, world!\n\0";

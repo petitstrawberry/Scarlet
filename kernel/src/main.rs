@@ -215,7 +215,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
     /* Relocate initramfs to usable memory area */
     early_println!("[Scarlet Kernel] Relocating initramfs...");
-    relocate_initramfs(&mut usable_area).expect("Failed to relocate initramfs");
+    if let Err(e) = relocate_initramfs(&mut usable_area) {
+        early_println!("[Scarlet Kernel] Failed to relocate initramfs: {}", e);
+    }
     early_println!("[Scarlet Kernel] Updated Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
     /* Initialize heap with the usable memory area after FDT */
     early_println!("[Scarlet Kernel] Initializing heap...");
