@@ -209,7 +209,7 @@ impl Task {
             },
             permissions,
         };
-        self.vm_manager.add_memory_map(mmap);
+        self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
         match segment {
             VirtualMemorySegment::Stack => self.stack_size += size,
             VirtualMemorySegment::Heap => self.data_size += size,
@@ -248,7 +248,8 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                         };
-                        self.vm_manager.add_memory_map(mmap1);
+                        self.vm_manager.add_memory_map(mmap1)
+                            .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
                     }
@@ -267,7 +268,8 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                         };
-                        self.vm_manager.add_memory_map(mmap2);
+                        self.vm_manager.add_memory_map(mmap2)
+                            .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
                     }

@@ -124,11 +124,11 @@ impl PageTable {
         unsafe { transmute(addr) }
     }
 
-    pub fn map_memory_area(&mut self, mmap: VirtualMemoryMap) {
+    pub fn map_memory_area(&mut self, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
         // Check if the address and size is aligned to PAGE_SIZE
         if mmap.vmarea.start % PAGE_SIZE != 0 || mmap.pmarea.start % PAGE_SIZE != 0 ||
             mmap.vmarea.size() % PAGE_SIZE != 0 || mmap.pmarea.size() % PAGE_SIZE != 0 {
-            panic!("Address is not aligned to PAGE_SIZE = {:#x}", PAGE_SIZE);
+            return Err("Address is not aligned to PAGE_SIZE");
         }
 
         let mut vaddr = mmap.vmarea.start;
@@ -144,6 +144,8 @@ impl PageTable {
                 None => break,
             }
         }
+
+        Ok(())
     }
 
     /* Only for root page table */
