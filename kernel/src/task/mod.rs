@@ -420,4 +420,41 @@ mod tests {
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
     }
+
+    #[test_case]
+    fn test_task_parent_child_relationship() {
+        let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+        parent_task.init();
+
+        let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+        child_task.init();
+
+        // Set parent-child relationship
+        child_task.set_parent_id(parent_task.get_id());
+        parent_task.add_child(child_task.get_id());
+
+        // Verify parent-child relationship
+        assert_eq!(child_task.get_parent_id(), Some(parent_task.get_id()));
+        assert!(parent_task.get_children().contains(&child_task.get_id()));
+
+        // Remove child and verify
+        assert!(parent_task.remove_child(child_task.get_id()));
+        assert!(!parent_task.get_children().contains(&child_task.get_id()));
+    }
+
+    #[test_case]
+    fn test_task_exit_status() {
+        let mut task = super::new_user_task("TaskWithExitStatus".to_string(), 0);
+        task.init();
+
+        // Verify initial exit status is None
+        assert_eq!(task.get_exit_status(), None);
+
+        // Set and verify exit status
+        task.set_exit_status(0);
+        assert_eq!(task.get_exit_status(), Some(0));
+
+        task.set_exit_status(1);
+        assert_eq!(task.get_exit_status(), Some(1));
+    }
 }
