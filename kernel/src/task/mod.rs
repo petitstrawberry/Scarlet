@@ -7,7 +7,7 @@ pub mod elf_loader;
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
@@ -44,6 +44,9 @@ pub struct Task {
     pub max_data_size: usize, /* Maximum size of the data segment in bytes */
     pub max_text_size: usize, /* Maximum size of the text segment in bytes */
     pub vm_manager: VirtualMemoryManager,
+    parent_id: Option<usize>,      /* Parent task ID */
+    children: Vec<usize>,          /* List of child task IDs */
+    exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 }
 
 static TASK_ID: Mutex<usize> = Mutex::new(0);
@@ -69,6 +72,9 @@ impl Task {
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
             vm_manager: VirtualMemoryManager::new(),
+            parent_id: None,
+            children: Vec::new(),
+            exit_status: None,
         };
         *taskid += 1;
         task
@@ -292,6 +298,72 @@ impl Task {
     pub fn set_entry_point(&mut self, entry: usize) {
         self.vcpu.set_pc(entry as u64);
     }
+
+    /// Get the parent ID
+    ///
+    /// # Returns
+    /// The parent task ID, or None if there is no parent
+    pub fn get_parent_id(&self) -> Option<usize> {
+        self.parent_id
+    }
+    
+    /// Set the parent task
+    ///
+    /// # Arguments
+    /// * `parent_id` - The ID of the parent task
+    pub fn set_parent_id(&mut self, parent_id: usize) {
+        self.parent_id = Some(parent_id);
+    }
+    
+    /// Add a child task
+    ///
+    /// # Arguments
+    /// * `child_id` - The ID of the child task
+    pub fn add_child(&mut self, child_id: usize) {
+        if !self.children.contains(&child_id) {
+            self.children.push(child_id);
+        }
+    }
+    
+    /// Remove a child task
+    ///
+    /// # Arguments
+    /// * `child_id` - The ID of the child task to remove
+    ///
+    /// # Returns
+    /// true if the removal was successful, false if the child task was not found
+    pub fn remove_child(&mut self, child_id: usize) -> bool {
+        if let Some(pos) = self.children.iter().position(|&id| id == child_id) {
+            self.children.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+    
+    /// Get the list of child tasks
+    ///
+    /// # Returns
+    /// A slice of child task IDs
+    pub fn get_children(&self) -> &[usize] {
+        &self.children
+    }
+    
+    /// Set the exit status
+    ///
+    /// # Arguments
+    /// * `status` - The exit status
+    pub fn set_exit_status(&mut self, status: i32) {
+        self.exit_status = Some(status);
+    }
+    
+    /// Get the exit status
+    ///
+    /// # Returns
+    /// The exit status, or None if not set
+    pub fn get_exit_status(&self) -> Option<i32> {
+        self.exit_status
+    }
 }
 
 /// Create a new kernel task.
@@ -347,5 +419,42 @@ mod tests {
         assert_eq!(task.get_brk(), 0x1008);
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
+    }
+
+    #[test_case]
+    fn test_task_parent_child_relationship() {
+        let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+        parent_task.init();
+
+        let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+        child_task.init();
+
+        // Set parent-child relationship
+        child_task.set_parent_id(parent_task.get_id());
+        parent_task.add_child(child_task.get_id());
+
+        // Verify parent-child relationship
+        assert_eq!(child_task.get_parent_id(), Some(parent_task.get_id()));
+        assert!(parent_task.get_children().contains(&child_task.get_id()));
+
+        // Remove child and verify
+        assert!(parent_task.remove_child(child_task.get_id()));
+        assert!(!parent_task.get_children().contains(&child_task.get_id()));
+    }
+
+    #[test_case]
+    fn test_task_exit_status() {
+        let mut task = super::new_user_task("TaskWithExitStatus".to_string(), 0);
+        task.init();
+
+        // Verify initial exit status is None
+        assert_eq!(task.get_exit_status(), None);
+
+        // Set and verify exit status
+        task.set_exit_status(0);
+        assert_eq!(task.get_exit_status(), Some(0));
+
+        task.set_exit_status(1);
+        assert_eq!(task.get_exit_status(), Some(1));
     }
 }
