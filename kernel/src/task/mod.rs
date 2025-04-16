@@ -364,6 +364,17 @@ impl Task {
     pub fn get_exit_status(&self) -> Option<i32> {
         self.exit_status
     }
+
+    /// Exit the task
+    /// 
+    /// # Arguments
+    /// * `status` - The exit status
+    /// 
+    pub fn exit(&mut self, status: i32) {
+        self.set_exit_status(status);
+        self.state = TaskState::Terminated; // Set the task state to Terminated
+        // When the next scheduler runs, it will remove this task from the scheduler
+    }
 }
 
 /// Create a new kernel task.
