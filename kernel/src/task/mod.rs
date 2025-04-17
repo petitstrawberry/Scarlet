@@ -19,6 +19,7 @@ pub enum TaskState {
     Ready,
     Running,
     Blocked,
+    Zombie,
     Terminated,
 }
 
@@ -49,7 +50,7 @@ pub struct Task {
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 }
 
-static TASK_ID: Mutex<usize> = Mutex::new(0);
+static TASK_ID: Mutex<usize> = Mutex::new(1);
 
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
@@ -371,9 +372,47 @@ impl Task {
     /// * `status` - The exit status
     /// 
     pub fn exit(&mut self, status: i32) {
-        self.set_exit_status(status);
-        self.state = TaskState::Terminated; // Set the task state to Terminated
-        // When the next scheduler runs, it will remove this task from the scheduler
+        match self.parent_id {
+            Some(parent_id) => {
+                if get_scheduler().get_task_by_id(parent_id).is_none() {
+                    self.state = TaskState::Terminated;
+                    return;
+                }
+                /* Set the exit status */
+                self.set_exit_status(status);
+                self.state = TaskState::Zombie;
+            },
+            None => {
+                /* If the task has no parent, it is terminated */
+                self.state = TaskState::Terminated;
+            }
+        }
+    }
+
+    /// Wait for a child task to exit and collect its status
+    /// 
+    /// # Arguments
+    /// * `child_id` - The ID of the child task to wait for
+    /// 
+    /// # Returns
+    /// The exit status of the child task, or an error if the child is not found or not in Zombie state
+    pub fn wait(&mut self, child_id: usize) -> Result<i32, &'static str> {
+        if !self.children.contains(&child_id) {
+            return Err("No such child");
+        }
+
+        if let Some(child_task) = get_scheduler().get_task_by_id(child_id) {
+            if child_task.get_state() == TaskState::Zombie {
+                let status = child_task.get_exit_status().unwrap_or(-1);
+                child_task.set_state(TaskState::Terminated);
+                self.remove_child(child_id);
+                Ok(status)
+            } else {
+                Err("Child has not exited or is not a zombie")
+            }
+        } else {
+            Err("Child task not found")
+        }
     }
 }
 
