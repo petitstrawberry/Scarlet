@@ -144,16 +144,17 @@ impl Scheduler {
     /// Returns a mutable reference to the task with the specified ID, if found.
     /// 
     /// # Arguments
-    /// * `cpu_id` - The CPU ID to search for the task.
     /// * `task_id` - The ID of the task to search for.
     /// 
     /// # Returns
     /// A mutable reference to the task if found, or None otherwise.
-    pub fn get_task_by_id(&mut self, cpu_id: usize, task_id: usize) -> Option<&mut Task> {
-        if cpu_id >= NUM_OF_CPUS {
-            return None;
+    pub fn get_task_by_id(&mut self, task_id: usize) -> Option<&mut Task> {
+        for task_queue in self.task_queue.iter_mut() {
+            if let Some(task) = task_queue.iter_mut().find(|t| t.get_id() == task_id) {
+                return Some(task);
+            }
         }
-        self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id)
+        None
     }
 }
 
