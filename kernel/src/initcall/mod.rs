@@ -33,9 +33,9 @@ unsafe extern "C" {
 }
 
 #[allow(static_mut_refs)]
-pub fn initcall_task() {
+pub fn call_initcalls() {
     let size = core::mem::size_of::<fn()>();
-
+    
     println!("Running initcalls... ");
     let mut func = unsafe { &__INITCALL_DRIVER_END as *const usize as usize };
     let end = unsafe { &__INITCALL_END as *const usize as usize };
@@ -49,12 +49,4 @@ pub fn initcall_task() {
     }
 
     println!("Initcalls done.");
-
-    mytask().unwrap().set_state(TaskState::Terminated);
-    idle(); 
-    // let mut i = 0;
-    // loop {
-    //     println!("Initcall task: idle: {}", i);
-    //     i += 1;
-    // }
 }

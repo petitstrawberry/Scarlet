@@ -120,24 +120,6 @@ fn late_init_initramfs() {
     } else {
         early_println!("[InitRamFS] Warning: Initramfs relocation failed, cannot mount");
     }
-    let mut task = new_user_task("init".to_string(), 0);
-    task.init();
-    let mut file = File::new("/bin/init".to_string());
-    file.open(0).map_err(|e| {
-        early_println!("[InitRamFS] Error opening init file: {:?}", e);
-        return;
-    }).unwrap();
-
-    match load_elf_into_task(&mut file, &mut task) {
-        Ok(_) => {
-            for map in task.vm_manager.get_memmap() {
-                early_println!("[InitRamFS] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);
-            }
-            early_println!("[InitRamFS] Successfully loaded init ELF into task");
-            get_scheduler().add_task(task, get_cpu().get_cpuid());
-        }
-        Err(e) => early_println!("[InitRamFS] Error loading ELF into task: {:?}", e),
-    }
 }
 
 // Register the initramfs initialization functions to be called during boot

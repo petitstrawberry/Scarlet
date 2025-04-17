@@ -164,14 +164,14 @@ extern crate alloc;
 use alloc::string::ToString;
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use environment::PAGE_SIZE;
-use fs::drivers::initramfs::relocate_initramfs;
-use initcall::{driver::driver_initcall_call, early::early_initcall_call, initcall_task};
+use fs::{drivers::initramfs::relocate_initramfs, File};
+use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
 use core::panic::PanicInfo;
 
-use arch::init_arch;
-use task::new_kernel_task;
+use arch::{get_cpu, init_arch};
+use task::{elf_loader::load_elf_into_task, new_kernel_task, new_user_task};
 use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
@@ -242,16 +242,34 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* Initialize (populate) devices */
     println!("[Scarlet Kernel] Initializing devices...");
     DeviceManager::get_mut_manager().populate_devices();
-    
+    /* Initcalls */
+    call_initcalls();
+    /* Initialize timer */
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
-    /* Make idle task as initial task */
-    println!("[Scarlet Kernel] Creating initial kernel task...");
-    let mut task = new_kernel_task("Initcall".to_string(), 0, initcall_task);
+    /* Make init task */
+    println!("[Scarlet Kernel] Creating initial user task...");
+    let mut task = new_user_task("init".to_string(), 0);
     task.init();
-    scheduler.add_task(task, cpu_id);
+    let mut file = File::new("/bin/init".to_string());
+    file.open(0).map_err(|e| {
+        early_println!("[Scarlet Kernel] Error opening init file: {:?}", e);
+        return;
+    }).unwrap();
+
+    match load_elf_into_task(&mut file, &mut task) {
+        Ok(_) => {
+            for map in task.vm_manager.get_memmap() {
+                early_println!("[Scarlet Kernel] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);
+            }
+            early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
+            get_scheduler().add_task(task, get_cpu().get_cpuid());
+        }
+        Err(e) => early_println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
+    }
+
     println!("[Scarlet Kernel] Scheduler will start...");
     scheduler.start_scheduler();
     loop {} 
