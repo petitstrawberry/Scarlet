@@ -13,7 +13,7 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::task::syscall::{sys_brk, sys_sbrk, sys_putchar};
+use crate::task::syscall::{sys_brk, sys_exit, sys_putchar, sys_sbrk};
 
 #[macro_use]
 mod macros;
@@ -22,6 +22,7 @@ syscall_table! {
     Invalid = 0 => |_: &mut Trapframe| {
         0
     },
+    Exit = 1 => sys_exit,
     Brk = 12 => sys_brk,
     Sbrk = 13 => sys_sbrk,
     Putchar = 16 => sys_putchar,
