@@ -1,5 +1,6 @@
-use crate::arch::Trapframe;
+use crate::arch::{get_cpu, Trapframe};
 use crate::print;
+use crate::sched::scheduler::get_scheduler;
 
 use super::mytask;
 
@@ -33,4 +34,12 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
         return usize::MAX; // -1
     }
     0
+}
+
+pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let exit_code = trapframe.get_arg(0) as i32;
+    task.exit(exit_code);
+    get_scheduler().schedule(get_cpu());
+    trapframe.get_arg(0) as usize
 }

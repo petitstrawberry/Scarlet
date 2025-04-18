@@ -5,9 +5,11 @@
 
 extern crate alloc;
 
+use core::panic;
+
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -65,36 +67,60 @@ impl Scheduler {
             }
         }
 
-        let task = self.task_queue[cpu_id].pop_front();
+        loop {
+            let task = self.task_queue[cpu_id].pop_front();
 
-        if self.task_queue[cpu_id].is_empty() {
-            match task {
-                Some(mut t) => {
-                    if self.current_task_id[cpu_id].is_none() {
-                        self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
+            /* If there are no subsequent tasks */
+            if self.task_queue[cpu_id].is_empty() {
+                match task {
+                    Some(mut t) => {
+                        match t.state {
+                            TaskState::Zombie => {
+                                panic!("At least one task must be scheduled");
+                            },
+                            TaskState::Terminated => {
+                                panic!("At least one task must be scheduled");
+                            },
+                            _ => {
+                                if self.current_task_id[cpu_id].is_none() {
+                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
+                                }
+                                self.current_task_id[cpu_id] = Some(t.get_id());
+                                self.task_queue[cpu_id].push_back(t);
+                                break;
+                            }
+                        }
                     }
-
-                    self.current_task_id[cpu_id] = Some(t.get_id());
-                    self.task_queue[cpu_id].push_back(t);
-                    return;
+                    /* If the task queue is empty, run the same task again */
+                    None => break,
                 }
-                None => return
-            }
-        }
-
-        match task {
-            Some(mut t) => {
-                let prev_task = match self.current_task_id[cpu_id] {
-                    Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
-                    None => None
-                };
-                if prev_task.is_some() {
-                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+            } else {
+                match task {
+                    Some(mut t) => {
+                        match t.state {
+                            TaskState::Zombie => {
+                                self.task_queue[cpu_id].push_back(t);
+                                continue;
+                            },
+                            TaskState::Terminated => {
+                                continue;
+                            },
+                            _ => {
+                                let prev_task = match self.current_task_id[cpu_id] {
+                                    Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
+                                    None => None
+                                };
+                                if prev_task.is_some() {
+                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+                                }
+                                self.current_task_id[cpu_id] = Some(t.get_id());
+                                self.task_queue[cpu_id].push_back(t);
+                            }
+                        }
+                    }
+                    None => break,
                 }
-                self.current_task_id[cpu_id] = Some(t.get_id());
-                self.task_queue[cpu_id].push_back(t);
             }
-            None => {}
         }
     }
 
