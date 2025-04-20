@@ -50,6 +50,8 @@ impl Dispatcher {
                 task.vcpu.switch(cpu);
                 set_next_mode(task.vcpu.get_mode());
             }
+            TaskState::Zombie => {
+            },
             TaskState::Terminated => {
             }
             _ => {}
