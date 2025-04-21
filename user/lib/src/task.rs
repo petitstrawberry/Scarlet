@@ -1,28 +1,28 @@
 use crate::syscall::{syscall0, syscall1, Syscall};
 
-/// プロセスをクローンします。
+/// Clones the current process.
 /// 
-/// # 戻り値
-/// - 親プロセスでは: 子プロセスのID
-/// - 子プロセスでは: 0
-/// - エラー時: -1（usize::MAX）
+/// # Return Value
+/// - In the parent process: the ID of the child process
+/// - In the child process: 0
+/// - On error: -1 (usize::MAX)
 pub fn clone() -> usize {
     syscall0(Syscall::Clone)
 }
 
-/// 現在のプロセスを終了します。
+/// Exits the current process.
 /// 
-/// # 引数
-/// * `code` - 終了コード
+/// # Arguments
+/// * `code` - Exit code
 pub fn exit(code: i32) -> ! {
     syscall1(Syscall::Exit, code as usize);
     unreachable!("exit syscall should not return");
 }
 
-/// プロセスの現在のIDを返します。
-/// 注：この実装はダミーです。実際のpid取得システムコールが
-/// 実装されるまでは常に1を返します。
+/// Returns the current process ID.
+/// Note: This implementation is a placeholder. Until the actual getpid syscall
+/// is implemented, it always returns 1.
 pub fn getpid() -> usize {
-    // 実際のgetpidシステムコールが実装されるまでのダミー実装
+    // Placeholder implementation until the actual getpid syscall is implemented
     1
 }

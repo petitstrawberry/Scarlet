@@ -1,5 +1,3 @@
-use alloc::task;
-
 use crate::arch::{get_cpu, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
