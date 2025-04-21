@@ -38,6 +38,10 @@ impl Vcpu {
         self.pc = pc;
     }
 
+    pub fn get_pc(&self) -> u64 {
+        self.pc
+    }
+
     pub fn get_mode(&self) -> Mode {
         self.mode
     }

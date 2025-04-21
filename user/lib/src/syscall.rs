@@ -4,6 +4,7 @@ use crate::arch::*;
 pub enum Syscall {
     Invalid = 0,
     Exit = 1,
+    Clone = 2,
     Brk = 12,
     Sbrk = 13,
     Putchar = 16,

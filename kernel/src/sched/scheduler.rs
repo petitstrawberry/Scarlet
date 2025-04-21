@@ -51,11 +51,7 @@ impl Scheduler {
     }
 
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
-        if self.task_queue[cpu_id].is_empty() {
-            self.task_queue[cpu_id].push_back(task);
-            return;
-        }
-        self.add_req_queue[cpu_id].push_back(task);
+        self.task_queue[cpu_id].push_back(task);
     }
 
     fn run(&mut self, cpu: &mut Arch) {
@@ -115,6 +111,7 @@ impl Scheduler {
                                 }
                                 self.current_task_id[cpu_id] = Some(t.get_id());
                                 self.task_queue[cpu_id].push_back(t);
+                                break;
                             }
                         }
                     }
@@ -132,8 +129,8 @@ impl Scheduler {
         timer.set_interval_us(cpu_id, self.interval);
 
         if !self.task_queue[cpu_id].is_empty() {
-            timer.start(cpu_id);
             self.run(cpu);
+            timer.start(cpu_id);
         }
     }
 
