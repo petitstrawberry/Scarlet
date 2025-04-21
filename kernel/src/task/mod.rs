@@ -382,10 +382,6 @@ impl Task {
             self.task_type
         );
         child.init();
-
-        // Set parent-child relationship
-        child.set_parent_id(self.id);
-        self.add_child(child.get_id());
         
         // Copy memory maps
         for mmap in self.vm_manager.get_memmap() {
@@ -447,7 +443,11 @@ impl Task {
         
         // Set the state to Ready
         child.state = self.state;
-        
+
+        // Set parent-child relationship
+        child.set_parent_id(self.id);
+        self.add_child(child.get_id());
+
         Ok(child)
     }
 
