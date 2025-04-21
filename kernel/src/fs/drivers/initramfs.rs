@@ -9,16 +9,10 @@
 
 use core::ptr;
 
-use alloc::string::ToString;
-
-use crate::arch::get_cpu;
 use crate::device::fdt::FdtManager;
-use crate::sched::scheduler::get_scheduler;
-use crate::task::elf_loader::load_elf_into_task;
-use crate::task::new_user_task;
 use crate::late_initcall;
 use crate::early_println;
-use crate::fs::{get_vfs_manager, File, FileSystemError};
+use crate::fs::{get_vfs_manager, FileSystemError};
 use crate::vm::vmem::MemoryArea;
 
 static mut INITRAMFS_AREA: Option<MemoryArea> = None;

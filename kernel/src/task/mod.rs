@@ -366,6 +366,91 @@ impl Task {
         self.exit_status
     }
 
+    /// Clone this task, creating a near-identical copy
+    /// 
+    /// # Returns
+    /// The cloned task
+    /// 
+    /// # Errors 
+    /// If the task cannot be cloned, an error is returned.
+    ///
+    pub fn clone_task(&mut self) -> Result<Task, &'static str> {
+        // Create a new task
+        let mut child = Task::new(
+            self.name.clone(),
+            self.priority,
+            self.task_type
+        );
+        child.init();
+        
+        // Copy memory maps
+        for mmap in self.vm_manager.get_memmap() {
+            // Allocate new pages for each memory region
+            let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+            let vaddr = mmap.vmarea.start;
+            
+            if num_pages > 0 {
+                // Create a new memory map
+                let permissions = mmap.permissions;
+                let pages = allocate_pages(num_pages);
+                let size = num_pages * PAGE_SIZE;
+                let paddr = pages as usize;
+                let new_mmap = VirtualMemoryMap {
+                    pmarea: MemoryArea {
+                        start: paddr,
+                        end: paddr + (size - 1),
+                    },
+                    vmarea: MemoryArea {
+                        start: vaddr,
+                        end: vaddr + (size - 1),
+                    },
+                    permissions,
+                };
+                
+                // Copy the contents of the original memory
+                for i in 0..num_pages {
+                    let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
+                    let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_page_addr as *const u8,
+                            dst_page_addr as *mut u8,
+                            PAGE_SIZE
+                        );
+                    }
+                }
+                
+                // Add the new memory map to the child task
+                child.vm_manager.add_memory_map(new_mmap)
+                    .map_err(|_| "Failed to add memory map to child task")?;
+            }
+        }
+        
+        // Copy register states
+        child.vcpu.regs = self.vcpu.regs.clone();
+        
+        // Copy state such as data size
+        child.stack_size = self.stack_size;
+        child.data_size = self.data_size;
+        child.text_size = self.text_size;
+        child.max_stack_size = self.max_stack_size;
+        child.max_data_size = self.max_data_size;
+        child.max_text_size = self.max_text_size;
+        
+        // Set the same entry point and PC
+        child.entry = self.entry;
+        child.vcpu.set_pc(self.vcpu.get_pc());
+        
+        // Set the state to Ready
+        child.state = self.state;
+
+        // Set parent-child relationship
+        child.set_parent_id(self.id);
+        self.add_child(child.get_id());
+
+        Ok(child)
+    }
+
     /// Exit the task
     /// 
     /// # Arguments

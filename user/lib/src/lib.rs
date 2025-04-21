@@ -73,6 +73,7 @@ mod arch;
 mod allocator;
 pub mod syscall;
 pub mod io;
+pub mod task;
 
 pub use core_exports::*;
 pub use alloc_exports::*;
