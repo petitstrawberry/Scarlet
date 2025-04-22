@@ -1,4 +1,11 @@
-use crate::arch::{get_cpu, Trapframe};
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use core::str;
+
+use crate::fs::File;
+use crate::task::elf_loader::load_elf_into_task;
+
+use crate::arch::{get_cpu, Registers, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
 
@@ -63,6 +70,74 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
         },
         Err(_) => {
             usize::MAX /* Return -1 on error */
+        }
+    }
+}
+
+pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
+    // Get arguments from the trapframe
+    let path_ptr = trapframe.get_arg(0) as *const u8;
+
+    /* 
+     * The second and third arguments are pointers to arrays of pointers to
+     * null-terminated strings (char **argv, char **envp).
+     * We will not use them in this implementation.
+     */
+    // let argv_ptr = trapframe.get_arg(1) as *const *const u8;
+    // let envp_ptr = trapframe.get_arg(2) as *const *const u8;
+    
+    // Increment PC to avoid infinite loop if execve fails
+    trapframe.epc += 4;
+    
+    // Get the current task
+    let task = mytask().unwrap();
+    
+    // Parse path as a null-terminated C string
+    let mut path_bytes = Vec::new();
+    let mut i = 0;
+    unsafe {
+        loop {
+            let byte = *path_ptr.add(i);
+            if byte == 0 {
+                break;
+            }
+            path_bytes.push(byte);
+            i += 1;
+            
+            // Safety check to prevent infinite loop
+            if i > 1024 {
+                return usize::MAX; // Path too long
+            }
+        }
+    }
+    
+    // Convert path bytes to string
+    let path_str = match str::from_utf8(&path_bytes) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    // Try to open the executable file
+    let mut file = File::new(path_str.to_string());
+    if file.open(0).is_err() {
+        return usize::MAX; // File open error
+    }
+    
+    // Load the ELF file and replace the current process
+    match load_elf_into_task(&mut file, task) {
+        Ok(entry_point) => {
+            // Set the new entry point for the task
+            task.set_entry_point(entry_point as usize);
+            
+            // Reset task's registers (except for those needed for arguments)
+            task.vcpu.regs = Registers::new();
+            
+            // Return 0 on success (though this should never actually return)
+            0
+        },
+        Err(_) => {
+            // Return error code
+            usize::MAX
         }
     }
 }
