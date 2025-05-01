@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_raw_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -202,7 +202,7 @@ impl Task {
         }
         
         let permissions = segment.get_permissions();
-        let pages = allocate_pages(num_of_pages);
+        let pages = allocate_raw_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
         let paddr = pages as usize;
         let mmap = VirtualMemoryMap {
@@ -281,7 +281,7 @@ impl Task {
                         // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
                     }
                     let offset = vaddr - mmap.vmarea.start;
-                    free_pages((mmap.pmarea.start + offset) as *mut Page, 1);
+                    free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
                     // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
                 },
                 None => {},
@@ -392,7 +392,7 @@ impl Task {
             if num_pages > 0 {
                 // Create a new memory map
                 let permissions = mmap.permissions;
-                let pages = allocate_pages(num_pages);
+                let pages = allocate_raw_pages(num_pages);
                 let size = num_pages * PAGE_SIZE;
                 let paddr = pages as usize;
                 let new_mmap = VirtualMemoryMap {

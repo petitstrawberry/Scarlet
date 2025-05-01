@@ -23,7 +23,7 @@ impl Page {
 /// 
 /// # Returns
 /// A pointer to the allocated pages.
-pub fn allocate_pages(num_of_pages: usize) -> *mut Page {
+pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
     let boxed_pages = alloc::vec![Page::new(); num_of_pages].into_boxed_slice();
     Box::into_raw(boxed_pages) as *mut Page
 }
@@ -33,7 +33,7 @@ pub fn allocate_pages(num_of_pages: usize) -> *mut Page {
 /// # Arguments
 /// * `pages` - A pointer to the pages to free
 /// * `num_of_pages` - The number of pages to free
-pub fn free_pages(pages: *mut Page, num_of_pages: usize) {
+pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
     unsafe {
         let _ = Box::from_raw(core::slice::from_raw_parts_mut(pages, num_of_pages));
     }

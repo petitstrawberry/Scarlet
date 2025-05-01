@@ -22,7 +22,7 @@ use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::VMMAX;
-use crate::mem::page::allocate_pages;
+use crate::mem::page::allocate_raw_pages;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::Task;
@@ -128,7 +128,7 @@ pub fn user_vm_init(task: &mut Task) {
 
     /* User stack page */
     let num_of_stack_page = 2; // 2 pages for user stack
-    let stack_pages = allocate_pages(num_of_stack_page);
+    let stack_pages = allocate_raw_pages(num_of_stack_page);
     let stack_start = 0xffff_ffff_ffff_f000 - num_of_stack_page * PAGE_SIZE;
     let stack_map = VirtualMemoryMap {
         vmarea: MemoryArea {
@@ -149,7 +149,7 @@ pub fn user_vm_init(task: &mut Task) {
     task.stack_size = num_of_stack_page * PAGE_SIZE;
 
     /* Guard page */
-    let guard_page = allocate_pages(1);
+    let guard_page = allocate_raw_pages(1);
     /* User program cannot access this page */
     let guard_map = VirtualMemoryMap {
         vmarea: MemoryArea {
@@ -197,7 +197,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     }).unwrap();
     task.data_size = kernel_area.end + 1;
 
-    let stack_pages = allocate_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
+    let stack_pages = allocate_raw_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
     let stack_map = VirtualMemoryMap {
         vmarea: MemoryArea {
             start: KERNEL_VM_STACK_START,
