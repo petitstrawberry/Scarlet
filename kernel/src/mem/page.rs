@@ -62,3 +62,8 @@ pub fn free_boxed_pages(pages: Box<[Page]>) {
     // The Box will be automatically freed when it goes out of scope
     drop(pages);
 }
+
+pub fn free_boxed_page(page: Box<Page>) {
+    // The Box will be automatically freed when it goes out of scope
+    drop(page);
+}
