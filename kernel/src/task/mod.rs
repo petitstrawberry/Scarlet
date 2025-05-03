@@ -7,10 +7,10 @@ pub mod elf_loader;
 
 extern crate alloc;
 
-use alloc::{boxed::Box, string::String, vec::Vec, vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_boxed_pages, allocate_raw_pages, free_boxed_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_boxed_pages, free_boxed_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -57,7 +57,7 @@ pub struct Task {
 #[derive(Debug, Clone)]
 pub struct ManagedPage {
     pub vaddr: usize,
-    pub page: Box<Page>,
+    pub page: Box<[Page]>,
 }
 
 static TASK_ID: Mutex<usize> = Mutex::new(1);
@@ -237,13 +237,11 @@ impl Task {
             _ => {},
         }
 
-        // Consume the Box<[Page]> directly and push each page into the managed_pages vector
-        for page in pages.into_vec() {
-            self.add_managed_page(ManagedPage {
-                vaddr,
-                page: Box::new(page),
-            });
-        }
+        self.add_managed_page(ManagedPage {
+            vaddr: mmap.vmarea.start,
+            page: pages,
+        });
+
 
         Ok(mmap)
     }
@@ -304,8 +302,7 @@ impl Task {
                     // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
 
                     if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        let boxed_page = vec![*free_page].into_boxed_slice();
-                        free_boxed_pages(boxed_page);
+                        free_boxed_pages(free_page);
                     }
                     
                     // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
@@ -326,6 +323,10 @@ impl Task {
     /// # Arguments
     /// * `pages` - The managed page to add
     /// 
+    /// # Note
+    /// Pages added as ManagedPage of the Task will be automatically freed when the Task is terminated.
+    /// So, you must not free them by calling free_raw_pages/free_boxed_pages manually.
+    /// 
     pub fn add_managed_page(&mut self, pages: ManagedPage) {
         self.managed_pages.push(pages);
     }
@@ -333,7 +334,7 @@ impl Task {
     /// Get managed page
     /// 
     /// # Arguments
-    /// * `paddr` - The physical address of the page
+    /// * `vaddr` - The virtual address of the page
     /// 
     /// # Returns
     /// The managed page if found, otherwise None
@@ -355,7 +356,7 @@ impl Task {
     /// # Returns
     /// The removed managed page if found, otherwise None
     /// 
-    fn remove_managed_page(&mut self, vaddr: usize) -> Option<Box<Page>> {
+    fn remove_managed_page(&mut self, vaddr: usize) -> Option<Box<[Page]>> {
         for i in 0..self.managed_pages.len() {
             if self.managed_pages[i].vaddr == vaddr {
                 let page = self.managed_pages.remove(i);
@@ -462,9 +463,9 @@ impl Task {
             if num_pages > 0 {
                 // Create a new memory map
                 let permissions = mmap.permissions;
-                let pages = allocate_raw_pages(num_pages);
+                let pages = allocate_boxed_pages(num_pages);
                 let size = num_pages * PAGE_SIZE;
-                let paddr = pages as usize;
+                let paddr = pages.as_ptr() as usize;
                 let new_mmap = VirtualMemoryMap {
                     pmarea: MemoryArea {
                         start: paddr,
@@ -488,13 +489,13 @@ impl Task {
                             PAGE_SIZE
                         );
                     }
-                    // Manage the new pages in the child task
-                    let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };    
-                    child.add_managed_page(ManagedPage {
-                        vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
-                        page,
-                    });
                 }
+
+                // Manage the new pages in the child task
+                child.add_managed_page(ManagedPage {
+                    vaddr: new_mmap.vmarea.start,
+                    page: pages,
+                });
                 
                 // Add the new memory map to the child task
                 child.vm_manager.add_memory_map(new_mmap)

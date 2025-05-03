@@ -33,7 +33,7 @@ use core::num;
 
 use crate::environment::PAGE_SIZE;
 use crate::fs::{File, SeekFrom};
-use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+use crate::mem::page::{allocate_boxed_pages, allocate_raw_pages, free_boxed_pages, free_raw_pages};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 use alloc::boxed::Box;
 use alloc::{format, vec};
@@ -418,7 +418,8 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
 
     // Allocate physical memory
     let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    let ptr = allocate_raw_pages(num_of_pages);
+    let mut pages = allocate_boxed_pages(num_of_pages);
+    let ptr = pages.as_mut_ptr() as *mut u8;
     if ptr.is_null() {
         return Err("Failed to allocate memory");
     }
@@ -436,18 +437,15 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
 
     // Add to VM manager
      if let Err(e) = task.vm_manager.add_memory_map(map) {
-        free_raw_pages(ptr, num_of_pages);
+        free_boxed_pages(pages);
         return Err(e);
     }
 
     // Manage segment page in the task
-    for i in 0..num_of_pages {
-        let page = unsafe { Box::from_raw(ptr.wrapping_add(i)) };    
-        task.add_managed_page(ManagedPage {
-            vaddr: vaddr + i * PAGE_SIZE,
-            page,
-        });
-    }
+    task.add_managed_page(ManagedPage {
+        vaddr,
+        page: pages,
+    });
 
     Ok(())
 }
