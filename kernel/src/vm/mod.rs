@@ -3,7 +3,6 @@
 //! This module provides the virtual memory abstraction for the kernel. It
 //! includes functions for managing virtual address spaces.
 
-use alloc::boxed::Box;
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
@@ -17,16 +16,13 @@ use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_page_table;
 use crate::arch::vm::get_root_page_table_idx;
 use crate::arch::Arch;
-use crate::environment::KERNEL_VM_STACK_END;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::VMMAX;
-use crate::mem::page::allocate_raw_pages;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
-use crate::task::ManagedPage;
 use crate::task::Task;
 
 extern crate alloc;
