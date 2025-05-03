@@ -63,6 +63,11 @@ pub fn free_boxed_pages(pages: Box<[Page]>) {
     drop(pages);
 }
 
+/// Frees a boxed page.
+/// 
+/// # Arguments
+/// * `page` - A boxed page to free
+/// 
 pub fn free_boxed_page(page: Box<Page>) {
     // The Box will be automatically freed when it goes out of scope
     drop(page);
