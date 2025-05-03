@@ -6,7 +6,7 @@ use crate::println;
 use crate::vm::get_kernel_vm_manager;
 
 #[unsafe(export_name = "_kernel_trap_entry")]
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn _kernel_trap_entry() {
     unsafe {
         naked_asm!("

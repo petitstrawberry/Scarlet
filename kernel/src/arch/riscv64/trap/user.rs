@@ -8,7 +8,7 @@ use crate::arch::Trapframe;
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn _user_trap_entry() {
     unsafe {
         naked_asm!("

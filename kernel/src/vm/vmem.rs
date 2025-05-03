@@ -139,16 +139,18 @@ pub enum VirtualMemorySegment {
     Bss,
     Heap,
     Stack,
+    Guard,
 }
 
 impl VirtualMemorySegment {
     pub fn get_permissions(&self) -> usize {
         match self {
-            VirtualMemorySegment::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize,
-            VirtualMemorySegment::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
-            VirtualMemorySegment::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
-            VirtualMemorySegment::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
-            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            VirtualMemorySegment::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemorySegment::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemorySegment::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemorySegment::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemorySegment::Guard => 0, // Any access to the guard page should cause a page fault
         }
     }
 }

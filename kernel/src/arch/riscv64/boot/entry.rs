@@ -5,7 +5,7 @@ use crate::{device::fdt::FdtManager, environment::STACK_SIZE, start_kernel};
 /// Entry point for the primary core
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn _entry() {
     unsafe {
         naked_asm!("
@@ -29,7 +29,7 @@ pub extern "C" fn _entry() {
 /// Entry point for the secondary cores
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry_ap")]
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn _entry_ap() {
     unsafe {
         naked_asm!("
