@@ -488,6 +488,7 @@ impl Task {
                             PAGE_SIZE
                         );
                     }
+                    // Manage the new pages in the child task
                     let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };    
                     child.add_managed_page(ManagedPage {
                         vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
