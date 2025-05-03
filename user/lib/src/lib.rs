@@ -12,7 +12,6 @@
 //!
 #![no_std]
 #![no_main]
-#![feature(naked_functions)]
 #![feature(alloc_error_handler)]
 #![feature(async_iterator)]
 #![feature(new_range_api)]
