@@ -234,8 +234,8 @@ impl Task {
             VirtualMemorySegment::Bss => self.data_size += size,
             VirtualMemorySegment::Data => self.data_size += size,
             VirtualMemorySegment::Text => self.text_size += size,
+            _ => {},
         }
-        // println!("Allocated pages: {:#x} - {:#x}", vaddr, vaddr + size - 1);
 
         // Convert the Box<[Page]> to Vec<Box<Page>> and push each page into the managed_pages vector
         for page in  pages.into_vec().iter().map(|page| Box::new(*page)) {

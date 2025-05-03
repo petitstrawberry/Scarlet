@@ -128,59 +128,11 @@ pub fn user_vm_init(task: &mut Task) {
 
     /* User stack page */
     let num_of_stack_page = 2; // 2 pages for user stack
-    let stack_pages = allocate_raw_pages(num_of_stack_page);
     let stack_start = 0xffff_ffff_ffff_f000 - num_of_stack_page * PAGE_SIZE;
-    let stack_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: stack_start,
-            end: stack_start + num_of_stack_page * PAGE_SIZE - 1,
-        },
-        pmarea: MemoryArea {
-            start: stack_pages as usize,
-            end: stack_pages as usize + num_of_stack_page * PAGE_SIZE - 1,
-        },
-        permissions: 
-            VirtualMemoryPermission::Read as usize |
-            VirtualMemoryPermission::Write as usize |
-            VirtualMemoryPermission::User as usize,
-    };
-
-    task.vm_manager.add_memory_map(stack_map).map_err(|e| panic!("Failed to add user stack memory map: {}", e)).unwrap();
-    println!("User stack mapped         : {:#018x} - {:#018x}", stack_map.vmarea.start, stack_map.vmarea.end);
-    task.stack_size = num_of_stack_page * PAGE_SIZE;
-
-    // // Manage the stack pages in the task
-    for i in 0..num_of_stack_page {
-        let page = unsafe { Box::from_raw(stack_pages.wrapping_add(i)) };    
-        task.add_managed_page(ManagedPage {
-            vaddr: stack_map.vmarea.start + i * PAGE_SIZE,
-            page,
-        });
-    }
+    task.allocate_pages(stack_start, num_of_stack_page, vmem::VirtualMemorySegment::Stack).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
 
     /* Guard page */
-    let guard_page = allocate_raw_pages(1);
-    /* User program cannot access this page */
-    let guard_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: stack_start - PAGE_SIZE,
-            end: stack_start - 1,
-        },
-        pmarea: MemoryArea {
-            start: guard_page as usize,
-            end: guard_page as usize + PAGE_SIZE - 1,
-        },
-        permissions: 0,
-    };
-    task.vm_manager.add_memory_map(guard_map).map_err(|e| panic!("Failed to add guard page memory map: {}", e)).unwrap();
-    println!("Guard page mapped         : {:#018x} - {:#018x}", guard_map.vmarea.start, guard_map.vmarea.end);
-
-    // Manage the guard page in the task
-    let page = unsafe { Box::from_raw(guard_page) };    
-    task.add_managed_page(ManagedPage {
-        vaddr: guard_map.vmarea.start,
-        page,
-    });
+   task.allocate_pages(stack_start - PAGE_SIZE, 1, vmem::VirtualMemorySegment::Guard).map_err(|e| panic!("Failed to get guard page: {}", e)).unwrap();
 
     setup_trampoline(&mut task.vm_manager);
 }
@@ -210,34 +162,8 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     }).unwrap();
     task.data_size = kernel_area.end + 1;
 
-    let stack_pages = allocate_raw_pages(KERNEL_VM_STACK_SIZE / PAGE_SIZE);
-    let stack_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: KERNEL_VM_STACK_START,
-            end: KERNEL_VM_STACK_END,
-        },
-        pmarea: MemoryArea {
-            start: stack_pages as usize,
-            end: stack_pages as usize + KERNEL_VM_STACK_SIZE - 1,
-        },
-        permissions: 
-            VirtualMemoryPermission::Read as usize |
-            VirtualMemoryPermission::Write as usize,
-    };
-    task.vm_manager.add_memory_map(stack_map).map_err(|e| panic!("Failed to add kernel stack memory map: {}", e)).unwrap();
-    task.stack_size = KERNEL_VM_STACK_SIZE;
-    /* Pre-map the kernel stack */
-    root_page_table.map_memory_area(stack_map).map_err(|e| {
-        panic!("Failed to map kernel stack memory area: {}", e);
-    }).unwrap();
-    // Manage the stack pages in the task
-    for i in 0..(KERNEL_VM_STACK_SIZE / PAGE_SIZE) {
-        let page = unsafe { Box::from_raw(stack_pages.wrapping_add(i)) };    
-        task.add_managed_page(ManagedPage {
-            vaddr: stack_map.vmarea.start + i * PAGE_SIZE,
-            page,
-        });
-    }
+    /* Stack page */
+    task.allocate_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE, vmem::VirtualMemorySegment::Stack).map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e)).unwrap();
 
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
@@ -253,11 +179,6 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Write as usize,
     };
     task.vm_manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
-
-    println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
-    println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
-    println!("Kernel stack mapped       : {:#018x} - {:#018x}", stack_map.vmarea.start as usize, stack_map.vmarea.end as usize);
-    println!("(Stack page)              : {:#018x}", stack_pages as usize);
 
     setup_trampoline(&mut task.vm_manager);
 }
@@ -282,13 +203,13 @@ fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
     let trapframe_vaddr = trampoline_vaddr_start + trapframe_offset;
     
-    println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
-    println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
-    println!("  Trap frame paddr  : {:#x}", trapframe_paddr);
-    println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
-    println!("  Trap frame vaddr  : {:#x}", trapframe_vaddr);
+    // println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    // println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
+    // println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
+    // println!("  Trap frame paddr  : {:#x}", trapframe_paddr);
+    // println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    // println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
+    // println!("  Trap frame vaddr  : {:#x}", trapframe_vaddr);
     
     let trampoline_map = VirtualMemoryMap {
         vmarea: MemoryArea {
