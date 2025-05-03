@@ -132,7 +132,7 @@ pub fn user_vm_init(task: &mut Task) {
     task.allocate_pages(stack_start, num_of_stack_page, vmem::VirtualMemorySegment::Stack).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
 
     /* Guard page */
-   task.allocate_pages(stack_start - PAGE_SIZE, 1, vmem::VirtualMemorySegment::Guard).map_err(|e| panic!("Failed to get guard page: {}", e)).unwrap();
+   task.allocate_pages(stack_start - PAGE_SIZE, 1, vmem::VirtualMemorySegment::Guard).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
 
     setup_trampoline(&mut task.vm_manager);
 }
