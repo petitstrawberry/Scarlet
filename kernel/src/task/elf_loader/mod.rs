@@ -418,7 +418,8 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
 
     // Allocate physical memory
     let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    let ptr = allocate_raw_pages(num_of_pages);
+    let pages = allocate_raw_pages(num_of_pages);
+    let ptr = pages as *mut u8;
     if ptr.is_null() {
         return Err("Failed to allocate memory");
     }
@@ -436,16 +437,15 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
 
     // Add to VM manager
      if let Err(e) = task.vm_manager.add_memory_map(map) {
-        free_raw_pages(ptr, num_of_pages);
+        free_raw_pages(pages, num_of_pages);
         return Err(e);
     }
 
     // Manage segment page in the task
     for i in 0..num_of_pages {
-        let page = unsafe { Box::from_raw(ptr.wrapping_add(i)) };    
         task.add_managed_page(ManagedPage {
             vaddr: vaddr + i * PAGE_SIZE,
-            page,
+            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
         });
     }
 
