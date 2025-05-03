@@ -135,7 +135,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(naked_functions)]
 #![feature(used_with_arg)]
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test::test_runner)]
@@ -171,7 +170,7 @@ use slab_allocator_rs::MIN_HEAP_SIZE;
 use core::panic::PanicInfo;
 
 use arch::{get_cpu, init_arch};
-use task::{elf_loader::load_elf_into_task, new_kernel_task, new_user_task};
+use task::{elf_loader::load_elf_into_task, new_user_task};
 use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
