@@ -5,9 +5,11 @@
 
 extern crate alloc;
 
+use core::panic;
+
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::new_kernel_task, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -49,11 +51,7 @@ impl Scheduler {
     }
 
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
-        if self.task_queue[cpu_id].is_empty() {
-            self.task_queue[cpu_id].push_back(task);
-            return;
-        }
-        self.add_req_queue[cpu_id].push_back(task);
+        self.task_queue[cpu_id].push_back(task);
     }
 
     fn run(&mut self, cpu: &mut Arch) {
@@ -65,36 +63,61 @@ impl Scheduler {
             }
         }
 
-        let task = self.task_queue[cpu_id].pop_front();
+        loop {
+            let task = self.task_queue[cpu_id].pop_front();
 
-        if self.task_queue[cpu_id].is_empty() {
-            match task {
-                Some(mut t) => {
-                    if self.current_task_id[cpu_id].is_none() {
-                        self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
+            /* If there are no subsequent tasks */
+            if self.task_queue[cpu_id].is_empty() {
+                match task {
+                    Some(mut t) => {
+                        match t.state {
+                            TaskState::Zombie => {
+                                panic!("At least one task must be scheduled");
+                            },
+                            TaskState::Terminated => {
+                                panic!("At least one task must be scheduled");
+                            },
+                            _ => {
+                                if self.current_task_id[cpu_id].is_none() {
+                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
+                                }
+                                self.current_task_id[cpu_id] = Some(t.get_id());
+                                self.task_queue[cpu_id].push_back(t);
+                                break;
+                            }
+                        }
                     }
-
-                    self.current_task_id[cpu_id] = Some(t.get_id());
-                    self.task_queue[cpu_id].push_back(t);
-                    return;
+                    /* If the task queue is empty, run the same task again */
+                    None => break,
                 }
-                None => return
-            }
-        }
-
-        match task {
-            Some(mut t) => {
-                let prev_task = match self.current_task_id[cpu_id] {
-                    Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
-                    None => None
-                };
-                if prev_task.is_some() {
-                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+            } else {
+                match task {
+                    Some(mut t) => {
+                        match t.state {
+                            TaskState::Zombie => {
+                                self.task_queue[cpu_id].push_back(t);
+                                continue;
+                            },
+                            TaskState::Terminated => {
+                                continue;
+                            },
+                            _ => {
+                                let prev_task = match self.current_task_id[cpu_id] {
+                                    Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
+                                    None => None
+                                };
+                                if prev_task.is_some() {
+                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
+                                }
+                                self.current_task_id[cpu_id] = Some(t.get_id());
+                                self.task_queue[cpu_id].push_back(t);
+                                break;
+                            }
+                        }
+                    }
+                    None => break,
                 }
-                self.current_task_id[cpu_id] = Some(t.get_id());
-                self.task_queue[cpu_id].push_back(t);
             }
-            None => {}
         }
     }
 
@@ -106,8 +129,8 @@ impl Scheduler {
         timer.set_interval_us(cpu_id, self.interval);
 
         if !self.task_queue[cpu_id].is_empty() {
-            timer.start(cpu_id);
             self.run(cpu);
+            timer.start(cpu_id);
         }
     }
 
@@ -139,6 +162,22 @@ impl Scheduler {
             Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
             None => None
         }
+    }
+
+    /// Returns a mutable reference to the task with the specified ID, if found.
+    /// 
+    /// # Arguments
+    /// * `task_id` - The ID of the task to search for.
+    /// 
+    /// # Returns
+    /// A mutable reference to the task if found, or None otherwise.
+    pub fn get_task_by_id(&mut self, task_id: usize) -> Option<&mut Task> {
+        for task_queue in self.task_queue.iter_mut() {
+            if let Some(task) = task_queue.iter_mut().find(|t| t.get_id() == task_id) {
+                return Some(task);
+            }
+        }
+        None
     }
 }
 

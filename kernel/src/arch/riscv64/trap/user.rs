@@ -8,7 +8,7 @@ use crate::arch::Trapframe;
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn _user_trap_entry() {
     unsafe {
         naked_asm!("
@@ -57,6 +57,9 @@ pub extern "C" fn _user_trap_entry() {
 
                 // Load and store a0 to trapframe
                 csrr    t0, sscratch
+                // Restore sscratch from a0
+                csrw   sscratch, a0
+
                 sd      t0, 80(a0)
 
                 /* Load the satp for the kernel space from trapframe */

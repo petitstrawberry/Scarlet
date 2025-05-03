@@ -1,12 +1,11 @@
 #![no_std]
 #![no_main]
-#![feature(naked_functions)]
 
 use core::arch::naked_asm;
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn _entry() {
     unsafe {
         naked_asm!("

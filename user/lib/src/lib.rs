@@ -12,7 +12,6 @@
 //!
 #![no_std]
 #![no_main]
-#![feature(naked_functions)]
 #![feature(alloc_error_handler)]
 #![feature(async_iterator)]
 #![feature(new_range_api)]
@@ -73,6 +72,7 @@ mod arch;
 mod allocator;
 pub mod syscall;
 pub mod io;
+pub mod task;
 
 pub use core_exports::*;
 pub use alloc_exports::*;

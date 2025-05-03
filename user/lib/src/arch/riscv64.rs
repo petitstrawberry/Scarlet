@@ -4,7 +4,7 @@ use crate::syscall::Syscall;
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn _entry() {
     unsafe {
         naked_asm!("

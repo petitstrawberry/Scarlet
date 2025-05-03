@@ -7,10 +7,10 @@ pub mod elf_loader;
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::{boxed::Box, string::String, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_pages, free_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -19,6 +19,7 @@ pub enum TaskState {
     Ready,
     Running,
     Blocked,
+    Zombie,
     Terminated,
 }
 
@@ -44,9 +45,22 @@ pub struct Task {
     pub max_data_size: usize, /* Maximum size of the data segment in bytes */
     pub max_text_size: usize, /* Maximum size of the text segment in bytes */
     pub vm_manager: VirtualMemoryManager,
+    /// Managed pages
+    /// 
+    /// Managed pages are freed automatically when the task is terminated.
+    managed_pages: Vec<ManagedPage>,
+    parent_id: Option<usize>,      /* Parent task ID */
+    children: Vec<usize>,          /* List of child task IDs */
+    exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 }
 
-static TASK_ID: Mutex<usize> = Mutex::new(0);
+#[derive(Debug, Clone)]
+pub struct ManagedPage {
+    pub vaddr: usize,
+    pub page: Box<Page>,
+}
+
+static TASK_ID: Mutex<usize> = Mutex::new(1);
 
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
@@ -69,6 +83,10 @@ impl Task {
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
             vm_manager: VirtualMemoryManager::new(),
+            managed_pages: Vec::new(),
+            parent_id: None,
+            children: Vec::new(),
+            exit_status: None,
         };
         *taskid += 1;
         task
@@ -195,7 +213,7 @@ impl Task {
         }
         
         let permissions = segment.get_permissions();
-        let pages = allocate_pages(num_of_pages);
+        let pages = allocate_raw_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
         let paddr = pages as usize;
         let mmap = VirtualMemoryMap {
@@ -216,8 +234,19 @@ impl Task {
             VirtualMemorySegment::Bss => self.data_size += size,
             VirtualMemorySegment::Data => self.data_size += size,
             VirtualMemorySegment::Text => self.text_size += size,
+            _ => {},
         }
-        // println!("Allocated pages: {:#x} - {:#x}", vaddr, vaddr + size - 1);
+
+        for i in 0..num_of_pages {
+            let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
+            let vaddr = mmap.vmarea.start + i * PAGE_SIZE;
+            self.add_managed_page(ManagedPage {
+                vaddr,
+                page
+            });
+        }
+
+
         Ok(mmap)
     }
 
@@ -273,8 +302,13 @@ impl Task {
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
                     }
-                    let offset = vaddr - mmap.vmarea.start;
-                    free_pages((mmap.pmarea.start + offset) as *mut Page, 1);
+                    // let offset = vaddr - mmap.vmarea.start;
+                    // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
+
+                    if let Some(free_page) = self.remove_managed_page(vaddr) {
+                        free_boxed_page(free_page);
+                    }
+                    
                     // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
                 },
                 None => {},
@@ -288,9 +322,261 @@ impl Task {
         }
     }
 
+    /// Add pages to the task
+    /// 
+    /// # Arguments
+    /// * `pages` - The managed page to add
+    /// 
+    /// # Note
+    /// Pages added as ManagedPage of the Task will be automatically freed when the Task is terminated.
+    /// So, you must not free them by calling free_raw_pages/free_boxed_pages manually.
+    /// 
+    pub fn add_managed_page(&mut self, pages: ManagedPage) {
+        self.managed_pages.push(pages);
+    }
+
+    /// Get managed page
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address of the page
+    /// 
+    /// # Returns
+    /// The managed page if found, otherwise None
+    /// 
+    fn get_managed_page(&self, vaddr: usize) -> Option<&ManagedPage> {
+        for page in &self.managed_pages {
+            if page.vaddr == vaddr {
+                return Some(page);
+            }
+        }
+        None
+    }
+
+    /// Remove managed page
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address of the page
+    /// 
+    /// # Returns
+    /// The removed managed page if found, otherwise None
+    /// 
+    fn remove_managed_page(&mut self, vaddr: usize) -> Option<Box<Page>> {
+        for i in 0..self.managed_pages.len() {
+            if self.managed_pages[i].vaddr == vaddr {
+                let page = self.managed_pages.remove(i);
+                return Some(page.page);
+            }
+        }
+        None
+    }
+
     // Set the entry point
     pub fn set_entry_point(&mut self, entry: usize) {
         self.vcpu.set_pc(entry as u64);
+    }
+
+    /// Get the parent ID
+    ///
+    /// # Returns
+    /// The parent task ID, or None if there is no parent
+    pub fn get_parent_id(&self) -> Option<usize> {
+        self.parent_id
+    }
+    
+    /// Set the parent task
+    ///
+    /// # Arguments
+    /// * `parent_id` - The ID of the parent task
+    pub fn set_parent_id(&mut self, parent_id: usize) {
+        self.parent_id = Some(parent_id);
+    }
+    
+    /// Add a child task
+    ///
+    /// # Arguments
+    /// * `child_id` - The ID of the child task
+    pub fn add_child(&mut self, child_id: usize) {
+        if !self.children.contains(&child_id) {
+            self.children.push(child_id);
+        }
+    }
+    
+    /// Remove a child task
+    ///
+    /// # Arguments
+    /// * `child_id` - The ID of the child task to remove
+    ///
+    /// # Returns
+    /// true if the removal was successful, false if the child task was not found
+    pub fn remove_child(&mut self, child_id: usize) -> bool {
+        if let Some(pos) = self.children.iter().position(|&id| id == child_id) {
+            self.children.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+    
+    /// Get the list of child tasks
+    ///
+    /// # Returns
+    /// A slice of child task IDs
+    pub fn get_children(&self) -> &[usize] {
+        &self.children
+    }
+    
+    /// Set the exit status
+    ///
+    /// # Arguments
+    /// * `status` - The exit status
+    pub fn set_exit_status(&mut self, status: i32) {
+        self.exit_status = Some(status);
+    }
+    
+    /// Get the exit status
+    ///
+    /// # Returns
+    /// The exit status, or None if not set
+    pub fn get_exit_status(&self) -> Option<i32> {
+        self.exit_status
+    }
+
+    /// Clone this task, creating a near-identical copy
+    /// 
+    /// # Returns
+    /// The cloned task
+    /// 
+    /// # Errors 
+    /// If the task cannot be cloned, an error is returned.
+    ///
+    pub fn clone_task(&mut self) -> Result<Task, &'static str> {
+        // Create a new task
+        let mut child = Task::new(
+            self.name.clone(),
+            self.priority,
+            self.task_type
+        );
+        child.init();
+        
+        // Copy memory maps
+        for mmap in self.vm_manager.get_memmap() {
+            // Allocate new pages for each memory region
+            let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+            let vaddr = mmap.vmarea.start;
+            
+            if num_pages > 0 {
+                // Create a new memory map
+                let permissions = mmap.permissions;
+                let pages = allocate_raw_pages(num_pages);
+                let size = num_pages * PAGE_SIZE;
+                let paddr = pages as usize;
+                let new_mmap = VirtualMemoryMap {
+                    pmarea: MemoryArea {
+                        start: paddr,
+                        end: paddr + (size - 1),
+                    },
+                    vmarea: MemoryArea {
+                        start: vaddr,
+                        end: vaddr + (size - 1),
+                    },
+                    permissions,
+                };
+                
+                // Copy the contents of the original memory
+                for i in 0..num_pages {
+                    let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
+                    let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_page_addr as *const u8,
+                            dst_page_addr as *mut u8,
+                            PAGE_SIZE
+                        );
+                    }
+                    // Manage the new pages in the child task
+                    child.add_managed_page(ManagedPage {
+                        vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
+                        page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+                    });
+                }
+                // Add the new memory map to the child task
+                child.vm_manager.add_memory_map(new_mmap)
+                    .map_err(|_| "Failed to add memory map to child task")?;
+            }
+        }
+        
+        // Copy register states
+        child.vcpu.regs = self.vcpu.regs.clone();
+        
+        // Copy state such as data size
+        child.stack_size = self.stack_size;
+        child.data_size = self.data_size;
+        child.text_size = self.text_size;
+        child.max_stack_size = self.max_stack_size;
+        child.max_data_size = self.max_data_size;
+        child.max_text_size = self.max_text_size;
+        
+        // Set the same entry point and PC
+        child.entry = self.entry;
+        child.vcpu.set_pc(self.vcpu.get_pc());
+        
+        // Set the state to Ready
+        child.state = self.state;
+
+        // Set parent-child relationship
+        child.set_parent_id(self.id);
+        self.add_child(child.get_id());
+
+        Ok(child)
+    }
+
+    /// Exit the task
+    /// 
+    /// # Arguments
+    /// * `status` - The exit status
+    /// 
+    pub fn exit(&mut self, status: i32) {
+        match self.parent_id {
+            Some(parent_id) => {
+                if get_scheduler().get_task_by_id(parent_id).is_none() {
+                    self.state = TaskState::Terminated;
+                    return;
+                }
+                /* Set the exit status */
+                self.set_exit_status(status);
+                self.state = TaskState::Zombie;
+            },
+            None => {
+                /* If the task has no parent, it is terminated */
+                self.state = TaskState::Terminated;
+            }
+        }
+    }
+
+    /// Wait for a child task to exit and collect its status
+    /// 
+    /// # Arguments
+    /// * `child_id` - The ID of the child task to wait for
+    /// 
+    /// # Returns
+    /// The exit status of the child task, or an error if the child is not found or not in Zombie state
+    pub fn wait(&mut self, child_id: usize) -> Result<i32, &'static str> {
+        if !self.children.contains(&child_id) {
+            return Err("No such child");
+        }
+
+        if let Some(child_task) = get_scheduler().get_task_by_id(child_id) {
+            if child_task.get_state() == TaskState::Zombie {
+                let status = child_task.get_exit_status().unwrap_or(-1);
+                child_task.set_state(TaskState::Terminated);
+                self.remove_child(child_id);
+                Ok(status)
+            } else {
+                Err("Child has not exited or is not a zombie")
+            }
+        } else {
+            Err("Child task not found")
+        }
     }
 }
 
@@ -347,5 +633,42 @@ mod tests {
         assert_eq!(task.get_brk(), 0x1008);
         task.set_brk(0x1000).unwrap();
         assert_eq!(task.get_brk(), 0x1000);
+    }
+
+    #[test_case]
+    fn test_task_parent_child_relationship() {
+        let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+        parent_task.init();
+
+        let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+        child_task.init();
+
+        // Set parent-child relationship
+        child_task.set_parent_id(parent_task.get_id());
+        parent_task.add_child(child_task.get_id());
+
+        // Verify parent-child relationship
+        assert_eq!(child_task.get_parent_id(), Some(parent_task.get_id()));
+        assert!(parent_task.get_children().contains(&child_task.get_id()));
+
+        // Remove child and verify
+        assert!(parent_task.remove_child(child_task.get_id()));
+        assert!(!parent_task.get_children().contains(&child_task.get_id()));
+    }
+
+    #[test_case]
+    fn test_task_exit_status() {
+        let mut task = super::new_user_task("TaskWithExitStatus".to_string(), 0);
+        task.init();
+
+        // Verify initial exit status is None
+        assert_eq!(task.get_exit_status(), None);
+
+        // Set and verify exit status
+        task.set_exit_status(0);
+        assert_eq!(task.get_exit_status(), Some(0));
+
+        task.set_exit_status(1);
+        assert_eq!(task.get_exit_status(), Some(1));
     }
 }
