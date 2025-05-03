@@ -7,7 +7,7 @@ pub mod elf_loader;
 
 extern crate alloc;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_raw_pages, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
@@ -45,6 +45,7 @@ pub struct Task {
     pub max_data_size: usize, /* Maximum size of the data segment in bytes */
     pub max_text_size: usize, /* Maximum size of the text segment in bytes */
     pub vm_manager: VirtualMemoryManager,
+    managed_pages: Vec<Box<Page>>, /* Vector of managed pages */
     parent_id: Option<usize>,      /* Parent task ID */
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
@@ -73,6 +74,7 @@ impl Task {
             max_data_size: DEAFAULT_MAX_TASK_DATA_SIZE,
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
             vm_manager: VirtualMemoryManager::new(),
+            managed_pages: Vec::new(),
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
@@ -292,6 +294,51 @@ impl Task {
         for p in 0..num_of_pages {
             let vaddr = (page + p) * PAGE_SIZE;
             root_pagetable.unmap(vaddr);
+        }
+    }
+
+    /// Add pages to the task
+    /// 
+    /// # Arguments
+    /// * `pages` - The pages to add
+    /// 
+    pub fn add_managed_page(&mut self, pages: Box<Page>) {
+        self.managed_pages.push(pages);
+    }
+
+    /// Get managed page
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address of the page
+    /// 
+    /// # Returns
+    /// The managed page if found, otherwise None
+    /// 
+    pub fn get_managed_page(&self, vaddr: usize) -> Option<&Page> {
+        self.managed_pages.iter().find(|page| {
+            let page_addr = page.as_ref() as *const Page as usize;
+            let page_end = page_addr + PAGE_SIZE - 1;
+            vaddr >= page_addr && vaddr <= page_end
+        }).map(|page| page.as_ref())
+    }
+
+    /// Remove managed page
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address of the page
+    /// 
+    /// # Returns
+    /// The removed managed page if found, otherwise None
+    /// 
+    pub fn remove_managed_page(&mut self, vaddr: usize) -> Option<Box<Page>> {
+        if let Some(pos) = self.managed_pages.iter().position(|page| {
+            let page_addr = page.as_ref() as *const Page as usize;
+            let page_end = page_addr + PAGE_SIZE - 1;
+            vaddr >= page_addr && vaddr <= page_end
+        }) {
+            Some(self.managed_pages.remove(pos))
+        } else {
+            None
         }
     }
 

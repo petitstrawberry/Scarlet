@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use crate::environment::PAGE_SIZE;
 
 #[repr(C, align(4096))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Page {
     pub data: [u8; PAGE_SIZE],
 }
@@ -24,7 +24,7 @@ impl Page {
 /// # Returns
 /// A pointer to the allocated pages.
 pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
-    let boxed_pages = alloc::vec![Page::new(); num_of_pages].into_boxed_slice();
+    let boxed_pages = allocate_boxed_pages(num_of_pages);
     Box::into_raw(boxed_pages) as *mut Page
 }
 
@@ -35,7 +35,8 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
 /// * `num_of_pages` - The number of pages to free
 pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
     unsafe {
-        let _ = Box::from_raw(core::slice::from_raw_parts_mut(pages, num_of_pages));
+        let boxed_pages = Box::from_raw(core::slice::from_raw_parts_mut(pages, num_of_pages));
+        free_boxed_pages(boxed_pages);
     }
 }
 
