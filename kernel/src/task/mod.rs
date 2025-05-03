@@ -237,11 +237,11 @@ impl Task {
             _ => {},
         }
 
-        // Convert the Box<[Page]> to Vec<Box<Page>> and push each page into the managed_pages vector
-        for page in  pages.into_vec().iter().map(|page| Box::new(*page)) {
+        // Consume the Box<[Page]> directly and push each page into the managed_pages vector
+        for page in pages.into_vec() {
             self.add_managed_page(ManagedPage {
                 vaddr,
-                page,
+                page: Box::new(page),
             });
         }
 
