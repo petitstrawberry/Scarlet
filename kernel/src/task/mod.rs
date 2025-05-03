@@ -45,7 +45,10 @@ pub struct Task {
     pub max_data_size: usize, /* Maximum size of the data segment in bytes */
     pub max_text_size: usize, /* Maximum size of the text segment in bytes */
     pub vm_manager: VirtualMemoryManager,
-    managed_pages: Vec<ManagedPage>, /* List of managed pages */
+    /// Managed pages
+    /// 
+    /// Managed pages are freed automatically when the task is terminated.
+    managed_pages: Vec<ManagedPage>,
     parent_id: Option<usize>,      /* Parent task ID */
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
@@ -53,7 +56,6 @@ pub struct Task {
 
 #[derive(Debug, Clone)]
 struct ManagedPage {
-    paddr: usize,
     vaddr: usize,
     page: Box<Page>,
 }
@@ -238,7 +240,6 @@ impl Task {
         // Convert the Box<[Page]> to Vec<Box<Page>> and push each page into the managed_pages vector
         for page in  pages.into_vec().iter().map(|page| Box::new(*page)) {
             self.add_managed_page(ManagedPage {
-                paddr,
                 vaddr,
                 page,
             });
