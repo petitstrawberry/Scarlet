@@ -55,9 +55,9 @@ pub struct Task {
 }
 
 #[derive(Debug, Clone)]
-struct ManagedPage {
-    vaddr: usize,
-    page: Box<Page>,
+pub struct ManagedPage {
+    pub vaddr: usize,
+    pub page: Box<Page>,
 }
 
 static TASK_ID: Mutex<usize> = Mutex::new(1);
@@ -326,7 +326,7 @@ impl Task {
     /// # Arguments
     /// * `pages` - The managed page to add
     /// 
-    fn add_managed_page(&mut self, pages: ManagedPage) {
+    pub fn add_managed_page(&mut self, pages: ManagedPage) {
         self.managed_pages.push(pages);
     }
 
@@ -488,6 +488,11 @@ impl Task {
                             PAGE_SIZE
                         );
                     }
+                    let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };    
+                    child.add_managed_page(ManagedPage {
+                        vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
+                        page,
+                    });
                 }
                 
                 // Add the new memory map to the child task

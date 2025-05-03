@@ -3,6 +3,7 @@
 //! This module provides the virtual memory abstraction for the kernel. It
 //! includes functions for managing virtual address spaces.
 
+use alloc::boxed::Box;
 use manager::VirtualMemoryManager;
 use vmem::MemoryArea;
 use vmem::VirtualMemoryMap;
@@ -25,6 +26,7 @@ use crate::environment::VMMAX;
 use crate::mem::page::allocate_raw_pages;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
+use crate::task::ManagedPage;
 use crate::task::Task;
 
 extern crate alloc;
@@ -121,10 +123,8 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
 }
 
 pub fn user_vm_init(task: &mut Task) {
-    let manager = &mut task.vm_manager;
-
     let asid = alloc_virtual_address_space();
-    manager.set_asid(asid);
+    task.vm_manager.set_asid(asid);
 
     /* User stack page */
     let num_of_stack_page = 2; // 2 pages for user stack
@@ -144,9 +144,19 @@ pub fn user_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::User as usize,
     };
-    manager.add_memory_map(stack_map).map_err(|e| panic!("Failed to add user stack memory map: {}", e)).unwrap();
+
+    task.vm_manager.add_memory_map(stack_map).map_err(|e| panic!("Failed to add user stack memory map: {}", e)).unwrap();
     println!("User stack mapped         : {:#018x} - {:#018x}", stack_map.vmarea.start, stack_map.vmarea.end);
     task.stack_size = num_of_stack_page * PAGE_SIZE;
+
+    // // Manage the stack pages in the task
+    for i in 0..num_of_stack_page {
+        let page = unsafe { Box::from_raw(stack_pages.wrapping_add(i)) };    
+        task.add_managed_page(ManagedPage {
+            vaddr: stack_map.vmarea.start + i * PAGE_SIZE,
+            page,
+        });
+    }
 
     /* Guard page */
     let guard_page = allocate_raw_pages(1);
@@ -160,23 +170,26 @@ pub fn user_vm_init(task: &mut Task) {
             start: guard_page as usize,
             end: guard_page as usize + PAGE_SIZE - 1,
         },
-        permissions: 
-            VirtualMemoryPermission::Read as usize |
-            VirtualMemoryPermission::Write as usize
+        permissions: 0,
     };
-    manager.add_memory_map(guard_map).map_err(|e| panic!("Failed to add guard page memory map: {}", e)).unwrap();
+    task.vm_manager.add_memory_map(guard_map).map_err(|e| panic!("Failed to add guard page memory map: {}", e)).unwrap();
     println!("Guard page mapped         : {:#018x} - {:#018x}", guard_map.vmarea.start, guard_map.vmarea.end);
 
-    setup_trampoline(manager);
+    // Manage the guard page in the task
+    let page = unsafe { Box::from_raw(guard_page) };    
+    task.add_managed_page(ManagedPage {
+        vaddr: guard_map.vmarea.start,
+        page,
+    });
+
+    setup_trampoline(&mut task.vm_manager);
 }
 
 pub fn user_kernel_vm_init(task: &mut Task) {
-    let manager = &mut task.vm_manager;
-
     let asid = alloc_virtual_address_space();
     let root_page_table_idx = get_root_page_table_idx(asid).unwrap();
     let root_page_table = get_page_table(root_page_table_idx).unwrap();
-    manager.set_asid(asid);
+    task.vm_manager.set_asid(asid);
 
     let kernel_area = unsafe { KERNEL_AREA.unwrap() };
 
@@ -188,7 +201,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
     };
-    manager.add_memory_map(kernel_map).map_err(|e| {
+    task.vm_manager.add_memory_map(kernel_map).map_err(|e| {
         panic!("Failed to add kernel memory map: {}", e);
     }).unwrap();
     /* Pre-map the kernel space */
@@ -211,12 +224,21 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
     };
-    manager.add_memory_map(stack_map).map_err(|e| panic!("Failed to add kernel stack memory map: {}", e)).unwrap();
+    task.vm_manager.add_memory_map(stack_map).map_err(|e| panic!("Failed to add kernel stack memory map: {}", e)).unwrap();
     task.stack_size = KERNEL_VM_STACK_SIZE;
     /* Pre-map the kernel stack */
     root_page_table.map_memory_area(stack_map).map_err(|e| {
         panic!("Failed to map kernel stack memory area: {}", e);
     }).unwrap();
+    // Manage the stack pages in the task
+    for i in 0..(KERNEL_VM_STACK_SIZE / PAGE_SIZE) {
+        let page = unsafe { Box::from_raw(stack_pages.wrapping_add(i)) };    
+        task.add_managed_page(ManagedPage {
+            vaddr: stack_map.vmarea.start + i * PAGE_SIZE,
+            page,
+        });
+    }
+
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
             start: 0x00,
@@ -230,14 +252,14 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
     };
-    manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
+    task.vm_manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
     println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
     println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
     println!("Kernel stack mapped       : {:#018x} - {:#018x}", stack_map.vmarea.start as usize, stack_map.vmarea.end as usize);
     println!("(Stack page)              : {:#018x}", stack_pages as usize);
 
-    setup_trampoline(manager);
+    setup_trampoline(&mut task.vm_manager);
 }
 
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
