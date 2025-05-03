@@ -4,7 +4,7 @@
   
 **A minimal operating system kernel written in Rust**
 
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](https://github.com/yourusername/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.10.0-blue.svg)](https://github.com/yourusername/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 
