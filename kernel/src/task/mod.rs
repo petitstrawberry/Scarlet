@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::String, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -181,7 +181,7 @@ impl Task {
                 match self.vm_manager.search_memory_map(prev_addr) {
                     Some(_) => {},
                     None => {
-                        match self.allocate_pages(prev_addr, num_of_pages, VirtualMemoryRegion::Data) {
+                        match self.allocate_data_pages(prev_addr, num_of_pages) {
                             Ok(_) => {},
                             Err(_) => return Err("Failed to allocate pages"),
                         }
@@ -206,13 +206,17 @@ impl Task {
     /// 
     /// # Errors
     /// If the address is not page aligned, or if the pages cannot be allocated.
-    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemoryRegion) -> Result<VirtualMemoryMap, &'static str> {
+    /// 
+    /// # Note
+    /// This function don't increment the size of the task.
+    /// You must increment the size of the task manually.
+    /// 
+    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, permissions: usize) -> Result<VirtualMemoryMap, &'static str> {
 
         if vaddr % PAGE_SIZE != 0 {
             return Err("Address is not page aligned");
         }
         
-        let permissions = segment.get_permissions();
         let pages = allocate_raw_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
         let paddr = pages as usize;
@@ -228,14 +232,6 @@ impl Task {
             permissions,
         };
         self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
-        match segment {
-            VirtualMemoryRegion::Stack => self.stack_size += size,
-            VirtualMemoryRegion::Heap => self.data_size += size,
-            VirtualMemoryRegion::Bss => self.data_size += size,
-            VirtualMemoryRegion::Data => self.data_size += size,
-            VirtualMemoryRegion::Text => self.text_size += size,
-            _ => {},
-        }
 
         for i in 0..num_of_pages {
             let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
@@ -320,6 +316,97 @@ impl Task {
             let vaddr = (page + p) * PAGE_SIZE;
             root_pagetable.unmap(vaddr);
         }
+    }
+
+    /// Allocate stack pages for the task. And increment the size of the task.
+    ///
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    pub fn allocate_text_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Text.default_permissions();
+        let res = self.allocate_pages(vaddr, num_of_pages, permissions);   
+        if res.is_ok() {
+            self.text_size += num_of_pages * PAGE_SIZE;
+        }
+        res
+    }
+
+    /// Allocate stack pages for the task. And increment the size of the task.
+    ///
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    pub fn allocate_stack_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Stack.default_permissions();
+        let res = self.allocate_pages(vaddr, num_of_pages, permissions)?;
+        self.stack_size += num_of_pages * PAGE_SIZE;
+        Ok(res)
+    }
+
+    /// Allocate data pages for the task. And increment the size of the task.
+    ///
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    pub fn allocate_data_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Data.default_permissions();
+        let res = self.allocate_pages(vaddr, num_of_pages, permissions)?;
+        self.data_size += num_of_pages * PAGE_SIZE;
+        Ok(res)
+    }
+
+    /// Allocate guard pages for the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    /// # Note
+    /// Gurad pages are not allocated in the physical memory space.
+    /// This function only maps the pages to the virtual memory space.
+    /// 
+    pub fn allocate_guard_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Guard.default_permissions();
+        let mmap = VirtualMemoryMap {
+            pmarea: MemoryArea {
+                start: 0,
+                end: 0,
+            },
+            vmarea: MemoryArea {
+                start: vaddr,
+                end: vaddr + num_of_pages * PAGE_SIZE - 1,
+            },
+            permissions,
+        };
+        Ok(mmap)
     }
 
     /// Add pages to the task

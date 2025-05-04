@@ -34,7 +34,7 @@ use core::num;
 use crate::environment::PAGE_SIZE;
 use crate::fs::{File, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
-use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
 use alloc::{format, vec};
 use alloc::string::{String, ToString};
@@ -432,7 +432,7 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     let map = VirtualMemoryMap {
         vmarea,
         pmarea,
-        permissions,
+        permissions
     };
 
     // Add to VM manager

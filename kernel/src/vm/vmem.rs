@@ -144,7 +144,7 @@ pub enum VirtualMemoryRegion {
 }
 
 impl VirtualMemoryRegion {
-    pub fn get_permissions(&self) -> usize {
+    pub fn default_permissions(&self) -> usize {
         match self {
             VirtualMemoryRegion::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize | VirtualMemoryPermission::User as usize,
             VirtualMemoryRegion::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,

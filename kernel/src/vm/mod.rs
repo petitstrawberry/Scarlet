@@ -125,10 +125,10 @@ pub fn user_vm_init(task: &mut Task) {
     /* User stack page */
     let num_of_stack_page = 2; // 2 pages for user stack
     let stack_start = 0xffff_ffff_ffff_f000 - num_of_stack_page * PAGE_SIZE;
-    task.allocate_pages(stack_start, num_of_stack_page, vmem::VirtualMemorySegment::Stack).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
+    task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
 
     /* Guard page */
-   task.allocate_pages(stack_start - PAGE_SIZE, 1, vmem::VirtualMemorySegment::Guard).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
+   task.allocate_guard_pages(stack_start - PAGE_SIZE, 1).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
 
     setup_trampoline(&mut task.vm_manager);
 }
@@ -159,7 +159,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     task.data_size = kernel_area.end + 1;
 
     /* Stack page */
-    task.allocate_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE, vmem::VirtualMemorySegment::Stack).map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e)).unwrap();
+    task.allocate_stack_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE).map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e)).unwrap();
 
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
