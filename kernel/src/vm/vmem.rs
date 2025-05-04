@@ -133,24 +133,26 @@ impl VirtualMemoryPermission {
     }
 }
 
-pub enum VirtualMemorySegment {
+pub enum VirtualMemoryRegion {
     Text,
     Data,
     Bss,
     Heap,
     Stack,
     Guard,
+    Unknown,
 }
 
-impl VirtualMemorySegment {
+impl VirtualMemoryRegion {
     pub fn get_permissions(&self) -> usize {
         match self {
-            VirtualMemorySegment::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Guard => 0, // Any access to the guard page should cause a page fault
+            VirtualMemoryRegion::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Guard => 0, // Any access to the guard page should cause a page fault
+            VirtualMemoryRegion::Unknown => panic!("Unknown memory segment"),
         }
     }
 }

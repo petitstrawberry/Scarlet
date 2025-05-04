@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::String, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -181,7 +181,7 @@ impl Task {
                 match self.vm_manager.search_memory_map(prev_addr) {
                     Some(_) => {},
                     None => {
-                        match self.allocate_pages(prev_addr, num_of_pages, VirtualMemorySegment::Data) {
+                        match self.allocate_pages(prev_addr, num_of_pages, VirtualMemoryRegion::Data) {
                             Ok(_) => {},
                             Err(_) => return Err("Failed to allocate pages"),
                         }
@@ -206,7 +206,7 @@ impl Task {
     /// 
     /// # Errors
     /// If the address is not page aligned, or if the pages cannot be allocated.
-    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
+    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemoryRegion) -> Result<VirtualMemoryMap, &'static str> {
 
         if vaddr % PAGE_SIZE != 0 {
             return Err("Address is not page aligned");
@@ -229,11 +229,11 @@ impl Task {
         };
         self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
         match segment {
-            VirtualMemorySegment::Stack => self.stack_size += size,
-            VirtualMemorySegment::Heap => self.data_size += size,
-            VirtualMemorySegment::Bss => self.data_size += size,
-            VirtualMemorySegment::Data => self.data_size += size,
-            VirtualMemorySegment::Text => self.text_size += size,
+            VirtualMemoryRegion::Stack => self.stack_size += size,
+            VirtualMemoryRegion::Heap => self.data_size += size,
+            VirtualMemoryRegion::Bss => self.data_size += size,
+            VirtualMemoryRegion::Data => self.data_size += size,
+            VirtualMemoryRegion::Text => self.text_size += size,
             _ => {},
         }
 
