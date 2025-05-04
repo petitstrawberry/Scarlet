@@ -189,8 +189,6 @@ impl Task {
                 }
             }
         }
-
-        self.data_size = brk - self.text_size;
         Ok(())
     }
 
