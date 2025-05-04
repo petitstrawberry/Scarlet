@@ -1,4 +1,7 @@
 use crate::syscall::{syscall0, syscall1, syscall3, Syscall};
+use crate::vec::Vec;
+
+// use crate::string::String;
 
 /// Clones the current process.
 /// 
@@ -31,12 +34,26 @@ pub fn getpid() -> usize {
 /// 
 /// # Arguments
 /// * `path` - Path to the executable
-/// * `argv` - Argument array (can be null)
-/// * `envp` - Environment variable array (can be null)
+/// * `argv` - Argument array
+/// * `envp` - Environment variable array
 ///
 /// # Return Value
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
-pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> usize {
-    syscall3(Syscall::Execve, path as usize, argv as usize, envp as usize)
+pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> usize {
+    let path_ptr = path.as_bytes().as_ptr() as usize;
+    let argv_ptr = if argv.is_empty() {
+        0
+    } else {
+        let argv_bytes: Vec<*const u8> = argv.iter().map(|s| s.as_bytes().as_ptr()).collect();
+        argv_bytes.as_ptr() as usize
+    };
+    let envp_ptr = if envp.is_empty() {
+        0
+    } else {
+        let envp_bytes: Vec<*const u8> = envp.iter().map(|s| s.as_bytes().as_ptr()).collect();
+        envp_bytes.as_ptr() as usize
+    };
+
+    syscall3(Syscall::Execve, path_ptr, argv_ptr, envp_ptr)
 }
