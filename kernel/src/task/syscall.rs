@@ -75,9 +75,10 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 }
 
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
     // Get arguments from the trapframe
-    let path_ptr = trapframe.get_arg(0) as *const u8;
-
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    
     /* 
      * The second and third arguments are pointers to arrays of pointers to
      * null-terminated strings (char **argv, char **envp).
