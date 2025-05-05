@@ -2,6 +2,7 @@ pub const NUM_OF_CPUS: usize = 2;
 pub const RISCV_STIMER_FREQ: u64 = 10000000; // 10MHz
 pub const VMMAX: usize = 0xffffffffffffffff;
 pub const STACK_SIZE: usize = 0x100000; // 512KB
+pub const USER_STACK_TOP: usize = 0xffff_ffff_ffff_f000;
 pub const PAGE_SIZE: usize = 0x1000; // 4KB
 pub const KERNEL_VM_STACK_SIZE: usize = 0x10000; // 64KiB
 pub const KERNEL_VM_STACK_END: usize = 0xffffffffffffefff;
