@@ -2,7 +2,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::str;
 
-use crate::fs::File;
+use crate::fs::{File, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
@@ -117,7 +117,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             i += 1;
             
             // Safety check to prevent infinite loop
-            if i > 1024 {
+            if i > MAX_PATH_LENGTH {
                 // Restore the managed pages, memory mapping and sizes
                 task.managed_pages = backup_pages; // Restore the pages
                 task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
