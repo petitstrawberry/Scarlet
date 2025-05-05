@@ -2,12 +2,14 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::str;
 
+use crate::environment::PAGE_SIZE;
 use crate::fs::File;
 use crate::task::elf_loader::load_elf_into_task;
 
-use crate::arch::{get_cpu, Registers, Trapframe};
+use crate::arch::{get_cpu, vm, Registers, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
+use crate::vm::{setup_stack, setup_trampoline};
 
 use super::mytask;
 
@@ -45,6 +47,7 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(get_cpu());
@@ -92,6 +95,13 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     
     // Get the current task
     let task = mytask().unwrap();
+
+    // Backup the managed pages
+    let mut backup_pages = Vec::new();
+    backup_pages.append(&mut task.managed_pages); // Move the pages to the backup
+    // Back up the vm mapping
+    let mut backup_vm_mapping = Vec::new();
+    backup_vm_mapping.append(&mut task.vm_manager.memmap); // Move the memory mapping to the backup
     
     // Parse path as a null-terminated C string
     let mut path_bytes = Vec::new();
@@ -107,6 +117,9 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             
             // Safety check to prevent infinite loop
             if i > 1024 {
+                // Restore the managed pages and memory mapping
+                task.managed_pages = backup_pages; // Restore the pages
+                task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
                 return usize::MAX; // Path too long
             }
         }
@@ -115,29 +128,52 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // Convert path bytes to string
     let path_str = match str::from_utf8(&path_bytes) {
         Ok(s) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => {
+            // Restore the managed pages and memory mapping
+            task.managed_pages = backup_pages; // Restore the pages
+            task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+            return usize::MAX // Invalid UTF-8
+        },
     };
     
     // Try to open the executable file
     let mut file = File::new(path_str.to_string());
     if file.open(0).is_err() {
+        // Restore the managed pages and memory mapping
+        task.managed_pages = backup_pages; // Restore the pages
+        task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
         return usize::MAX; // File open error
     }
     
     // Load the ELF file and replace the current process
     match load_elf_into_task(&mut file, task) {
         Ok(entry_point) => {
+            // Clear page table entries
+            let idx = vm::get_root_page_table_idx(task.vm_manager.get_asid()).unwrap();
+            let root_page_table = vm::get_page_table(idx).unwrap();
+            root_page_table.unmap_all();
+            // Setup the trapframe
+            setup_trampoline(&mut task.vm_manager);
+            // Setup the stack
+            let stack_pointer = setup_stack(task);
+
             // Set the new entry point for the task
             task.set_entry_point(entry_point as usize);
             
             // Reset task's registers (except for those needed for arguments)
             task.vcpu.regs = Registers::new();
+            task.vcpu.regs.reg[2] = stack_pointer; // Set stack pointer
+            task.vcpu.switch(trapframe);
             
             // Return 0 on success (though this should never actually return)
             0
         },
         Err(_) => {
             // Return error code
+            // Restore the managed pages and memory mapping
+            task.managed_pages = backup_pages; // Restore the pages
+            task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+
             usize::MAX
         }
     }
