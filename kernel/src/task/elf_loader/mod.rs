@@ -332,7 +332,7 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
             })?;
 
 
-            // Infence segment type
+            // Inference segment type
             let segment_type = if ph.p_flags & PF_X != 0 {
                 VirtualMemoryRegion::Text
             } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
