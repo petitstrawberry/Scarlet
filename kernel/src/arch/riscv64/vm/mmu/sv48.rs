@@ -225,6 +225,7 @@ impl PageTable {
             let entry = &mut self.entries[i];
             entry.invalidate();
         }
-        unsafe { asm!("sfence.vma") };
+        // Ensure the TLB flush instruction is not optimized away.
+        unsafe { asm!("sfence.vma", options(volatile)) };
     }
 }
