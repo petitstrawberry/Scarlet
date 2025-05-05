@@ -226,6 +226,6 @@ impl PageTable {
             entry.invalidate();
         }
         // Ensure the TLB flush instruction is not optimized away.
-        unsafe { asm!("sfence.vma", options(volatile)) };
+        unsafe { asm!("sfence.vma") };
     }
 }
