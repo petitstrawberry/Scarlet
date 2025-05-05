@@ -2,14 +2,13 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::str;
 
-use crate::environment::PAGE_SIZE;
 use crate::fs::File;
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
-use crate::vm::{setup_stack, setup_trampoline};
+use crate::vm::{setup_user_stack, setup_trampoline};
 
 use super::mytask;
 
@@ -105,7 +104,6 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // Backing up the size
     let backup_text_size = task.text_size;
     let backup_data_size = task.data_size;
-    let backup_stack_size = task.stack_size;
     
     // Parse path as a null-terminated C string
     let mut path_bytes = Vec::new();
@@ -126,7 +124,6 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
                 task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
                 task.text_size = backup_text_size; // Restore the text size
                 task.data_size = backup_data_size; // Restore the data size
-                task.stack_size = backup_stack_size; // Restore the stack size
                 return usize::MAX; // Path too long
             }
         }
@@ -141,7 +138,6 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
             task.text_size = backup_text_size; // Restore the text size
             task.data_size = backup_data_size; // Restore the data size
-            task.stack_size = backup_stack_size; // Restore the stack size
             return usize::MAX // Invalid UTF-8
         },
     };
@@ -154,7 +150,6 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
         task.text_size = backup_text_size; // Restore the text size
         task.data_size = backup_data_size; // Restore the data size
-        task.stack_size = backup_stack_size; // Restore the stack size
         return usize::MAX; // File open error
     }
 
@@ -172,7 +167,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             // Setup the trapframe
             setup_trampoline(&mut task.vm_manager);
             // Setup the stack
-            let stack_pointer = setup_stack(task);
+            let stack_pointer = setup_user_stack(task);
 
             // Set the new entry point for the task
             task.set_entry_point(entry_point as usize);
@@ -194,7 +189,6 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
             task.text_size = backup_text_size; // Restore the text size
             task.data_size = backup_data_size; // Restore the data size
-            task.stack_size = backup_stack_size; // Restore the stack size
 
             // Return error code
             usize::MAX

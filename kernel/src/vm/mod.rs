@@ -179,7 +179,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     setup_trampoline(&mut task.vm_manager);
 }
 
-pub fn setup_stack(task: &mut Task) -> usize{
+pub fn setup_user_stack(task: &mut Task) -> usize{
     /* User stack page */
     let num_of_stack_page = 2; // 2 pages for user stack
     let stack_start = 0xffff_ffff_ffff_f000 - num_of_stack_page * PAGE_SIZE;
