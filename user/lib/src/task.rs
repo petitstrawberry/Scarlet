@@ -47,13 +47,13 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> usize {
     let argv_ptr = if argv.is_empty() {
         0
     } else {
-        let argv_bytes: Vec<*const u8> = argv.iter().map(|s| s.as_bytes().as_ptr()).collect();
+        let argv_bytes: Box<[*const u8]> = argv.iter().map(|s| s.as_bytes().as_ptr()).collect::<Vec<_>>().into_boxed_slice();
         argv_bytes.as_ptr() as usize
     };
     let envp_ptr = if envp.is_empty() {
         0
     } else {
-        let envp_bytes: Vec<*const u8> = envp.iter().map(|s| s.as_bytes().as_ptr()).collect();
+        let envp_bytes: Box<[*const u8]> = envp.iter().map(|s| s.as_bytes().as_ptr()).collect::<Vec<_>>().into_boxed_slice();
         envp_bytes.as_ptr() as usize
     };
     
