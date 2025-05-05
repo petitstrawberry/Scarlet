@@ -44,8 +44,8 @@ use super::vmem::VirtualMemoryMap;
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
-    memmap: Vec<VirtualMemoryMap>,
-    asid: usize,
+    pub memmap: Vec<VirtualMemoryMap>,
+    pub asid: usize,
 }
 
 impl VirtualMemoryManager {
