@@ -99,9 +99,13 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // Backup the managed pages
     let mut backup_pages = Vec::new();
     backup_pages.append(&mut task.managed_pages); // Move the pages to the backup
-    // Back up the vm mapping
+    // Backup the vm mapping
     let mut backup_vm_mapping = Vec::new();
     backup_vm_mapping.append(&mut task.vm_manager.memmap); // Move the memory mapping to the backup
+    // Backing up the size
+    let backup_text_size = task.text_size;
+    let backup_data_size = task.data_size;
+    let backup_stack_size = task.stack_size;
     
     // Parse path as a null-terminated C string
     let mut path_bytes = Vec::new();
@@ -117,9 +121,12 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             
             // Safety check to prevent infinite loop
             if i > 1024 {
-                // Restore the managed pages and memory mapping
+                // Restore the managed pages, memory mapping and sizes
                 task.managed_pages = backup_pages; // Restore the pages
                 task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+                task.text_size = backup_text_size; // Restore the text size
+                task.data_size = backup_data_size; // Restore the data size
+                task.stack_size = backup_stack_size; // Restore the stack size
                 return usize::MAX; // Path too long
             }
         }
@@ -129,9 +136,12 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let path_str = match str::from_utf8(&path_bytes) {
         Ok(s) => s,
         Err(_) => {
-            // Restore the managed pages and memory mapping
+            // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
             task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+            task.text_size = backup_text_size; // Restore the text size
+            task.data_size = backup_data_size; // Restore the data size
+            task.stack_size = backup_stack_size; // Restore the stack size
             return usize::MAX // Invalid UTF-8
         },
     };
@@ -139,11 +149,18 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // Try to open the executable file
     let mut file = File::new(path_str.to_string());
     if file.open(0).is_err() {
-        // Restore the managed pages and memory mapping
+        // Restore the managed pages, memory mapping and sizes
         task.managed_pages = backup_pages; // Restore the pages
         task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+        task.text_size = backup_text_size; // Restore the text size
+        task.data_size = backup_data_size; // Restore the data size
+        task.stack_size = backup_stack_size; // Restore the stack size
         return usize::MAX; // File open error
     }
+
+    task.text_size = 0;
+    task.data_size = 0;
+    task.stack_size = 0;
     
     // Load the ELF file and replace the current process
     match load_elf_into_task(&mut file, task) {
@@ -162,18 +179,24 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             
             // Reset task's registers (except for those needed for arguments)
             task.vcpu.regs = Registers::new();
+            // Set the stack pointer
             task.vcpu.set_sp(stack_pointer);
+
+            // Switch to the new task
             task.vcpu.switch(trapframe);
             
             // Return 0 on success (though this should never actually return)
             0
         },
         Err(_) => {
-            // Return error code
-            // Restore the managed pages and memory mapping
+            // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
             task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+            task.text_size = backup_text_size; // Restore the text size
+            task.data_size = backup_data_size; // Restore the data size
+            task.stack_size = backup_stack_size; // Restore the stack size
 
+            // Return error code
             usize::MAX
         }
     }
