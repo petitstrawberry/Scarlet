@@ -42,6 +42,10 @@ impl Vcpu {
         self.pc
     }
 
+    pub fn set_sp(&mut self, sp: usize) {
+        self.regs.reg[2] = sp;
+    }
+
     pub fn get_mode(&self) -> Mode {
         self.mode
     }
