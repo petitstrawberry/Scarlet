@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::String, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -38,6 +38,7 @@ pub struct Task {
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
+    brk: usize, /* Program break (NOT work in Kernel task) */
     pub stack_size: usize, /* Size of the stack in bytes */
     pub data_size: usize, /* Size of the data segment in bytes (NOT work in Kernel task) */
     pub text_size: usize, /* Size of the text segment in bytes (NOT work in Kernel task) */
@@ -76,6 +77,7 @@ impl Task {
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
+            brk: 0,
             stack_size: 0,
             data_size: 0,
             text_size: 0,
@@ -146,7 +148,7 @@ impl Task {
     /// # Returns
     /// The program break address
     pub fn get_brk(&self) -> usize {
-        self.text_size + self.data_size
+        self.brk
     }
 
     /// Set the program break (NOT work in Kernel task)
@@ -168,9 +170,7 @@ impl Task {
             let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let num_of_pages = (prev_addr - addr) / PAGE_SIZE;
-            
-            self.free_pages(addr, num_of_pages);
-            
+            self.free_data_pages(addr, num_of_pages);            
         } else if brk > prev_brk {
             /* Allocate pages */
             /* Round address to the page boundary */
@@ -190,6 +190,7 @@ impl Task {
                 }
             }
         }
+        self.brk = brk;
         Ok(())
     }
 
@@ -338,6 +339,17 @@ impl Task {
         res
     }
 
+    /// Free text pages for the task. And decrement the size of the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to free
+    /// 
+    pub fn free_text_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        self.free_pages(vaddr, num_of_pages);
+        self.text_size -= num_of_pages * PAGE_SIZE;
+    }
+
     /// Allocate stack pages for the task. And increment the size of the task.
     ///
     /// # Arguments
@@ -357,6 +369,17 @@ impl Task {
         Ok(res)
     }
 
+    /// Free stack pages for the task. And decrement the size of the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to free
+    /// 
+    pub fn free_stack_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        self.free_pages(vaddr, num_of_pages);
+        self.stack_size -= num_of_pages * PAGE_SIZE;
+    }
+
     /// Allocate data pages for the task. And increment the size of the task.
     ///
     /// # Arguments
@@ -374,6 +397,17 @@ impl Task {
         let res = self.allocate_pages(vaddr, num_of_pages, permissions)?;
         self.data_size += num_of_pages * PAGE_SIZE;
         Ok(res)
+    }
+
+    /// Free data pages for the task. And decrement the size of the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to free
+    /// 
+    pub fn free_data_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        self.free_pages(vaddr, num_of_pages);
+        self.data_size -= num_of_pages * PAGE_SIZE;
     }
 
     /// Allocate guard pages for the task.
