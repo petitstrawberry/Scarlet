@@ -162,7 +162,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             
             // Reset task's registers (except for those needed for arguments)
             task.vcpu.regs = Registers::new();
-            task.vcpu.regs.reg[2] = stack_pointer; // Set stack pointer
+            task.vcpu.set_sp(stack_pointer);
             task.vcpu.switch(trapframe);
             
             // Return 0 on success (though this should never actually return)
