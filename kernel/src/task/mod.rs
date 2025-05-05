@@ -38,9 +38,9 @@ pub struct Task {
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
-    brk: usize, /* Program break (NOT work in Kernel task) */
+    pub brk: Option<usize>, /* Program break (NOT work in Kernel task) */
     pub stack_size: usize, /* Size of the stack in bytes */
-    pub data_size: usize, /* Size of the data segment in bytes (NOT work in Kernel task) */
+    pub data_size: usize, /* Size of the data segment in bytes (page unit) (NOT work in Kernel task) */
     pub text_size: usize, /* Size of the text segment in bytes (NOT work in Kernel task) */
     pub max_stack_size: usize, /* Maximum size of the stack in bytes */
     pub max_data_size: usize, /* Maximum size of the data segment in bytes */
@@ -77,7 +77,7 @@ impl Task {
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
-            brk: 0,
+            brk: None,
             stack_size: 0,
             data_size: 0,
             text_size: 0,
@@ -148,7 +148,10 @@ impl Task {
     /// # Returns
     /// The program break address
     pub fn get_brk(&self) -> usize {
-        self.brk
+        if self.brk.is_none() {
+            return self.text_size + self.data_size;
+        }
+        self.brk.unwrap()
     }
 
     /// Set the program break (NOT work in Kernel task)
@@ -190,7 +193,7 @@ impl Task {
                 }
             }
         }
-        self.brk = brk;
+        self.brk = Some(brk);
         Ok(())
     }
 
