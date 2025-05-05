@@ -160,6 +160,8 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // Load the ELF file and replace the current process
     match load_elf_into_task(&mut file, task) {
         Ok(entry_point) => {
+            // Set the name
+            task.name = path_str.to_string();
             // Clear page table entries
             let idx = vm::get_root_page_table_idx(task.vm_manager.get_asid()).unwrap();
             let root_page_table = vm::get_page_table(idx).unwrap();
