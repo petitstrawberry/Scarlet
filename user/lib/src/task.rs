@@ -44,20 +44,16 @@ pub fn getpid() -> usize {
 /// - On error: -1 (usize::MAX)
 pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> usize {
     let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
-    let argv_ptr = if argv.is_empty() {
-        0
-    } else {
-        let argv_bytes: Box<[*const u8]> = argv.iter().map(|s| s.as_bytes().as_ptr()).collect::<Vec<_>>().into_boxed_slice();
-        argv_bytes.as_ptr() as usize
-    };
-    let envp_ptr = if envp.is_empty() {
-        0
-    } else {
-        let envp_bytes: Box<[*const u8]> = envp.iter().map(|s| s.as_bytes().as_ptr()).collect::<Vec<_>>().into_boxed_slice();
-        envp_bytes.as_ptr() as usize
-    };
+    let argv_ptr = 0; // argv is not used in this implementation
+    let envp_ptr = 0; // envp is not used in this implementation
+    let res = syscall3(Syscall::Execve, path_ptr, argv_ptr, envp_ptr);
     
-    syscall3(Syscall::Execve, path_ptr, argv_ptr, envp_ptr)
+    // If the syscall fails, we need to free the allocated memory
+    // (On success, the context is switched, so this code is not reached)
+    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the path
+
+    // Return the result of the syscall
+    res
 }
 
 fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
