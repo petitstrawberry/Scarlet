@@ -1,5 +1,7 @@
+use crate::println;
 use crate::syscall::{syscall0, syscall1, syscall3, Syscall};
 use crate::vec::Vec;
+use crate::boxed::Box;
 
 // use crate::string::String;
 
@@ -41,7 +43,7 @@ pub fn getpid() -> usize {
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
 pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> usize {
-    let path_ptr = path.as_bytes().as_ptr() as usize;
+    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
     let argv_ptr = if argv.is_empty() {
         0
     } else {
@@ -54,6 +56,16 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> usize {
         let envp_bytes: Vec<*const u8> = envp.iter().map(|s| s.as_bytes().as_ptr()).collect();
         envp_bytes.as_ptr() as usize
     };
-
+    
     syscall3(Syscall::Execve, path_ptr, argv_ptr, envp_ptr)
+}
+
+fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
+    if s.as_bytes().contains(&0) {
+        return Err(()); // 内部に null バイトがある場合はエラー
+    }
+    let mut v = Vec::with_capacity(s.len() + 1);
+    v.extend_from_slice(s.as_bytes());
+    v.push(0); // null 終端
+    Ok(v)
 }
