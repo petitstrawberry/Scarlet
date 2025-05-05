@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::String, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemorySegment}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -38,6 +38,7 @@ pub struct Task {
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
+    brk: usize, /* Program break (NOT work in Kernel task) */
     pub stack_size: usize, /* Size of the stack in bytes */
     pub data_size: usize, /* Size of the data segment in bytes (NOT work in Kernel task) */
     pub text_size: usize, /* Size of the text segment in bytes (NOT work in Kernel task) */
@@ -76,6 +77,7 @@ impl Task {
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
+            brk: 0,
             stack_size: 0,
             data_size: 0,
             text_size: 0,
@@ -97,12 +99,13 @@ impl Task {
             TaskType::Kernel => {
                 user_kernel_vm_init(self);
                 /* Set sp to the top of the kernel stack */
-                self.vcpu.regs.reg[2] = KERNEL_VM_STACK_END + 1;
+                self.vcpu.set_sp(KERNEL_VM_STACK_END + 1);
+
             },
             TaskType::User => { 
                 user_vm_init(self);
                 /* Set sp to the top of the user stack */
-                self.vcpu.regs.reg[2] = 0xffff_ffff_ffff_f000;
+                self.vcpu.set_sp(0xffff_ffff_ffff_f000);
             }
         }
         
@@ -145,7 +148,7 @@ impl Task {
     /// # Returns
     /// The program break address
     pub fn get_brk(&self) -> usize {
-        self.text_size + self.data_size
+        self.brk
     }
 
     /// Set the program break (NOT work in Kernel task)
@@ -167,9 +170,7 @@ impl Task {
             let prev_addr = (prev_brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let num_of_pages = (prev_addr - addr) / PAGE_SIZE;
-            
-            self.free_pages(addr, num_of_pages);
-            
+            self.free_data_pages(addr, num_of_pages);            
         } else if brk > prev_brk {
             /* Allocate pages */
             /* Round address to the page boundary */
@@ -181,7 +182,7 @@ impl Task {
                 match self.vm_manager.search_memory_map(prev_addr) {
                     Some(_) => {},
                     None => {
-                        match self.allocate_pages(prev_addr, num_of_pages, VirtualMemorySegment::Data) {
+                        match self.allocate_data_pages(prev_addr, num_of_pages) {
                             Ok(_) => {},
                             Err(_) => return Err("Failed to allocate pages"),
                         }
@@ -189,8 +190,7 @@ impl Task {
                 }
             }
         }
-
-        self.data_size = brk - self.text_size;
+        self.brk = brk;
         Ok(())
     }
 
@@ -206,13 +206,17 @@ impl Task {
     /// 
     /// # Errors
     /// If the address is not page aligned, or if the pages cannot be allocated.
-    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, segment: VirtualMemorySegment) -> Result<VirtualMemoryMap, &'static str> {
+    /// 
+    /// # Note
+    /// This function don't increment the size of the task.
+    /// You must increment the size of the task manually.
+    /// 
+    pub fn allocate_pages(&mut self, vaddr: usize, num_of_pages: usize, permissions: usize) -> Result<VirtualMemoryMap, &'static str> {
 
         if vaddr % PAGE_SIZE != 0 {
             return Err("Address is not page aligned");
         }
         
-        let permissions = segment.get_permissions();
         let pages = allocate_raw_pages(num_of_pages);
         let size = num_of_pages * PAGE_SIZE;
         let paddr = pages as usize;
@@ -228,14 +232,6 @@ impl Task {
             permissions,
         };
         self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
-        match segment {
-            VirtualMemorySegment::Stack => self.stack_size += size,
-            VirtualMemorySegment::Heap => self.data_size += size,
-            VirtualMemorySegment::Bss => self.data_size += size,
-            VirtualMemorySegment::Data => self.data_size += size,
-            VirtualMemorySegment::Text => self.text_size += size,
-            _ => {},
-        }
 
         for i in 0..num_of_pages {
             let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
@@ -320,6 +316,130 @@ impl Task {
             let vaddr = (page + p) * PAGE_SIZE;
             root_pagetable.unmap(vaddr);
         }
+    }
+
+    /// Allocate text pages for the task. And increment the size of the task.
+    ///
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    pub fn allocate_text_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Text.default_permissions();
+        let res = self.allocate_pages(vaddr, num_of_pages, permissions);   
+        if res.is_ok() {
+            self.text_size += num_of_pages * PAGE_SIZE;
+        }
+        res
+    }
+
+    /// Free text pages for the task. And decrement the size of the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to free
+    /// 
+    pub fn free_text_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        self.free_pages(vaddr, num_of_pages);
+        self.text_size -= num_of_pages * PAGE_SIZE;
+    }
+
+    /// Allocate stack pages for the task. And increment the size of the task.
+    ///
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    pub fn allocate_stack_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Stack.default_permissions();
+        let res = self.allocate_pages(vaddr, num_of_pages, permissions)?;
+        self.stack_size += num_of_pages * PAGE_SIZE;
+        Ok(res)
+    }
+
+    /// Free stack pages for the task. And decrement the size of the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to free
+    /// 
+    pub fn free_stack_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        self.free_pages(vaddr, num_of_pages);
+        self.stack_size -= num_of_pages * PAGE_SIZE;
+    }
+
+    /// Allocate data pages for the task. And increment the size of the task.
+    ///
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    pub fn allocate_data_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Data.default_permissions();
+        let res = self.allocate_pages(vaddr, num_of_pages, permissions)?;
+        self.data_size += num_of_pages * PAGE_SIZE;
+        Ok(res)
+    }
+
+    /// Free data pages for the task. And decrement the size of the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to free
+    /// 
+    pub fn free_data_pages(&mut self, vaddr: usize, num_of_pages: usize) {
+        self.free_pages(vaddr, num_of_pages);
+        self.data_size -= num_of_pages * PAGE_SIZE;
+    }
+
+    /// Allocate guard pages for the task.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
+    /// * `num_of_pages` - The number of pages to allocate
+    /// 
+    /// # Returns
+    /// The memory map of the allocated pages, if successful.
+    /// 
+    /// # Errors
+    /// If the address is not page aligned, or if the pages cannot be allocated.
+    /// 
+    /// # Note
+    /// Gurad pages are not allocated in the physical memory space.
+    /// This function only maps the pages to the virtual memory space.
+    /// 
+    pub fn allocate_guard_pages(&mut self, vaddr: usize, num_of_pages: usize) -> Result<VirtualMemoryMap, &'static str> {
+        let permissions = VirtualMemoryRegion::Guard.default_permissions();
+        let mmap = VirtualMemoryMap {
+            pmarea: MemoryArea {
+                start: 0,
+                end: 0,
+            },
+            vmarea: MemoryArea {
+                start: vaddr,
+                end: vaddr + num_of_pages * PAGE_SIZE - 1,
+            },
+            permissions,
+        };
+        Ok(mmap)
     }
 
     /// Add pages to the task

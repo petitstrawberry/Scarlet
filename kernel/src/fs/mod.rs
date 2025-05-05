@@ -9,6 +9,8 @@ use spin::{Mutex, RwLock};
 
 extern crate alloc;
 
+pub const MAX_PATH_LENGTH: usize = 1024;
+
 // Singleton for global access to the VFS manager
 static mut VFS_MANAGER: Option<VfsManager> = None;
 

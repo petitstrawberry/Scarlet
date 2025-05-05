@@ -219,4 +219,13 @@ impl PageTable {
             Err(_) => {}
         }
     }
+
+    pub fn unmap_all(&mut self) {
+        for i in 0..512 {
+            let entry = &mut self.entries[i];
+            entry.invalidate();
+        }
+        // Ensure the TLB flush instruction is not optimized away.
+        unsafe { asm!("sfence.vma") };
+    }
 }
