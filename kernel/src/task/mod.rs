@@ -317,7 +317,7 @@ impl Task {
         }
     }
 
-    /// Allocate stack pages for the task. And increment the size of the task.
+    /// Allocate text pages for the task. And increment the size of the task.
     ///
     /// # Arguments
     /// * `vaddr` - The virtual address to allocate pages (NOTE: The address must be page aligned)
