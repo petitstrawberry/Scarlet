@@ -179,10 +179,21 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     setup_trampoline(&mut task.vm_manager);
 }
 
+pub fn setup_stack(task: &mut Task) -> usize{
+    /* User stack page */
+    let num_of_stack_page = 2; // 2 pages for user stack
+    let stack_start = 0xffff_ffff_ffff_f000 - num_of_stack_page * PAGE_SIZE;
+    task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
+    /* Guard page */
+    task.allocate_guard_pages(stack_start - PAGE_SIZE, 1).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
+    
+    0xffff_ffff_ffff_f000
+}
+
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
 static mut TRAMPOLINE_TRAPFRAME: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
 
-fn setup_trampoline(manager: &mut VirtualMemoryManager) {
+pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trampoline_start = unsafe { &__TRAMPOLINE_START as *const usize as usize };
     let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
     let trampoline_size = trampoline_end - trampoline_start;
