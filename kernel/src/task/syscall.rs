@@ -99,8 +99,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let mut backup_pages = Vec::new();
     backup_pages.append(&mut task.managed_pages); // Move the pages to the backup
     // Backup the vm mapping
-    let mut backup_vm_mapping = Vec::new();
-    backup_vm_mapping.append(&mut task.vm_manager.memmap); // Move the memory mapping to the backup
+    let backup_vm_mapping = task.vm_manager.remove_all_memory_maps(); // Move the memory mapping to the backup
     // Backing up the size
     let backup_text_size = task.text_size;
     let backup_data_size = task.data_size;
@@ -121,7 +120,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             if i > 1024 {
                 // Restore the managed pages, memory mapping and sizes
                 task.managed_pages = backup_pages; // Restore the pages
-                task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+                task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
                 task.text_size = backup_text_size; // Restore the text size
                 task.data_size = backup_data_size; // Restore the data size
                 return usize::MAX; // Path too long
@@ -135,7 +134,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         Err(_) => {
             // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
-            task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
             task.text_size = backup_text_size; // Restore the text size
             task.data_size = backup_data_size; // Restore the data size
             return usize::MAX // Invalid UTF-8
@@ -147,7 +146,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     if file.open(0).is_err() {
         // Restore the managed pages, memory mapping and sizes
         task.managed_pages = backup_pages; // Restore the pages
-        task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+        task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
         task.text_size = backup_text_size; // Restore the text size
         task.data_size = backup_data_size; // Restore the data size
         return usize::MAX; // File open error
@@ -188,7 +187,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         Err(_) => {
             // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
-            task.vm_manager.memmap = backup_vm_mapping; // Restore the memory mapping
+            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
             task.text_size = backup_text_size; // Restore the text size
             task.data_size = backup_data_size; // Restore the data size
 

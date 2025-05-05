@@ -44,8 +44,8 @@ use super::vmem::VirtualMemoryMap;
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
-    pub memmap: Vec<VirtualMemoryMap>,
-    pub asid: usize,
+    memmap: Vec<VirtualMemoryMap>,
+    asid: usize,
 }
 
 impl VirtualMemoryManager {
@@ -123,6 +123,35 @@ impl VirtualMemoryManager {
         } else {
             None
         }
+    }
+
+    /// Removes all memory maps.
+    /// 
+    /// # Returns
+    /// The removed memory maps.
+    pub fn remove_all_memory_maps(&mut self) -> Vec<VirtualMemoryMap> {
+        let mut removed_maps = Vec::new();
+        while !self.memmap.is_empty() {
+            removed_maps.push(self.memmap.remove(0));
+        }
+        removed_maps
+    }
+
+    /// Restores the memory maps from a given vector.
+    ///
+    /// # Arguments
+    /// * `maps` - The vector of memory maps to restore
+    /// 
+    /// # Returns
+    /// A result indicating success or failure.
+    /// 
+    pub fn restore_memory_maps(&mut self, maps: Vec<VirtualMemoryMap>) -> Result<(), &'static str> {
+        for map in maps {
+            if let Err(e) = self.add_memory_map(map) {
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Searches for a memory map containing the given virtual address.
