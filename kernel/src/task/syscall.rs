@@ -205,8 +205,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     let _options = trapframe.get_arg(2) as i32; // Not used in this implementation
 
     if pid == -1 {
-        for child in task.get_children() {
-            let pid = child;
+        for pid in task.get_children().clone() {
             match task.wait(pid) {
                 Ok(status) => {
                     // If the child task is exited, we can return the status

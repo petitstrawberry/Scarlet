@@ -544,8 +544,8 @@ impl Task {
     ///
     /// # Returns
     /// A vector of child task IDs
-    pub fn get_children(&self) -> Vec<usize> {
-        self.children.clone()
+    pub fn get_children(&self) -> &Vec<usize> {
+        &self.children
     }
     
     /// Set the exit status
