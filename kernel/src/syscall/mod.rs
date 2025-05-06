@@ -13,7 +13,7 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_exit, sys_putchar, sys_sbrk, sys_waitpid};
+use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_exit, sys_getpid, sys_putchar, sys_sbrk, sys_waitpid};
 
 #[macro_use]
 mod macros;
@@ -26,6 +26,7 @@ syscall_table! {
     Clone = 2 => sys_clone,
     Execve = 3 => sys_execve,
     Waitpid = 4 => sys_waitpid,
+    Getpid = 6 => sys_getpid,
     Brk = 12 => sys_brk,
     Sbrk = 13 => sys_sbrk,
     Putchar = 16 => sys_putchar,

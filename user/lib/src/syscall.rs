@@ -7,6 +7,7 @@ pub enum Syscall {
     Clone = 2,
     Execve = 3,
     Waitpid = 4,
+    Getpid = 6,
     Brk = 12,
     Sbrk = 13,
     Putchar = 16,
