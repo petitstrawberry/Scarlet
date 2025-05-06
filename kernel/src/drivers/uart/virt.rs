@@ -49,9 +49,13 @@ impl Serial for Uart {
         self.reg_write(THR_OFFSET, c);
     }
 
-    fn read_byte(&self) -> u8 {
-        while self.reg_read(LSR_OFFSET) & LSR_DR == 0 {}
-        self.reg_read(RHR_OFFSET)
+    // Currently, this function does not block until a byte is available.
+    fn read_byte(&self) -> Option<u8> {
+        // while self.reg_read(LSR_OFFSET) & LSR_DR == 0 {}
+        if self.reg_read(LSR_OFFSET) & LSR_DR == 0 {
+            return None;
+        }
+        Some(self.reg_read(RHR_OFFSET))
     }
 
 
