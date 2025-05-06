@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::{println, task::{execve, exit}};
+use std::{println, task::{execve, exit, waitpid}};
 
 
 #[unsafe(no_mangle)]
@@ -17,8 +17,17 @@ pub extern "C" fn main() {
             }
             exit(-1);
         }
+        -1 => {
+            println!("init: Failed to clone");
+            loop {}
+        }
         pid => {
             println!("init: I am the parent process, child PID: {}", pid);
+            let res = waitpid(pid, 0);
+            println!("init: Child process exited with status: {}", res.1);
+            if res.1 != 0 {
+                println!("init: Child process exited with error");
+            }
             loop {}
         }
     }

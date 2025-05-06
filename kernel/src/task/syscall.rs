@@ -1,6 +1,6 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use core::str;
+use core::{error, str};
 
 use crate::fs::{File, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
@@ -8,6 +8,7 @@ use crate::task::elf_loader::load_elf_into_task;
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
+use crate::task::WaitError;
 use crate::vm::{setup_user_stack, setup_trampoline};
 
 use super::mytask;
@@ -193,6 +194,75 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
 
             // Return error code
             usize::MAX
+        }
+    }
+}
+
+pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let pid = trapframe.get_arg(0) as i32;
+    let status_ptr = trapframe.get_arg(1) as *mut i32;
+    let _options = trapframe.get_arg(2) as i32; // Not used in this implementation
+
+    if pid == -1 {
+        for child in task.get_children() {
+            let pid = child;
+            match task.wait(pid) {
+                Ok(status) => {
+                    // If the child task is exited, we can return the status
+                    if status_ptr != core::ptr::null_mut() {
+                        let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                        unsafe {
+                            *status_ptr = status;
+                        }
+                    }
+                    trapframe.epc += 4;
+                    return pid;
+                },
+                Err(error) => {
+                    match error {
+                        WaitError::ChildNotExited(_) => continue,
+                        _ => {
+                            trapframe.epc += 4;
+                            return usize::MAX;
+                        },
+                    }
+                }
+            }
+        }
+        // Any child process has exited
+        trapframe.epc += 4;
+        return usize::MAX;
+    }
+    
+    match task.wait(pid as usize) {
+        Ok(status) => {
+            // If the child task is exited, we can return the status
+            if status_ptr != core::ptr::null_mut() {
+                let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                unsafe {
+                    *status_ptr = status;
+                }
+            }
+            trapframe.epc += 4;
+            pid as usize
+        }
+        Err(error) => {
+            match error {
+                WaitError::NoSuchChild(_) => {
+                    trapframe.epc += 4;
+                    usize::MAX
+                },
+                WaitError::ChildTaskNotFound(_) => {
+                    trapframe.epc += 4;
+                    usize::MAX
+                },
+                WaitError::ChildNotExited(_) => {
+                    // If the child task is not exited, we need to wait for it
+                    get_scheduler().schedule(trapframe);
+                    trapframe.get_return_value()
+                },
+            }
         }
     }
 }

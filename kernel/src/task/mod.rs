@@ -7,7 +7,7 @@ pub mod elf_loader;
 
 extern crate alloc;
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
@@ -543,9 +543,9 @@ impl Task {
     /// Get the list of child tasks
     ///
     /// # Returns
-    /// A slice of child task IDs
-    pub fn get_children(&self) -> &[usize] {
-        &self.children
+    /// A vector of child task IDs
+    pub fn get_children(&self) -> Vec<usize> {
+        self.children.clone()
     }
     
     /// Set the exit status
@@ -683,9 +683,9 @@ impl Task {
     /// 
     /// # Returns
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
-    pub fn wait(&mut self, child_id: usize) -> Result<i32, &'static str> {
+    pub fn wait(&mut self, child_id: usize) -> Result<i32, WaitError> {
         if !self.children.contains(&child_id) {
-            return Err("No such child");
+            return Err(WaitError::NoSuchChild("No such child task".to_string()));
         }
 
         if let Some(child_task) = get_scheduler().get_task_by_id(child_id) {
@@ -695,10 +695,26 @@ impl Task {
                 self.remove_child(child_id);
                 Ok(status)
             } else {
-                Err("Child has not exited or is not a zombie")
+                Err(WaitError::ChildNotExited("Child has not exited or is not a zombie".to_string()))
             }
         } else {
-            Err("Child task not found")
+            Err(WaitError::ChildTaskNotFound("Child task not found".to_string()))
+        }
+    }
+}
+
+pub enum WaitError {
+    NoSuchChild(String),
+    ChildNotExited(String),
+    ChildTaskNotFound(String),
+}
+
+impl WaitError {
+    pub fn message(&self) -> &str {
+        match self {
+            WaitError::NoSuchChild(msg) => msg,
+            WaitError::ChildNotExited(msg) => msg,
+            WaitError::ChildTaskNotFound(msg) => msg,
         }
     }
 }
