@@ -33,6 +33,15 @@ pub fn getpid() -> u32 {
     syscall0(Syscall::Getpid) as u32
 }
 
+/// Returns the parent process ID.
+/// 
+/// # Return Value
+/// - The process ID of the parent process. If the process has no parent, returns own PID.
+/// 
+pub fn getppid() -> u32 {
+    syscall0(Syscall::Getppid) as u32
+}
+
 /// Executes a program, replacing the current process image.
 /// 
 /// # Arguments

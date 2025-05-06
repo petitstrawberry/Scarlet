@@ -271,3 +271,9 @@ pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
     trapframe.epc += 4;
     task.get_id() as usize
 }
+
+pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.epc += 4;
+    task.get_parent_id().unwrap_or(task.get_id()) as usize
+}

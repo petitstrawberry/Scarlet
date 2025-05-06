@@ -9,5 +9,7 @@ use std::{println, task::exit};
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     println!("Hello, world!");
+    println!("PID  = {}", std::task::getpid());
+    println!("PPID = {}", std::task::getppid());
     exit(0);
 }
