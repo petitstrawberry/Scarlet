@@ -48,12 +48,8 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
     let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0).unwrap();
-    if let Some(c) = serial.read_byte() {
-        trapframe.epc += 4;
-        return c as usize;
-    } else {
-        trapframe.get_return_value()
-    }
+    trapframe.epc += 4;
+    serial.read_byte() as usize
 }
 
 pub fn sys_exit(trapframe: &mut Trapframe) -> usize {

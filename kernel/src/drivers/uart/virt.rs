@@ -50,12 +50,11 @@ impl Serial for Uart {
     }
 
     // Currently, this function does not block until a byte is available.
-    fn read_byte(&self) -> Option<u8> {
-        // while self.reg_read(LSR_OFFSET) & LSR_DR == 0 {}
+    fn read_byte(&self) -> u8 {
         if self.reg_read(LSR_OFFSET) & LSR_DR == 0 {
-            return None;
+            return 0;
         }
-        Some(self.reg_read(RHR_OFFSET))
+        self.reg_read(RHR_OFFSET)
     }
 
 

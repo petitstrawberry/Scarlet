@@ -29,7 +29,12 @@ pub fn putchar(c: char) -> usize {
 /// The character read from the console.
 /// 
 pub fn get_char() -> char {
-    syscall0(syscall::Syscall::Getchar) as u8 as char
+    loop {
+        let c = syscall0(syscall::Syscall::Getchar) as u8;
+        if c != 0 {
+            return c as char;
+        }
+    }
 }
 
 /// Outputs a string to the console
