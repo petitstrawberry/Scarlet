@@ -265,3 +265,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
         }
     }
 }
+
+pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.epc += 4;
+    task.get_id() as usize
+}

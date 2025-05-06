@@ -25,11 +25,12 @@ pub fn exit(code: i32) -> ! {
 }
 
 /// Returns the current process ID.
-/// Note: This implementation is a placeholder. Until the actual getpid syscall
-/// is implemented, it always returns 1.
+///
+/// # Return Value
+/// - The process ID of the calling process
+/// 
 pub fn getpid() -> u32 {
-    // Placeholder implementation until the actual getpid syscall is implemented
-    1
+    syscall0(Syscall::Getpid) as u32
 }
 
 /// Executes a program, replacing the current process image.
