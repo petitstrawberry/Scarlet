@@ -70,7 +70,7 @@ fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
 /// 
 /// # Arguments
 /// * `pid` - Process ID of the child process to wait for. If -1, wait for any child process.
-/// * `options` - Options for the waitpid syscall.
+/// * `options` - Options for the waitpid syscall. (Currently not implemented and always ignored.)
 /// 
 /// # Return Value
 /// (pid, status)
