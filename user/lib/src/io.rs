@@ -1,4 +1,4 @@
-use crate::syscall::{syscall1, Syscall};
+use crate::syscall::{self, syscall0, syscall1, Syscall};
 use core::fmt;
 
 // Functions related to character output
@@ -16,6 +16,25 @@ use core::fmt;
 /// 
 pub fn putchar(c: char) -> usize {
     sys_putchar(c)
+}
+
+/// Reads a single character from the console
+/// This is a temporary implementation that will eventually be replaced
+/// by standard input or device files.
+/// 
+/// # Note
+/// This function is blocking and will wait for user input.
+/// 
+/// # Returns
+/// The character read from the console.
+/// 
+pub fn get_char() -> char {
+    loop {
+        let c = syscall0(syscall::Syscall::Getchar) as u8;
+        if c != 0 {
+            return c as char;
+        }
+    }
 }
 
 /// Outputs a string to the console

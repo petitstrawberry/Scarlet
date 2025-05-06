@@ -2,6 +2,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::{error, str};
 
+use crate::device::manager::DeviceManager;
 use crate::fs::{File, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
@@ -43,6 +44,12 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
         return usize::MAX; // -1
     }
     0
+}
+
+pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
+    let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0).unwrap();
+    trapframe.epc += 4;
+    serial.read_byte() as usize
 }
 
 pub fn sys_exit(trapframe: &mut Trapframe) -> usize {

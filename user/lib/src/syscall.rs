@@ -13,6 +13,7 @@ pub enum Syscall {
     Brk = 12,
     Sbrk = 13,
     Putchar = 16,
+    Getchar = 17,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
