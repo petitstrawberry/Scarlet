@@ -82,3 +82,14 @@ pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
     let pid = syscall3(Syscall::Waitpid, pid as usize, &mut status as *mut i32 as usize, options as usize);
     (pid as i32, status)
 }
+
+/// Waits for any child process to exit.
+/// 
+/// # Return Value
+/// (pid, status)
+/// - pid: The process ID of the child process that exited.
+/// - status: The exit status of the child process.
+/// 
+pub fn wait() -> (i32, i32) {
+    waitpid(-1, 0)
+}
