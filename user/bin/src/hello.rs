@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::{println, task::exit};
+use std::{print, println, string::String, task::exit};
 
 
 #[unsafe(no_mangle)]
