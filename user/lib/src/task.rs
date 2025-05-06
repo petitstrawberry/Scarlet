@@ -10,9 +10,9 @@ use crate::boxed::Box;
 /// # Return Value
 /// - In the parent process: the ID of the child process
 /// - In the child process: 0
-/// - On error: -1 (usize::MAX)
-pub fn clone() -> usize {
-    syscall0(Syscall::Clone)
+/// - On error: -1
+pub fn clone() -> i32 {
+    syscall0(Syscall::Clone) as i32
 }
 
 /// Exits the current process.
@@ -27,7 +27,7 @@ pub fn exit(code: i32) -> ! {
 /// Returns the current process ID.
 /// Note: This implementation is a placeholder. Until the actual getpid syscall
 /// is implemented, it always returns 1.
-pub fn getpid() -> usize {
+pub fn getpid() -> u32 {
     // Placeholder implementation until the actual getpid syscall is implemented
     1
 }
@@ -42,7 +42,7 @@ pub fn getpid() -> usize {
 /// # Return Value
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
-pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> usize {
+pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
     let argv_ptr = 0; // argv is not used in this implementation
     let envp_ptr = 0; // envp is not used in this implementation
@@ -53,7 +53,7 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> usize {
     let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the path
 
     // Return the result of the syscall
-    res
+    res as i32
 }
 
 fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
@@ -64,4 +64,32 @@ fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
     v.extend_from_slice(s.as_bytes());
     v.push(0); // Null terminator
     Ok(v)
+}
+
+/// Waits for a child process to exit.
+/// 
+/// # Arguments
+/// * `pid` - Process ID of the child process to wait for. If -1, wait for any child process.
+/// * `options` - Options for the waitpid syscall. (Currently not implemented and always ignored.)
+/// 
+/// # Return Value
+/// (pid, status)
+/// - pid: The process ID of the child process that exited.
+/// - status: The exit status of the child process.
+/// 
+pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
+    let mut status: i32 = 0;
+    let pid = syscall3(Syscall::Waitpid, pid as usize, &mut status as *mut i32 as usize, options as usize);
+    (pid as i32, status)
+}
+
+/// Waits for any child process to exit.
+/// 
+/// # Return Value
+/// (pid, status)
+/// - pid: The process ID of the child process that exited.
+/// - status: The exit status of the child process.
+/// 
+pub fn wait() -> (i32, i32) {
+    waitpid(-1, 0)
 }
