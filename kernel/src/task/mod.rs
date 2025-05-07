@@ -618,6 +618,36 @@ impl Task {
         }
     }
 
+    /// Add a file handle to the task
+    /// 
+    /// # Arguments
+    /// * `handle` - The file handle to add
+    /// 
+    /// # Returns
+    /// The index of the added file handle, or an error message if the file descriptor table is full
+    /// 
+    pub fn add_file_handle(&mut self, handle: Box<dyn FileHandle>) -> Result<usize, &'static str> {
+        if let Some(fd) = self.allocate_fd() {
+            self.file_handles[fd] = Some(handle);
+            Ok(fd)
+        } else {
+            Err("File descriptor table is full")
+        }
+    }
+
+    /// Allocate a file descriptor
+    /// 
+    /// # Returns
+    /// The allocated file descriptor, or None if no file descriptors are available
+    /// 
+    fn allocate_fd(&mut self) -> Option<usize> {
+        if let Some(fd) = self.fd_table.pop() {
+            Some(fd)
+        } else {
+            None
+        }
+    }
+
 
 
     /// Clone this task, creating a near-identical copy
