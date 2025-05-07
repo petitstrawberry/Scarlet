@@ -69,7 +69,7 @@ static TASK_ID: Mutex<usize> = Mutex::new(1);
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
-        let task = Task {
+        let mut task = Task {
             id: *taskid,
             name,
             priority,
@@ -95,6 +95,11 @@ impl Task {
             fd_table: Vec::new(),
             file_handles: [ const { None }; 256],
         };
+        
+        for i in (0..256).rev() {
+            task.fd_table.push(i);
+        }
+
         *taskid += 1;
         task
     }
