@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::FileHandle, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
 
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -29,7 +29,6 @@ pub enum TaskType {
     User,
 }
 
-#[derive(Debug, Clone)]
 pub struct Task {
     id: usize,
     pub name: String,
@@ -53,6 +52,10 @@ pub struct Task {
     parent_id: Option<usize>,      /* Parent task ID */
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
+
+    // File descriptors (FileHandle) table
+    fd_table: Vec<usize>,
+    file_handles: [Option<Box<dyn FileHandle>>; 256],
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +92,8 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
+            fd_table: Vec::new(),
+            file_handles: [ const { None }; 256],
         };
         *taskid += 1;
         task
