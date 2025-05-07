@@ -575,6 +575,51 @@ impl Task {
         self.exit_status
     }
 
+    /// Get the file descriptor table
+    /// 
+    /// # Returns
+    /// A reference to the file descriptor table
+    /// 
+    pub fn get_fd_table(&self) -> &Vec<usize> {
+        &self.fd_table
+    }
+
+    /// Get the file handle at the specified index
+    /// 
+    /// # Arguments
+    /// * `index` - The index of the file handle
+    /// 
+    /// # Returns
+    /// The file handle at the specified index, or None if not found
+    /// 
+    pub fn get_file_handle(&self, index: usize) -> Option<&Box<dyn FileHandle>> {
+        if index < NUM_OF_FDS {
+            self.file_handles[index].as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Set the file handle at the specified index
+    /// 
+    /// # Arguments
+    /// * `index` - The index of the file handle
+    /// * `handle` - The file handle to set
+    /// 
+    /// # Returns
+    /// The result of setting the file handle, which is Ok(()) if successful or an error message if not.
+    /// 
+    pub fn set_file_handle(&mut self, index: usize, handle: Box<dyn FileHandle>) -> Result<(), &'static str> {
+        if index < NUM_OF_FDS {
+            self.file_handles[index] = Some(handle);
+            Ok(())
+        } else {
+            Err("Index out of bounds")
+        }
+    }
+
+
+
     /// Clone this task, creating a near-identical copy
     /// 
     /// # Returns
