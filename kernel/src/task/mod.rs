@@ -12,6 +12,7 @@ use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::FileHandle, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
 
+const NUM_OF_FDS: usize = 256;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -93,10 +94,10 @@ impl Task {
             children: Vec::new(),
             exit_status: None,
             fd_table: Vec::new(),
-            file_handles: [ const { None }; 256],
+            file_handles: [ const { None }; NUM_OF_FDS],
         };
         
-        for i in (0..256).rev() {
+        for i in (0..NUM_OF_FDS).rev() {
             task.fd_table.push(i);
         }
 
