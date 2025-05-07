@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::{error, str};
 
 use crate::device::manager::DeviceManager;
-use crate::fs::{File, MAX_PATH_LENGTH};
+use crate::fs::{get_vfs_manager, File, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
@@ -283,4 +283,52 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.epc += 4;
     task.get_parent_id().unwrap_or(task.get_id()) as usize
+}
+
+pub fn sys_open(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let _flags = trapframe.get_arg(1) as i32;
+    let _mode = trapframe.get_arg(2) as i32;
+
+    // Increment PC to avoid infinite loop if open fails
+    trapframe.epc += 4;
+
+    // Parse path as a null-terminated C string
+    let mut path_bytes = Vec::new();
+    let mut i = 0;
+    unsafe {
+        loop {
+            let byte = *path_ptr.add(i);
+            if byte == 0 {
+                break;
+            }
+            path_bytes.push(byte);
+            i += 1;
+
+            if i > MAX_PATH_LENGTH {
+                return usize::MAX; // Path too long
+            }
+        }
+    }
+
+    // Convert path bytes to string
+    let path_str = match str::from_utf8(&path_bytes) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    // Try to open the file
+    let file = get_vfs_manager().open(path_str, 0);
+    match file {
+        Ok(file) => {
+            // Register the file with the task
+            let fd = task.add_file_handle(file);
+            if fd.is_err() {
+                return usize::MAX; // File descriptor error
+            }
+            fd.unwrap() as usize
+        }
+        Err(_) => usize::MAX, // File open error
+    }
 }
