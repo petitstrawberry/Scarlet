@@ -137,7 +137,7 @@ impl<'a> File<'a> {
         }
         
         if let Some(mut handle) = self.handle.take() {
-            let result = handle.close();
+            let result = handle.release();
             self.is_open = false;
             result
         } else {
@@ -332,8 +332,8 @@ pub trait FileHandle: Send + Sync {
     /// Move the position within the file
     fn seek(&mut self, whence: SeekFrom) -> Result<u64>;
     
-    /// Close the file
-    fn close(&mut self) -> Result<()>;
+    /// Release the file resource
+    fn release(&mut self) -> Result<()>;
     
     /// Get the metadata
     fn metadata(&self) -> Result<FileMetadata>;

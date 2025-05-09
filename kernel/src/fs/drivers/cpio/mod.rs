@@ -405,7 +405,7 @@ impl FileHandle for CpiofsFileHandle {
         Ok(self.position as u64)
     }
 
-    fn close(&mut self) -> Result<()> {
+    fn release(&mut self) -> Result<()> {
         Ok(())
     }
 

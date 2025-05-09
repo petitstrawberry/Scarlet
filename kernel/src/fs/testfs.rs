@@ -252,7 +252,7 @@ impl FileHandle for TestFileHandle {
         Ok(self.position)
     }
     
-    fn close(&mut self) -> Result<()> {
+    fn release(&mut self) -> Result<()> {
         Ok(())
     }
     
