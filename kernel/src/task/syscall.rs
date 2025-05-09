@@ -1,6 +1,6 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
-use core::{error, str};
+use core::str;
 
 use crate::device::manager::DeviceManager;
 use crate::fs::{get_vfs_manager, File, MAX_PATH_LENGTH};
@@ -150,8 +150,8 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     };
     
     // Try to open the executable file
-    let mut file = File::new(path_str.to_string());
-    if file.open(0).is_err() {
+    let file = File::new(path_str.to_string());
+    if file.is_err() {
         // Restore the managed pages, memory mapping and sizes
         task.managed_pages = backup_pages; // Restore the pages
         task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
@@ -159,6 +159,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         task.data_size = backup_data_size; // Restore the data size
         return usize::MAX; // File open error
     }
+    let mut file = file.unwrap();
 
     task.text_size = 0;
     task.data_size = 0;

@@ -100,8 +100,7 @@ fn test_load_elf() {
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test.elf";
     manager.create_file(file_path).expect("Failed to create test file");
-    let mut file = File::with_manager(file_path.to_string(), &mut manager);
-    file.open(0).expect("Failed to open test file");
+    let mut file = File::with_manager(file_path.to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
     file.write(include_bytes!("test.elf")).expect("Failed to write test ELF file");
     
     // Create a new task
@@ -141,8 +140,7 @@ fn test_load_elf_invalid_magic() {
 
     // Create a mock ELF file with an invalid magic number
     let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
-    let mut file = File::with_manager("invalid.elf".to_string(), &mut manager);
-    file.open(0).expect("Failed to open invalid ELF file");
+    let mut file = File::with_manager("invalid.elf".to_string(), &mut manager).unwrap();
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
 
     // Create a new task
@@ -194,8 +192,7 @@ fn test_load_elf_invalid_alignment() {
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_memsz
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
 
-    let mut file = File::with_manager("invalid_align.elf".to_string(), &mut manager);
-    file.open(0).expect("Failed to open invalid ELF file");
+    let mut file = File::with_manager("invalid_align.elf".to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
 
     // Create a new task
@@ -220,8 +217,7 @@ fn test_load_elf_bss_zeroed() {
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test_bss.elf";
     manager.create_file(file_path).expect("Failed to create test file");
-    let mut file = File::with_manager(file_path.to_string(), &mut manager);
-    file.open(0).expect("Failed to open test file");
+    let mut file = File::with_manager(file_path.to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
 
     // Create a mock ELF file with a .bss section
     let mut elf_data = vec![0u8; 64];

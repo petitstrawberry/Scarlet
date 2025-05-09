@@ -83,140 +83,47 @@ pub struct FileMetadata {
     pub accessed_time: u64,
 }
 
-pub struct File<'a> {
+pub struct File {
     pub path: String,
-    handle: Option<Box<dyn FileHandle>>,
-    is_open: bool,
-    manager_ref: ManagerRef<'a>,
+    handle: Box<dyn FileHandle>,
 }
-impl<'a> File<'a> {
+impl File {
     //// Create a new file object (use the global manager by default)
-    pub fn new(path: String) -> Self {
-        Self {
+    pub fn new(path: String) -> Result<Self>{
+        let handle = get_vfs_manager().open(&path, 0)?;
+        Ok(Self {
             path,
-            handle: None,
-            is_open: false,
-            manager_ref: ManagerRef::Global,
-        }
+            handle: handle,
+        })
     }
     
     /// Create a file object that uses a specific manager
-    pub fn with_manager(path: String, manager: &'a mut VfsManager) -> Self {
-        Self {
+    pub fn with_manager(path: String, manager: &VfsManager) -> Result<Self> {
+        let handle = manager.open(&path, 0)?;
+        Ok(Self {
             path,
-            handle: None,
-            is_open: false,
-            manager_ref: ManagerRef::Local(manager),
-        }
+            handle: handle,
+        })
     }
-    
-    // Internal method to get the manager to use
-    fn get_manager(&self) -> &VfsManager {
-        match &self.manager_ref {
-            ManagerRef::Global => get_vfs_manager(),
-            ManagerRef::Local(manager) => manager,
-        }
-    }
-    
-    /// Open the file
-    pub fn open(&mut self, flags: u32) -> Result<()> {
-        if self.is_open {
-            return Ok(());
-        }
-        
-        let handle = self.get_manager().open(&self.path, flags)?;
-        self.handle = Some(handle);
-        self.is_open = true;
-        Ok(())
-    }
-    
-    /// Close the file
-    pub fn close(&mut self) -> Result<()> {
-        if !self.is_open {
-            return Ok(());
-        }
-        
-        if let Some(mut handle) = self.handle.take() {
-            let result = handle.release();
-            self.is_open = false;
-            result
-        } else {
-            Ok(())
-        }
-    }
-    
+
     /// Read data from the file
     pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        if !self.is_open {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "File not open".to_string(),
-            });
-        }
-        
-        if let Some(handle) = self.handle.as_mut() {
-            handle.read(buffer)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+        self.handle.read(buffer)
     }
     
     /// Write data to the file
-    pub fn write(&mut self, buffer: &[u8]) -> Result<usize> {
-        if !self.is_open {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "File not open".to_string(),
-            });
-        }
-        
-        if let Some(handle) = self.handle.as_mut() {
-            handle.write(buffer)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+    pub fn write(&mut self, buffer: &[u8]) -> Result<usize> { 
+        self.handle.write(buffer)
     }
     
     /// Change the position within the file
     pub fn seek(&mut self, whence: SeekFrom) -> Result<u64> {
-        if !self.is_open {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "File not open".to_string(),
-            });
-        }
-        
-        if let Some(handle) = self.handle.as_mut() {
-            handle.seek(whence)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+        self.handle.seek(whence)
     }
     
     /// Get the metadata of the file
     pub fn metadata(&self) -> Result<FileMetadata> {
-        if !self.is_open {
-            // Metadata can be obtained even if the file is not open
-            return self.get_manager().metadata(&self.path);
-        }
-        
-        if let Some(handle) = self.handle.as_ref() {
-            handle.metadata()
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+        self.handle.metadata()
     }
     
     /// Get the size of the file
@@ -239,19 +146,11 @@ impl<'a> File<'a> {
         
         Ok(buffer)
     }
-    
-    /// Check if the file is open
-    pub fn is_open(&self) -> bool {
-        self.is_open
-    }
 }
 
-impl<'a> Drop for File<'a> {
+impl Drop for File {
     fn drop(&mut self) {
-        // Automatically close the file when dropped
-        if self.is_open {
-            let _ = self.close();
-        }
+        self.handle.release().unwrap();
     }
 }
 /// Structure representing a directory entry
