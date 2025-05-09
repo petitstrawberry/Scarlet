@@ -252,7 +252,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
     task.init();
-    let mut file = File::new("/bin/init".to_string()).unwrap();
+    let mut file = File::open("/bin/init".to_string()).unwrap();
 
     match load_elf_into_task(&mut file, &mut task) {
         Ok(_) => {

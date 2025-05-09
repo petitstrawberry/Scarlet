@@ -196,7 +196,7 @@ fn test_file_creation() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
 
     // Create an instance of the file structure
-    let file = File::with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
     assert_eq!(file.path, "/mnt/test.txt");
 }
 
@@ -211,7 +211,7 @@ fn test_file_open_close() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create and open a file object
-    let file = File::with_manager("/mnt/test.txt".to_string(), &mut manager);
+    let file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
     
     // Open the file
     assert!(file.is_ok());
@@ -227,7 +227,7 @@ fn test_file_read_write() {
     let fs_id = manager.register_fs(fs); // fs_idを取得
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
-    let mut file = File::with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
 
     // Read test
     let mut buffer = [0u8; 20];
@@ -258,7 +258,7 @@ fn test_file_seek() {
     let fs_id = manager.register_fs(fs); // fs_idを取得
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
-    let mut file = File::with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
     
     // Seek from the start
     let pos = file.seek(SeekFrom::Start(5)).unwrap();
@@ -287,7 +287,7 @@ fn test_file_metadata_and_size() {
     let fs_id = manager.register_fs(fs); // fs_idを取得
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
-    let mut file = File::with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
     
     // Get metadata (possible even when not open)
     let metadata = file.metadata().unwrap();
@@ -312,7 +312,7 @@ fn test_file_read_all() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // let mut file = File::new("/mnt/test.txt".to_string(), 0);
-    let mut file = File::with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
     // Write
     file.write(b"Hello, world!").unwrap();
     
@@ -343,14 +343,14 @@ fn test_file_auto_close() {
     // Open a file within a scope
     {
         // let mut file = File::new("/mnt/test.txt".to_string(), 0);
-        let file = File::with_manager("/mnt/test.txt".to_string(), &mut manager);
+        let file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
         assert!(file.is_ok());
         
         // Exiting the scope will automatically close the file due to the Drop trait
     }
     
     // Verify that a new file object can be created and opened
-    let file2 = File::with_manager("/mnt/test.txt".to_string(), &mut manager);
+    let file2 = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
     assert!(file2.is_ok());
 }
 
@@ -410,7 +410,7 @@ fn test_directory_create_file() {
     assert!(entries.iter().any(|e| e.name == "newfile.txt" && e.file_type == FileType::RegularFile));
     
     // Try opening the file
-    let file = File::with_manager("/mnt/newfile.txt".to_string(), &mut manager);
+    let file = File::open_with_manager("/mnt/newfile.txt".to_string(), &mut manager);
     assert!(file.is_ok());
 }
 

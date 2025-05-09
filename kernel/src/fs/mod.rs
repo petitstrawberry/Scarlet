@@ -88,30 +88,67 @@ pub struct File {
     handle: Box<dyn FileHandle>,
 }
 impl File {
-    //// Create a new file object (use the global manager by default)
-    pub fn new(path: String) -> Result<Self>{
+    //// Open a file using the global VFS manager
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the file
+    /// 
+    /// # Returns
+    ///
+    /// * `Result<File>` - The opened file object
+    /// 
+    pub fn open(path: String) -> Result<Self>{
         let handle = get_vfs_manager().open(&path, 0)?;
         Ok(Self {
             path,
-            handle: handle,
+            handle,
         })
     }
     
-    /// Create a file object that uses a specific manager
-    pub fn with_manager(path: String, manager: &VfsManager) -> Result<Self> {
+    /// Open a file using a specific VFS manager
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the file
+    /// * `manager` - The VFS manager to use
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<File>` - The opened file object
+    /// 
+    pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self> {
         let handle = manager.open(&path, 0)?;
         Ok(Self {
             path,
-            handle: handle,
+            handle,
         })
     }
 
     /// Read data from the file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `buffer` - The buffer to read data into
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<usize>` - The number of bytes read
+    /// 
     pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
         self.handle.read(buffer)
     }
     
     /// Write data to the file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `buffer` - The buffer containing data to write
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<usize>` - The number of bytes written
+    /// 
     pub fn write(&mut self, buffer: &[u8]) -> Result<usize> { 
         self.handle.write(buffer)
     }
