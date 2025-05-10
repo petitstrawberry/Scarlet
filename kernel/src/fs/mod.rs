@@ -206,14 +206,14 @@ pub struct Directory<'a> {
 }
 
 impl<'a> Directory<'a> {
-    pub fn new(path: String) -> Self {
+    pub fn open(path: String) -> Self {
         Self {
             path,
             manager_ref: ManagerRef::Global,
         }
     }
     
-    pub fn with_manager(path: String, manager: &'a mut VfsManager) -> Self {
+    pub fn open_with_manager(path: String, manager: &'a mut VfsManager) -> Self {
         Self {
             path,
             manager_ref: ManagerRef::Local(manager),

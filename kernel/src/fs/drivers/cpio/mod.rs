@@ -352,7 +352,7 @@ impl FileOperations for Cpiofs {
     }
     
     fn root_dir(&self) -> Result<crate::fs::Directory> {
-        Ok(Directory::new(self.mount_point.clone() + "/"))
+        Ok(Directory::open(self.mount_point.clone() + "/"))
     }
 }
 

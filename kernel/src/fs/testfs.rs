@@ -541,7 +541,7 @@ impl FileOperations for TestFileSystem {
     }
     
     fn root_dir(&self) -> Result<Directory> {
-        Ok(Directory::new("/".to_string()))
+        Ok(Directory::open("/".to_string()))
     }
 }
 

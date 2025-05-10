@@ -365,7 +365,7 @@ fn test_directory_creation() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create an instance of the directory structure
-    let dir = Directory::with_manager("/mnt".to_string(), &mut manager);
+    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
     assert_eq!(dir.path, "/mnt");
 }
 
@@ -380,7 +380,7 @@ fn test_directory_read_entries() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Read directory entries
-    let dir = Directory::with_manager("/mnt".to_string(), &mut manager);
+    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
     let entries = dir.read_entries().unwrap();
     
     assert_eq!(entries.len(), 2);
@@ -401,7 +401,7 @@ fn test_directory_create_file() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create a file in the directory
-    let dir = Directory::with_manager("/mnt".to_string(), &mut manager);
+    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
     let result = dir.create_file("newfile.txt");
     assert!(result.is_ok());
     
@@ -425,7 +425,7 @@ fn test_directory_create_subdirectory() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Create a subdirectory
-    let dir = Directory::with_manager("/mnt".to_string(), &mut manager);
+    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
     let result = dir.create_dir("subdir");
     assert!(result.is_ok());
     
@@ -434,7 +434,7 @@ fn test_directory_create_subdirectory() {
     assert!(entries.iter().any(|e| e.name == "subdir" && e.file_type == FileType::Directory));
     
     // Operate on the subdirectory
-    let subdir = Directory::with_manager("/mnt/subdir".to_string(), &mut manager);
+    let subdir = Directory::open_with_manager("/mnt/subdir".to_string(), &mut manager);
     let entries = subdir.read_entries().unwrap();
     assert!(entries.is_empty()); // Newly created directory is empty
 }
@@ -450,18 +450,18 @@ fn test_directory_nested_operations() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Nested operations
-    let root_dir = Directory::with_manager("/mnt".to_string(), &mut manager);
+    let root_dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
     
     // Create a subdirectory
     root_dir.create_dir("level1").unwrap();
     
     // Operate on the subdirectory
-    let level1_dir = Directory::with_manager("/mnt/level1".to_string(), &mut manager);
+    let level1_dir = Directory::open_with_manager("/mnt/level1".to_string(), &mut manager);
     level1_dir.create_dir("level2").unwrap();
     level1_dir.create_file("file_in_level1.txt").unwrap();
     
     // Operate on a deeper level
-    let level2_dir = Directory::with_manager("/mnt/level1/level2".to_string(), &mut manager);
+    let level2_dir = Directory::open_with_manager("/mnt/level1/level2".to_string(), &mut manager);
     level2_dir.create_file("deep_file.txt").unwrap();
     
     // Verify
@@ -481,7 +481,7 @@ fn test_directory_error_handling() {
     let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Non-existent directory
-    let nonexistent_dir = Directory::with_manager("/mnt/nonexistent".to_string(), &mut manager);
+    let nonexistent_dir = Directory::open_with_manager("/mnt/nonexistent".to_string(), &mut manager);
     let result = nonexistent_dir.read_entries();
     match result {
         Ok(_) => panic!("Expected an error, but got success"),
@@ -502,7 +502,7 @@ fn test_directory_error_handling() {
     }
     
     // Treat a file as a directory
-    let file_as_dir = Directory::with_manager("/mnt/test.txt".to_string(), &mut manager);
+    let file_as_dir = Directory::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
     let result = file_as_dir.read_entries();
     match result {
         Ok(_) => panic!("Expected an error, but got success"),
@@ -524,7 +524,7 @@ fn test_directory_with_global_manager() {
     let _ = global_manager.mount(fs_id, "/mnt"); // fs_idを使用
     
     // Directory operations using the global manager
-    let dir = Directory::new("/mnt".to_string());
+    let dir = Directory::open("/mnt".to_string());
     let entries = dir.read_entries().unwrap();
     assert_eq!(entries.len(), 2);
     
