@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::str;
 
 use crate::device::manager::DeviceManager;
-use crate::fs::{get_vfs_manager, File, MAX_PATH_LENGTH};
+use crate::fs::{get_vfs_manager, File, SeekFrom, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
@@ -397,6 +397,38 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
         }
         Err(_) => {
             return usize::MAX; // Write error
+        }
+    }
+}
+
+pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let offset = trapframe.get_arg(1) as i32;
+    let whence = trapframe.get_arg(2) as i32;
+
+    // Increment PC to avoid infinite loop if lseek fails
+    trapframe.epc += 4;
+
+    let file = task.get_mut_file(fd);
+    if file.is_none() {
+        return usize::MAX; // Invalid file descriptor
+    }
+
+    let file = file.unwrap();
+    let whence  = match whence {
+        0 => SeekFrom::Start(offset as u64),
+        1 => SeekFrom::Current(offset as i64),
+        2 => SeekFrom::End(offset as i64),
+        _ => return usize::MAX, // Invalid whence
+    };
+
+    match file.seek(whence) {
+        Ok(pos) => {
+            pos as usize
+        }
+        Err(_) => {
+            return usize::MAX; // Lseek error
         }
     }
 }
