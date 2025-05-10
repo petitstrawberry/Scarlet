@@ -333,3 +333,14 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
         Err(_) => usize::MAX, // File open error
     }
 }
+
+pub fn sys_close(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    trapframe.epc += 4;
+    if task.remove_file(fd).is_ok() {
+        0
+    } else {
+        usize::MAX // -1
+    }
+}
