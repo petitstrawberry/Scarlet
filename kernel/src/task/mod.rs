@@ -600,34 +600,34 @@ impl Task {
         }
     }
 
-    /// Get the mutable file at the specified index
+    /// Get the mutable file at the specified file descriptor
     /// 
     /// # Arguments
-    /// * `index` - The index of the file
+    /// * `fd` - The file descriptor of the file
     /// 
     /// # Returns
-    /// The mutable file at the specified index, or None if not found
+    /// The mutable file at the specified file descriptor, or None if not found
     /// 
-    pub fn get_file_mut(&mut self, index: usize) -> Option<&mut File> {
-        if index < NUM_OF_FDS {
-            self.files[index].as_mut()
+    pub fn get_file_mut(&mut self, fd: usize) -> Option<&mut File> {
+        if fd < NUM_OF_FDS {
+            self.files[fd].as_mut()
         } else {
             None
         }
     }
 
-    /// Set the file at the specified index
+    /// Set the file at the specified file descriptor
     /// 
     /// # Arguments
-    /// * `index` - The index of the file
+    /// * `fd` - The file descriptor of the file
     /// * `file` - The file to set
     /// 
     /// # Returns
     /// The result of setting the file, which is Ok(()) if successful or an error message if not.
     /// 
-    pub fn set_file(&mut self, index: usize, file: File) -> Result<(), &'static str> {
-        if index < NUM_OF_FDS {
-            self.files[index] = Some(file);
+    pub fn set_file(&mut self, fd: usize, file: File) -> Result<(), &'static str> {
+        if fd < NUM_OF_FDS {
+            self.files[fd] = Some(file);
             Ok(())
         } else {
             Err("Index out of bounds")
@@ -640,7 +640,7 @@ impl Task {
     /// * `file` - The file handle to add
     /// 
     /// # Returns
-    /// The index of the added file, or an error message if the file descriptor table is full
+    /// The file descriptor of the file, or an error message if the file descriptor table is full
     /// 
     pub fn add_file(&mut self, file: File) -> Result<usize, &'static str> {
         if let Some(fd) = self.allocate_fd() {
@@ -648,6 +648,27 @@ impl Task {
             Ok(fd)
         } else {
             Err("File descriptor table is full")
+        }
+    }
+
+    /// Remove a file from the task
+    /// 
+    /// # Arguments
+    /// * `fd` - The file descriptor to remove
+    /// 
+    /// # Returns
+    /// The result of removing the file, which is Ok(()) if successful or an error message if not.
+    /// 
+    pub fn remove_file(&mut self, fd: usize) -> Result<(), &'static str> {
+        if fd < NUM_OF_FDS {
+            if self.files[fd].is_none() {
+                return Err("File descriptor is already empty");
+            }
+            self.files[fd] = None;
+            self.fd_table.push(fd);
+            Ok(())
+        } else {
+            Err("File descriptor out of bounds")
         }
     }
 
