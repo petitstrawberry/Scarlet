@@ -1,6 +1,5 @@
-use crate::println;
+use crate::string::str_to_cstr_bytes;
 use crate::syscall::{syscall0, syscall1, syscall3, Syscall};
-use crate::vec::Vec;
 use crate::boxed::Box;
 
 // use crate::string::String;
@@ -64,16 +63,6 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
 
     // Return the result of the syscall
     res as i32
-}
-
-fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
-    if s.as_bytes().contains(&0) {
-        return Err(()); // Error if there is a null byte inside
-    }
-    let mut v = Vec::with_capacity(s.len() + 1);
-    v.extend_from_slice(s.as_bytes());
-    v.push(0); // Null terminator
-    Ok(v)
 }
 
 /// Waits for a child process to exit.

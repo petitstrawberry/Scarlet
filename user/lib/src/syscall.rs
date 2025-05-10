@@ -12,8 +12,15 @@ pub enum Syscall {
     Getppid = 7,
     Brk = 12,
     Sbrk = 13,
+    // BASIC I/O
     Putchar = 16,
     Getchar = 17,
+    // File operations
+    Open = 20,
+    Close = 21,
+    Read = 22,
+    Write = 23,
+    Lseek = 24,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
