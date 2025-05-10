@@ -372,3 +372,31 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
         }
     }
 }
+
+pub fn sys_write(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let count = trapframe.get_arg(2) as usize;
+
+    // Increment PC to avoid infinite loop if write fails
+    trapframe.epc += 4;
+
+    let file = task.get_mut_file(fd);
+    if file.is_none() {
+        return usize::MAX; // Invalid file descriptor
+    }
+
+    let file = file.unwrap();
+
+    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
+    
+    match file.write(buffer) {
+        Ok(n) => {
+            n
+        }
+        Err(_) => {
+            return usize::MAX; // Write error
+        }
+    }
+}
