@@ -320,11 +320,11 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     };
 
     // Try to open the file
-    let file = get_vfs_manager().open(path_str, 0);
+    let file = File::open(path_str.to_string());
     match file {
         Ok(file) => {
             // Register the file with the task
-            let fd = task.add_file_handle(file);
+            let fd = task.add_file(file);
             if fd.is_err() {
                 return usize::MAX; // File descriptor error
             }

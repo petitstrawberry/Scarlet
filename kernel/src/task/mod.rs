@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::FileHandle, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, FileHandle}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
 
 const NUM_OF_FDS: usize = 256;
 
@@ -54,9 +54,9 @@ pub struct Task {
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
-    // File descriptors (FileHandle) table
+    // File descriptors (File) table
     fd_table: Vec<usize>,
-    file_handles: [Option<Box<dyn FileHandle>>; 256],
+    files: [Option<File>; 256],
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +94,7 @@ impl Task {
             children: Vec::new(),
             exit_status: None,
             fd_table: Vec::new(),
-            file_handles: [ const { None }; NUM_OF_FDS],
+            files: [ const { None }; NUM_OF_FDS],
         };
         
         for i in (0..NUM_OF_FDS).rev() {
@@ -584,51 +584,67 @@ impl Task {
         &self.fd_table
     }
 
-    /// Get the file handle at the specified index
+    /// Get the file at the specified index
     /// 
     /// # Arguments
-    /// * `index` - The index of the file handle
+    /// * `index` - The index of the file
     /// 
     /// # Returns
-    /// The file handle at the specified index, or None if not found
+    /// The file at the specified index, or None if not found
     /// 
-    pub fn get_file_handle(&self, index: usize) -> Option<&Box<dyn FileHandle>> {
+    pub fn get_file(&self, index: usize) -> Option<&File> {
         if index < NUM_OF_FDS {
-            self.file_handles[index].as_ref()
+            self.files[index].as_ref()
         } else {
             None
         }
     }
 
-    /// Set the file handle at the specified index
+    /// Get the mutable file at the specified index
     /// 
     /// # Arguments
-    /// * `index` - The index of the file handle
-    /// * `handle` - The file handle to set
+    /// * `index` - The index of the file
     /// 
     /// # Returns
-    /// The result of setting the file handle, which is Ok(()) if successful or an error message if not.
+    /// The mutable file at the specified index, or None if not found
     /// 
-    pub fn set_file_handle(&mut self, index: usize, handle: Box<dyn FileHandle>) -> Result<(), &'static str> {
+    pub fn get_file_mut(&mut self, index: usize) -> Option<&mut File> {
         if index < NUM_OF_FDS {
-            self.file_handles[index] = Some(handle);
+            self.files[index].as_mut()
+        } else {
+            None
+        }
+    }
+
+    /// Set the file at the specified index
+    /// 
+    /// # Arguments
+    /// * `index` - The index of the file
+    /// * `file` - The file to set
+    /// 
+    /// # Returns
+    /// The result of setting the file, which is Ok(()) if successful or an error message if not.
+    /// 
+    pub fn set_file(&mut self, index: usize, file: File) -> Result<(), &'static str> {
+        if index < NUM_OF_FDS {
+            self.files[index] = Some(file);
             Ok(())
         } else {
             Err("Index out of bounds")
         }
     }
 
-    /// Add a file handle to the task
+    /// Add a file to the task
     /// 
     /// # Arguments
-    /// * `handle` - The file handle to add
+    /// * `file` - The file handle to add
     /// 
     /// # Returns
-    /// The index of the added file handle, or an error message if the file descriptor table is full
+    /// The index of the added file, or an error message if the file descriptor table is full
     /// 
-    pub fn add_file_handle(&mut self, handle: Box<dyn FileHandle>) -> Result<usize, &'static str> {
+    pub fn add_file(&mut self, file: File) -> Result<usize, &'static str> {
         if let Some(fd) = self.allocate_fd() {
-            self.file_handles[fd] = Some(handle);
+            self.files[fd] = Some(file);
             Ok(fd)
         } else {
             Err("File descriptor table is full")
