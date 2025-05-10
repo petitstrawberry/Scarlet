@@ -72,6 +72,7 @@ mod allocator;
 pub mod syscall;
 pub mod io;
 pub mod task;
+pub mod fs;
 pub mod string;
 
 pub use core_exports::*;
