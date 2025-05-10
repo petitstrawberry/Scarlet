@@ -18,15 +18,32 @@ pub extern "C" fn main() {
         print!("# ");
         loop {
             let c = std::io::get_char();
-            if c == '\r' {
+            
+            if c as u8 >= 0x20 && c as u8 <= 0x7e {
+                // Handle printable characters
+                inputs.push(c);
+                print!("{}", c); 
+            } else if c == '\r' {
+                print!("\n");
                 break;
+            } else if c == '\x7f' {
+                // Handle backspace
+                if !inputs.is_empty() {
+                    inputs.pop();
+                    print!("\x08 \x08"); // Move back, print space, move back again
+                }
+            } else if c == '\t' {
+                // Handle tab
+                inputs.push(' ');
+                print!(" ");
             }
-            inputs.push(c);
-            print!("{}", c);
         }
-        println!();
         if inputs == "exit" {
             break;
+        }
+
+        if inputs.is_empty() {
+            continue;
         }
 
         match clone() {
