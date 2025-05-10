@@ -1,4 +1,5 @@
 pub mod drivers;
+pub mod syscall;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
