@@ -432,3 +432,35 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
         }
     }
 }
+
+pub fn sys_lseek64(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let offset = trapframe.get_arg(1) as i64;
+    let whence = trapframe.get_arg(2) as i32;
+
+    // Increment PC to avoid infinite loop if lseek fails
+    trapframe.epc += 4;
+
+    let file = task.get_mut_file(fd);
+    if file.is_none() {
+        return usize::MAX; // Invalid file descriptor
+    }
+
+    let file = file.unwrap();
+    let whence  = match whence {
+        0 => SeekFrom::Start(offset as u64),
+        1 => SeekFrom::Current(offset),
+        2 => SeekFrom::End(offset),
+        _ => return usize::MAX, // Invalid whence
+    };
+
+    match file.seek(whence) {
+        Ok(pos) => {
+            pos as usize
+        }
+        Err(_) => {
+            return usize::MAX; // Lseek error
+        }
+    }
+}
