@@ -344,3 +344,31 @@ pub fn sys_close(trapframe: &mut Trapframe) -> usize {
         usize::MAX // -1
     }
 }
+
+pub fn sys_read(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
+    let count = trapframe.get_arg(2) as usize;
+
+    // Increment PC to avoid infinite loop if read fails
+    trapframe.epc += 4;
+
+    let file = task.get_mut_file(fd);
+    if file.is_none() {
+        return usize::MAX; // Invalid file descriptor
+    }
+
+    let file = file.unwrap();
+
+    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+    
+    match file.read(buffer) {
+        Ok(n) => {
+            n
+        }
+        Err(_) => {
+            return usize::MAX; // Read error
+        }
+    }
+}

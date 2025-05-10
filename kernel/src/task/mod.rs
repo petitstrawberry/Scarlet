@@ -608,7 +608,7 @@ impl Task {
     /// # Returns
     /// The mutable file at the specified file descriptor, or None if not found
     /// 
-    pub fn get_file_mut(&mut self, fd: usize) -> Option<&mut File> {
+    pub fn get_mut_file(&mut self, fd: usize) -> Option<&mut File> {
         if fd < NUM_OF_FDS {
             self.files[fd].as_mut()
         } else {
