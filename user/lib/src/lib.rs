@@ -64,6 +64,7 @@ mod alloc_exports {
     pub use alloc::rc;
     pub use alloc::slice;
     pub use alloc::str;
+    pub use alloc::string;
     pub use alloc::vec;
 }
 
@@ -73,7 +74,7 @@ pub mod syscall;
 pub mod io;
 pub mod task;
 pub mod fs;
-pub mod string;
+pub mod utils;
 
 pub use core_exports::*;
 pub use alloc_exports::*;

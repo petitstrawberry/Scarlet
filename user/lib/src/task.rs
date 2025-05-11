@@ -1,4 +1,4 @@
-use crate::string::str_to_cstr_bytes;
+use crate::utils::str_to_cstr_bytes;
 use crate::syscall::{syscall0, syscall1, syscall3, Syscall};
 use crate::boxed::Box;
 

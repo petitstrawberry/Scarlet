@@ -1,4 +1,6 @@
 use crate::vec::Vec;
+extern crate alloc;
+pub use alloc::string::*;
 
 pub fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
     if s.as_bytes().contains(&0) {
