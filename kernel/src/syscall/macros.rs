@@ -29,6 +29,12 @@ macro_rules! syscall_table {
         /// # Errors
         /// Returns an error if the syscall number is invalid
         pub fn syscall_handler(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+            if let Some(task) = crate::task::mytask() {
+                if let Some(abi) = &task.abi {
+                    return abi.handle_syscall(trapframe)
+                }    
+            }
+
             let syscall_number = trapframe.get_syscall_number();
             if syscall_number == 0 {
                 return Err("Invalid syscall number");

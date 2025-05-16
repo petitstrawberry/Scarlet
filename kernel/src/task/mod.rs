@@ -4,6 +4,7 @@
 
 pub mod syscall;
 pub mod elf_loader;
+pub mod abi;
 
 extern crate alloc;
 
@@ -29,7 +30,6 @@ pub enum TaskType {
     User,
 }
 
-#[derive(Debug, Clone)]
 pub struct Task {
     id: usize,
     pub name: String,
@@ -53,6 +53,9 @@ pub struct Task {
     parent_id: Option<usize>,      /* Parent task ID */
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
+
+    /// Dynamic ABI
+    pub abi: Option<Box<dyn abi::AbiModule>>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +92,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
+            abi: None,
         };
         *taskid += 1;
         task
