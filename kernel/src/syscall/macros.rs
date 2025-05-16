@@ -18,7 +18,7 @@ macro_rules! syscall_table {
             )*
         }
 
-        /// Syscall handler
+        /// Syscall dispatcher
         /// 
         /// # Arguments
         /// * `trapframe` - The trapframe
@@ -28,7 +28,7 @@ macro_rules! syscall_table {
         /// 
         /// # Errors
         /// Returns an error if the syscall number is invalid
-        pub fn syscall_handler(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+        pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
             if let Some(task) = crate::task::mytask() {
                 if let Some(abi) = &task.abi {
                     return abi.handle_syscall(trapframe)
