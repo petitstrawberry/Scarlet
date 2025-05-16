@@ -72,3 +72,12 @@ impl AbiRegsitry {
     }
 }
 
+#[macro_export]
+macro_rules! register_abi_module {
+    ($abi_type:ty) => {
+        {
+            use $crate::task::abi::AbiRegsitry;
+            AbiRegsitry::shared().register_abi(Box::new(<$abi_type>::new()));
+        }
+    };
+}
