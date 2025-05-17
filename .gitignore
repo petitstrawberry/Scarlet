@@ -1,7 +1,10 @@
 /kernel/target
+/kernel_api/target
 /user/lib/target
 /user/bin/target
 /export-macro/target
+/xtask/target
 /mkfs/initramfs/bin/*
 /mkfs/*.cpio
 dist/
+.DS_Store

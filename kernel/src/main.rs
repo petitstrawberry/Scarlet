@@ -178,9 +178,11 @@ use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 
+use export_macro::export;
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
+#[export]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     use arch::instruction::idle;

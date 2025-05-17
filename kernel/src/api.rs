@@ -12,7 +12,7 @@ pub fn kernel_shutdown() -> ! {
     crate::arch::shutdown()
 }
 
-#[export]
-pub fn kernel_panic(msg: &str) -> ! {
-    crate::panic!(msg)
-}
+// #[export]
+// pub fn kernel_panic(msg: &str) -> ! {
+//     crate::panic!(msg)
+// }

@@ -1,0 +1,8 @@
+[package]
+name = "ScarletAPI"
+version = "0.10.0"
+edition = "2024"
+
+[lib]
+name = "kernel_api"
+path = "src/lib.rs"

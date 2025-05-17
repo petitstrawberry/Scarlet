@@ -1,9 +1,11 @@
 {
     "rust-analyzer.linkedProjects": [
         "kernel/Cargo.toml",
+        "kernel_api/Cargo.toml",
         "user/lib/Cargo.toml",
         "user/bin/Cargo.toml",
         "export-macro/Cargo.toml",
         "xtask/Cargo.toml",
+        "modules/simple/Cargo.toml",
     ]
 }

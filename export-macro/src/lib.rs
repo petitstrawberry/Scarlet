@@ -37,11 +37,8 @@ pub fn export(_attr: TokenStream, item: TokenStream) -> TokenStream {
     
     // 元の関数と初期化関数を生成
     let r#gen = quote! {
-        // カーネル側の実装
-        #[cfg(not(feature = "kernel_api"))]
         #input
 
-        #[cfg(not(feature = "kernel_api"))]
         #[allow(non_snake_case)]
         fn #init_fn_name() {
             unsafe {
@@ -49,20 +46,8 @@ pub fn export(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        #[cfg(not(feature = "kernel_api"))]
         paste::paste! {
             crate::early_initcall!(#init_fn_name);
-        }
-
-        // kernel_api側の実装
-        #[cfg(feature = "kernel_api")]
-        pub fn #fn_name(#fn_inputs) #fn_output {
-            let func_ptr = unsafe { crate::symbol::API_SYMBOLS.#fn_name };
-            if func_ptr.is_null() {
-                panic!("API function {} not initialized", stringify!(#fn_name));
-            }
-            let f: fn(#fn_inputs) #fn_output = unsafe { core::mem::transmute(func_ptr) };
-            f(#(#arg_names),*)
         }
     };
     r#gen.into()
