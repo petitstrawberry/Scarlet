@@ -1,12 +1,14 @@
-use crate::early_println;
 
+use crate::early_println;
 
 #[macro_export]
 macro_rules! early_initcall {
     ($func:ident) => {
-        #[unsafe(link_section = ".initcall.early")]
-        #[used(linker)]
-        static __EARLY_INITCALL__ : fn() = $func;
+        paste::paste! {
+            #[unsafe(link_section = ".initcall.early")]
+            #[used(linker)]
+            static [<__EARLY_INITCALL_ $func:upper>]: fn() = $func;
+        }
     };
 }
 

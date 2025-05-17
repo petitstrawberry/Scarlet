@@ -152,9 +152,11 @@ pub mod environment;
 pub mod vm;
 pub mod task;
 pub mod initcall;
+pub mod api; // エクスポートされるAPI関数用
 pub mod syscall;
 pub mod device;
 pub mod fs;
+pub mod symbol;
 
 #[cfg(test)]
 pub mod test;

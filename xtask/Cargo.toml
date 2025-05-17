@@ -1,0 +1,10 @@
+[package]
+name = "xtask"
+version = "0.10.0"
+edition = "2024"
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit"] }
+walkdir = "2.3"

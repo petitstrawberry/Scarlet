@@ -3,5 +3,7 @@
         "kernel/Cargo.toml",
         "user/lib/Cargo.toml",
         "user/bin/Cargo.toml",
+        "export-macro/Cargo.toml",
+        "xtask/Cargo.toml",
     ]
 }
