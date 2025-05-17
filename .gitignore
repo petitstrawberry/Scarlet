@@ -1,6 +1,8 @@
 /kernel/target
+/kernel/proc_macros/target
 /user/lib/target
 /user/bin/target
+/tools/generate_kernel_api/target
 /mkfs/initramfs/bin/*
 /mkfs/*.cpio
 dist/
