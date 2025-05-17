@@ -29,7 +29,6 @@ pub enum TaskType {
     User,
 }
 
-#[derive(Debug, Clone)]
 pub struct Task {
     id: usize,
     pub name: String,
