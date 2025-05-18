@@ -5,12 +5,6 @@ use super::AbiModule;
 #[derive(Default)]
 pub struct ScarletAbi;
 
-impl ScarletAbi {
-    pub fn new() -> Self {
-        ScarletAbi {}
-    }
-}
-
 impl AbiModule for ScarletAbi {
     fn name() -> &'static str {
         "scarlet"

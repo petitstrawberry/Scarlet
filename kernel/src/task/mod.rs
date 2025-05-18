@@ -91,7 +91,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            abi: Box::new(ScarletAbi::new()) // Default ABI
+            abi: Box::new(ScarletAbi::default()) // Default ABI
         };
         *taskid += 1;
         task
