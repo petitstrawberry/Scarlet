@@ -1,6 +1,7 @@
+use crate::{arch::Trapframe, task::mytask};
 use alloc::{boxed::Box, vec::Vec};
 
-use crate::arch::Trapframe;
+pub mod scarlet;
 
 /// ABI module trait.
 /// 
@@ -72,12 +73,7 @@ impl AbiRegsitry {
     }
 }
 
-#[macro_export]
-macro_rules! register_abi_module {
-    ($abi_type:ty) => {
-        {
-            use $crate::task::abi::AbiRegsitry;
-            AbiRegsitry::shared().register_abi(Box::new(<$abi_type>::new()));
-        }
-    };
+pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+    let task = mytask().unwrap();
+    task.abi.handle_syscall(trapframe)
 }
