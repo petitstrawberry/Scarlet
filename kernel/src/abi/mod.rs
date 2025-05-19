@@ -1,5 +1,13 @@
+//! ABI module.
+//! 
+//! This module provides the interface for ABI (Application Binary Interface) modules
+//! in the Scarlet kernel. ABI modules are responsible for handling system calls
+//! and providing the necessary functionality for different application binary
+//! interfaces.
+//! 
+
 use crate::{arch::Trapframe, task::mytask};
-use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
+use alloc::{boxed::Box, string::{String, ToString}};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -22,6 +30,11 @@ pub trait AbiModule: 'static {
 }
 
 
+/// ABI registry.
+/// 
+/// This struct is responsible for managing the registration and instantiation
+/// of ABI modules in the Scarlet kernel.
+/// 
 pub struct AbiRegistry {
     factories: HashMap<String, fn() -> Box<dyn AbiModule>>,
 }
@@ -35,7 +48,7 @@ impl AbiRegistry {
 
     #[allow(static_mut_refs)]
     pub fn global() -> &'static Mutex<AbiRegistry> {
-        // スピンロックを使った遅延初期化
+        // Lazy initialization using spin lock
         static mut INSTANCE: Option<Mutex<AbiRegistry>> = None;
         static INIT: spin::Once = spin::Once::new();
         
@@ -44,7 +57,7 @@ impl AbiRegistry {
                 INSTANCE = Some(Mutex::new(AbiRegistry::new()));
             });
             
-            // INIT.call_onceが呼ばれた後でのみアクセスするため安全
+            // Safe to access after INIT.call_once is called
             INSTANCE.as_ref().unwrap()
         }
     }

@@ -1,3 +1,10 @@
+//! Scarlet Native ABI Module
+//! 
+//! This module implements the Scarlet ABI for the Scarlet kernel.
+//! It provides the necessary functionality for handling system calls
+//! and interacting with the Scarlet kernel.
+//! 
+
 use crate::{arch::Trapframe, early_initcall, register_abi, syscall::syscall_handler};
 
 use super::AbiModule;

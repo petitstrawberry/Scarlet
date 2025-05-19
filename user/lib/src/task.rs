@@ -77,6 +77,7 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     res as i32
 } 
 
+// Converts a Rust string to a null-terminated C string in bytes
 fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
     if s.as_bytes().contains(&0) {
         return Err(()); // Error if there is a null byte inside
