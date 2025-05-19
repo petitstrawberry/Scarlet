@@ -73,6 +73,7 @@ pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     let abi_ptr = Box::into_raw(str_to_cstr_bytes(abi).unwrap().into_boxed_slice()) as *const u8 as usize;
     let res = syscall4(Syscall::ExecveABI, path_ptr, argv_ptr, envp_ptr, abi_ptr);
 
+    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the path
     let _ = unsafe { Box::from_raw(abi_ptr as *mut u8) }; // Free the abi
     res as i32
 } 
