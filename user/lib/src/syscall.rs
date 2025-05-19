@@ -6,10 +6,11 @@ pub enum Syscall {
     Exit = 1,
     Clone = 2,
     Execve = 3,
-    Waitpid = 4,
-    Kill = 5,
-    Getpid = 6,
-    Getppid = 7,
+    ExecveABI = 4,
+    Waitpid = 5,
+    Kill = 6,
+    Getpid = 7,
+    Getppid = 8,
     Brk = 12,
     Sbrk = 13,
     Putchar = 16,
@@ -30,4 +31,8 @@ pub fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
 
 pub fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usize {
     arch_syscall3(syscall, arg1, arg2, arg3)
+}
+
+pub fn syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> usize {
+    arch_syscall4(syscall, arg1, arg2, arg3, arg4)
 }
