@@ -2,6 +2,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::{error, str};
 
+use crate::abi::{AbiRegistry, MAX_ABI_LENGTH};
 use crate::device::manager::DeviceManager;
 use crate::fs::{File, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
@@ -203,6 +204,48 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             usize::MAX
         }
     }
+}
+
+pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.epc += 4;
+
+    let abi_str_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(3)).unwrap() as *const u8;
+    let mut abi_bytes = Vec::new();
+    let mut i = 0;
+    unsafe {
+        loop {
+            let byte = *abi_str_ptr.add(i);
+            if byte == 0 {
+                break;
+            }
+            abi_bytes.push(byte);
+            i += 1;
+            
+            // Safety check to prevent infinite loop
+            if i > MAX_ABI_LENGTH {
+                return usize::MAX; // Path too long
+            }
+        }
+    }
+    // Convert abi bytes to string
+    let abi_str = match str::from_utf8(&abi_bytes) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    let abi = AbiRegistry::instantiate(abi_str);
+    if abi.is_none() {
+        return usize::MAX; // ABI not found
+    }
+    let backup_abi = task.abi.take();
+    task.abi = abi;
+    
+    let res = sys_execve(trapframe);
+    if res == usize::MAX {
+        // Restore the ABI
+        task.abi = backup_abi;
+    }
+    res
 }
 
 pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {

@@ -2,7 +2,7 @@ use crate::{arch::Trapframe, early_initcall, register_abi, syscall::syscall_hand
 
 use super::AbiModule;
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 pub struct ScarletAbi;
 
 impl AbiModule for ScarletAbi {

@@ -54,7 +54,7 @@ pub struct Task {
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
     /// Dynamic ABI
-    pub abi: Box<dyn AbiModule>,
+    pub abi: Option<Box<dyn AbiModule>>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            abi: Box::new(ScarletAbi::default()) // Default ABI
+            abi: Some(Box::new(ScarletAbi::default())) // Default ABI
         };
         *taskid += 1;
         task

@@ -5,6 +5,8 @@ use spin::Mutex;
 
 pub mod scarlet;
 
+pub const MAX_ABI_LENGTH: usize = 64;
+
 /// ABI module trait.
 /// 
 /// This trait defines the interface for ABI modules in the Scarlet kernel.
@@ -73,5 +75,6 @@ macro_rules! register_abi {
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
     let task = mytask().unwrap();
-    task.abi.handle_syscall(trapframe)
+    let abi = task.abi.as_deref_mut().expect("ABI not set");
+    abi.handle_syscall(trapframe)
 }
