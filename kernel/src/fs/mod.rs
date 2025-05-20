@@ -104,7 +104,7 @@ impl File {
     pub fn open(path: String) -> Result<Self>{
         let handle = get_vfs_manager().open(&path, 0)?;
         Ok(Self {
-            path: path,
+            path,
             handle,
         })
     }
