@@ -1,18 +1,18 @@
 use core::arch::asm;
 use core::panic;
 
+use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
 use crate::arch::Trapframe;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
-use crate::syscall::syscall_handler;
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Environment call from U-mode */
         8 => {
             /* Execute SystemCall */
-            match syscall_handler(trapframe) {
+            match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
                     trapframe.set_return_value(ret);
                 }

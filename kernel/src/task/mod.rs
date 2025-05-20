@@ -11,6 +11,7 @@ use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, FileHandle}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
+use crate::abi::{scarlet::ScarletAbi, AbiModule};
 
 const NUM_OF_FDS: usize = 256;
 
@@ -54,9 +55,13 @@ pub struct Task {
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
+    /// Dynamic ABI
+    pub abi: Option<Box<dyn AbiModule>>,
+
     // File descriptors (File) table
     fd_table: Vec<usize>,
     files: [Option<File>; 256],
+
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +98,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
+            abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             fd_table: Vec::new(),
             files: [ const { None }; NUM_OF_FDS],
         };

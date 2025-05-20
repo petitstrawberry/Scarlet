@@ -1,5 +1,5 @@
-use crate::utils::str_to_cstr_bytes;
-use crate::syscall::{syscall0, syscall1, syscall3, Syscall};
+use crate::syscall::{syscall0, syscall1, syscall3, syscall4, Syscall};
+use crate::vec::Vec;
 use crate::boxed::Box;
 
 // use crate::string::String;
@@ -63,6 +63,29 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
 
     // Return the result of the syscall
     res as i32
+}
+
+pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
+    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let argv_ptr = 0; // argv is not used in this implementation
+    let envp_ptr = 0; // envp is not used in this implementation
+    let abi_ptr = Box::into_raw(str_to_cstr_bytes(abi).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let res = syscall4(Syscall::ExecveABI, path_ptr, argv_ptr, envp_ptr, abi_ptr);
+
+    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the path
+    let _ = unsafe { Box::from_raw(abi_ptr as *mut u8) }; // Free the abi
+    res as i32
+} 
+
+// Converts a Rust string to a null-terminated C string in bytes
+fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
+    if s.as_bytes().contains(&0) {
+        return Err(()); // Error if there is a null byte inside
+    }
+    let mut v = Vec::with_capacity(s.len() + 1);
+    v.extend_from_slice(s.as_bytes());
+    v.push(0); // Null terminator
+    Ok(v)
 }
 
 /// Waits for a child process to exit.
