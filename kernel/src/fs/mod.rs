@@ -1,10 +1,11 @@
 pub mod drivers;
 pub mod syscall;
+pub mod helper;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
-use crate::device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice};
+use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task};
 
 use spin::{Mutex, RwLock};
 
@@ -766,6 +767,36 @@ impl VfsManager {
         
         let fs = mount_points.get(best_match).unwrap().fs.clone();
         Ok((fs, relative_path))
+    }
+
+    /// Get absolute path from relative path and current working directory
+    /// 
+    /// # Arguments
+    /// 
+    /// * `task` - The task containing the current working directory
+    /// * `path` - The relative path to convert
+    /// 
+    pub fn to_absolute_path(&self, task: &Task, path: &str) -> Result<String> {
+        if path.starts_with('/') {
+            // If the path is already absolute, return it as is
+            Ok(path.to_string())
+        } else {
+            let cwd = task.cwd.clone();
+            if cwd.is_none() {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::InvalidPath,
+                    message: "Current working directory is not set".to_string(),
+                });
+            }
+            // Combine the current working directory and the relative path to create an absolute path
+            let mut absolute_path = cwd.unwrap();
+            if !absolute_path.ends_with('/') {
+                absolute_path.push('/');
+            }
+            absolute_path.push_str(path);
+            // Normalize and return the result
+            Ok(Self::normalize_path(&absolute_path))
+        }
     }
 
     

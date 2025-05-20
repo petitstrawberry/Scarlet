@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use super::*;
 use crate::device::block::mockblk::MockBlockDevice;
 use crate::fs::testfs::{TestFileSystem, TestFileSystemDriver};
+use crate::task::new_user_task;
 
 // Test cases
 #[test_case]
@@ -816,4 +817,44 @@ fn test_path_normalization() {
     assert_eq!(VfsManager::normalize_path("../a/b/c"), "../a/b/c");
     assert_eq!(VfsManager::normalize_path("a/b/c/.."), "a/b");
     assert_eq!(VfsManager::normalize_path("a/b/c/../.."), "a");
+}
+
+#[test_case]
+fn test_to_absolute_path() {
+    // Setup
+    let mut manager = VfsManager::new();
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    
+    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    
+    let mut task = new_user_task("test".to_string(), 0);
+    task.cwd = Some("/mnt".to_string());
+
+    let relative_path = "test.txt";
+    let absolute_path = manager.to_absolute_path(&task, relative_path).unwrap();
+    assert_eq!(absolute_path, "/mnt/test.txt");
+
+
+    let relative_path = "./test.txt";
+    let absolute_path = manager.to_absolute_path(&task, relative_path).unwrap();
+    assert_eq!(absolute_path, "/mnt/test.txt");
+
+    let relative_path = "../test.txt";
+    let absolute_path = manager.to_absolute_path(&task, relative_path).unwrap();
+    assert_eq!(absolute_path, "/test.txt"); // Should not resolve to /test.txt
+
+    let relative_path = "./a/../test.txt";
+    let absolute_path = manager.to_absolute_path(&task, relative_path).unwrap();
+    assert_eq!(absolute_path, "/mnt/test.txt"); // Should resolve to /mnt/test.txt
+
+    let relative_path = "/a/b/test.txt";
+    let absolute_path = manager.to_absolute_path(&task, relative_path).unwrap();
+    assert_eq!(absolute_path, "/a/b/test.txt"); // Should not resolve to /mnt/a/b/test.txt
+
+    task.cwd = None; // Reset current working directory
+    let relative_path = "test.txt";
+    let absolute_path = manager.to_absolute_path(&task, relative_path);
+    assert!(absolute_path.is_err());
 }

@@ -61,7 +61,8 @@ pub struct Task {
     // File descriptors (File) table
     fd_table: Vec<usize>,
     files: [Option<File>; 256],
-
+    // Current working directory
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +102,7 @@ impl Task {
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             fd_table: Vec::new(),
             files: [ const { None }; NUM_OF_FDS],
+            cwd: None,
         };
         
         for i in (0..NUM_OF_FDS).rev() {
