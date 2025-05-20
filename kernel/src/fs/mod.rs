@@ -31,6 +31,7 @@ pub enum FileSystemErrorKind {
     PermissionDenied,
     IoError,
     InvalidData,
+    InvalidPath,
     AlreadyExists,
     NotADirectory,
     NotAFile,
@@ -708,7 +709,7 @@ impl VfsManager {
     ///
     /// # Arguments
     /// 
-    /// * `path` - The path to resolve
+    /// * `path` - The path to resolve (must be absolute)
     /// 
     /// # Returns
     /// 
@@ -719,6 +720,13 @@ impl VfsManager {
     /// * `FileSystemError` - If no file system is mounted for the specified path
     /// 
     fn resolve_path(&self, path: &str) -> Result<(FileSystemRef, String)> {
+        // Check if the path is absolute
+        if !path.starts_with('/') {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::InvalidPath,
+                message: format!("Path must be absolute: {}", path),
+            });
+        }
         let path = Self::normalize_path(path);
         let mut best_match = "";
         let mount_points = self.mount_points.read();

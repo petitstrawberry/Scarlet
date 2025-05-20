@@ -135,12 +135,12 @@ fn test_load_elf_invalid_magic() {
     let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
-    let file_path = "invalid.elf";
+    let file_path = "/invalid.elf";
     manager.create_file(file_path).expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid magic number
     let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
-    let mut file = File::open_with_manager("invalid.elf".to_string(), &mut manager).unwrap();
+    let mut file = File::open_with_manager("/invalid.elf".to_string(), &mut manager).unwrap();
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
 
     // Create a new task
@@ -163,7 +163,7 @@ fn test_load_elf_invalid_alignment() {
     let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
-    let file_path = "invalid_align.elf";
+    let file_path = "/invalid_align.elf";
     manager.create_file(file_path).expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid alignment
@@ -192,7 +192,7 @@ fn test_load_elf_invalid_alignment() {
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_memsz
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
 
-    let mut file = File::open_with_manager("invalid_align.elf".to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
+    let mut file = File::open_with_manager("/invalid_align.elf".to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
 
     // Create a new task
