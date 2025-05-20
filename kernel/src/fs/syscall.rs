@@ -2,7 +2,7 @@ use alloc::{string::ToString, vec::Vec};
 
 use crate::{arch::Trapframe, task::mytask};
 
-use super::{File, SeekFrom, MAX_PATH_LENGTH};
+use super::{File, SeekFrom, VfsManager, MAX_PATH_LENGTH};
 
 pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
@@ -33,12 +33,12 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
 
     // Convert path bytes to string
     let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => s,
+        Ok(s) => VfsManager::to_absolute_path(&task, s).unwrap(),
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
     // Try to open the file
-    let file = File::open(path_str.to_string());
+    let file = File::open(path_str);
     match file {
         Ok(file) => {
             // Register the file with the task

@@ -4,7 +4,7 @@ use core::str;
 
 use crate::abi::{AbiRegistry, MAX_ABI_LENGTH};
 use crate::device::manager::DeviceManager;
-use crate::fs::{get_vfs_manager, File, SeekFrom, MAX_PATH_LENGTH};
+use crate::fs::{get_vfs_manager, File, SeekFrom, VfsManager, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
@@ -139,7 +139,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     
     // Convert path bytes to string
     let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => s,
+        Ok(s) => VfsManager::to_absolute_path(&task, s).unwrap(),
         Err(_) => {
             // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
@@ -151,7 +151,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     };
     
     // Try to open the executable file
-    let file = File::open(path_str.to_string());
+    let file = File::open(path_str.clone());
     if file.is_err() {
         // Restore the managed pages, memory mapping and sizes
         task.managed_pages = backup_pages; // Restore the pages
@@ -170,7 +170,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     match load_elf_into_task(&mut file, task) {
         Ok(entry_point) => {
             // Set the name
-            task.name = path_str.to_string();
+            task.name = path_str;
             // Clear page table entries
             let idx = vm::get_root_page_table_idx(task.vm_manager.get_asid()).unwrap();
             let root_page_table = vm::get_page_table(idx).unwrap();

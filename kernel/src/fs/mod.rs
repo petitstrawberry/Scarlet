@@ -104,7 +104,7 @@ impl File {
     pub fn open(path: String) -> Result<Self>{
         let handle = get_vfs_manager().open(&path, 0)?;
         Ok(Self {
-            path,
+            path: path,
             handle,
         })
     }
@@ -776,7 +776,7 @@ impl VfsManager {
     /// * `task` - The task containing the current working directory
     /// * `path` - The relative path to convert
     /// 
-    pub fn to_absolute_path(&self, task: &Task, path: &str) -> Result<String> {
+    pub fn to_absolute_path(task: &Task, path: &str) -> Result<String> {
         if path.starts_with('/') {
             // If the path is already absolute, return it as is
             Ok(path.to_string())
