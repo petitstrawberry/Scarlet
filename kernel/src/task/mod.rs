@@ -773,6 +773,12 @@ impl Task {
         // Set the same entry point and PC
         child.entry = self.entry;
         child.vcpu.set_pc(self.vcpu.get_pc());
+
+        // Copy file descriptors
+        // TODO: Copy file descriptors
+
+        // Copy the current working directory
+        child.cwd = self.cwd.clone();
         
         // Set the state to Ready
         child.state = self.state;
