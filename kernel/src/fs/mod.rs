@@ -87,8 +87,8 @@ pub struct FileMetadata {
 }
 
 pub struct File {
-    pub path: String,
-    handle: Box<dyn FileHandle>,
+    // pub path: String,
+    handle: Arc<dyn FileHandle>,
 }
 impl File {
     //// Open a file using the global VFS manager
@@ -104,7 +104,6 @@ impl File {
     pub fn open(path: String) -> Result<Self>{
         let handle = get_vfs_manager().open(&path, 0)?;
         Ok(Self {
-            path,
             handle,
         })
     }
@@ -123,7 +122,6 @@ impl File {
     pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self> {
         let handle = manager.open(&path, 0)?;
         Ok(Self {
-            path,
             handle,
         })
     }
@@ -263,16 +261,16 @@ pub enum SeekFrom {
 /// Trait for file handlers
 pub trait FileHandle: Send + Sync {
     /// Read from the file
-    fn read(&mut self, buffer: &mut [u8]) -> Result<usize>;
+    fn read(&self, buffer: &mut [u8]) -> Result<usize>;
     
     /// Write to the file
-    fn write(&mut self, buffer: &[u8]) -> Result<usize>;
+    fn write(&self, buffer: &[u8]) -> Result<usize>;
     
     /// Move the position within the file
-    fn seek(&mut self, whence: SeekFrom) -> Result<u64>;
+    fn seek(&self, whence: SeekFrom) -> Result<u64>;
     
     /// Release the file resource
-    fn release(&mut self) -> Result<()>;
+    fn release(&self) -> Result<()>;
     
     /// Get the metadata
     fn metadata(&self) -> Result<FileMetadata>;
@@ -308,7 +306,7 @@ pub trait FileSystem: Send + Sync {
 /// Trait defining file operations
 pub trait FileOperations: Send + Sync {
     /// Open a file
-    fn open(&self, path: &str, flags: u32) -> Result<Box<dyn FileHandle>>;
+    fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileHandle>>;
     
     /// Read directory entries
     fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>>;
@@ -801,7 +799,7 @@ impl VfsManager {
 
     
     // Open a file
-    pub fn open(&self, path: &str, flags: u32) -> Result<Box<dyn FileHandle>> {
+    pub fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileHandle>> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))
     }
     

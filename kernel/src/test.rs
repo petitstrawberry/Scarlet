@@ -14,10 +14,12 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[cfg(test)]
 pub fn test_runner(tests: &[&dyn Fn()]) {
+
     use crate::println;
 
     println!("[Test Runner] Running {} tests", tests.len());
     for test in tests {
+        // println!("[Test Runner] Running test: {:?}", test as *const _);
         test();
     }
 
