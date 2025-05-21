@@ -365,7 +365,7 @@ impl FileHandle for CpiofsFileHandle {
     fn read(&self, buffer: &mut [u8]) -> Result<usize> {
         let content = self.content.read();
         let mut position = self.position.write();
-        let available = self.content.read().len() - *position;
+        let available = content.len() - *position;
         let to_read = buffer.len().min(available);
         buffer[..to_read].copy_from_slice(&content[*position..*position + to_read]);
         *position += to_read;
