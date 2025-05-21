@@ -775,7 +775,8 @@ impl Task {
         child.vcpu.set_pc(self.vcpu.get_pc());
 
         // Copy file descriptors
-        // TODO: Copy file descriptors
+        child.fd_table = self.fd_table.clone();
+        child.files = self.files.clone();
 
         // Copy the current working directory
         child.cwd = self.cwd.clone();

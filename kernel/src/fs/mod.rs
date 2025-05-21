@@ -86,6 +86,7 @@ pub struct FileMetadata {
     pub accessed_time: u64,
 }
 
+#[derive(Clone)]
 pub struct File {
     // pub path: String,
     handle: Arc<dyn FileHandle>,
