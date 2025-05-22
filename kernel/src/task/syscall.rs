@@ -139,7 +139,17 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     
     // Convert path bytes to string
     let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => VfsManager::to_absolute_path(&task, s).unwrap(),
+        Ok(s) => match VfsManager::to_absolute_path(&task, s) {
+            Ok(path) => path,
+            Err(_) => {
+                // Restore the managed pages, memory mapping and sizes
+                task.managed_pages = backup_pages; // Restore the pages
+                task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
+                task.text_size = backup_text_size; // Restore the text size
+                task.data_size = backup_data_size; // Restore the data size
+                return usize::MAX; // Path error
+            }
+        },
         Err(_) => {
             // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
