@@ -168,7 +168,7 @@ use fs::{drivers::initramfs::relocate_initramfs, File};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
-use core::panic::PanicInfo;
+use core::panic::{self, PanicInfo};
 
 use arch::{get_cpu, init_arch};
 use task::{elf_loader::load_elf_into_task, new_user_task};
@@ -254,7 +254,12 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let mut task = new_user_task("init".to_string(), 0);
     task.init();
     task.cwd = Some("/".to_string());
-    let mut file = File::open("/bin/init".to_string()).unwrap();
+    let mut file = match  File::open("/bin/init".to_string()) {
+        Ok(file) => file,
+        Err(e) => {
+            panic!("Failed to open init file: {:?}", e);
+        },
+    };
 
     match load_elf_into_task(&mut file, &mut task) {
         Ok(_) => {
