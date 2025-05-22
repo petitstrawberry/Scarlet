@@ -15,6 +15,7 @@ use crate::syscall::{syscall2, syscall3, Syscall};
 pub fn open(path: &str, flags: usize) -> i32 {
     let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
     let res = syscall2(Syscall::Open, path_ptr, flags);
+    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the allocated memory
     // Return the result of the syscall
     res as i32
 }
