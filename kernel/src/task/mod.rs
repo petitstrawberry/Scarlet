@@ -13,6 +13,9 @@ use spin::Mutex;
 use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, FileHandle}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 
+/// The maximum number of file descriptors a task can have.
+/// This value is set to 256 as a reasonable default for most use cases,
+/// balancing resource usage and typical application needs. Adjust if necessary.
 const NUM_OF_FDS: usize = 256;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
