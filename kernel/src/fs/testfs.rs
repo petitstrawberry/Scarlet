@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use spin::rwlock::RwLock;
 use spin::Mutex;
 
 use super::*;
@@ -193,73 +194,77 @@ impl FileSystem for TestFileSystem {
 // File handle for testing
 struct TestFileHandle {
     path: String,
-    position: u64,
-    content: Vec<u8>,
+    position: RwLock<u64>,
+    content: RwLock<Vec<u8>>,
 }
 
 impl FileHandle for TestFileHandle {
-    fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        if self.position as usize >= self.content.len() {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+        let mut position = self.position.write();
+        let content = self.content.read();
+        if *position as usize >= content.len() {
             return Ok(0); // EOF
         }
         
-        let available = self.content.len() - self.position as usize;
+        let available = content.len() - *position as usize;
         let to_read = buffer.len().min(available);
         
-        buffer[..to_read].copy_from_slice(&self.content[self.position as usize..self.position as usize + to_read]);
-        self.position += to_read as u64;
+        buffer[..to_read].copy_from_slice(&content[*position as usize..*position as usize + to_read]);
+        *position += to_read as u64;
         
         Ok(to_read)
     }
     
-    fn write(&mut self, buffer: &[u8]) -> Result<usize> {
-        let pos = self.position as usize;
+    fn write(&self, buffer: &[u8]) -> Result<usize> {
+        let mut position = self.position.write();
+        let mut content = self.content.write();
         
         // Expand file size if necessary
-        if pos + buffer.len() > self.content.len() {
-            self.content.resize(pos + buffer.len(), 0);
+        if *position as usize + buffer.len() > content.len() {
+            content.resize(*position as usize + buffer.len(), 0);
         }
         
         // Write data
-        self.content[pos..pos + buffer.len()].copy_from_slice(buffer);
-        self.position += buffer.len() as u64;
+        content[*position as usize..*position as usize + buffer.len()].copy_from_slice(buffer);
+        *position += buffer.len() as u64;
         
         Ok(buffer.len())
     }
     
-    fn seek(&mut self, whence: SeekFrom) -> Result<u64> {
+    fn seek(&self, whence: SeekFrom) -> Result<u64> {
+        let mut position = self.position.write();
         match whence {
             SeekFrom::Start(offset) => {
-                self.position = offset;
+                *position = offset;
             },
             SeekFrom::Current(offset) => {
                 if offset >= 0 {
-                    self.position = self.position.saturating_add(offset as u64);
+                    *position = position.saturating_add(offset as u64);
                 } else {
-                    self.position = self.position.saturating_sub((-offset) as u64);
+                    *position = position.saturating_sub((-offset) as u64);
                 }
             },
             SeekFrom::End(offset) => {
-                let end = self.content.len() as u64;
+                let end = self.content.read().len() as u64;
                 if offset >= 0 {
-                    self.position = end.saturating_add(offset as u64);
+                    *position = end.saturating_add(offset as u64);
                 } else {
-                    self.position = end.saturating_sub((-offset) as u64);
+                    *position = end.saturating_sub((-offset) as u64);
                 }
             },
         }
         
-        Ok(self.position)
+        Ok(*position)
     }
     
-    fn close(&mut self) -> Result<()> {
+    fn release(&self) -> Result<()> {
         Ok(())
     }
     
     fn metadata(&self) -> Result<FileMetadata> {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
-            size: self.content.len(),
+            size: self.content.read().len(),
             permissions: FilePermission {
                 read: true,
                 write: true,
@@ -273,15 +278,15 @@ impl FileHandle for TestFileHandle {
 }
 
 impl FileOperations for TestFileSystem {
-    fn open(&self, path: &str, _flags: u32) -> Result<Box<dyn FileHandle>> {
+    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileHandle>> {
         let normalized = self.normalize_path(path);
         
         // Simple implementation for testing (only check the beginning of the path)
         if normalized == "/test.txt" {
-            return Ok(Box::new(TestFileHandle {
+            return Ok(Arc::new(TestFileHandle {
                 path: normalized,
-                position: 0,
-                content: b"Hello, world!".to_vec(),
+                position: RwLock::new(0),
+                content: RwLock::new(b"Hello, world!".to_vec()),
             }));
         }
 
@@ -293,10 +298,10 @@ impl FileOperations for TestFileSystem {
         for (dir_path, entries) in self.directories.lock().iter() {
             if dir_path == parent_path {
                 if let Some(_) = entries.iter().find(|e| e.name == name && e.file_type == FileType::RegularFile) {
-                    return Ok(Box::new(TestFileHandle {
+                    return Ok(Arc::new(TestFileHandle {
                         path: normalized,
-                        position: 0,
-                        content: Vec::new(), // Newly created files are empty
+                        position: RwLock::new(0),
+                        content: RwLock::new(Vec::new()), // Newly created files are empty
                     }));
                 }
             }
@@ -541,7 +546,7 @@ impl FileOperations for TestFileSystem {
     }
     
     fn root_dir(&self) -> Result<Directory> {
-        Ok(Directory::new("/".to_string()))
+        Ok(Directory::open("/".to_string()))
     }
 }
 

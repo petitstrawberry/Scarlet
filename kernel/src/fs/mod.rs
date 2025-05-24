@@ -1,9 +1,11 @@
 pub mod drivers;
+pub mod syscall;
+pub mod helper;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
-use crate::device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice};
+use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task};
 
 use spin::{Mutex, RwLock};
 
@@ -30,6 +32,7 @@ pub enum FileSystemErrorKind {
     PermissionDenied,
     IoError,
     InvalidData,
+    InvalidPath,
     AlreadyExists,
     NotADirectory,
     NotAFile,
@@ -83,140 +86,83 @@ pub struct FileMetadata {
     pub accessed_time: u64,
 }
 
-pub struct File<'a> {
-    pub path: String,
-    handle: Option<Box<dyn FileHandle>>,
-    is_open: bool,
-    manager_ref: ManagerRef<'a>,
+#[derive(Clone)]
+pub struct File {
+    // pub path: String,
+    handle: Arc<dyn FileHandle>,
 }
-impl<'a> File<'a> {
-    //// Create a new file object (use the global manager by default)
-    pub fn new(path: String) -> Self {
-        Self {
-            path,
-            handle: None,
-            is_open: false,
-            manager_ref: ManagerRef::Global,
-        }
+impl File {
+    //// Open a file using the global VFS manager
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the file
+    /// 
+    /// # Returns
+    ///
+    /// * `Result<File>` - The opened file object
+    /// 
+    pub fn open(path: String) -> Result<Self>{
+        let handle = get_vfs_manager().open(&path, 0)?;
+        Ok(Self {
+            handle,
+        })
     }
     
-    /// Create a file object that uses a specific manager
-    pub fn with_manager(path: String, manager: &'a mut VfsManager) -> Self {
-        Self {
-            path,
-            handle: None,
-            is_open: false,
-            manager_ref: ManagerRef::Local(manager),
-        }
+    /// Open a file using a specific VFS manager
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the file
+    /// * `manager` - The VFS manager to use
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<File>` - The opened file object
+    /// 
+    pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self> {
+        let handle = manager.open(&path, 0)?;
+        Ok(Self {
+            handle,
+        })
     }
-    
-    // Internal method to get the manager to use
-    fn get_manager(&self) -> &VfsManager {
-        match &self.manager_ref {
-            ManagerRef::Global => get_vfs_manager(),
-            ManagerRef::Local(manager) => manager,
-        }
-    }
-    
-    /// Open the file
-    pub fn open(&mut self, flags: u32) -> Result<()> {
-        if self.is_open {
-            return Ok(());
-        }
-        
-        let handle = self.get_manager().open(&self.path, flags)?;
-        self.handle = Some(handle);
-        self.is_open = true;
-        Ok(())
-    }
-    
-    /// Close the file
-    pub fn close(&mut self) -> Result<()> {
-        if !self.is_open {
-            return Ok(());
-        }
-        
-        if let Some(mut handle) = self.handle.take() {
-            let result = handle.close();
-            self.is_open = false;
-            result
-        } else {
-            Ok(())
-        }
-    }
-    
+
     /// Read data from the file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `buffer` - The buffer to read data into
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<usize>` - The number of bytes read
+    /// 
     pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        if !self.is_open {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "File not open".to_string(),
-            });
-        }
-        
-        if let Some(handle) = self.handle.as_mut() {
-            handle.read(buffer)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+        self.handle.read(buffer)
     }
     
     /// Write data to the file
-    pub fn write(&mut self, buffer: &[u8]) -> Result<usize> {
-        if !self.is_open {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "File not open".to_string(),
-            });
-        }
-        
-        if let Some(handle) = self.handle.as_mut() {
-            handle.write(buffer)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+    /// 
+    /// # Arguments
+    /// 
+    /// * `buffer` - The buffer containing data to write
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<usize>` - The number of bytes written
+    /// 
+    pub fn write(&mut self, buffer: &[u8]) -> Result<usize> { 
+        self.handle.write(buffer)
     }
     
     /// Change the position within the file
     pub fn seek(&mut self, whence: SeekFrom) -> Result<u64> {
-        if !self.is_open {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "File not open".to_string(),
-            });
-        }
-        
-        if let Some(handle) = self.handle.as_mut() {
-            handle.seek(whence)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+        self.handle.seek(whence)
     }
     
     /// Get the metadata of the file
     pub fn metadata(&self) -> Result<FileMetadata> {
-        if !self.is_open {
-            // Metadata can be obtained even if the file is not open
-            return self.get_manager().metadata(&self.path);
-        }
-        
-        if let Some(handle) = self.handle.as_ref() {
-            handle.metadata()
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: "Invalid file handle".to_string(),
-            })
-        }
+        self.handle.metadata()
     }
     
     /// Get the size of the file
@@ -239,19 +185,11 @@ impl<'a> File<'a> {
         
         Ok(buffer)
     }
-    
-    /// Check if the file is open
-    pub fn is_open(&self) -> bool {
-        self.is_open
-    }
 }
 
-impl<'a> Drop for File<'a> {
+impl Drop for File {
     fn drop(&mut self) {
-        // Automatically close the file when dropped
-        if self.is_open {
-            let _ = self.close();
-        }
+        self.handle.release().unwrap();
     }
 }
 /// Structure representing a directory entry
@@ -270,14 +208,14 @@ pub struct Directory<'a> {
 }
 
 impl<'a> Directory<'a> {
-    pub fn new(path: String) -> Self {
+    pub fn open(path: String) -> Self {
         Self {
             path,
             manager_ref: ManagerRef::Global,
         }
     }
     
-    pub fn with_manager(path: String, manager: &'a mut VfsManager) -> Self {
+    pub fn open_with_manager(path: String, manager: &'a mut VfsManager) -> Self {
         Self {
             path,
             manager_ref: ManagerRef::Local(manager),
@@ -324,16 +262,16 @@ pub enum SeekFrom {
 /// Trait for file handlers
 pub trait FileHandle: Send + Sync {
     /// Read from the file
-    fn read(&mut self, buffer: &mut [u8]) -> Result<usize>;
+    fn read(&self, buffer: &mut [u8]) -> Result<usize>;
     
     /// Write to the file
-    fn write(&mut self, buffer: &[u8]) -> Result<usize>;
+    fn write(&self, buffer: &[u8]) -> Result<usize>;
     
     /// Move the position within the file
-    fn seek(&mut self, whence: SeekFrom) -> Result<u64>;
+    fn seek(&self, whence: SeekFrom) -> Result<u64>;
     
-    /// Close the file
-    fn close(&mut self) -> Result<()>;
+    /// Release the file resource
+    fn release(&self) -> Result<()>;
     
     /// Get the metadata
     fn metadata(&self) -> Result<FileMetadata>;
@@ -369,7 +307,7 @@ pub trait FileSystem: Send + Sync {
 /// Trait defining file operations
 pub trait FileOperations: Send + Sync {
     /// Open a file
-    fn open(&self, path: &str, flags: u32) -> Result<Box<dyn FileHandle>>;
+    fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileHandle>>;
     
     /// Read directory entries
     fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>>;
@@ -771,7 +709,7 @@ impl VfsManager {
     ///
     /// # Arguments
     /// 
-    /// * `path` - The path to resolve
+    /// * `path` - The path to resolve (must be absolute)
     /// 
     /// # Returns
     /// 
@@ -782,6 +720,13 @@ impl VfsManager {
     /// * `FileSystemError` - If no file system is mounted for the specified path
     /// 
     fn resolve_path(&self, path: &str) -> Result<(FileSystemRef, String)> {
+        // Check if the path is absolute
+        if !path.starts_with('/') {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::InvalidPath,
+                message: format!("Path must be absolute: {}", path),
+            });
+        }
         let path = Self::normalize_path(path);
         let mut best_match = "";
         let mount_points = self.mount_points.read();
@@ -823,9 +768,39 @@ impl VfsManager {
         Ok((fs, relative_path))
     }
 
+    /// Get absolute path from relative path and current working directory
+    /// 
+    /// # Arguments
+    /// 
+    /// * `task` - The task containing the current working directory
+    /// * `path` - The relative path to convert
+    /// 
+    pub fn to_absolute_path(task: &Task, path: &str) -> Result<String> {
+        if path.starts_with('/') {
+            // If the path is already absolute, return it as is
+            Ok(path.to_string())
+        } else {
+            let cwd = task.cwd.clone();
+            if cwd.is_none() {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::InvalidPath,
+                    message: "Current working directory is not set".to_string(),
+                });
+            }
+            // Combine the current working directory and the relative path to create an absolute path
+            let mut absolute_path = cwd.unwrap();
+            if !absolute_path.ends_with('/') {
+                absolute_path.push('/');
+            }
+            absolute_path.push_str(path);
+            // Normalize and return the result
+            Ok(Self::normalize_path(&absolute_path))
+        }
+    }
+
     
     // Open a file
-    pub fn open(&self, path: &str, flags: u32) -> Result<Box<dyn FileHandle>> {
+    pub fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileHandle>> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))
     }
     

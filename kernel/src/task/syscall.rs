@@ -1,10 +1,9 @@
-use alloc::string::ToString;
 use alloc::vec::Vec;
-use core::{error, str};
+use core::str;
 
 use crate::abi::{AbiRegistry, MAX_ABI_LENGTH};
 use crate::device::manager::DeviceManager;
-use crate::fs::{File, MAX_PATH_LENGTH};
+use crate::fs::{File, VfsManager, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
@@ -139,7 +138,17 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     
     // Convert path bytes to string
     let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => s,
+        Ok(s) => match VfsManager::to_absolute_path(&task, s) {
+            Ok(path) => path,
+            Err(_) => {
+                // Restore the managed pages, memory mapping and sizes
+                task.managed_pages = backup_pages; // Restore the pages
+                task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
+                task.text_size = backup_text_size; // Restore the text size
+                task.data_size = backup_data_size; // Restore the data size
+                return usize::MAX; // Path error
+            }
+        },
         Err(_) => {
             // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
@@ -151,8 +160,8 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     };
     
     // Try to open the executable file
-    let mut file = File::new(path_str.to_string());
-    if file.open(0).is_err() {
+    let file = File::open(path_str.clone());
+    if file.is_err() {
         // Restore the managed pages, memory mapping and sizes
         task.managed_pages = backup_pages; // Restore the pages
         task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
@@ -160,6 +169,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         task.data_size = backup_data_size; // Restore the data size
         return usize::MAX; // File open error
     }
+    let mut file = file.unwrap();
 
     task.text_size = 0;
     task.data_size = 0;
@@ -169,7 +179,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     match load_elf_into_task(&mut file, task) {
         Ok(entry_point) => {
             // Set the name
-            task.name = path_str.to_string();
+            task.name = path_str;
             // Clear page table entries
             let idx = vm::get_root_page_table_idx(task.vm_manager.get_asid()).unwrap();
             let root_page_table = vm::get_page_table(idx).unwrap();

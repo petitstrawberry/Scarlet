@@ -33,8 +33,8 @@
 //! let fs = cpio_driver.create_from_memory(&initramfs_memory_area)?;
 //! vfs_manager.register_filesystem(fs)?;
 //! ```
-use alloc::{boxed::Box, format, string::{String, ToString}, vec::Vec};
-use spin::Mutex;
+use alloc::{boxed::Box, format, string::{String, ToString}, sync::Arc, vec::Vec};
+use spin::{Mutex, RwLock};
 
 use crate::{driver_initcall, fs::{
     get_vfs_manager, Directory, DirectoryEntry, FileHandle, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, Result, VirtualFileSystem
@@ -254,13 +254,13 @@ impl FileSystem for Cpiofs {
 }
 
 impl FileOperations for Cpiofs {
-    fn open(&self, path: &str, _flags: u32) -> Result<Box<dyn crate::fs::FileHandle>> {
+    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn crate::fs::FileHandle>> {
         let path = self.normalize_path(path);
         let entries = self.entries.lock();
         if let Some(entry) = entries.iter().find(|e| e.name == path) {
-            Ok(Box::new(CpiofsFileHandle {
-                content: entry.data.clone().unwrap_or_default(),
-                position: 0,
+            Ok(Arc::new(CpiofsFileHandle {
+                content: RwLock::new(entry.data.clone().unwrap_or_default()),
+                position: RwLock::new(0),
             }))
         } else {
             Err(FileSystemError {
@@ -352,45 +352,49 @@ impl FileOperations for Cpiofs {
     }
     
     fn root_dir(&self) -> Result<crate::fs::Directory> {
-        Ok(Directory::new(self.mount_point.clone() + "/"))
+        Ok(Directory::open(self.mount_point.clone() + "/"))
     }
 }
 
 struct CpiofsFileHandle {
-    content: Vec<u8>,
-    position: usize,
+    content: RwLock<Vec<u8>>,
+    position: RwLock<usize>,
 }
 
 impl FileHandle for CpiofsFileHandle {
-    fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        let available = self.content.len() - self.position;
+    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+        let content = self.content.read();
+        let mut position = self.position.write();
+        let available = content.len() - *position;
         let to_read = buffer.len().min(available);
-        buffer[..to_read].copy_from_slice(&self.content[self.position..self.position + to_read]);
-        self.position += to_read;
+        buffer[..to_read].copy_from_slice(&content[*position..*position + to_read]);
+        *position += to_read;
         Ok(to_read)
     }
 
-    fn write(&mut self, _buffer: &[u8]) -> Result<usize> {
+    fn write(&self, _buffer: &[u8]) -> Result<usize> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
             message: "Initramfs is read-only".to_string(),
         })
     }
 
-    fn seek(&mut self, whence: crate::fs::SeekFrom) -> Result<u64> {
+    fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64> {
+        let mut position = self.position.write();
+        let content = self.content.read();
         let new_pos = match whence {
             crate::fs::SeekFrom::Start(offset) => offset as usize,
             crate::fs::SeekFrom::Current(offset) => {
-                if offset < 0 && self.position < offset.abs() as usize {
+                if offset < 0 && *position < offset.abs() as usize {
                     0
                 } else if offset < 0 {
-                    self.position - offset.abs() as usize
+                    *position - offset.abs() as usize
                 } else {
-                    self.position + offset as usize
+                    *position + offset as usize
                 }
             },
             crate::fs::SeekFrom::End(offset) => {
-                let end = self.content.len();
+                let end = content.len();
                 if offset < 0 && end < offset.abs() as usize {
                     0
                 } else if offset < 0 {
@@ -401,18 +405,19 @@ impl FileHandle for CpiofsFileHandle {
             },
         };
         
-        self.position = new_pos;
-        Ok(self.position as u64)
+        *position = new_pos;
+        Ok(*position as u64)
     }
 
-    fn close(&mut self) -> Result<()> {
+    fn release(&self) -> Result<()> {
         Ok(())
     }
 
     fn metadata(&self) -> Result<FileMetadata> {
+        let content = self.content.read();
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
-            size: self.content.len(),
+            size: content.len(),
             permissions: crate::fs::FilePermission {
                 read: true,
                 write: false,

@@ -10,8 +10,13 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use spin::Mutex;
 
-use crate::{abi::{scarlet::ScarletAbi, AbiModule}, arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, FileHandle}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion}}};
+use crate::abi::{scarlet::ScarletAbi, AbiModule};
 
+/// The maximum number of file descriptors a task can have.
+/// This value is set to 256 as a reasonable default for most use cases,
+/// balancing resource usage and typical application needs. Adjust if necessary.
+const NUM_OF_FDS: usize = 256;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
@@ -55,6 +60,12 @@ pub struct Task {
 
     /// Dynamic ABI
     pub abi: Option<Box<dyn AbiModule>>,
+
+    // File descriptors (File) table
+    fd_table: Vec<usize>,
+    files: [Option<File>; 256],
+    // Current working directory
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +79,7 @@ static TASK_ID: Mutex<usize> = Mutex::new(1);
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
-        let task = Task {
+        let mut task = Task {
             id: *taskid,
             name,
             priority,
@@ -91,8 +102,16 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            abi: Some(Box::new(ScarletAbi::default())) // Default ABI
+            abi: Some(Box::new(ScarletAbi::default())), // Default ABI
+            fd_table: Vec::new(),
+            files: [ const { None }; NUM_OF_FDS],
+            cwd: None,
         };
+        
+        for i in (0..NUM_OF_FDS).rev() {
+            task.fd_table.push(i);
+        }
+
         *taskid += 1;
         task
     }
@@ -567,6 +586,118 @@ impl Task {
         self.exit_status
     }
 
+    /// Get the file descriptor table
+    /// 
+    /// # Returns
+    /// A reference to the file descriptor table
+    /// 
+    pub fn get_fd_table(&self) -> &Vec<usize> {
+        &self.fd_table
+    }
+
+    /// Get the file at the specified index
+    /// 
+    /// # Arguments
+    /// * `index` - The index of the file
+    /// 
+    /// # Returns
+    /// The file at the specified index, or None if not found
+    /// 
+    pub fn get_file(&self, index: usize) -> Option<&File> {
+        if index < NUM_OF_FDS {
+            self.files[index].as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Get the mutable file at the specified file descriptor
+    /// 
+    /// # Arguments
+    /// * `fd` - The file descriptor of the file
+    /// 
+    /// # Returns
+    /// The mutable file at the specified file descriptor, or None if not found
+    /// 
+    pub fn get_mut_file(&mut self, fd: usize) -> Option<&mut File> {
+        if fd < NUM_OF_FDS {
+            self.files[fd].as_mut()
+        } else {
+            None
+        }
+    }
+
+    /// Set the file at the specified file descriptor
+    /// 
+    /// # Arguments
+    /// * `fd` - The file descriptor of the file
+    /// * `file` - The file to set
+    /// 
+    /// # Returns
+    /// The result of setting the file, which is Ok(()) if successful or an error message if not.
+    /// 
+    pub fn set_file(&mut self, fd: usize, file: File) -> Result<(), &'static str> {
+        if fd < NUM_OF_FDS {
+            self.files[fd] = Some(file);
+            Ok(())
+        } else {
+            Err("Index out of bounds")
+        }
+    }
+
+    /// Add a file to the task
+    /// 
+    /// # Arguments
+    /// * `file` - The file handle to add
+    /// 
+    /// # Returns
+    /// The file descriptor of the file, or an error message if the file descriptor table is full
+    /// 
+    pub fn add_file(&mut self, file: File) -> Result<usize, &'static str> {
+        if let Some(fd) = self.allocate_fd() {
+            self.files[fd] = Some(file);
+            Ok(fd)
+        } else {
+            Err("File descriptor table is full")
+        }
+    }
+
+    /// Remove a file from the task
+    /// 
+    /// # Arguments
+    /// * `fd` - The file descriptor to remove
+    /// 
+    /// # Returns
+    /// The result of removing the file, which is Ok(()) if successful or an error message if not.
+    /// 
+    pub fn remove_file(&mut self, fd: usize) -> Result<(), &'static str> {
+        if fd < NUM_OF_FDS {
+            if self.files[fd].is_none() {
+                return Err("File descriptor is already empty");
+            }
+            self.files[fd] = None;
+            self.fd_table.push(fd);
+            Ok(())
+        } else {
+            Err("File descriptor out of bounds")
+        }
+    }
+
+    /// Allocate a file descriptor
+    /// 
+    /// # Returns
+    /// The allocated file descriptor, or None if no file descriptors are available
+    /// 
+    fn allocate_fd(&mut self) -> Option<usize> {
+        if let Some(fd) = self.fd_table.pop() {
+            Some(fd)
+        } else {
+            None
+        }
+    }
+
+
+
     /// Clone this task, creating a near-identical copy
     /// 
     /// # Returns
@@ -645,6 +776,13 @@ impl Task {
         // Set the same entry point and PC
         child.entry = self.entry;
         child.vcpu.set_pc(self.vcpu.get_pc());
+
+        // Copy file descriptors
+        child.fd_table = self.fd_table.clone();
+        child.files = self.files.clone();
+
+        // Copy the current working directory
+        child.cwd = self.cwd.clone();
         
         // Set the state to Ready
         child.state = self.state;

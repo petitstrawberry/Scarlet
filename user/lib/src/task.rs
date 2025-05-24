@@ -1,4 +1,3 @@
-use crate::println;
 use crate::syscall::{syscall0, syscall1, syscall3, syscall4, Syscall};
 use crate::vec::Vec;
 use crate::boxed::Box;
