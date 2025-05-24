@@ -293,15 +293,6 @@ pub trait FileSystem: Send + Sync {
 
     /// Get the identifier of the file system
     fn get_id(&self) -> usize;
-
-    /// Get the block size
-    fn get_block_size(&self) -> usize;
-
-    /// Read from the disk
-    fn read_block(&mut self, block_idx: usize, buffer: &mut [u8]) -> Result<()>;
-
-    /// Write to the disk
-    fn write_block(&mut self, block_idx: usize, buffer: &[u8]) -> Result<()>;
 }
 
 /// Trait defining file operations
@@ -964,18 +955,6 @@ impl FileSystem for GenericFileSystem {
     
     fn get_id(&self) -> usize {
         self.id
-    }
-    
-    fn get_block_size(&self) -> usize {
-        self.block_size
-    }
-
-    fn read_block(&mut self, block_idx: usize, buffer: &mut [u8]) -> Result<()> {
-        self.read_block_internal(block_idx, buffer)
-    }
-
-    fn write_block(&mut self, block_idx: usize, buffer: &[u8]) -> Result<()> {
-        self.write_block_internal(block_idx, buffer)
     }
 }
 

@@ -233,24 +233,6 @@ impl FileSystem for Cpiofs {
     fn get_id(&self) -> usize {
         self.id
     }
-
-    fn get_block_size(&self) -> usize {
-        512 // Fixed block size
-    }
-
-    fn read_block(&mut self, _block_idx: usize, _buffer: &mut [u8]) -> Result<()> {
-        Err(FileSystemError {
-            kind: FileSystemErrorKind::NotSupported,
-            message: "Initramfs does not support block operations".to_string(),
-        })
-    }
-
-    fn write_block(&mut self, _block_idx: usize, _buffer: &[u8]) -> Result<()> {
-        Err(FileSystemError {
-            kind: FileSystemErrorKind::NotSupported,
-            message: "Initramfs does not support block operations".to_string(),
-        })
-    }
 }
 
 impl FileOperations for Cpiofs {
