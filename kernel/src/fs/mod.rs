@@ -103,10 +103,7 @@ impl File {
     /// * `Result<File>` - The opened file object
     /// 
     pub fn open(path: String) -> Result<Self>{
-        let handle = get_vfs_manager().open(&path, 0)?;
-        Ok(Self {
-            handle,
-        })
+        get_vfs_manager().open(&path, 0)
     }
     
     /// Open a file using a specific VFS manager
@@ -121,10 +118,7 @@ impl File {
     /// * `Result<File>` - The opened file object
     /// 
     pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self> {
-        let handle = manager.open(&path, 0)?;
-        Ok(Self {
-            handle,
-        })
+        manager.open(&path, 0)
     }
 
     /// Read data from the file
@@ -791,8 +785,12 @@ impl VfsManager {
 
     
     // Open a file
-    pub fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileHandle>> {
-        self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))
+    pub fn open(&self, path: &str, flags: u32) -> Result<File> {
+        let handle = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags));
+        match handle {
+            Ok(handle) => Ok(File { handle }),
+            Err(e) => Err(e),
+        }
     }
     
     // Read directory entries
