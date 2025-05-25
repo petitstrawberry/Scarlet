@@ -488,7 +488,7 @@ impl FileSystemDriver for TestFileSystemDriver {
     }
     
     fn filesystem_type(&self) -> FileSystemType {
-        FileSystemType::Block  // このドライバーはブロックデバイスベースのファイルシステム
+        FileSystemType::Block  // This driver is for block device based filesystem
     }
     
     fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
