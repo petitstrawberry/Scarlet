@@ -38,7 +38,7 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     };
 
     // Try to open the file
-    let file = File::open(path_str);
+    let file =  task.vfs.as_ref().unwrap().open(&path_str, 0);
     match file {
         Ok(file) => {
             // Register the file with the task

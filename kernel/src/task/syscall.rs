@@ -160,7 +160,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     };
     
     // Try to open the executable file
-    let file = File::open(path_str.clone());
+    let file = task.vfs.as_ref().unwrap().open(&path_str, 0);
     if file.is_err() {
         // Restore the managed pages, memory mapping and sizes
         task.managed_pages = backup_pages; // Restore the pages

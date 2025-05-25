@@ -10,6 +10,7 @@
 use core::ptr;
 
 use crate::device::fdt::FdtManager;
+use crate::fs::VfsManager;
 use crate::late_initcall;
 use crate::early_println;
 use crate::fs::{get_vfs_manager, FileSystemError};
@@ -67,11 +68,12 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
 /// and mounts it at the root ("/") mount point.
 ///
 /// # Arguments
+/// * `manager` - A mutable reference to the VFS manager. 
 /// * `initramfs` - The memory area of the initramfs.
 ///
 /// # Returns
 /// Result<(), FileSystemError>: Ok if mounting was successful, Err otherwise.
-fn mount_initramfs(initramfs: MemoryArea) -> Result<(), FileSystemError> {
+fn mount_initramfs(manager: &mut VfsManager, initramfs: MemoryArea) -> Result<(), FileSystemError> {
     early_println!("[InitRamFS] Initializing initramfs");
     
     early_println!("[InitRamFS] Using initramfs at address: {:#x}, size: {} bytes", 
@@ -84,7 +86,7 @@ fn mount_initramfs(initramfs: MemoryArea) -> Result<(), FileSystemError> {
     let fs_id = vfs_manager.create_and_register_memory_fs("cpiofs", &initramfs)?;
     
     // Mount the filesystem at the root directory
-    match vfs_manager.mount(fs_id, "/") {
+    match manager.mount(fs_id, "/") {
         Ok(_) => {
             early_println!("[InitRamFS] Successfully mounted initramfs at root directory");
             Ok(())
@@ -96,18 +98,14 @@ fn mount_initramfs(initramfs: MemoryArea) -> Result<(), FileSystemError> {
     }
 }
 
-/// Late initialization of initramfs
-///
-/// This function is called after virtual memory is set up to mount
-/// the initramfs as the root filesystem.
 #[allow(static_mut_refs)]
-fn late_init_initramfs() {
+pub fn init_initramfs(manager: &mut VfsManager) {
     let initramfs_ptr = unsafe { INITRAMFS_AREA.as_ref().map(|area| area.start as *const u8).unwrap_or(core::ptr::null()) };
     if !initramfs_ptr.is_null() {
         let initramfs = unsafe { *INITRAMFS_AREA.as_ref().unwrap() };
         
         // Mount the initramfs
-        if let Err(e) = mount_initramfs(initramfs.clone()) {
+        if let Err(e) = mount_initramfs(manager, initramfs.clone()) {
             early_println!("[InitRamFS] Warning: Could not mount initramfs: {:?}", e);
             return;
         }
@@ -115,6 +113,3 @@ fn late_init_initramfs() {
         early_println!("[InitRamFS] Warning: Initramfs relocation failed, cannot mount");
     }
 }
-
-// Register the initramfs initialization functions to be called during boot
-late_initcall!(late_init_initramfs);
