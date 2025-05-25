@@ -910,99 +910,99 @@ fn test_create_from_nonexistent_driver() {
 fn test_container_rootfs_switching_demo() {
     // === Container Demo: Rootfs switching for container-like functionality ===
     
-    // 1. メインシステム用のファイルシステムをグローバルVfsManagerに設定
+    // 1. Set up filesystem for main system in global VfsManager
     let global_vfs = get_vfs_manager();
     
-    // メインシステム用のファイルシステム（TestFileSystemを使用）
+    // Filesystem for main system (using TestFileSystem)
     let main_device = Box::new(MockBlockDevice::new(1, "main_disk", 512, 100));
     let main_fs = Box::new(TestFileSystem::new(0, "main_testfs", main_device, 512));
     let main_fs_id = global_vfs.register_fs(main_fs);
     global_vfs.mount(main_fs_id, "/")
         .expect("Failed to mount main filesystem");
     
-    // メインシステムでディレクトリとファイルを作成
+    // Create directories and files in main system
     global_vfs.create_dir("/system").expect("Failed to create /system");
     global_vfs.create_file("/system/main.conf").expect("Failed to create main config");
     
-    // 2. コンテナ1用の独立したVfsManagerを作成
+    // 2. Create independent VfsManager for container 1
     let mut container1_vfs = VfsManager::new();
     
-    // コンテナ1用のファイルシステム
+    // Filesystem for container 1
     let container1_device = Box::new(MockBlockDevice::new(2, "container1_disk", 512, 100));
     let container1_fs = Box::new(TestFileSystem::new(1, "container1_testfs", container1_device, 512));
     let container1_fs_id = container1_vfs.register_fs(container1_fs);
     container1_vfs.mount(container1_fs_id, "/")
         .expect("Failed to mount container1 filesystem");
     
-    // コンテナ1のファイルシステムにアプリケーション用のファイルを作成
+    // Create application files in container 1 filesystem
     container1_vfs.create_dir("/app").expect("Failed to create /app");
     container1_vfs.create_file("/app/config.json").expect("Failed to create app config");
     container1_vfs.create_dir("/tmp").expect("Failed to create /tmp");
     
-    // 3. コンテナ2用の独立したVfsManagerを作成
+    // 3. Create independent VfsManager for container 2
     let mut container2_vfs = VfsManager::new();
     
-    // コンテナ2用のファイルシステム
+    // Filesystem for container 2
     let container2_device = Box::new(MockBlockDevice::new(3, "container2_disk", 512, 100));
     let container2_fs = Box::new(TestFileSystem::new(2, "container2_testfs", container2_device, 512));
     let container2_fs_id = container2_vfs.register_fs(container2_fs);
     container2_vfs.mount(container2_fs_id, "/")
         .expect("Failed to mount container2 filesystem");
     
-    // コンテナ2のファイルシステムに異なるアプリケーション用のファイルを作成
+    // Create different application files in container 2 filesystem
     container2_vfs.create_dir("/service").expect("Failed to create /service");
     container2_vfs.create_file("/service/daemon.conf").expect("Failed to create daemon config");
     container2_vfs.create_dir("/data").expect("Failed to create /data");
     
-    // 4. 異なるVfsManagerを持つタスクを作成
+    // 4. Create tasks with different VfsManagers
     
-    // メインシステムタスク（グローバルVfsManagerを使用）
+    // Main system task (uses global VfsManager)
     let mut main_task = new_user_task("main_system".to_string(), 0);
-    main_task.vfs = None; // グローバルVfsManagerを使用
+    main_task.vfs = None; // Use global VfsManager
     main_task.cwd = Some("/".to_string());
     
-    // コンテナ1タスク（独立したVfsManagerを使用）
+    // Container 1 task (uses independent VfsManager)
     let mut container1_task = new_user_task("container1_app".to_string(), 0);
     container1_task.vfs = Some(Arc::new(container1_vfs));
     container1_task.cwd = Some("/app".to_string());
     
-    // コンテナ2タスク（独立したVfsManagerを使用）
+    // Container 2 task (uses independent VfsManager)
     let mut container2_task = new_user_task("container2_service".to_string(), 0);
     container2_task.vfs = Some(Arc::new(container2_vfs));
     container2_task.cwd = Some("/service".to_string());
     
-    // 5. 各タスクからのファイルシステムアクセスをテスト
+    // 5. Test filesystem access from each task
     
-    // メインシステムタスクからのアクセス（グローバルVfsManagerを使用）
+    // Access from main system task (uses global VfsManager)
     let main_entries = global_vfs
         .read_dir("/")
         .expect("Failed to read root directory from main task");
     
-    // /systemディレクトリが見えることを確認
+    // Verify that /system directory is visible
     assert!(main_entries.iter().any(|e| e.name == "system"));
     
-    // コンテナ1タスクからのアクセス
+    // Access from container 1 task
     let container1_entries = container1_task.vfs.as_ref().unwrap()
         .read_dir("/")
         .expect("Failed to read root directory from container1 task");
     
-    // /appディレクトリが見えて、/systemは見えないことを確認
+    // Verify that /app directory is visible but /system is not
     assert!(container1_entries.iter().any(|e| e.name == "app"));
     assert!(!container1_entries.iter().any(|e| e.name == "system"));
     
-    // コンテナ2タスクからのアクセス
+    // Access from container 2 task
     let container2_entries = container2_task.vfs.as_ref().unwrap()
         .read_dir("/")
         .expect("Failed to read root directory from container2 task");
     
-    // /serviceディレクトリが見えて、/systemや/appは見えないことを確認
+    // Verify that /service directory is visible but /system and /app are not
     assert!(container2_entries.iter().any(|e| e.name == "service"));
     assert!(!container2_entries.iter().any(|e| e.name == "system"));
     assert!(!container2_entries.iter().any(|e| e.name == "app"));
     
-    // 6. パス解決のテスト
+    // 6. Test path resolution
     
-    // 各タスクの現在のワーキングディレクトリからの相対パス解決
+    // Relative path resolution from each task's current working directory
     let main_abs_path = VfsManager::to_absolute_path(&main_task, "main.conf")
         .expect("Failed to resolve path in main task");
     assert_eq!(main_abs_path, "/main.conf");
@@ -1015,19 +1015,19 @@ fn test_container_rootfs_switching_demo() {
         .expect("Failed to resolve path in container2 task");
     assert_eq!(container2_abs_path, "/service/daemon.conf");
     
-    // 7. ファイルアクセスの分離をテスト
+    // 7. Test file access isolation
     
-    // メインシステムのファイルにコンテナからアクセスできないことを確認
+    // Verify that containers cannot access main system files
     let container1_main_access = container1_task.vfs.as_ref().unwrap()
         .open("/system/main.conf", 0);
     assert!(container1_main_access.is_err(), "Container1 should not access main system files");
     
-    // コンテナ1のファイルにコンテナ2からアクセスできないことを確認
+    // Verify that container 2 cannot access container 1 files
     let container2_app_access = container2_task.vfs.as_ref().unwrap()
         .open("/app/config.json", 0);
     assert!(container2_app_access.is_err(), "Container2 should not access container1 files");
     
-    // 各コンテナは自分のファイルにはアクセスできることを確認
+    // Verify that each container can access its own files
     let container1_own_access = container1_task.vfs.as_ref().unwrap()
         .open("/app/config.json", 0);
     assert!(container1_own_access.is_ok(), "Container1 should access its own files");
@@ -1036,32 +1036,32 @@ fn test_container_rootfs_switching_demo() {
         .open("/service/daemon.conf", 0);
     assert!(container2_own_access.is_ok(), "Container2 should access its own files");
     
-    // 8. タスククローン時のVfsManager継承をテスト
+    // 8. Test VfsManager inheritance during task cloning
     
-    // コンテナ1タスクをクローンして、VfsManagerが継承されることを確認
+    // Clone container 1 task and verify VfsManager inheritance
     let cloned_container1_task = container1_task.clone_task()
         .expect("Failed to clone container1 task");
     
-    // クローンされたタスクも同じVfsManagerを使用することを確認
+    // Verify that cloned task uses same VfsManager
     assert!(cloned_container1_task.vfs.is_some());
     
-    // クローンされたタスクからも同じファイルシステムが見えることを確認
+    // Verify that cloned task sees same filesystem
     let cloned_entries = cloned_container1_task.vfs.as_ref().unwrap()
         .read_dir("/")
         .expect("Failed to read directory from cloned task");
     assert!(cloned_entries.iter().any(|e| e.name == "app"));
     assert!(!cloned_entries.iter().any(|e| e.name == "system"));
     
-    // 9. VfsManagerの統計情報を確認
+    // 9. Verify VfsManager statistics
     assert_eq!(global_vfs.mount_points.read().len(), 1);
     assert_eq!(container1_task.vfs.as_ref().unwrap().mount_points.read().len(), 1);
     assert_eq!(container2_task.vfs.as_ref().unwrap().mount_points.read().len(), 1);
     
-    // 10. クリーンアップ
+    // 10. Cleanup
     let _ = global_vfs.unmount("/");
     
     // === Container Demo completed successfully! ===
-    // 実証された機能:
+    // Demonstrated features:
     // - ✓ Multiple isolated VfsManager instances
     // - ✓ Different filesystem views per container/task
     // - ✓ Path resolution isolation
