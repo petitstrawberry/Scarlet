@@ -850,3 +850,57 @@ fn test_to_absolute_path() {
     let absolute_path = VfsManager::to_absolute_path(&task, relative_path);
     assert!(absolute_path.is_err());
 }
+
+#[test_case]
+fn test_driver_registration() {
+    let mut manager = FileSystemDriverManager::new();
+    
+    // 最初は空
+    assert_eq!(manager.list_drivers().len(), 0);
+    assert!(!manager.has_driver("testfs"));
+    
+    // ドライバを登録
+    manager.register_driver(Box::new(TestFileSystemDriver));
+    
+    // 登録されていることを確認
+    assert_eq!(manager.list_drivers().len(), 1);
+    assert!(manager.has_driver("testfs"));
+    assert_eq!(manager.list_drivers()[0], "testfs");
+}
+
+#[test_case]
+fn test_driver_type_check() {
+    let mut manager = FileSystemDriverManager::new();
+    manager.register_driver(Box::new(TestFileSystemDriver));
+    
+    // ドライバのタイプを確認
+    assert_eq!(manager.get_driver_type("testfs"), Some(FileSystemType::Block));
+    assert_eq!(manager.get_driver_type("nonexistent"), None);
+}
+
+#[test_case]
+fn test_create_from_block() {
+    let mut manager = FileSystemDriverManager::new();
+    manager.register_driver(Box::new(TestFileSystemDriver));
+    
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+    let result = manager.create_from_block("testfs", device, 512);
+    
+    assert!(result.is_ok());
+    let fs = result.unwrap();
+    assert_eq!(fs.name(), "testfs");
+}
+
+#[test_case]
+fn test_create_from_nonexistent_driver() {
+    let manager = FileSystemDriverManager::new();
+    
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+    let result = manager.create_from_block("nonexistent", device, 512);
+    
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind, FileSystemErrorKind::NotFound);
+        assert_eq!(e.message, "File system driver 'nonexistent' not found");
+    }
+}

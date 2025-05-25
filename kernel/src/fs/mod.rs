@@ -5,7 +5,7 @@ pub mod helper;
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
-use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task};
+use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task, vm::vmem::MemoryArea};
 
 use spin::{Mutex, RwLock};
 
@@ -401,6 +401,146 @@ pub trait FileSystemDriver: Send + Sync {
     }
 }
 
+/// File system driver manager responsible for managing file system drivers
+/// 
+/// Separates the responsibility of driver management from VfsManager,
+/// handling registration, search, and creation of file systems
+pub struct FileSystemDriverManager {
+    /// Registered file system drivers
+    drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
+}
+
+impl FileSystemDriverManager {
+    /// Create a new file system driver manager
+    pub fn new() -> Self {
+        Self {
+            drivers: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Register a file system driver
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver` - The file system driver to register
+    pub fn register_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
+        self.drivers.write().insert(driver.name().to_string(), driver);
+    }
+
+    /// Get a list of registered driver names
+    /// 
+    /// # Returns
+    /// 
+    /// * `Vec<String>` - List of registered driver names
+    pub fn list_drivers(&self) -> Vec<String> {
+        self.drivers.read().keys().cloned().collect()
+    }
+
+    /// Check if a driver with the specified name is registered
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name to check
+    /// 
+    /// # Returns
+    /// 
+    /// * `bool` - true if the driver is registered
+    pub fn has_driver(&self, driver_name: &str) -> bool {
+        self.drivers.read().contains_key(driver_name)
+    }
+
+    /// Create a file system from a block device
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name to use
+    /// * `block_device` - The block device
+    /// * `block_size` - The block size
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or the file system cannot be created
+    pub fn create_from_block(
+        &self,
+        driver_name: &str,
+        block_device: Box<dyn BlockDevice>,
+        block_size: usize,
+    ) -> Result<Box<dyn VirtualFileSystem>> {
+        let binding = self.drivers.read();
+        let driver = binding.get(driver_name).ok_or(FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: format!("File system driver '{}' not found", driver_name),
+        })?;
+
+        if driver.filesystem_type() == FileSystemType::Memory || driver.filesystem_type() == FileSystemType::Virtual {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: format!("File system driver '{}' does not support block devices", driver_name),
+            });
+        }
+
+        driver.create_from_block(block_device, block_size)
+    }
+
+    /// Create a file system from a memory area
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name to use
+    /// * `memory_area` - The memory area
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or the file system cannot be created
+    pub fn create_from_memory(
+        &self,
+        driver_name: &str,
+        memory_area: &MemoryArea,
+    ) -> Result<Box<dyn VirtualFileSystem>> {
+        let binding = self.drivers.read();
+        let driver = binding.get(driver_name).ok_or(FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: format!("File system driver '{}' not found", driver_name),
+        })?;
+
+        if driver.filesystem_type() == FileSystemType::Block {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: format!("File system driver '{}' does not support memory-based filesystems", driver_name),
+            });
+        }
+
+        driver.create_from_memory(memory_area)
+    }
+
+    /// Get driver information
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name
+    /// 
+    /// # Returns
+    /// 
+    /// * `Option<FileSystemType>` - The file system type of the driver
+    pub fn get_driver_type(&self, driver_name: &str) -> Option<FileSystemType> {
+        self.drivers.read().get(driver_name).map(|driver| driver.filesystem_type())
+    }
+}
+
+impl Default for FileSystemDriverManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub type FileSystemRef = Arc<RwLock<Box<dyn VirtualFileSystem>>>;
 
 /// Mount point information
@@ -419,7 +559,7 @@ pub enum ManagerRef<'a> {
 pub struct VfsManager {
     filesystems: RwLock<Vec<FileSystemRef>>,
     mount_points: RwLock<BTreeMap<String, MountPoint>>,
-    drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
+    driver_manager: FileSystemDriverManager,
     next_fs_id: RwLock<usize>,
 }
 
@@ -428,14 +568,14 @@ impl VfsManager {
         Self {
             filesystems: RwLock::new(Vec::new()),
             mount_points: RwLock::new(BTreeMap::new()),
-            drivers: RwLock::new(BTreeMap::new()),
+            driver_manager: FileSystemDriverManager::new(),
             next_fs_id: RwLock::new(0),
         }
     }
 
     /// Register a file system driver
     pub fn register_fs_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
-        self.drivers.write().insert(driver.name().to_string(), driver);
+        self.driver_manager.register_driver(driver);
     }
     
     /// Register a file system
@@ -484,23 +624,8 @@ impl VfsManager {
         block_size: usize,
     ) -> Result<usize> {
         
-        // Create the file system using the driver
-        let fs = {
-            let binding = self.drivers.read();
-            let driver = binding.get(driver_name).ok_or(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: format!("File system driver '{}' not found", driver_name),
-            })?;
-            
-            if driver.filesystem_type() == FileSystemType::Memory || driver.filesystem_type() == FileSystemType::Virtual {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotSupported,
-                    message: format!("File system driver '{}' does not support block devices", driver_name),
-                });
-            }
-            
-            driver.create_from_block(block_device, block_size)?
-        };
+        // Create the file system using the driver manager
+        let fs = self.driver_manager.create_from_block(driver_name, block_device, block_size)?;
 
         Ok(self.register_fs(fs))
     }
@@ -526,23 +651,8 @@ impl VfsManager {
         memory_area: &crate::vm::vmem::MemoryArea,
     ) -> Result<usize> {
         
-        // Create the file system using the driver
-        let fs = {
-            let binding = self.drivers.read();
-            let driver = binding.get(driver_name).ok_or(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: format!("File system driver '{}' not found", driver_name),
-            })?;
-            
-            if driver.filesystem_type() == FileSystemType::Block {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotSupported,
-                    message: format!("File system driver '{}' does not support memory-based filesystems", driver_name),
-                });
-            }
-            
-            driver.create_from_memory(memory_area)?
-        };
+        // Create the file system using the driver manager
+        let fs = self.driver_manager.create_from_memory(driver_name, memory_area)?;
 
         Ok(self.register_fs(fs))
     }
