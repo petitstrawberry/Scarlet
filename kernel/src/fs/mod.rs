@@ -557,6 +557,7 @@ impl Default for FileSystemDriverManager {
 pub type FileSystemRef = Arc<RwLock<Box<dyn VirtualFileSystem>>>;
 
 /// Mount point information
+#[derive(Clone)]
 pub struct MountPoint {
     pub path: String,
     pub fs: FileSystemRef,
@@ -569,18 +570,19 @@ pub enum ManagerRef<'a> {
 
 
 /// VFS manager
+#[derive(Clone)]
 pub struct VfsManager {
-    filesystems: RwLock<Vec<FileSystemRef>>,
-    mount_points: RwLock<BTreeMap<String, MountPoint>>,
-    next_fs_id: RwLock<usize>,
+    filesystems: Vec<FileSystemRef>,
+    mount_points: BTreeMap<String, MountPoint>,
+    next_fs_id: usize,
 }
 
 impl VfsManager {
     pub fn new() -> Self {
         Self {
-            filesystems: RwLock::new(Vec::new()),
-            mount_points: RwLock::new(BTreeMap::new()),
-            next_fs_id: RwLock::new(0),
+            filesystems: Vec::new(),
+            mount_points: BTreeMap::new(),
+            next_fs_id: 0,
         }
     }
 
@@ -595,16 +597,14 @@ impl VfsManager {
     /// * `usize` - The ID of the registered file system
     /// 
     pub fn register_fs(&mut self, mut fs: Box<dyn VirtualFileSystem>) -> usize {
-        let mut filesystems = self.filesystems.write();
         // Assign a unique ID to the file system
-        let mut next_id = self.next_fs_id.write();
-        fs.set_id(*next_id);
+        fs.set_id(self.next_fs_id);
         // Increment the ID for the next file system
-        *next_id += 1;
-        let lock = Arc::new(RwLock::new(fs));
-        filesystems.push(lock);
+        self.next_fs_id += 1;
+        let fs = Arc::new(RwLock::new(fs));
+        self.filesystems.push(fs);
         // Return the ID
-        *next_id - 1
+        self.next_fs_id - 1
     }
 
     /// Create and register a block-based file system by specifying the driver name
@@ -675,16 +675,15 @@ impl VfsManager {
     /// * `Result<()>` - Ok if the mount was successful, Err if there was an error
     /// 
     pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
-        let mut filesystems = self.filesystems.write();
         // Search for the specified file system by ID
-        let fs_idx = filesystems.iter().position(|fs| fs.read().get_id() == fs_id)
+        let fs_idx = self.filesystems.iter().position(|fs| fs.read().get_id() == fs_id)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: format!("File system with ID {} not found", fs_id),
             })?;
             
         // Retrieve the file system (ownership transfer)
-        let fs = filesystems.remove(fs_idx);
+        let fs = self.filesystems.remove(fs_idx);
         {
             let mut fs = fs.write();
             
@@ -698,7 +697,7 @@ impl VfsManager {
             fs,
         };
         
-        self.mount_points.write().insert(mount_point.to_string(), mount_point_entry);
+        self.mount_points.insert(mount_point.to_string(), mount_point_entry);
         
         Ok(())
     }
@@ -715,14 +714,14 @@ impl VfsManager {
     /// 
     pub fn unmount(&mut self, mount_point: &str) -> Result<()> {
         // Search for the mount point
-        let mp = self.mount_points.write().remove(mount_point)
+        let mp = self.mount_points.remove(mount_point)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: "Mount point not found".to_string(),
             })?;
     
         // Return the file system to the registration list
-        self.filesystems.write().push(mp.fs);
+        self.filesystems.push(mp.fs);
         
         Ok(())
     }
@@ -830,10 +829,9 @@ impl VfsManager {
         }
         let path = Self::normalize_path(path);
         let mut best_match = "";
-        let mount_points = self.mount_points.read();
         
         // First try exact matching of mount points
-        for (mp_path, _) in mount_points.iter() {
+        for (mp_path, _) in self.mount_points.iter() {
             // If there's an exact match
             if path == *mp_path {
                 best_match = mp_path;
@@ -865,7 +863,7 @@ impl VfsManager {
             format!("/{}", suffix.trim_start_matches('/'))
         };
         
-        let fs = mount_points.get(best_match).unwrap().fs.clone();
+        let fs = self.mount_points.get(best_match).unwrap().fs.clone();
         Ok((fs, relative_path))
     }
 

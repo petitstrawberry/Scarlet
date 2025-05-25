@@ -68,7 +68,7 @@ pub struct Task {
     pub cwd: Option<String>,
 
     // VfsManager
-    pub vfs: Option<Arc<VfsManager>>,
+    pub vfs: Option<VfsManager>,
 }
 
 #[derive(Debug, Clone)]
@@ -787,7 +787,7 @@ impl Task {
 
         // Copy vfs manager
         if let Some(vfs) = &self.vfs {
-            child.vfs = Some(Arc::clone(vfs));
+            child.vfs = Some(vfs.clone());
         } else {
             child.vfs = None;
         }
