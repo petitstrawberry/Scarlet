@@ -13,19 +13,6 @@ extern crate alloc;
 
 pub const MAX_PATH_LENGTH: usize = 1024;
 
-// Singleton for global access to the VFS manager
-static mut VFS_MANAGER: Option<VfsManager> = None;
-
-#[allow(static_mut_refs)]
-pub fn get_vfs_manager() -> &'static mut VfsManager {
-    unsafe {
-        if VFS_MANAGER.is_none() {
-            VFS_MANAGER = Some(VfsManager::new());
-        }
-        VFS_MANAGER.as_mut().unwrap()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileSystemErrorKind {
     NotFound,
@@ -92,20 +79,6 @@ pub struct File {
     handle: Arc<dyn FileHandle>,
 }
 impl File {
-    //// Open a file using the global VFS manager
-    /// 
-    /// # Arguments
-    /// 
-    /// * `path` - The path to the file
-    /// 
-    /// # Returns
-    ///
-    /// * `Result<File>` - The opened file object
-    /// 
-    pub fn open(path: String) -> Result<Self>{
-        get_vfs_manager().open(&path, 0)
-    }
-    
     /// Open a file using a specific VFS manager
     /// 
     /// # Arguments
@@ -214,36 +187,6 @@ impl<'a> Directory<'a> {
             path,
             manager_ref: ManagerRef::Local(manager),
         }
-    }
-    
-    fn get_manager(&self) -> &VfsManager {
-        match &self.manager_ref {
-            ManagerRef::Global => get_vfs_manager(),
-            ManagerRef::Local(manager) => manager,
-        }
-    }
-
-    pub fn read_entries(&self) -> Result<Vec<DirectoryEntry>> {
-        // Read directory entries via the VFS manager
-        self.get_manager().read_dir(&self.path)
-    }
-    
-    pub fn create_file(&self, name: &str) -> Result<()> {
-        let path = if self.path.ends_with('/') {
-            format!("{}{}", self.path, name)
-        } else {
-            format!("{}/{}", self.path, name)
-        };
-        self.get_manager().create_file(&path)
-    }
-    
-    pub fn create_dir(&self, name: &str) -> Result<()> {
-        let path = if self.path.ends_with('/') {
-            format!("{}{}", self.path, name)
-        } else {
-            format!("{}/{}", self.path, name)
-        };
-        self.get_manager().create_dir(&path)
     }
 }
 

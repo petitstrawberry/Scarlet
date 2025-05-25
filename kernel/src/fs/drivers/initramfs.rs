@@ -11,9 +11,8 @@ use core::ptr;
 
 use crate::device::fdt::FdtManager;
 use crate::fs::VfsManager;
-use crate::late_initcall;
 use crate::early_println;
-use crate::fs::{get_vfs_manager, FileSystemError};
+use crate::fs::FileSystemError;
 use crate::vm::vmem::MemoryArea;
 
 static mut INITRAMFS_AREA: Option<MemoryArea> = None;

@@ -731,19 +731,19 @@ fn test_create_from_nonexistent_driver() {
 fn test_container_rootfs_switching_demo() {
     // === Container Demo: Rootfs switching for container-like functionality ===
     
-    // 1. Set up filesystem for main system in global VfsManager
-    let global_vfs = get_vfs_manager();
+    // 1. Set up filesystem for main system
+    let mut main_vfs = VfsManager::new();
     
     // Filesystem for main system (using TestFileSystem)
     let main_device = Box::new(MockBlockDevice::new(1, "main_disk", 512, 100));
     let main_fs = Box::new(TestFileSystem::new(0, "main_testfs", main_device, 512));
-    let main_fs_id = global_vfs.register_fs(main_fs);
-    global_vfs.mount(main_fs_id, "/")
+    let main_fs_id = main_vfs.register_fs(main_fs);
+    main_vfs.mount(main_fs_id, "/")
         .expect("Failed to mount main filesystem");
     
     // Create directories and files in main system
-    global_vfs.create_dir("/system").expect("Failed to create /system");
-    global_vfs.create_file("/system/main.conf").expect("Failed to create main config");
+    main_vfs.create_dir("/system").expect("Failed to create /system");
+    main_vfs.create_file("/system/main.conf").expect("Failed to create main config");
     
     // 2. Create independent VfsManager for container 1
     let mut container1_vfs = VfsManager::new();
@@ -795,7 +795,7 @@ fn test_container_rootfs_switching_demo() {
     // 5. Test filesystem access from each task
     
     // Access from main system task (uses global VfsManager)
-    let main_entries = global_vfs
+    let main_entries = main_vfs
         .read_dir("/")
         .expect("Failed to read root directory from main task");
     
@@ -874,12 +874,12 @@ fn test_container_rootfs_switching_demo() {
     assert!(!cloned_entries.iter().any(|e| e.name == "system"));
     
     // 9. Verify VfsManager statistics
-    assert_eq!(global_vfs.mount_points.len(), 1);
+    assert_eq!(main_vfs.mount_points.len(), 1);
     assert_eq!(container1_task.vfs.as_ref().unwrap().mount_points.len(), 1);
     assert_eq!(container2_task.vfs.as_ref().unwrap().mount_points.len(), 1);
     
     // 10. Cleanup
-    let _ = global_vfs.unmount("/");
+    let _ = main_vfs.unmount("/");
     
     // === Container Demo completed successfully! ===
     // Demonstrated features:
