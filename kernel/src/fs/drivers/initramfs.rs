@@ -78,12 +78,9 @@ fn mount_initramfs(manager: &mut VfsManager, initramfs: MemoryArea) -> Result<()
     
     early_println!("[InitRamFS] Using initramfs at address: {:#x}, size: {} bytes", 
         initramfs.start, initramfs.size());
-
-    // Get the VFS manager
-    let vfs_manager = get_vfs_manager();
     
     // Create and register a CPIO filesystem from the initramfs memory area
-    let fs_id = vfs_manager.create_and_register_memory_fs("cpiofs", &initramfs)?;
+    let fs_id = manager.create_and_register_memory_fs("cpiofs", &initramfs)?;
     
     // Mount the filesystem at the root directory
     match manager.mount(fs_id, "/") {

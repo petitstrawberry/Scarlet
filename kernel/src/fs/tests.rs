@@ -539,7 +539,7 @@ fn test_filesystem_driver_and_create_register_fs() {
     let mut manager = VfsManager::new();
 
     // Register a mock driver
-    manager.register_fs_driver(Box::new(TestFileSystemDriver));
+    get_fs_driver_manager().register_driver(Box::new(TestFileSystemDriver));
 
     // Create a block device
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));

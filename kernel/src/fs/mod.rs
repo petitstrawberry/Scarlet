@@ -401,6 +401,19 @@ pub trait FileSystemDriver: Send + Sync {
     }
 }
 
+// Singleton for global access to the FileSystemDriverManager
+static mut FS_DRIVER_MANAGER: Option<FileSystemDriverManager> = None;
+
+#[allow(static_mut_refs)]
+pub fn get_fs_driver_manager() -> &'static mut FileSystemDriverManager {
+    unsafe {
+        if FS_DRIVER_MANAGER.is_none() {
+            FS_DRIVER_MANAGER = Some(FileSystemDriverManager::new());
+        }
+        FS_DRIVER_MANAGER.as_mut().unwrap()
+    }
+}
+
 /// File system driver manager responsible for managing file system drivers
 /// 
 /// Separates the responsibility of driver management from VfsManager,
@@ -559,7 +572,6 @@ pub enum ManagerRef<'a> {
 pub struct VfsManager {
     filesystems: RwLock<Vec<FileSystemRef>>,
     mount_points: RwLock<BTreeMap<String, MountPoint>>,
-    driver_manager: FileSystemDriverManager,
     next_fs_id: RwLock<usize>,
 }
 
@@ -568,16 +580,10 @@ impl VfsManager {
         Self {
             filesystems: RwLock::new(Vec::new()),
             mount_points: RwLock::new(BTreeMap::new()),
-            driver_manager: FileSystemDriverManager::new(),
             next_fs_id: RwLock::new(0),
         }
     }
 
-    /// Register a file system driver
-    pub fn register_fs_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
-        self.driver_manager.register_driver(driver);
-    }
-    
     /// Register a file system
     /// 
     /// # Arguments
@@ -625,7 +631,7 @@ impl VfsManager {
     ) -> Result<usize> {
         
         // Create the file system using the driver manager
-        let fs = self.driver_manager.create_from_block(driver_name, block_device, block_size)?;
+        let fs = get_fs_driver_manager().create_from_block(driver_name, block_device, block_size)?;
 
         Ok(self.register_fs(fs))
     }
@@ -652,7 +658,7 @@ impl VfsManager {
     ) -> Result<usize> {
         
         // Create the file system using the driver manager
-        let fs = self.driver_manager.create_from_memory(driver_name, memory_area)?;
+        let fs = get_fs_driver_manager().create_from_memory(driver_name, memory_area)?;
 
         Ok(self.register_fs(fs))
     }
