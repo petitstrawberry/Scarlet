@@ -52,28 +52,39 @@ pub fn getppid() -> u32 {
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
 pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
-    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
+    let path_boxed_slice_len = path_boxed_slice.len();
+    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
+
     let argv_ptr = 0; // argv is not used in this implementation
     let envp_ptr = 0; // envp is not used in this implementation
     let res = syscall3(Syscall::Execve, path_ptr, argv_ptr, envp_ptr);
     
     // If the syscall fails, we need to free the allocated memory
     // (On success, the context is switched, so this code is not reached)
-    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the path
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) };
 
     // Return the result of the syscall
     res as i32
 }
 
 pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
-    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
+    let path_boxed_slice_len = path_boxed_slice.len();
+    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
+
     let argv_ptr = 0; // argv is not used in this implementation
     let envp_ptr = 0; // envp is not used in this implementation
-    let abi_ptr = Box::into_raw(str_to_cstr_bytes(abi).unwrap().into_boxed_slice()) as *const u8 as usize;
+   
+    let abi_boxed_slice = str_to_cstr_bytes(abi).unwrap().into_boxed_slice();
+    let abi_boxed_slice_len = abi_boxed_slice.len();
+    let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
+    
     let res = syscall4(Syscall::ExecveABI, path_ptr, argv_ptr, envp_ptr, abi_ptr);
 
-    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the path
-    let _ = unsafe { Box::from_raw(abi_ptr as *mut u8) }; // Free the abi
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) }; // Free the path
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(abi_ptr as *mut u8, abi_boxed_slice_len)) }; // Free the abi
+
     res as i32
 } 
 
