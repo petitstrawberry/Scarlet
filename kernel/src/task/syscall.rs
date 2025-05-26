@@ -254,6 +254,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
             
             // Safety check to prevent infinite loop
             if i > MAX_ABI_LENGTH {
+                trapframe.epc += 4;
                 return usize::MAX; // Path too long
             }
         }
@@ -265,6 +266,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     };
     let abi = AbiRegistry::instantiate(abi_str);
     if abi.is_none() {
+        trapframe.epc += 4;
         return usize::MAX; // ABI not found
     }
     let backup_abi = task.abi.take();
