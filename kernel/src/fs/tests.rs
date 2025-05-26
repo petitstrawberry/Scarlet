@@ -8,8 +8,8 @@ use crate::task::new_user_task;
 #[test_case]
 fn test_vfs_manager_creation() {
     let manager = VfsManager::new();
-    assert_eq!(manager.filesystems.len(), 0);
-    assert_eq!(manager.mount_points.len(), 0);
+    assert_eq!(manager.filesystems.read().len(), 0);
+    assert_eq!(manager.mount_points.read().len(), 0);
 }
 
 #[test_case]
@@ -19,12 +19,12 @@ fn test_fs_registration_and_mount() {
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
-    assert_eq!(manager.filesystems.len(), 1);
+    assert_eq!(manager.filesystems.read().len(), 1);
     
     let result = manager.mount(fs_id, "/mnt"); // Use fs_id
     assert!(result.is_ok());
-    assert_eq!(manager.filesystems.len(), 0);
-    assert_eq!(manager.mount_points.len(), 1);
+    assert_eq!(manager.filesystems.read().len(), 0);
+    assert_eq!(manager.mount_points.read().len(), 1);
 }
 
 #[test_case]
@@ -165,13 +165,13 @@ fn test_unmount() {
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
-    assert_eq!(manager.mount_points.len(), 1);
+    assert_eq!(manager.mount_points.read().len(), 1);
     
     // Unmount
     let result = manager.unmount("/mnt");
     assert!(result.is_ok());
-    assert_eq!(manager.mount_points.len(), 0);
-    assert_eq!(manager.filesystems.len(), 1); // The file system should be returned
+    assert_eq!(manager.mount_points.read().len(), 0);
+    assert_eq!(manager.filesystems.read().len(), 1); // The file system should be returned
     
     // Attempt to unmount an invalid mount point
     let result = manager.unmount("/invalid");
@@ -371,17 +371,17 @@ fn test_filesystem_driver_and_create_register_fs() {
 
     // Verify that the file system is correctly registered
     assert_eq!(fs_id, 0); // The first registration should have ID 0
-    assert_eq!(manager.filesystems.len(), 1);
+    assert_eq!(manager.filesystems.read().len(), 1);
 
     // Check the name of the registered file system
-    let registered_fs = manager.filesystems[0].clone();
+    let registered_fs = manager.filesystems.read()[0].clone();
     assert_eq!(registered_fs.read().name(), "testfs");
 
     // Mount and verify functionality
     let result = manager.mount(fs_id, "/mnt");
     assert!(result.is_ok());
-    assert_eq!(manager.mount_points.len(), 1);
-    assert!(manager.mount_points.contains_key("/mnt"));
+    assert_eq!(manager.mount_points.read().len(), 1);
+    assert!(manager.mount_points.read().contains_key("/mnt"));
 }
 
 #[test_case]
@@ -499,9 +499,9 @@ fn test_nested_mount_points() {
     manager.unmount("/").unwrap();
     
     // Ensure all mount points are unmounted
-    assert_eq!(manager.mount_points.len(), 0);
+    assert_eq!(manager.mount_points.read().len(), 0);
     // Ensure all file systems are returned to the registration list
-    assert_eq!(manager.filesystems.len(), 3);
+    assert_eq!(manager.filesystems.read().len(), 3);
 }
 
 #[test_case]
@@ -874,9 +874,9 @@ fn test_container_rootfs_switching_demo() {
     assert!(!cloned_entries.iter().any(|e| e.name == "system"));
     
     // 9. Verify VfsManager statistics
-    assert_eq!(main_vfs.mount_points.len(), 1);
-    assert_eq!(container1_task.vfs.as_ref().unwrap().mount_points.len(), 1);
-    assert_eq!(container2_task.vfs.as_ref().unwrap().mount_points.len(), 1);
+    assert_eq!(main_vfs.mount_points.read().len(), 1);
+    assert_eq!(container1_task.vfs.as_ref().unwrap().mount_points.read().len(), 1);
+    assert_eq!(container2_task.vfs.as_ref().unwrap().mount_points.read().len(), 1);
     
     // 10. Cleanup
     let _ = main_vfs.unmount("/");
@@ -914,14 +914,14 @@ fn test_vfs_manager_clone_behavior() {
     cloned_manager.mount(fs2_id, "/mnt2").unwrap();
     
     // Verify original manager is not affected
-    assert_eq!(original_manager.mount_points.len(), 1);
-    assert_eq!(cloned_manager.mount_points.len(), 2);
-    assert!(original_manager.mount_points.contains_key("/mnt"));
-    assert!(!original_manager.mount_points.contains_key("/mnt2"));
-    assert!(cloned_manager.mount_points.contains_key("/mnt"));
-    assert!(cloned_manager.mount_points.contains_key("/mnt2"));
-    assert_eq!(original_manager.next_fs_id, 1);
-    assert_eq!(cloned_manager.next_fs_id, 2);
+    assert_eq!(original_manager.mount_points.read().len(), 1);
+    assert_eq!(cloned_manager.mount_points.read().len(), 2);
+    assert!(original_manager.mount_points.read().contains_key("/mnt"));
+    assert!(!original_manager.mount_points.read().contains_key("/mnt2"));
+    assert!(cloned_manager.mount_points.read().contains_key("/mnt"));
+    assert!(cloned_manager.mount_points.read().contains_key("/mnt2"));
+    assert_eq!(*original_manager.next_fs_id.read(), 1);
+    assert_eq!(*cloned_manager.next_fs_id.read(), 2);
     
     // === Test 2: FileSystem object sharing ===
     // Create file in original manager
