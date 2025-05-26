@@ -784,12 +784,12 @@ fn test_container_rootfs_switching_demo() {
     
     // Container 1 task (uses independent VfsManager)
     let mut container1_task = new_user_task("container1_app".to_string(), 0);
-    container1_task.vfs = Some(container1_vfs);
+    container1_task.vfs = Some(Arc::new(container1_vfs));
     container1_task.cwd = Some("/app".to_string());
     
     // Container 2 task (uses independent VfsManager)
     let mut container2_task = new_user_task("container2_service".to_string(), 0);
-    container2_task.vfs = Some(container2_vfs);
+    container2_task.vfs = Some(Arc::new(container2_vfs));
     container2_task.cwd = Some("/service".to_string());
     
     // 5. Test filesystem access from each task
