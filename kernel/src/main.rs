@@ -63,10 +63,15 @@
 //!
 //! Scarlet implements a flexible Virtual File System (VFS) layer that provides:
 //!
+//! - **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance for containerization:
+//!   - Tasks store `Option<Arc<VfsManager>>` allowing independent filesystem namespaces
+//!   - Support for both complete isolation and selective filesystem sharing
+//!
 //! - **Filesystem Abstraction**: Common interface for multiple filesystem implementations through the `VirtualFileSystem` trait
 //!   hierarchy, enabling support for various filesystems like FAT32, ext2, or custom implementations
 //!
 //! - **Mount Point Management**: Support for mounting filesystems at different locations with unified path handling:
+//!   - Independent mount point namespaces per VfsManager instance
 //!   - Hierarchical mount points with proper path resolution
 //!   - Support for mounting the same filesystem at multiple locations
 //!   - Automatic mapping between absolute paths and filesystem-relative paths

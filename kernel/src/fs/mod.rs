@@ -1,3 +1,49 @@
+//! Virtual File System (VFS) module.
+//!
+//! This module provides a flexible Virtual File System implementation that supports
+//! per-task isolated filesystems and containerization.
+//!
+//! # Architecture Overview
+//!
+//! The VFS architecture has evolved to support containerization and process isolation:
+//!
+//! ## VfsManager Distribution
+//!
+//! - **Per-Task VfsManager**: Each task can have its own isolated `VfsManager` instance
+//!   stored as `Option<Arc<VfsManager>>` in the task structure
+//! - **Shared Filesystems**: Multiple VfsManager instances can share underlying filesystem
+//!   objects while maintaining independent mount points
+//!
+//! ## Key Components
+//!
+//! - `VfsManager`: Main VFS management structure supporting both isolation and sharing
+//! - `FileSystemDriverManager`: Global singleton for filesystem driver registration
+//! - `VirtualFileSystem`: Trait combining filesystem and file operation interfaces
+//! - `MountPoint`: Associates filesystem instances with mount paths
+//!
+//! ## Usage Patterns
+//!
+//! ### Container Isolation
+//! ```rust
+//! // Create isolated VfsManager for container
+//! let mut container_vfs = VfsManager::new();
+//! container_vfs.mount(fs_id, "/");
+//! 
+//! // Assign to task
+//! task.vfs = Some(Arc::new(container_vfs));
+//! ```
+//!
+//! ### Shared Filesystem Access
+//! ```rust
+//! // Clone VfsManager to share filesystem objects
+//! let shared_vfs = original_vfs.clone();
+//! // Independent mount points, shared filesystem content
+//! ```
+//!
+//!
+//! The design enables flexible deployment scenarios from simple shared filesystems
+//! to complete filesystem isolation for containerized applications.
+
 pub mod drivers;
 pub mod syscall;
 pub mod helper;
@@ -512,7 +558,40 @@ pub enum ManagerRef<'a> {
 }
 
 
-/// VFS manager
+/// VFS manager for per-task or shared filesystem management.
+///
+/// `VfsManager` provides flexible virtual filesystem management supporting both
+/// process isolation and filesystem sharing scenarios.
+///
+/// # Architecture
+///
+/// Each `VfsManager` instance maintains:
+/// - Independent mount point namespace
+/// - Reference-counted filesystem objects that can be shared between managers
+/// - Thread-safe operations via RwLock protection
+///
+/// # Usage Scenarios
+///
+/// ## 1. Container Isolation
+/// Each container gets its own `VfsManager` with completely isolated mount points:
+/// ```rust
+/// let mut container_vfs = VfsManager::new();
+/// container_vfs.mount(container_fs_id, "/");
+/// task.vfs = Some(Arc::new(container_vfs));
+/// ```
+///
+/// ## 2. Shared Filesystem Access
+/// Multiple tasks can share filesystem objects while maintaining independent mount points:
+/// ```rust
+/// let shared_vfs = original_vfs.clone(); // Shares filesystem objects
+/// shared_vfs.mount(shared_fs_id, "/mnt/shared"); // Independent mount points
+/// ```
+///
+/// # Thread Safety
+///
+/// All internal data structures use RwLock for thread-safe concurrent access.
+/// The `Clone` implementation creates independent mount point namespaces while
+/// sharing the underlying filesystem objects through Arc references.
 pub struct VfsManager {
     filesystems: RwLock<Vec<FileSystemRef>>,
     mount_points: RwLock<BTreeMap<String, MountPoint>>,
@@ -879,6 +958,30 @@ impl VfsManager {
 }
 
 impl Clone for VfsManager {
+    /// Creates a clone of VfsManager with independent mount points but shared filesystem objects.
+    ///
+    /// This implementation supports filesystem sharing between tasks while maintaining
+    /// independent mount point namespaces. Key characteristics:
+    ///
+    /// - **Mount Points**: Each clone gets independent mount point mappings
+    /// - **Filesystem Objects**: Underlying FileSystemRef objects are shared via Arc cloning
+    /// - **Filesystem ID**: Independent ID counters for each VfsManager instance
+    ///
+    /// # Use Cases
+    ///
+    /// - **Shared Filesystems**: Multiple containers sharing the same filesystem content
+    /// - **Independent Namespaces**: Each task can have different mount point layouts
+    /// - **Copy-on-Write Semantics**: Changes to mount points don't affect the original
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let original_vfs = VfsManager::new();
+    /// // ... register and mount filesystems in original_vfs
+    /// 
+    /// let shared_vfs = original_vfs.clone();
+    /// // shared_vfs sees the same filesystem objects but can mount them differently
+    /// ```
     fn clone(&self) -> Self {
         Self {
             filesystems: RwLock::new(self.filesystems.read().clone()),

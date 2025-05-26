@@ -777,11 +777,6 @@ fn test_container_rootfs_switching_demo() {
     
     // 4. Create tasks with different VfsManagers
     
-    // Main system task (uses global VfsManager)
-    let mut main_task = new_user_task("main_system".to_string(), 0);
-    main_task.vfs = None; // Use global VfsManager
-    main_task.cwd = Some("/".to_string());
-    
     // Container 1 task (uses independent VfsManager)
     let mut container1_task = new_user_task("container1_app".to_string(), 0);
     container1_task.vfs = Some(Arc::new(container1_vfs));
@@ -794,7 +789,7 @@ fn test_container_rootfs_switching_demo() {
     
     // 5. Test filesystem access from each task
     
-    // Access from main system task (uses global VfsManager)
+    // Access from main system task (no VfsManager assigned)
     let main_entries = main_vfs
         .read_dir("/")
         .expect("Failed to read root directory from main task");
@@ -822,11 +817,6 @@ fn test_container_rootfs_switching_demo() {
     assert!(!container2_entries.iter().any(|e| e.name == "app"));
     
     // 6. Test path resolution
-    
-    // Relative path resolution from each task's current working directory
-    let main_abs_path = VfsManager::to_absolute_path(&main_task, "main.conf")
-        .expect("Failed to resolve path in main task");
-    assert_eq!(main_abs_path, "/main.conf");
     
     let container1_abs_path = VfsManager::to_absolute_path(&container1_task, "config.json")
         .expect("Failed to resolve path in container1 task");
