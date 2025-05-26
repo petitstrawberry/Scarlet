@@ -63,10 +63,15 @@
 //!
 //! Scarlet implements a flexible Virtual File System (VFS) layer that provides:
 //!
+//! - **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance for containerization:
+//!   - Tasks store `Option<Arc<VfsManager>>` allowing independent filesystem namespaces
+//!   - Support for both complete isolation and selective filesystem sharing
+//!
 //! - **Filesystem Abstraction**: Common interface for multiple filesystem implementations through the `VirtualFileSystem` trait
 //!   hierarchy, enabling support for various filesystems like FAT32, ext2, or custom implementations
 //!
 //! - **Mount Point Management**: Support for mounting filesystems at different locations with unified path handling:
+//!   - Independent mount point namespaces per VfsManager instance
 //!   - Hierarchical mount points with proper path resolution
 //!   - Support for mounting the same filesystem at multiple locations
 //!   - Automatic mapping between absolute paths and filesystem-relative paths
@@ -161,10 +166,10 @@ pub mod fs;
 pub mod test;
 
 extern crate alloc;
-use alloc::string::ToString;
+use alloc::{string::ToString, sync::Arc};
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use environment::PAGE_SIZE;
-use fs::{drivers::initramfs::relocate_initramfs, File};
+use fs::{drivers::initramfs::{init_initramfs, relocate_initramfs}, File, VfsManager};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
@@ -249,12 +254,18 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
+    /* Initialize initramfs */
+    println!("[Scarlet Kernel] Initializing initramfs...");
+    let mut manager = VfsManager::new();
+    init_initramfs(&mut manager);
     /* Make init task */
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
+
     task.init();
+    task.vfs = Some(Arc::new(manager));
     task.cwd = Some("/".to_string());
-    let mut file = match  File::open("/bin/init".to_string()) {
+    let mut file = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
         Ok(file) => file,
         Err(e) => {
             panic!("Failed to open init file: {:?}", e);

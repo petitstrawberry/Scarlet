@@ -164,14 +164,16 @@ Examples of this can be seen in device management, filesystem access, and task s
 
 Scarlet implements a flexible Virtual File System (VFS) layer that provides:
 
+- **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance for containerization and namespace isolation
 - **Filesystem Abstraction**: Common interface for multiple filesystem implementations
-- **Mount Point Management**: Support for mounting filesystems at different locations in a unified hierarchy
+- **Mount Point Management**: Support for mounting filesystems at different locations in a unified hierarchy, with independent mount point namespaces per VfsManager
 - **Path Resolution**: Normalization and resolution of file paths across different mounted filesystems
 - **File Operations**: Standard operations (open, read, write, seek, close) with resource safety
+- **Shared Filesystem Access**: Multiple tasks can share filesystem objects while maintaining independent mount points
 - **Block Device Interface**: Abstraction layer for interacting with storage devices
 - **Driver Framework**: Extensible system for adding new filesystem implementations
 
-The VFS implementation uses Rust's trait system to define interfaces that different filesystems must implement, allowing for strong typing while maintaining flexibility.
+The VFS implementation supports both complete filesystem isolation for containers and selective sharing scenarios, using Rust's trait system to define interfaces that different filesystems must implement while maintaining flexibility and strong typing.
 
 ## Contributing
 

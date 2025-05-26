@@ -38,7 +38,11 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     };
 
     // Try to open the file
-    let file = File::open(path_str);
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+    let file = vfs.open(&path_str, 0);
     match file {
         Ok(file) => {
             // Register the file with the task

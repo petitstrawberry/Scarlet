@@ -1,3 +1,49 @@
+//! Virtual File System (VFS) module.
+//!
+//! This module provides a flexible Virtual File System implementation that supports
+//! per-task isolated filesystems and containerization.
+//!
+//! # Architecture Overview
+//!
+//! The VFS architecture has evolved to support containerization and process isolation:
+//!
+//! ## VfsManager Distribution
+//!
+//! - **Per-Task VfsManager**: Each task can have its own isolated `VfsManager` instance
+//!   stored as `Option<Arc<VfsManager>>` in the task structure
+//! - **Shared Filesystems**: Multiple VfsManager instances can share underlying filesystem
+//!   objects while maintaining independent mount points
+//!
+//! ## Key Components
+//!
+//! - `VfsManager`: Main VFS management structure supporting both isolation and sharing
+//! - `FileSystemDriverManager`: Global singleton for filesystem driver registration
+//! - `VirtualFileSystem`: Trait combining filesystem and file operation interfaces
+//! - `MountPoint`: Associates filesystem instances with mount paths
+//!
+//! ## Usage Patterns
+//!
+//! ### Container Isolation
+//! ```rust
+//! // Create isolated VfsManager for container
+//! let mut container_vfs = VfsManager::new();
+//! container_vfs.mount(fs_id, "/");
+//! 
+//! // Assign to task
+//! task.vfs = Some(Arc::new(container_vfs));
+//! ```
+//!
+//! ### Shared Filesystem Access
+//! ```rust
+//! // Clone VfsManager to share filesystem objects
+//! let shared_vfs = original_vfs.clone();
+//! // Independent mount points, shared filesystem content
+//! ```
+//!
+//!
+//! The design enables flexible deployment scenarios from simple shared filesystems
+//! to complete filesystem isolation for containerized applications.
+
 pub mod drivers;
 pub mod syscall;
 pub mod helper;
@@ -5,26 +51,13 @@ pub mod helper;
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
-use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task};
+use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task, vm::vmem::MemoryArea};
 
 use spin::{Mutex, RwLock};
 
 extern crate alloc;
 
 pub const MAX_PATH_LENGTH: usize = 1024;
-
-// Singleton for global access to the VFS manager
-static mut VFS_MANAGER: Option<VfsManager> = None;
-
-#[allow(static_mut_refs)]
-pub fn get_vfs_manager() -> &'static mut VfsManager {
-    unsafe {
-        if VFS_MANAGER.is_none() {
-            VFS_MANAGER = Some(VfsManager::new());
-        }
-        VFS_MANAGER.as_mut().unwrap()
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileSystemErrorKind {
@@ -92,23 +125,6 @@ pub struct File {
     handle: Arc<dyn FileHandle>,
 }
 impl File {
-    //// Open a file using the global VFS manager
-    /// 
-    /// # Arguments
-    /// 
-    /// * `path` - The path to the file
-    /// 
-    /// # Returns
-    ///
-    /// * `Result<File>` - The opened file object
-    /// 
-    pub fn open(path: String) -> Result<Self>{
-        let handle = get_vfs_manager().open(&path, 0)?;
-        Ok(Self {
-            handle,
-        })
-    }
-    
     /// Open a file using a specific VFS manager
     /// 
     /// # Arguments
@@ -121,10 +137,7 @@ impl File {
     /// * `Result<File>` - The opened file object
     /// 
     pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self> {
-        let handle = manager.open(&path, 0)?;
-        Ok(Self {
-            handle,
-        })
+        manager.open(&path, 0)
     }
 
     /// Read data from the file
@@ -220,36 +233,6 @@ impl<'a> Directory<'a> {
             path,
             manager_ref: ManagerRef::Local(manager),
         }
-    }
-    
-    fn get_manager(&self) -> &VfsManager {
-        match &self.manager_ref {
-            ManagerRef::Global => get_vfs_manager(),
-            ManagerRef::Local(manager) => manager,
-        }
-    }
-
-    pub fn read_entries(&self) -> Result<Vec<DirectoryEntry>> {
-        // Read directory entries via the VFS manager
-        self.get_manager().read_dir(&self.path)
-    }
-    
-    pub fn create_file(&self, name: &str) -> Result<()> {
-        let path = if self.path.ends_with('/') {
-            format!("{}{}", self.path, name)
-        } else {
-            format!("{}/{}", self.path, name)
-        };
-        self.get_manager().create_file(&path)
-    }
-    
-    pub fn create_dir(&self, name: &str) -> Result<()> {
-        let path = if self.path.ends_with('/') {
-            format!("{}{}", self.path, name)
-        } else {
-            format!("{}/{}", self.path, name)
-        };
-        self.get_manager().create_dir(&path)
     }
 }
 
@@ -407,9 +390,163 @@ pub trait FileSystemDriver: Send + Sync {
     }
 }
 
+// Singleton for global access to the FileSystemDriverManager
+static mut FS_DRIVER_MANAGER: Option<FileSystemDriverManager> = None;
+
+#[allow(static_mut_refs)]
+pub fn get_fs_driver_manager() -> &'static mut FileSystemDriverManager {
+    unsafe {
+        if FS_DRIVER_MANAGER.is_none() {
+            FS_DRIVER_MANAGER = Some(FileSystemDriverManager::new());
+        }
+        FS_DRIVER_MANAGER.as_mut().unwrap()
+    }
+}
+
+/// File system driver manager responsible for managing file system drivers
+/// 
+/// Separates the responsibility of driver management from VfsManager,
+/// handling registration, search, and creation of file systems
+pub struct FileSystemDriverManager {
+    /// Registered file system drivers
+    drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
+}
+
+impl FileSystemDriverManager {
+    /// Create a new file system driver manager
+    pub fn new() -> Self {
+        Self {
+            drivers: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Register a file system driver
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver` - The file system driver to register
+    pub fn register_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
+        self.drivers.write().insert(driver.name().to_string(), driver);
+    }
+
+    /// Get a list of registered driver names
+    /// 
+    /// # Returns
+    /// 
+    /// * `Vec<String>` - List of registered driver names
+    pub fn list_drivers(&self) -> Vec<String> {
+        self.drivers.read().keys().cloned().collect()
+    }
+
+    /// Check if a driver with the specified name is registered
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name to check
+    /// 
+    /// # Returns
+    /// 
+    /// * `bool` - true if the driver is registered
+    pub fn has_driver(&self, driver_name: &str) -> bool {
+        self.drivers.read().contains_key(driver_name)
+    }
+
+    /// Create a file system from a block device
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name to use
+    /// * `block_device` - The block device
+    /// * `block_size` - The block size
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or the file system cannot be created
+    pub fn create_from_block(
+        &self,
+        driver_name: &str,
+        block_device: Box<dyn BlockDevice>,
+        block_size: usize,
+    ) -> Result<Box<dyn VirtualFileSystem>> {
+        let binding = self.drivers.read();
+        let driver = binding.get(driver_name).ok_or(FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: format!("File system driver '{}' not found", driver_name),
+        })?;
+
+        if driver.filesystem_type() == FileSystemType::Memory || driver.filesystem_type() == FileSystemType::Virtual {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: format!("File system driver '{}' does not support block devices", driver_name),
+            });
+        }
+
+        driver.create_from_block(block_device, block_size)
+    }
+
+    /// Create a file system from a memory area
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name to use
+    /// * `memory_area` - The memory area
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or the file system cannot be created
+    pub fn create_from_memory(
+        &self,
+        driver_name: &str,
+        memory_area: &MemoryArea,
+    ) -> Result<Box<dyn VirtualFileSystem>> {
+        let binding = self.drivers.read();
+        let driver = binding.get(driver_name).ok_or(FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: format!("File system driver '{}' not found", driver_name),
+        })?;
+
+        if driver.filesystem_type() == FileSystemType::Block {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: format!("File system driver '{}' does not support memory-based filesystems", driver_name),
+            });
+        }
+
+        driver.create_from_memory(memory_area)
+    }
+
+    /// Get driver information
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The driver name
+    /// 
+    /// # Returns
+    /// 
+    /// * `Option<FileSystemType>` - The file system type of the driver
+    pub fn get_driver_type(&self, driver_name: &str) -> Option<FileSystemType> {
+        self.drivers.read().get(driver_name).map(|driver| driver.filesystem_type())
+    }
+}
+
+impl Default for FileSystemDriverManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub type FileSystemRef = Arc<RwLock<Box<dyn VirtualFileSystem>>>;
 
 /// Mount point information
+#[derive(Clone)]
 pub struct MountPoint {
     pub path: String,
     pub fs: FileSystemRef,
@@ -421,11 +558,43 @@ pub enum ManagerRef<'a> {
 }
 
 
-/// VFS manager
+/// VFS manager for per-task or shared filesystem management.
+///
+/// `VfsManager` provides flexible virtual filesystem management supporting both
+/// process isolation and filesystem sharing scenarios.
+///
+/// # Architecture
+///
+/// Each `VfsManager` instance maintains:
+/// - Independent mount point namespace
+/// - Reference-counted filesystem objects that can be shared between managers
+/// - Thread-safe operations via RwLock protection
+///
+/// # Usage Scenarios
+///
+/// ## 1. Container Isolation
+/// Each container gets its own `VfsManager` with completely isolated mount points:
+/// ```rust
+/// let mut container_vfs = VfsManager::new();
+/// container_vfs.mount(container_fs_id, "/");
+/// task.vfs = Some(Arc::new(container_vfs));
+/// ```
+///
+/// ## 2. Shared Filesystem Access
+/// Multiple tasks can share filesystem objects while maintaining independent mount points:
+/// ```rust
+/// let shared_vfs = original_vfs.clone(); // Shares filesystem objects
+/// shared_vfs.mount(shared_fs_id, "/mnt/shared"); // Independent mount points
+/// ```
+///
+/// # Thread Safety
+///
+/// All internal data structures use RwLock for thread-safe concurrent access.
+/// The `Clone` implementation creates independent mount point namespaces while
+/// sharing the underlying filesystem objects through Arc references.
 pub struct VfsManager {
     filesystems: RwLock<Vec<FileSystemRef>>,
     mount_points: RwLock<BTreeMap<String, MountPoint>>,
-    drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
     next_fs_id: RwLock<usize>,
 }
 
@@ -434,16 +603,10 @@ impl VfsManager {
         Self {
             filesystems: RwLock::new(Vec::new()),
             mount_points: RwLock::new(BTreeMap::new()),
-            drivers: RwLock::new(BTreeMap::new()),
             next_fs_id: RwLock::new(0),
         }
     }
 
-    /// Register a file system driver
-    pub fn register_fs_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
-        self.drivers.write().insert(driver.name().to_string(), driver);
-    }
-    
     /// Register a file system
     /// 
     /// # Arguments
@@ -455,16 +618,15 @@ impl VfsManager {
     /// * `usize` - The ID of the registered file system
     /// 
     pub fn register_fs(&mut self, mut fs: Box<dyn VirtualFileSystem>) -> usize {
-        let mut filesystems = self.filesystems.write();
+        let mut next_fs_id = self.next_fs_id.write();
         // Assign a unique ID to the file system
-        let mut next_id = self.next_fs_id.write();
-        fs.set_id(*next_id);
+        fs.set_id(*next_fs_id);
         // Increment the ID for the next file system
-        *next_id += 1;
-        let lock = Arc::new(RwLock::new(fs));
-        filesystems.push(lock);
+        *next_fs_id += 1;
+        let fs = Arc::new(RwLock::new(fs));
+        self.filesystems.write().push(fs);
         // Return the ID
-        *next_id - 1
+        *next_fs_id - 1
     }
 
     /// Create and register a block-based file system by specifying the driver name
@@ -490,23 +652,8 @@ impl VfsManager {
         block_size: usize,
     ) -> Result<usize> {
         
-        // Create the file system using the driver
-        let fs = {
-            let binding = self.drivers.read();
-            let driver = binding.get(driver_name).ok_or(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: format!("File system driver '{}' not found", driver_name),
-            })?;
-            
-            if driver.filesystem_type() == FileSystemType::Memory || driver.filesystem_type() == FileSystemType::Virtual {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotSupported,
-                    message: format!("File system driver '{}' does not support block devices", driver_name),
-                });
-            }
-            
-            driver.create_from_block(block_device, block_size)?
-        };
+        // Create the file system using the driver manager
+        let fs = get_fs_driver_manager().create_from_block(driver_name, block_device, block_size)?;
 
         Ok(self.register_fs(fs))
     }
@@ -532,23 +679,8 @@ impl VfsManager {
         memory_area: &crate::vm::vmem::MemoryArea,
     ) -> Result<usize> {
         
-        // Create the file system using the driver
-        let fs = {
-            let binding = self.drivers.read();
-            let driver = binding.get(driver_name).ok_or(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: format!("File system driver '{}' not found", driver_name),
-            })?;
-            
-            if driver.filesystem_type() == FileSystemType::Block {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotSupported,
-                    message: format!("File system driver '{}' does not support memory-based filesystems", driver_name),
-                });
-            }
-            
-            driver.create_from_memory(memory_area)?
-        };
+        // Create the file system using the driver manager
+        let fs = get_fs_driver_manager().create_from_memory(driver_name, memory_area)?;
 
         Ok(self.register_fs(fs))
     }
@@ -711,6 +843,7 @@ impl VfsManager {
     /// * `FileSystemError` - If no file system is mounted for the specified path
     /// 
     fn resolve_path(&self, path: &str) -> Result<(FileSystemRef, String)> {
+        let mount_points = self.mount_points.read();
         // Check if the path is absolute
         if !path.starts_with('/') {
             return Err(FileSystemError {
@@ -720,7 +853,6 @@ impl VfsManager {
         }
         let path = Self::normalize_path(path);
         let mut best_match = "";
-        let mount_points = self.mount_points.read();
         
         // First try exact matching of mount points
         for (mp_path, _) in mount_points.iter() {
@@ -791,8 +923,12 @@ impl VfsManager {
 
     
     // Open a file
-    pub fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileHandle>> {
-        self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))
+    pub fn open(&self, path: &str, flags: u32) -> Result<File> {
+        let handle = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags));
+        match handle {
+            Ok(handle) => Ok(File { handle }),
+            Err(e) => Err(e),
+        }
     }
     
     // Read directory entries
@@ -818,6 +954,40 @@ impl VfsManager {
     // Get the metadata
     pub fn metadata(&self, path: &str) -> Result<FileMetadata> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().metadata(relative_path))
+    }
+}
+
+impl Clone for VfsManager {
+    /// Creates a clone of VfsManager with independent mount points but shared filesystem objects.
+    ///
+    /// This implementation supports filesystem sharing between tasks while maintaining
+    /// independent mount point namespaces. Key characteristics:
+    ///
+    /// - **Mount Points**: Each clone gets independent mount point mappings
+    /// - **Filesystem Objects**: Underlying FileSystemRef objects are shared via Arc cloning
+    /// - **Filesystem ID**: Independent ID counters for each VfsManager instance
+    ///
+    /// # Use Cases
+    ///
+    /// - **Shared Filesystems**: Multiple containers sharing the same filesystem content
+    /// - **Independent Namespaces**: Each task can have different mount point layouts
+    /// - **Copy-on-Write Semantics**: Changes to mount points don't affect the original
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let original_vfs = VfsManager::new();
+    /// // ... register and mount filesystems in original_vfs
+    /// 
+    /// let shared_vfs = original_vfs.clone();
+    /// // shared_vfs sees the same filesystem objects but can mount them differently
+    /// ```
+    fn clone(&self) -> Self {
+        Self {
+            filesystems: RwLock::new(self.filesystems.read().clone()),
+            mount_points: RwLock::new(self.mount_points.read().clone()),
+            next_fs_id: RwLock::new(*self.next_fs_id.read()),
+        }
     }
 }
 

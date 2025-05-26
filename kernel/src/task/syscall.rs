@@ -159,8 +159,28 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         },
     };
     
+    // Ensure that task.vfs is initialized before proceeding.
+    if task.vfs.is_none() {
+        // Restore the managed pages, memory mapping and sizes
+        task.managed_pages = backup_pages; // Restore the pages
+        task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
+        task.text_size = backup_text_size; // Restore the text size
+        task.data_size = backup_data_size; // Restore the data size
+        return usize::MAX; // VFS not initialized
+    }
+    
     // Try to open the executable file
-    let file = File::open(path_str.clone());
+    let file = match task.vfs.as_ref() {
+        Some(vfs) => vfs.open(&path_str, 0),
+        None => {
+            // Restore the managed pages, memory mapping and sizes
+            task.managed_pages = backup_pages; // Restore the pages
+            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
+            task.text_size = backup_text_size; // Restore the text size
+            task.data_size = backup_data_size; // Restore the data size
+            return usize::MAX; // VFS uninitialized
+        }
+    };
     if file.is_err() {
         // Restore the managed pages, memory mapping and sizes
         task.managed_pages = backup_pages; // Restore the pages

@@ -18,10 +18,10 @@ fn test_fs_registration_and_mount() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
+    let fs_id = manager.register_fs(fs); // Get fs_id
     assert_eq!(manager.filesystems.read().len(), 1);
     
-    let result = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let result = manager.mount(fs_id, "/mnt"); // Use fs_id
     assert!(result.is_ok());
     assert_eq!(manager.filesystems.read().len(), 0);
     assert_eq!(manager.mount_points.read().len(), 1);
@@ -33,8 +33,8 @@ fn test_path_resolution() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // Resolve valid path
     match manager.with_resolve_path("/mnt/test.txt", |fs, relative_path| {
@@ -67,8 +67,8 @@ fn test_file_operations() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // Open file
     let mut file = manager.open("/mnt/test.txt", 0).unwrap();
@@ -98,8 +98,8 @@ fn test_directory_operations() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // Get directory entries
     let entries = manager.read_dir("/mnt").unwrap();
@@ -163,8 +163,8 @@ fn test_unmount() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     assert_eq!(manager.mount_points.read().len(), 1);
     
     // Unmount
@@ -193,8 +193,8 @@ fn test_file_creation() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
 
     // Create an instance of the file structure
     // let file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
@@ -208,8 +208,8 @@ fn test_file_open_close() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // Create and open a file object
     let file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
@@ -225,8 +225,8 @@ fn test_file_read_write() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
 
@@ -245,8 +245,8 @@ fn test_file_read_write() {
     file.seek(SeekFrom::Start(0)).unwrap();
     let mut buffer2 = [0u8; 20];
     let bytes_read2 = file.read(&mut buffer2).unwrap();
-    assert_eq!(bytes_read2, 13);
-    assert_eq!(&buffer2[..9], b"Test data");
+    assert_eq!(bytes_read2, 13); // File length is still 13 (Hello, world!)
+    assert_eq!(&buffer2[..9], b"Test data"); // The beginning part has been replaced
 }
 
 #[test_case]
@@ -256,8 +256,8 @@ fn test_file_seek() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
     
@@ -285,8 +285,8 @@ fn test_file_metadata_and_size() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
     
@@ -309,8 +309,8 @@ fn test_file_read_all() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // let mut file = File::new("/mnt/test.txt".to_string(), 0);
     let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
@@ -338,8 +338,8 @@ fn test_file_auto_close() {
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
     let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
     
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
+    let fs_id = manager.register_fs(fs); // Get fs_id
+    let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // Open a file within a scope
     {
@@ -356,190 +356,12 @@ fn test_file_auto_close() {
 }
 
 #[test_case]
-fn test_directory_creation() {
-    // Setup
-    let mut manager = VfsManager::new();
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
-    
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
-    
-    // Create an instance of the directory structure
-    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
-    assert_eq!(dir.path, "/mnt");
-}
-
-#[test_case]
-fn test_directory_read_entries() {
-    // Setup
-    let mut manager = VfsManager::new();
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
-    
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
-    
-    // Read directory entries
-    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
-    let entries = dir.read_entries().unwrap();
-    
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].name, "test.txt");
-    assert_eq!(entries[1].name, "testdir");
-    assert_eq!(entries[0].file_type, FileType::RegularFile);
-    assert_eq!(entries[1].file_type, FileType::Directory);
-}
-
-#[test_case]
-fn test_directory_create_file() {
-    // Setup
-    let mut manager = VfsManager::new();
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
-    
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
-    
-    // Create a file in the directory
-    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
-    let result = dir.create_file("newfile.txt");
-    assert!(result.is_ok());
-    
-    // Verify the created file
-    let entries = dir.read_entries().unwrap();
-    assert!(entries.iter().any(|e| e.name == "newfile.txt" && e.file_type == FileType::RegularFile));
-    
-    // Try opening the file
-    let file = File::open_with_manager("/mnt/newfile.txt".to_string(), &mut manager);
-    assert!(file.is_ok());
-}
-
-#[test_case]
-fn test_directory_create_subdirectory() {
-    // Setup
-    let mut manager = VfsManager::new();
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
-    
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
-    
-    // Create a subdirectory
-    let dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
-    let result = dir.create_dir("subdir");
-    assert!(result.is_ok());
-    
-    // Verify the created directory
-    let entries = dir.read_entries().unwrap();
-    assert!(entries.iter().any(|e| e.name == "subdir" && e.file_type == FileType::Directory));
-    
-    // Operate on the subdirectory
-    let subdir = Directory::open_with_manager("/mnt/subdir".to_string(), &mut manager);
-    let entries = subdir.read_entries().unwrap();
-    assert!(entries.is_empty()); // Newly created directory is empty
-}
-
-#[test_case]
-fn test_directory_nested_operations() {
-    // Setup
-    let mut manager = VfsManager::new();
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
-    
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
-    
-    // Nested operations
-    let root_dir = Directory::open_with_manager("/mnt".to_string(), &mut manager);
-    
-    // Create a subdirectory
-    root_dir.create_dir("level1").unwrap();
-    
-    // Operate on the subdirectory
-    let level1_dir = Directory::open_with_manager("/mnt/level1".to_string(), &mut manager);
-    level1_dir.create_dir("level2").unwrap();
-    level1_dir.create_file("file_in_level1.txt").unwrap();
-    
-    // Operate on a deeper level
-    let level2_dir = Directory::open_with_manager("/mnt/level1/level2".to_string(), &mut manager);
-    level2_dir.create_file("deep_file.txt").unwrap();
-    
-    // Verify
-    let entries = level2_dir.read_entries().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "deep_file.txt");
-}
-
-#[test_case]
-fn test_directory_error_handling() {
-    // Setup
-    let mut manager = VfsManager::new();
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
-    
-    let fs_id = manager.register_fs(fs); // fs_idを取得
-    let _ = manager.mount(fs_id, "/mnt"); // fs_idを使用
-    
-    // Non-existent directory
-    let nonexistent_dir = Directory::open_with_manager("/mnt/nonexistent".to_string(), &mut manager);
-    let result = nonexistent_dir.read_entries();
-    match result {
-        Ok(_) => panic!("Expected an error, but got success"),
-        Err(e) => {
-            assert_eq!(e.kind, FileSystemErrorKind::NotFound);
-            assert_eq!(e.message, "Directory not found".to_string());
-        }
-    }
-    
-    // Create a file in a non-existent directory
-    let result = nonexistent_dir.create_file("test.txt");
-    match result {
-        Ok(_) => panic!("Expected an error, but got success"),
-        Err(e) => {
-            assert_eq!(e.kind, FileSystemErrorKind::NotFound);
-            assert_eq!(e.message, "Parent directory not found".to_string());
-        }
-    }
-    
-    // Treat a file as a directory
-    let file_as_dir = Directory::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
-    let result = file_as_dir.read_entries();
-    match result {
-        Ok(_) => panic!("Expected an error, but got success"),
-        Err(e) => {
-            assert_eq!(e.kind, FileSystemErrorKind::NotADirectory);
-            assert_eq!(e.message, "Not a directory".to_string());
-        }
-    }
-}
-
-#[test_case]
-fn test_directory_with_global_manager() {
-    // Setup the global VFS manager
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
-    
-    let global_manager = get_vfs_manager();
-    let fs_id = global_manager.register_fs(fs);
-    let _ = global_manager.mount(fs_id, "/mnt"); // fs_idを使用
-    
-    // Directory operations using the global manager
-    let dir = Directory::open("/mnt".to_string());
-    let entries = dir.read_entries().unwrap();
-    assert_eq!(entries.len(), 2);
-    
-    // Cleanup
-    let _ = global_manager.unmount("/mnt");
-}
-
-#[test_case]
 fn test_filesystem_driver_and_create_register_fs() {
     // Initialize VfsManager
     let mut manager = VfsManager::new();
 
     // Register a mock driver
-    manager.register_fs_driver(Box::new(TestFileSystemDriver));
+    get_fs_driver_manager().register_driver(Box::new(TestFileSystemDriver));
 
     // Create a block device
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
@@ -849,4 +671,300 @@ fn test_to_absolute_path() {
     let relative_path = "test.txt";
     let absolute_path = VfsManager::to_absolute_path(&task, relative_path);
     assert!(absolute_path.is_err());
+}
+
+#[test_case]
+fn test_driver_registration() {
+    let mut manager = FileSystemDriverManager::new();
+    
+    // Initially empty
+    assert_eq!(manager.list_drivers().len(), 0);
+    assert!(!manager.has_driver("testfs"));
+    
+    // Register driver
+    manager.register_driver(Box::new(TestFileSystemDriver));
+    
+    // Verify registration
+    assert_eq!(manager.list_drivers().len(), 1);
+    assert!(manager.has_driver("testfs"));
+    assert_eq!(manager.list_drivers()[0], "testfs");
+}
+
+#[test_case]
+fn test_driver_type_check() {
+    let mut manager = FileSystemDriverManager::new();
+    manager.register_driver(Box::new(TestFileSystemDriver));
+    
+    // Check driver type
+    assert_eq!(manager.get_driver_type("testfs"), Some(FileSystemType::Block));
+    assert_eq!(manager.get_driver_type("nonexistent"), None);
+}
+
+#[test_case]
+fn test_create_from_block() {
+    let mut manager = FileSystemDriverManager::new();
+    manager.register_driver(Box::new(TestFileSystemDriver));
+    
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+    let result = manager.create_from_block("testfs", device, 512);
+    
+    assert!(result.is_ok());
+    let fs = result.unwrap();
+    assert_eq!(fs.name(), "testfs");
+}
+
+#[test_case]
+fn test_create_from_nonexistent_driver() {
+    let manager = FileSystemDriverManager::new();
+    
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+    let result = manager.create_from_block("nonexistent", device, 512);
+    
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind, FileSystemErrorKind::NotFound);
+        assert_eq!(e.message, "File system driver 'nonexistent' not found");
+    }
+}
+
+#[test_case]
+fn test_container_rootfs_switching_demo() {
+    // === Container Demo: Rootfs switching for container-like functionality ===
+    
+    // 1. Set up filesystem for main system
+    let mut main_vfs = VfsManager::new();
+    
+    // Filesystem for main system (using TestFileSystem)
+    let main_device = Box::new(MockBlockDevice::new(1, "main_disk", 512, 100));
+    let main_fs = Box::new(TestFileSystem::new(0, "main_testfs", main_device, 512));
+    let main_fs_id = main_vfs.register_fs(main_fs);
+    main_vfs.mount(main_fs_id, "/")
+        .expect("Failed to mount main filesystem");
+    
+    // Create directories and files in main system
+    main_vfs.create_dir("/system").expect("Failed to create /system");
+    main_vfs.create_file("/system/main.conf").expect("Failed to create main config");
+    
+    // 2. Create independent VfsManager for container 1
+    let mut container1_vfs = VfsManager::new();
+    
+    // Filesystem for container 1
+    let container1_device = Box::new(MockBlockDevice::new(2, "container1_disk", 512, 100));
+    let container1_fs = Box::new(TestFileSystem::new(1, "container1_testfs", container1_device, 512));
+    let container1_fs_id = container1_vfs.register_fs(container1_fs);
+    container1_vfs.mount(container1_fs_id, "/")
+        .expect("Failed to mount container1 filesystem");
+    
+    // Create application files in container 1 filesystem
+    container1_vfs.create_dir("/app").expect("Failed to create /app");
+    container1_vfs.create_file("/app/config.json").expect("Failed to create app config");
+    container1_vfs.create_dir("/tmp").expect("Failed to create /tmp");
+    
+    // 3. Create independent VfsManager for container 2
+    let mut container2_vfs = VfsManager::new();
+    
+    // Filesystem for container 2
+    let container2_device = Box::new(MockBlockDevice::new(3, "container2_disk", 512, 100));
+    let container2_fs = Box::new(TestFileSystem::new(2, "container2_testfs", container2_device, 512));
+    let container2_fs_id = container2_vfs.register_fs(container2_fs);
+    container2_vfs.mount(container2_fs_id, "/")
+        .expect("Failed to mount container2 filesystem");
+    
+    // Create different application files in container 2 filesystem
+    container2_vfs.create_dir("/service").expect("Failed to create /service");
+    container2_vfs.create_file("/service/daemon.conf").expect("Failed to create daemon config");
+    container2_vfs.create_dir("/data").expect("Failed to create /data");
+    
+    // 4. Create tasks with different VfsManagers
+    
+    // Container 1 task (uses independent VfsManager)
+    let mut container1_task = new_user_task("container1_app".to_string(), 0);
+    container1_task.vfs = Some(Arc::new(container1_vfs));
+    container1_task.cwd = Some("/app".to_string());
+    
+    // Container 2 task (uses independent VfsManager)
+    let mut container2_task = new_user_task("container2_service".to_string(), 0);
+    container2_task.vfs = Some(Arc::new(container2_vfs));
+    container2_task.cwd = Some("/service".to_string());
+    
+    // 5. Test filesystem access from each task
+    
+    // Access from main system task (no VfsManager assigned)
+    let main_entries = main_vfs
+        .read_dir("/")
+        .expect("Failed to read root directory from main task");
+    
+    // Verify that /system directory is visible
+    assert!(main_entries.iter().any(|e| e.name == "system"));
+    
+    // Access from container 1 task
+    let container1_entries = container1_task.vfs.as_ref().unwrap()
+        .read_dir("/")
+        .expect("Failed to read root directory from container1 task");
+    
+    // Verify that /app directory is visible but /system is not
+    assert!(container1_entries.iter().any(|e| e.name == "app"));
+    assert!(!container1_entries.iter().any(|e| e.name == "system"));
+    
+    // Access from container 2 task
+    let container2_entries = container2_task.vfs.as_ref().unwrap()
+        .read_dir("/")
+        .expect("Failed to read root directory from container2 task");
+    
+    // Verify that /service directory is visible but /system and /app are not
+    assert!(container2_entries.iter().any(|e| e.name == "service"));
+    assert!(!container2_entries.iter().any(|e| e.name == "system"));
+    assert!(!container2_entries.iter().any(|e| e.name == "app"));
+    
+    // 6. Test path resolution
+    
+    let container1_abs_path = VfsManager::to_absolute_path(&container1_task, "config.json")
+        .expect("Failed to resolve path in container1 task");
+    assert_eq!(container1_abs_path, "/app/config.json");
+    
+    let container2_abs_path = VfsManager::to_absolute_path(&container2_task, "daemon.conf")
+        .expect("Failed to resolve path in container2 task");
+    assert_eq!(container2_abs_path, "/service/daemon.conf");
+    
+    // 7. Test file access isolation
+    
+    // Verify that containers cannot access main system files
+    let container1_main_access = container1_task.vfs.as_ref().unwrap()
+        .open("/system/main.conf", 0);
+    assert!(container1_main_access.is_err(), "Container1 should not access main system files");
+    
+    // Verify that container 2 cannot access container 1 files
+    let container2_app_access = container2_task.vfs.as_ref().unwrap()
+        .open("/app/config.json", 0);
+    assert!(container2_app_access.is_err(), "Container2 should not access container1 files");
+    
+    // Verify that each container can access its own files
+    let container1_own_access = container1_task.vfs.as_ref().unwrap()
+        .open("/app/config.json", 0);
+    assert!(container1_own_access.is_ok(), "Container1 should access its own files");
+    
+    let container2_own_access = container2_task.vfs.as_ref().unwrap()
+        .open("/service/daemon.conf", 0);
+    assert!(container2_own_access.is_ok(), "Container2 should access its own files");
+    
+    // 8. Test VfsManager inheritance during task cloning
+    
+    // Clone container 1 task and verify VfsManager inheritance
+    let cloned_container1_task = container1_task.clone_task()
+        .expect("Failed to clone container1 task");
+    
+    // Verify that cloned task uses same VfsManager
+    assert!(cloned_container1_task.vfs.is_some());
+    
+    // Verify that cloned task sees same filesystem
+    let cloned_entries = cloned_container1_task.vfs.as_ref().unwrap()
+        .read_dir("/")
+        .expect("Failed to read directory from cloned task");
+    assert!(cloned_entries.iter().any(|e| e.name == "app"));
+    assert!(!cloned_entries.iter().any(|e| e.name == "system"));
+    
+    // 9. Verify VfsManager statistics
+    assert_eq!(main_vfs.mount_points.read().len(), 1);
+    assert_eq!(container1_task.vfs.as_ref().unwrap().mount_points.read().len(), 1);
+    assert_eq!(container2_task.vfs.as_ref().unwrap().mount_points.read().len(), 1);
+    
+    // 10. Cleanup
+    let _ = main_vfs.unmount("/");
+    
+    // === Container Demo completed successfully! ===
+    // Demonstrated features:
+    // - ✓ Multiple isolated VfsManager instances
+    // - ✓ Different filesystem views per container/task
+    // - ✓ Path resolution isolation
+    // - ✓ File access isolation between containers
+    // - ✓ VfsManager inheritance in task cloning
+    // - ✓ Container-like filesystem namespace isolation
+}
+
+#[test_case]
+fn test_vfs_manager_clone_behavior() {
+    // Create original VfsManager
+    let mut original_manager = VfsManager::new();
+    
+    // Register and mount filesystem
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs_id = original_manager.register_fs(fs);
+    original_manager.mount(fs_id, "/mnt").unwrap();
+    
+    // Clone VfsManager
+    let mut cloned_manager = original_manager.clone();
+    
+    // === Test 1: Mount point independence ===
+    // Add new filesystem and mount point in cloned manager
+    let device2 = Box::new(MockBlockDevice::new(2, "test_disk2", 512, 100));
+    let fs2 = Box::new(TestFileSystem::new(1, "testfs2", device2, 512));
+    let fs2_id = cloned_manager.register_fs(fs2);
+    assert_eq!(fs2_id, 1); // New ID is assigned in cloned manager
+    cloned_manager.mount(fs2_id, "/mnt2").unwrap();
+    
+    // Verify original manager is not affected
+    assert_eq!(original_manager.mount_points.read().len(), 1);
+    assert_eq!(cloned_manager.mount_points.read().len(), 2);
+    assert!(original_manager.mount_points.read().contains_key("/mnt"));
+    assert!(!original_manager.mount_points.read().contains_key("/mnt2"));
+    assert!(cloned_manager.mount_points.read().contains_key("/mnt"));
+    assert!(cloned_manager.mount_points.read().contains_key("/mnt2"));
+    assert_eq!(*original_manager.next_fs_id.read(), 1);
+    assert_eq!(*cloned_manager.next_fs_id.read(), 2);
+    
+    // === Test 2: FileSystem object sharing ===
+    // Create file in original manager
+    original_manager.create_file("/mnt/original_file.txt").unwrap();
+    
+    // Same file is visible from cloned manager (shared)
+    let entries_from_clone = cloned_manager.read_dir("/mnt").unwrap();
+    assert!(entries_from_clone.iter().any(|e| e.name == "original_file.txt"));
+    
+    // Create file in cloned manager
+    cloned_manager.create_file("/mnt/cloned_file.txt").unwrap();
+    
+    // Same file is visible from original manager (shared)
+    let entries_from_original = original_manager.read_dir("/mnt").unwrap();
+    assert!(entries_from_original.iter().any(|e| e.name == "cloned_file.txt"));
+}
+
+#[test_case]
+fn test_proper_vfs_isolation_with_new_instances() {
+    // === Correct implementation method for isolation ===
+    
+    // Create independent VfsManager instances (not clone)
+    let mut manager1 = VfsManager::new();
+    let mut manager2 = VfsManager::new();
+    
+    // Register independent filesystems for each
+    let device1 = Box::new(MockBlockDevice::new(1, "disk1", 512, 100));
+    let fs1 = Box::new(TestFileSystem::new(0, "fs1", device1, 512));
+    let fs1_id = manager1.register_fs(fs1);
+    manager1.mount(fs1_id, "/mnt").unwrap();
+    
+    let device2 = Box::new(MockBlockDevice::new(2, "disk2", 512, 100));
+    let fs2 = Box::new(TestFileSystem::new(1, "fs2", device2, 512));
+    let fs2_id = manager2.register_fs(fs2);
+    manager2.mount(fs2_id, "/mnt").unwrap();
+    
+    // Create file in manager1
+    manager1.create_file("/mnt/file_in_container1.txt").unwrap();
+    // Visible from manager1 (correct isolation)
+    let entries1 = manager1.read_dir("/mnt").unwrap();
+    assert!(entries1.iter().any(|e| e.name == "file_in_container1.txt"));
+    
+    // Not visible from manager2 (correct isolation)
+    let entries2 = manager2.read_dir("/mnt").unwrap();
+    assert!(!entries2.iter().any(|e| e.name == "file_in_container1.txt"));
+    
+    // Create file in manager2
+    manager2.create_file("/mnt/file_in_container2.txt").unwrap();
+    // Visible from manager2 (correct isolation)
+    let entries2 = manager2.read_dir("/mnt").unwrap();
+    assert!(entries2.iter().any(|e| e.name == "file_in_container2.txt"));
+    
+    // Not visible from manager1 (correct isolation)
+    let entries1 = manager1.read_dir("/mnt").unwrap();
+    assert!(!entries1.iter().any(|e| e.name == "file_in_container2.txt"));
 }
