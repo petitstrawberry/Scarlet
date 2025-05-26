@@ -53,7 +53,7 @@ pub struct Task {
     /// Managed pages
     /// 
     /// Managed pages are freed automatically when the task is terminated.
-    managed_pages: Vec<ManagedPage>,
+    pub managed_pages: Vec<ManagedPage>,
     parent_id: Option<usize>,      /* Parent task ID */
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
