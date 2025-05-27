@@ -7,6 +7,7 @@ use spin::Mutex;
 
 use super::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
+use crate::device::{Device, DeviceType, char::CharDevice, block::BlockDevice};
 
 // Simple file system implementation for testing
 pub struct TestFileSystem {
@@ -558,222 +559,15 @@ impl FileSystemDriver for TestFileSystemDriver {
     }
 }
 
-// Test device implementations for device file testing
-use crate::device::{Device, DeviceType, char::CharDevice, block::BlockDevice};
-use crate::traits::serial::Serial;
-use core::fmt;
-
-/// Test Character Device implementation
-pub struct TestCharDevice {
-    id: usize,
-    name: &'static str,
-    read_buffer: RwLock<Vec<u8>>,
-    write_buffer: RwLock<Vec<u8>>,
-    read_index: RwLock<usize>,
-}
-
-impl TestCharDevice {
-    pub fn new(id: usize, name: &'static str) -> Self {
-        Self {
-            id,
-            name,
-            read_buffer: RwLock::new(vec![b'T', b'e', b's', b't']),
-            write_buffer: RwLock::new(Vec::new()),
-            read_index: RwLock::new(0),
-        }
-    }
-
-    pub fn set_read_data(&self, data: Vec<u8>) {
-        *self.read_buffer.write() = data;
-        *self.read_index.write() = 0;
-    }
-
-    pub fn get_written_data(&self) -> Vec<u8> {
-        self.write_buffer.read().clone()
-    }
-}
-
-impl Device for TestCharDevice {
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Char
-    }
-
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn id(&self) -> usize {
-        self.id
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-}
-
-impl CharDevice for TestCharDevice {
-    fn read_byte(&mut self) -> Option<u8> {
-        let mut index = self.read_index.write();
-        let buffer = self.read_buffer.read();
-        if *index < buffer.len() {
-            let byte = buffer[*index];
-            *index += 1;
-            Some(byte)
-        } else {
-            None
-        }
-    }
-
-    fn write_byte(&mut self, byte: u8) -> core::result::Result<(), &'static str> {
-        self.write_buffer.write().push(byte);
-        Ok(())
-    }
-
-    fn can_read(&self) -> bool {
-        let index = self.read_index.read();
-        let buffer = self.read_buffer.read();
-        *index < buffer.len()
-    }
-
-    fn can_write(&self) -> bool {
-        true
-    }
-}
-
-impl Serial for TestCharDevice {
-    fn init(&mut self) {
-        // Test implementation - do nothing
-    }
-    
-    fn put(&mut self, c: char) -> fmt::Result {
-        self.write_byte(c as u8).map_err(|_| fmt::Error)
-    }
-
-    fn get(&mut self) -> Option<char> {
-        self.read_byte().map(|b| b as char)
-    }
-}
-
-impl fmt::Write for TestCharDevice {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            if self.write_byte(byte).is_err() {
-                return Err(fmt::Error);
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Test Block Device implementation
-pub struct TestBlockDevice {
-    id: usize,
-    name: &'static str,
-    data: RwLock<Vec<Vec<u8>>>,
-    request_queue: RwLock<Vec<Box<crate::device::block::request::BlockIORequest>>>,
-}
-
-impl TestBlockDevice {
-    pub fn new(id: usize, name: &'static str, sector_size: usize, sector_count: usize) -> Self {
-        let mut data = Vec::with_capacity(sector_count);
-        for _ in 0..sector_count {
-            data.push(vec![0; sector_size]);
-        }
-
-        Self {
-            id,
-            name,
-            data: RwLock::new(data),
-            request_queue: RwLock::new(Vec::new()),
-        }
-    }
-}
-
-impl Device for TestBlockDevice {
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Block
-    }
-
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn id(&self) -> usize {
-        self.id
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-}
-
-impl BlockDevice for TestBlockDevice {
-    fn get_id(&self) -> usize {
-        self.id
-    }
-
-    fn get_disk_name(&self) -> &'static str {
-        self.name
-    }
-
-    fn get_disk_size(&self) -> usize {
-        let data = self.data.read();
-        data.len() * if data.is_empty() { 0 } else { data[0].len() }
-    }
-
-    fn enqueue_request(&mut self, request: Box<crate::device::block::request::BlockIORequest>) {
-        self.request_queue.write().push(request);
-    }
-
-    fn process_requests(&mut self) -> Vec<crate::device::block::request::BlockIOResult> {
-        use crate::device::block::request::{BlockIORequestType, BlockIOResult};
-        
-        let mut results = Vec::new();
-        let mut queue = self.request_queue.write();
-        let requests = core::mem::replace(&mut *queue, Vec::new());
-
-        for mut request in requests {
-            let result = {
-                let mut data = self.data.write();
-                match request.request_type {
-                    BlockIORequestType::Read => {
-                        if request.sector < data.len() {
-                            request.buffer = data[request.sector].clone();
-                            Ok(())
-                        } else {
-                            Err("Invalid sector")
-                        }
-                    }
-                    BlockIORequestType::Write => {
-                        if request.sector < data.len() {
-                            let buffer_len = request.buffer.len();
-                            let sector_len = data[request.sector].len();
-                            let len = buffer_len.min(sector_len);
-                            data[request.sector][..len].copy_from_slice(&request.buffer[..len]);
-                            Ok(())
-                        } else {
-                            Err("Invalid sector")
-                        }
-                    }
-                }
-            };
-
-            results.push(BlockIOResult { request, result });
-        }
-
-        results
-    }
-}
-
 #[cfg(test)]
 mod device_tests {
     use super::*;
-    use crate::fs::{FileType, DeviceFileInfo};
+    use crate::{device::{block::mockblk::MockBlockDevice, char::mockchar::MockCharDevice}, fs::{DeviceFileInfo, FileType}};
 
     #[test_case]
     fn test_device_file_char_device() {
         // Create a test character device
-        let test_char_device = Box::new(TestCharDevice::new(1, "test_char"));
+        let test_char_device = Box::new(MockCharDevice::new(1, "test_char"));
         
         // Register the device with DeviceManager
         let device_id = DeviceManager::get_mut_manager().register_device(test_char_device as Box<dyn Device>);
@@ -807,7 +601,7 @@ mod device_tests {
     #[test_case]
     fn test_device_file_block_device() {
         // Create a test block device
-        let test_block_device = Box::new(TestBlockDevice::new(2, "test_block", 512, 100));
+        let test_block_device = Box::new(MockBlockDevice::new(2, "test_block", 512, 100));
         
         // Register the device with DeviceManager
         let device_id = DeviceManager::get_mut_manager().register_device(test_block_device as Box<dyn Device>);
@@ -841,14 +635,14 @@ mod device_tests {
     #[test_case]
     fn test_device_file_through_filesystem() {
         // Create a test file system
-        let block_device = Box::new(TestBlockDevice::new(3, "fs_block", 512, 100));
+        let block_device = Box::new(MockBlockDevice::new(3, "fs_block", 512, 100));
         let fs = TestFileSystem::new(0, "testfs", block_device, 512);
         
         // Verify the filesystem was created properly
         assert_eq!(fs.name(), "testfs");
 
         // Create a test character device for device file
-        let test_char_device = Box::new(TestCharDevice::new(4, "fs_char"));
+        let test_char_device = Box::new(MockCharDevice::new(4, "fs_char"));
         let device_id = DeviceManager::get_mut_manager().register_device(test_char_device as Box<dyn Device>);
 
         // Test device access through filesystem interface
@@ -884,7 +678,7 @@ mod device_tests {
     #[test_case]
     fn test_serial_device_functionality() {
         // Create test character device that implements Serial
-        let mut test_device = TestCharDevice::new(5, "serial_test");
+        let mut test_device = MockCharDevice::new(5, "serial_test");
         
         // Test write functionality
         test_device.set_read_data(vec![b'H', b'e', b'l', b'l', b'o']);
@@ -893,14 +687,14 @@ mod device_tests {
         assert_eq!(test_device.read_byte(), Some(b'H'));
         assert_eq!(test_device.read_byte(), Some(b'e'));
 
-        test_device.write_byte(b'T');
-        test_device.write_byte(b'e');
-        test_device.write_byte(b's');
-        test_device.write_byte(b't');
+        test_device.write_byte(b'T').unwrap();
+        test_device.write_byte(b'e').unwrap();
+        test_device.write_byte(b's').unwrap();
+        test_device.write_byte(b't').unwrap();
 
         // Check written data
         let written = test_device.get_written_data();
-        assert_eq!(written, vec![b'T', b'e', b's', b't']);
+        assert_eq!(written, &vec![b'T', b'e', b's', b't']);
         
         // Test readiness
         assert!(test_device.can_read());
