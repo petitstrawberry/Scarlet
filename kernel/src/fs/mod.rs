@@ -51,7 +51,7 @@ pub mod helper;
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
-use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task, vm::vmem::MemoryArea};
+use crate::{device::{block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, DeviceType}, task::Task, vm::vmem::MemoryArea};
 
 use spin::{Mutex, RwLock};
 
@@ -91,11 +91,17 @@ impl fmt::Debug for FileSystemError {
 pub type Result<T> = core::result::Result<T, FileSystemError>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeviceFileInfo {
+    pub device_id: usize,
+    pub device_type: DeviceType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileType {
     RegularFile,
     Directory,
-    CharDevice,
-    BlockDevice,
+    CharDevice(DeviceFileInfo),
+    BlockDevice(DeviceFileInfo),
     Pipe,
     SymbolicLink,
     Socket,
@@ -286,8 +292,27 @@ pub trait FileOperations: Send + Sync {
     /// Read directory entries
     fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>>;
     
-    /// Create a file
-    fn create_file(&self, path: &str) -> Result<()>;
+    /// Create a file with the specified type.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the file to create.
+    /// * `file_type` - The type of file to create. This can be a regular file, a device file, or other supported types.
+    /// 
+    /// # Behavior
+    /// 
+    /// - **Regular Files**: These are standard files used for storing data. They are created in the filesystem and can be read from or written to using standard file operations.
+    /// - **Device Files**: These represent hardware devices and are typically used for interacting with device drivers. Creating a device file may involve additional steps, such as associating the file with a specific device driver or hardware resource.
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Creating a device file may require elevated permissions or specific system configurations.
+    /// - If a file already exists at the specified path, the function will return an error of type `FileSystemErrorKind::AlreadyExists`.
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - `Ok` if the file was created successfully, or an error if the operation failed. Errors may include `PermissionDenied`, `InvalidPath`, or `DeviceError` for device files.
+    fn create_file(&self, path: &str, file_type: FileType) -> Result<()>;
     
     /// Create a directory
     fn create_dir(&self, path: &str) -> Result<()>;
@@ -319,6 +344,8 @@ pub enum FileSystemType {
     Hybrid,
     /// Special or virtual file systems (e.g., procfs, sysfs)
     Virtual,
+    /// Device file system (e.g., /dev)
+    Device,
 }
 
 /// Trait for file system drivers
@@ -386,6 +413,15 @@ pub trait FileSystemDriver: Send + Sync {
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotSupported,
             message: "create_from_memory() not implemented for this file system driver".to_string(),
+        })
+    }
+
+    fn create(&self) -> Result<Box<dyn VirtualFileSystem>> {
+        // Default implementation that can be overridden by specific drivers
+        // This is a convenience method for drivers that do not need to handle block or memory creation
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "create() not implemented for this file system driver".to_string(),
         })
     }
 }
@@ -936,9 +972,18 @@ impl VfsManager {
         self.with_resolve_path(path, |fs, relative_path| fs.read().read_dir(relative_path))
     }
     
-    // Create a file
-    pub fn create_file(&self, path: &str) -> Result<()> {
-        self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path))
+    /// Create a file with specified type
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the file to create
+    /// * `file_type` - The type of file to create
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the file was created successfully, Err otherwise
+    pub fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
+        self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path, file_type))
     }
     
     // Create a directory
@@ -954,6 +999,121 @@ impl VfsManager {
     // Get the metadata
     pub fn metadata(&self, path: &str) -> Result<FileMetadata> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().metadata(relative_path))
+    }
+
+    // Create a regular file
+    pub fn create_regular_file(&self, path: &str) -> Result<()> {
+        self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path, FileType::RegularFile))
+    }
+    
+    /// Create a character device file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the device file to create
+    /// * `device_info` - Information about the device
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the device file was created successfully, Err otherwise
+    pub fn create_char_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
+        self.create_file(path, FileType::CharDevice(device_info))
+    }
+    
+    /// Create a block device file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the device file to create
+    /// * `device_info` - Information about the device
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the device file was created successfully, Err otherwise
+    pub fn create_block_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
+        self.create_file(path, FileType::BlockDevice(device_info))
+    }
+
+    /// Create a pipe file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the pipe to create
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the pipe was created successfully, Err otherwise
+    pub fn create_pipe(&self, path: &str) -> Result<()> {
+        self.create_file(path, FileType::Pipe)
+    }
+
+    /// Create a symbolic link
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the symbolic link to create
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the symbolic link was created successfully, Err otherwise
+    pub fn create_symlink(&self, path: &str) -> Result<()> {
+        self.create_file(path, FileType::SymbolicLink)
+    }
+
+    /// Create a socket file
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the socket to create
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the socket was created successfully, Err otherwise
+    pub fn create_socket(&self, path: &str) -> Result<()> {
+        self.create_file(path, FileType::Socket)
+    }
+
+    /// Create a device file of any type
+    /// 
+    /// This is a convenience method that automatically determines the appropriate
+    /// FileType based on the DeviceType in the DeviceFileInfo.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to the device file to create
+    /// * `device_info` - Information about the device including its type
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the device file was created successfully, Err otherwise
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// use crate::device::{DeviceType, DeviceFileInfo};
+    /// 
+    /// let device_info = DeviceFileInfo {
+    ///     device_id: 1,
+    ///     device_type: DeviceType::Char,
+    /// };
+    /// 
+    /// vfs_manager.create_device_file("/dev/tty0", device_info)?;
+    /// ```
+    pub fn create_device_file(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
+        match device_info.device_type {
+            crate::device::DeviceType::Char => {
+                self.create_file(path, FileType::CharDevice(device_info))
+            },
+            crate::device::DeviceType::Block => {
+                self.create_file(path, FileType::BlockDevice(device_info))
+            },
+            _ => {
+                Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: "Unsupported device type for file creation".to_string(),
+                })
+            },
+        }
     }
 }
 

@@ -6,6 +6,7 @@ use spin::rwlock::RwLock;
 use spin::Mutex;
 
 use super::*;
+use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 
 // Simple file system implementation for testing
 pub struct TestFileSystem {
@@ -125,10 +126,25 @@ struct TestFileHandle {
     path: String,
     position: RwLock<u64>,
     content: RwLock<Vec<u8>>,
+    file_type: FileType,
+    device_guard: Option<BorrowedDeviceGuard>,
 }
 
 impl FileHandle for TestFileHandle {
     fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+        // Handle device files
+        if let Some(ref device_guard) = self.device_guard {
+            // For device files, delegate to the device's read operation
+            let device = device_guard.device();
+            let device_read = device.read();
+            
+            // Use device-specific read logic (this is a simplified example)
+            // In a real implementation, you would need to use device-specific traits
+            // For now, return 0 to indicate EOF for device reads
+            return Ok(0);
+        }
+        
+        // Handle regular files
         let mut position = self.position.write();
         let content = self.content.read();
         if *position as usize >= content.len() {
@@ -145,6 +161,19 @@ impl FileHandle for TestFileHandle {
     }
     
     fn write(&self, buffer: &[u8]) -> Result<usize> {
+        // Handle device files
+        if let Some(ref device_guard) = self.device_guard {
+            // For device files, delegate to the device's write operation
+            let device = device_guard.device();
+            let device_write = device.write();
+            
+            // Use device-specific write logic (this is a simplified example)
+            // In a real implementation, you would need to use device-specific traits
+            // For now, just return the buffer length as if written successfully
+            return Ok(buffer.len());
+        }
+        
+        // Handle regular files
         let mut position = self.position.write();
         let mut content = self.content.write();
         
@@ -216,6 +245,8 @@ impl FileOperations for TestFileSystem {
                 path: normalized,
                 position: RwLock::new(0),
                 content: RwLock::new(b"Hello, world!".to_vec()),
+                file_type: FileType::RegularFile,
+                device_guard: None,
             }));
         }
 
@@ -226,12 +257,45 @@ impl FileOperations for TestFileSystem {
         
         for (dir_path, entries) in self.directories.lock().iter() {
             if dir_path == parent_path {
-                if let Some(_) = entries.iter().find(|e| e.name == name && e.file_type == FileType::RegularFile) {
+                // Check if it's a regular file
+                if let Some(entry) = entries.iter().find(|e| e.name == name && e.file_type == FileType::RegularFile) {
                     return Ok(Arc::new(TestFileHandle {
                         path: normalized,
                         position: RwLock::new(0),
                         content: RwLock::new(Vec::new()), // Newly created files are empty
+                        file_type: entry.file_type,
+                        device_guard: None,
                     }));
+                }
+                
+                // Check if it's a device file
+                if let Some(entry) = entries.iter().find(|e| e.name == name && 
+                    (matches!(e.file_type, FileType::CharDevice(_)) || matches!(e.file_type, FileType::BlockDevice(_)))) {
+                    
+                    // Extract device ID from the FileType
+                    let device_id = match entry.file_type {
+                        FileType::CharDevice(ref info) | FileType::BlockDevice(ref info) => info.device_id,
+                        _ => unreachable!(),
+                    };
+                    
+                    // Try to borrow the device from DeviceManager
+                    match DeviceManager::get_manager().borrow_device(device_id) {
+                        Ok(guard) => {
+                            return Ok(Arc::new(TestFileHandle {
+                                path: normalized,
+                                position: RwLock::new(0),
+                                content: RwLock::new(Vec::new()), // Device files don't have content
+                                file_type: entry.file_type,
+                                device_guard: Some(guard),
+                            }));
+                        },
+                        Err(_) => {
+                            return Err(FileSystemError {
+                                kind: FileSystemErrorKind::PermissionDenied,
+                                message: "Failed to access device".to_string(),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -272,7 +336,7 @@ impl FileOperations for TestFileSystem {
         }
     }
     
-    fn create_file(&self, path: &str) -> Result<()> {
+    fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
         let normalized = self.normalize_path(path);
         let parent_path = normalized.rfind('/').map_or("/", |idx| &normalized[..idx]);
         let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
@@ -290,10 +354,10 @@ impl FileOperations for TestFileSystem {
                     });
                 }
                 
-                // Add the new file to the entries
+                // Add the new file to the entries with specified type
                 entries.push(DirectoryEntry {
                     name: file_name.to_string(),
-                    file_type: FileType::RegularFile,
+                    file_type,
                     size: 0,
                     metadata: None,
                 });

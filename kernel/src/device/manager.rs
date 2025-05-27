@@ -217,7 +217,7 @@ pub struct DeviceManager {
     /* Manager for basic devices */
     pub basic: BasicDeviceManager,
     /* Other devices */
-    devices: Mutex<BTreeMap<DeviceType, Vec<Arc<DeviceHandle>>>>,
+    devices: Mutex<Vec<Arc<DeviceHandle>>>,
     /* Device drivers */
     drivers: Mutex<Vec<Box<dyn DeviceDriver>>>,
 }
@@ -228,7 +228,7 @@ impl DeviceManager {
             basic: BasicDeviceManager {
                 serials: Vec::new(),
             },
-            devices: Mutex::new(BTreeMap::new()),
+            devices: Mutex::new(Vec::new()),
             drivers: Mutex::new(Vec::new()),
         }
     }
@@ -246,80 +246,75 @@ impl DeviceManager {
     /// Register a device with the manager
     /// 
     /// # Arguments
-    /// 
     /// * `device`: The device to register.
+    /// 
+    /// # Returns
+    ///  * The id of the registered device.
     /// 
     /// # Example
     /// 
     /// ```rust
     /// let device = Box::new(MyDevice::new());
-    /// DeviceManager::get_mut_manager().register_device(device);
+    /// let id = DeviceManager::get_mut_manager().register_device(device);
     /// ```
     /// 
-    pub fn register_device(&self, device: Box<dyn Device>) {
-        let device_type = device.device_type();
+    pub fn register_device(&self, device: Box<dyn Device>) -> usize {
         let mut devices = self.devices.lock();
         let device = Arc::new(RwLock::new(device));
         let handle = DeviceHandle::new(device).into();
-        devices.entry(device_type).or_default().push(handle);
+        let id = devices.len();
+        devices.push(handle);
+        id
     }
 
     /// Borrow a device by type and index
     /// 
     /// # Arguments
     /// 
-    /// * `device_type`: The type of device to borrow.
-    /// * `idx`: The index of the device to borrow.
+    /// * `id`: The id of the device to borrow.
     /// 
     /// # Returns
     /// 
     /// A result containing a reference to the borrowed device, or an error if the device type is not found or the index is out of bounds.
     /// 
-    pub fn borrow_device(&self, device_type: DeviceType, idx: usize) -> Result<BorrowedDeviceGuard, &'static str> {
-        let devices = self.devices.lock();
-        if let Some(devices) = devices.get(&device_type) {
-            if idx < devices.len() {
-                let device = &devices[idx];
-                if device.is_in_use_exclusive() {
-                    return Err("Device is already in use exclusively");
-                }
-                device.increment_borrow_count(); // Increment borrow count
-                device.set_in_use(); // Mark the device as in use
-                return Ok(BorrowedDeviceGuard::new(Arc::clone(device)));
-            } else {
-                return Err("Index out of bounds");
+    pub fn borrow_device(&self, id: usize) -> Result<BorrowedDeviceGuard, &'static str> {
+        let devices = self.devices.lock();    
+        if id < devices.len() {
+            let device = &devices[id];
+            if device.is_in_use_exclusive() {
+                return Err("Device is already in use exclusively");
             }
+            device.increment_borrow_count(); // Increment borrow count
+            device.set_in_use(); // Mark the device as in use
+            return Ok(BorrowedDeviceGuard::new(Arc::clone(device)));
+        } else {
+            return Err("Index out of bounds");
         }
-        Err("Device type not found")
     }
 
     /// Borrow an exclusive device by type and index
     /// 
     /// # Arguments
     /// 
-    /// * `device_type`: The type of device to borrow.
-    /// * `idx`: The index of the device to borrow.
+    /// * `id`: The id of the device to borrow.
     /// 
     /// # Returns
     /// 
     /// A result containing a reference to the borrowed device, or an error if the device type is not found or the index is out of bounds.
     /// 
-    pub fn borrow_exclusive_device(&self, device_type: DeviceType, idx: usize) -> Result<BorrowedDeviceGuard, &'static str> {
-        let devices = self.devices.lock();
-        if let Some(devices) = devices.get(&device_type) {
-            if idx < devices.len() {
-                let handle = &devices[idx];
-                if handle.is_in_use() {
-                    return Err("Device is already in use");
-                }
-                handle.increment_borrow_count(); // Increment borrow count
-                handle.set_in_use_exclusive(); // Mark the device as in use
-                return Ok(BorrowedDeviceGuard::new(Arc::clone(handle)));
-            } else {
-                return Err("Index out of bounds");
+    pub fn borrow_exclusive_device(&self, id: usize) -> Result<BorrowedDeviceGuard, &'static str> {
+    let devices = self.devices.lock();
+        if id < devices.len() {
+            let handle = &devices[id];
+            if handle.is_in_use() {
+                return Err("Device is already in use");
             }
+            handle.increment_borrow_count(); // Increment borrow count
+            handle.set_in_use_exclusive(); // Mark the device as in use
+            return Ok(BorrowedDeviceGuard::new(Arc::clone(handle)));
+        } else {
+            return Err("Index out of bounds");
         }
-        Err("Device type not found")
     }
 
 
@@ -327,20 +322,13 @@ impl DeviceManager {
 
     /// Get the number of devices of a specific type
     /// 
-    /// # Arguments
-    /// 
-    /// * `device_type`: The type of device to count.
-    /// 
     /// # Returns
     /// 
     /// The number of devices of the specified type.
     /// 
-    pub fn get_devices_count(&self, device_type: DeviceType) -> usize {
+    pub fn get_devices_count(&self) -> usize {
         let devices = self.devices.lock();
-        if let Some(devices) = devices.get(&device_type) {
-            return devices.len();
-        }
-        0
+        devices.len()
     }
 
     pub fn borrow_drivers(&self) -> &Mutex<Vec<Box<dyn DeviceDriver>>> {
@@ -498,8 +486,8 @@ mod tests {
             1,
         ));
         let manager = DeviceManager::get_mut_manager();
-        manager.register_device(device);
-        let borrowed_device = manager.borrow_device(DeviceType::Generic, 0);
+        let id = manager.register_device(device);
+        let borrowed_device = manager.borrow_device(id);
         assert!(borrowed_device.is_ok());
         let borrowed_device = borrowed_device.unwrap();
         let device = borrowed_device.device();
@@ -513,8 +501,8 @@ mod tests {
             1,
         ));
         let manager = DeviceManager::get_mut_manager();
-        manager.register_device(device);
-        let borrowed_device = manager.borrow_exclusive_device(DeviceType::Generic, 0);
+        let id = manager.register_device(device);
+        let borrowed_device = manager.borrow_exclusive_device(id);
         assert!(borrowed_device.is_ok());
         let borrowed_device = borrowed_device.unwrap();
         let device = borrowed_device.device();
@@ -528,13 +516,13 @@ mod tests {
             1,
         ));
         let manager = DeviceManager::get_mut_manager();
-        manager.register_device(device);
-        let borrowed_device = manager.borrow_exclusive_device(DeviceType::Generic, 0);
+        let id = manager.register_device(device);
+        let borrowed_device = manager.borrow_exclusive_device(id);
         assert!(borrowed_device.is_ok());
         let borrowed_device = borrowed_device.unwrap();
         let device = borrowed_device.device();
         assert_eq!(device.read().name(), "test");
-        let borrowed_device2 = manager.borrow_exclusive_device(DeviceType::Generic, 0);
+        let borrowed_device2 = manager.borrow_exclusive_device(id);
         assert!(borrowed_device2.is_err());
     }
 
@@ -545,9 +533,9 @@ mod tests {
             1,
         ));
         let manager = DeviceManager::get_mut_manager();
-        manager.register_device(device);
+        let id = manager.register_device(device);
         {
-            let borrowed_device = manager.borrow_device(DeviceType::Generic, 0);
+            let borrowed_device = manager.borrow_device(id);
             assert!(borrowed_device.is_ok());
             let borrowed_device = borrowed_device.unwrap();
             let device = borrowed_device.device();
@@ -557,7 +545,7 @@ mod tests {
             assert_eq!(borrowed_device.handle.get_borrow_count(), 1);
         }
         // After the borrowed device goes out of scope, we should be able to borrow it again
-        let borrowed_device = manager.borrow_exclusive_device(DeviceType::Generic, 0);
+        let borrowed_device = manager.borrow_exclusive_device(id);
         assert!(borrowed_device.is_ok());
     }
 
@@ -568,9 +556,9 @@ mod tests {
             1,
         ));
         let manager = DeviceManager::get_mut_manager();
-        manager.register_device(device);
+        let id = manager.register_device(device);
         {
-            let borrowed_device = manager.borrow_device(DeviceType::Generic, 0);
+            let borrowed_device = manager.borrow_device(id);
             assert!(borrowed_device.is_ok());
             let borrowed_device = borrowed_device.unwrap();
             let device = borrowed_device.device();
@@ -581,7 +569,7 @@ mod tests {
             
             {
                 // Second borrow
-                let borrowed_device = manager.borrow_device(DeviceType::Generic, 0).unwrap();
+                let borrowed_device = manager.borrow_device(id).unwrap();
                 let device = borrowed_device.device();
                 assert_eq!(device.read().name(), "test");
                 // The device should still be in use
@@ -595,21 +583,14 @@ mod tests {
             assert_eq!(borrowed_device.handle.get_borrow_count(), 1);
         }
         // After the borrowed device goes out of scope, we should be able to borrow it again
-        let borrowed_device = manager.borrow_exclusive_device(DeviceType::Generic, 0);
+        let borrowed_device = manager.borrow_exclusive_device(id);
         assert!(borrowed_device.is_ok());
-    }
-
-    #[test_case]
-    fn test_borrow_invalid_device_type() {
-        let manager = DeviceManager::get_manager();
-        let borrowed_device = manager.borrow_device(DeviceType::NonExistent, 0);
-        assert!(borrowed_device.is_err());
     }
 
     #[test_case]
     fn test_borrow_out_of_bounds() {
         let manager = DeviceManager::get_manager();
-        let borrowed_device = manager.borrow_device(DeviceType::Generic, 999);
+        let borrowed_device = manager.borrow_device(999);
         assert!(borrowed_device.is_err());
     }
 
@@ -617,12 +598,12 @@ mod tests {
     fn test_borrow_while_exclusive() {
         let device = Box::new(GenericDevice::new("test", 1));
         let manager = DeviceManager::get_mut_manager();
-        manager.register_device(device);
+        let id = manager.register_device(device);
 
-        let borrowed_device = manager.borrow_exclusive_device(DeviceType::Generic, 0);
+        let borrowed_device = manager.borrow_exclusive_device(id);
         assert!(borrowed_device.is_ok());
 
-        let borrowed_device2 = manager.borrow_device(DeviceType::Generic, 0);
+        let borrowed_device2 = manager.borrow_device(id);
         assert!(borrowed_device2.is_err());
     }
 }
