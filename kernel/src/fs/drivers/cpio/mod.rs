@@ -288,7 +288,7 @@ impl FileOperations for Cpiofs {
         Ok(filtered_entries)
     }
 
-    fn create_file(&self, _path: &str) -> Result<()> {
+    fn create_file(&self, _path: &str, _file_type: FileType) -> Result<()> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
             message: "Initramfs is read-only".to_string(),

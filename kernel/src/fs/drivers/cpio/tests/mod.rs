@@ -75,7 +75,7 @@ fn test_initramfs_read_only_operations() {
     let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Attempt a write operation
-    let result = initramfs.create_file("/new_file.txt");
+    let result = initramfs.create_file("/new_file.txt", FileType::RegularFile);
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::ReadOnly);
 

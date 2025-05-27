@@ -99,7 +99,7 @@ fn test_load_elf() {
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
+    manager.create_regular_file(file_path).expect("Failed to create test file");
     let mut file = File::open_with_manager(file_path.to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
     file.write(include_bytes!("test.elf")).expect("Failed to write test ELF file");
     
@@ -136,7 +136,7 @@ fn test_load_elf_invalid_magic() {
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/invalid.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
+    manager.create_regular_file(file_path).expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid magic number
     let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
@@ -164,7 +164,7 @@ fn test_load_elf_invalid_alignment() {
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/invalid_align.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
+    manager.create_regular_file(file_path).expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid alignment
     let mut invalid_elf_data = vec![0u8; 64];
@@ -216,7 +216,7 @@ fn test_load_elf_bss_zeroed() {
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test_bss.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
+    manager.create_regular_file(file_path).expect("Failed to create test file");
     let mut file = File::open_with_manager(file_path.to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
 
     // Create a mock ELF file with a .bss section

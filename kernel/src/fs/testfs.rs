@@ -272,7 +272,7 @@ impl FileOperations for TestFileSystem {
         }
     }
     
-    fn create_file(&self, path: &str) -> Result<()> {
+    fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
         let normalized = self.normalize_path(path);
         let parent_path = normalized.rfind('/').map_or("/", |idx| &normalized[..idx]);
         let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
@@ -290,10 +290,10 @@ impl FileOperations for TestFileSystem {
                     });
                 }
                 
-                // Add the new file to the entries
+                // Add the new file to the entries with specified type
                 entries.push(DirectoryEntry {
                     name: file_name.to_string(),
-                    file_type: FileType::RegularFile,
+                    file_type,
                     size: 0,
                     metadata: None,
                 });

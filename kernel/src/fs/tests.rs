@@ -119,7 +119,7 @@ fn test_directory_operations() {
     assert!(entries_after.iter().any(|e| e.name == "newdir" && e.file_type == FileType::Directory));
     
     // Create file
-    let result = manager.create_file("/mnt/newdir/newfile.txt");
+    let result = manager.create_regular_file("/mnt/newdir/newfile.txt");
     assert!(result.is_ok());
     
     // Verify
@@ -451,13 +451,13 @@ fn test_nested_mount_points() {
     
     // 2. Test file operations - Operations on nested mount points
     // Create file in root
-    manager.create_file("/rootfile.txt").unwrap();
+    manager.create_regular_file("/rootfile.txt").unwrap();
     
     // Create file in /mnt
-    manager.create_file("/mnt/mntfile.txt").unwrap();
+    manager.create_regular_file("/mnt/mntfile.txt").unwrap();
     
     // Create file in /mnt/usb
-    manager.create_file("/mnt/usb/usbfile.txt").unwrap();
+    manager.create_regular_file("/mnt/usb/usbfile.txt").unwrap();
     
     // Verify directory listings at each mount point
     let root_entries = manager.read_dir("/").unwrap();
@@ -594,10 +594,10 @@ fn test_directory_boundary_handling() {
 
     // Test case 7: Boundary check for file operations
     // Create file in /mnt_data
-    manager.create_file("/mnt_data/testfile.txt").unwrap();
+    manager.create_regular_file("/mnt_data/testfile.txt").unwrap();
     
     // Create file in /mnt/sub
-    manager.create_file("/mnt/sub/testfile.txt").unwrap();
+    manager.create_regular_file("/mnt/sub/testfile.txt").unwrap();
     
     // Ensure files are correctly created in each file system
     let mnt_data_entries = manager.read_dir("/mnt_data").unwrap();
@@ -743,7 +743,7 @@ fn test_container_rootfs_switching_demo() {
     
     // Create directories and files in main system
     main_vfs.create_dir("/system").expect("Failed to create /system");
-    main_vfs.create_file("/system/main.conf").expect("Failed to create main config");
+    main_vfs.create_regular_file("/system/main.conf").expect("Failed to create main config");
     
     // 2. Create independent VfsManager for container 1
     let mut container1_vfs = VfsManager::new();
@@ -757,7 +757,7 @@ fn test_container_rootfs_switching_demo() {
     
     // Create application files in container 1 filesystem
     container1_vfs.create_dir("/app").expect("Failed to create /app");
-    container1_vfs.create_file("/app/config.json").expect("Failed to create app config");
+    container1_vfs.create_regular_file("/app/config.json").expect("Failed to create app config");
     container1_vfs.create_dir("/tmp").expect("Failed to create /tmp");
     
     // 3. Create independent VfsManager for container 2
@@ -772,7 +772,7 @@ fn test_container_rootfs_switching_demo() {
     
     // Create different application files in container 2 filesystem
     container2_vfs.create_dir("/service").expect("Failed to create /service");
-    container2_vfs.create_file("/service/daemon.conf").expect("Failed to create daemon config");
+    container2_vfs.create_regular_file("/service/daemon.conf").expect("Failed to create daemon config");
     container2_vfs.create_dir("/data").expect("Failed to create /data");
     
     // 4. Create tasks with different VfsManagers
@@ -915,14 +915,14 @@ fn test_vfs_manager_clone_behavior() {
     
     // === Test 2: FileSystem object sharing ===
     // Create file in original manager
-    original_manager.create_file("/mnt/original_file.txt").unwrap();
+    original_manager.create_regular_file("/mnt/original_file.txt").unwrap();
     
     // Same file is visible from cloned manager (shared)
     let entries_from_clone = cloned_manager.read_dir("/mnt").unwrap();
     assert!(entries_from_clone.iter().any(|e| e.name == "original_file.txt"));
     
     // Create file in cloned manager
-    cloned_manager.create_file("/mnt/cloned_file.txt").unwrap();
+    cloned_manager.create_regular_file("/mnt/cloned_file.txt").unwrap();
     
     // Same file is visible from original manager (shared)
     let entries_from_original = original_manager.read_dir("/mnt").unwrap();
@@ -949,7 +949,7 @@ fn test_proper_vfs_isolation_with_new_instances() {
     manager2.mount(fs2_id, "/mnt").unwrap();
     
     // Create file in manager1
-    manager1.create_file("/mnt/file_in_container1.txt").unwrap();
+    manager1.create_regular_file("/mnt/file_in_container1.txt").unwrap();
     // Visible from manager1 (correct isolation)
     let entries1 = manager1.read_dir("/mnt").unwrap();
     assert!(entries1.iter().any(|e| e.name == "file_in_container1.txt"));
@@ -959,7 +959,7 @@ fn test_proper_vfs_isolation_with_new_instances() {
     assert!(!entries2.iter().any(|e| e.name == "file_in_container1.txt"));
     
     // Create file in manager2
-    manager2.create_file("/mnt/file_in_container2.txt").unwrap();
+    manager2.create_regular_file("/mnt/file_in_container2.txt").unwrap();
     // Visible from manager2 (correct isolation)
     let entries2 = manager2.read_dir("/mnt").unwrap();
     assert!(entries2.iter().any(|e| e.name == "file_in_container2.txt"));
