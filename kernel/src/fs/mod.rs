@@ -292,16 +292,26 @@ pub trait FileOperations: Send + Sync {
     /// Read directory entries
     fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>>;
     
-    /// Create a file with specified type
+    /// Create a file with the specified type.
     /// 
     /// # Arguments
     /// 
-    /// * `path` - The path to the file to create
-    /// * `file_type` - The type of file to create (regular file, device file, etc.)
+    /// * `path` - The path to the file to create.
+    /// * `file_type` - The type of file to create. This can be a regular file, a device file, or other supported types.
+    /// 
+    /// # Behavior
+    /// 
+    /// - **Regular Files**: These are standard files used for storing data. They are created in the filesystem and can be read from or written to using standard file operations.
+    /// - **Device Files**: These represent hardware devices and are typically used for interacting with device drivers. Creating a device file may involve additional steps, such as associating the file with a specific device driver or hardware resource.
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Creating a device file may require elevated permissions or specific system configurations.
+    /// - If a file already exists at the specified path, the function will return an error of type `FileSystemErrorKind::AlreadyExists`.
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the file was created successfully, Err otherwise
+    /// * `Result<()>` - `Ok` if the file was created successfully, or an error if the operation failed. Errors may include `PermissionDenied`, `InvalidPath`, or `DeviceError` for device files.
     fn create_file(&self, path: &str, file_type: FileType) -> Result<()>;
     
     /// Create a directory
