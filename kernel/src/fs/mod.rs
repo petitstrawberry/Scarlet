@@ -319,6 +319,8 @@ pub enum FileSystemType {
     Hybrid,
     /// Special or virtual file systems (e.g., procfs, sysfs)
     Virtual,
+    /// Device file system (e.g., /dev)
+    Device,
 }
 
 /// Trait for file system drivers
@@ -386,6 +388,15 @@ pub trait FileSystemDriver: Send + Sync {
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotSupported,
             message: "create_from_memory() not implemented for this file system driver".to_string(),
+        })
+    }
+
+    fn create(&self) -> Result<Box<dyn VirtualFileSystem>> {
+        // Default implementation that can be overridden by specific drivers
+        // This is a convenience method for drivers that do not need to handle block or memory creation
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "create() not implemented for this file system driver".to_string(),
         })
     }
 }
