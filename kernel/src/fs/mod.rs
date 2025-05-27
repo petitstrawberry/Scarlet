@@ -51,7 +51,7 @@ pub mod helper;
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
-use crate::{device::block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, task::Task, vm::vmem::MemoryArea};
+use crate::{device::{block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, DeviceType}, task::Task, vm::vmem::MemoryArea};
 
 use spin::{Mutex, RwLock};
 
@@ -91,11 +91,17 @@ impl fmt::Debug for FileSystemError {
 pub type Result<T> = core::result::Result<T, FileSystemError>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeviceFileInfo {
+    pub device_id: usize,
+    pub device_type: DeviceType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileType {
     RegularFile,
     Directory,
-    CharDevice,
-    BlockDevice,
+    CharDevice(DeviceFileInfo),
+    BlockDevice(DeviceFileInfo),
     Pipe,
     SymbolicLink,
     Socket,
