@@ -1,10 +1,10 @@
 // UART driver for QEMU virt machine
 
-use core::{fmt, ptr::{read_volatile, write_volatile}};
+use core::{fmt, any::Any, ptr::{read_volatile, write_volatile}};
 use core::fmt::Write;
 use alloc::boxed::Box;
 
-use crate::{early_initcall, traits::serial::Serial};
+use crate::{early_initcall, traits::serial::Serial, device::{Device, DeviceType, char::CharDevice}};
 
 
 #[derive(Clone)]
@@ -24,9 +24,6 @@ impl Uart {
         Uart { base }
     }
 
-    pub fn init(&self) {
-    }
-
     fn reg_write(&self, offset: usize, value: u8) {
         let addr = self.base + offset;
         unsafe { write_volatile(addr as *mut u8, value) }
@@ -37,42 +34,87 @@ impl Uart {
         unsafe { read_volatile(addr as *const u8) }
     }
 
-}
-
-impl Serial for Uart {
-    fn init(&self) {
-        self.init();
-    }
-    
-    fn write_byte(&self, c: u8) {
+    fn write_byte_internal(&self, c: u8) {
         while self.reg_read(LSR_OFFSET) & LSR_THRE == 0 {}
         self.reg_write(THR_OFFSET, c);
     }
 
-    // Currently, this function does not block until a byte is available.
-    fn read_byte(&self) -> u8 {
+    fn read_byte_internal(&self) -> u8 {
         if self.reg_read(LSR_OFFSET) & LSR_DR == 0 {
             return 0;
         }
         self.reg_read(RHR_OFFSET)
     }
+}
 
+impl Serial for Uart {
+    fn init(&mut self) {
+        // Initialization code for the UART can be added here if needed.
+        // For now, we assume the UART is already initialized by the QEMU virt machine.
+    }
 
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.bytes() {
-            if c == b'\n' {
-                self.write_byte(b'\r');
-            }
-            self.write_byte(c);
-        }
+    fn put(&mut self, c: char) -> fmt::Result {
+        self.write_byte_internal(c as u8); // Block until ready
         Ok(())
     }
 
+    fn get(&mut self) -> Option<char> {
+        if self.can_read() {
+            Some(self.read_byte_internal() as char)
+        } else {
+            None
+        }
+    }
+}
+
+impl Device for Uart {
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Char
+    }
+
+    fn name(&self) -> &'static str {
+        "virt-uart"
+    }
+
+    fn id(&self) -> usize {
+        0
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl CharDevice for Uart {
+    fn read_byte(&mut self) -> Option<u8> {
+        if self.can_read() {
+            Some(self.read_byte_internal())
+        } else {
+            None
+        }
+    }
+
+    fn write_byte(&mut self, byte: u8) -> Result<(), &'static str> {
+        self.write_byte_internal(byte); // Block until ready
+        Ok(())
+    }
+
+    fn can_read(&self) -> bool {
+        self.reg_read(LSR_OFFSET) & LSR_DR != 0
+    }
+
+    fn can_write(&self) -> bool {
+        self.reg_read(LSR_OFFSET) & LSR_THRE != 0
+    }
+    
 }
 
 impl Write for Uart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        Serial::write_str(self, s)
+        for c in s.chars() {
+            self.put(c)?;
+        }
+        Ok(())
     }
 }
 

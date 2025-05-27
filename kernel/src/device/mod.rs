@@ -9,6 +9,7 @@ pub mod manager;
 pub mod fdt;
 pub mod platform;
 pub mod block;
+pub mod char;
 
 extern crate alloc;
 use core::any::Any;

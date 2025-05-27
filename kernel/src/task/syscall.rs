@@ -49,7 +49,12 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
     let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0).unwrap();
     trapframe.epc += 4;
-    serial.read_byte() as usize
+    
+    if let Some(byte) = serial.get() {
+        byte as usize
+    } else {
+        0 // Return 0 if no data available
+    }
 }
 
 pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
