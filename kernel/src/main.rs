@@ -149,6 +149,7 @@ pub mod abi;
 pub mod arch;
 pub mod drivers;
 pub mod timer;
+pub mod time;
 pub mod library;
 pub mod mem;
 pub mod traits;
