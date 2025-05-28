@@ -448,6 +448,33 @@ impl FileSystemDriver for CpiofsDriver {
             })
         }
     }
+    
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+        use crate::fs::params::*;
+        
+        // Try to downcast to CpioFSParams
+        if let Some(_cpio_params) = params.as_any().downcast_ref::<CpioFSParams>() {
+            // CPIO filesystem requires memory area for creation, so we cannot create from parameters alone
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
+            });
+        }
+        
+        // Try to downcast to BasicFSParams for compatibility
+        if let Some(_basic_params) = params.as_any().downcast_ref::<BasicFSParams>() {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
+            });
+        }
+        
+        // If all downcasts fail, return error
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "CPIO filesystem requires CpioFSParams and memory area for creation".to_string(),
+        })
+    }
 }
 
 fn register_driver() {

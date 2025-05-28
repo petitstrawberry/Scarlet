@@ -47,6 +47,8 @@
 pub mod drivers;
 pub mod syscall;
 pub mod helper;
+pub mod tmpfs;
+pub mod params;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
@@ -62,6 +64,7 @@ pub const MAX_PATH_LENGTH: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileSystemErrorKind {
     NotFound,
+    NoSpace,
     PermissionDenied,
     IoError,
     InvalidData,
@@ -424,6 +427,31 @@ pub trait FileSystemDriver: Send + Sync {
             message: "create() not implemented for this file system driver".to_string(),
         })
     }
+
+    /// Create a file system with structured parameters
+    /// 
+    /// This method creates file systems using type-safe structured parameters
+    /// that implement the FileSystemParams trait. This approach replaces the
+    /// old BTreeMap<String, String> approach with better type safety.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `params` - Structured parameter implementing FileSystemParams
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// 
+    /// # Note
+    /// 
+    /// This method uses dynamic dispatch for parameter handling to support
+    /// future dynamic filesystem module loading while maintaining type safety.
+    /// 
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+        // Default implementation falls back to create()
+        let _ = params; // Suppress unused parameter warning
+        self.create()
+    }
 }
 
 // Singleton for global access to the FileSystemDriverManager
@@ -557,6 +585,49 @@ impl FileSystemDriverManager {
         }
 
         driver.create_from_memory(memory_area)
+    }
+
+    /// Create a file system with structured parameters
+    /// 
+    /// This method accepts any type implementing FileSystemParams and uses
+    /// dynamic dispatch to handle it. This replaces the previous generic approach
+    /// to enable future dynamic filesystem module loading.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The name of the driver to use
+    /// * `params` - Parameter structure implementing FileSystemParams
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or creation fails
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// use crate::fs::params::TmpFSParams;
+    /// 
+    /// let params = TmpFSParams::new(1048576, 0); // 1MB limit, fs_id=0
+    /// let fs = manager.create_with_params("tmpfs", &params)?;
+    /// ```
+    pub fn create_with_params(
+        &self, 
+        driver_name: &str, 
+        params: &dyn crate::fs::params::FileSystemParams
+    ) -> Result<Box<dyn VirtualFileSystem>> {
+        let binding = self.drivers.read();
+        let driver = binding.get(driver_name)
+            .ok_or_else(|| FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: format!("File system driver '{}' not found", driver_name),
+            })?;
+
+        // Use dynamic dispatch for structured parameters
+        driver.create_with_params(params)
     }
 
     /// Get driver information
@@ -717,6 +788,45 @@ impl VfsManager {
         
         // Create the file system using the driver manager
         let fs = get_fs_driver_manager().create_from_memory(driver_name, memory_area)?;
+
+        Ok(self.register_fs(fs))
+    }
+
+    /// Create and register a file system with structured parameters
+    /// 
+    /// This method allows creating file systems with structured configuration
+    /// parameters. It uses dynamic dispatch to handle different parameter types,
+    /// enabling future dynamic filesystem module loading.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The name of the file system driver
+    /// * `params` - Parameter structure implementing FileSystemParams
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<usize>` - The ID of the registered file system
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the driver is not found or if the file system cannot be created
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// use crate::fs::params::TmpFSParams;
+    /// 
+    /// let params = TmpFSParams::new(1048576, 42); // 1MB limit, fs_id=42
+    /// let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params)?;
+    /// ```
+    pub fn create_and_register_fs_with_params(
+        &mut self,
+        driver_name: &str,
+        params: &dyn crate::fs::params::FileSystemParams,
+    ) -> Result<usize> {
+        
+        // Create the file system using the driver manager with structured parameters
+        let fs = get_fs_driver_manager().create_with_params(driver_name, params)?;
 
         Ok(self.register_fs(fs))
     }
