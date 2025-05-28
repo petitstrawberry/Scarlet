@@ -136,12 +136,74 @@ impl FileHandle for TestFileHandle {
         // Handle device files
         if let Some(ref device_guard) = self.device_guard {
             // For device files, delegate to the device's read operation
-            let _device = device_guard.device();
+            let device_guard_ref = device_guard.device();
+            let mut device_write = device_guard_ref.write();
             
-            // Use device-specific read logic (this is a simplified example)
-            // In a real implementation, you would need to use device-specific traits
-            // For now, return 0 to indicate EOF for device reads
-            return Ok(0);
+            match device_write.device_type() {
+                DeviceType::Char => {
+                    if let Some(char_device) = device_write.as_char_device() {
+                        let mut bytes_read = 0;
+                        for i in 0..buffer.len() {
+                            if let Some(byte) = char_device.read_byte() {
+                                buffer[i] = byte;
+                                bytes_read += 1;
+                            } else {
+                                break; // No more data available
+                            }
+                        }
+                        return Ok(bytes_read);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a character device".to_string(),
+                        });
+                    }
+                },
+                DeviceType::Block => {
+                    if let Some(block_device) = device_write.as_block_device() {
+                        // For block devices, read from sector 0 (simplified implementation)
+                        let request = Box::new(crate::device::block::request::BlockIORequest {
+                            request_type: crate::device::block::request::BlockIORequestType::Read,
+                            sector: 0,
+                            sector_count: 1,
+                            head: 0,
+                            cylinder: 0,
+                            buffer: vec![0; buffer.len().min(512)],
+                        });
+                        
+                        block_device.enqueue_request(request);
+                        let results = block_device.process_requests();
+                        
+                        if let Some(result) = results.first() {
+                            match &result.result {
+                                Ok(_) => {
+                                    let bytes_to_copy = buffer.len().min(result.request.buffer.len());
+                                    buffer[..bytes_to_copy].copy_from_slice(&result.request.buffer[..bytes_to_copy]);
+                                    return Ok(bytes_to_copy);
+                                },
+                                Err(e) => {
+                                    return Err(FileSystemError {
+                                        kind: FileSystemErrorKind::IoError,
+                                        message: format!("Block device read failed: {}", e),
+                                    });
+                                }
+                            }
+                        }
+                        return Ok(0);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a block device".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(FileSystemError {
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Unsupported device type".to_string(),
+                    });
+                }
+            }
         }
         
         // Handle regular files
@@ -164,12 +226,68 @@ impl FileHandle for TestFileHandle {
         // Handle device files
         if let Some(ref device_guard) = self.device_guard {
             // For device files, delegate to the device's write operation
-            let _device = device_guard.device();
+            let device_guard_ref = device_guard.device();
+            let mut device_write = device_guard_ref.write();
             
-            // Use device-specific write logic (this is a simplified example)
-            // In a real implementation, you would need to use device-specific traits
-            // For now, just return the buffer length as if written successfully
-            return Ok(buffer.len());
+            match device_write.device_type() {
+                DeviceType::Char => {
+                    if let Some(char_device) = device_write.as_char_device() {
+                        let mut bytes_written = 0;
+                        for &byte in buffer {
+                            match char_device.write_byte(byte) {
+                                Ok(_) => bytes_written += 1,
+                                Err(_) => break, // Stop on first error
+                            }
+                        }
+                        return Ok(bytes_written);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a character device".to_string(),
+                        });
+                    }
+                },
+                DeviceType::Block => {
+                    if let Some(block_device) = device_write.as_block_device() {
+                        // For block devices, write to sector 0 (simplified implementation)
+                        let request = Box::new(crate::device::block::request::BlockIORequest {
+                            request_type: crate::device::block::request::BlockIORequestType::Write,
+                            sector: 0,
+                            sector_count: 1,
+                            head: 0,
+                            cylinder: 0,
+                            buffer: buffer.to_vec(),
+                        });
+                        
+                        block_device.enqueue_request(request);
+                        let results = block_device.process_requests();
+                        
+                        if let Some(result) = results.first() {
+                            match &result.result {
+                                Ok(_) => return Ok(buffer.len()),
+                                Err(e) => {
+                                    return Err(FileSystemError {
+                                        kind: FileSystemErrorKind::IoError,
+                                        message: format!("Block device write failed: {}", e),
+                                    });
+                                }
+                            }
+                        }
+                        return Ok(0);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a block device".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(FileSystemError {
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Unsupported device type".to_string(),
+                    });
+                }
+            }
         }
         
         // Handle regular files
@@ -220,7 +338,7 @@ impl FileHandle for TestFileHandle {
     
     fn metadata(&self) -> Result<FileMetadata> {
         Ok(FileMetadata {
-            file_type: FileType::RegularFile,
+            file_type: self.file_type.clone(),
             size: self.content.read().len(),
             permissions: FilePermission {
                 read: true,
@@ -358,7 +476,18 @@ impl FileOperations for TestFileSystem {
                     name: file_name.to_string(),
                     file_type,
                     size: 0,
-                    metadata: None,
+                    metadata: Some(FileMetadata {
+                        file_type: file_type.clone(),
+                        size: 0,
+                        permissions: FilePermission {
+                            read: true,
+                            write: true,
+                            execute: false,
+                        },
+                        created_time: 0,
+                        modified_time: 0,
+                        accessed_time: 0,
+                    }),
                 });
                 
                 return Ok(());
@@ -515,18 +644,20 @@ impl FileOperations for TestFileSystem {
         for (dir_path, entries) in self.directories.lock().iter() {
             if dir_path == parent_path {
                 if let Some(entry) = entries.iter().find(|e| e.name == name) {
-                    return Ok(FileMetadata {
-                        file_type: entry.file_type,
-                        size: entry.size,
-                        permissions: FilePermission {
-                            read: true,
-                            write: true,
-                            execute: false,
-                        },
-                        created_time: 0,
-                        modified_time: 0,
-                        accessed_time: 0,
-                    });
+                    return Ok(
+                        entry.metadata.clone().unwrap_or(FileMetadata {
+                            file_type: entry.file_type.clone(),
+                            size: 0,
+                            permissions: FilePermission {
+                                read: true,
+                                write: true,
+                                execute: false,
+                            },
+                            created_time: 0,
+                            modified_time: 0,
+                            accessed_time: 0,
+                        })
+                    )
                 }
             }
         }
@@ -642,7 +773,9 @@ mod device_tests {
         assert_eq!(fs.name(), "testfs");
 
         // Create a test character device for device file
-        let test_char_device = Box::new(MockCharDevice::new(4, "fs_char"));
+        let mut test_char_device = Box::new(MockCharDevice::new(4, "fs_char"));
+        test_char_device.set_read_data(vec![b'T', b'e', b's', b't']);
+
         let device_id = DeviceManager::get_mut_manager().register_device(test_char_device as Box<dyn Device>);
 
         // Test device access through filesystem interface
@@ -673,6 +806,22 @@ mod device_tests {
         } else {
             panic!("Expected CharDevice file type");
         }
+
+        // Create device file in the filesystem
+        fs.create_dir("/dev").unwrap();
+        fs.create_file("/dev/test_char", FileType::CharDevice(device_info)).unwrap();
+        // Verify that the file can be opened
+        let file_handle = fs.open("/dev/test_char", 0).unwrap();
+        assert!(file_handle.metadata().is_ok());
+        assert_eq!(file_handle.metadata().unwrap().file_type, FileType::CharDevice(device_info));
+
+        // Test reading from the device file
+        let mut read_buffer = [0u8; 4];
+        let bytes_read = file_handle.read(&mut read_buffer).unwrap();
+        assert_eq!(bytes_read, 4);
+        assert_eq!(&read_buffer[..bytes_read], b"Test");
+
+
     }
 
     #[test_case]
@@ -699,5 +848,198 @@ mod device_tests {
         // Test readiness
         assert!(test_device.can_read());
         assert!(test_device.can_write());
+    }
+
+    #[test_case]
+    fn test_device_file_comprehensive_operations() {
+        // Create a test file system
+        let block_device = Box::new(MockBlockDevice::new(6, "test_block", 512, 100));
+        let fs = TestFileSystem::new(0, "testfs", block_device, 512);
+        
+        // Create test character device for comprehensive testing
+        let mut test_char_device = Box::new(MockCharDevice::new(7, "comprehensive_char"));
+        test_char_device.set_read_data(vec![b'H', b'e', b'l', b'l', b'o', b' ', b'W', b'o', b'r', b'l', b'd', b'!']);
+        
+        let device_id = DeviceManager::get_mut_manager().register_device(test_char_device as Box<dyn Device>);
+        
+        // Create device file info
+        let device_info = DeviceFileInfo {
+            device_id,
+            device_type: DeviceType::Char,
+        };
+        
+        // Create /dev directory and device file
+        fs.create_dir("/dev").unwrap();
+        fs.create_file("/dev/comprehensive_char", FileType::CharDevice(device_info)).unwrap();
+        
+        // Test file creation and opening
+        let file_handle = fs.open("/dev/comprehensive_char", 0).unwrap();
+        
+        // Verify file metadata
+        let metadata = file_handle.metadata().unwrap();
+        assert_eq!(metadata.file_type, FileType::CharDevice(device_info));
+        assert_eq!(metadata.size, 0); // Device files should have size 0
+        
+        // Test reading from device file
+        let mut read_buffer = [0u8; 12];
+        let bytes_read = file_handle.read(&mut read_buffer).unwrap();
+        assert_eq!(bytes_read, 12);
+        assert_eq!(&read_buffer[..bytes_read], b"Hello World!");
+        
+        // Test writing to device file
+        let write_data = b"Test Write";
+        let bytes_written = file_handle.write(write_data).unwrap();
+        assert_eq!(bytes_written, 10);
+        
+        // Verify the write was successful by checking the device's internal state
+        // Note: In a real test, we would need a way to verify the write operation
+        // For MockCharDevice, this would require accessing the written data
+        
+        // Test multiple read/write operations
+        let mut small_buffer = [0u8; 5];
+        let bytes_read_2 = file_handle.read(&mut small_buffer).unwrap();
+        // Should be 0 since we've already read all data
+        assert_eq!(bytes_read_2, 0);
+        
+        // Test another write operation
+        let write_data_2 = b"More data";
+        let bytes_written_2 = file_handle.write(write_data_2).unwrap();
+        assert_eq!(bytes_written_2, 9);
+    }
+    
+    #[test_case]
+    fn test_device_file_block_device_operations() {
+        // Create a test file system
+        let fs_block_device = Box::new(MockBlockDevice::new(8, "fs_block", 512, 100));
+        let fs = TestFileSystem::new(0, "testfs", fs_block_device, 512);
+        
+        // Create test block device for device file
+        let test_block_device = Box::new(MockBlockDevice::new(9, "test_block_dev", 512, 100));
+        let device_id = DeviceManager::get_mut_manager().register_device(test_block_device as Box<dyn Device>);
+        
+        // Create device file info
+        let device_info = DeviceFileInfo {
+            device_id,
+            device_type: DeviceType::Block,
+        };
+        
+        // Create /dev directory and block device file
+        fs.create_dir("/dev").unwrap();
+        fs.create_file("/dev/test_block", FileType::BlockDevice(device_info)).unwrap();
+        
+        // Test file creation and opening
+        let file_handle = fs.open("/dev/test_block", 0).unwrap();
+        
+        // Verify file metadata
+        let metadata = file_handle.metadata().unwrap();
+        assert_eq!(metadata.file_type, FileType::BlockDevice(device_info));
+        assert_eq!(metadata.size, 0); // Device files should have size 0
+        
+        // Test writing to block device file
+        let write_data = vec![0xAA; 512];
+        let bytes_written = file_handle.write(&write_data).unwrap();
+        assert_eq!(bytes_written, 512);
+        
+        // Test reading from block device file
+        let mut read_buffer = vec![0u8; 512];
+        let bytes_read = file_handle.read(&mut read_buffer).unwrap();
+        assert_eq!(bytes_read, 512);
+        assert_eq!(read_buffer, write_data);
+    }
+    
+    #[test_case]
+    fn test_device_file_error_handling() {
+        // Create a test file system
+        let block_device = Box::new(MockBlockDevice::new(10, "error_test_block", 512, 100));
+        let fs = TestFileSystem::new(0, "testfs", block_device, 512);
+        
+        // Test opening non-existent device file
+        let result = fs.open("/dev/nonexistent", 0);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind, FileSystemErrorKind::NotFound);
+        }
+        
+        // Create a device file but don't register the device
+        let fake_device_info = DeviceFileInfo {
+            device_id: 9999, // Non-existent device ID
+            device_type: DeviceType::Char,
+        };
+        
+        fs.create_dir("/dev").unwrap();
+        fs.create_file("/dev/fake_device", FileType::CharDevice(fake_device_info)).unwrap();
+        
+        // Try to open the device file with non-existent device
+        let result = fs.open("/dev/fake_device", 0);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind, FileSystemErrorKind::PermissionDenied);
+        }
+    }
+    
+    #[test_case]
+    fn test_mixed_file_types_in_filesystem() {
+        // Create a test file system
+        let block_device = Box::new(MockBlockDevice::new(11, "mixed_test_block", 512, 100));
+        let fs = TestFileSystem::new(0, "testfs", block_device, 512);
+        
+        // Create test devices
+        let mut char_device = Box::new(MockCharDevice::new(12, "mixed_char"));
+        char_device.set_read_data(vec![b'M', b'i', b'x', b'e', b'd']);
+        let char_device_id = DeviceManager::get_mut_manager().register_device(char_device as Box<dyn Device>);
+        
+        let block_device_test = Box::new(MockBlockDevice::new(13, "mixed_block", 512, 100));
+        let block_device_id = DeviceManager::get_mut_manager().register_device(block_device_test as Box<dyn Device>);
+        
+        // Create mixed file structure
+        fs.create_dir("/dev").unwrap();
+        fs.create_dir("/home").unwrap();
+        
+        // Create regular file
+        fs.create_file("/home/regular.txt", FileType::RegularFile).unwrap();
+        
+        // Create device files
+        fs.create_file("/dev/char_device", FileType::CharDevice(DeviceFileInfo {
+            device_id: char_device_id,
+            device_type: DeviceType::Char,
+        })).unwrap();
+        
+        fs.create_file("/dev/block_device", FileType::BlockDevice(DeviceFileInfo {
+            device_id: block_device_id,
+            device_type: DeviceType::Block,
+        })).unwrap();
+        
+        // Test opening and using different file types
+        
+        // Regular file
+        let regular_file = fs.open("/home/regular.txt", 0).unwrap();
+        let regular_metadata = regular_file.metadata().unwrap();
+        assert_eq!(regular_metadata.file_type, FileType::RegularFile);
+        
+        // Character device file
+        let char_file = fs.open("/dev/char_device", 0).unwrap();
+        let char_metadata = char_file.metadata().unwrap();
+        assert!(matches!(char_metadata.file_type, FileType::CharDevice(_)));
+        
+        // Test reading from character device
+        let mut char_buffer = [0u8; 5];
+        let char_bytes_read = char_file.read(&mut char_buffer).unwrap();
+        assert_eq!(char_bytes_read, 5);
+        assert_eq!(&char_buffer, b"Mixed");
+        
+        // Block device file
+        let block_file = fs.open("/dev/block_device", 0).unwrap();
+        let block_metadata = block_file.metadata().unwrap();
+        assert!(matches!(block_metadata.file_type, FileType::BlockDevice(_)));
+        
+        // Test writing to and reading from block device
+        let test_data = vec![0x55; 256];
+        let block_bytes_written = block_file.write(&test_data).unwrap();
+        assert_eq!(block_bytes_written, 256);
+        
+        let mut block_buffer = vec![0u8; 256];
+        let block_bytes_read = block_file.read(&mut block_buffer).unwrap();
+        assert_eq!(block_bytes_read, 256);
+        assert_eq!(block_buffer, test_data);
     }
 }

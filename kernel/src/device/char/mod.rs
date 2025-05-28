@@ -122,6 +122,14 @@ impl Device for GenericCharDevice {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    
+    fn as_char_device(&mut self) -> Option<&mut dyn CharDevice> {
+        Some(self)
+    }
 }
 
 impl CharDevice for GenericCharDevice {
