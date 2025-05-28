@@ -274,6 +274,14 @@ impl Device for VirtioBlockDevice {
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
+    
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+    
+    fn as_block_device(&mut self) -> Option<&mut dyn crate::device::block::BlockDevice> {
+        Some(self)
+    }
 }
 
 impl VirtioDevice for VirtioBlockDevice {
