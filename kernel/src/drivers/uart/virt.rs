@@ -53,11 +53,25 @@ impl Serial for Uart {
         // For now, we assume the UART is already initialized by the QEMU virt machine.
     }
 
+    /// Writes a character to the UART. (blocking)
+    /// 
+    /// This function will block until the UART is ready to accept the character.
+    /// 
+    /// # Arguments
+    /// * `c` - The character to write to the UART
+    /// 
+    /// # Returns
+    /// A `fmt::Result` indicating success or failure.
+    /// 
     fn put(&mut self, c: char) -> fmt::Result {
         self.write_byte_internal(c as u8); // Block until ready
         Ok(())
     }
 
+    /// Reads a character from the UART. (non-blocking)
+    /// 
+    /// Returns `Some(char)` if a character is available, or `None` if not.
+    /// 
     fn get(&mut self) -> Option<char> {
         if self.can_read() {
             Some(self.read_byte_internal() as char)
