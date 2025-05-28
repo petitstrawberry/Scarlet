@@ -47,6 +47,7 @@
 pub mod drivers;
 pub mod syscall;
 pub mod helper;
+pub mod params;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;

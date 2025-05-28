@@ -688,6 +688,25 @@ impl FileSystemDriver for TestFileSystemDriver {
     fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
         Ok(Box::new(TestFileSystem::new(0, "testfs", block_device, block_size)))
     }
+    
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+        use crate::fs::params::*;
+        use crate::device::block::mockblk::MockBlockDevice;
+        
+        // Try to downcast to BasicFSParams
+        if let Some(basic_params) = params.as_any().downcast_ref::<BasicFSParams>() {
+            // Create a mock block device for testing
+            let block_device = Box::new(MockBlockDevice::new(1, "test_block", 512, 100));
+            let block_size = basic_params.block_size.unwrap_or(512);
+            return Ok(Box::new(TestFileSystem::new(basic_params.fs_id, "testfs", block_device, block_size)));
+        }
+        
+        // If downcast fails, return error
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "TestFS requires BasicFSParams parameter type".to_string(),
+        })
+    }
 }
 
 #[cfg(test)]

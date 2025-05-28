@@ -968,3 +968,125 @@ fn test_proper_vfs_isolation_with_new_instances() {
     let entries1 = manager1.read_dir("/mnt").unwrap();
     assert!(!entries1.iter().any(|e| e.name == "file_in_container2.txt"));
 }
+
+// Test cases for structured parameter system
+#[test_case]
+fn test_structured_parameters_tmpfs() {
+    use crate::fs::params::TmpFSParams;
+    
+    // Register TmpFS driver
+    get_fs_driver_manager().register_driver(Box::new(crate::fs::tmpfs::TmpFSDriver));
+    
+    let mut manager = VfsManager::new();
+    
+    // Create TmpFS with specific parameters
+    let params = TmpFSParams::new(1024 * 1024, 42); // 1MB limit, fs_id=42
+    let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params).unwrap();
+    
+    // Mount the filesystem
+    let result = manager.mount(fs_id, "/tmp");
+    assert!(result.is_ok());
+    
+    // Verify the filesystem is mounted and working
+    let result = manager.create_dir("/tmp/test");
+    assert!(result.is_ok());
+    
+    let entries = manager.read_dir("/tmp").unwrap();
+    assert!(entries.iter().any(|e| e.name == "test" && e.file_type == FileType::Directory));
+}
+
+#[test_case]
+fn test_structured_parameters_testfs() {
+    use crate::fs::params::BasicFSParams;
+    
+    // Register TestFS driver
+    get_fs_driver_manager().register_driver(Box::new(TestFileSystemDriver));
+    
+    let mut manager = VfsManager::new();
+    
+    // Create TestFS with specific parameters
+    let params = BasicFSParams::new(123)
+        .with_block_size(1024)
+        .with_read_only(false);
+    let fs_id = manager.create_and_register_fs_with_params("testfs", &params).unwrap();
+    
+    // Mount the filesystem
+    let result = manager.mount(fs_id, "/test");
+    assert!(result.is_ok());
+    
+    // Verify the filesystem is mounted and working
+    let entries = manager.read_dir("/test").unwrap();
+    assert!(entries.len() >= 2); // Should have at least test.txt and testdir
+    assert!(entries.iter().any(|e| e.name == "test.txt"));
+    assert!(entries.iter().any(|e| e.name == "testdir"));
+}
+
+#[test_case]
+fn test_structured_parameters_cpio_error() {
+    use crate::fs::params::CpioFSParams;
+    use crate::fs::drivers::cpio::CpiofsDriver;
+    
+    // Register CPIO driver
+    get_fs_driver_manager().register_driver(Box::new(CpiofsDriver));
+    
+    let mut manager = VfsManager::new();
+    
+    // Try to create CPIO filesystem with parameters (should fail)
+    let params = CpioFSParams::new(456);
+    let result = manager.create_and_register_fs_with_params("cpiofs", &params);
+    
+    // Should fail because CPIO requires memory area
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind, FileSystemErrorKind::NotSupported);
+        assert!(e.message.contains("memory area"));
+    }
+}
+
+#[test_case]
+fn test_structured_parameters_backward_compatibility() {
+    use crate::fs::params::BasicFSParams;
+    
+    // Register TestFS driver
+    get_fs_driver_manager().register_driver(Box::new(TestFileSystemDriver));
+    
+    let mut manager = VfsManager::new();
+    
+    // Test that regular block device creation still works
+    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
+    let fs_id = manager.create_and_register_block_fs("testfs", device, 512).unwrap();
+    
+    // Mount and test
+    let result = manager.mount(fs_id, "/legacy");
+    assert!(result.is_ok());
+    
+    let entries = manager.read_dir("/legacy").unwrap();
+    assert!(entries.iter().any(|e| e.name == "test.txt"));
+    
+    // Test that structured parameters also work for the same driver
+    let params = BasicFSParams::new(789);
+    let fs_id2 = manager.create_and_register_fs_with_params("testfs", &params).unwrap();
+    
+    let result = manager.mount(fs_id2, "/structured");
+    assert!(result.is_ok());
+    
+    let entries = manager.read_dir("/structured").unwrap();
+    assert!(entries.iter().any(|e| e.name == "test.txt"));
+}
+
+#[test_case]
+fn test_structured_parameters_driver_not_found() {
+    use crate::fs::params::BasicFSParams;
+    
+    let mut manager = VfsManager::new();
+    
+    // Try to create filesystem with non-existent driver
+    let params = BasicFSParams::new(999);
+    let result = manager.create_and_register_fs_with_params("nonexistent", &params);
+    
+    assert!(result.is_err());
+    if let Err(e) = result {
+        assert_eq!(e.kind, FileSystemErrorKind::NotFound);
+        assert!(e.message.contains("not found"));
+    }
+}
