@@ -120,6 +120,9 @@ impl CharDevice for Uart {
 impl Write for Uart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for c in s.chars() {
+            if c == '\n' {
+                self.put('\r')?; // Convert newline to carriage return + newline
+            }
             self.put(c)?;
         }
         Ok(())
