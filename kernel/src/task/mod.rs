@@ -756,6 +756,7 @@ impl Task {
                     child.vm_manager.add_memory_map(shared_mmap)
                         .map_err(|_| "Failed to add shared memory map to child task")?;
 
+                    // TODO: Add logic to determine if the memory map is a trampoline
                     // If the memory map is the trampoline, pre-map it
                     if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
                         // Pre-map the trampoline page
@@ -764,9 +765,6 @@ impl Task {
                     }
 
                 } else {
-                    println!("Cloning private memory map: {:#x} - {:#x}", 
-                        mmap.vmarea.start, mmap.vmarea.end);
-
                     // Private memory regions: allocate new pages and copy contents
                     let permissions = mmap.permissions;
                     let pages = allocate_raw_pages(num_pages);
