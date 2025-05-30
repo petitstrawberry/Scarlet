@@ -456,7 +456,8 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     let map = VirtualMemoryMap {
         vmarea,
         pmarea,
-        permissions
+        permissions,
+        is_shared: false, // User program memory should not be shared
     };
 
     // Add to VM manager

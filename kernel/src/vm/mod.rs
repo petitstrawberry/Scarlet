@@ -91,6 +91,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
+        is_shared: true, // Kernel memory should be shared across all processes
     };
     manager.add_memory_map(kernel_map).map_err(|e| panic!("Failed to add kernel memory map: {}", e)).unwrap();
     /* Pre-map the kernel space */
@@ -108,6 +109,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
+        is_shared: true, // Device memory should be shared
     };
     manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
@@ -149,6 +151,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
+        is_shared: true, // Kernel memory should be shared across all processes
     };
     task.vm_manager.add_memory_map(kernel_map).map_err(|e| {
         panic!("Failed to add kernel memory map: {}", e);
@@ -174,6 +177,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
+        is_shared: true, // Device memory should be shared
     };
     task.vm_manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
@@ -232,6 +236,7 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
+        is_shared: true, // Trampoline should be shared across all processes
     };
 
     manager.add_memory_map(trampoline_map)
