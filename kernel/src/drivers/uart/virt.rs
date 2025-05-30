@@ -4,7 +4,7 @@ use core::{fmt, any::Any, ptr::{read_volatile, write_volatile}};
 use core::fmt::Write;
 use alloc::boxed::Box;
 
-use crate::{early_initcall, traits::serial::Serial, device::{Device, DeviceType, char::CharDevice}};
+use crate::{device::{char::CharDevice, Device, DeviceType}, early_initcall, traits::serial::Serial};
 
 
 #[derive(Clone)]
