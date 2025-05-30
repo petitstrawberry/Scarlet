@@ -59,7 +59,7 @@ pub struct Task {
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
     /// Dynamic ABI
-    pub abi: Option<Box<dyn AbiModule>>,
+    pub abi: Option<Arc<dyn AbiModule>>,
 
     // File descriptors (File) table
     fd_table: Vec<usize>,
@@ -105,7 +105,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            abi: Some(Box::new(ScarletAbi::default())), // Default ABI
+            abi: Some(Arc::new(ScarletAbi::default())), // Default ABI
             fd_table: Vec::new(),
             files: [ const { None }; NUM_OF_FDS],
             cwd: None,
@@ -830,6 +830,13 @@ impl Task {
             child.vfs = Some(vfs.clone());
         } else {
             child.vfs = None;
+        }
+
+        // Copy the ABI
+        if let Some(abi) = &self.abi {
+            child.abi = Some(abi.clone());
+        } else {
+            child.abi = None;
         }
 
         // Copy the current working directory

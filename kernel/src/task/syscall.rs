@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::str;
 
@@ -7,7 +8,7 @@ use crate::fs::{File, VfsManager, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
-use crate::print;
+use crate::{print, println};
 use crate::sched::scheduler::get_scheduler;
 use crate::task::WaitError;
 use crate::vm::{setup_user_stack, setup_trampoline};
@@ -274,14 +275,22 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
         trapframe.epc += 4;
         return usize::MAX; // ABI not found
     }
-    let backup_abi = task.abi.take();
-    task.abi = abi;
-    
+    let abi = abi.unwrap();
+    // let backup_abi = task.abi.take();
+    // let backup_vfs = task.vfs.take();
+
     let res = sys_execve(trapframe);
-    if res == usize::MAX {
-        // Restore the ABI
-        task.abi = backup_abi;
+
+    if res != usize::MAX {
+        match abi.init_fs() {
+            Some(vfs) => {
+                task.vfs = Some(Arc::new(vfs));
+            },
+            None => {}
+        }
+        task.abi = Some(abi);
     }
+
     res
 }
 
