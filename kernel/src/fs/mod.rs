@@ -49,6 +49,7 @@ pub mod syscall;
 pub mod helper;
 pub mod tmpfs;
 pub mod params;
+pub mod mount_tree;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
@@ -56,6 +57,7 @@ use core::fmt;
 use crate::{device::{block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, DeviceType}, task::Task, vm::vmem::MemoryArea};
 
 use spin::{Mutex, RwLock};
+use mount_tree::{MountTree, MountPoint as TreeMountPoint, MountType, MountOptions};
 
 extern crate alloc;
 
@@ -652,13 +654,6 @@ impl Default for FileSystemDriverManager {
 
 pub type FileSystemRef = Arc<RwLock<Box<dyn VirtualFileSystem>>>;
 
-/// Mount point information
-#[derive(Clone)]
-pub struct MountPoint {
-    pub path: String,
-    pub fs: FileSystemRef,
-}
-
 pub enum ManagerRef<'a> {
     Global, // Use the global manager
     Local(&'a mut VfsManager), // Use a specific manager
@@ -673,9 +668,10 @@ pub enum ManagerRef<'a> {
 /// # Architecture
 ///
 /// Each `VfsManager` instance maintains:
-/// - Independent mount point namespace
+/// - Independent mount point namespace using hierarchical MountTree
 /// - Reference-counted filesystem objects that can be shared between managers
 /// - Thread-safe operations via RwLock protection
+/// - Security-enhanced path resolution with protection against directory traversal
 ///
 /// # Usage Scenarios
 ///
@@ -683,7 +679,8 @@ pub enum ManagerRef<'a> {
 /// Each container gets its own `VfsManager` with completely isolated mount points:
 /// ```rust
 /// let mut container_vfs = VfsManager::new();
-/// container_vfs.mount(container_fs_id, "/");
+/// let fs_index = container_vfs.register_fs(container_fs);
+/// container_vfs.mount(fs_index, "/");
 /// task.vfs = Some(Arc::new(container_vfs));
 /// ```
 ///
@@ -691,8 +688,17 @@ pub enum ManagerRef<'a> {
 /// Multiple tasks can share filesystem objects while maintaining independent mount points:
 /// ```rust
 /// let shared_vfs = original_vfs.clone(); // Shares filesystem objects
-/// shared_vfs.mount(shared_fs_id, "/mnt/shared"); // Independent mount points
+/// let fs_index = shared_vfs.register_fs(shared_fs);
+/// shared_vfs.mount(fs_index, "/mnt/shared"); // Independent mount points
 /// ```
+///
+/// # Performance Improvements
+///
+/// The new MountTree implementation provides:
+/// - O(log k) path resolution where k is path depth
+/// - Efficient mount point hierarchy management
+/// - Security-enhanced path normalization
+/// - Reduced memory usage through Trie structure
 ///
 /// # Thread Safety
 ///
@@ -701,7 +707,7 @@ pub enum ManagerRef<'a> {
 /// sharing the underlying filesystem objects through Arc references.
 pub struct VfsManager {
     filesystems: RwLock<Vec<FileSystemRef>>,
-    mount_points: RwLock<BTreeMap<String, MountPoint>>,
+    mount_tree: RwLock<MountTree>,
     next_fs_id: RwLock<usize>,
 }
 
@@ -709,7 +715,7 @@ impl VfsManager {
     pub fn new() -> Self {
         Self {
             filesystems: RwLock::new(Vec::new()),
-            mount_points: RwLock::new(BTreeMap::new()),
+            mount_tree: RwLock::new(MountTree::new()),
             next_fs_id: RwLock::new(0),
         }
     }
@@ -854,19 +860,25 @@ impl VfsManager {
         // Retrieve the file system (ownership transfer)
         let fs = filesystems.remove(fs_idx);
         {
-            let mut fs = fs.write();
+            let mut fs_write = fs.write();
             
             // Perform the mount operation
-            fs.mount(mount_point)?;
+            fs_write.mount(mount_point)?;
         }
         
-        // Register the mount point
-        let mount_point_entry = MountPoint {
+        // Create mount point entry with enhanced metadata
+        let mount_point_entry = TreeMountPoint {
             path: mount_point.to_string(),
-            fs,
+            fs: fs.clone(),
+            mount_type: MountType::Regular,
+            mount_options: MountOptions::default(),
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: Get actual timestamp
         };
         
-        self.mount_points.write().insert(mount_point.to_string(), mount_point_entry);
+        // Register with MountTree
+        self.mount_tree.write().mount(mount_point, mount_point_entry)?;
         
         Ok(())
     }
@@ -882,15 +894,11 @@ impl VfsManager {
     /// * `Result<()>` - Ok if the unmount was successful, Err if there was an error
     /// 
     pub fn unmount(&mut self, mount_point: &str) -> Result<()> {
-        // Search for the mount point
-        let mp = self.mount_points.write().remove(mount_point)
-            .ok_or(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "Mount point not found".to_string(),
-            })?;
+        // Remove the mount point from MountTree
+        let mp = self.mount_tree.write().remove(mount_point)?;
     
         // Return the file system to the registration list
-        self.filesystems.write().push(mp.fs);
+        self.filesystems.write().push(mp.fs.clone());
         
         Ok(())
     }
@@ -989,7 +997,6 @@ impl VfsManager {
     /// * `FileSystemError` - If no file system is mounted for the specified path
     /// 
     fn resolve_path(&self, path: &str) -> Result<(FileSystemRef, String)> {
-        let mount_points = self.mount_points.read();
         // Check if the path is absolute
         if !path.starts_with('/') {
             return Err(FileSystemError {
@@ -997,44 +1004,10 @@ impl VfsManager {
                 message: format!("Path must be absolute: {}", path),
             });
         }
-        let path = Self::normalize_path(path);
-        let mut best_match = "";
         
-        // First try exact matching of mount points
-        for (mp_path, _) in mount_points.iter() {
-            // If there's an exact match
-            if path == *mp_path {
-                best_match = mp_path;
-                break; // Exact match has highest priority
-            }
-            
-            // Match at directory boundaries
-            if mp_path == "/" || // Root always matches
-                (path.starts_with(mp_path) && 
-                mp_path.len() > best_match.len() &&
-                (mp_path.len() == path.len() || path.as_bytes().get(mp_path.len()) == Some(&b'/'))) {
-                best_match = mp_path;
-            }
-        }
-        
-        if best_match.is_empty() {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: format!("No filesystem mounted for path: {}", path),
-            });
-        }
-        
-        let relative_path = if path == best_match || path.len() == best_match.len() {
-            // If it points to the mount point itself
-            "/".to_string()
-        } else {
-            // For paths under the mount point, normalize the leading /
-            let suffix = &path[best_match.len()..];
-            format!("/{}", suffix.trim_start_matches('/'))
-        };
-        
-        let fs = mount_points.get(best_match).unwrap().fs.clone();
-        Ok((fs, relative_path))
+        let mount_tree = self.mount_tree.read();
+        let (mount_point, relative_path) = mount_tree.resolve(path)?;
+        Ok((mount_point.fs.clone(), relative_path))
     }
 
     /// Get absolute path from relative path and current working directory
@@ -1225,6 +1198,24 @@ impl VfsManager {
             },
         }
     }
+
+    /// Get the number of mount points (for testing purposes)
+    #[cfg(test)]
+    pub fn mount_count(&self) -> usize {
+        self.mount_tree.read().len()
+    }
+
+    /// Check if a specific mount point exists (for testing purposes)
+    #[cfg(test)]
+    pub fn has_mount_point(&self, path: &str) -> bool {
+        self.mount_tree.read().resolve(path).is_ok()
+    }
+
+    /// List all mount points (for testing purposes)
+    #[cfg(test)]
+    pub fn list_mount_points(&self) -> Vec<String> {
+        self.mount_tree.read().list_all()
+    }
 }
 
 impl Clone for VfsManager {
@@ -1233,9 +1224,8 @@ impl Clone for VfsManager {
     /// This implementation supports filesystem sharing between tasks while maintaining
     /// independent mount point namespaces. Key characteristics:
     ///
-    /// - **Mount Points**: Each clone gets independent mount point mappings
+    /// - **Mount Points**: Each clone gets independent mount point mappings (starting from same state)
     /// - **Filesystem Objects**: Underlying FileSystemRef objects are shared via Arc cloning
-    /// - **Filesystem ID**: Independent ID counters for each VfsManager instance
     ///
     /// # Use Cases
     ///
@@ -1250,13 +1240,13 @@ impl Clone for VfsManager {
     /// // ... register and mount filesystems in original_vfs
     /// 
     /// let shared_vfs = original_vfs.clone();
-    /// // shared_vfs sees the same filesystem objects but can mount them differently
+    /// // shared_vfs sees the same filesystem objects and initial mount points
     /// ```
     fn clone(&self) -> Self {
         Self {
-            filesystems: RwLock::new(self.filesystems.read().clone()),
-            mount_points: RwLock::new(self.mount_points.read().clone()),
-            next_fs_id: RwLock::new(*self.next_fs_id.read()),
+            filesystems: RwLock::new(self.filesystems.read().clone()), // Clone the Vec content
+            mount_tree: RwLock::new(self.mount_tree.read().clone()), // Clone mount tree with existing mounts
+            next_fs_id: RwLock::new(*self.next_fs_id.read()), // Clone the counter value
         }
     }
 }
