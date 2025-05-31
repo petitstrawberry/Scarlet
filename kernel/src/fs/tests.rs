@@ -1089,3 +1089,309 @@ fn test_structured_parameters_driver_not_found() {
         assert!(e.message.contains("not found"));
     }
 }
+
+#[test_case]
+fn test_bind_mount() {
+    let mut manager = VfsManager::new();
+    
+    // Set up source filesystem
+    let source_device = Box::new(MockBlockDevice::new(1, "source_disk", 512, 100));
+    let source_fs = Box::new(TestFileSystem::new("source_fs", source_device, 512));
+    let source_fs_id = manager.register_fs(source_fs);
+    manager.mount(source_fs_id, "/mnt/source").unwrap();
+    
+    // Create a file in source
+    manager.create_regular_file("/mnt/source/test_file.txt").unwrap();
+    
+    // Create bind mount
+    let result = manager.bind_mount("/mnt/source", "/mnt/target", false);
+    assert!(result.is_ok());
+    
+    // Verify bind mount exists
+    assert!(manager.is_bind_mount("/mnt/target"));
+    assert!(!manager.is_bind_mount("/mnt/source"));
+    
+    // Verify file is accessible through bind mount
+    let entries = manager.read_dir("/mnt/target").unwrap();
+    assert!(entries.iter().any(|e| e.name == "test_file.txt"));
+    
+    // List bind mounts
+    let bind_mounts = manager.list_bind_mounts();
+    assert_eq!(bind_mounts.len(), 1);
+    assert_eq!(bind_mounts[0].0, "/mnt/source"); // source path
+    assert_eq!(bind_mounts[0].1, "/mnt/target"); // target path
+    assert_eq!(bind_mounts[0].2, false); // read_only flag
+    // ---
+    // Test: Basic bind mount functionality.
+    // - Create a bind mount from /mnt/source to /mnt/target.
+    // - Verify that files in the source are visible at the target.
+    // - Check that list_bind_mounts returns the correct tuple.
+    // - Confirm is_bind_mount returns true for the target and false for the source.
+}
+
+#[test_case]
+fn test_bind_mount_read_only() {
+    let mut manager = VfsManager::new();
+    
+    // Set up source filesystem
+    let source_device = Box::new(MockBlockDevice::new(1, "source_disk", 512, 100));
+    let source_fs = Box::new(TestFileSystem::new("source_fs", source_device, 512));
+    let source_fs_id = manager.register_fs(source_fs);
+    manager.mount(source_fs_id, "/mnt/source").unwrap();
+    
+    // Create read-only bind mount
+    let result = manager.bind_mount("/mnt/source", "/mnt/readonly", true);
+    assert!(result.is_ok());
+    
+    // Verify it's a read-only bind mount
+    let bind_mounts = manager.list_bind_mounts();
+    assert_eq!(bind_mounts.len(), 1);
+    assert_eq!(bind_mounts[0].2, true); // read_only flag should be true
+    // ---
+    // Test: Read-only bind mount.
+    // - Create a bind mount with the read_only flag set to true.
+    // - Check that list_bind_mounts returns the correct read_only status.
+}
+
+#[test_case]
+fn test_bind_mount_shared() {
+    let mut manager = VfsManager::new();
+    
+    // Set up source filesystem
+    let source_device = Box::new(MockBlockDevice::new(1, "source_disk", 512, 100));
+    let source_fs = Box::new(TestFileSystem::new("source_fs", source_device, 512));
+    let source_fs_id = manager.register_fs(source_fs);
+    manager.mount(source_fs_id, "/mnt/source").unwrap();
+    
+    // Create shared bind mount
+    let result = manager.bind_mount_shared("/mnt/source", "/mnt/shared");
+    assert!(result.is_ok());
+    
+    // Verify it's a bind mount
+    assert!(manager.is_bind_mount("/mnt/shared"));
+    // ---
+    // Test: Shared bind mount.
+    // - Create a shared bind mount and verify is_bind_mount returns true for the target.
+}
+
+#[test_case]
+fn test_bind_mount_from_different_vfs() {
+    let mut host_manager = VfsManager::new();
+    let mut container_manager = VfsManager::new();
+    
+    // Set up source filesystem in host
+    let source_device = Box::new(MockBlockDevice::new(1, "host_disk", 512, 100));
+    let source_fs = Box::new(TestFileSystem::new("host_fs", source_device, 512));
+    let source_fs_id = host_manager.register_fs(source_fs);
+    host_manager.mount(source_fs_id, "/data").unwrap();
+    
+    // Create file in host
+    host_manager.create_regular_file("/data/shared_file.txt").unwrap();
+    
+    // Bind mount from host to container
+    let host_arc = Arc::new(host_manager);
+    let result = container_manager.bind_mount_from(&host_arc, "/data", "/mnt/shared", true);
+    assert!(result.is_ok());
+    
+    // Verify file is accessible in container through bind mount
+    let entries = container_manager.read_dir("/mnt/shared").unwrap();
+    assert!(entries.iter().any(|e| e.name == "shared_file.txt"));
+    
+    // Verify it's a bind mount
+    assert!(container_manager.is_bind_mount("/mnt/shared"));
+    // ---
+    // Test: Cross-VFS bind mount.
+    // - Bind mount a directory from one VfsManager to another.
+    // - Verify that files from the host are visible in the container.
+    // - Confirm is_bind_mount returns true for the container's target.
+}
+
+#[test_case]
+fn test_bind_mount_error_cases() {
+    let mut manager = VfsManager::new();
+    
+    // Test bind mount from non-existent source
+    let result = manager.bind_mount("/nonexistent", "/mnt/target", false);
+    assert!(result.is_err());
+    
+    // Set up a source
+    let source_device = Box::new(MockBlockDevice::new(1, "source_disk", 512, 100));
+    let source_fs = Box::new(TestFileSystem::new("source_fs", source_device, 512));
+    let source_fs_id = manager.register_fs(source_fs);
+    manager.mount(source_fs_id, "/mnt/source").unwrap();
+    
+    // Create bind mount
+    manager.bind_mount("/mnt/source", "/mnt/target", false).unwrap();
+    
+    // Test bind mount to existing target
+    let result = manager.bind_mount("/mnt/source", "/mnt/target", false);
+    assert!(result.is_err());
+    // ---
+    // Test: Error handling for bind mounts.
+    // - Try to bind mount from a non-existent source (should fail).
+    // - Try to bind mount to an already used target (should fail).
+}
+
+#[test_case]
+fn test_bindmount_thread_safe_access() {
+    let mut vfs = VfsManager::new();
+    let source_device = Box::new(MockBlockDevice::new(1, "source_disk", 512, 100));
+    let source_fs = Box::new(TestFileSystem::new("source_fs", source_device, 512));
+    let source_fs_id = vfs.register_fs(source_fs);
+    vfs.mount(source_fs_id, "/mnt/source").unwrap();
+    let entries = vfs.read_dir("/mnt/source").unwrap();
+    assert!(entries.iter().any(|e| e.name == "test.txt"));
+    let vfs_arc = Arc::new(vfs);
+    let result = vfs_arc.bind_mount_shared_ref("/mnt/source", "/mnt/target", false);
+    assert!(result.is_ok());
+    let entries = vfs_arc.read_dir("/mnt/target").unwrap();
+    assert!(entries.iter().any(|e| e.name == "test.txt"));
+    assert!(vfs_arc.is_bind_mount("/mnt/target"));
+    assert!(!vfs_arc.is_bind_mount("/mnt/source"));
+    // ---
+    // Test: Bind mount thread-safe access method.
+    // - Use bind_mount_shared_ref for thread-safe operation.
+    // - Verify that the bind mount works and is recognized as a bind mount.
+}
+
+#[test_case]
+fn test_container_bind_mount_scenario() {
+    let mut host_vfs = VfsManager::new();
+    let host_device = Box::new(MockBlockDevice::new(1, "host_disk", 512, 100));
+    let host_fs = Box::new(TestFileSystem::new("host_fs", host_device, 512));
+    let host_fs_id = host_vfs.register_fs(host_fs);
+    host_vfs.mount(host_fs_id, "/data").unwrap();
+    let mut container_vfs = VfsManager::new();
+    let container_device = Box::new(MockBlockDevice::new(2, "container_disk", 512, 100));
+    let container_fs = Box::new(TestFileSystem::new("container_fs", container_device, 512));
+    let container_fs_id = container_vfs.register_fs(container_fs);
+    container_vfs.mount(container_fs_id, "/").unwrap();
+    let host_arc = Arc::new(host_vfs);
+    container_vfs.bind_mount_from(&host_arc, "/data", "/host-data", true).unwrap();
+    let entries = container_vfs.read_dir("/host-data").unwrap();
+    assert!(entries.iter().any(|e| e.name == "test.txt"));
+    let bind_mounts = container_vfs.list_bind_mounts();
+    assert_eq!(bind_mounts.len(), 1);
+    assert_eq!(bind_mounts[0].0, "/data");
+    assert_eq!(bind_mounts[0].1, "/host-data");
+    assert_eq!(bind_mounts[0].2, true);
+    let host_bind_mounts = host_arc.list_bind_mounts();
+    assert_eq!(host_bind_mounts.len(), 0);
+    // ---
+    // Test: Container orchestration scenario with bind mounts.
+    // - Bind mount a host directory into a container VFS as read-only.
+    // - Verify file visibility and correct bind mount listing in both VFSs.
+}
+
+#[test_case]
+fn test_multiple_bind_mounts_performance() {
+    let mut vfs = VfsManager::new();
+    // [ ] 1. Create and mount 5 filesystems at /source0 to /source4
+    for i in 0..5 {
+        let device = Box::new(MockBlockDevice::new(i + 1, "disk", 512, 100));
+        let fs = Box::new(TestFileSystem::new("testfs", device, 512));
+        let fs_id = vfs.register_fs(fs);
+        vfs.mount(fs_id, &format!("/source{}", i)).unwrap();
+    }
+    // [ ] 2. Create 5 bind mounts from /sourceN to /targetN
+    for i in 0..5 {
+        let source_path = format!("/source{}", i);
+        let target_path = format!("/target{}", i);
+        vfs.bind_mount(&source_path, &target_path, false).unwrap();
+    }
+    // [ ] 3. Check that 5 bind mounts are listed
+    assert_eq!(vfs.list_bind_mounts().len(), 5);
+    // [ ] 4. For each target, verify it is a bind mount and files are visible
+    for i in 0..5 {
+        let target_path = format!("/target{}", i);
+        assert!(vfs.is_bind_mount(&target_path));
+        let entries = vfs.read_dir(&target_path).unwrap();
+        assert!(entries.iter().any(|e| e.name == "test.txt"));
+    }
+    // [ ] 5. For each source, verify it is not a bind mount and files are visible
+    for i in 0..5 {
+        let source_path = format!("/source{}", i);
+        assert!(!vfs.is_bind_mount(&source_path));
+        let entries = vfs.read_dir(&source_path).unwrap();
+        assert!(entries.iter().any(|e| e.name == "test.txt"));
+    }
+    // ---
+    // Test: Performance and correctness with multiple bind mounts.
+    // - [x] Create and verify 5 bind mounts in a loop.
+    // - [x] Ensure all target paths are bind mounts and all source paths are not.
+    // - [x] Check file visibility through all bind mounts.
+}
+
+#[test_case]
+fn test_bindmount_error_handling() {
+    let mut vfs = VfsManager::new();
+    // [ ] 1. Try to bind mount from a non-existent source (should fail)
+    let result = vfs.bind_mount("/nonexistent", "/target", false);
+    assert!(result.is_err());
+    // [ ] 2. Try to bind mount from a non-existent source in another VFS (should fail)
+    let other_vfs = Arc::new(VfsManager::new());
+    let result = vfs.bind_mount_from(&other_vfs, "/nonexistent", "/target", false);
+    assert!(result.is_err());
+    // [ ] 3. Set up a valid source and mount it
+    let device = Box::new(MockBlockDevice::new(1, "disk", 512, 100));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
+    let fs_id = vfs.register_fs(fs);
+    vfs.mount(fs_id, "/source").unwrap();
+    // [ ] 4. Create a valid bind mount
+    vfs.bind_mount("/source", "/target", false).unwrap();
+    // [ ] 5. Try to bind mount to an already used target (should fail)
+    let result = vfs.bind_mount("/source", "/target", false);
+    assert!(result.is_err());
+    // [ ] 6. Try to bind mount to an already used target using shared_ref (should fail)
+    let vfs_arc = Arc::new(vfs);
+    let result = vfs_arc.bind_mount_shared_ref("/source", "/target", false);
+    assert!(result.is_err());
+    // ---
+    // Test: Comprehensive error handling for bind mounts.
+    // - [x] Try various invalid bind mount operations and ensure errors are returned.
+    // - [x] Includes duplicate targets and cross-VFS errors.
+}
+
+#[test_case]
+fn test_mount_tree_with_bind_mounts() {
+    let mut vfs = VfsManager::new();
+    // [ ] 1. Mount fs1 at "/"
+    let device1 = Box::new(MockBlockDevice::new(1, "disk1", 512, 100));
+    let fs1 = Box::new(TestFileSystem::new("fs1", device1, 512));
+    let fs1_id = vfs.register_fs(fs1);
+    vfs.mount(fs1_id, "/").unwrap();
+    // [ ] 2. Mount fs2 at "/mnt"
+    let device2 = Box::new(MockBlockDevice::new(2, "disk2", 512, 100));
+    let fs2 = Box::new(TestFileSystem::new("fs2", device2, 512));
+    let fs2_id = vfs.register_fs(fs2);
+    vfs.mount(fs2_id, "/mnt").unwrap();
+    // [ ] 3. Create bind mount from /mnt to /bind1 (rw)
+    vfs.bind_mount("/mnt", "/bind1", false).unwrap();
+    // [ ] 4. Create bind mount from / to /bind2 (ro)
+    vfs.bind_mount("/", "/bind2", true).unwrap();
+    // [ ] 5. List all mount points and verify
+    let mount_points = vfs.list_mount_points();
+    assert_eq!(mount_points.len(), 4);
+    assert!(mount_points.contains(&"/".to_string()));
+    assert!(mount_points.contains(&"/mnt".to_string()));
+    assert!(mount_points.contains(&"/bind1".to_string()));
+    assert!(mount_points.contains(&"/bind2".to_string()));
+    // [ ] 6. Check is_bind_mount for each mount point
+    assert!(!vfs.is_bind_mount("/"));
+    assert!(!vfs.is_bind_mount("/mnt"));
+    assert!(vfs.is_bind_mount("/bind1"));
+    assert!(vfs.is_bind_mount("/bind2"));
+    // [ ] 7. List bind mounts and verify source/target/readonly
+    let bind_mounts = vfs.list_bind_mounts();
+    assert_eq!(bind_mounts.len(), 2);
+    let bind1 = bind_mounts.iter().find(|bm| bm.1 == "/bind1").unwrap();
+    assert_eq!(bind1.0, "/mnt");
+    assert_eq!(bind1.2, false);
+    let bind2 = bind_mounts.iter().find(|bm| bm.1 == "/bind2").unwrap();
+    assert_eq!(bind2.0, "/");
+    assert_eq!(bind2.2, true);
+    // ---
+    // Test: Mount tree structure with bind mounts.
+    // - [x] Mix regular and bind mounts, then verify mount point listing and bind mount detection.
+    // - [x] Check that bind_mounts returns correct source/target/read_only info for each bind mount.
+}

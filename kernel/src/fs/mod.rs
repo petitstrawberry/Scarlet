@@ -1,11 +1,12 @@
 //! Virtual File System (VFS) module.
 //!
 //! This module provides a flexible Virtual File System implementation that supports
-//! per-task isolated filesystems and containerization.
+//! per-task isolated filesystems, containerization, and bind mount functionality.
 //!
 //! # Architecture Overview
 //!
-//! The VFS architecture has evolved to support containerization and process isolation:
+//! The VFS architecture has evolved to support containerization, process isolation,
+//! and advanced mount operations including bind mounts:
 //!
 //! ## VfsManager Distribution
 //!
@@ -13,6 +14,8 @@
 //!   stored as `Option<Arc<VfsManager>>` in the task structure
 //! - **Shared Filesystems**: Multiple VfsManager instances can share underlying filesystem
 //!   objects while maintaining independent mount points
+//! - **Bind Mounts**: Support for mounting directories from one location to another,
+//!   including cross-VFS bind mounting for container orchestration
 //!
 //! ## Key Components
 //!
@@ -20,14 +23,51 @@
 //! - `FileSystemDriverManager`: Global singleton for filesystem driver registration
 //! - `VirtualFileSystem`: Trait combining filesystem and file operation interfaces
 //! - `MountPoint`: Associates filesystem instances with mount paths
+//! - `MountTree`: Hierarchical mount tree structure supporting bind mounts
+//!
+//! ## Bind Mount Functionality
+//!
+//! The VFS provides comprehensive bind mount support for flexible directory mapping:
+//!
+//! ### Basic Bind Mounts
+//! ```rust
+//! let mut vfs = VfsManager::new();
+//! // Mount a directory at another location
+//! vfs.bind_mount("/source/dir", "/target/dir", false)?;
+//! ```
+//!
+//! ### Read-Only Bind Mounts
+//! ```rust
+//! // Create read-only bind mount for security
+//! vfs.bind_mount("/source/dir", "/readonly/dir", true)?;
+//! ```
+//!
+//! ### Cross-VFS Bind Mounts
+//! ```rust
+//! // Share directories between isolated VFS instances
+//! let host_vfs = Arc::new(vfs_manager);
+//! container_vfs.bind_mount_from(&host_vfs, "/host/data", "/container/data", false)?;
+//! ```
+//!
+
+//! ### Thread-Safe Access
+//! Bind mount operations are thread-safe and can be called from system call context:
+//! ```rust
+//! // Use shared reference method for system calls
+//! vfs_arc.bind_mount_shared_ref("/source", "/target", false)?;
+//! ```
 //!
 //! ## Usage Patterns
 //!
-//! ### Container Isolation
+//! ### Container Isolation with Bind Mounts
 //! ```rust
 //! // Create isolated VfsManager for container
 //! let mut container_vfs = VfsManager::new();
 //! container_vfs.mount(fs_id, "/");
+//! 
+//! // Bind mount host resources into container
+//! let host_vfs = Arc::new(host_vfs_manager);
+//! container_vfs.bind_mount_from(&host_vfs, "/host/shared", "/shared", true)?;
 //! 
 //! // Assign to task
 //! task.vfs = Some(Arc::new(container_vfs));
@@ -40,9 +80,9 @@
 //! // Independent mount points, shared filesystem content
 //! ```
 //!
-//!
 //! The design enables flexible deployment scenarios from simple shared filesystems
-//! to complete filesystem isolation for containerized applications.
+//! to complete filesystem isolation with selective resource sharing for containerized
+//! applications through bind mounts.
 
 pub mod drivers;
 pub mod syscall;
@@ -902,6 +942,249 @@ impl VfsManager {
         Ok(())
     }
 
+    /// Bind mount a source path to a target path
+    /// 
+    /// This creates a bind mount where the target path will provide access to the same
+    /// content as the source path. The bind mount can be read-only or read-write.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_path` - The source path to bind from
+    /// * `target_path` - The target mount point where the source will be accessible
+    /// * `read_only` - Whether the bind mount should be read-only
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// // Bind mount /mnt/source to /mnt/target as read-only
+    /// vfs_manager.bind_mount("/mnt/source", "/mnt/target", true)?;
+    /// ```
+    pub fn bind_mount(&mut self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
+        // Resolve the source path to get the filesystem and relative path
+        let (source_fs, _source_relative_path) = self.resolve_path(source_path)?;
+        
+        // Create a bind mount point entry
+        let bind_type = if read_only {
+            mount_tree::BindType::ReadOnly
+        } else {
+            mount_tree::BindType::ReadWrite
+        };
+        
+        let mount_point_entry = TreeMountPoint {
+            path: target_path.to_string(),
+            fs: source_fs.clone(),
+            fs_id: 0, // Special ID for bind mounts - they don't consume fs_id
+            mount_type: MountType::Bind {
+                source_vfs: None, // Same VFS manager
+                source_path: source_path.to_string(),
+                bind_type,
+            },
+            mount_options: MountOptions {
+                read_only,
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: Get actual timestamp
+        };
+        
+        // Register with MountTree
+        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+        
+        Ok(())
+    }
+
+    /// Bind mount from another VFS manager
+    /// 
+    /// This creates a bind mount where the target path in this VFS manager
+    /// will provide access to content from a different VFS manager instance.
+    /// This is useful for sharing filesystem content between containers.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_vfs` - The source VFS manager containing the source path
+    /// * `source_path` - The source path in the source VFS manager
+    /// * `target_path` - The target mount point in this VFS manager
+    /// * `read_only` - Whether the bind mount should be read-only
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// // Bind mount /data from host_vfs to /mnt/shared in container_vfs
+    /// container_vfs.bind_mount_from(&host_vfs, "/data", "/mnt/shared", false)?;
+    /// ```
+    pub fn bind_mount_from(
+        &mut self, 
+        source_vfs: &Arc<VfsManager>, 
+        source_path: &str, 
+        target_path: &str, 
+        read_only: bool
+    ) -> Result<()> {
+        // Resolve the source path in the source VFS manager
+        let (source_fs, _source_relative_path) = source_vfs.resolve_path(source_path)?;
+        
+        let bind_type = if read_only {
+            mount_tree::BindType::ReadOnly
+        } else {
+            mount_tree::BindType::ReadWrite
+        };
+        
+        let mount_point_entry = TreeMountPoint {
+            path: target_path.to_string(),
+            fs: source_fs.clone(),
+            fs_id: 0, // Special ID for bind mounts
+            mount_type: MountType::Bind {
+                source_vfs: Some(source_vfs.clone()),
+                source_path: source_path.to_string(),
+                bind_type,
+            },
+            mount_options: MountOptions {
+                read_only,
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: Get actual timestamp
+        };
+        
+        // Register with MountTree
+        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+        
+        Ok(())
+    }
+
+    /// Create a shared bind mount
+    /// 
+    /// This creates a shared bind mount where changes to mount propagation
+    /// will be shared between the source and target. This is useful for
+    /// scenarios where you want mount events to propagate between namespaces.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_path` - The source path to bind from
+    /// * `target_path` - The target mount point
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the shared bind mount was successful, Err otherwise
+    pub fn bind_mount_shared(&mut self, source_path: &str, target_path: &str) -> Result<()> {
+        let (source_fs, _source_relative_path) = self.resolve_path(source_path)?;
+        
+        let mount_point_entry = TreeMountPoint {
+            path: target_path.to_string(),
+            fs: source_fs.clone(),
+            fs_id: 0, // Special ID for bind mounts
+            mount_type: MountType::Bind {
+                source_vfs: None,
+                source_path: source_path.to_string(),
+                bind_type: mount_tree::BindType::Shared,
+            },
+            mount_options: MountOptions::default(),
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: Get actual timestamp
+        };
+        
+        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+        
+        Ok(())
+    }
+
+    /// Thread-safe bind mount for use from system calls
+    /// 
+    /// This method can be called on a shared VfsManager (Arc<VfsManager>)
+    /// from system call context where &mut self is not available.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_path` - The source path to bind from
+    /// * `target_path` - The target mount point where the source will be accessible
+    /// * `read_only` - Whether the bind mount should be read-only
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    pub fn bind_mount_shared_ref(&self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
+        // Resolve the source path to get the filesystem and relative path
+        let (source_fs, _source_relative_path) = self.resolve_path(source_path)?;
+        
+        // Create a bind mount point entry
+        let bind_type = if read_only {
+            mount_tree::BindType::ReadOnly
+        } else {
+            mount_tree::BindType::ReadWrite
+        };
+        
+        let mount_point_entry = TreeMountPoint {
+            path: target_path.to_string(),
+            fs: source_fs.clone(),
+            fs_id: 0, // Special ID for bind mounts - they don't consume fs_id
+            mount_type: MountType::Bind {
+                source_vfs: None, // Same VFS manager
+                source_path: source_path.to_string(),
+                bind_type,
+            },
+            mount_options: MountOptions {
+                read_only,
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: Get actual timestamp
+        };
+        
+        // Register with MountTree
+        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+        
+        Ok(())
+    }
+
+    /// List all bind mounts in this VFS manager
+    /// 
+    /// # Returns
+    /// 
+    /// * `Vec<(String, String, bool)>` - List of (source_path, target_path, is_read_only) tuples
+    pub fn list_bind_mounts(&self) -> Vec<(String, String, bool)> {
+        let mut bind_mounts = Vec::new();
+        let mount_tree = self.mount_tree.read();
+        
+        for mount_path in mount_tree.list_all() {
+            if let Ok((mount_point, _)) = mount_tree.resolve(&mount_path) {
+                if let MountType::Bind { source_path, bind_type, .. } = &mount_point.mount_type {
+                    let is_read_only = matches!(bind_type, mount_tree::BindType::ReadOnly);
+                    bind_mounts.push((source_path.clone(), mount_path, is_read_only));
+                }
+            }
+        }
+        
+        bind_mounts
+    }
+
+    /// Check if a path is a bind mount
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to check
+    /// 
+    /// # Returns
+    /// 
+    /// * `bool` - True if the path is a bind mount, false otherwise
+    pub fn is_bind_mount(&self, path: &str) -> bool {
+        if let Ok((mount_point, _)) = self.mount_tree.read().resolve(path) {
+            matches!(mount_point.mount_type, MountType::Bind { .. })
+        } else {
+            false
+        }
+    }
+
     /// Normalize a path
     /// 
     /// # Arguments
@@ -1198,20 +1481,17 @@ impl VfsManager {
         }
     }
 
-    /// Get the number of mount points (for testing purposes)
-    #[cfg(test)]
+    /// Get the number of mount points
     pub fn mount_count(&self) -> usize {
         self.mount_tree.read().len()
     }
 
-    /// Check if a specific mount point exists (for testing purposes)
-    #[cfg(test)]
+    /// Check if a specific mount point exists
     pub fn has_mount_point(&self, path: &str) -> bool {
         self.mount_tree.read().resolve(path).is_ok()
     }
 
-    /// List all mount points (for testing purposes)
-    #[cfg(test)]
+    /// List all mount points
     pub fn list_mount_points(&self) -> Vec<String> {
         self.mount_tree.read().list_all()
     }
