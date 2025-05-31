@@ -52,7 +52,6 @@ pub struct CpiofsEntry {
 
 /// Structure representing the entire Initramfs
 pub struct Cpiofs {
-    id: usize,
     name: &'static str,
     entries: Mutex<Vec<CpiofsEntry>>, // List of entries
     mounted: bool,
@@ -74,7 +73,6 @@ impl Cpiofs {
     pub fn new(name: &'static str, cpio_data: &[u8]) -> Result<Self> {
         let entries = Self::parse_cpio(cpio_data)?;
         Ok(Self {
-            id: 0, // ID is set by the VfsManager
             name,
             entries: Mutex::new(entries),
             mounted: false,
@@ -224,14 +222,6 @@ impl FileSystem for Cpiofs {
 
     fn name(&self) -> &str {
         self.name
-    }
-
-    fn set_id(&mut self, id: usize) {
-        self.id = id;
-    }
-
-    fn get_id(&self) -> usize {
-        self.id
     }
 }
 

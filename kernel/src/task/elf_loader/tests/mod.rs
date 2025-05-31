@@ -95,7 +95,7 @@ fn test_load_elf() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new("test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test.elf";
@@ -132,7 +132,7 @@ fn test_load_elf_invalid_magic() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new("test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/invalid.elf";
@@ -160,7 +160,7 @@ fn test_load_elf_invalid_alignment() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new( "test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/invalid_align.elf";
@@ -212,7 +212,7 @@ fn test_load_elf_bss_zeroed() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new( "test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test_bss.elf";

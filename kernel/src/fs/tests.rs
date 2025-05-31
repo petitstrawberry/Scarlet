@@ -16,7 +16,7 @@ fn test_vfs_manager_creation() {
 fn test_fs_registration_and_mount() {
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     assert_eq!(manager.filesystems.read().len(), 1);
@@ -31,7 +31,7 @@ fn test_fs_registration_and_mount() {
 fn test_path_resolution() {
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -65,7 +65,7 @@ fn test_path_resolution() {
 fn test_file_operations() {
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -96,7 +96,7 @@ fn test_file_operations() {
 fn test_directory_operations() {
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -139,7 +139,7 @@ fn test_directory_operations() {
 #[test_case]
 fn test_block_device_operations() {
     let device = MockBlockDevice::new(1, "test_disk", 512, 100);
-    let fs = GenericFileSystem::new(0, "generic", Box::new(device), 512);
+    let fs = GenericFileSystem::new("generic", Box::new(device), 512);
     
     // Prepare test data
     let test_data = [0xAA; 512];
@@ -161,7 +161,7 @@ fn test_block_device_operations() {
 fn test_unmount() {
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
      let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     assert_eq!(manager.mount_count(), 1);
@@ -190,7 +190,7 @@ fn test_file_creation() {
     // Setup
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -205,7 +205,7 @@ fn test_file_open_close() {
     // Setup
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -222,7 +222,7 @@ fn test_file_read_write() {
     // Setup
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -253,7 +253,7 @@ fn test_file_seek() {
     // Setup
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -282,7 +282,7 @@ fn test_file_metadata_and_size() {
     // Setup
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -306,7 +306,7 @@ fn test_file_read_all() {
     // Setup
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -335,7 +335,7 @@ fn test_file_auto_close() {
     // Setup
     let mut manager = VfsManager::new();
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
@@ -373,7 +373,7 @@ fn test_filesystem_driver_and_create_register_fs() {
     assert_eq!(manager.filesystems.read().len(), 1);
 
     // Check the name of the registered file system
-    let registered_fs = manager.filesystems.read()[0].clone();
+    let registered_fs = manager.filesystems.read().get(&fs_id).unwrap().clone();
     assert_eq!(registered_fs.read().name(), "testfs");
 
     // Mount and verify functionality
@@ -390,18 +390,18 @@ fn test_nested_mount_points() {
     
     // Root file system
     let root_device = Box::new(MockBlockDevice::new(1, "root_disk", 512, 100));
-    let root_fs = Box::new(TestFileSystem::new(0, "rootfs", root_device, 512));
+    let root_fs = Box::new(TestFileSystem::new("rootfs", root_device, 512));
     let root_fs_id = manager.register_fs(root_fs);
     
     // File system for /mnt
     let mnt_device = Box::new(MockBlockDevice::new(2, "mnt_disk", 512, 100));
-    let mnt_fs = Box::new(TestFileSystem::new(0, "mntfs", mnt_device, 512));
+    let mnt_fs = Box::new(TestFileSystem::new("mntfs", mnt_device, 512));
     let mnt_fs_id = manager.register_fs(mnt_fs);
     
     // File system for /mnt/usb
     let usb_device = Box::new(MockBlockDevice::new(3, "usb_disk", 512, 100));
 
-    let usb_fs = Box::new(TestFileSystem::new(0, "usbfs", usb_device, 512));
+    let usb_fs = Box::new(TestFileSystem::new("usbfs", usb_device, 512));
     let usb_fs_id = manager.register_fs(usb_fs);
 
     
@@ -509,13 +509,13 @@ fn test_directory_boundary_handling() {
     let mut manager = VfsManager::new();
     
     // Create 4 different file systems
-    let root_fs = Box::new(TestFileSystem::new(0, "rootfs", 
+    let root_fs = Box::new(TestFileSystem::new("rootfs", 
         Box::new(MockBlockDevice::new(1, "root_disk", 512, 100)), 512));
-    let mnt_fs = Box::new(TestFileSystem::new(0, "mntfs", 
+    let mnt_fs = Box::new(TestFileSystem::new("mntfs", 
         Box::new(MockBlockDevice::new(2, "mnt_disk", 512, 100)), 512));
-    let mnt_data_fs = Box::new(TestFileSystem::new(0, "mnt_datafs", 
+    let mnt_data_fs = Box::new(TestFileSystem::new("mnt_datafs", 
         Box::new(MockBlockDevice::new(3, "mnt_data_disk", 512, 100)), 512));
-    let mnt_sub_fs = Box::new(TestFileSystem::new(0, "mnt_subfs", 
+    let mnt_sub_fs = Box::new(TestFileSystem::new("mnt_subfs", 
         Box::new(MockBlockDevice::new(4, "mnt_sub_disk", 512, 100)), 512));
     
     // Register file systems
@@ -735,7 +735,7 @@ fn test_container_rootfs_switching_demo() {
     
     // Filesystem for main system (using TestFileSystem)
     let main_device = Box::new(MockBlockDevice::new(1, "main_disk", 512, 100));
-    let main_fs = Box::new(TestFileSystem::new(0, "main_testfs", main_device, 512));
+    let main_fs = Box::new(TestFileSystem::new("main_testfs", main_device, 512));
     let main_fs_id = main_vfs.register_fs(main_fs);
     main_vfs.mount(main_fs_id, "/")
         .expect("Failed to mount main filesystem");
@@ -749,7 +749,7 @@ fn test_container_rootfs_switching_demo() {
     
     // Filesystem for container 1
     let container1_device = Box::new(MockBlockDevice::new(2, "container1_disk", 512, 100));
-    let container1_fs = Box::new(TestFileSystem::new(1, "container1_testfs", container1_device, 512));
+    let container1_fs = Box::new(TestFileSystem::new("container1_testfs", container1_device, 512));
     let container1_fs_id = container1_vfs.register_fs(container1_fs);
     container1_vfs.mount(container1_fs_id, "/")
         .expect("Failed to mount container1 filesystem");
@@ -764,7 +764,7 @@ fn test_container_rootfs_switching_demo() {
     
     // Filesystem for container 2
     let container2_device = Box::new(MockBlockDevice::new(3, "container2_disk", 512, 100));
-    let container2_fs = Box::new(TestFileSystem::new(2, "container2_testfs", container2_device, 512));
+    let container2_fs = Box::new(TestFileSystem::new("container2_testfs", container2_device, 512));
     let container2_fs_id = container2_vfs.register_fs(container2_fs);
     container2_vfs.mount(container2_fs_id, "/")
         .expect("Failed to mount container2 filesystem");
@@ -887,7 +887,7 @@ fn test_vfs_manager_clone_behavior() {
     
     // Register and mount filesystem
     let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new(0, "testfs", device, 512));
+    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
     let fs_id = original_manager.register_fs(fs);
     original_manager.mount(fs_id, "/mnt").unwrap();
 
@@ -897,7 +897,7 @@ fn test_vfs_manager_clone_behavior() {
     // === Test 1: Mount point independence ===
     // Add new filesystem and mount point in cloned manager
     let device2 = Box::new(MockBlockDevice::new(2, "test_disk2", 512, 100));
-    let fs2 = Box::new(TestFileSystem::new(1, "testfs2", device2, 512));
+    let fs2 = Box::new(TestFileSystem::new("testfs2", device2, 512));
     let fs2_id = cloned_manager.register_fs(fs2);
     assert_eq!(fs2_id, 1); // New ID is assigned in cloned manager
     cloned_manager.mount(fs2_id, "/mnt2").unwrap();
@@ -938,12 +938,12 @@ fn test_proper_vfs_isolation_with_new_instances() {
     
     // Register independent filesystems for each
     let device1 = Box::new(MockBlockDevice::new(1, "disk1", 512, 100));
-    let fs1 = Box::new(TestFileSystem::new(0, "fs1", device1, 512));
+    let fs1 = Box::new(TestFileSystem::new("fs1", device1, 512));
     let fs1_id = manager1.register_fs(fs1);
     manager1.mount(fs1_id, "/mnt").unwrap();
     
     let device2 = Box::new(MockBlockDevice::new(2, "disk2", 512, 100));
-    let fs2 = Box::new(TestFileSystem::new(1, "fs2", device2, 512));
+    let fs2 = Box::new(TestFileSystem::new("fs2", device2, 512));
     let fs2_id = manager2.register_fs(fs2);
     manager2.mount(fs2_id, "/mnt").unwrap();
     
@@ -979,7 +979,7 @@ fn test_structured_parameters_tmpfs() {
     let mut manager = VfsManager::new();
     
     // Create TmpFS with specific parameters
-    let params = TmpFSParams::new(1024 * 1024, 42); // 1MB limit, fs_id=42
+    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB limit
     let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params).unwrap();
     
     // Mount the filesystem
@@ -1004,7 +1004,7 @@ fn test_structured_parameters_testfs() {
     let mut manager = VfsManager::new();
     
     // Create TestFS with specific parameters
-    let params = BasicFSParams::new(123)
+    let params = BasicFSParams::new()
         .with_block_size(1024)
         .with_read_only(false);
     let fs_id = manager.create_and_register_fs_with_params("testfs", &params).unwrap();
@@ -1031,7 +1031,7 @@ fn test_structured_parameters_cpio_error() {
     let mut manager = VfsManager::new();
     
     // Try to create CPIO filesystem with parameters (should fail)
-    let params = CpioFSParams::new(456);
+    let params = CpioFSParams::new();
     let result = manager.create_and_register_fs_with_params("cpiofs", &params);
     
     // Should fail because CPIO requires memory area
@@ -1063,7 +1063,7 @@ fn test_structured_parameters_backward_compatibility() {
     assert!(entries.iter().any(|e| e.name == "test.txt"));
     
     // Test that structured parameters also work for the same driver
-    let params = BasicFSParams::new(789);
+    let params = BasicFSParams::new();
     let fs_id2 = manager.create_and_register_fs_with_params("testfs", &params).unwrap();
     
     let result = manager.mount(fs_id2, "/structured");
@@ -1080,7 +1080,7 @@ fn test_structured_parameters_driver_not_found() {
     let mut manager = VfsManager::new();
     
     // Try to create filesystem with non-existent driver
-    let params = BasicFSParams::new(999);
+    let params = BasicFSParams::new();
     let result = manager.create_and_register_fs_with_params("nonexistent", &params);
     
     assert!(result.is_err());

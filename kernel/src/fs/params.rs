@@ -28,15 +28,12 @@ pub trait FileSystemParams {
 pub struct TmpFSParams {
     /// Maximum memory usage in bytes (0 = unlimited)
     pub memory_limit: usize,
-    /// Filesystem identifier
-    pub fs_id: usize,
 }
 
 impl Default for TmpFSParams {
     fn default() -> Self {
         Self {
             memory_limit: 0, // Unlimited by default
-            fs_id: 0,
         }
     }
 }
@@ -46,23 +43,6 @@ impl TmpFSParams {
     pub fn with_memory_limit(memory_limit: usize) -> Self {
         Self {
             memory_limit,
-            fs_id: 0,
-        }
-    }
-    
-    /// Create TmpFS parameters with specified filesystem ID
-    pub fn with_fs_id(fs_id: usize) -> Self {
-        Self {
-            memory_limit: 0,
-            fs_id,
-        }
-    }
-    
-    /// Create TmpFS parameters with both memory limit and filesystem ID
-    pub fn new(memory_limit: usize, fs_id: usize) -> Self {
-        Self {
-            memory_limit,
-            fs_id,
         }
     }
 }
@@ -71,7 +51,6 @@ impl FileSystemParams for TmpFSParams {
     fn to_string_map(&self) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
         map.insert("memory_limit".to_string(), self.memory_limit.to_string());
-        map.insert("fs_id".to_string(), self.fs_id.to_string());
         map
     }
     
@@ -83,14 +62,7 @@ impl FileSystemParams for TmpFSParams {
             0 // Default to unlimited memory
         };
 
-        let fs_id = if let Some(id_str) = map.get("fs_id") {
-            id_str.parse::<usize>()
-                .map_err(|_| format!("Invalid fs_id value: {}", id_str))?
-        } else {
-            0 // Default filesystem ID
-        };
-
-        Ok(Self { memory_limit, fs_id })
+        Ok(Self { memory_limit })
     }
     
     fn as_any(&self) -> &dyn Any {
@@ -101,41 +73,29 @@ impl FileSystemParams for TmpFSParams {
 /// Parameters for CPIO filesystem creation
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpioFSParams {
-    /// Filesystem identifier
-    pub fs_id: usize,
 }
 
 impl Default for CpioFSParams {
     fn default() -> Self {
         Self {
-            fs_id: 0,
         }
     }
 }
 
 impl CpioFSParams {
-    /// Create CPIO parameters with specified filesystem ID
-    pub fn new(fs_id: usize) -> Self {
-        Self { fs_id }
+    /// Create CPIO parameters
+    pub fn new() -> Self {
+        Self { }
     }
 }
 
 impl FileSystemParams for CpioFSParams {
     fn to_string_map(&self) -> BTreeMap<String, String> {
-        let mut map = BTreeMap::new();
-        map.insert("fs_id".to_string(), self.fs_id.to_string());
-        map
+        BTreeMap::new()
     }
     
-    fn from_string_map(map: &BTreeMap<String, String>) -> Result<Self, String> {
-        let fs_id = if let Some(id_str) = map.get("fs_id") {
-            id_str.parse::<usize>()
-                .map_err(|_| format!("Invalid fs_id value: {}", id_str))?
-        } else {
-            0 // Default filesystem ID
-        };
-
-        Ok(Self { fs_id })
+    fn from_string_map(_map: &BTreeMap<String, String>) -> Result<Self, String> {
+        Ok(Self { })
     }
     
     fn as_any(&self) -> &dyn Any {
@@ -146,8 +106,6 @@ impl FileSystemParams for CpioFSParams {
 /// Generic parameters for basic filesystem creation
 #[derive(Debug, Clone, PartialEq)]
 pub struct BasicFSParams {
-    /// Filesystem identifier
-    pub fs_id: usize,
     /// Block size (for block-based filesystems)
     pub block_size: Option<usize>,
     /// Read-only flag
@@ -157,7 +115,6 @@ pub struct BasicFSParams {
 impl Default for BasicFSParams {
     fn default() -> Self {
         Self {
-            fs_id: 0,
             block_size: None,
             read_only: false,
         }
@@ -165,10 +122,9 @@ impl Default for BasicFSParams {
 }
 
 impl BasicFSParams {
-    /// Create basic parameters with specified filesystem ID
-    pub fn new(fs_id: usize) -> Self {
+    /// Create basic parameters with default values
+    pub fn new() -> Self {
         Self {
-            fs_id,
             block_size: None,
             read_only: false,
         }
@@ -190,7 +146,6 @@ impl BasicFSParams {
 impl FileSystemParams for BasicFSParams {
     fn to_string_map(&self) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
-        map.insert("fs_id".to_string(), self.fs_id.to_string());
         
         if let Some(block_size) = self.block_size {
             map.insert("block_size".to_string(), block_size.to_string());
@@ -201,13 +156,6 @@ impl FileSystemParams for BasicFSParams {
     }
     
     fn from_string_map(map: &BTreeMap<String, String>) -> Result<Self, String> {
-        let fs_id = if let Some(id_str) = map.get("fs_id") {
-            id_str.parse::<usize>()
-                .map_err(|_| format!("Invalid fs_id value: {}", id_str))?
-        } else {
-            0 // Default filesystem ID
-        };
-
         let block_size = if let Some(size_str) = map.get("block_size") {
             Some(size_str.parse::<usize>()
                 .map_err(|_| format!("Invalid block_size value: {}", size_str))?)
@@ -222,7 +170,7 @@ impl FileSystemParams for BasicFSParams {
             false // Default to read-write
         };
 
-        Ok(Self { fs_id, block_size, read_only })
+        Ok(Self { block_size, read_only })
     }
     
     fn as_any(&self) -> &dyn Any {

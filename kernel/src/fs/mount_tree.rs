@@ -29,6 +29,7 @@ struct MountNode {
 pub struct MountPoint {
     pub path: String,
     pub fs: super::FileSystemRef,
+    pub fs_id: usize,  // VfsManager managed filesystem ID
     pub mount_type: MountType,
     pub mount_options: MountOptions,
     pub parent: Option<String>,

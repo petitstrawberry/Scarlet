@@ -281,12 +281,6 @@ pub trait FileSystem: Send + Sync {
     
     /// Get the name of the file system
     fn name(&self) -> &str;
-
-    /// Set the ID of the file system
-    fn set_id(&mut self, id: usize);
-
-    /// Get the identifier of the file system
-    fn get_id(&self) -> usize;
 }
 
 /// Trait defining file operations
@@ -706,7 +700,7 @@ pub enum ManagerRef<'a> {
 /// The `Clone` implementation creates independent mount point namespaces while
 /// sharing the underlying filesystem objects through Arc references.
 pub struct VfsManager {
-    filesystems: RwLock<Vec<FileSystemRef>>,
+    filesystems: RwLock<BTreeMap<usize, FileSystemRef>>,
     mount_tree: RwLock<MountTree>,
     next_fs_id: RwLock<usize>,
 }
@@ -714,7 +708,7 @@ pub struct VfsManager {
 impl VfsManager {
     pub fn new() -> Self {
         Self {
-            filesystems: RwLock::new(Vec::new()),
+            filesystems: RwLock::new(BTreeMap::new()),
             mount_tree: RwLock::new(MountTree::new()),
             next_fs_id: RwLock::new(0),
         }
@@ -730,16 +724,16 @@ impl VfsManager {
     /// 
     /// * `usize` - The ID of the registered file system
     /// 
-    pub fn register_fs(&mut self, mut fs: Box<dyn VirtualFileSystem>) -> usize {
+    pub fn register_fs(&mut self, fs: Box<dyn VirtualFileSystem>) -> usize {
         let mut next_fs_id = self.next_fs_id.write();
-        // Assign a unique ID to the file system
-        fs.set_id(*next_fs_id);
-        // Increment the ID for the next file system
+        let fs_id = *next_fs_id;
         *next_fs_id += 1;
-        let fs = Arc::new(RwLock::new(fs));
-        self.filesystems.write().push(fs);
-        // Return the ID
-        *next_fs_id - 1
+        
+        // Do not set ID on filesystem - VfsManager manages it
+        let fs_ref = Arc::new(RwLock::new(fs));
+        self.filesystems.write().insert(fs_id, fs_ref);
+        
+        fs_id
     }
 
     /// Create and register a block-based file system by specifying the driver name
@@ -850,15 +844,14 @@ impl VfsManager {
     /// 
     pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
         let mut filesystems = self.filesystems.write();
-        // Search for the specified file system by ID
-        let fs_idx = filesystems.iter().position(|fs| fs.read().get_id() == fs_id)
+        
+        // Remove the file system from available pool using BTreeMap
+        let fs = filesystems.remove(&fs_id)
             .ok_or(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: format!("File system with ID {} not found", fs_id),
             })?;
             
-        // Retrieve the file system (ownership transfer)
-        let fs = filesystems.remove(fs_idx);
         {
             let mut fs_write = fs.write();
             
@@ -870,6 +863,7 @@ impl VfsManager {
         let mount_point_entry = TreeMountPoint {
             path: mount_point.to_string(),
             fs: fs.clone(),
+            fs_id,  // Store VfsManager's ID in mount point
             mount_type: MountType::Regular,
             mount_options: MountOptions::default(),
             parent: None,
@@ -897,8 +891,13 @@ impl VfsManager {
         // Remove the mount point from MountTree
         let mp = self.mount_tree.write().remove(mount_point)?;
     
-        // Return the file system to the registration list
-        self.filesystems.write().push(mp.fs.clone());
+        {
+            let mut fs_write = mp.fs.write();
+            fs_write.unmount()?;
+        }
+        
+        // Return the file system to the registration list using stored fs_id
+        self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
         
         Ok(())
     }
@@ -1253,7 +1252,6 @@ impl Clone for VfsManager {
 
 // Template for a basic file system implementation
 pub struct GenericFileSystem {
-    id: usize,
     name: &'static str,
     block_device: Mutex<Box<dyn BlockDevice>>,
     block_size: usize,
@@ -1262,9 +1260,8 @@ pub struct GenericFileSystem {
 }
 
 impl GenericFileSystem {
-    pub fn new(id: usize, name: &'static str, block_device: Box<dyn BlockDevice>, block_size: usize) -> Self {
+    pub fn new(name: &'static str, block_device: Box<dyn BlockDevice>, block_size: usize) -> Self {
         Self {
-            id,
             name,
             block_device: Mutex::new(block_device),
             block_size,
@@ -1377,14 +1374,6 @@ impl FileSystem for GenericFileSystem {
     
     fn name(&self) -> &str {
         self.name
-    }
-
-    fn set_id(&mut self, id: usize) {
-        self.id = id;
-    }
-    
-    fn get_id(&self) -> usize {
-        self.id
     }
 }
 
