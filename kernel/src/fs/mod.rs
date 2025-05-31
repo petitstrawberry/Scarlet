@@ -74,10 +74,37 @@
 //! ```
 //!
 //! ### Shared Filesystem Access
+//!
+//! The VFS supports two distinct patterns for sharing filesystem resources:
+//!
+//! #### Pattern 1: Independent Mount Points with Shared Content
 //! ```rust
-//! // Clone VfsManager to share filesystem objects
+//! // Clone VfsManager to share filesystem objects but maintain separate mount points
 //! let shared_vfs = original_vfs.clone();
-//! // Independent mount points, shared filesystem content
+//! 
+//! // Each VfsManager maintains its own mount tree
+//! // but shares the underlying filesystem drivers and inode caches
+//! shared_vfs.mount("/proc", proc_fs)?;  // Only affects shared_vfs mount tree
+//! 
+//! // Useful for:
+//! // - Container-like isolation with selective sharing
+//! // - Process-specific mount namespaces
+//! // - Independent filesystem views with shared storage backends
+//! ```
+//!
+//! #### Pattern 2: Complete VFS Sharing via Arc
+//! ```rust
+//! // Share entire VfsManager instance including mount points
+//! let shared_vfs = Arc::new(original_vfs);
+//! let task_vfs = Arc::clone(&shared_vfs);
+//! 
+//! // All mount operations affect the shared mount tree
+//! shared_vfs.mount("/tmp", tmpfs)?;  // Visible to all references
+//! 
+//! // Useful for:
+//! // - Fork-like behavior where child inherits parent's full filesystem view
+//! // - Thread-like sharing where all threads see the same mount points
+//! // - System-wide mount operations
 //! ```
 //!
 //! The design enables flexible deployment scenarios from simple shared filesystems
