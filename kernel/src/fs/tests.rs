@@ -1,4 +1,4 @@
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use super::*;
 use crate::device::block::mockblk::MockBlockDevice;
 use crate::fs::testfs::{TestFileSystem, TestFileSystemDriver};
@@ -1394,4 +1394,223 @@ fn test_mount_tree_with_bind_mounts() {
     // Test: Mount tree structure with bind mounts.
     // - [x] Mix regular and bind mounts, then verify mount point listing and bind mount detection.
     // - [x] Check that bind_mounts returns correct source/target/read_only info for each bind mount.
+}
+
+#[test_case]
+fn test_bind_mount_from_security_basic() {
+    // Test basic security of bind_mount_from to prevent directory traversal
+    
+    // Create host VFS with sensitive directories
+    let mut host_vfs = VfsManager::new();
+    let host_device = Box::new(MockBlockDevice::new(1, "host_disk", 512, 100));
+    let host_fs = Box::new(TestFileSystem::new("host_fs", host_device, 512));
+    let host_fs_id = host_vfs.register_fs(host_fs);
+    host_vfs.mount(host_fs_id, "/").unwrap();
+    
+    // Create container VFS
+    let mut container_vfs = VfsManager::new();
+    let container_device = Box::new(MockBlockDevice::new(2, "container_disk", 512, 100));
+    let container_fs = Box::new(TestFileSystem::new("container_fs", container_device, 512));
+    let container_fs_id = container_vfs.register_fs(container_fs);
+    container_vfs.mount(container_fs_id, "/").unwrap();
+    
+    // Wrap host VFS in Arc for bind_mount_from
+    let host_vfs_arc = Arc::new(host_vfs);
+    
+    // Attempt to bind mount from host /etc to container /host_etc (should work)
+    let result = container_vfs.bind_mount_from(&host_vfs_arc, "/etc", "/host_etc", true);
+    assert!(result.is_ok(), "Basic bind_mount_from should succeed");
+    
+    // Verify the mount was created
+    assert!(container_vfs.is_bind_mount("/host_etc"));
+    let bind_mounts = container_vfs.list_bind_mounts();
+    let host_etc_bind = bind_mounts.iter().find(|bm| bm.1 == "/host_etc");
+    assert!(host_etc_bind.is_some());
+    assert_eq!(host_etc_bind.unwrap().0, "/etc");
+    assert_eq!(host_etc_bind.unwrap().2, true); // read-only
+}
+
+#[test_case]
+fn test_bind_mount_from_directory_traversal_prevention() {
+    // Test that bind_mount_from properly normalizes paths and prevents directory traversal attacks
+    
+    // Create host VFS with directory structure for testing traversal attempts
+    let mut host_vfs = VfsManager::new();
+    let host_device = Box::new(MockBlockDevice::new(1, "host_disk", 512, 100));
+    let host_fs = Box::new(TestFileSystem::new("host_fs", host_device, 512));
+    let host_fs_id = host_vfs.register_fs(host_fs);
+    host_vfs.mount(host_fs_id, "/").unwrap();
+    
+    // Create essential system directories
+    host_vfs.create_dir("/etc").expect("Failed to create /etc");
+    host_vfs.create_dir("/var").expect("Failed to create /var");
+    host_vfs.create_dir("/usr").expect("Failed to create /usr");
+    host_vfs.create_dir("/usr/bin").expect("Failed to create /usr/bin");
+    host_vfs.create_dir("/home").expect("Failed to create /home");
+    host_vfs.create_dir("/home/user").expect("Failed to create /home/user");
+    host_vfs.create_regular_file("/etc/passwd").expect("Failed to create /etc/passwd");
+    host_vfs.create_regular_file("/var/secrets").expect("Failed to create /var/secrets");
+    host_vfs.create_regular_file("/usr/bin/app").expect("Failed to create /usr/bin/app");
+    host_vfs.create_regular_file("/home/user/data.txt").expect("Failed to create /home/user/data.txt");
+    
+    // Create container VFS
+    let mut container_vfs = VfsManager::new();
+    let container_device = Box::new(MockBlockDevice::new(2, "container_disk", 512, 100));
+    let container_fs = Box::new(TestFileSystem::new("container_fs", container_device, 512));
+    let container_fs_id = container_vfs.register_fs(container_fs);
+    container_vfs.mount(container_fs_id, "/").unwrap();
+    
+    let host_vfs_arc = Arc::new(host_vfs);
+    
+    // === Test 1: Basic directory traversal prevention ===
+    let traversal_attempts = vec![
+        ("../etc", "Parent directory access from relative path"),
+        ("../../usr", "Multiple parent directories"),
+        ("/var/../etc", "Intermediate traversal in absolute path"),
+        ("/usr/bin/../../etc", "Complex traversal with legitimate prefix"),
+        ("//etc", "Double slash normalization"),
+        ("/./etc", "Current directory reference"),
+        ("/etc/../..", "Traversal to root parent"),
+        ("/..", "Direct parent access from root"),
+        ("../../../etc", "Deep parent traversal"),
+        ("./../../usr", "Mixed current and parent references"),
+    ];
+    
+    for (traversal_path, description) in traversal_attempts {
+        let result = container_vfs.bind_mount_from(&host_vfs_arc, traversal_path, "/traversal_test", true);
+        
+        match result {
+            Ok(_) => {
+                // If mount succeeded, verify path was properly normalized
+                let bind_mounts = container_vfs.list_bind_mounts();
+                if let Some(mount) = bind_mounts.iter().find(|bm| bm.1 == "/traversal_test") {
+                    // Normalized path should not contain traversal sequences
+                    assert!(!mount.0.contains(".."), 
+                        "Normalized path contains '..': {} -> {} ({})", traversal_path, mount.0, description);
+                    assert!(!mount.0.contains("./"), 
+                        "Normalized path contains './': {} -> {} ({})", traversal_path, mount.0, description);
+                    assert!(mount.0.starts_with('/'), 
+                        "Normalized path not absolute: {} ({})", mount.0, description);
+                }
+                let _ = container_vfs.unmount("/traversal_test");
+            }
+            Err(_) => {
+                // Rejection of traversal attempts is also acceptable security behavior
+                assert!(!container_vfs.is_bind_mount("/traversal_test"), 
+                    "Mount should not exist after failed traversal attempt: {}", description);
+            }
+        }
+    }
+    
+    // === Test 2: Validate legitimate absolute paths work ===
+    let legitimate_paths = vec!["/etc", "/var", "/usr", "/usr/bin", "/home/user"];
+    
+    for path in legitimate_paths {
+        let result = container_vfs.bind_mount_from(&host_vfs_arc, path, "/legitimate_test", false);
+        assert!(result.is_ok(), "Legitimate path should be mountable: {}", path);
+        
+        // Verify mount is accessible
+        let entries = container_vfs.read_dir("/legitimate_test");
+        assert!(entries.is_ok(), "Mounted path should be readable: {}", path);
+        
+        let _ = container_vfs.unmount("/legitimate_test");
+    }
+    
+    // === Test 3: Ensure security isolation between attempts ===
+    
+    // First mount a safe directory
+    let safe_result = container_vfs.bind_mount_from(&host_vfs_arc, "/home/user", "/safe_mount", true);
+    assert!(safe_result.is_ok(), "Safe mount should succeed");
+    
+    // Try traversal attack - should not affect existing safe mount
+    let _attack_result = container_vfs.bind_mount_from(&host_vfs_arc, "/home/../etc", "/attack_mount", true);
+    // Whether attack succeeds or fails, safe mount should remain intact
+    
+    assert!(container_vfs.is_bind_mount("/safe_mount"), "Safe mount should remain after attack attempt");
+    let safe_access = container_vfs.read_dir("/safe_mount");
+    assert!(safe_access.is_ok(), "Safe mount should remain accessible");
+    
+    // Cleanup
+    let _ = container_vfs.unmount("/safe_mount");
+    let _ = container_vfs.unmount("/attack_mount");
+}
+
+#[test_case]
+fn test_bind_mount_from_security_edge_cases() {
+    // Test specific edge cases for cross-VFS bind mount security
+    
+    // Create host VFS with security-focused directory structure
+    let mut host_vfs = VfsManager::new();
+    let host_device = Box::new(MockBlockDevice::new(1, "host_security", 512, 100));
+    let host_fs = Box::new(TestFileSystem::new("host_fs", host_device, 512));
+    let host_fs_id = host_vfs.register_fs(host_fs);
+    host_vfs.mount(host_fs_id, "/").unwrap();
+    
+    // Create directories for security testing
+    host_vfs.create_dir("/public").expect("Failed to create /public");
+    host_vfs.create_dir("/private").expect("Failed to create /private");
+    host_vfs.create_dir("/temp").expect("Failed to create /temp");
+    host_vfs.create_dir("/nested").expect("Failed to create /nested");
+    host_vfs.create_dir("/nested/deep").expect("Failed to create /nested/deep");
+    host_vfs.create_dir("/nested/deep/buried").expect("Failed to create /nested/deep/buried");
+    
+    // Create test files
+    host_vfs.create_regular_file("/public/readme.txt").expect("Failed to create readme");
+    host_vfs.create_regular_file("/private/secret.key").expect("Failed to create secret");
+    host_vfs.create_regular_file("/nested/deep/buried/treasure.txt").expect("Failed to create treasure");
+    
+    // Create container VFS
+    let mut container_vfs = VfsManager::new();
+    let container_device = Box::new(MockBlockDevice::new(2, "container_security", 512, 100));
+    let container_fs = Box::new(TestFileSystem::new("container_fs", container_device, 512));
+    let container_fs_id = container_vfs.register_fs(container_fs);
+    container_vfs.mount(container_fs_id, "/").unwrap();
+    
+    let host_vfs_arc = Arc::new(host_vfs);
+    
+    // === Test 1: Cross-VFS file access through deep bind mounts ===
+    
+    // Mount deeply nested directory from host to container
+    let deep_mount = container_vfs.bind_mount_from(&host_vfs_arc, "/nested/deep", "/deep_mount", false);
+    assert!(deep_mount.is_ok(), "Deep mount should succeed");
+    
+    // Verify we can access files through the bind mount
+    let buried_file = container_vfs.open("/deep_mount/buried/treasure.txt", 0);
+    assert!(buried_file.is_ok(), "Should be able to access files through cross-VFS bind mount");
+    
+    // === Test 2: Permission inheritance across VFS boundaries ===
+    
+    // Mount with read-only flag
+    let ro_mount = container_vfs.bind_mount_from(&host_vfs_arc, "/public", "/ro_public", true);
+    assert!(ro_mount.is_ok(), "Read-only mount should succeed");
+    
+    // Verify read access works
+    let readonly_file = container_vfs.open("/ro_public/readme.txt", 0);
+    assert!(readonly_file.is_ok(), "Read access through RO mount should work");
+    
+    // === Test 3: Mount point collision prevention ===
+    
+    // Try to mount over existing mount point (should fail)
+    let collision_mount = container_vfs.bind_mount_from(&host_vfs_arc, "/private", "/ro_public", false);
+    assert!(collision_mount.is_err(), "Mount collision should be prevented");
+    
+    // Original mount should remain unaffected
+    assert!(container_vfs.is_bind_mount("/ro_public"), "Original mount should persist");
+    
+    // === Test 4: Resource cleanup and isolation ===
+    
+    // Unmount all test mounts
+    let deep_unmount = container_vfs.unmount("/deep_mount");
+    assert!(deep_unmount.is_ok(), "Deep mount unmount should succeed");
+    
+    let ro_unmount = container_vfs.unmount("/ro_public");
+    assert!(ro_unmount.is_ok(), "RO mount unmount should succeed");
+    
+    // Verify host VFS remains unaffected by container operations
+    let host_check = host_vfs_arc.read_dir("/nested/deep");
+    assert!(host_check.is_ok(), "Host VFS should remain accessible after container unmounts");
+    
+    // Verify container VFS maintains independence
+    let container_check = container_vfs.read_dir("/");
+    assert!(container_check.is_ok(), "Container VFS should maintain independence");
 }
