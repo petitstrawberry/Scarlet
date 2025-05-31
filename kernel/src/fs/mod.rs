@@ -679,7 +679,8 @@ pub enum ManagerRef<'a> {
 /// Each container gets its own `VfsManager` with completely isolated mount points:
 /// ```rust
 /// let mut container_vfs = VfsManager::new();
-/// container_vfs.mount(container_fs_id, "/");
+/// let fs_index = container_vfs.register_fs(container_fs);
+/// container_vfs.mount(fs_index, "/");
 /// task.vfs = Some(Arc::new(container_vfs));
 /// ```
 ///
@@ -687,7 +688,8 @@ pub enum ManagerRef<'a> {
 /// Multiple tasks can share filesystem objects while maintaining independent mount points:
 /// ```rust
 /// let shared_vfs = original_vfs.clone(); // Shares filesystem objects
-/// shared_vfs.mount(shared_fs_id, "/mnt/shared"); // Independent mount points
+/// let fs_index = shared_vfs.register_fs(shared_fs);
+/// shared_vfs.mount(fs_index, "/mnt/shared"); // Independent mount points
 /// ```
 ///
 /// # Performance Improvements
@@ -1224,7 +1226,6 @@ impl Clone for VfsManager {
     ///
     /// - **Mount Points**: Each clone gets independent mount point mappings (starting from same state)
     /// - **Filesystem Objects**: Underlying FileSystemRef objects are shared via Arc cloning
-    /// - **Filesystem ID**: Shared ID counter for consistent filesystem identification
     ///
     /// # Use Cases
     ///
