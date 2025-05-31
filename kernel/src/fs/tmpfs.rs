@@ -191,7 +191,6 @@ impl TmpNode {
 
 /// TmpFS - RAM-only filesystem
 pub struct TmpFS {
-    id: usize,
     mounted: bool,
     mount_point: String,
     /// Root directory of the filesystem
@@ -204,11 +203,10 @@ pub struct TmpFS {
 
 impl TmpFS {
     /// Create a new TmpFS instance
-    pub fn new(id: usize, max_memory: usize) -> Self {
+    pub fn new(max_memory: usize) -> Self {
         let root = TmpNode::new_directory("/".to_string());
         
         Self {
-            id,
             mounted: false,
             mount_point: String::new(),
             root: RwLock::new(root),
@@ -402,14 +400,6 @@ impl FileSystem for TmpFS {
     
     fn name(&self) -> &str {
         "tmpfs"
-    }
-
-    fn set_id(&mut self, id: usize) {
-        self.id = id;
-    }
-    
-    fn get_id(&self) -> usize {
-        self.id
     }
 }
 
@@ -873,12 +863,12 @@ impl FileSystemDriver for TmpFSDriver {
     
     fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
         // TmpFS doesn't use block devices, but we can create an instance with unlimited memory
-        Ok(Box::new(TmpFS::new(0, 0)))
+        Ok(Box::new(TmpFS::new(0)))
     }
     
     fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
         // TmpFS doesn't need specific memory area, create with unlimited memory
-        Ok(Box::new(TmpFS::new(0, 0)))
+        Ok(Box::new(TmpFS::new(0)))
     }
 
     fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
@@ -886,12 +876,12 @@ impl FileSystemDriver for TmpFSDriver {
         
         // Try to downcast to TmpFSParams first
         if let Some(tmpfs_params) = params.as_any().downcast_ref::<TmpFSParams>() {
-            return Ok(Box::new(TmpFS::new(tmpfs_params.fs_id, tmpfs_params.memory_limit)));
+            return Ok(Box::new(TmpFS::new(tmpfs_params.memory_limit)));
         }
         
         // Try to downcast to BasicFSParams for compatibility
-        if let Some(basic_params) = params.as_any().downcast_ref::<BasicFSParams>() {
-            return Ok(Box::new(TmpFS::new(basic_params.fs_id, 0))); // Unlimited memory for basic params
+        if let Some(_basic_params) = params.as_any().downcast_ref::<BasicFSParams>() {
+            return Ok(Box::new(TmpFS::new(0))); // Unlimited memory for basic params
         }
         
         // If all downcasts fail, return error
@@ -905,12 +895,12 @@ impl FileSystemDriver for TmpFSDriver {
 impl TmpFSDriver {
     /// Create a new TmpFS with specified memory limit
     pub fn create_with_limit(&self, max_memory: usize) -> Box<dyn VirtualFileSystem> {
-        Box::new(TmpFS::new(0, max_memory))
+        Box::new(TmpFS::new(max_memory))
     }
     
     /// Create a new TmpFS with unlimited memory
     pub fn create_unlimited(&self) -> Box<dyn VirtualFileSystem> {
-        Box::new(TmpFS::new(0, 0))
+        Box::new(TmpFS::new(0))
     }
 }
 
@@ -930,7 +920,7 @@ mod tests {
 
     #[test_case]
     fn test_tmpfs_basic_operations() {
-        let tmpfs = TmpFS::new(0, 0); // Unlimited memory
+        let tmpfs = TmpFS::new(0); // Unlimited memory
         
         // Test directory creation
         tmpfs.create_dir("/test").unwrap();
@@ -960,7 +950,7 @@ mod tests {
 
     #[test_case]
     fn test_tmpfs_memory_limit() {
-        let tmpfs = TmpFS::new(0, 100); // 100 bytes limit
+        let tmpfs = TmpFS::new(100); // 100 bytes limit
         
         tmpfs.create_file("/test.txt", FileType::RegularFile).unwrap();
         let file = tmpfs.open("/test.txt", 0).unwrap();
@@ -979,7 +969,7 @@ mod tests {
 
     #[test_case]
     fn test_tmpfs_device_files() {
-        let tmpfs = TmpFS::new(0, 0);
+        let tmpfs = TmpFS::new(0);
         
         // Create a character device
         let mut char_device = Box::new(MockCharDevice::new(1, "tmpfs_char"));
@@ -1005,7 +995,7 @@ mod tests {
 
     #[test_case]
     fn test_tmpfs_file_operations() {
-        let tmpfs = TmpFS::new(0, 0);
+        let tmpfs = TmpFS::new(0);
         
         // Create nested directories
         tmpfs.create_dir("/home").unwrap();
@@ -1034,7 +1024,7 @@ mod tests {
 
     #[test_case]
     fn test_tmpfs_memory_management() {
-        let tmpfs = TmpFS::new(0, 1000); // 1KB limit
+        let tmpfs = TmpFS::new(1000); // 1KB limit
         
         // Create multiple files
         for i in 0..10 {
@@ -1061,7 +1051,7 @@ mod tests {
 
     #[test_case]
     fn test_tmpfs_large_file_operations() {
-        let tmpfs = TmpFS::new(0, 0); // Unlimited
+        let tmpfs = TmpFS::new(0); // Unlimited
         
         tmpfs.create_file("/large.bin", FileType::RegularFile).unwrap();
         let file = tmpfs.open("/large.bin", 0).unwrap();
