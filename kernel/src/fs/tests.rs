@@ -1262,7 +1262,6 @@ fn test_container_bind_mount_scenario() {
     let host_device = Box::new(MockBlockDevice::new(1, "host_disk", 512, 100));
     let host_fs = Box::new(TestFileSystem::new("host_fs", host_device, 512));
     let host_fs_id = host_vfs.register_fs(host_fs);
-    let host_datafs = Box::new(TmpFS::new(0));
     host_vfs.mount(host_fs_id, "/data").unwrap();
     // host_vfs.create_dir("/data").unwrap();
     let mut container_vfs = VfsManager::new();
@@ -1273,7 +1272,6 @@ fn test_container_bind_mount_scenario() {
     let host_arc = Arc::new(host_vfs);
     container_vfs.bind_mount_from(&host_arc, "/data", "/host-data", true).unwrap();
 
-    let bind_mounts = container_vfs.list_bind_mounts();
     let entries = container_vfs.read_dir("/host-data").unwrap();
     assert!(entries.iter().any(|e| e.name == "test.txt"));
     // ---
