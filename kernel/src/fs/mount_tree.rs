@@ -14,7 +14,7 @@ pub struct MountTree {
     path_cache: BTreeMap<String, Arc<MountPoint>>,
 }
 
-struct MountNode {
+pub struct MountNode {
     /// Path component
     component: RwLock<String>,
     /// Mount information if this node is a mount point
@@ -36,6 +36,31 @@ pub struct MountPoint {
     pub mount_time: u64,
 }
 
+impl MountPoint {
+    /// Get filesystem and internal path from MountPoint
+    /// Supports Regular/Tmpfs/Overlay mounts only
+    pub fn resolve_fs(&self, relative_path: &str) -> Result<(super::FileSystemRef, String)> {
+        match &self.mount_type {
+            MountType::Regular => {
+                // Regular mount: return filesystem as-is
+                Ok((self.fs.clone(), relative_path.to_string()))
+            }
+            
+            MountType::Overlay { .. } => {
+                // Overlay mount: simplified to treat as Regular for now
+                Ok((self.fs.clone(), relative_path.to_string()))
+            }
+            
+            MountType::Bind { .. } => {
+                Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: "Bind mount not supported in this implementation".to_string(),
+                })
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum MountType {
     Regular,
@@ -48,9 +73,6 @@ pub enum MountType {
         lower_layers: Vec<String>,
         upper_layer: String,
         work_dir: String,
-    },
-    Tmpfs {
-        memory_limit: usize,
     },
 }
 
@@ -128,48 +150,62 @@ impl MountTree {
         Ok(())
     }
     
-    /// Path resolution (efficient O(log k) implementation)
-    pub fn resolve(&self, path: &str) -> Result<(Arc<MountPoint>, String)> {
+    /// Find mount point by path
+    /// 
+    /// This method resolves the given path to its corresponding mount point.
+    /// 
+    /// # Arguments
+    /// * `path` - The absolute path to resolve.
+    /// 
+    /// # Returns
+    /// * `Ok((Arc<MountNode>, String))` - A tuple containing the resolved mount node and the relative path.
+    /// * `Err(FileSystemError)` - If the path is invalid or no mount point is found.
+    /// 
+    pub fn resolve(&self, path: &str) -> Result<(Arc<MountNode>, String)> {
         let normalized = Self::normalize_path(path)?;
-        // Try direct cache lookup
-        if let Some(mount) = self.path_cache.get(&normalized) {
-            return Ok((mount.clone(), "/".to_string()));
-        }
-        
         let components = self.split_path(&normalized);
         
-        let mut current_arc = self.root.clone();
-        let mut best_match: Option<Arc<MountPoint>> = None;
+        let mut current_node = self.root.clone();
+        let mut best_match_node: Option<Arc<MountNode>> = None;
         let mut match_depth = 0;
         
-        // Search for longest match using Trie structure
-        for (depth, component) in components.iter().enumerate() {
-            // Check if current node has a mount point
-            {
-                let mount_guard = current_arc.mount_point.read();
-                if let Some(mount) = &*mount_guard {
-                    best_match = Some(mount.clone());
-                    match_depth = depth;
-                }
+        // Check if root node is a mount point
+        {
+            let mount_guard = current_node.mount_point.read();
+            if mount_guard.is_some() {
+                best_match_node = Some(current_node.clone());
+                match_depth = 0;
             }
-            
+        }
+        
+        // Traverse Trie to find the deepest mount point
+        for (depth, component) in components.iter().enumerate() {
             // Move to next node
-            let next_arc = {
-                let children_guard = current_arc.children.read();
+            let next_node = {
+                let children_guard = current_node.children.read();
                 if let Some(child) = children_guard.get(component) {
                     child.clone()
                 } else {
                     break;
                 }
             };
-            current_arc = next_arc;
+            current_node = next_node;
+            
+            // Check if the moved-to node is a mount point
+            {
+                let mount_guard = current_node.mount_point.read();
+                if mount_guard.is_some() {
+                    best_match_node = Some(current_node.clone());
+                    match_depth = depth + 1; // +1 for depth after movement
+                }
+            }
         }
         
-        let mount = best_match.ok_or(FileSystemError {
+        let resolved_node = best_match_node.ok_or(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
             message: format!("No mount point found for path: {}", path),
         })?;
-
+        
         // Build relative path
         let relative_components = &components[match_depth..];
         let relative_path = if relative_components.is_empty() {
@@ -177,9 +213,10 @@ impl MountTree {
         } else {
             format!("/{}", relative_components.join("/"))
         };
-
-        Ok((mount, relative_path))
+        
+        Ok((resolved_node, relative_path))
     }
+
     
     /// Remove mount point
     pub fn remove(&mut self, path: &str) -> Result<Arc<MountPoint>> {
@@ -298,6 +335,24 @@ impl MountNode {
             component: RwLock::new(component),
             mount_point: RwLock::new(None),
             children: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Get the mount point associated with this node
+    /// 
+    /// # Returns
+    /// * `Ok(Arc<MountPoint>)` - The mount point if it exists.
+    /// * `Err(FileSystemError)` - If no mount point is found.
+    /// 
+    pub fn get_mount_point(&self) -> Result<Arc<MountPoint>> {
+        let mount_guard = self.mount_point.read();
+        if let Some(mount_point) = &*mount_guard {
+            Ok(mount_point.clone())
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: "No mount point found".to_string(),
+            })
         }
     }
 }

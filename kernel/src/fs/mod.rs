@@ -1199,19 +1199,7 @@ impl VfsManager {
     /// 
     /// * `Vec<(String, String, bool)>` - List of (source_path, target_path, is_read_only) tuples
     pub fn list_bind_mounts(&self) -> Vec<(String, String, bool)> {
-        let mut bind_mounts = Vec::new();
-        let mount_tree = self.mount_tree.read();
-        
-        for mount_path in mount_tree.list_all() {
-            if let Ok((mount_point, _)) = mount_tree.resolve(&mount_path) {
-                if let MountType::Bind { source_path, bind_type, .. } = &mount_point.mount_type {
-                    let is_read_only = matches!(bind_type, mount_tree::BindType::ReadOnly);
-                    bind_mounts.push((source_path.clone(), mount_path, is_read_only));
-                }
-            }
-        }
-        
-        bind_mounts
+        todo!()
     }
 
     /// Check if a path is a bind mount
@@ -1225,7 +1213,8 @@ impl VfsManager {
     /// * `bool` - True if the path is a bind mount, false otherwise
     pub fn is_bind_mount(&self, path: &str) -> bool {
         if let Ok((mount_point, _)) = self.mount_tree.read().resolve(path) {
-            matches!(mount_point.mount_type, MountType::Bind { .. })
+            // matches!(mount_point.mount_type, MountType::Bind { .. })
+            false
         } else {
             false
         }
@@ -1333,22 +1322,16 @@ impl VfsManager {
             });
         }
         
+        // Phase 1: Get MountNode and relative path from MountTree
         let mount_tree = self.mount_tree.read();
-        let (mount_point, relative_path) = mount_tree.resolve(path)?;
-        match &mount_point.mount_type {
-            MountType::Bind { source_vfs, source_path, .. } => {
-                // If it's a bind mount, use the source VFS and path
-                if source_vfs.is_some() {
-                    return Ok((mount_point.fs.clone(), source_path.clone() + &relative_path));
-                } else {
-                    // If no source VFS, use the current mount point's fs
-                    return Ok((mount_point.fs.clone(), relative_path));
-                }
-            },
-            _ => {}
-        }
-
-        Ok((mount_point.fs.clone(), relative_path))
+        let (mount_node, relative_path) = mount_tree.resolve(path)?;
+        drop(mount_tree);
+        
+        // Phase 2: Get MountPoint from MountNode
+        let mount_point = mount_node.get_mount_point()?;
+        
+        // Phase 3: Get filesystem and internal path from MountPoint
+        mount_point.resolve_fs(&relative_path)
     }
 
     /// Get absolute path from relative path and current working directory
