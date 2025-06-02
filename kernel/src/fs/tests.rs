@@ -882,53 +882,6 @@ fn test_container_rootfs_switching_demo() {
     // - ✓ Container-like filesystem namespace isolation
 }
 
-#[test_case]
-fn test_vfs_manager_clone_behavior() {
-    // Create original VfsManager
-    let mut original_manager = VfsManager::new();
-    
-    // Register and mount filesystem
-    let device = Box::new(MockBlockDevice::new(1, "test_disk", 512, 100));
-    let fs = Box::new(TestFileSystem::new("testfs", device, 512));
-    let fs_id = original_manager.register_fs(fs);
-    original_manager.mount(fs_id, "/mnt").unwrap();
-
-    // Clone VfsManager
-    let mut cloned_manager = original_manager.clone();
-    
-    // === Test 1: Mount point independence ===
-    // Add new filesystem and mount point in cloned manager
-    let device2 = Box::new(MockBlockDevice::new(2, "test_disk2", 512, 100));
-    let fs2 = Box::new(TestFileSystem::new("testfs2", device2, 512));
-    let fs2_id = cloned_manager.register_fs(fs2);
-    assert_eq!(fs2_id, 2); // New ID is assigned in cloned manager
-    cloned_manager.mount(fs2_id, "/mnt2").unwrap();
-    
-    // Verify original manager is not affected
-    assert_eq!(original_manager.mount_count(), 1);
-    assert_eq!(cloned_manager.mount_count(), 2);
-    assert!(original_manager.has_mount_point("/mnt"));
-    assert!(!original_manager.has_mount_point("/mnt2"));
-    assert!(cloned_manager.has_mount_point("/mnt"));
-    assert!(cloned_manager.has_mount_point("/mnt2"));
-    assert_eq!(*original_manager.next_fs_id.read(), 2);
-    assert_eq!(*cloned_manager.next_fs_id.read(), 3);
-    
-    // === Test 2: FileSystem object sharing ===
-    // Create file in original manager
-    original_manager.create_regular_file("/mnt/original_file.txt").unwrap();
-    
-    // Same file is visible from cloned manager (shared)
-    let entries_from_clone = cloned_manager.read_dir("/mnt").unwrap();
-    assert!(entries_from_clone.iter().any(|e| e.name == "original_file.txt"));
-    
-    // Create file in cloned manager
-    cloned_manager.create_regular_file("/mnt/cloned_file.txt").unwrap();
-    
-    // Same file is visible from original manager (shared)
-    let entries_from_original = original_manager.read_dir("/mnt").unwrap();
-    assert!(entries_from_original.iter().any(|e| e.name == "cloned_file.txt"));
-}
 
 #[test_case]
 fn test_proper_vfs_isolation_with_new_instances() {

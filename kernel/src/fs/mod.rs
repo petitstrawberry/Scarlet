@@ -1556,38 +1556,6 @@ impl VfsManager {
     }
 }
 
-impl Clone for VfsManager {
-    /// Creates a clone of VfsManager with independent mount points but shared filesystem objects.
-    ///
-    /// This implementation supports filesystem sharing between tasks while maintaining
-    /// independent mount point namespaces. Key characteristics:
-    ///
-    /// - **Mount Points**: Each clone gets independent mount point mappings (starting from same state)
-    /// - **Filesystem Objects**: Underlying FileSystemRef objects are shared via Arc cloning
-    ///
-    /// # Use Cases
-    ///
-    /// - **Shared Filesystems**: Multiple containers sharing the same filesystem content
-    /// - **Independent Namespaces**: Each task can have different mount point layouts
-    /// - **Copy-on-Write Semantics**: Changes to mount points don't affect the original
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let original_vfs = VfsManager::new();
-    /// // ... register and mount filesystems in original_vfs
-    /// 
-    /// let shared_vfs = original_vfs.clone();
-    /// // shared_vfs sees the same filesystem objects and initial mount points
-    /// ```
-    fn clone(&self) -> Self {
-        Self {
-            filesystems: RwLock::new(self.filesystems.read().clone()), // Clone the Vec content
-            mount_tree: RwLock::new(self.mount_tree.read().clone()), // Clone mount tree with existing mounts
-            next_fs_id: RwLock::new(*self.next_fs_id.read()), // Clone the counter value
-        }
-    }
-}
 
 // Template for a basic file system implementation
 pub struct GenericFileSystem {
