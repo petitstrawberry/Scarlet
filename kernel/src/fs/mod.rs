@@ -1195,15 +1195,6 @@ impl VfsManager {
         Ok(())
     }
 
-    /// List all bind mounts in this VFS manager
-    /// 
-    /// # Returns
-    /// 
-    /// * `Vec<(String, String, bool)>` - List of (source_path, target_path, is_read_only) tuples
-    pub fn list_bind_mounts(&self) -> Vec<(String, String, bool)> {
-        todo!()
-    }
-
     /// Check if a path is a bind mount
     /// 
     /// # Arguments
