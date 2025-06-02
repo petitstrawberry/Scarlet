@@ -958,7 +958,7 @@ impl VfsManager {
         let mp = self.mount_tree.write().remove(mount_point)?;
     
         match &mp.mount_type {
-            MountType::Bind { source_vfs: _, source_path: _, bind_type: _ } => {
+            mount_tree::MountType::Bind { .. } => {
                 // Bind mounts do not need to unmount the underlying filesystem
                 // They are just references to existing filesystems
             },
@@ -998,39 +998,39 @@ impl VfsManager {
     /// vfs_manager.bind_mount("/mnt/source", "/mnt/target", true)?;
     /// ```
     pub fn bind_mount(&mut self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
-        // Normalize the source path to prevent directory traversal
-        let normalized_source_path = Self::normalize_path(source_path);
+        let normalized_source = Self::normalize_path(source_path);
+        let normalized_target = Self::normalize_path(target_path);
+
+        // Get the source MountNode
+        let mount_tree = self.mount_tree.read();
+        let (source_mount_node, source_relative_path) = mount_tree.resolve(&normalized_source)?;
+        drop(mount_tree);
         
-        // Resolve the normalized source path to get the filesystem and relative path
-        let (source_fs, _source_relative_path) = self.resolve_path(&normalized_source_path)?;
+        // Get the source filesystem (for caching)
+        let source_mount_point = source_mount_node.get_mount_point()?;
+        let source_fs = source_mount_point.fs.clone();
         
-        // Create a bind mount point entry
-        let bind_type = if read_only {
-            mount_tree::BindType::ReadOnly
-        } else {
-            mount_tree::BindType::ReadWrite
-        };
-        
-        let mount_point_entry = TreeMountPoint {
-            path: target_path.to_string(),
-            fs: source_fs.clone(),
-            fs_id: 0, // Special ID for bind mounts - they don't consume fs_id
-            mount_type: MountType::Bind {
-                source_vfs: None, // Same VFS manager
-                source_path: normalized_source_path,
-                bind_type,
+        // Create the bind mount point
+        let bind_mount_point = mount_tree::MountPoint {
+            path: normalized_target.clone(),
+            fs: source_fs,
+            fs_id: 0, // Special ID for bind mounts
+            mount_type: mount_tree::MountType::Bind {
+                source_mount_node,
+                source_relative_path,
+                bind_type: if read_only { mount_tree::BindType::ReadOnly } else { mount_tree::BindType::ReadWrite },
             },
-            mount_options: MountOptions {
+            mount_options: mount_tree::MountOptions {
                 read_only,
                 ..Default::default()
             },
             parent: None,
             children: Vec::new(),
-            mount_time: 0, // TODO: Get actual timestamp
+            mount_time: 0, // TODO: actual timestamp
         };
         
-        // Register with MountTree
-        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+        // Register the bind mount in the MountTree
+        self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
         
         Ok(())
     }
@@ -1065,38 +1065,39 @@ impl VfsManager {
         target_path: &str, 
         read_only: bool
     ) -> Result<()> {
-        // Normalize the source path to prevent directory traversal
-        let normalized_source_path = Self::normalize_path(source_path);
-        let normalized_target_path = Self::normalize_path(target_path);
-        // Resolve the normalized source path in the source VFS manager
-        let (source_fs, source_relative_path) = source_vfs.resolve_path(&normalized_source_path)?;
+        let normalized_source = Self::normalize_path(source_path);
+        let normalized_target = Self::normalize_path(target_path);
         
-        let bind_type = if read_only {
-            mount_tree::BindType::ReadOnly
-        } else {
-            mount_tree::BindType::ReadWrite
-        };
+        // Get MountNode from source VFS
+        let source_mount_tree = source_vfs.mount_tree.read();
+        let (source_mount_node, source_relative_path) = source_mount_tree.resolve(&normalized_source)?;
+        drop(source_mount_tree);
         
-        let mount_point_entry = TreeMountPoint {
-            path: normalized_target_path,
-            fs: source_fs.clone(),
-            fs_id: 0, // Special ID for bind mounts
-            mount_type: MountType::Bind {
-                source_vfs: Some(source_vfs.clone()),
-                source_path: source_relative_path,
-                bind_type,
+        // Get the source filesystem
+        let source_mount_point = source_mount_node.get_mount_point()?;
+        let source_fs = source_mount_point.fs.clone();
+
+        // Create the bind mount point
+        let bind_mount_point = mount_tree::MountPoint {
+            path: normalized_target.clone(),
+            fs: source_fs,
+            fs_id: 0,
+            mount_type: mount_tree::MountType::Bind {
+                source_mount_node,
+                source_relative_path,
+                bind_type: if read_only { mount_tree::BindType::ReadOnly } else { mount_tree::BindType::ReadWrite },
             },
-            mount_options: MountOptions {
+            mount_options: mount_tree::MountOptions {
                 read_only,
                 ..Default::default()
             },
             parent: None,
             children: Vec::new(),
-            mount_time: 0, // TODO: Get actual timestamp
+            mount_time: 0,
         };
-        
-        // Register with MountTree
-        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+
+        // Register the bind mount in the MountTree
+        self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
         
         Ok(())
     }
@@ -1119,15 +1120,16 @@ impl VfsManager {
         // Normalize the source path to prevent directory traversal
         let normalized_source_path = Self::normalize_path(source_path);
         
-        let (source_fs, _source_relative_path) = self.resolve_path(&normalized_source_path)?;
+        // Resolve the source path to get the mount node and relative path within that mount
+        let (source_mount_node, source_relative_path) = self.mount_tree.read().resolve(&normalized_source_path)?;
         
         let mount_point_entry = TreeMountPoint {
             path: target_path.to_string(),
-            fs: source_fs.clone(),
+            fs: source_mount_node.get_mount_point()?.fs.clone(),
             fs_id: 0, // Special ID for bind mounts
             mount_type: MountType::Bind {
-                source_vfs: None,
-                source_path: normalized_source_path,
+                source_mount_node,
+                source_relative_path,
                 bind_type: mount_tree::BindType::Shared,
             },
             mount_options: MountOptions::default(),
@@ -1159,8 +1161,8 @@ impl VfsManager {
         // Normalize the source path to prevent directory traversal
         let normalized_source_path = Self::normalize_path(source_path);
         
-        // Resolve the normalized source path to get the filesystem and relative path
-        let (source_fs, _source_relative_path) = self.resolve_path(&normalized_source_path)?;
+        // Resolve the source path to get the mount node and relative path within that mount
+        let (source_mount_node, source_relative_path) = self.mount_tree.read().resolve(&normalized_source_path)?;
         
         // Create a bind mount point entry
         let bind_type = if read_only {
@@ -1171,11 +1173,11 @@ impl VfsManager {
         
         let mount_point_entry = TreeMountPoint {
             path: target_path.to_string(),
-            fs: source_fs.clone(),
+            fs: source_mount_node.get_mount_point()?.fs.clone(),
             fs_id: 0, // Special ID for bind mounts - they don't consume fs_id
             mount_type: MountType::Bind {
-                source_vfs: None, // Same VFS manager
-                source_path: normalized_source_path,
+                source_mount_node,
+                source_relative_path,
                 bind_type,
             },
             mount_options: MountOptions {
@@ -1212,9 +1214,12 @@ impl VfsManager {
     /// 
     /// * `bool` - True if the path is a bind mount, false otherwise
     pub fn is_bind_mount(&self, path: &str) -> bool {
-        if let Ok((mount_point, _)) = self.mount_tree.read().resolve(path) {
-            // matches!(mount_point.mount_type, MountType::Bind { .. })
-            false
+        if let Ok((mount_node, _)) = self.mount_tree.read().resolve(path) {
+            if let Ok(mount_point) = mount_node.get_mount_point() {
+                matches!(mount_point.mount_type, MountType::Bind { .. })
+            } else {
+                false
+            }
         } else {
             false
         }

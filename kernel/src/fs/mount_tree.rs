@@ -40,22 +40,39 @@ impl MountPoint {
     /// Get filesystem and internal path from MountPoint
     /// Supports Regular/Tmpfs/Overlay mounts only
     pub fn resolve_fs(&self, relative_path: &str) -> Result<(super::FileSystemRef, String)> {
+        self.resolve_fs_with_depth(relative_path, 0)
+    }
+    
+    fn resolve_fs_with_depth(&self, relative_path: &str, depth: usize) -> Result<(super::FileSystemRef, String)> {
+        // Prevent circular references
+        if depth > 32 {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Too many bind mount redirections".to_string(),
+            });
+        }
+        
         match &self.mount_type {
-            MountType::Regular => {
+            MountType::Regular | MountType::Overlay { .. } => {
                 // Regular mount: return filesystem as-is
                 Ok((self.fs.clone(), relative_path.to_string()))
             }
             
-            MountType::Overlay { .. } => {
-                // Overlay mount: simplified to treat as Regular for now
-                Ok((self.fs.clone(), relative_path.to_string()))
-            }
-            
-            MountType::Bind { .. } => {
-                Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotSupported,
-                    message: "Bind mount not supported in this implementation".to_string(),
-                })
+            MountType::Bind { source_mount_node, source_relative_path, .. } => {
+                // Combine paths
+                let full_source_path = match (relative_path, source_relative_path.as_str()) {
+                    ("/", _) => source_relative_path.clone(),
+                    (_, "/") => relative_path.to_string().clone(),
+                    (rel, src) => {
+                        let src_trimmed = src.trim_end_matches('/');
+                        let rel_trimmed = rel.trim_start_matches('/');
+                        format!("{}/{}", src_trimmed, rel_trimmed)
+                    }
+                };
+                
+                // Recursively resolve with source MountNode
+                let source_mount_point = source_mount_node.get_mount_point()?;
+                source_mount_point.resolve_fs_with_depth(&full_source_path, depth + 1)
             }
         }
     }
@@ -65,8 +82,8 @@ impl MountPoint {
 pub enum MountType {
     Regular,
     Bind {
-        source_vfs: Option<Arc<VfsManager>>,
-        source_path: String,
+        source_mount_node: Arc<MountNode>,
+        source_relative_path: String,
         bind_type: BindType,
     },
     Overlay {
