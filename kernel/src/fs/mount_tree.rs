@@ -9,19 +9,18 @@ use super::*;
 /// Mount point management using Trie structure
 #[derive(Clone)]
 pub struct MountTree {
-    root: MountNode,
+    root: Arc<MountNode>,
     /// Cache for fast lookup
     path_cache: BTreeMap<String, Arc<MountPoint>>,
 }
 
-#[derive(Clone)]
 struct MountNode {
     /// Path component
-    component: String,
+    component: RwLock<String>,
     /// Mount information if this node is a mount point
-    mount_point: Option<Arc<MountPoint>>,
+    mount_point: RwLock<Option<Arc<MountPoint>>>,
     /// Child nodes
-    children: BTreeMap<String, MountNode>,
+    children: RwLock<BTreeMap<String, Arc<MountNode>>>,
 }
 
 /// Extended mount point information
@@ -86,7 +85,7 @@ impl Default for MountOptions {
 impl MountTree {
     pub fn new() -> Self {
         Self {
-            root: MountNode::new("".to_string()),
+            root: Arc::new(MountNode::new("".to_string())),
             path_cache: BTreeMap::new(),
         }
     }
@@ -102,15 +101,19 @@ impl MountTree {
         let components = self.split_path(&normalized);
         
         // Traverse path using Trie structure
-        let mut current = &mut self.root;
+        let mut current_arc = self.root.clone();
         for component in &components {
-            current = current.children
-                .entry(component.clone())
-                .or_insert_with(|| MountNode::new(component.clone()));
+            let next_arc = {
+                let mut children = current_arc.children.write();
+                children.entry(component.clone())
+                    .or_insert_with(|| Arc::new(MountNode::new(component.clone())))
+                    .clone()
+            };
+            current_arc = next_arc;
         }
         
         // Return error if mount point already exists
-        if current.mount_point.is_some() {
+        if current_arc.mount_point.read().is_some() {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
                 message: format!("Mount point {} already exists", path),
@@ -119,7 +122,7 @@ impl MountTree {
         
         // Set mount point
         let mount_point_arc = Arc::new(mount_point);
-        current.mount_point = Some(mount_point_arc.clone());
+        *current_arc.mount_point.write() = Some(mount_point_arc.clone());
         self.path_cache.insert(normalized, mount_point_arc);
         
         Ok(())
@@ -135,31 +138,37 @@ impl MountTree {
         
         let components = self.split_path(&normalized);
         
-
-        let mut current = &self.root;
-        let mut best_match: Option<&Arc<MountPoint>> = None;
+        let mut current_arc = self.root.clone();
+        let mut best_match: Option<Arc<MountPoint>> = None;
         let mut match_depth = 0;
         
         // Search for longest match using Trie structure
         for (depth, component) in components.iter().enumerate() {
             // Check if current node has a mount point
-            if let Some(mount) = &current.mount_point {
-                best_match = Some(mount);
-                match_depth = depth;
+            {
+                let mount_guard = current_arc.mount_point.read();
+                if let Some(mount) = &*mount_guard {
+                    best_match = Some(mount.clone());
+                    match_depth = depth;
+                }
             }
             
             // Move to next node
-            if let Some(child) = current.children.get(component) {
-                current = child;
-            } else {
-                break;
-            }
+            let next_arc = {
+                let children_guard = current_arc.children.read();
+                if let Some(child) = children_guard.get(component) {
+                    child.clone()
+                } else {
+                    break;
+                }
+            };
+            current_arc = next_arc;
         }
         
         let mount = best_match.ok_or(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
             message: format!("No mount point found for path: {}", path),
-        })?.clone();
+        })?;
 
         // Build relative path
         let relative_components = &components[match_depth..];
@@ -178,19 +187,27 @@ impl MountTree {
         let components = self.split_path(&normalized);
         
         // Traverse path to find node
-        let mut current = &mut self.root;
+        let mut current_arc = self.root.clone();
         for component in &components {
-            current = current.children.get_mut(component).ok_or(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: format!("Mount point {} not found", path),
-            })?;
+            let next_arc = {
+                let children = current_arc.children.read();
+                children.get(component)
+                    .ok_or(FileSystemError {
+                        kind: FileSystemErrorKind::NotFound,
+                        message: format!("Mount point {} not found", path),
+                    })?
+                    .clone()
+            };
+            current_arc = next_arc;
         }
         
         // Remove mount point
-        let mount_point = current.mount_point.take().ok_or(FileSystemError {
-            kind: FileSystemErrorKind::NotFound,
-            message: format!("No mount point at {}", path),
-        })?;
+        let mount_point = current_arc.mount_point.write()
+            .take()
+            .ok_or(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: format!("No mount point at {}", path),
+            })?;
         
         self.path_cache.remove(&normalized);
         
@@ -253,12 +270,17 @@ impl MountTree {
     }
     
     fn collect_mount_paths(&self, node: &MountNode, current_path: String, paths: &mut Vec<String>) {
-        if node.mount_point.is_some() {
+        // Check if this node has a mount point
+        let mount_guard = node.mount_point.read();
+        if mount_guard.is_some() {
             let path = if current_path.is_empty() { "/".to_string() } else { current_path.clone() };
             paths.push(path);
         }
+        // Guard is dropped here
         
-        for (component, child) in &node.children {
+        // Iterate through children
+        let children_guard = node.children.read();
+        for (component, child) in children_guard.iter() {
             let child_path = if current_path.is_empty() {
                 format!("/{}", component)
             } else {
@@ -266,15 +288,16 @@ impl MountTree {
             };
             self.collect_mount_paths(child, child_path, paths);
         }
+        // Guard is dropped here
     }
 }
 
 impl MountNode {
     fn new(component: String) -> Self {
         Self {
-            component,
-            mount_point: None,
-            children: BTreeMap::new(),
+            component: RwLock::new(component),
+            mount_point: RwLock::new(None),
+            children: RwLock::new(BTreeMap::new()),
         }
     }
 }
