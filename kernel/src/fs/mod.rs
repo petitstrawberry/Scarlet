@@ -1205,7 +1205,8 @@ impl VfsManager {
     /// 
     /// * `bool` - True if the path is a bind mount, false otherwise
     pub fn is_bind_mount(&self, path: &str) -> bool {
-        if let Ok((mount_node, _)) = self.mount_tree.read().resolve(path) {
+        // Use non-transparent resolution to check the mount node itself
+        if let Ok((mount_node, _)) = self.mount_tree.read().resolve_non_transparent(path) {
             if let Ok(mount_point) = mount_node.get_mount_point() {
                 matches!(mount_point.mount_type, MountType::Bind { .. })
             } else {
@@ -1317,15 +1318,17 @@ impl VfsManager {
                 message: format!("Path must be absolute: {}", path),
             });
         }
+
+        crate::println!("Resolving path: {}", path);
         
         // Phase 1: Get MountNode and relative path from MountTree
         let mount_tree = self.mount_tree.read();
         let (mount_node, relative_path) = mount_tree.resolve(path)?;
         drop(mount_tree);
-        
+
         // Phase 2: Get MountPoint from MountNode
         let mount_point = mount_node.get_mount_point()?;
-        
+
         // Phase 3: Get filesystem and internal path from MountPoint
         mount_point.resolve_fs(&relative_path)
     }
