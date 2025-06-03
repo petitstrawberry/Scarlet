@@ -1098,7 +1098,7 @@ impl VfsManager {
     /// ```rust
     /// use crate::fs::params::TmpFSParams;
     /// 
-    /// let params = TmpFSParams::new(1048576, 42); // 1MB limit, fs_id=42
+    /// let params = TmpFSParams::with_memory_limit(1048576); // 1MB limit
     /// let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params)?;
     /// ```
     pub fn create_and_register_fs_with_params(
