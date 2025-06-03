@@ -77,22 +77,7 @@
 //!
 //! The VFS supports two distinct patterns for sharing filesystem resources:
 //!
-//! #### Pattern 1: Independent Mount Points with Shared Content
-//! ```rust
-//! // Clone VfsManager to share filesystem objects but maintain separate mount points
-//! let shared_vfs = original_vfs.clone();
-//! 
-//! // Each VfsManager maintains its own mount tree
-//! // but shares the underlying filesystem drivers and inode caches
-//! shared_vfs.mount("/proc", proc_fs)?;  // Only affects shared_vfs mount tree
-//! 
-//! // Useful for:
-//! // - Container-like isolation with selective sharing
-//! // - Process-specific mount namespaces
-//! // - Independent filesystem views with shared storage backends
-//! ```
-//!
-//! #### Pattern 2: Complete VFS Sharing via Arc
+//! #### VFS Sharing via Arc
 //! ```rust
 //! // Share entire VfsManager instance including mount points
 //! let shared_vfs = Arc::new(original_vfs);
@@ -295,7 +280,8 @@ pub struct DirectoryEntry {
 /// Structure representing a directory
 pub struct Directory<'a> {
     pub path: String,
-    manager_ref: ManagerRef<'a>,  // Added
+    #[allow(dead_code)]
+    manager_ref: ManagerRef<'a>,
 }
 
 impl<'a> Directory<'a> {
@@ -885,11 +871,11 @@ pub enum ManagerRef<'a> {
 /// ```
 ///
 /// ## 2. Shared Filesystem Access
-/// Multiple tasks can share filesystem objects while maintaining independent mount points:
+/// Multiple tasks can share VfsManager objects using Arc:
 /// ```rust
-/// let shared_vfs = original_vfs.clone(); // Shares filesystem objects
+/// let shared_vfs = Arc::new(original_vfs); // Shares filesystem objects and mount points
 /// let fs_index = shared_vfs.register_fs(shared_fs);
-/// shared_vfs.mount(fs_index, "/mnt/shared"); // Independent mount points
+/// shared_vfs.mount(fs_index, "/mnt/shared"); // Shared mount points
 /// ```
 ///
 /// # Performance Improvements
@@ -903,8 +889,8 @@ pub enum ManagerRef<'a> {
 /// # Thread Safety
 ///
 /// All internal data structures use RwLock for thread-safe concurrent access.
-/// The `Clone` implementation creates independent mount point namespaces while
-/// sharing the underlying filesystem objects through Arc references.
+/// VfsManager can be shared between threads using Arc for cases requiring
+/// shared filesystem access across multiple tasks.
 pub struct VfsManager {
     filesystems: RwLock<BTreeMap<usize, FileSystemRef>>,
     mount_tree: RwLock<MountTree>,
