@@ -77,29 +77,14 @@
 //!
 //! The VFS supports two distinct patterns for sharing filesystem resources:
 //!
-//! #### Pattern 1: Independent Mount Points with Shared Content
-//! ```rust
-//! // Clone VfsManager to share filesystem objects but maintain separate mount points
-//! let shared_vfs = original_vfs.clone();
-//! 
-//! // Each VfsManager maintains its own mount tree
-//! // but shares the underlying filesystem drivers and inode caches
-//! shared_vfs.mount("/proc", proc_fs)?;  // Only affects shared_vfs mount tree
-//! 
-//! // Useful for:
-//! // - Container-like isolation with selective sharing
-//! // - Process-specific mount namespaces
-//! // - Independent filesystem views with shared storage backends
-//! ```
-//!
-//! #### Pattern 2: Complete VFS Sharing via Arc
+//! #### VFS Sharing via Arc
 //! ```rust
 //! // Share entire VfsManager instance including mount points
 //! let shared_vfs = Arc::new(original_vfs);
 //! let task_vfs = Arc::clone(&shared_vfs);
 //! 
 //! // All mount operations affect the shared mount tree
-//! shared_vfs.mount("/tmp", tmpfs)?;  // Visible to all references
+//! shared_vfs.mount(tmpfs_id, "/tmp")?;  // Visible to all references
 //! 
 //! // Useful for:
 //! // - Fork-like behavior where child inherits parent's full filesystem view
@@ -162,6 +147,41 @@ impl fmt::Debug for FileSystemError {
 /// Result type for file system operations
 pub type Result<T> = core::result::Result<T, FileSystemError>;
 
+/// Information about device files in the filesystem
+/// 
+/// Scarlet uses a simplified device identification system based on unique device IDs
+/// rather than the traditional Unix major/minor number pairs. This provides:
+/// 
+/// - **Simplified Management**: Single ID instead of major/minor pair reduces complexity
+/// - **Unified Namespace**: All devices share a common ID space regardless of type
+/// - **Dynamic Allocation**: Device IDs can be dynamically assigned without conflicts
+/// - **Type Safety**: Device type is explicitly specified alongside the ID
+/// 
+/// # Architecture
+/// 
+/// Each device in Scarlet is uniquely identified by:
+/// - `device_id`: A unique identifier within the system's device namespace
+/// - `device_type`: Explicit type classification (Character, Block, etc.)
+/// 
+/// This differs from traditional Unix systems where:
+/// - Major numbers identify device drivers
+/// - Minor numbers identify specific devices within a driver
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// // Character device for terminal
+/// let tty_device = DeviceFileInfo {
+///     device_id: 1,
+///     device_type: DeviceType::Char,
+/// };
+/// 
+/// // Block device for storage
+/// let disk_device = DeviceFileInfo {
+///     device_id: 100,
+///     device_type: DeviceType::Block,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceFileInfo {
     pub device_id: usize,
@@ -295,7 +315,8 @@ pub struct DirectoryEntry {
 /// Structure representing a directory
 pub struct Directory<'a> {
     pub path: String,
-    manager_ref: ManagerRef<'a>,  // Added
+    #[allow(dead_code)]
+    manager_ref: ManagerRef<'a>,
 }
 
 impl<'a> Directory<'a> {
@@ -885,11 +906,11 @@ pub enum ManagerRef<'a> {
 /// ```
 ///
 /// ## 2. Shared Filesystem Access
-/// Multiple tasks can share filesystem objects while maintaining independent mount points:
+/// Multiple tasks can share VfsManager objects using Arc:
 /// ```rust
-/// let shared_vfs = original_vfs.clone(); // Shares filesystem objects
+/// let shared_vfs = Arc::new(original_vfs); // Shares filesystem objects and mount points
 /// let fs_index = shared_vfs.register_fs(shared_fs);
-/// shared_vfs.mount(fs_index, "/mnt/shared"); // Independent mount points
+/// shared_vfs.mount(fs_index, "/mnt/shared"); // Shared mount points
 /// ```
 ///
 /// # Performance Improvements
@@ -903,8 +924,8 @@ pub enum ManagerRef<'a> {
 /// # Thread Safety
 ///
 /// All internal data structures use RwLock for thread-safe concurrent access.
-/// The `Clone` implementation creates independent mount point namespaces while
-/// sharing the underlying filesystem objects through Arc references.
+/// VfsManager can be shared between threads using Arc for cases requiring
+/// shared filesystem access across multiple tasks.
 pub struct VfsManager {
     filesystems: RwLock<BTreeMap<usize, FileSystemRef>>,
     mount_tree: RwLock<MountTree>,
@@ -1077,7 +1098,7 @@ impl VfsManager {
     /// ```rust
     /// use crate::fs::params::TmpFSParams;
     /// 
-    /// let params = TmpFSParams::new(1048576, 42); // 1MB limit, fs_id=42
+    /// let params = TmpFSParams::with_memory_limit(1048576); // 1MB limit
     /// let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params)?;
     /// ```
     pub fn create_and_register_fs_with_params(
@@ -1223,7 +1244,7 @@ impl VfsManager {
             mount_time: 0, // TODO: actual timestamp
         };
         
-        // Register the bind mount in the MountTree
+        // Insert the bind mount into the MountTree
         self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
         
         Ok(())
@@ -1290,7 +1311,7 @@ impl VfsManager {
             mount_time: 0,
         };
 
-        // Register the bind mount in the MountTree
+        // Insert the bind mount into the MountTree
         self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
         
         Ok(())
@@ -1824,10 +1845,14 @@ impl VfsManager {
     /// Character devices provide unbuffered access to hardware devices
     /// and are accessed through character-based I/O operations.
     /// 
+    /// In Scarlet's device architecture, devices are identified by a unique
+    /// device ID rather than traditional major/minor number pairs, providing
+    /// a simplified and unified device identification system.
+    /// 
     /// # Arguments
     /// 
     /// * `path` - The absolute path where the character device file should be created
-    /// * `device_info` - Device information including major and minor numbers
+    /// * `device_info` - Device information including unique device ID and type
     /// 
     /// # Returns
     /// 
@@ -1842,9 +1867,8 @@ impl VfsManager {
     /// ```rust
     /// // Create a character device file for /dev/tty
     /// let device_info = DeviceFileInfo {
+    ///     device_id: 1,
     ///     device_type: DeviceType::Char,
-    ///     major: 5,
-    ///     minor: 0,
     /// };
     /// vfs.create_char_device("/dev/tty", device_info)?;
     /// ```
@@ -1858,10 +1882,14 @@ impl VfsManager {
     /// Block devices provide buffered access to hardware devices
     /// and are accessed through block-based I/O operations.
     /// 
+    /// In Scarlet's device architecture, devices are identified by a unique
+    /// device ID rather than traditional major/minor number pairs, enabling
+    /// simplified device management and registration.
+    /// 
     /// # Arguments
     /// 
     /// * `path` - The absolute path where the block device file should be created
-    /// * `device_info` - Device information including major and minor numbers
+    /// * `device_info` - Device information including unique device ID and type
     /// 
     /// # Returns
     /// 
@@ -1876,9 +1904,8 @@ impl VfsManager {
     /// ```rust
     /// // Create a block device file for /dev/sda
     /// let device_info = DeviceFileInfo {
+    ///     device_id: 8,
     ///     device_type: DeviceType::Block,
-    ///     major: 8,
-    ///     minor: 0,
     /// };
     /// vfs.create_block_device("/dev/sda", device_info)?;
     /// ```
