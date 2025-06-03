@@ -84,7 +84,7 @@
 //! let task_vfs = Arc::clone(&shared_vfs);
 //! 
 //! // All mount operations affect the shared mount tree
-//! shared_vfs.mount(tmpfs, "/tmp")?;  // Visible to all references
+//! shared_vfs.mount(tmpfs_id, "/tmp")?;  // Visible to all references
 //! 
 //! // Useful for:
 //! // - Fork-like behavior where child inherits parent's full filesystem view
@@ -1244,7 +1244,7 @@ impl VfsManager {
             mount_time: 0, // TODO: actual timestamp
         };
         
-        // Register the bind mount in the MountTree
+        // Insert the bind mount into the MountTree
         self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
         
         Ok(())
@@ -1311,7 +1311,7 @@ impl VfsManager {
             mount_time: 0,
         };
 
-        // Register the bind mount in the MountTree
+        // Insert the bind mount into the MountTree
         self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
         
         Ok(())
