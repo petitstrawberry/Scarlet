@@ -1,11 +1,12 @@
 //! Virtual File System (VFS) module.
 //!
 //! This module provides a flexible Virtual File System implementation that supports
-//! per-task isolated filesystems and containerization.
+//! per-task isolated filesystems, containerization, and bind mount functionality.
 //!
 //! # Architecture Overview
 //!
-//! The VFS architecture has evolved to support containerization and process isolation:
+//! The VFS architecture has evolved to support containerization, process isolation,
+//! and advanced mount operations including bind mounts:
 //!
 //! ## VfsManager Distribution
 //!
@@ -13,6 +14,8 @@
 //!   stored as `Option<Arc<VfsManager>>` in the task structure
 //! - **Shared Filesystems**: Multiple VfsManager instances can share underlying filesystem
 //!   objects while maintaining independent mount points
+//! - **Bind Mounts**: Support for mounting directories from one location to another,
+//!   including cross-VFS bind mounting for container orchestration
 //!
 //! ## Key Components
 //!
@@ -20,29 +23,93 @@
 //! - `FileSystemDriverManager`: Global singleton for filesystem driver registration
 //! - `VirtualFileSystem`: Trait combining filesystem and file operation interfaces
 //! - `MountPoint`: Associates filesystem instances with mount paths
+//! - `MountTree`: Hierarchical mount tree structure supporting bind mounts
+//!
+//! ## Bind Mount Functionality
+//!
+//! The VFS provides comprehensive bind mount support for flexible directory mapping:
+//!
+//! ### Basic Bind Mounts
+//! ```rust
+//! let mut vfs = VfsManager::new();
+//! // Mount a directory at another location
+//! vfs.bind_mount("/source/dir", "/target/dir", false)?;
+//! ```
+//!
+//! ### Read-Only Bind Mounts
+//! ```rust
+//! // Create read-only bind mount for security
+//! vfs.bind_mount("/source/dir", "/readonly/dir", true)?;
+//! ```
+//!
+//! ### Cross-VFS Bind Mounts
+//! ```rust
+//! // Share directories between isolated VFS instances
+//! let host_vfs = Arc::new(vfs_manager);
+//! container_vfs.bind_mount_from(&host_vfs, "/host/data", "/container/data", false)?;
+//! ```
+//!
+
+//! ### Thread-Safe Access
+//! Bind mount operations are thread-safe and can be called from system call context:
+//! ```rust
+//! // Use shared reference method for system calls
+//! vfs_arc.bind_mount_shared_ref("/source", "/target", false)?;
+//! ```
 //!
 //! ## Usage Patterns
 //!
-//! ### Container Isolation
+//! ### Container Isolation with Bind Mounts
 //! ```rust
 //! // Create isolated VfsManager for container
 //! let mut container_vfs = VfsManager::new();
 //! container_vfs.mount(fs_id, "/");
+//! 
+//! // Bind mount host resources into container
+//! let host_vfs = Arc::new(host_vfs_manager);
+//! container_vfs.bind_mount_from(&host_vfs, "/host/shared", "/shared", true)?;
 //! 
 //! // Assign to task
 //! task.vfs = Some(Arc::new(container_vfs));
 //! ```
 //!
 //! ### Shared Filesystem Access
+//!
+//! The VFS supports two distinct patterns for sharing filesystem resources:
+//!
+//! #### Pattern 1: Independent Mount Points with Shared Content
 //! ```rust
-//! // Clone VfsManager to share filesystem objects
+//! // Clone VfsManager to share filesystem objects but maintain separate mount points
 //! let shared_vfs = original_vfs.clone();
-//! // Independent mount points, shared filesystem content
+//! 
+//! // Each VfsManager maintains its own mount tree
+//! // but shares the underlying filesystem drivers and inode caches
+//! shared_vfs.mount("/proc", proc_fs)?;  // Only affects shared_vfs mount tree
+//! 
+//! // Useful for:
+//! // - Container-like isolation with selective sharing
+//! // - Process-specific mount namespaces
+//! // - Independent filesystem views with shared storage backends
 //! ```
 //!
+//! #### Pattern 2: Complete VFS Sharing via Arc
+//! ```rust
+//! // Share entire VfsManager instance including mount points
+//! let shared_vfs = Arc::new(original_vfs);
+//! let task_vfs = Arc::clone(&shared_vfs);
+//! 
+//! // All mount operations affect the shared mount tree
+//! shared_vfs.mount("/tmp", tmpfs)?;  // Visible to all references
+//! 
+//! // Useful for:
+//! // - Fork-like behavior where child inherits parent's full filesystem view
+//! // - Thread-like sharing where all threads see the same mount points
+//! // - System-wide mount operations
+//! ```
 //!
 //! The design enables flexible deployment scenarios from simple shared filesystems
-//! to complete filesystem isolation for containerized applications.
+//! to complete filesystem isolation with selective resource sharing for containerized
+//! applications through bind mounts.
 
 pub mod drivers;
 pub mod syscall;
@@ -453,6 +520,20 @@ pub trait FileSystemDriver: Send + Sync {
 // Singleton for global access to the FileSystemDriverManager
 static mut FS_DRIVER_MANAGER: Option<FileSystemDriverManager> = None;
 
+/// Global filesystem driver manager singleton
+/// 
+/// Provides global access to the FileSystemDriverManager instance.
+/// This function ensures thread-safe initialization of the singleton
+/// and returns a mutable reference for driver registration and filesystem creation.
+/// 
+/// # Returns
+/// 
+/// Mutable reference to the global FileSystemDriverManager instance
+/// 
+/// # Thread Safety
+/// 
+/// This function is marked as unsafe due to static mutable access, but
+/// the returned manager uses internal synchronization for thread safety.
 #[allow(static_mut_refs)]
 pub fn get_fs_driver_manager() -> &'static mut FileSystemDriverManager {
     unsafe {
@@ -463,69 +544,152 @@ pub fn get_fs_driver_manager() -> &'static mut FileSystemDriverManager {
     }
 }
 
-/// File system driver manager responsible for managing file system drivers
+/// Global filesystem driver manager singleton
 /// 
-/// Separates the responsibility of driver management from VfsManager,
-/// handling registration, search, and creation of file systems
+/// Provides global access to the FileSystemDriverManager instance.
+/// This function ensures thread-safe initialization of the singleton
+/// and returns a mutable reference for driver registration and filesystem creation.
+/// 
+/// # Returns
+/// 
+/// Mutable reference to the global FileSystemDriverManager instance
+/// 
+/// # Thread Safety
+/// 
+/// This function is marked as unsafe due to static mutable access, but
+/// Filesystem driver manager for centralized driver registration and management
+/// 
+/// The FileSystemDriverManager provides a centralized system for managing filesystem
+/// drivers in the kernel. It separates driver management responsibilities from individual
+/// VfsManager instances, enabling shared driver access across multiple VFS namespaces.
+/// 
+/// # Features
+/// 
+/// - **Driver Registration**: Register filesystem drivers for system-wide use
+/// - **Type-Safe Creation**: Create filesystems with structured parameter validation
+/// - **Multi-Source Support**: Support for block device, memory, and virtual filesystems
+/// - **Thread Safety**: All operations are thread-safe using RwLock protection
+/// - **Future Extensibility**: Designed for dynamic filesystem module loading
+/// 
+/// # Architecture
+/// 
+/// The manager maintains a registry of drivers identified by name, with each driver
+/// implementing the FileSystemDriver trait. Drivers specify their supported source
+/// types (block, memory, virtual) and provide creation methods for each type.
+/// 
+/// # Usage
+/// 
+/// ```rust
+/// // Register a filesystem driver
+/// let manager = get_fs_driver_manager();
+/// manager.register_driver(Box::new(MyFSDriver));
+/// 
+/// // Create filesystem from block device
+/// let device = get_block_device();
+/// let fs = manager.create_from_block("myfs", device, 512)?;
+/// 
+/// // Create filesystem with structured parameters
+/// let params = MyFSParams::new();
+/// let fs = manager.create_with_params("myfs", &params)?;
+/// ```
 pub struct FileSystemDriverManager {
-    /// Registered file system drivers
+    /// Registered file system drivers indexed by name
     drivers: RwLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
 }
 
 impl FileSystemDriverManager {
-    /// Create a new file system driver manager
+    /// Create a new filesystem driver manager
+    /// 
+    /// Initializes an empty driver manager with no registered drivers.
+    /// Drivers must be registered using register_driver() before they
+    /// can be used to create filesystems.
+    /// 
+    /// # Returns
+    /// 
+    /// A new FileSystemDriverManager instance
     pub fn new() -> Self {
         Self {
             drivers: RwLock::new(BTreeMap::new()),
         }
     }
 
-    /// Register a file system driver
+    /// Register a filesystem driver
+    /// 
+    /// Adds a new filesystem driver to the manager's registry. The driver
+    /// will be indexed by its name() method return value. If a driver with
+    /// the same name already exists, it will be replaced.
     /// 
     /// # Arguments
     /// 
-    /// * `driver` - The file system driver to register
+    /// * `driver` - The filesystem driver to register, implementing FileSystemDriver trait
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// let manager = get_fs_driver_manager();
+    /// manager.register_driver(Box::new(MyFileSystemDriver));
+    /// ```
     pub fn register_driver(&mut self, driver: Box<dyn FileSystemDriver>) {
         self.drivers.write().insert(driver.name().to_string(), driver);
     }
 
     /// Get a list of registered driver names
     /// 
+    /// Returns the names of all currently registered filesystem drivers.
+    /// This is useful for debugging and system introspection.
+    /// 
     /// # Returns
     /// 
-    /// * `Vec<String>` - List of registered driver names
+    /// Vector of driver names in alphabetical order
     pub fn list_drivers(&self) -> Vec<String> {
         self.drivers.read().keys().cloned().collect()
     }
 
     /// Check if a driver with the specified name is registered
     /// 
+    /// Performs a quick lookup to determine if a named driver exists
+    /// in the registry without attempting to use it.
+    /// 
     /// # Arguments
     /// 
-    /// * `driver_name` - The driver name to check
+    /// * `driver_name` - The name of the driver to check for
     /// 
     /// # Returns
     /// 
-    /// * `bool` - true if the driver is registered
+    /// `true` if the driver is registered, `false` otherwise
     pub fn has_driver(&self, driver_name: &str) -> bool {
         self.drivers.read().contains_key(driver_name)
     }
 
-    /// Create a file system from a block device
+    /// Create a filesystem from a block device
+    /// 
+    /// Creates a new filesystem instance using the specified driver and block device.
+    /// The driver must support block device-based filesystem creation. This method
+    /// validates that the driver supports block devices before attempting creation.
     /// 
     /// # Arguments
     /// 
-    /// * `driver_name` - The driver name to use
-    /// * `block_device` - The block device
-    /// * `block_size` - The block size
+    /// * `driver_name` - The name of the registered driver to use
+    /// * `block_device` - The block device that will store the filesystem data
+    /// * `block_size` - The block size for I/O operations (typically 512, 1024, or 4096 bytes)
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Err(FileSystemError)` - If driver not found, doesn't support block devices, or creation fails
     /// 
     /// # Errors
     /// 
-    /// * `FileSystemError` - If the driver is not found or the file system cannot be created
+    /// - `NotFound` - Driver with the specified name is not registered
+    /// - `NotSupported` - Driver doesn't support block device-based filesystems
+    /// - Driver-specific errors during filesystem creation
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// let device = get_block_device();
+    /// let fs = manager.create_from_block("ext4", device, 4096)?;
+    /// ```
     pub fn create_from_block(
         &self,
         driver_name: &str,
@@ -548,20 +712,34 @@ impl FileSystemDriverManager {
         driver.create_from_block(block_device, block_size)
     }
 
-    /// Create a file system from a memory area
+    /// Create a filesystem from a memory area
+    /// 
+    /// Creates a new filesystem instance using the specified driver and memory region.
+    /// This is typically used for RAM-based filesystems like tmpfs or for mounting
+    /// filesystem images stored in memory (e.g., initramfs).
     /// 
     /// # Arguments
     /// 
-    /// * `driver_name` - The driver name to use
-    /// * `memory_area` - The memory area
+    /// * `driver_name` - The name of the registered driver to use
+    /// * `memory_area` - The memory region containing filesystem data or available for use
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Err(FileSystemError)` - If driver not found, doesn't support memory-based creation, or creation fails
     /// 
     /// # Errors
     /// 
-    /// * `FileSystemError` - If the driver is not found or the file system cannot be created
+    /// - `NotFound` - Driver with the specified name is not registered
+    /// - `NotSupported` - Driver only supports block device-based filesystems
+    /// - Driver-specific errors during filesystem creation
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// let memory_area = MemoryArea::new(addr, size);
+    /// let fs = manager.create_from_memory("cpiofs", &memory_area)?;
+    /// ```
     pub fn create_from_memory(
         &self,
         driver_name: &str,
@@ -583,33 +761,45 @@ impl FileSystemDriverManager {
         driver.create_from_memory(memory_area)
     }
 
-    /// Create a file system with structured parameters
+    /// Create a filesystem with structured parameters
     /// 
-    /// This method accepts any type implementing FileSystemParams and uses
-    /// dynamic dispatch to handle it. This replaces the previous generic approach
-    /// to enable future dynamic filesystem module loading.
+    /// This method creates filesystems using type-safe structured parameters that
+    /// implement the FileSystemParams trait. This approach replaces the old BTreeMap<String, String>
+    /// configuration method with better type safety and validation.
+    /// 
+    /// The method uses dynamic dispatch to handle different parameter types, enabling
+    /// future dynamic filesystem module loading while maintaining type safety at the
+    /// driver level.
     /// 
     /// # Arguments
     /// 
-    /// * `driver_name` - The name of the driver to use
-    /// * `params` - Parameter structure implementing FileSystemParams
+    /// * `driver_name` - The name of the registered driver to use
+    /// * `params` - Parameter structure implementing FileSystemParams trait
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Err(FileSystemError)` - If driver not found, parameters invalid, or creation fails
     /// 
     /// # Errors
     /// 
-    /// * `FileSystemError` - If the driver is not found or creation fails
+    /// - `NotFound` - Driver with the specified name is not registered
+    /// - `NotSupported` - Driver doesn't support the provided parameter type
+    /// - Driver-specific parameter validation errors
     /// 
     /// # Example
     /// 
     /// ```rust
     /// use crate::fs::params::TmpFSParams;
     /// 
-    /// let params = TmpFSParams::new(1048576, 0); // 1MB limit, fs_id=0
+    /// let params = TmpFSParams::new(1048576, 0); // 1MB limit
     /// let fs = manager.create_with_params("tmpfs", &params)?;
     /// ```
+    /// 
+    /// # Note
+    /// 
+    /// This method uses dynamic dispatch for parameter handling to support
+    /// future dynamic filesystem module loading while maintaining type safety.
     pub fn create_with_params(
         &self, 
         driver_name: &str, 
@@ -626,15 +816,31 @@ impl FileSystemDriverManager {
         driver.create_with_params(params)
     }
 
-    /// Get driver information
+    /// Get filesystem driver information by name
+    /// 
+    /// Retrieves the filesystem type supported by a registered driver.
+    /// This is useful for validating driver capabilities before attempting
+    /// to create filesystems.
     /// 
     /// # Arguments
     /// 
-    /// * `driver_name` - The driver name
+    /// * `driver_name` - The name of the driver to query
     /// 
     /// # Returns
     /// 
-    /// * `Option<FileSystemType>` - The file system type of the driver
+    /// * `Some(FileSystemType)` - The filesystem type if driver exists
+    /// * `None` - If no driver with the specified name is registered
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// if let Some(fs_type) = manager.get_driver_type("tmpfs") {
+    ///     match fs_type {
+    ///         FileSystemType::Virtual => println!("TmpFS is a virtual filesystem"),
+    ///         _ => println!("Unexpected filesystem type"),
+    ///     }
+    /// }
+    /// ```
     pub fn get_driver_type(&self, driver_name: &str) -> Option<FileSystemType> {
         self.drivers.read().get(driver_name).map(|driver| driver.filesystem_type())
     }
@@ -706,24 +912,63 @@ pub struct VfsManager {
 }
 
 impl VfsManager {
+    /// Create a new VFS manager instance
+    /// 
+    /// This method creates a new VfsManager with empty filesystem registry
+    /// and mount tree. Each VfsManager instance provides an isolated
+    /// filesystem namespace, making it suitable for containerization and
+    /// process isolation scenarios.
+    /// 
+    /// # Returns
+    /// 
+    /// * `Self` - A new VfsManager instance ready for filesystem registration and mounting
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create isolated VFS for a container
+    /// let container_vfs = VfsManager::new();
+    /// 
+    /// // Create shared VFS for multiple tasks
+    /// let shared_vfs = Arc::new(VfsManager::new());
+    /// ```
     pub fn new() -> Self {
         Self {
             filesystems: RwLock::new(BTreeMap::new()),
             mount_tree: RwLock::new(MountTree::new()),
-            next_fs_id: RwLock::new(0),
+            next_fs_id: RwLock::new(1), // Start from 1 to avoid zero ID
         }
     }
 
-    /// Register a file system
+    /// Register a filesystem with the VFS manager
+    /// 
+    /// This method adds a filesystem instance to the VfsManager's registry,
+    /// assigning it a unique ID for future operations. The filesystem remains
+    /// available for mounting until it's actually mounted on a mount point.
     /// 
     /// # Arguments
     /// 
-    /// * `fs` - The file system to register
+    /// * `fs` - The filesystem instance to register (must implement VirtualFileSystem)
     /// 
     /// # Returns
     /// 
-    /// * `usize` - The ID of the registered file system
+    /// * `usize` - Unique filesystem ID for use in mount operations
     /// 
+    /// # Thread Safety
+    /// 
+    /// This method is thread-safe and can be called concurrently from multiple threads.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Register a block-based filesystem
+    /// let device = Box::new(SomeBlockDevice::new());
+    /// let fs = Box::new(SomeFileSystem::new("myfs", device, 512));
+    /// let fs_id = vfs_manager.register_fs(fs);
+    /// 
+    /// // Later mount the filesystem
+    /// vfs_manager.mount(fs_id, "/mnt")?;
+    /// ```
     pub fn register_fs(&mut self, fs: Box<dyn VirtualFileSystem>) -> usize {
         let mut next_fs_id = self.next_fs_id.write();
         let fs_id = *next_fs_id;
@@ -736,22 +981,30 @@ impl VfsManager {
         fs_id
     }
 
-    /// Create and register a block-based file system by specifying the driver name
+    /// Create and register a block device-based filesystem
+    /// 
+    /// This convenience method combines filesystem creation and registration in a single
+    /// operation. It uses the global FileSystemDriverManager to create a filesystem
+    /// from the specified block device and automatically registers it with this VfsManager.
     /// 
     /// # Arguments
     /// 
-    /// * `driver_name` - The name of the file system driver
-    /// * `block_device` - The block device to use
-    /// * `block_size` - The block size of the device
+    /// * `driver_name` - The name of the registered filesystem driver to use
+    /// * `block_device` - The block device that will store the filesystem data
+    /// * `block_size` - The block size for I/O operations (typically 512, 1024, or 4096 bytes)
     /// 
     /// # Returns
     /// 
-    /// * `Result<usize>` - The ID of the registered file system
+    /// * `Ok(usize)` - The filesystem ID assigned by this VfsManager
+    /// * `Err(FileSystemError)` - If driver not found, creation fails, or registration fails
     /// 
-    /// # Errors
+    /// # Example
     /// 
-    /// * `FileSystemError` - If the driver is not found or if the file system cannot be created
-    /// 
+    /// ```rust
+    /// let device = get_block_device();
+    /// let fs_id = vfs_manager.create_and_register_block_fs("ext4", device, 4096)?;
+    /// vfs_manager.mount(fs_id, "/mnt")?;
+    /// ```
     pub fn create_and_register_block_fs(
         &mut self,
         driver_name: &str,
@@ -765,21 +1018,29 @@ impl VfsManager {
         Ok(self.register_fs(fs))
     }
 
-    /// Create and register a memory-based file system by specifying the driver name
+    /// Create and register a memory-based filesystem
+    /// 
+    /// This convenience method combines filesystem creation and registration in a single
+    /// operation for memory-based filesystems like tmpfs or initramfs. It uses the global
+    /// FileSystemDriverManager to create a filesystem and automatically registers it.
     /// 
     /// # Arguments
     /// 
-    /// * `driver_name` - The name of the file system driver
-    /// * `memory_area` - The memory area containing the filesystem data
+    /// * `driver_name` - The name of the registered filesystem driver to use
+    /// * `memory_area` - The memory region containing filesystem data or available for use
     /// 
     /// # Returns
     /// 
-    /// * `Result<usize>` - The ID of the registered file system
+    /// * `Ok(usize)` - The filesystem ID assigned by this VfsManager
+    /// * `Err(FileSystemError)` - If driver not found, creation fails, or registration fails
     /// 
-    /// # Errors
+    /// # Example
     /// 
-    /// * `FileSystemError` - If the driver is not found or if the file system cannot be created
-    /// 
+    /// ```rust
+    /// let memory_area = MemoryArea::new(initramfs_addr, initramfs_size);
+    /// let fs_id = vfs_manager.create_and_register_memory_fs("cpiofs", &memory_area)?;
+    /// vfs_manager.mount(fs_id, "/")?;
+    /// ```
     pub fn create_and_register_memory_fs(
         &mut self,
         driver_name: &str,
@@ -844,7 +1105,6 @@ impl VfsManager {
     /// 
     pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
         let mut filesystems = self.filesystems.write();
-        
         // Remove the file system from available pool using BTreeMap
         let fs = filesystems.remove(&fs_id)
             .ok_or(FileSystemError {
@@ -891,15 +1151,264 @@ impl VfsManager {
         // Remove the mount point from MountTree
         let mp = self.mount_tree.write().remove(mount_point)?;
     
-        {
-            let mut fs_write = mp.fs.write();
-            fs_write.unmount()?;
+        match &mp.mount_type {
+            mount_tree::MountType::Bind { .. } => {
+                // Bind mounts do not need to unmount the underlying filesystem
+                // They are just references to existing filesystems
+            },
+            _ => {
+                // For regular mounts, we need to call unmount on the filesystem
+                let mut fs_write = mp.fs.write();
+                fs_write.unmount()?;
+
+                // Return the file system to the registration list using stored fs_id
+                self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
+            }
         }
         
-        // Return the file system to the registration list using stored fs_id
-        self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
         
         Ok(())
+    }
+
+    /// Bind mount a source path to a target path
+    /// 
+    /// This creates a bind mount where the target path will provide access to the same
+    /// content as the source path. The bind mount can be read-only or read-write.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_path` - The source path to bind from
+    /// * `target_path` - The target mount point where the source will be accessible
+    /// * `read_only` - Whether the bind mount should be read-only
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// // Bind mount /mnt/source to /mnt/target as read-only
+    /// vfs_manager.bind_mount("/mnt/source", "/mnt/target", true)?;
+    /// ```
+    pub fn bind_mount(&mut self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
+        let normalized_source = Self::normalize_path(source_path);
+        let normalized_target = Self::normalize_path(target_path);
+
+        // Get the source MountNode
+        let mount_tree = self.mount_tree.read();
+        let (source_mount_node, source_relative_path) = mount_tree.resolve(&normalized_source)?;
+        drop(mount_tree);
+        
+        // Get the source filesystem (for caching)
+        let source_mount_point = source_mount_node.get_mount_point()?;
+        let source_fs = source_mount_point.fs.clone();
+        
+        // Create the bind mount point
+        let bind_mount_point = mount_tree::MountPoint {
+            path: normalized_target.clone(),
+            fs: source_fs,
+            fs_id: 0, // Special ID for bind mounts
+            mount_type: mount_tree::MountType::Bind {
+                source_mount_node,
+                source_relative_path,
+                bind_type: if read_only { mount_tree::BindType::ReadOnly } else { mount_tree::BindType::ReadWrite },
+            },
+            mount_options: mount_tree::MountOptions {
+                read_only,
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: actual timestamp
+        };
+        
+        // Register the bind mount in the MountTree
+        self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
+        
+        Ok(())
+    }
+
+    /// Bind mount from another VFS manager
+    /// 
+    /// This creates a bind mount where the target path in this VFS manager
+    /// will provide access to content from a different VFS manager instance.
+    /// This is useful for sharing filesystem content between containers.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_vfs` - The source VFS manager containing the source path
+    /// * `source_path` - The source path in the source VFS manager
+    /// * `target_path` - The target mount point in this VFS manager
+    /// * `read_only` - Whether the bind mount should be read-only
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// // Bind mount /data from host_vfs to /mnt/shared in container_vfs
+    /// container_vfs.bind_mount_from(&host_vfs, "/data", "/mnt/shared", false)?;
+    /// ```
+    pub fn bind_mount_from(
+        &mut self, 
+        source_vfs: &Arc<VfsManager>, 
+        source_path: &str, 
+        target_path: &str, 
+        read_only: bool
+    ) -> Result<()> {
+        let normalized_source = Self::normalize_path(source_path);
+        let normalized_target = Self::normalize_path(target_path);
+        
+        // Get MountNode from source VFS
+        let source_mount_tree = source_vfs.mount_tree.read();
+        let (source_mount_node, source_relative_path) = source_mount_tree.resolve(&normalized_source)?;
+        drop(source_mount_tree);
+        
+        // Get the source filesystem
+        let source_mount_point = source_mount_node.get_mount_point()?;
+        let source_fs = source_mount_point.fs.clone();
+
+        // Create the bind mount point
+        let bind_mount_point = mount_tree::MountPoint {
+            path: normalized_target.clone(),
+            fs: source_fs,
+            fs_id: 0,
+            mount_type: mount_tree::MountType::Bind {
+                source_mount_node,
+                source_relative_path,
+                bind_type: if read_only { mount_tree::BindType::ReadOnly } else { mount_tree::BindType::ReadWrite },
+            },
+            mount_options: mount_tree::MountOptions {
+                read_only,
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0,
+        };
+
+        // Register the bind mount in the MountTree
+        self.mount_tree.write().insert(&normalized_target, bind_mount_point)?;
+        
+        Ok(())
+    }
+
+    /// Create a shared bind mount
+    /// 
+    /// This creates a shared bind mount where changes to mount propagation
+    /// will be shared between the source and target. This is useful for
+    /// scenarios where you want mount events to propagate between namespaces.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_path` - The source path to bind from
+    /// * `target_path` - The target mount point
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the shared bind mount was successful, Err otherwise
+    pub fn bind_mount_shared(&mut self, source_path: &str, target_path: &str) -> Result<()> {
+        // Normalize the source path to prevent directory traversal
+        let normalized_source_path = Self::normalize_path(source_path);
+        
+        // Resolve the source path to get the mount node and relative path within that mount
+        let (source_mount_node, source_relative_path) = self.mount_tree.read().resolve(&normalized_source_path)?;
+        
+        let mount_point_entry = TreeMountPoint {
+            path: target_path.to_string(),
+            fs: source_mount_node.get_mount_point()?.fs.clone(),
+            fs_id: 0, // Special ID for bind mounts
+            mount_type: MountType::Bind {
+                source_mount_node,
+                source_relative_path,
+                bind_type: mount_tree::BindType::Shared,
+            },
+            mount_options: MountOptions::default(),
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: Get actual timestamp
+        };
+        
+        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+        
+        Ok(())
+    }
+
+    /// Thread-safe bind mount for use from system calls
+    /// 
+    /// This method can be called on a shared VfsManager (Arc<VfsManager>)
+    /// from system call context where &mut self is not available.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `source_path` - The source path to bind from
+    /// * `target_path` - The target mount point where the source will be accessible
+    /// * `read_only` - Whether the bind mount should be read-only
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    pub fn bind_mount_shared_ref(&self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
+        // Normalize the source path to prevent directory traversal
+        let normalized_source_path = Self::normalize_path(source_path);
+        
+        // Resolve the source path to get the mount node and relative path within that mount
+        let (source_mount_node, source_relative_path) = self.mount_tree.read().resolve(&normalized_source_path)?;
+        
+        // Create a bind mount point entry
+        let bind_type = if read_only {
+            mount_tree::BindType::ReadOnly
+        } else {
+            mount_tree::BindType::ReadWrite
+        };
+        
+        let mount_point_entry = TreeMountPoint {
+            path: target_path.to_string(),
+            fs: source_mount_node.get_mount_point()?.fs.clone(),
+            fs_id: 0, // Special ID for bind mounts - they don't consume fs_id
+            mount_type: MountType::Bind {
+                source_mount_node,
+                source_relative_path,
+                bind_type,
+            },
+            mount_options: MountOptions {
+                read_only,
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0, // TODO: Get actual timestamp
+        };
+        
+        // Register with MountTree
+        self.mount_tree.write().mount(target_path, mount_point_entry)?;
+        
+        Ok(())
+    }
+
+    /// Check if a path is a bind mount
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The path to check
+    /// 
+    /// # Returns
+    /// 
+    /// * `bool` - True if the path is a bind mount, false otherwise
+    pub fn is_bind_mount(&self, path: &str) -> bool {
+        // Use non-transparent resolution to check the mount node itself
+        if let Ok((mount_node, _)) = self.mount_tree.read().resolve_non_transparent(path) {
+            if let Ok(mount_point) = mount_node.get_mount_point() {
+                matches!(mount_point.mount_type, MountType::Bind { .. })
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
     /// Normalize a path
@@ -982,7 +1491,55 @@ impl VfsManager {
     }
 
     /// Resolve the path to the file system and relative path
-    ///
+    /// 
+    /// This method performs path resolution within the VfsManager's mount tree,
+    /// handling bind mounts, security validation, and path normalization.
+    /// 
+    /// # Path Resolution Process
+    /// 
+    /// 1. **Path Normalization**: Remove `.` and `..` components, validate against directory traversal
+    /// 2. **Mount Point Lookup**: Find the most specific mount point for the given path
+    /// 3. **Bind Mount Resolution**: Transparently handle bind mounts by resolving to source
+    /// 4. **Relative Path Calculation**: Calculate the path relative to the filesystem root
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path to resolve (must start with `/`)
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(FileSystemRef, String)>` - Tuple containing:
+    ///   - `FileSystemRef`: Arc-wrapped filesystem that handles this path
+    ///   - `String`: Path relative to the filesystem root (always starts with `/`)
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemErrorKind::NotFound` - No filesystem mounted for the path
+    /// * `FileSystemErrorKind::InvalidPath` - Path validation failed (e.g., directory traversal attempt)
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Mount filesystem at /mnt
+    /// let fs_id = vfs.register_fs(filesystem);
+    /// vfs.mount(fs_id, "/mnt")?;
+    /// 
+    /// // Resolve paths
+    /// let (fs, rel_path) = vfs.resolve_path("/mnt/dir/file.txt")?;
+    /// assert_eq!(rel_path, "/dir/file.txt");
+    /// 
+    /// // Bind mount example
+    /// vfs.bind_mount("/mnt/data", "/data", false)?;
+    /// let (fs2, rel_path2) = vfs.resolve_path("/data/file.txt")?;
+    /// // fs2 points to the same filesystem as fs, rel_path2 is "/data/file.txt"
+    /// ```
+    /// 
+    /// # Security
+    /// 
+    /// This method includes protection against directory traversal attacks:
+    /// - Normalizes `..` and `.` components
+    /// - Prevents escaping mount point boundaries
+    /// - Validates all path components for security
     /// # Arguments
     /// 
     /// * `path` - The path to resolve (must be absolute)
@@ -1004,18 +1561,47 @@ impl VfsManager {
             });
         }
         
+        // Phase 1: Get MountNode and relative path from MountTree
         let mount_tree = self.mount_tree.read();
-        let (mount_point, relative_path) = mount_tree.resolve(path)?;
-        Ok((mount_point.fs.clone(), relative_path))
+        let (mount_node, relative_path) = mount_tree.resolve(path)?;
+        drop(mount_tree);
+
+        // Phase 2: Get MountPoint from MountNode
+        let mount_point = mount_node.get_mount_point()?;
+
+        // Phase 3: Get filesystem and internal path from MountPoint
+        mount_point.resolve_fs(&relative_path)
     }
 
     /// Get absolute path from relative path and current working directory
     /// 
     /// # Arguments
+    /// Convert a relative path to an absolute path using the task's current working directory
+    /// 
+    /// This method provides path resolution for system calls that accept relative paths.
+    /// It combines the task's current working directory with the relative path to
+    /// create an absolute path suitable for VFS operations.
+    /// 
+    /// # Arguments
     /// 
     /// * `task` - The task containing the current working directory
-    /// * `path` - The relative path to convert
+    /// * `path` - The relative path to convert (if already absolute, returns as-is)
     /// 
+    /// # Returns
+    /// 
+    /// * `Result<String>` - The absolute path ready for VFS operations
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // If task cwd is "/home/user" and path is "documents/file.txt"
+    /// let abs_path = VfsManager::to_absolute_path(&task, "documents/file.txt")?;
+    /// assert_eq!(abs_path, "/home/user/documents/file.txt");
+    /// 
+    /// // Absolute paths are returned unchanged
+    /// let abs_path = VfsManager::to_absolute_path(&task, "/etc/config")?;
+    /// assert_eq!(abs_path, "/etc/config");
+    /// ```
     pub fn to_absolute_path(task: &Task, path: &str) -> Result<String> {
         if path.starts_with('/') {
             // If the path is already absolute, return it as is
@@ -1039,8 +1625,34 @@ impl VfsManager {
         }
     }
 
-    
-    // Open a file
+    /// Open a file for reading/writing
+    /// 
+    /// This method opens a file through the VFS layer, automatically resolving
+    /// the path to the appropriate filesystem and handling mount points and
+    /// bind mounts transparently.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path to the file to open
+    /// * `flags` - File open flags (read, write, create, etc.)
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<File>` - A file handle for performing I/O operations
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the file cannot be opened or the path is invalid
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Open an existing file for reading
+    /// let file = vfs.open("/etc/config.txt", OpenFlags::RDONLY)?;
+    /// 
+    /// // Create and open a new file for writing
+    /// let file = vfs.open("/tmp/output.txt", OpenFlags::WRONLY | OpenFlags::CREATE)?;
+    /// ```
     pub fn open(&self, path: &str, flags: u32) -> Result<File> {
         let handle = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags));
         match handle {
@@ -1048,8 +1660,32 @@ impl VfsManager {
             Err(e) => Err(e),
         }
     }
-    
-    // Read directory entries
+    /// Read directory entries
+    /// 
+    /// This method reads all entries from a directory, returning a vector of
+    /// directory entry structures containing file names, types, and metadata.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path to the directory to read
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Vec<DirectoryEntry>>` - Vector of directory entries
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the directory cannot be read or doesn't exist
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // List files in a directory
+    /// let entries = vfs.read_dir("/home/user")?;
+    /// for entry in entries {
+    ///     println!("{}: {:?}", entry.name, entry.file_type);
+    /// }
+    /// ```
     pub fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().read_dir(relative_path))
     }
@@ -1067,90 +1703,266 @@ impl VfsManager {
     pub fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path, file_type))
     }
-    
-    // Create a directory
+    /// Create a directory at the specified path
+    /// 
+    /// This method creates a new directory in the filesystem, handling
+    /// parent directory creation if necessary (depending on filesystem implementation).
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path where the directory should be created
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the directory was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the directory cannot be created or already exists
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a new directory
+    /// vfs.create_dir("/tmp/new_directory")?;
+    /// 
+    /// // Create nested directories (if supported by filesystem)
+    /// vfs.create_dir("/tmp/path/to/directory")?;
+    /// ```
     pub fn create_dir(&self, path: &str) -> Result<()> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().create_dir(relative_path))
     }
-    
-    // Remove a file/directory
+    /// Remove a file or directory
+    /// 
+    /// This method removes a file or directory from the filesystem.
+    /// For directories, the behavior depends on the filesystem implementation
+    /// (some may require the directory to be empty).
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path to the file or directory to remove
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the item was removed successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the item cannot be removed or doesn't exist
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Remove a file
+    /// vfs.remove("/tmp/old_file.txt")?;
+    /// 
+    /// // Remove a directory
+    /// vfs.remove("/tmp/empty_directory")?;
+    /// ```
     pub fn remove(&self, path: &str) -> Result<()> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().remove(relative_path))
     }
-    
-    // Get the metadata
+    /// Get file or directory metadata
+    /// 
+    /// This method retrieves metadata information about a file or directory,
+    /// including file type, size, permissions, and timestamps.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path to the file or directory
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<FileMetadata>` - Metadata structure containing file information
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the file doesn't exist or metadata cannot be retrieved
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Get file metadata
+    /// let metadata = vfs.metadata("/etc/config.txt")?;
+    /// println!("File size: {} bytes", metadata.size);
+    /// println!("File type: {:?}", metadata.file_type);
+    /// ```
     pub fn metadata(&self, path: &str) -> Result<FileMetadata> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().metadata(relative_path))
     }
 
-    // Create a regular file
+    /// Create a regular file
+    /// 
+    /// This method creates a new regular file at the specified path.
+    /// It's a convenience method that creates a file with FileType::RegularFile.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path where the file should be created
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the file was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the file cannot be created or already exists
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a new regular file
+    /// vfs.create_regular_file("/tmp/new_file.txt")?;
+    /// ```
     pub fn create_regular_file(&self, path: &str) -> Result<()> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path, FileType::RegularFile))
     }
     
     /// Create a character device file
     /// 
+    /// This method creates a character device file in the filesystem.
+    /// Character devices provide unbuffered access to hardware devices
+    /// and are accessed through character-based I/O operations.
+    /// 
     /// # Arguments
     /// 
-    /// * `path` - The path to the device file to create
-    /// * `device_info` - Information about the device
+    /// * `path` - The absolute path where the character device file should be created
+    /// * `device_info` - Device information including major and minor numbers
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the device file was created successfully, Err otherwise
+    /// * `Result<()>` - Ok if the device file was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the device file cannot be created
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a character device file for /dev/tty
+    /// let device_info = DeviceFileInfo {
+    ///     device_type: DeviceType::Char,
+    ///     major: 5,
+    ///     minor: 0,
+    /// };
+    /// vfs.create_char_device("/dev/tty", device_info)?;
+    /// ```
     pub fn create_char_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
         self.create_file(path, FileType::CharDevice(device_info))
     }
     
     /// Create a block device file
     /// 
+    /// This method creates a block device file in the filesystem.
+    /// Block devices provide buffered access to hardware devices
+    /// and are accessed through block-based I/O operations.
+    /// 
     /// # Arguments
     /// 
-    /// * `path` - The path to the device file to create
-    /// * `device_info` - Information about the device
+    /// * `path` - The absolute path where the block device file should be created
+    /// * `device_info` - Device information including major and minor numbers
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the device file was created successfully, Err otherwise
+    /// * `Result<()>` - Ok if the device file was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the device file cannot be created
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a block device file for /dev/sda
+    /// let device_info = DeviceFileInfo {
+    ///     device_type: DeviceType::Block,
+    ///     major: 8,
+    ///     minor: 0,
+    /// };
+    /// vfs.create_block_device("/dev/sda", device_info)?;
+    /// ```
     pub fn create_block_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
         self.create_file(path, FileType::BlockDevice(device_info))
     }
 
-    /// Create a pipe file
+    /// Create a named pipe (FIFO)
+    /// 
+    /// This method creates a named pipe in the filesystem, which provides
+    /// inter-process communication through a FIFO queue mechanism.
     /// 
     /// # Arguments
     /// 
-    /// * `path` - The path to the pipe to create
+    /// * `path` - The absolute path where the pipe should be created
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the pipe was created successfully, Err otherwise
+    /// * `Result<()>` - Ok if the pipe was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the pipe cannot be created
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a named pipe for IPC
+    /// vfs.create_pipe("/tmp/my_pipe")?;
+    /// ```
     pub fn create_pipe(&self, path: &str) -> Result<()> {
         self.create_file(path, FileType::Pipe)
     }
 
     /// Create a symbolic link
     /// 
+    /// This method creates a symbolic link (symlink) in the filesystem.
+    /// A symbolic link is a file that contains a reference to another file or directory.
+    /// 
     /// # Arguments
     /// 
-    /// * `path` - The path to the symbolic link to create
+    /// * `path` - The absolute path where the symbolic link should be created
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the symbolic link was created successfully, Err otherwise
+    /// * `Result<()>` - Ok if the symbolic link was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the symbolic link cannot be created
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a symbolic link
+    /// vfs.create_symlink("/tmp/link_to_file")?;
+    /// ```
     pub fn create_symlink(&self, path: &str) -> Result<()> {
         self.create_file(path, FileType::SymbolicLink)
     }
 
     /// Create a socket file
     /// 
+    /// This method creates a Unix domain socket file in the filesystem.
+    /// Socket files provide local inter-process communication endpoints.
+    /// 
     /// # Arguments
     /// 
-    /// * `path` - The path to the socket to create
+    /// * `path` - The absolute path where the socket file should be created
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the socket was created successfully, Err otherwise
+    /// * `Result<()>` - Ok if the socket file was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the socket file cannot be created
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a Unix domain socket
+    /// vfs.create_socket("/tmp/my_socket")?;
+    /// ```
     pub fn create_socket(&self, path: &str) -> Result<()> {
         self.create_file(path, FileType::Socket)
     }
@@ -1198,68 +2010,88 @@ impl VfsManager {
         }
     }
 
-    /// Get the number of mount points (for testing purposes)
-    #[cfg(test)]
+    /// Get the number of mount points
     pub fn mount_count(&self) -> usize {
         self.mount_tree.read().len()
     }
 
-    /// Check if a specific mount point exists (for testing purposes)
-    #[cfg(test)]
+    /// Check if a specific mount point exists
     pub fn has_mount_point(&self, path: &str) -> bool {
         self.mount_tree.read().resolve(path).is_ok()
     }
 
-    /// List all mount points (for testing purposes)
-    #[cfg(test)]
+    /// List all mount points
     pub fn list_mount_points(&self) -> Vec<String> {
         self.mount_tree.read().list_all()
     }
 }
 
-impl Clone for VfsManager {
-    /// Creates a clone of VfsManager with independent mount points but shared filesystem objects.
-    ///
-    /// This implementation supports filesystem sharing between tasks while maintaining
-    /// independent mount point namespaces. Key characteristics:
-    ///
-    /// - **Mount Points**: Each clone gets independent mount point mappings (starting from same state)
-    /// - **Filesystem Objects**: Underlying FileSystemRef objects are shared via Arc cloning
-    ///
-    /// # Use Cases
-    ///
-    /// - **Shared Filesystems**: Multiple containers sharing the same filesystem content
-    /// - **Independent Namespaces**: Each task can have different mount point layouts
-    /// - **Copy-on-Write Semantics**: Changes to mount points don't affect the original
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let original_vfs = VfsManager::new();
-    /// // ... register and mount filesystems in original_vfs
-    /// 
-    /// let shared_vfs = original_vfs.clone();
-    /// // shared_vfs sees the same filesystem objects and initial mount points
-    /// ```
-    fn clone(&self) -> Self {
-        Self {
-            filesystems: RwLock::new(self.filesystems.read().clone()), // Clone the Vec content
-            mount_tree: RwLock::new(self.mount_tree.read().clone()), // Clone mount tree with existing mounts
-            next_fs_id: RwLock::new(*self.next_fs_id.read()), // Clone the counter value
-        }
-    }
-}
 
-// Template for a basic file system implementation
+/// Template for a basic block device-based file system implementation
+/// 
+/// `GenericFileSystem` provides a foundation for implementing filesystems
+/// that operate on block devices. It handles common filesystem operations
+/// including mounting, block I/O, and basic filesystem state management.
+/// 
+/// This is primarily used as a base for filesystem drivers and testing,
+/// not intended for direct use in production filesystems.
+/// 
+/// # Architecture
+/// 
+/// - **Block Device Integration**: Direct interface with block devices for storage
+/// - **Mount State Management**: Tracks filesystem mount status and mount points
+/// - **Thread-Safe Block I/O**: Mutex-protected access to the underlying block device
+/// - **Extensible Design**: Can be extended by specific filesystem implementations
+/// 
+/// # Usage
+/// 
+/// ```rust
+/// // Create a generic filesystem on a block device
+/// let block_device = Box::new(SomeBlockDevice::new());
+/// let fs = GenericFileSystem::new("myfs", block_device, 512);
+/// 
+/// // Register with VFS
+/// let fs_id = vfs_manager.register_fs(Box::new(fs));
+/// vfs_manager.mount(fs_id, "/mnt")?;
+/// ```
 pub struct GenericFileSystem {
+    /// Name of the filesystem instance
     name: &'static str,
+    /// Block device for storage operations (mutex-protected for thread safety)
+    #[allow(dead_code)]
     block_device: Mutex<Box<dyn BlockDevice>>,
+    /// Block size for I/O operations
+    #[allow(dead_code)]
     block_size: usize,
+    /// Mount status of the filesystem
     mounted: bool,
+    /// Current mount point path
     mount_point: String,
 }
 
 impl GenericFileSystem {
+    /// Create a new generic filesystem instance
+    /// 
+    /// This method initializes a new filesystem instance that operates on a block device.
+    /// The filesystem starts in an unmounted state and can be mounted later through
+    /// the VFS layer.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `name` - A static string identifier for this filesystem instance
+    /// * `block_device` - The block device that will provide storage for this filesystem
+    /// * `block_size` - The block size to use for I/O operations (typically 512, 1024, 4096)
+    /// 
+    /// # Returns
+    /// 
+    /// * `Self` - A new GenericFileSystem instance ready for registration
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// let device = Box::new(SomeBlockDevice::new());
+    /// let fs = GenericFileSystem::new("myfs", device, 512);
+    /// ```
     pub fn new(name: &'static str, block_device: Box<dyn BlockDevice>, block_size: usize) -> Self {
         Self {
             name,
@@ -1270,6 +2102,21 @@ impl GenericFileSystem {
         }
     }
     
+    /// Internal method for reading blocks from the underlying block device
+    /// 
+    /// This method provides a low-level interface for reading data blocks
+    /// from the filesystem's block device. It handles device locking and
+    /// error conversion for filesystem operations.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `block_idx` - The index of the block to read
+    /// * `buffer` - Buffer to store the read data
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the block was read successfully
+    #[allow(dead_code)]
     fn read_block_internal(&self, block_idx: usize, buffer: &mut [u8]) -> Result<()> {
         let mut device = self.block_device.lock();
         
@@ -1311,6 +2158,21 @@ impl GenericFileSystem {
         }
     }
     
+    /// Internal method for writing blocks to the underlying block device
+    /// 
+    /// This method provides a low-level interface for writing data blocks
+    /// to the filesystem's block device. It handles device locking and
+    /// error conversion for filesystem operations.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `block_idx` - The index of the block to write
+    /// * `buffer` - Buffer containing the data to write
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the block was written successfully
+    #[allow(dead_code)]
     fn write_block_internal(&self, block_idx: usize, buffer: &[u8]) -> Result<()> {
         let mut device = self.block_device.lock();
         

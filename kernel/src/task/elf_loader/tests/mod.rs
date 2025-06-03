@@ -1,3 +1,8 @@
+//! ELF loader test suite.
+//!
+//! Tests for ELF binary loading and execution, including integration with
+//! VfsManager for filesystem-based executable loading in isolated namespaces.
+
 use alloc::boxed::Box;
 
 use crate::{device::block::mockblk::MockBlockDevice, fs::{testfs::TestFileSystem, VfsManager}, task::new_user_task};
