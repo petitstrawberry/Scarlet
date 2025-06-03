@@ -147,6 +147,41 @@ impl fmt::Debug for FileSystemError {
 /// Result type for file system operations
 pub type Result<T> = core::result::Result<T, FileSystemError>;
 
+/// Information about device files in the filesystem
+/// 
+/// Scarlet uses a simplified device identification system based on unique device IDs
+/// rather than the traditional Unix major/minor number pairs. This provides:
+/// 
+/// - **Simplified Management**: Single ID instead of major/minor pair reduces complexity
+/// - **Unified Namespace**: All devices share a common ID space regardless of type
+/// - **Dynamic Allocation**: Device IDs can be dynamically assigned without conflicts
+/// - **Type Safety**: Device type is explicitly specified alongside the ID
+/// 
+/// # Architecture
+/// 
+/// Each device in Scarlet is uniquely identified by:
+/// - `device_id`: A unique identifier within the system's device namespace
+/// - `device_type`: Explicit type classification (Character, Block, etc.)
+/// 
+/// This differs from traditional Unix systems where:
+/// - Major numbers identify device drivers
+/// - Minor numbers identify specific devices within a driver
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// // Character device for terminal
+/// let tty_device = DeviceFileInfo {
+///     device_id: 1,
+///     device_type: DeviceType::Char,
+/// };
+/// 
+/// // Block device for storage
+/// let disk_device = DeviceFileInfo {
+///     device_id: 100,
+///     device_type: DeviceType::Block,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceFileInfo {
     pub device_id: usize,
@@ -1810,10 +1845,14 @@ impl VfsManager {
     /// Character devices provide unbuffered access to hardware devices
     /// and are accessed through character-based I/O operations.
     /// 
+    /// In Scarlet's device architecture, devices are identified by a unique
+    /// device ID rather than traditional major/minor number pairs, providing
+    /// a simplified and unified device identification system.
+    /// 
     /// # Arguments
     /// 
     /// * `path` - The absolute path where the character device file should be created
-    /// * `device_info` - Device information including major and minor numbers
+    /// * `device_info` - Device information including unique device ID and type
     /// 
     /// # Returns
     /// 
@@ -1828,9 +1867,8 @@ impl VfsManager {
     /// ```rust
     /// // Create a character device file for /dev/tty
     /// let device_info = DeviceFileInfo {
+    ///     device_id: 1,
     ///     device_type: DeviceType::Char,
-    ///     major: 5,
-    ///     minor: 0,
     /// };
     /// vfs.create_char_device("/dev/tty", device_info)?;
     /// ```
@@ -1844,10 +1882,14 @@ impl VfsManager {
     /// Block devices provide buffered access to hardware devices
     /// and are accessed through block-based I/O operations.
     /// 
+    /// In Scarlet's device architecture, devices are identified by a unique
+    /// device ID rather than traditional major/minor number pairs, enabling
+    /// simplified device management and registration.
+    /// 
     /// # Arguments
     /// 
     /// * `path` - The absolute path where the block device file should be created
-    /// * `device_info` - Device information including major and minor numbers
+    /// * `device_info` - Device information including unique device ID and type
     /// 
     /// # Returns
     /// 
@@ -1862,9 +1904,8 @@ impl VfsManager {
     /// ```rust
     /// // Create a block device file for /dev/sda
     /// let device_info = DeviceFileInfo {
+    ///     device_id: 8,
     ///     device_type: DeviceType::Block,
-    ///     major: 8,
-    ///     minor: 0,
     /// };
     /// vfs.create_block_device("/dev/sda", device_info)?;
     /// ```
