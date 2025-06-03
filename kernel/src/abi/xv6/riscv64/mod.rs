@@ -30,7 +30,7 @@ impl AbiModule for Xv6Riscv64Abi {
     fn init_fs(&self) -> Option<VfsManager> {
         // println!("Initializing tmpfs for Xv6Riscv64 ABI");
         let mut vfs = VfsManager::new();
-        let id = vfs.create_and_register_fs_with_params("tmpfs", &TmpFSParams::new(0, 0))
+        let id = vfs.create_and_register_fs_with_params("tmpfs", &TmpFSParams::default())
             .expect("Failed to create tmpfs");
         let _ = vfs.mount(id, "/");
         Some(vfs)
