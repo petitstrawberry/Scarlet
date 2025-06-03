@@ -67,7 +67,29 @@ pub struct Task {
     // Current working directory
     pub cwd: Option<String>,
 
-    // VfsManager
+    /// Virtual File System Manager
+    /// 
+    /// Each task can have its own isolated VfsManager instance for containerization
+    /// and namespace isolation. The VfsManager provides:
+    /// 
+    /// - **Filesystem Isolation**: Independent mount point namespaces allowing
+    ///   complete filesystem isolation between tasks or containers
+    /// - **Selective Sharing**: Arc-based filesystem object sharing enables
+    ///   controlled resource sharing while maintaining namespace independence
+    /// - **Bind Mount Support**: Advanced bind mount capabilities for flexible
+    ///   directory mapping and container orchestration scenarios
+    /// - **Security**: Path normalization and validation preventing directory
+    ///   traversal attacks and unauthorized filesystem access
+    /// 
+    /// # Usage Patterns
+    /// 
+    /// - `None`: Task uses global filesystem namespace (traditional Unix-like behavior)
+    /// - `Some(Arc<VfsManager>)`: Task has isolated filesystem namespace (container-like behavior)
+    /// 
+    /// # Thread Safety
+    /// 
+    /// VfsManager is thread-safe and can be shared between tasks using Arc.
+    /// All internal operations use RwLock for concurrent access protection.
     pub vfs: Option<Arc<VfsManager>>,
 }
 

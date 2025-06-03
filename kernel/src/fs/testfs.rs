@@ -11,7 +11,6 @@ use crate::device::{Device, DeviceType, char::CharDevice, block::BlockDevice};
 
 // Simple file system implementation for testing
 pub struct TestFileSystem {
-    id: usize,
     name: &'static str,
     block_device: Mutex<Box<dyn BlockDevice>>,
     block_size: usize,
@@ -22,7 +21,7 @@ pub struct TestFileSystem {
 }
 
 impl TestFileSystem {
-    pub fn new(id: usize, name: &'static str, block_device: Box<dyn BlockDevice>, block_size: usize) -> Self {
+    pub fn new(name: &'static str, block_device: Box<dyn BlockDevice>, block_size: usize) -> Self {
         // Initialize the root directory
         let mut dirs = Vec::new();
         dirs.push((
@@ -44,7 +43,6 @@ impl TestFileSystem {
         ));
         
         Self {
-            id,
             name,
             block_device: Mutex::new(block_device),
             block_size,
@@ -111,14 +109,6 @@ impl FileSystem for TestFileSystem {
     
     fn name(&self) -> &str {
         self.name
-    }
-
-    fn set_id(&mut self, id: usize) {
-        self.id = id;
-    }
-    
-    fn get_id(&self) -> usize {
-        self.id
     }
 }
 
@@ -686,7 +676,7 @@ impl FileSystemDriver for TestFileSystemDriver {
     }
     
     fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
-        Ok(Box::new(TestFileSystem::new(0, "testfs", block_device, block_size)))
+        Ok(Box::new(TestFileSystem::new("testfs", block_device, block_size)))
     }
     
     fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
@@ -698,7 +688,7 @@ impl FileSystemDriver for TestFileSystemDriver {
             // Create a mock block device for testing
             let block_device = Box::new(MockBlockDevice::new(1, "test_block", 512, 100));
             let block_size = basic_params.block_size.unwrap_or(512);
-            return Ok(Box::new(TestFileSystem::new(basic_params.fs_id, "testfs", block_device, block_size)));
+            return Ok(Box::new(TestFileSystem::new("testfs", block_device, block_size)));
         }
         
         // If downcast fails, return error
@@ -786,7 +776,7 @@ mod device_tests {
     fn test_device_file_through_filesystem() {
         // Create a test file system
         let block_device = Box::new(MockBlockDevice::new(3, "fs_block", 512, 100));
-        let fs = TestFileSystem::new(0, "testfs", block_device, 512);
+        let fs = TestFileSystem::new("testfs", block_device, 512);
         
         // Verify the filesystem was created properly
         assert_eq!(fs.name(), "testfs");
@@ -873,7 +863,7 @@ mod device_tests {
     fn test_device_file_comprehensive_operations() {
         // Create a test file system
         let block_device = Box::new(MockBlockDevice::new(6, "test_block", 512, 100));
-        let fs = TestFileSystem::new(0, "testfs", block_device, 512);
+        let fs = TestFileSystem::new("testfs", block_device, 512);
         
         // Create test character device for comprehensive testing
         let mut test_char_device = Box::new(MockCharDevice::new(7, "comprehensive_char"));
@@ -930,7 +920,7 @@ mod device_tests {
     fn test_device_file_block_device_operations() {
         // Create a test file system
         let fs_block_device = Box::new(MockBlockDevice::new(8, "fs_block", 512, 100));
-        let fs = TestFileSystem::new(0, "testfs", fs_block_device, 512);
+        let fs = TestFileSystem::new("testfs", fs_block_device, 512);
         
         // Create test block device for device file
         let test_block_device = Box::new(MockBlockDevice::new(9, "test_block_dev", 512, 100));
@@ -970,7 +960,7 @@ mod device_tests {
     fn test_device_file_error_handling() {
         // Create a test file system
         let block_device = Box::new(MockBlockDevice::new(10, "error_test_block", 512, 100));
-        let fs = TestFileSystem::new(0, "testfs", block_device, 512);
+        let fs = TestFileSystem::new("testfs", block_device, 512);
         
         // Test opening non-existent device file
         let result = fs.open("/dev/nonexistent", 0);
@@ -1000,7 +990,7 @@ mod device_tests {
     fn test_mixed_file_types_in_filesystem() {
         // Create a test file system
         let block_device = Box::new(MockBlockDevice::new(11, "mixed_test_block", 512, 100));
-        let fs = TestFileSystem::new(0, "testfs", block_device, 512);
+        let fs = TestFileSystem::new("testfs", block_device, 512);
         
         // Create test devices
         let mut char_device = Box::new(MockCharDevice::new(12, "mixed_char"));

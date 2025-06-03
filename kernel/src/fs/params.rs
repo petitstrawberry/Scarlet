@@ -1,68 +1,157 @@
-//! File System Parameter Types
+//! Filesystem Parameter System
 //! 
-//! This module provides type-safe parameter structures for filesystem creation,
-//! replacing the raw BTreeMap<String, String> approach with proper structured
-//! configuration types.
+//! This module provides a type-safe parameter system for filesystem creation,
+//! replacing the legacy BTreeMap<String, String> approach with structured
+//! configuration types that provide compile-time validation and better ergonomics.
+//! 
+//! # Overview
+//! 
+//! The parameter system enables:
+//! - **Type Safety**: Compile-time validation of filesystem parameters
+//! - **Backward Compatibility**: Conversion to/from string maps for legacy code
+//! - **Extensibility**: Easy addition of new parameter types for different filesystems
+//! - **Dynamic Dispatch**: Support for future dynamic filesystem module loading
+//! 
+//! # Architecture
+//! 
+//! All filesystem parameter types implement the `FileSystemParams` trait, which
+//! provides standardized interfaces for:
+//! - String map conversion for backward compatibility
+//! - Dynamic type identification for runtime dispatch
+//! - Structured access to typed configuration data
+//! 
+//! # Usage
+//! 
+//! ```rust
+//! use crate::fs::params::{TmpFSParams, BasicFSParams};
+//! 
+//! // Create TmpFS with 1MB memory limit
+//! let tmpfs_params = TmpFSParams::with_memory_limit(1048576);
+//! let fs_id = vfs_manager.create_and_register_fs_with_params("tmpfs", &tmpfs_params)?;
+//! 
+//! // Create basic filesystem
+//! let basic_params = BasicFSParams::with_block_size(4096);
+//! let fs_id = vfs_manager.create_and_register_fs_with_params("ext4", &basic_params)?;
+//! ```
 
 use alloc::string::{String, ToString};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use core::any::Any;
 
-/// Trait for filesystem-specific parameter types
+/// Core trait for filesystem parameter types
+/// 
+/// This trait enables type-safe filesystem configuration while maintaining
+/// backward compatibility with string-based parameter systems. All filesystem
+/// parameter structures must implement this trait to be usable with the
+/// VfsManager's structured parameter creation methods.
+/// 
+/// # Dynamic Dispatch Support
+/// 
+/// The trait includes `as_any()` to enable dynamic downcasting, which supports
+/// future dynamic filesystem module loading scenarios where parameter types
+/// may not be known at compile time.
 pub trait FileSystemParams {
-    /// Convert the parameters to a string map for backward compatibility
+    /// Convert parameters to string map for backward compatibility
+    /// 
+    /// This method serializes the structured parameters into a key-value
+    /// string map that can be consumed by legacy filesystem drivers that
+    /// haven't been updated to use structured parameters.
+    /// 
+    /// # Returns
+    /// 
+    /// BTreeMap containing string representations of all parameters
     fn to_string_map(&self) -> BTreeMap<String, String>;
     
-    /// Create parameters from a string map for backward compatibility
+    /// Create parameters from string map for backward compatibility
+    /// 
+    /// This method deserializes parameters from a string map, enabling
+    /// legacy code to continue working while gradually migrating to
+    /// structured parameter usage.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `map` - String map containing parameter key-value pairs
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(Self)` - Successfully parsed parameters
+    /// * `Err(String)` - Parse error with description
     fn from_string_map(map: &BTreeMap<String, String>) -> Result<Self, String>
     where
         Self: Sized;
         
-    /// Enable dynamic downcasting for parameter types
+    /// Enable dynamic downcasting for runtime type identification
+    /// 
+    /// This method supports dynamic dispatch scenarios where the exact
+    /// parameter type is not known at compile time, such as when loading
+    /// filesystem modules dynamically.
+    /// 
+    /// # Returns
+    /// 
+    /// Reference to self as Any trait object for downcasting
     fn as_any(&self) -> &dyn Any;
 }
 
-/// Parameters for TmpFS filesystem creation
+/// TmpFS filesystem configuration parameters
+/// 
+/// Configuration structure for creating TmpFS (temporary filesystem) instances.
+/// TmpFS is a RAM-based filesystem that stores all data in memory, making it
+/// very fast but volatile (data is lost on reboot).
+/// 
+/// # Features
+/// 
+/// - **Memory Limiting**: Configurable maximum memory usage to prevent OOM
+/// - **Performance**: All operations occur in RAM for maximum speed
+/// - **Volatility**: Data exists only while mounted and system is running
+/// 
+/// # Memory Management
+/// 
+/// The memory limit prevents runaway processes from consuming all available
+/// RAM through filesystem operations. A limit of 0 means unlimited memory usage.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TmpFSParams {
     /// Maximum memory usage in bytes (0 = unlimited)
+    /// 
+    /// This limit applies to the total size of all files and directories
+    /// stored in the TmpFS instance. When the limit is reached, write
+    /// operations will fail with ENOSPC (No space left on device).
     pub memory_limit: usize,
-    /// Filesystem identifier
-    pub fs_id: usize,
 }
 
 impl Default for TmpFSParams {
+    /// Create TmpFS parameters with unlimited memory
+    /// 
+    /// The default configuration allows unlimited memory usage, which
+    /// provides maximum flexibility but requires careful monitoring in
+    /// production environments.
     fn default() -> Self {
         Self {
             memory_limit: 0, // Unlimited by default
-            fs_id: 0,
         }
     }
 }
 
 impl TmpFSParams {
     /// Create TmpFS parameters with specified memory limit
+    /// 
+    /// # Arguments
+    /// 
+    /// * `memory_limit` - Maximum memory usage in bytes (0 for unlimited)
+    /// 
+    /// # Returns
+    /// 
+    /// TmpFSParams instance with the specified memory limit
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// // Create TmpFS with 10MB limit
+    /// let params = TmpFSParams::with_memory_limit(10 * 1024 * 1024);
+    /// ```
     pub fn with_memory_limit(memory_limit: usize) -> Self {
         Self {
             memory_limit,
-            fs_id: 0,
-        }
-    }
-    
-    /// Create TmpFS parameters with specified filesystem ID
-    pub fn with_fs_id(fs_id: usize) -> Self {
-        Self {
-            memory_limit: 0,
-            fs_id,
-        }
-    }
-    
-    /// Create TmpFS parameters with both memory limit and filesystem ID
-    pub fn new(memory_limit: usize, fs_id: usize) -> Self {
-        Self {
-            memory_limit,
-            fs_id,
         }
     }
 }
@@ -71,7 +160,6 @@ impl FileSystemParams for TmpFSParams {
     fn to_string_map(&self) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
         map.insert("memory_limit".to_string(), self.memory_limit.to_string());
-        map.insert("fs_id".to_string(), self.fs_id.to_string());
         map
     }
     
@@ -83,14 +171,7 @@ impl FileSystemParams for TmpFSParams {
             0 // Default to unlimited memory
         };
 
-        let fs_id = if let Some(id_str) = map.get("fs_id") {
-            id_str.parse::<usize>()
-                .map_err(|_| format!("Invalid fs_id value: {}", id_str))?
-        } else {
-            0 // Default filesystem ID
-        };
-
-        Ok(Self { memory_limit, fs_id })
+        Ok(Self { memory_limit })
     }
     
     fn as_any(&self) -> &dyn Any {
@@ -101,41 +182,29 @@ impl FileSystemParams for TmpFSParams {
 /// Parameters for CPIO filesystem creation
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpioFSParams {
-    /// Filesystem identifier
-    pub fs_id: usize,
 }
 
 impl Default for CpioFSParams {
     fn default() -> Self {
         Self {
-            fs_id: 0,
         }
     }
 }
 
 impl CpioFSParams {
-    /// Create CPIO parameters with specified filesystem ID
-    pub fn new(fs_id: usize) -> Self {
-        Self { fs_id }
+    /// Create CPIO parameters
+    pub fn new() -> Self {
+        Self { }
     }
 }
 
 impl FileSystemParams for CpioFSParams {
     fn to_string_map(&self) -> BTreeMap<String, String> {
-        let mut map = BTreeMap::new();
-        map.insert("fs_id".to_string(), self.fs_id.to_string());
-        map
+        BTreeMap::new()
     }
     
-    fn from_string_map(map: &BTreeMap<String, String>) -> Result<Self, String> {
-        let fs_id = if let Some(id_str) = map.get("fs_id") {
-            id_str.parse::<usize>()
-                .map_err(|_| format!("Invalid fs_id value: {}", id_str))?
-        } else {
-            0 // Default filesystem ID
-        };
-
-        Ok(Self { fs_id })
+    fn from_string_map(_map: &BTreeMap<String, String>) -> Result<Self, String> {
+        Ok(Self { })
     }
     
     fn as_any(&self) -> &dyn Any {
@@ -146,8 +215,6 @@ impl FileSystemParams for CpioFSParams {
 /// Generic parameters for basic filesystem creation
 #[derive(Debug, Clone, PartialEq)]
 pub struct BasicFSParams {
-    /// Filesystem identifier
-    pub fs_id: usize,
     /// Block size (for block-based filesystems)
     pub block_size: Option<usize>,
     /// Read-only flag
@@ -157,7 +224,6 @@ pub struct BasicFSParams {
 impl Default for BasicFSParams {
     fn default() -> Self {
         Self {
-            fs_id: 0,
             block_size: None,
             read_only: false,
         }
@@ -165,10 +231,9 @@ impl Default for BasicFSParams {
 }
 
 impl BasicFSParams {
-    /// Create basic parameters with specified filesystem ID
-    pub fn new(fs_id: usize) -> Self {
+    /// Create basic parameters with default values
+    pub fn new() -> Self {
         Self {
-            fs_id,
             block_size: None,
             read_only: false,
         }
@@ -190,7 +255,6 @@ impl BasicFSParams {
 impl FileSystemParams for BasicFSParams {
     fn to_string_map(&self) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
-        map.insert("fs_id".to_string(), self.fs_id.to_string());
         
         if let Some(block_size) = self.block_size {
             map.insert("block_size".to_string(), block_size.to_string());
@@ -201,13 +265,6 @@ impl FileSystemParams for BasicFSParams {
     }
     
     fn from_string_map(map: &BTreeMap<String, String>) -> Result<Self, String> {
-        let fs_id = if let Some(id_str) = map.get("fs_id") {
-            id_str.parse::<usize>()
-                .map_err(|_| format!("Invalid fs_id value: {}", id_str))?
-        } else {
-            0 // Default filesystem ID
-        };
-
         let block_size = if let Some(size_str) = map.get("block_size") {
             Some(size_str.parse::<usize>()
                 .map_err(|_| format!("Invalid block_size value: {}", size_str))?)
@@ -222,7 +279,7 @@ impl FileSystemParams for BasicFSParams {
             false // Default to read-write
         };
 
-        Ok(Self { fs_id, block_size, read_only })
+        Ok(Self { block_size, read_only })
     }
     
     fn as_any(&self) -> &dyn Any {

@@ -61,36 +61,58 @@
 //!
 //! ## Virtual File System
 //!
-//! Scarlet implements a flexible Virtual File System (VFS) layer that provides:
+//! Scarlet implements a highly flexible Virtual File System (VFS) layer designed for
+//! containerization and process isolation with advanced bind mount capabilities:
 //!
-//! - **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance for containerization:
+//! ### Core Architecture
+//!
+//! - **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance:
 //!   - Tasks store `Option<Arc<VfsManager>>` allowing independent filesystem namespaces
-//!   - Support for both complete isolation and selective filesystem sharing
+//!   - Support for complete filesystem isolation or selective resource sharing
+//!   - Thread-safe operations via RwLock protection throughout the VFS layer
 //!
-//! - **Filesystem Abstraction**: Common interface for multiple filesystem implementations through the `VirtualFileSystem` trait
-//!   hierarchy, enabling support for various filesystems like FAT32, ext2, or custom implementations
+//! - **Filesystem Driver Framework**: Modular driver system with type-safe parameter handling:
+//!   - Global `FileSystemDriverManager` singleton for driver registration and management
+//!   - Support for block device, memory-based, and virtual filesystem creation
+//!   - Structured parameter system replacing old string-based configuration
+//!   - Dynamic dispatch enabling future runtime filesystem module loading
 //!
-//! - **Mount Point Management**: Support for mounting filesystems at different locations with unified path handling:
+//! - **Enhanced Mount Tree**: Hierarchical mount point management with bind mount support:
+//!   - O(log k) path resolution performance where k is path depth
 //!   - Independent mount point namespaces per VfsManager instance
-//!   - Hierarchical mount points with proper path resolution
-//!   - Support for mounting the same filesystem at multiple locations
-//!   - Automatic mapping between absolute paths and filesystem-relative paths
+//!   - Security-enhanced path normalization preventing directory traversal attacks
+//!   - Efficient Trie-based mount point storage reducing memory usage
 //!
-//! - **Path Resolution**: Normalization and resolution of file paths across different mounted filesystems:
-//!   - Handling of relative paths (with `./` and `../`)
-//!   - Support for absolute paths from root
-//!   - Finding the most specific mount point for any given path
+//! ### Bind Mount Functionality
 //!
-//! - **File Operations**: Standard operations with resource safety and RAII:
-//!   - Files automatically close when dropped
-//!   - Buffered read/write operations
-//!   - Seek operations for random file access
-//!   - Directory listing and manipulation
+//! Advanced bind mount capabilities for flexible directory mapping and container orchestration:
 //!
-//! - **Block Device Interface**: Abstraction layer for interacting with storage devices:
-//!   - Request queue for efficient I/O operations
-//!   - Support for asynchronous operations
-//!   - Error handling and recovery mechanisms
+//! - **Basic Bind Mounts**: Mount directories from one location to another within the same VfsManager
+//! - **Cross-VFS Bind Mounts**: Share directories between isolated VfsManager instances for container resource sharing
+//! - **Read-Only Bind Mounts**: Security-enhanced mounting with write protection
+//! - **Shared Bind Mounts**: Mount propagation sharing for complex namespace scenarios
+//! - **Thread-Safe Operations**: Bind mount operations callable from system call context
+//!
+//! ### Path Resolution & Security
+//!
+//! - **Normalized Path Handling**: Automatic resolution of relative paths (`.` and `..`)
+//! - **Security Protection**: Prevention of directory traversal attacks through path validation
+//! - **Transparent Resolution**: Seamless handling of bind mounts and nested mount points
+//! - **Performance Optimization**: Efficient path lookup with O(log k) complexity
+//!
+//! ### File Operations & Resource Management
+//!
+//! - **RAII Resource Safety**: Files automatically close when dropped, preventing resource leaks
+//! - **Thread-Safe File Access**: Concurrent file operations with proper locking
+//! - **Handle Management**: Arc-based file handle sharing with automatic cleanup
+//! - **Directory Operations**: Complete directory manipulation with metadata support
+//!
+//! ### Storage Integration
+//!
+//! - **Block Device Interface**: Abstraction layer for storage device interaction
+//! - **Memory-Based Filesystems**: Support for RAM-based filesystems like tmpfs
+//! - **Hybrid Filesystem Support**: Filesystems operating on both block devices and memory
+//! - **Device File Support**: Integration with character and block device management
 //!
 //! ## Boot Process
 //!

@@ -1,3 +1,17 @@
+//! Task-related system call implementations.
+//!
+//! This module implements system calls that interact with task management,
+//! filesystem operations, and process control. Many operations leverage
+//! the VfsManager for filesystem access when tasks have isolated namespaces.
+//!
+//! # VfsManager Integration
+//!
+//! System calls automatically use the task's VfsManager when available:
+//! - Tasks with `vfs: Some(Arc<VfsManager>)` use their isolated filesystem namespace
+//! - Tasks with `vfs: None` fall back to global filesystem operations
+//! - Bind mount operations enable controlled sharing between isolated namespaces
+//! - All filesystem operations are thread-safe and handle concurrent access properly
+
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::str;
