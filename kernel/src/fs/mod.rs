@@ -84,7 +84,7 @@
 //! let task_vfs = Arc::clone(&shared_vfs);
 //! 
 //! // All mount operations affect the shared mount tree
-//! shared_vfs.mount("/tmp", tmpfs)?;  // Visible to all references
+//! shared_vfs.mount(tmpfs, "/tmp")?;  // Visible to all references
 //! 
 //! // Useful for:
 //! // - Fork-like behavior where child inherits parent's full filesystem view
