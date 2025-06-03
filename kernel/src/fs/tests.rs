@@ -1,3 +1,23 @@
+//! Virtual File System (VFS) test suite.
+//!
+//! This module contains comprehensive tests for the VFS layer, including:
+//! - VfsManager creation and filesystem registration
+//! - Mount/unmount operations with filesystem lifecycle management
+//! - Path resolution and security validation (preventing directory traversal)
+//! - File and directory operations with proper resource management
+//! - Block device integration and I/O operations
+//! - Bind mount functionality and cross-VFS sharing capabilities
+//! - Error handling and edge case validation
+//!
+//! # Test Architecture
+//!
+//! Tests use MockBlockDevice and TestFileSystem to simulate real filesystem
+//! operations without requiring actual hardware. The test suite validates:
+//! - Thread-safe operations and concurrent access patterns
+//! - RAII resource management and automatic cleanup
+//! - Security protections and access control
+//! - Performance characteristics and scalability
+
 use alloc::{boxed::Box, sync::Arc};
 use super::*;
 use crate::device::block::mockblk::MockBlockDevice;

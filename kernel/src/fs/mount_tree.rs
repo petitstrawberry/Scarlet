@@ -7,6 +7,38 @@ use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use super::*;
 
 /// Mount point management using Trie structure
+/// 
+/// MountTree provides efficient hierarchical mount point management using a Trie
+/// data structure. This enables O(log k) path resolution where k is the path depth,
+/// making filesystem operations scale well with complex mount hierarchies.
+/// 
+/// # Features
+/// 
+/// - **Efficient Path Resolution**: Trie-based lookup for fast mount point discovery
+/// - **Bind Mount Support**: Advanced bind mounting with cross-VFS capability
+/// - **Security**: Enhanced path normalization preventing directory traversal attacks
+/// - **Caching**: Optional path caching for frequently accessed mount points
+/// - **Thread Safety**: All operations are thread-safe using RwLock protection
+/// 
+/// # Architecture
+/// 
+/// The mount tree consists of:
+/// - Root node representing the filesystem root "/"
+/// - Internal nodes for directory components
+/// - Leaf nodes containing actual mount points
+/// - Path cache for performance optimization
+/// 
+/// # Usage
+/// 
+/// ```rust
+/// let mut mount_tree = MountTree::new();
+/// 
+/// // Mount a filesystem
+/// mount_tree.mount("/mnt/data", mount_point)?;
+/// 
+/// // Resolve a path to its mount point
+/// let (mount_node, relative_path) = mount_tree.resolve("/mnt/data/file.txt")?;
+/// ```
 #[derive(Clone)]
 pub struct MountTree {
     root: Arc<MountNode>,
@@ -14,6 +46,17 @@ pub struct MountTree {
     path_cache: BTreeMap<String, Arc<MountPoint>>,
 }
 
+/// Mount tree node representing a single component in the filesystem hierarchy
+/// 
+/// Each MountNode represents a directory component in the filesystem path.
+/// Nodes can optionally contain mount points and have child nodes for
+/// subdirectories. The tree structure enables efficient path traversal
+/// and mount point resolution.
+/// 
+/// # Thread Safety
+/// 
+/// All fields are protected by RwLock to ensure thread-safe access in
+/// a multi-threaded kernel environment.
 pub struct MountNode {
     /// Path component
     #[allow(dead_code)]
@@ -25,6 +68,15 @@ pub struct MountNode {
 }
 
 impl MountNode {
+    /// Create a new mount node with the specified path component
+    /// 
+    /// # Arguments
+    /// 
+    /// * `component` - The path component name for this node
+    /// 
+    /// # Returns
+    /// 
+    /// A new MountNode instance with the given component name
     fn new(component: String) -> Self {
         Self {
             component: RwLock::new(component),
@@ -298,25 +350,82 @@ impl MountNode {
 }
 
 /// Extended mount point information
+/// 
+/// MountPoint contains comprehensive information about a mounted filesystem,
+/// including metadata, mount options, and relationship information for
+/// hierarchical mount management.
+/// 
+/// # Features
+/// 
+/// - **Filesystem Integration**: Direct reference to the mounted filesystem
+/// - **Mount Hierarchy**: Parent/child relationships for mount tree management
+/// - **Security Options**: Configurable mount options for access control
+/// - **Bind Mount Support**: Resolves bind mount chains to actual filesystems
+/// - **Metadata Tracking**: Mount time and filesystem identification
+/// 
+/// # Thread Safety
+/// 
+/// MountPoint is designed to be shared safely between threads using Arc
+/// wrapper when stored in the mount tree.
 #[derive(Clone)]
 pub struct MountPoint {
+    /// Absolute mount path in the filesystem hierarchy
     pub path: String,
+    /// Reference to the actual filesystem implementation
     pub fs: super::FileSystemRef,
-    pub fs_id: usize,  // VfsManager managed filesystem ID
+    /// VfsManager-assigned filesystem identifier
+    pub fs_id: usize,
+    /// Type of mount (regular, bind, overlay)
     pub mount_type: MountType,
+    /// Security and behavior options for this mount
     pub mount_options: MountOptions,
+    /// Parent mount path (None for root mount)
     pub parent: Option<String>,
+    /// List of child mount paths
     pub children: Vec<String>,
+    /// Timestamp when this mount was created
     pub mount_time: u64,
 }
 
 impl MountPoint {
-    /// Get filesystem and internal path from MountPoint
-    /// Supports Regular/Tmpfs/Overlay mounts only
+    /// Resolve filesystem and internal path from MountPoint
+    /// 
+    /// This method resolves bind mount chains to find the actual filesystem
+    /// that handles the requested path. For regular mounts, it returns the
+    /// filesystem directly. For bind mounts, it recursively follows the
+    /// bind chain to the source filesystem.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `relative_path` - Path relative to this mount point
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok((FileSystemRef, String))` - The actual filesystem and the resolved path within it
+    /// * `Err(FileSystemError)` - If bind mount resolution fails or exceeds recursion limit
+    /// 
+    /// # Note
+    /// 
+    /// This method only supports Regular, Tmpfs, and Overlay mounts.
+    /// Bind mounts are resolved transparently to their source filesystems.
     pub fn resolve_fs(&self, relative_path: &str) -> Result<(super::FileSystemRef, String)> {
         self.resolve_fs_with_depth(relative_path, 0)
     }
     
+    /// Internal method for bind mount resolution with recursion depth tracking
+    /// 
+    /// This method prevents infinite recursion in circular bind mount chains
+    /// by limiting the maximum recursion depth to 32 levels.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `relative_path` - Path relative to this mount point
+    /// * `depth` - Current recursion depth for loop detection
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok((FileSystemRef, String))` - The actual filesystem and resolved path
+    /// * `Err(FileSystemError)` - If recursion limit exceeded or resolution fails
     fn resolve_fs_with_depth(&self, relative_path: &str, depth: usize) -> Result<(super::FileSystemRef, String)> {
         // Prevent circular references
         if depth > 32 {
@@ -352,34 +461,77 @@ impl MountPoint {
     }
 }
 
+/// Mount type classification for different mount strategies
+/// 
+/// This enum defines the various mount types supported by the VFS system,
+/// each with different behaviors and resource handling approaches.
 #[derive(Clone)]
 pub enum MountType {
+    /// Regular filesystem mount
+    /// 
+    /// Standard mount where the filesystem directly handles all operations
+    /// at the mount point. This is the most common mount type.
     Regular,
+    
+    /// Bind mount - maps one directory tree to another location
+    /// 
+    /// Bind mounts allow the same filesystem content to be accessible
+    /// from multiple mount points. They support:
+    /// - Cross-VFS sharing for container resource sharing
+    /// - Read-only restrictions for security
+    /// - Shared propagation for namespace management
     Bind {
+        /// Source mount node that provides the actual filesystem
         source_mount_node: Arc<MountNode>,
+        /// Relative path within the source filesystem
         source_relative_path: String,
+        /// Type of bind mount (read-only, read-write, shared)
         bind_type: BindType,
     },
+    
+    /// Overlay filesystem mount
+    /// 
+    /// Combines multiple filesystem layers into a unified view,
+    /// typically used for container images and copy-on-write scenarios.
     Overlay {
+        /// Lower filesystem layers (read-only)
         lower_layers: Vec<String>,
+        /// Upper layer for writes
         upper_layer: String,
+        /// Working directory for overlay operations
         work_dir: String,
     },
 }
 
+/// Bind mount type specifying access and propagation behavior
+/// 
+/// Different bind types provide various levels of access control
+/// and mount propagation for container and namespace isolation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BindType {
+    /// Read-only bind mount - prevents write operations
     ReadOnly,
+    /// Read-write bind mount - allows full access
     ReadWrite,
+    /// Shared bind mount - propagates mount events to other namespaces
     Shared,
 }
 
+/// Mount options controlling filesystem behavior and security
+/// 
+/// These options provide fine-grained control over filesystem access
+/// and can be used to enhance security in containerized environments.
 #[derive(Clone)]
 pub struct MountOptions {
+    /// Prevent write operations on this mount
     pub read_only: bool,
+    /// Disable execution of binaries on this mount
     pub no_exec: bool,
+    /// Disable set-uid/set-gid bits on this mount
     pub no_suid: bool,
+    /// Disable device file access on this mount
     pub no_dev: bool,
+    /// Force synchronous I/O operations
     pub sync: bool,
 }
 
@@ -396,6 +548,14 @@ impl Default for MountOptions {
 }
 
 impl MountTree {
+    /// Create a new empty mount tree
+    /// 
+    /// Initializes a new mount tree with an empty root node and no cached paths.
+    /// This creates the foundation for a new filesystem namespace.
+    /// 
+    /// # Returns
+    /// 
+    /// A new MountTree instance ready for mount operations
     pub fn new() -> Self {
         Self {
             root: Arc::new(MountNode::new("".to_string())),
@@ -403,12 +563,39 @@ impl MountTree {
         }
     }
     
-    /// Add mount point (used by VfsManager)
+    /// Add mount point (VfsManager interface)
+    /// 
+    /// This method provides the primary interface for VfsManager to add new
+    /// mount points to the tree. It normalizes the path and delegates to
+    /// the internal insert method.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Absolute path where the filesystem should be mounted
+    /// * `mount_point` - MountPoint structure containing mount information
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(())` - Mount operation succeeded
+    /// * `Err(FileSystemError)` - If path is invalid or mount point already exists
     pub fn mount(&mut self, path: &str, mount_point: MountPoint) -> Result<()> {
         self.insert(path, mount_point)
     }
     
-    /// Add mount point
+    /// Internal method to add mount point to the tree
+    /// 
+    /// This method handles the actual insertion logic, creating intermediate
+    /// nodes as needed and validating that mount points don't conflict.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Normalized absolute path for the mount
+    /// * `mount_point` - MountPoint structure to insert
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(())` - Mount point successfully added
+    /// * `Err(FileSystemError)` - If mount point already exists at the path
     pub fn insert(&mut self, path: &str, mount_point: MountPoint) -> Result<()> {
         let normalized = Self::normalize_path(path)?;
         let components = self.split_path(&normalized);
@@ -495,7 +682,20 @@ impl MountTree {
         }
     }
     
-    /// Remove mount point
+    /// Remove mount point from the tree
+    /// 
+    /// Removes a mount point at the specified path and returns the removed
+    /// MountPoint for cleanup. This operation also removes the path from
+    /// the internal cache.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Absolute path of the mount point to remove
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(Arc<MountPoint>)` - The removed mount point
+    /// * `Err(FileSystemError)` - If no mount point exists at the path
     pub fn remove(&mut self, path: &str) -> Result<Arc<MountPoint>> {
         let normalized = Self::normalize_path(path)?;
         let components = self.split_path(&normalized);
@@ -528,7 +728,15 @@ impl MountTree {
         Ok(mount_point)
     }
     
-    /// List all mount points
+    /// List all mount points in the tree
+    /// 
+    /// Returns a vector of all mount point paths currently registered
+    /// in the mount tree. This is useful for debugging and system
+    /// introspection.
+    /// 
+    /// # Returns
+    /// 
+    /// Vector of mount point paths in no particular order
     pub fn list_all(&self) -> Vec<String> {
         let mut paths = Vec::new();
         self.collect_mount_paths(&self.root, String::new(), &mut paths);
@@ -536,11 +744,47 @@ impl MountTree {
     }
     
     /// Get number of mount points
+    /// 
+    /// Returns the total number of mount points currently registered
+    /// in this mount tree.
+    /// 
+    /// # Returns
+    /// 
+    /// Number of active mount points
     pub fn len(&self) -> usize {
         self.path_cache.len()
     }
     
-    /// Secure path normalization
+    /// Secure path normalization with directory traversal protection
+    /// 
+    /// This method normalizes filesystem paths by resolving "." and ".."
+    /// components while preventing directory traversal attacks that could
+    /// escape the filesystem root. It ensures all paths are absolute
+    /// and properly formatted.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Input path to normalize
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(String)` - Normalized absolute path
+    /// * `Err(FileSystemError)` - If path is not absolute or invalid
+    /// 
+    /// # Security
+    /// 
+    /// This method prevents:
+    /// - Relative path traversal (../../../etc/passwd)
+    /// - Root directory escape attempts
+    /// - Malformed path components
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// assert_eq!(MountTree::normalize_path("/a/b/../c")?, "/a/c");
+    /// assert_eq!(MountTree::normalize_path("/a/./b")?, "/a/b");
+    /// assert_eq!(MountTree::normalize_path("/../..")?, "/");
+    /// ```
     pub fn normalize_path(path: &str) -> Result<String> {
         if !path.starts_with('/') {
             return Err(FileSystemError {
@@ -572,6 +816,18 @@ impl MountTree {
         }
     }
     
+    /// Split normalized path into components
+    /// 
+    /// Converts a normalized path string into a vector of path components
+    /// for tree traversal. Root path "/" becomes an empty vector.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Normalized absolute path
+    /// 
+    /// # Returns
+    /// 
+    /// Vector of path components, empty for root path
     fn split_path(&self, path: &str) -> Vec<String> {
         if path == "/" {
             return Vec::new();
@@ -583,6 +839,16 @@ impl MountTree {
             .collect()
     }
     
+    /// Recursively collect mount paths from tree nodes
+    /// 
+    /// Internal method for traversing the mount tree and collecting
+    /// all mount point paths for the list_all() operation.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `node` - Current node being examined
+    /// * `current_path` - Path accumulated up to this node
+    /// * `paths` - Vector to collect found mount paths
     fn collect_mount_paths(&self, node: &MountNode, current_path: String, paths: &mut Vec<String>) {
         // Check if this node has a mount point
         let mount_guard = node.mount_point.read();

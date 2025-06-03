@@ -1,36 +1,130 @@
-//! File System Parameter Types
+//! Filesystem Parameter System
 //! 
-//! This module provides type-safe parameter structures for filesystem creation,
-//! replacing the raw BTreeMap<String, String> approach with proper structured
-//! configuration types.
+//! This module provides a type-safe parameter system for filesystem creation,
+//! replacing the legacy BTreeMap<String, String> approach with structured
+//! configuration types that provide compile-time validation and better ergonomics.
+//! 
+//! # Overview
+//! 
+//! The parameter system enables:
+//! - **Type Safety**: Compile-time validation of filesystem parameters
+//! - **Backward Compatibility**: Conversion to/from string maps for legacy code
+//! - **Extensibility**: Easy addition of new parameter types for different filesystems
+//! - **Dynamic Dispatch**: Support for future dynamic filesystem module loading
+//! 
+//! # Architecture
+//! 
+//! All filesystem parameter types implement the `FileSystemParams` trait, which
+//! provides standardized interfaces for:
+//! - String map conversion for backward compatibility
+//! - Dynamic type identification for runtime dispatch
+//! - Structured access to typed configuration data
+//! 
+//! # Usage
+//! 
+//! ```rust
+//! use crate::fs::params::{TmpFSParams, BasicFSParams};
+//! 
+//! // Create TmpFS with 1MB memory limit
+//! let tmpfs_params = TmpFSParams::with_memory_limit(1048576);
+//! let fs_id = vfs_manager.create_and_register_fs_with_params("tmpfs", &tmpfs_params)?;
+//! 
+//! // Create basic filesystem
+//! let basic_params = BasicFSParams::with_block_size(4096);
+//! let fs_id = vfs_manager.create_and_register_fs_with_params("ext4", &basic_params)?;
+//! ```
 
 use alloc::string::{String, ToString};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use core::any::Any;
 
-/// Trait for filesystem-specific parameter types
+/// Core trait for filesystem parameter types
+/// 
+/// This trait enables type-safe filesystem configuration while maintaining
+/// backward compatibility with string-based parameter systems. All filesystem
+/// parameter structures must implement this trait to be usable with the
+/// VfsManager's structured parameter creation methods.
+/// 
+/// # Dynamic Dispatch Support
+/// 
+/// The trait includes `as_any()` to enable dynamic downcasting, which supports
+/// future dynamic filesystem module loading scenarios where parameter types
+/// may not be known at compile time.
 pub trait FileSystemParams {
-    /// Convert the parameters to a string map for backward compatibility
+    /// Convert parameters to string map for backward compatibility
+    /// 
+    /// This method serializes the structured parameters into a key-value
+    /// string map that can be consumed by legacy filesystem drivers that
+    /// haven't been updated to use structured parameters.
+    /// 
+    /// # Returns
+    /// 
+    /// BTreeMap containing string representations of all parameters
     fn to_string_map(&self) -> BTreeMap<String, String>;
     
-    /// Create parameters from a string map for backward compatibility
+    /// Create parameters from string map for backward compatibility
+    /// 
+    /// This method deserializes parameters from a string map, enabling
+    /// legacy code to continue working while gradually migrating to
+    /// structured parameter usage.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `map` - String map containing parameter key-value pairs
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(Self)` - Successfully parsed parameters
+    /// * `Err(String)` - Parse error with description
     fn from_string_map(map: &BTreeMap<String, String>) -> Result<Self, String>
     where
         Self: Sized;
         
-    /// Enable dynamic downcasting for parameter types
+    /// Enable dynamic downcasting for runtime type identification
+    /// 
+    /// This method supports dynamic dispatch scenarios where the exact
+    /// parameter type is not known at compile time, such as when loading
+    /// filesystem modules dynamically.
+    /// 
+    /// # Returns
+    /// 
+    /// Reference to self as Any trait object for downcasting
     fn as_any(&self) -> &dyn Any;
 }
 
-/// Parameters for TmpFS filesystem creation
+/// TmpFS filesystem configuration parameters
+/// 
+/// Configuration structure for creating TmpFS (temporary filesystem) instances.
+/// TmpFS is a RAM-based filesystem that stores all data in memory, making it
+/// very fast but volatile (data is lost on reboot).
+/// 
+/// # Features
+/// 
+/// - **Memory Limiting**: Configurable maximum memory usage to prevent OOM
+/// - **Performance**: All operations occur in RAM for maximum speed
+/// - **Volatility**: Data exists only while mounted and system is running
+/// 
+/// # Memory Management
+/// 
+/// The memory limit prevents runaway processes from consuming all available
+/// RAM through filesystem operations. A limit of 0 means unlimited memory usage.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TmpFSParams {
     /// Maximum memory usage in bytes (0 = unlimited)
+    /// 
+    /// This limit applies to the total size of all files and directories
+    /// stored in the TmpFS instance. When the limit is reached, write
+    /// operations will fail with ENOSPC (No space left on device).
     pub memory_limit: usize,
 }
 
 impl Default for TmpFSParams {
+    /// Create TmpFS parameters with unlimited memory
+    /// 
+    /// The default configuration allows unlimited memory usage, which
+    /// provides maximum flexibility but requires careful monitoring in
+    /// production environments.
     fn default() -> Self {
         Self {
             memory_limit: 0, // Unlimited by default
@@ -40,6 +134,21 @@ impl Default for TmpFSParams {
 
 impl TmpFSParams {
     /// Create TmpFS parameters with specified memory limit
+    /// 
+    /// # Arguments
+    /// 
+    /// * `memory_limit` - Maximum memory usage in bytes (0 for unlimited)
+    /// 
+    /// # Returns
+    /// 
+    /// TmpFSParams instance with the specified memory limit
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// // Create TmpFS with 10MB limit
+    /// let params = TmpFSParams::with_memory_limit(10 * 1024 * 1024);
+    /// ```
     pub fn with_memory_limit(memory_limit: usize) -> Self {
         Self {
             memory_limit,
