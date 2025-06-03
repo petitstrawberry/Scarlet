@@ -7,6 +7,7 @@
 [![Version](https://img.shields.io/badge/version-0.11.1-blue.svg)](https://github.com/yourusername/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
 
 </div>
 
