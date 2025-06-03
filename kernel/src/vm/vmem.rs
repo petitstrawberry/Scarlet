@@ -12,6 +12,7 @@ pub struct VirtualMemoryMap {
     pub pmarea: MemoryArea,
     pub vmarea: MemoryArea,
     pub permissions: usize,
+    pub is_shared: bool,
 }
 
 impl VirtualMemoryMap {
@@ -21,14 +22,16 @@ impl VirtualMemoryMap {
     /// * `pmarea` - The physical memory area to map
     /// * `vmarea` - The virtual memory area to map to
     /// * `permissions` - The permissions to set for the virtual memory area
+    /// * `is_shared` - Whether this memory map should be shared between tasks
     /// 
     /// # Returns
     /// A new virtual memory map with the given physical and virtual memory areas.
-    pub fn new(pmarea: MemoryArea, vmarea: MemoryArea, permissions: usize) -> Self {
+    pub fn new(pmarea: MemoryArea, vmarea: MemoryArea, permissions: usize, is_shared: bool) -> Self {
         VirtualMemoryMap {
             pmarea,
             vmarea,
             permissions,
+            is_shared,
         }
     }
 
@@ -133,24 +136,39 @@ impl VirtualMemoryPermission {
     }
 }
 
-pub enum VirtualMemorySegment {
+pub enum VirtualMemoryRegion {
     Text,
     Data,
     Bss,
     Heap,
     Stack,
     Guard,
+    Unknown,
 }
 
-impl VirtualMemorySegment {
-    pub fn get_permissions(&self) -> usize {
+impl VirtualMemoryRegion {
+    pub fn default_permissions(&self) -> usize {
         match self {
-            VirtualMemorySegment::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
-            VirtualMemorySegment::Guard => 0, // Any access to the guard page should cause a page fault
+            VirtualMemoryRegion::Text => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Execute as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Data => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Bss => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Heap => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Stack => VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize | VirtualMemoryPermission::User as usize,
+            VirtualMemoryRegion::Guard => 0, // Any access to the guard page should cause a page fault
+            VirtualMemoryRegion::Unknown => panic!("Unknown memory segment"),
+        }
+    }
+
+    /// Returns whether this memory region should be shared between tasks by default
+    pub fn is_shareable(&self) -> bool {
+        match self {
+            VirtualMemoryRegion::Text => true,  // Text segments can be shared (read-only executable code)
+            VirtualMemoryRegion::Data => false, // Data segments should not be shared (writable)
+            VirtualMemoryRegion::Bss => false,  // BSS segments should not be shared (writable)
+            VirtualMemoryRegion::Heap => false, // Heap should not be shared (writable)
+            VirtualMemoryRegion::Stack => false, // Stack should not be shared (writable, task-specific)
+            VirtualMemoryRegion::Guard => true,  // Guard pages can be shared (no physical backing)
+            VirtualMemoryRegion::Unknown => false, // Unknown segments should not be shared by default
         }
     }
 }

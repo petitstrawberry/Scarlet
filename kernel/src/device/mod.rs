@@ -9,6 +9,7 @@ pub mod manager;
 pub mod fdt;
 pub mod platform;
 pub mod block;
+pub mod char;
 
 extern crate alloc;
 use core::any::Any;
@@ -59,6 +60,17 @@ pub trait Device: Send + Sync {
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;
     fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    
+    /// Cast to CharDevice if this device is a character device
+    fn as_char_device(&mut self) -> Option<&mut dyn char::CharDevice> {
+        None
+    }
+    
+    /// Cast to BlockDevice if this device is a block device  
+    fn as_block_device(&mut self) -> Option<&mut dyn block::BlockDevice> {
+        None
+    }
 }
 
 pub struct GenericDevice {
@@ -87,6 +99,10 @@ impl Device for GenericDevice {
     }
 
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }

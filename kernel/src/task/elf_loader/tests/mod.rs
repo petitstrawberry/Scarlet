@@ -1,3 +1,8 @@
+//! ELF loader test suite.
+//!
+//! Tests for ELF binary loading and execution, including integration with
+//! VfsManager for filesystem-based executable loading in isolated namespaces.
+
 use alloc::boxed::Box;
 
 use crate::{device::block::mockblk::MockBlockDevice, fs::{testfs::TestFileSystem, VfsManager}, task::new_user_task};
@@ -95,13 +100,12 @@ fn test_load_elf() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new("test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
-    let mut file = File::with_manager(file_path.to_string(), &mut manager);
-    file.open(0).expect("Failed to open test file");
+    manager.create_regular_file(file_path).expect("Failed to create test file");
+    let mut file = File::open_with_manager(file_path.to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
     file.write(include_bytes!("test.elf")).expect("Failed to write test ELF file");
     
     // Create a new task
@@ -133,16 +137,15 @@ fn test_load_elf_invalid_magic() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new("test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
-    let file_path = "invalid.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
+    let file_path = "/invalid.elf";
+    manager.create_regular_file(file_path).expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid magic number
     let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
-    let mut file = File::with_manager("invalid.elf".to_string(), &mut manager);
-    file.open(0).expect("Failed to open invalid ELF file");
+    let mut file = File::open_with_manager("/invalid.elf".to_string(), &mut manager).unwrap();
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
 
     // Create a new task
@@ -162,11 +165,11 @@ fn test_load_elf_invalid_alignment() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new( "test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
-    let file_path = "invalid_align.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
+    let file_path = "/invalid_align.elf";
+    manager.create_regular_file(file_path).expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid alignment
     let mut invalid_elf_data = vec![0u8; 64];
@@ -194,8 +197,7 @@ fn test_load_elf_invalid_alignment() {
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_memsz
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
 
-    let mut file = File::with_manager("invalid_align.elf".to_string(), &mut manager);
-    file.open(0).expect("Failed to open invalid ELF file");
+    let mut file = File::open_with_manager("/invalid_align.elf".to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
 
     // Create a new task
@@ -215,13 +217,12 @@ fn test_load_elf_bss_zeroed() {
 
     let mut manager = VfsManager::new();
     let blk_dev = MockBlockDevice::new(0, "test_blk", 512, 1024);
-    let fs = TestFileSystem::new(0, "test_fs", Box::new(blk_dev), 512);
+    let fs = TestFileSystem::new( "test_fs", Box::new(blk_dev), 512);
     let fs_id = manager.register_fs(Box::new(fs));
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test_bss.elf";
-    manager.create_file(file_path).expect("Failed to create test file");
-    let mut file = File::with_manager(file_path.to_string(), &mut manager);
-    file.open(0).expect("Failed to open test file");
+    manager.create_regular_file(file_path).expect("Failed to create test file");
+    let mut file = File::open_with_manager(file_path.to_string(), &mut manager).map_err(|_| "Failed to create file").unwrap();
 
     // Create a mock ELF file with a .bss section
     let mut elf_data = vec![0u8; 64];

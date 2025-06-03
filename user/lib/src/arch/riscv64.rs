@@ -84,3 +84,25 @@ pub fn arch_syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) ->
     }
     ret
 }
+
+pub fn arch_syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> usize {
+    let mut ret: usize;
+    unsafe {
+        asm!(
+        "mv a7, {syscall}
+        mv a0, {arg1}
+        mv a1, {arg2}
+        mv a2, {arg3}
+        mv a3, {arg4}
+        ecall",
+        syscall = in(reg) syscall as usize,
+        arg1 = in(reg) arg1,
+        arg2 = in(reg) arg2,
+        arg3 = in(reg) arg3,
+        arg4 = in(reg) arg4,
+        out("a0") ret,
+        options(nostack)
+        );
+    }
+    ret
+}

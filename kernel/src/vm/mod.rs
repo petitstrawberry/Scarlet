@@ -20,6 +20,7 @@ use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::PAGE_SIZE;
+use crate::environment::USER_STACK_TOP;
 use crate::environment::VMMAX;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
@@ -90,6 +91,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
+        is_shared: true, // Kernel memory should be shared across all processes
     };
     manager.add_memory_map(kernel_map).map_err(|e| panic!("Failed to add kernel memory map: {}", e)).unwrap();
     /* Pre-map the kernel space */
@@ -107,6 +109,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
+        is_shared: true, // Device memory should be shared
     };
     manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
@@ -124,11 +127,11 @@ pub fn user_vm_init(task: &mut Task) {
 
     /* User stack page */
     let num_of_stack_page = 2; // 2 pages for user stack
-    let stack_start = 0xffff_ffff_ffff_f000 - num_of_stack_page * PAGE_SIZE;
-    task.allocate_pages(stack_start, num_of_stack_page, vmem::VirtualMemorySegment::Stack).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
+    let stack_start = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
+    task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
 
     /* Guard page */
-   task.allocate_pages(stack_start - PAGE_SIZE, 1, vmem::VirtualMemorySegment::Guard).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
+   task.allocate_guard_pages(stack_start - PAGE_SIZE, 1).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
 
     setup_trampoline(&mut task.vm_manager);
 }
@@ -148,6 +151,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
+        is_shared: true, // Kernel memory should be shared across all processes
     };
     task.vm_manager.add_memory_map(kernel_map).map_err(|e| {
         panic!("Failed to add kernel memory map: {}", e);
@@ -159,7 +163,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     task.data_size = kernel_area.end + 1;
 
     /* Stack page */
-    task.allocate_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE, vmem::VirtualMemorySegment::Stack).map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e)).unwrap();
+    task.allocate_stack_pages(KERNEL_VM_STACK_START, KERNEL_VM_STACK_SIZE / PAGE_SIZE).map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e)).unwrap();
 
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
@@ -173,16 +177,28 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         permissions: 
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
+        is_shared: true, // Device memory should be shared
     };
     task.vm_manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
     setup_trampoline(&mut task.vm_manager);
 }
 
+pub fn setup_user_stack(task: &mut Task) -> usize{
+    /* User stack page */
+    let num_of_stack_page = 2; // 2 pages for user stack
+    let stack_start = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
+    task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
+    /* Guard page */
+    task.allocate_guard_pages(stack_start - PAGE_SIZE, 1).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
+    
+    USER_STACK_TOP
+}
+
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
 static mut TRAMPOLINE_TRAPFRAME: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
 
-fn setup_trampoline(manager: &mut VirtualMemoryManager) {
+pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trampoline_start = unsafe { &__TRAMPOLINE_START as *const usize as usize };
     let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
     let trampoline_size = trampoline_end - trampoline_start;
@@ -220,6 +236,7 @@ fn setup_trampoline(manager: &mut VirtualMemoryManager) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
+        is_shared: true, // Trampoline should be shared across all processes
     };
 
     manager.add_memory_map(trampoline_map)

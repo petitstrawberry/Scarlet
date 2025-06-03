@@ -34,7 +34,7 @@ use core::num;
 use crate::environment::PAGE_SIZE;
 use crate::fs::{File, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
-use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
 use alloc::{format, vec};
 use alloc::string::{String, ToString};
@@ -330,6 +330,30 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
             map_elf_segment(task, ph.p_vaddr as usize, aligned_size as usize, ph.p_align as usize, ph.p_flags).map_err(|e| ElfLoaderError {
                 message: format!("Failed to map ELF segment: {:?}", e),
             })?;
+
+
+            // Inference segment type
+            let segment_type = if ph.p_flags & PF_X != 0 {
+                VirtualMemoryRegion::Text
+            } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
+                VirtualMemoryRegion::Data
+            } else {
+                VirtualMemoryRegion::Unknown
+            };
+
+            match segment_type {
+                VirtualMemoryRegion::Text => {
+                    task.text_size += aligned_size as usize;
+                },
+                VirtualMemoryRegion::Data => {
+                    task.data_size += aligned_size as usize;
+                },
+                _ => {
+                    return Err(ElfLoaderError {
+                        message: format!("Unknown segment type: {:#x}", ph.p_flags),
+                    });
+                }
+            }
             
             // Prepare segment data (file size)
             let mut segment_data = vec![0u8; ph.p_filesz as usize];
@@ -433,6 +457,7 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
         vmarea,
         pmarea,
         permissions,
+        is_shared: false, // User program memory should not be shared
     };
 
     // Add to VM manager

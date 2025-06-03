@@ -4,7 +4,7 @@
   
 **A minimal operating system kernel written in Rust**
 
-[![Version](https://img.shields.io/badge/version-0.10.0-blue.svg)](https://github.com/yourusername/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.11.0-blue.svg)](https://github.com/yourusername/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 
@@ -162,16 +162,46 @@ Examples of this can be seen in device management, filesystem access, and task s
 
 ## Virtual File System
 
-Scarlet implements a flexible Virtual File System (VFS) layer that provides:
+Scarlet implements a highly flexible Virtual File System (VFS) layer designed for containerization, process isolation, and advanced bind mount capabilities:
 
-- **Filesystem Abstraction**: Common interface for multiple filesystem implementations
-- **Mount Point Management**: Support for mounting filesystems at different locations in a unified hierarchy
-- **Path Resolution**: Normalization and resolution of file paths across different mounted filesystems
-- **File Operations**: Standard operations (open, read, write, seek, close) with resource safety
-- **Block Device Interface**: Abstraction layer for interacting with storage devices
-- **Driver Framework**: Extensible system for adding new filesystem implementations
+### Core Architecture
 
-The VFS implementation uses Rust's trait system to define interfaces that different filesystems must implement, allowing for strong typing while maintaining flexibility.
+- **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance for containerization and namespace isolation, supporting both complete filesystem isolation and selective resource sharing through Arc-based filesystem object sharing
+- **Filesystem Driver Framework**: Modular driver system with global `FileSystemDriverManager` singleton, supporting block device, memory-based, and virtual filesystem creation with type-safe structured parameter handling
+- **Enhanced Mount Tree**: Hierarchical mount point management with O(log k) path resolution performance, independent mount point namespaces per VfsManager, and security-enhanced path normalization preventing directory traversal attacks
+
+### Advanced Bind Mount System
+
+- **Basic Bind Mounts**: Mount directories from one location to another within the same VfsManager for flexible filesystem layout management
+- **Cross-VFS Bind Mounts**: Share directories between isolated VfsManager instances, enabling controlled resource sharing between containers while maintaining namespace isolation
+- **Security-Enhanced Mounting**: Read-only bind mount support with write protection and proper permission inheritance
+- **Shared Bind Mounts**: Mount propagation sharing for complex namespace scenarios and container orchestration
+- **Thread-Safe Operations**: All bind mount operations are callable from system call context with proper locking
+
+### Path Resolution & Security
+
+- **Normalized Path Handling**: Automatic resolution of relative paths (`.` and `..`) with security validation
+- **Directory Traversal Protection**: Comprehensive path validation preventing escape attacks through malicious path components
+- **Transparent Resolution**: Seamless handling of bind mounts and nested mount points with proper filesystem delegation
+- **Performance Optimization**: Efficient Trie-based mount point storage with O(log k) lookup complexity
+
+### File Operations & Resource Management
+
+- **RAII Resource Safety**: Files automatically close when dropped, filesystem handles are properly released, and memory is freed automatically
+- **Thread-Safe File Access**: Concurrent file operations with RwLock protection and proper handle sharing through Arc
+- **Standard Operations**: Complete support for open, read, write, seek, close operations with resource safety guarantees
+- **Directory Operations**: Full directory manipulation including creation, deletion, listing with metadata support
+- **Handle Management**: Arc-based file handle sharing with automatic cleanup and reference counting
+
+### Storage & Device Integration
+
+- **Block Device Interface**: Abstraction layer for interacting with storage devices including disk drives and other block-oriented storage
+- **Memory-Based Filesystems**: Support for RAM-based filesystems like tmpfs with configurable size limits and persistence options
+- **Device File Support**: Integration with character and block device management for /dev filesystem functionality
+- **Hybrid Filesystem Support**: Filesystems that can operate on both block devices and memory regions for maximum flexibility
+- **Driver Framework**: Extensible system for adding new filesystem implementations with proper type safety and error handling
+
+The VFS implementation enables flexible deployment scenarios from simple shared filesystems to complete filesystem isolation with selective resource sharing, making it ideal for containerized applications, microkernel architectures, and security-conscious environments.
 
 ## Contributing
 

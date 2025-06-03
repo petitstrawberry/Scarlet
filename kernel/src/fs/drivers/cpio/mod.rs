@@ -33,11 +33,11 @@
 //! let fs = cpio_driver.create_from_memory(&initramfs_memory_area)?;
 //! vfs_manager.register_filesystem(fs)?;
 //! ```
-use alloc::{boxed::Box, format, string::{String, ToString}, vec::Vec};
-use spin::Mutex;
+use alloc::{boxed::Box, format, string::{String, ToString}, sync::Arc, vec::Vec};
+use spin::{Mutex, RwLock};
 
 use crate::{driver_initcall, fs::{
-    get_vfs_manager, Directory, DirectoryEntry, FileHandle, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, Result, VirtualFileSystem
+    get_fs_driver_manager, Directory, DirectoryEntry, FileHandle, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, Result, VirtualFileSystem
 }, vm::vmem::MemoryArea};
 
 /// Structure representing an Initramfs entry
@@ -52,7 +52,6 @@ pub struct CpiofsEntry {
 
 /// Structure representing the entire Initramfs
 pub struct Cpiofs {
-    id: usize,
     name: &'static str,
     entries: Mutex<Vec<CpiofsEntry>>, // List of entries
     mounted: bool,
@@ -74,7 +73,6 @@ impl Cpiofs {
     pub fn new(name: &'static str, cpio_data: &[u8]) -> Result<Self> {
         let entries = Self::parse_cpio(cpio_data)?;
         Ok(Self {
-            id: 0, // ID is set by the VfsManager
             name,
             entries: Mutex::new(entries),
             mounted: false,
@@ -225,42 +223,16 @@ impl FileSystem for Cpiofs {
     fn name(&self) -> &str {
         self.name
     }
-
-    fn set_id(&mut self, id: usize) {
-        self.id = id;
-    }
-
-    fn get_id(&self) -> usize {
-        self.id
-    }
-
-    fn get_block_size(&self) -> usize {
-        512 // Fixed block size
-    }
-
-    fn read_block(&mut self, _block_idx: usize, _buffer: &mut [u8]) -> Result<()> {
-        Err(FileSystemError {
-            kind: FileSystemErrorKind::NotSupported,
-            message: "Initramfs does not support block operations".to_string(),
-        })
-    }
-
-    fn write_block(&mut self, _block_idx: usize, _buffer: &[u8]) -> Result<()> {
-        Err(FileSystemError {
-            kind: FileSystemErrorKind::NotSupported,
-            message: "Initramfs does not support block operations".to_string(),
-        })
-    }
 }
 
 impl FileOperations for Cpiofs {
-    fn open(&self, path: &str, _flags: u32) -> Result<Box<dyn crate::fs::FileHandle>> {
+    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn crate::fs::FileHandle>> {
         let path = self.normalize_path(path);
         let entries = self.entries.lock();
         if let Some(entry) = entries.iter().find(|e| e.name == path) {
-            Ok(Box::new(CpiofsFileHandle {
-                content: entry.data.clone().unwrap_or_default(),
-                position: 0,
+            Ok(Arc::new(CpiofsFileHandle {
+                content: RwLock::new(entry.data.clone().unwrap_or_default()),
+                position: RwLock::new(0),
             }))
         } else {
             Err(FileSystemError {
@@ -306,7 +278,7 @@ impl FileOperations for Cpiofs {
         Ok(filtered_entries)
     }
 
-    fn create_file(&self, _path: &str) -> Result<()> {
+    fn create_file(&self, _path: &str, _file_type: FileType) -> Result<()> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
             message: "Initramfs is read-only".to_string(),
@@ -352,45 +324,49 @@ impl FileOperations for Cpiofs {
     }
     
     fn root_dir(&self) -> Result<crate::fs::Directory> {
-        Ok(Directory::new(self.mount_point.clone() + "/"))
+        Ok(Directory::open(self.mount_point.clone() + "/"))
     }
 }
 
 struct CpiofsFileHandle {
-    content: Vec<u8>,
-    position: usize,
+    content: RwLock<Vec<u8>>,
+    position: RwLock<usize>,
 }
 
 impl FileHandle for CpiofsFileHandle {
-    fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        let available = self.content.len() - self.position;
+    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+        let content = self.content.read();
+        let mut position = self.position.write();
+        let available = content.len() - *position;
         let to_read = buffer.len().min(available);
-        buffer[..to_read].copy_from_slice(&self.content[self.position..self.position + to_read]);
-        self.position += to_read;
+        buffer[..to_read].copy_from_slice(&content[*position..*position + to_read]);
+        *position += to_read;
         Ok(to_read)
     }
 
-    fn write(&mut self, _buffer: &[u8]) -> Result<usize> {
+    fn write(&self, _buffer: &[u8]) -> Result<usize> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
             message: "Initramfs is read-only".to_string(),
         })
     }
 
-    fn seek(&mut self, whence: crate::fs::SeekFrom) -> Result<u64> {
+    fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64> {
+        let mut position = self.position.write();
+        let content = self.content.read();
         let new_pos = match whence {
             crate::fs::SeekFrom::Start(offset) => offset as usize,
             crate::fs::SeekFrom::Current(offset) => {
-                if offset < 0 && self.position < offset.abs() as usize {
+                if offset < 0 && *position < offset.abs() as usize {
                     0
                 } else if offset < 0 {
-                    self.position - offset.abs() as usize
+                    *position - offset.abs() as usize
                 } else {
-                    self.position + offset as usize
+                    *position + offset as usize
                 }
             },
             crate::fs::SeekFrom::End(offset) => {
-                let end = self.content.len();
+                let end = content.len();
                 if offset < 0 && end < offset.abs() as usize {
                     0
                 } else if offset < 0 {
@@ -401,18 +377,19 @@ impl FileHandle for CpiofsFileHandle {
             },
         };
         
-        self.position = new_pos;
-        Ok(self.position as u64)
+        *position = new_pos;
+        Ok(*position as u64)
     }
 
-    fn close(&mut self) -> Result<()> {
+    fn release(&self) -> Result<()> {
         Ok(())
     }
 
     fn metadata(&self) -> Result<FileMetadata> {
+        let content = self.content.read();
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
-            size: self.content.len(),
+            size: content.len(),
             permissions: crate::fs::FilePermission {
                 read: true,
                 write: false,
@@ -461,11 +438,38 @@ impl FileSystemDriver for CpiofsDriver {
             })
         }
     }
+    
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+        use crate::fs::params::*;
+        
+        // Try to downcast to CpioFSParams
+        if let Some(_cpio_params) = params.as_any().downcast_ref::<CpioFSParams>() {
+            // CPIO filesystem requires memory area for creation, so we cannot create from parameters alone
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
+            });
+        }
+        
+        // Try to downcast to BasicFSParams for compatibility
+        if let Some(_basic_params) = params.as_any().downcast_ref::<BasicFSParams>() {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
+            });
+        }
+        
+        // If all downcasts fail, return error
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "CPIO filesystem requires CpioFSParams and memory area for creation".to_string(),
+        })
+    }
 }
 
 fn register_driver() {
-    let vfs_manager = get_vfs_manager();
-    vfs_manager.register_fs_driver(Box::new(CpiofsDriver));
+    let fs_driver_manager = get_fs_driver_manager();
+    fs_driver_manager.register_driver(Box::new(CpiofsDriver));
 }
 
 driver_initcall!(register_driver);

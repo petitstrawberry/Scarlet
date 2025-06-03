@@ -125,6 +125,35 @@ impl VirtualMemoryManager {
         }
     }
 
+    /// Removes all memory maps.
+    /// 
+    /// # Returns
+    /// The removed memory maps.
+    pub fn remove_all_memory_maps(&mut self) -> Vec<VirtualMemoryMap> {
+        let mut removed_maps = Vec::new();
+        while !self.memmap.is_empty() {
+            removed_maps.push(self.memmap.remove(0));
+        }
+        removed_maps
+    }
+
+    /// Restores the memory maps from a given vector.
+    ///
+    /// # Arguments
+    /// * `maps` - The vector of memory maps to restore
+    /// 
+    /// # Returns
+    /// A result indicating success or failure.
+    /// 
+    pub fn restore_memory_maps(&mut self, maps: Vec<VirtualMemoryMap>) -> Result<(), &'static str> {
+        for map in maps {
+            if let Err(e) = self.add_memory_map(map) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     /// Searches for a memory map containing the given virtual address.
     /// 
     /// # Arguments
@@ -219,7 +248,7 @@ mod tests {
     fn test_add_and_get_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
-        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0 };
+        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
         vmm.add_memory_map(map).unwrap();
         assert_eq!(vmm.get_memory_map(0).unwrap().vmarea.start, 0x1000);
     }
@@ -228,7 +257,7 @@ mod tests {
     fn test_remove_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
-        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0 };
+        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
         vmm.add_memory_map(map).unwrap();
         let removed_map = vmm.remove_memory_map(0).unwrap();
         assert_eq!(removed_map.vmarea.start, 0x1000);
@@ -239,9 +268,9 @@ mod tests {
     fn test_search_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
         let vma1 = MemoryArea { start: 0x1000, end: 0x1fff };
-        let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0 };
+        let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0, is_shared: false };
         let vma2 = MemoryArea { start: 0x3000, end: 0x3fff };
-        let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2, permissions: 0 };
+        let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2, permissions: 0, is_shared: false };
         vmm.add_memory_map(map1).unwrap();
         vmm.add_memory_map(map2).unwrap();
         let found_map = vmm.search_memory_map(0x3500).unwrap();

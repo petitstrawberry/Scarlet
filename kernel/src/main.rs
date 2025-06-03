@@ -61,31 +61,58 @@
 //!
 //! ## Virtual File System
 //!
-//! Scarlet implements a flexible Virtual File System (VFS) layer that provides:
+//! Scarlet implements a highly flexible Virtual File System (VFS) layer designed for
+//! containerization and process isolation with advanced bind mount capabilities:
 //!
-//! - **Filesystem Abstraction**: Common interface for multiple filesystem implementations through the `VirtualFileSystem` trait
-//!   hierarchy, enabling support for various filesystems like FAT32, ext2, or custom implementations
+//! ### Core Architecture
 //!
-//! - **Mount Point Management**: Support for mounting filesystems at different locations with unified path handling:
-//!   - Hierarchical mount points with proper path resolution
-//!   - Support for mounting the same filesystem at multiple locations
-//!   - Automatic mapping between absolute paths and filesystem-relative paths
+//! - **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance:
+//!   - Tasks store `Option<Arc<VfsManager>>` allowing independent filesystem namespaces
+//!   - Support for complete filesystem isolation or selective resource sharing
+//!   - Thread-safe operations via RwLock protection throughout the VFS layer
 //!
-//! - **Path Resolution**: Normalization and resolution of file paths across different mounted filesystems:
-//!   - Handling of relative paths (with `./` and `../`)
-//!   - Support for absolute paths from root
-//!   - Finding the most specific mount point for any given path
+//! - **Filesystem Driver Framework**: Modular driver system with type-safe parameter handling:
+//!   - Global `FileSystemDriverManager` singleton for driver registration and management
+//!   - Support for block device, memory-based, and virtual filesystem creation
+//!   - Structured parameter system replacing old string-based configuration
+//!   - Dynamic dispatch enabling future runtime filesystem module loading
 //!
-//! - **File Operations**: Standard operations with resource safety and RAII:
-//!   - Files automatically close when dropped
-//!   - Buffered read/write operations
-//!   - Seek operations for random file access
-//!   - Directory listing and manipulation
+//! - **Enhanced Mount Tree**: Hierarchical mount point management with bind mount support:
+//!   - O(log k) path resolution performance where k is path depth
+//!   - Independent mount point namespaces per VfsManager instance
+//!   - Security-enhanced path normalization preventing directory traversal attacks
+//!   - Efficient Trie-based mount point storage reducing memory usage
 //!
-//! - **Block Device Interface**: Abstraction layer for interacting with storage devices:
-//!   - Request queue for efficient I/O operations
-//!   - Support for asynchronous operations
-//!   - Error handling and recovery mechanisms
+//! ### Bind Mount Functionality
+//!
+//! Advanced bind mount capabilities for flexible directory mapping and container orchestration:
+//!
+//! - **Basic Bind Mounts**: Mount directories from one location to another within the same VfsManager
+//! - **Cross-VFS Bind Mounts**: Share directories between isolated VfsManager instances for container resource sharing
+//! - **Read-Only Bind Mounts**: Security-enhanced mounting with write protection
+//! - **Shared Bind Mounts**: Mount propagation sharing for complex namespace scenarios
+//! - **Thread-Safe Operations**: Bind mount operations callable from system call context
+//!
+//! ### Path Resolution & Security
+//!
+//! - **Normalized Path Handling**: Automatic resolution of relative paths (`.` and `..`)
+//! - **Security Protection**: Prevention of directory traversal attacks through path validation
+//! - **Transparent Resolution**: Seamless handling of bind mounts and nested mount points
+//! - **Performance Optimization**: Efficient path lookup with O(log k) complexity
+//!
+//! ### File Operations & Resource Management
+//!
+//! - **RAII Resource Safety**: Files automatically close when dropped, preventing resource leaks
+//! - **Thread-Safe File Access**: Concurrent file operations with proper locking
+//! - **Handle Management**: Arc-based file handle sharing with automatic cleanup
+//! - **Directory Operations**: Complete directory manipulation with metadata support
+//!
+//! ### Storage Integration
+//!
+//! - **Block Device Interface**: Abstraction layer for storage device interaction
+//! - **Memory-Based Filesystems**: Support for RAM-based filesystems like tmpfs
+//! - **Hybrid Filesystem Support**: Filesystems operating on both block devices and memory
+//! - **Device File Support**: Integration with character and block device management
 //!
 //! ## Boot Process
 //!
@@ -140,9 +167,11 @@
 #![test_runner(crate::test::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+pub mod abi;
 pub mod arch;
 pub mod drivers;
 pub mod timer;
+pub mod time;
 pub mod library;
 pub mod mem;
 pub mod traits;
@@ -160,14 +189,14 @@ pub mod fs;
 pub mod test;
 
 extern crate alloc;
-use alloc::string::ToString;
+use alloc::{string::ToString, sync::Arc};
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use environment::PAGE_SIZE;
-use fs::{drivers::initramfs::relocate_initramfs, File};
+use fs::{drivers::initramfs::{init_initramfs, relocate_initramfs}, File, VfsManager};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
-use core::panic::PanicInfo;
+use core::panic::{self, PanicInfo};
 
 use arch::{get_cpu, init_arch};
 use task::{elf_loader::load_elf_into_task, new_user_task};
@@ -248,15 +277,23 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
+    /* Initialize initramfs */
+    println!("[Scarlet Kernel] Initializing initramfs...");
+    let mut manager = VfsManager::new();
+    init_initramfs(&mut manager);
     /* Make init task */
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
+
     task.init();
-    let mut file = File::new("/bin/init".to_string());
-    file.open(0).map_err(|e| {
-        early_println!("[Scarlet Kernel] Error opening init file: {:?}", e);
-        return;
-    }).unwrap();
+    task.vfs = Some(Arc::new(manager));
+    task.cwd = Some("/".to_string());
+    let mut file = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
+        Ok(file) => file,
+        Err(e) => {
+            panic!("Failed to open init file: {:?}", e);
+        },
+    };
 
     match load_elf_into_task(&mut file, &mut task) {
         Ok(_) => {

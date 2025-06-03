@@ -65,6 +65,14 @@ impl Device for GenericBlockDevice {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    
+    fn as_block_device(&mut self) -> Option<&mut dyn BlockDevice> {
+        Some(self)
+    }
 }
 
 impl BlockDevice for GenericBlockDevice {
