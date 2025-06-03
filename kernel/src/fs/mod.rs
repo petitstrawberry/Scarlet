@@ -1318,8 +1318,6 @@ impl VfsManager {
                 message: format!("Path must be absolute: {}", path),
             });
         }
-
-        crate::println!("Resolving path: {}", path);
         
         // Phase 1: Get MountNode and relative path from MountTree
         let mount_tree = self.mount_tree.read();
