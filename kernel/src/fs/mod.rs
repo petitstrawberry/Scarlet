@@ -990,7 +990,7 @@ impl VfsManager {
     /// // Later mount the filesystem
     /// vfs_manager.mount(fs_id, "/mnt")?;
     /// ```
-    pub fn register_fs(&mut self, fs: Box<dyn VirtualFileSystem>) -> usize {
+    pub fn register_fs(&self, fs: Box<dyn VirtualFileSystem>) -> usize {
         let mut next_fs_id = self.next_fs_id.write();
         let fs_id = *next_fs_id;
         *next_fs_id += 1;
@@ -1027,7 +1027,7 @@ impl VfsManager {
     /// vfs_manager.mount(fs_id, "/mnt")?;
     /// ```
     pub fn create_and_register_block_fs(
-        &mut self,
+        &self,
         driver_name: &str,
         block_device: Box<dyn BlockDevice>,
         block_size: usize,
@@ -1063,7 +1063,7 @@ impl VfsManager {
     /// vfs_manager.mount(fs_id, "/")?;
     /// ```
     pub fn create_and_register_memory_fs(
-        &mut self,
+        &self,
         driver_name: &str,
         memory_area: &crate::vm::vmem::MemoryArea,
     ) -> Result<usize> {
@@ -1102,7 +1102,7 @@ impl VfsManager {
     /// let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params)?;
     /// ```
     pub fn create_and_register_fs_with_params(
-        &mut self,
+        &self,
         driver_name: &str,
         params: &dyn crate::fs::params::FileSystemParams,
     ) -> Result<usize> {
@@ -1124,7 +1124,7 @@ impl VfsManager {
     /// 
     /// * `Result<()>` - Ok if the mount was successful, Err if there was an error
     /// 
-    pub fn mount(&mut self, fs_id: usize, mount_point: &str) -> Result<()> {
+    pub fn mount(&self, fs_id: usize, mount_point: &str) -> Result<()> {
         let mut filesystems = self.filesystems.write();
         // Remove the file system from available pool using BTreeMap
         let fs = filesystems.remove(&fs_id)
@@ -1168,7 +1168,7 @@ impl VfsManager {
     /// 
     /// * `Result<()>` - Ok if the unmount was successful, Err if there was an error
     /// 
-    pub fn unmount(&mut self, mount_point: &str) -> Result<()> {
+    pub fn unmount(&self, mount_point: &str) -> Result<()> {
         // Remove the mount point from MountTree
         let mp = self.mount_tree.write().remove(mount_point)?;
     
@@ -1212,7 +1212,7 @@ impl VfsManager {
     /// // Bind mount /mnt/source to /mnt/target as read-only
     /// vfs_manager.bind_mount("/mnt/source", "/mnt/target", true)?;
     /// ```
-    pub fn bind_mount(&mut self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
+    pub fn bind_mount(&self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
         let normalized_source = Self::normalize_path(source_path);
         let normalized_target = Self::normalize_path(target_path);
 
@@ -1274,7 +1274,7 @@ impl VfsManager {
     /// container_vfs.bind_mount_from(&host_vfs, "/data", "/mnt/shared", false)?;
     /// ```
     pub fn bind_mount_from(
-        &mut self, 
+        &self, 
         source_vfs: &Arc<VfsManager>, 
         source_path: &str, 
         target_path: &str, 
@@ -1331,7 +1331,7 @@ impl VfsManager {
     /// # Returns
     /// 
     /// * `Result<()>` - Ok if the shared bind mount was successful, Err otherwise
-    pub fn bind_mount_shared(&mut self, source_path: &str, target_path: &str) -> Result<()> {
+    pub fn bind_mount_shared(&self, source_path: &str, target_path: &str) -> Result<()> {
         // Normalize the source path to prevent directory traversal
         let normalized_source_path = Self::normalize_path(source_path);
         
