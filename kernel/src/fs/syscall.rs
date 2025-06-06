@@ -11,7 +11,7 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let _mode = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if open fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     // Parse path as a null-terminated C string
     let mut path_bytes = Vec::new();
@@ -59,7 +59,7 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
 pub fn sys_close(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
     if task.remove_file(fd).is_ok() {
         0
     } else {
@@ -74,7 +74,7 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if read fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     let file = task.get_mut_file(fd);
     if file.is_none() {
@@ -102,7 +102,7 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     let file = task.get_mut_file(fd);
     if file.is_none() {
@@ -130,7 +130,7 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
     let whence = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if lseek fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     let file = task.get_mut_file(fd);
     if file.is_none() {

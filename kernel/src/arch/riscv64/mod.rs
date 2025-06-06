@@ -9,10 +9,12 @@ use vcpu::Mode;
 use vm::get_page_table;
 use vm::get_root_page_table_idx;
 
+use crate::arch::instruction::Instruction;
 use crate::early_println;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
+use crate::task::Task;
 
 pub mod boot;
 pub mod instruction;
@@ -110,6 +112,20 @@ impl Trapframe {
 
     pub fn set_arg(&mut self, index: usize, value: usize) {
         self.regs.reg[index + 10] = value; // a0 - a7
+    }
+
+    /// Increment the program counter (epc) to the next instruction
+    /// This is typically used after handling a trap or syscall to continue execution.
+    /// 
+    pub fn increment_pc_next(&mut self, task: &Task) {
+        let instruction = Instruction::fetch(
+            task.vm_manager.translate_vaddr(self.epc as usize).unwrap()
+        );
+        let len = instruction.len();
+        if len == 0 {
+            panic!("Invalid instruction length: {}", len);
+        }
+        self.epc += len as u64;
     }
 }
 
