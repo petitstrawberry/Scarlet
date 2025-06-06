@@ -123,9 +123,12 @@ impl Trapframe {
         );
         let len = instruction.len();
         if len == 0 {
-            panic!("Invalid instruction length: {}", len);
+            debug_assert!(len > 0, "Invalid instruction length: {}", len);
+            early_println!("Warning: Invalid instruction length encountered. Defaulting to 4 bytes.");
+            self.epc += 4; // Default to 4 bytes for invalid instruction length
+        } else {
+            self.epc += len as u64;
         }
-        self.epc += len as u64;
     }
 }
 
