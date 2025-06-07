@@ -1,5 +1,5 @@
 use alloc::{boxed::Box, string::ToString, vec::Vec};
-use crate::{arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, File, FileType, SeekFrom, VfsManager}, println, task::{elf_loader::load_elf_into_task, mytask}, vm};
+use crate::{arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, File, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager}, println, task::{elf_loader::load_elf_into_task, mytask}, vm};
 
 const MAX_PATH_LENGTH: usize = 128;
 const MAX_ARGS: usize = 32;
@@ -17,7 +17,7 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     // let argv_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const *const u8;
     
     // Increment PC to avoid infinite loop if execve fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     task.vcpu.store(trapframe); // Store the current trapframe in the task's vcpu
     
@@ -56,7 +56,7 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     
     // Convert path bytes to string
     let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => s,
+        Ok(s) => VfsManager::to_absolute_path(&task, s).unwrap(),
         Err(_) => {
             // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
@@ -69,7 +69,7 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     
     // Try to open the executable file
     let file = match task.vfs.as_ref() {
-        Some(vfs) => vfs.open(path_str, 0),
+        Some(vfs) => vfs.open(path_str.as_str(), 0),
         None => {
             // Restore the managed pages, memory mapping and sizes
             task.managed_pages = backup_pages; // Restore the pages
@@ -143,7 +143,7 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let _mode = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if open fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     // Parse path as a null-terminated C string
     let mut path_bytes = Vec::new();
@@ -186,7 +186,6 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
             fd.unwrap() as usize
         }
         Err(e) =>{
-            // println!("Failed to open file: {} with error: {:?}", path_str, e);
             usize::MAX // File open error
         }
     }
@@ -195,7 +194,7 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
 pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     if let Some(old_file) = task.get_file(fd) {
         let file = old_file.clone();
@@ -212,7 +211,7 @@ pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
 pub fn sys_close(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
     if task.remove_file(fd).is_ok() {
         0
     } else {
@@ -226,11 +225,10 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
-    // Increment PC to avoid infinite loop if read fails
-    trapframe.epc += 4;
-
     let file = task.get_mut_file(fd);
     if file.is_none() {
+        // Increment PC to avoid infinite loop if read fails
+        trapframe.increment_pc_next(task);
         return usize::MAX; // Invalid file descriptor
     }
 
@@ -240,10 +238,16 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     
     match file.read(buffer) {
         Ok(n) => {
+            // Increment PC to avoid infinite loop if read fails
+            if n != 0 {
+                trapframe.increment_pc_next(task);
+            }
             n
         }
         Err(_) => {
-            return usize::MAX; // Read error
+            // Increment PC to avoid infinite loop if read fails
+            trapframe.increment_pc_next(task);
+            usize::MAX // Read error;
         }
     }
 }
@@ -255,7 +259,7 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     let file = task.get_mut_file(fd);
     if file.is_none() {
@@ -283,7 +287,7 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
     let whence = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if lseek fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     let file = task.get_mut_file(fd);
     if file.is_none() {
@@ -310,8 +314,8 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
 
 // Create device file
 pub fn sys_mknod(trapframe: &mut Trapframe) -> usize {
-    trapframe.epc += 4;
     let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
     let name_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let name = get_path_str(name_ptr).unwrap();
     let path = VfsManager::to_absolute_path(&task, &name).unwrap();

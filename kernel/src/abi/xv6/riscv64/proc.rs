@@ -3,7 +3,7 @@ use crate::{arch::{get_cpu, Trapframe}, sched::scheduler::get_scheduler, task::{
 pub fn sys_fork(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
     
-    trapframe.epc += 4; /* Increment the program counter */
+    trapframe.increment_pc_next(parent_task); /* Increment the program counter */
 
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.store(trapframe);
@@ -46,7 +46,7 @@ pub fn sys_wait(trapframe: &mut Trapframe) -> usize {
                         *status_ptr = status;
                     }
                 }
-                trapframe.epc += 4;
+                trapframe.increment_pc_next(task);
                 return pid;
             },
             Err(error) => {
@@ -59,9 +59,6 @@ pub fn sys_wait(trapframe: &mut Trapframe) -> usize {
             }
         }
     }
-    // Any child process has exited
-    // trapframe.epc += 4;
-    // return usize::MAX;
     return trapframe.get_return_value();
 }
 
