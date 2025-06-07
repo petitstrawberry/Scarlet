@@ -6,6 +6,7 @@ use crate::arch::trap::print_traplog;
 use crate::arch::Trapframe;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
+use crate::task::mytask;
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
@@ -20,7 +21,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     // panic!("Syscall error: {}", msg);
                     println!("Syscall error: {}", msg);
                     trapframe.set_return_value(usize::MAX); // Set error code: -1
-                    trapframe.epc += 4;
+                    trapframe.increment_pc_next(mytask().unwrap());
                 }
             }
         }

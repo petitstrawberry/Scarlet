@@ -251,6 +251,10 @@ impl File {
     pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
         self.handle.read(buffer)
     }
+
+    pub fn readdir(&mut self) -> Result<Vec<DirectoryEntry>> {
+        self.handle.readdir()
+    }
     
     /// Write data to the file
     /// 
@@ -345,6 +349,9 @@ pub enum SeekFrom {
 pub trait FileHandle: Send + Sync {
     /// Read from the file
     fn read(&self, buffer: &mut [u8]) -> Result<usize>;
+
+    /// Read directory entries
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>>;
     
     /// Write to the file
     fn write(&self, buffer: &[u8]) -> Result<usize>;
