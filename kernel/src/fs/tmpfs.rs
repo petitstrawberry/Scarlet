@@ -545,6 +545,36 @@ impl FileHandle for TmpFileHandle {
             })
         }
     }
+
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
+        let fs = self.get_fs();
+        
+        if let Some(node) = fs.find_node(&self.path) {
+            if node.file_type != FileType::Directory {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotADirectory,
+                    message: "Not a directory".to_string(),
+                });
+            }
+            
+            let mut entries = Vec::new();
+            for (name, child) in node.children.entries() {
+                entries.push(DirectoryEntry {
+                    name: name.clone(),
+                    file_type: child.file_type.clone(),
+                    size: child.metadata.size,
+                    metadata: Some(child.metadata.clone()),
+                });
+            }
+            
+            Ok(entries)
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: "Directory not found".to_string(),
+            })
+        }
+    }
     
     fn write(&self, buffer: &[u8]) -> Result<usize> {
         // Handle device files
@@ -1076,5 +1106,135 @@ mod tests {
         // Check file size
         let metadata = file.metadata().unwrap();
         assert_eq!(metadata.size, 8192);
+    }
+
+    #[test_case]
+    fn test_tmpfs_file_readdir() {
+        let mut tmpfs = TmpFS::new(0); // Unlimited memory
+        tmpfs.mount("/tmp").unwrap();
+        
+        // Create test directory structure
+        tmpfs.create_dir("/subdir").unwrap();
+        tmpfs.create_file("/file1.txt", FileType::RegularFile).unwrap();
+        tmpfs.create_file("/file2.bin", FileType::RegularFile).unwrap();
+        tmpfs.create_file("/subdir/nested.txt", FileType::RegularFile).unwrap();
+        
+        // Open root directory as a file
+        let file = tmpfs.open("/", 0).unwrap();
+        let entries = file.readdir().unwrap();
+        
+        // Verify directory entries
+        assert_eq!(entries.len(), 3); // subdir, file1.txt, file2.bin
+        
+        let mut entry_names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        entry_names.sort();
+        assert_eq!(entry_names, vec!["file1.txt", "file2.bin", "subdir"]);
+        
+        // Check file types
+        for entry in &entries {
+            match entry.name.as_str() {
+                "subdir" => assert_eq!(entry.file_type, FileType::Directory),
+                "file1.txt" | "file2.bin" => assert_eq!(entry.file_type, FileType::RegularFile),
+                _ => panic!("Unexpected entry: {}", entry.name),
+            }
+        }
+        
+        // Test subdirectory listing
+        let subdir_file = tmpfs.open("/subdir", 0).unwrap();
+        let subdir_entries = subdir_file.readdir().unwrap();
+        assert_eq!(subdir_entries.len(), 1);
+        assert_eq!(subdir_entries[0].name, "nested.txt");
+        assert_eq!(subdir_entries[0].file_type, FileType::RegularFile);
+    }
+
+    #[test_case]
+    fn test_tmpfs_readdir_with_special_entries() {
+        let mut tmpfs = TmpFS::new(0);
+        tmpfs.mount("/tmp").unwrap();
+        
+        // Create device file
+        let mut char_device = Box::new(MockCharDevice::new(10, "test_device"));
+        char_device.set_read_data(vec![b'D', b'E', b'V']);
+        let device_id = DeviceManager::get_mut_manager().register_device(char_device as Box<dyn Device>);
+        
+        let device_info = DeviceFileInfo {
+            device_id,
+            device_type: DeviceType::Char,
+        };
+        
+        tmpfs.create_dir("/dev").unwrap();
+        tmpfs.create_file("/dev/test_char", FileType::CharDevice(device_info)).unwrap();
+        tmpfs.create_file("/dev/regular.txt", FileType::RegularFile).unwrap();
+        
+        // Test /dev directory listing
+        let dev_file = tmpfs.open("/dev", 0).unwrap();
+        let dev_entries = dev_file.readdir().unwrap();
+        
+        assert_eq!(dev_entries.len(), 2);
+        
+        let mut found_device = false;
+        let mut found_regular = false;
+        
+        for entry in &dev_entries {
+            match entry.name.as_str() {
+                "test_char" => {
+                    assert_eq!(entry.file_type, FileType::CharDevice(device_info));
+                    found_device = true;
+                },
+                "regular.txt" => {
+                    assert_eq!(entry.file_type, FileType::RegularFile);
+                    found_regular = true;
+                },
+                _ => panic!("Unexpected entry: {}", entry.name),
+            }
+        }
+        
+        assert!(found_device, "Device file not found in directory listing");
+        assert!(found_regular, "Regular file not found in directory listing");
+    }
+
+    #[test_case]
+    fn test_tmpfs_readdir_error_cases() {
+        let mut tmpfs = TmpFS::new(0);
+        tmpfs.mount("/tmp").unwrap();
+        
+        // Create a regular file
+        tmpfs.create_file("/regular.txt", FileType::RegularFile).unwrap();
+        
+        // Try to readdir on a regular file (should fail)
+        let file = tmpfs.open("/regular.txt", 0).unwrap();
+        let result = file.readdir();
+        assert!(result.is_err());
+        
+        if let Err(e) = result {
+            assert_eq!(e.kind, FileSystemErrorKind::NotADirectory);
+        }
+        
+        // Try to readdir on non-existent path
+        let result = tmpfs.open("/nonexistent", 0);
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_tmpfs_empty_directory_readdir() {
+        let mut tmpfs = TmpFS::new(0);
+        tmpfs.mount("/tmp").unwrap();
+        
+        // Create empty directory
+        tmpfs.create_dir("/empty").unwrap();
+        
+        // Test reading empty directory
+        let empty_dir = tmpfs.open("/empty", 0).unwrap();
+        let entries = empty_dir.readdir().unwrap();
+        
+        // Empty directory should return empty list
+        assert_eq!(entries.len(), 0);
+        
+        // Root directory should contain the empty directory
+        let root_file = tmpfs.open("/", 0).unwrap();
+        let root_entries = root_file.readdir().unwrap();
+        assert_eq!(root_entries.len(), 1);
+        assert_eq!(root_entries[0].name, "empty");
+        assert_eq!(root_entries[0].file_type, FileType::Directory);
     }
 }

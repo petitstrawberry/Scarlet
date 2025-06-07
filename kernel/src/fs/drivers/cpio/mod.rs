@@ -344,6 +344,13 @@ impl FileHandle for CpiofsFileHandle {
         Ok(to_read)
     }
 
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "CpiofsFileHandle does not support readdir".to_string(),
+        })
+    }
+
     fn write(&self, _buffer: &[u8]) -> Result<usize> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
