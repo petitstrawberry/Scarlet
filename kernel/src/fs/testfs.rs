@@ -119,7 +119,11 @@ struct TestFileHandle {
     content: RwLock<Vec<u8>>,
     file_type: FileType,
     device_guard: Option<BorrowedDeviceGuard>,
+    fs: *const TestFileSystem, // Pointer to the file system for device access
 }
+
+unsafe impl Send for TestFileHandle {}
+unsafe impl Sync for TestFileHandle {}
 
 impl FileHandle for TestFileHandle {
     fn read(&self, buffer: &mut [u8]) -> Result<usize> {
@@ -211,7 +215,11 @@ impl FileHandle for TestFileHandle {
         
         Ok(to_read)
     }
-    
+
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
+        todo!("readdir not implemented for TestFileHandle");
+    }
+
     fn write(&self, buffer: &[u8]) -> Result<usize> {
         // Handle device files
         if let Some(ref device_guard) = self.device_guard {
@@ -354,6 +362,7 @@ impl FileOperations for TestFileSystem {
                 content: RwLock::new(b"Hello, world!".to_vec()),
                 file_type: FileType::RegularFile,
                 device_guard: None,
+                fs: self as *const TestFileSystem, // Store a pointer to the file system
             }));
         }
 
@@ -365,13 +374,14 @@ impl FileOperations for TestFileSystem {
         for (dir_path, entries) in self.directories.lock().iter() {
             if dir_path == parent_path {
                 // Check if it's a regular file
-                if let Some(entry) = entries.iter().find(|e| e.name == name && e.file_type == FileType::RegularFile) {
+                if let Some(entry) = entries.iter().find(|e| e.name == name && (e.file_type == FileType::RegularFile || e.file_type == FileType::Directory)) {
                     return Ok(Arc::new(TestFileHandle {
                         path: normalized,
                         position: RwLock::new(0),
                         content: RwLock::new(Vec::new()), // Newly created files are empty
                         file_type: entry.file_type,
                         device_guard: None,
+                        fs: self as *const TestFileSystem, // Store a pointer to the file system
                     }));
                 }
                 
@@ -394,6 +404,7 @@ impl FileOperations for TestFileSystem {
                                 content: RwLock::new(Vec::new()), // Device files don't have content
                                 file_type: entry.file_type,
                                 device_guard: Some(guard),
+                                fs: self as *const TestFileSystem, // Store a pointer to the file system
                             }));
                         },
                         Err(_) => {
