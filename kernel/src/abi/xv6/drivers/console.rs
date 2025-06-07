@@ -46,7 +46,13 @@ impl Device for ConsoleDevice {
 impl CharDevice for ConsoleDevice {
     fn read_byte(&mut self) -> Option<u8> {
         let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0)?;
-        serial.get().map(|c| c as u8)
+        serial.get().map(|c| {
+            if c == '\r' {
+                serial.put('\n').ok(); // Convert carriage return to newline
+            }
+            serial.put(c).ok(); // Echo back the character
+            c as u8
+        })
     }
 
     fn write_byte(&mut self, byte: u8) -> Result<(), &'static str> {
