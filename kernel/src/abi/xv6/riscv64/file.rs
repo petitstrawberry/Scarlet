@@ -1,8 +1,7 @@
 use alloc::{boxed::Box, string::ToString, vec::Vec};
-use crate::{arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, File, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager}, println, task::{elf_loader::load_elf_into_task, mytask}, vm};
+use crate::{arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager}, task::{elf_loader::load_elf_into_task, mytask}, vm};
 
 const MAX_PATH_LENGTH: usize = 128;
-const MAX_ARGS: usize = 32;
 
 pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
