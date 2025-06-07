@@ -73,3 +73,14 @@ pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
     // This is a placeholder implementation
     0
 }
+
+pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let increment = trapframe.get_arg(0);
+    let brk = task.get_brk();
+    trapframe.increment_pc_next(task);
+    match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
+        Ok(_) => brk,
+        Err(_) => usize::MAX, /* -1 */
+    }
+}

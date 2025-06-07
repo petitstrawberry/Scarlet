@@ -9,7 +9,7 @@ pub mod fs;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use proc::{sys_exit, sys_fork, sys_wait, sys_kill};
 
-use crate::{abi::AbiModule, early_initcall, fs::{params::TmpFSParams, VfsManager}, register_abi};
+use crate::{abi::{xv6::riscv64::{file::{sys_close, sys_read}, fs::sys_fstat, proc::sys_sbrk}, AbiModule}, early_initcall, fs::VfsManager, register_abi};
 
 
 #[derive(Default)]
@@ -44,14 +44,14 @@ syscall_table! {
     Exit = 2 => sys_exit,
     Wait = 3 => sys_wait,
     // Pipe = 4 => sys_pipe,
-    // Read = 5 => sys_read,
+    Read = 5 => sys_read,
     Kill = 6 => sys_kill,
     Exec = 7 => sys_exec,
-    // Fstat = 8 => sys_fstat,
+    Fstat = 8 => sys_fstat,
     // Chdir = 9 => sys_chdir,
     Dup = 10 => sys_dup,
     // Getpid = 11 => sys_getpid,
-    // Sbrk = 12 => sys_sbrk,
+    Sbrk = 12 => sys_sbrk,
     // Sleep = 13 => sys_sleep,
     // Uptime = 14 => sys_uptime,
     Open = 15 => sys_open,
@@ -60,7 +60,7 @@ syscall_table! {
     // Unlink = 18 => sys_unlink,
     // Link = 19 => sys_link,
     // Mkdir = 20 => sys_mkdir,
-    // Close = 21 => sys_close,
+    Close = 21 => sys_close,
 }
 
 fn register_xv6_abi() {
