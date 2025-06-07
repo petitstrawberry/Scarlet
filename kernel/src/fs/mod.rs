@@ -126,11 +126,13 @@ pub enum FileSystemErrorKind {
     AlreadyExists,
     NotADirectory,
     NotAFile,
+    IsADirectory,
     ReadOnly,
     DeviceError,
     NotSupported,
     BrokenFileSystem,
     Busy,
+    DirectoryNotEmpty,
 }
 
 pub struct FileSystemError {
