@@ -2,6 +2,7 @@
 mod macros;
 mod proc;
 mod file;
+pub mod fs;
 
 // pub mod drivers;
 
