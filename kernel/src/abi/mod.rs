@@ -33,9 +33,8 @@ pub trait AbiModule: 'static + Send + Sync {
     fn init(&self) {
         // Default implementation does nothing
     }
-    fn init_fs(&self) -> Option<VfsManager> {
-        // Default implementation returns None
-        None
+    fn init_fs(&self, _vfs: &mut VfsManager) {
+        // Default implementation does nothing
     }
 }
 
