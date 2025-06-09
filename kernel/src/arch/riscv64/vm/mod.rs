@@ -10,17 +10,20 @@ pub mod mmu;
 extern crate alloc;
 
 use alloc::{boxed::Box, vec};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 use mmu::PageTable;
 use spin::RwLock;
 use spin::lazy::Lazy;
 
-use crate::mem::page::{self, allocate_raw_pages};
+use crate::mem::page::allocate_raw_pages;
 
 const NUM_OF_ASID: usize = u16::MAX as usize + 1; // Maximum ASID value
-static mut ASID_BITMAP_TABLES: RwLock<[u64; NUM_OF_ASID / 64]> = RwLock::new([0; NUM_OF_ASID / 64]);
+static mut ASID_BITMAP_TABLES: Lazy<RwLock<[u64; NUM_OF_ASID / 64]>> = Lazy::new(|| {
+    let mut tables = [0; NUM_OF_ASID / 64];
+    tables[0] = 1; // Mark the first ASID as used to avoid returning 0, which is reserved
+    RwLock::new(tables)
+});
 // static mut ROOT_PAGE_TABLES: Lazy<RwLock<HashMap<u16, *mut PageTable>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 static mut PAGE_TABLES: Lazy<RwLock<HashMap<u16, Vec<Box<PageTable>>>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 
@@ -70,7 +73,6 @@ pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
 pub fn alloc_virtual_address_space() -> u16 {
     unsafe {
         let mut asid_table = ASID_BITMAP_TABLES.write();
-        asid_table[0] |= 1; // Mark the first ASID as used to avoid returning 0, which is reserved
         for word_idx in 0..(NUM_OF_ASID / 64) {
             let word = asid_table[word_idx];
             if word != u64::MAX { // Check if there is a free ASID in this word
