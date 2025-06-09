@@ -1,14 +1,16 @@
 use core::{arch::asm, mem::transmute};
 use core::result::Result;
 
+
+use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
 use crate::vm::vmem::VirtualMemoryPermission;
-use crate::{arch::vm::{get_page_table, new_page_table_idx}, vm::vmem::VirtualMemoryMap};
+use crate::{vm::vmem::VirtualMemoryMap};
 
 const MAX_PAGING_LEVEL: usize = 3;
 
 #[repr(align(8))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct PageTableEntry {
     pub entry: u64,
 }
@@ -83,6 +85,7 @@ impl PageTableEntry {
 }
 
 #[repr(align(4096))]
+#[derive(Debug)]
 pub struct PageTable {
     pub entries: [PageTableEntry; 512],
 }
@@ -94,7 +97,7 @@ impl PageTable {
         }
     }
 
-    pub fn switch(&self, asid: usize) {
+    pub fn switch(&self, asid: u16) {
         let satp = self.get_val_for_satp(asid);
         unsafe {
             asm!(
@@ -113,7 +116,8 @@ impl PageTable {
     /// # Note
     /// 
     /// Only for RISC-V (Sv48).
-    pub fn get_val_for_satp(&self, asid: usize) -> u64 {
+    pub fn get_val_for_satp(&self, asid: u16) -> u64 {
+        let asid = asid as usize;
         let mode = 9;
         let ppn = self as *const _ as usize >> 12;
         (mode << 60 | asid << 44 | ppn) as u64
@@ -124,7 +128,7 @@ impl PageTable {
         unsafe { transmute(addr) }
     }
 
-    pub fn map_memory_area(&mut self, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
+    pub fn map_memory_area(&mut self, asid: u16, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
         // Check if the address and size is aligned to PAGE_SIZE
         if mmap.vmarea.start % PAGE_SIZE != 0 || mmap.pmarea.start % PAGE_SIZE != 0 ||
             mmap.vmarea.size() % PAGE_SIZE != 0 || mmap.pmarea.size() % PAGE_SIZE != 0 {
@@ -134,7 +138,7 @@ impl PageTable {
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(vaddr, paddr, mmap.permissions);
+            self.map(asid, vaddr, paddr, mmap.permissions);
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
                 None => break,
@@ -149,7 +153,7 @@ impl PageTable {
     }
 
     /* Only for root page table */
-    pub fn map(&mut self, vaddr: usize, paddr: usize, permissions: usize) {
+    pub fn map(&mut self, asid: u16, vaddr: usize, paddr: usize, permissions: usize) {
         let vaddr = vaddr & 0xffff_ffff_ffff_f000;
         let paddr = paddr & 0xffff_ffff_ffff_f000;
         for i in (0..=MAX_PAGING_LEVEL).rev() {
@@ -180,10 +184,9 @@ impl PageTable {
                 Err(t) => {
                     let vpn = vaddr >> (12 + 9 * i) & 0x1ff;
                     let entry = &mut t.entries[vpn];
-                    let next_table_idx = new_page_table_idx();
-                    let next_table = get_page_table(next_table_idx).unwrap();
+                    let next_table_ptr = unsafe { new_raw_pagetable(asid as u16) };
                     entry
-                        .set_ppn(next_table as *const _ as usize >> 12)
+                        .set_ppn(next_table_ptr as usize >> 12)
                         .validate();
                 }
             }
