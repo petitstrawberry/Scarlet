@@ -100,8 +100,8 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
             // Set the name
             task.name = path_str.to_string();
             // Clear page table entries
-            let idx = arch::vm::get_root_page_table_idx(task.vm_manager.get_asid()).unwrap();
-            let root_page_table = arch::vm::get_page_table(idx).unwrap();
+            let idx = arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
+            let root_page_table = arch::vm::get_pagetable(idx).unwrap();
             root_page_table.unmap_all();
             // Setup the trapframe
             vm::setup_trampoline(&mut task.vm_manager);
