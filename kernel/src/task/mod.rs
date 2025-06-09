@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, VfsManager}, library::std::print, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, VfsManager}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 
 /// The maximum number of file descriptors a task can have.
@@ -545,6 +545,8 @@ impl Task {
         None
     }
 
+
+
     // Set the entry point
     pub fn set_entry_point(&mut self, entry: usize) {
         self.vcpu.set_pc(entry as u64);
@@ -783,7 +785,7 @@ impl Task {
                     if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
                         // Pre-map the trampoline page
                         let root_pagetable = child.vm_manager.get_root_page_table().unwrap();
-                        root_pagetable.map_memory_area(shared_mmap)?;
+                        root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)?;
                     }
 
                 } else {

@@ -137,7 +137,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     match manager.get_root_page_table() {
                         Some(root_page_table) => {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(vaddr, paddr, mmap.permissions);
+                            root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
                         }
                         None => panic!("Root page table is not found"),
                     }
@@ -157,7 +157,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     match manager.get_root_page_table() {
                         Some(root_page_table) => {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(vaddr, paddr, mmap.permissions);
+                            root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
                         }
                         None => panic!("Root page table is not found"),
                     }

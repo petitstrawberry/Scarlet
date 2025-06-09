@@ -17,7 +17,7 @@ use core::str;
 
 use crate::abi::{AbiRegistry, MAX_ABI_LENGTH};
 use crate::device::manager::DeviceManager;
-use crate::fs::{File, VfsManager, MAX_PATH_LENGTH};
+use crate::fs::{VfsManager, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
@@ -220,8 +220,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             // Set the name
             task.name = path_str;
             // Clear page table entries
-            let idx = vm::get_root_page_table_idx(task.vm_manager.get_asid()).unwrap();
-            let root_page_table = vm::get_page_table(idx).unwrap();
+            let root_page_table  = vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
             root_page_table.unmap_all();
             // Setup the trapframe
             setup_trampoline(&mut task.vm_manager);

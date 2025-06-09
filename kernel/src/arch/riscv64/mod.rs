@@ -6,10 +6,9 @@ use trap::kernel::_kernel_trap_entry;
 use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
 use vcpu::Mode;
-use vm::get_page_table;
-use vm::get_root_page_table_idx;
 
 use crate::arch::instruction::Instruction;
+use crate::arch::vm::get_root_pagetable;
 use crate::early_println;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::STACK_SIZE;
@@ -78,14 +77,10 @@ impl Trapframe {
         self.kernel_trap = addr as u64;
     }
 
-    pub fn set_next_address_space(&mut self, asid: usize) {
-        let root_page_table_idx = get_root_page_table_idx(asid);
-        if root_page_table_idx.is_none() {
-            panic!("No root page table found for ASID {}", asid);
-        }
-        let root_page_table = get_page_table(root_page_table_idx.unwrap()).unwrap();
-        
-        let satp = root_page_table.get_val_for_satp(asid);
+    pub fn set_next_address_space(&mut self, asid: u16) {
+        let root_pagetable = get_root_pagetable(asid).expect("No root page table found for ASID");
+
+        let satp = root_pagetable.get_val_for_satp(asid);
         self.satp = satp as u64;
     }
 

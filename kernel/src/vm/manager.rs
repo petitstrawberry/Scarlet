@@ -36,16 +36,17 @@
 //!
 
 extern crate alloc;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 
-use crate::{arch::vm::{get_page_table, get_root_page_table_idx, mmu::PageTable}, environment::PAGE_SIZE};
+use crate::{arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable}, environment::PAGE_SIZE};
 
 use super::vmem::VirtualMemoryMap;
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
     memmap: Vec<VirtualMemoryMap>,
-    asid: usize,
+    asid: u16,
+    page_tables: Vec<Arc<PageTable>>,
 }
 
 impl VirtualMemoryManager {
@@ -57,6 +58,7 @@ impl VirtualMemoryManager {
         VirtualMemoryManager {
             memmap: Vec::new(),
             asid: 0,
+            page_tables: Vec::new(),
         }
     }
 
@@ -64,7 +66,14 @@ impl VirtualMemoryManager {
     /// 
     /// # Arguments
     /// * `asid` - The ASID to set
-    pub fn set_asid(&mut self, asid: usize) {
+    pub fn set_asid(&mut self, asid: u16) {
+        if self.asid == asid {
+            return; // No change needed
+        }
+        if self.asid != 0 && is_asid_used(self.asid) {
+            // Free the previous address space if it exists
+            free_virtual_address_space(self.asid);
+        }
         self.asid = asid;
     }
 
@@ -72,7 +81,7 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The ASID for the virtual memory manager.
-    pub fn get_asid(&self) -> usize {
+    pub fn get_asid(&self) -> u16 {
         self.asid
     }
 
@@ -188,17 +197,17 @@ impl VirtualMemoryManager {
         ret
     }
 
+    /// Adds a page table to the virtual memory manager.
+    pub fn add_page_table(&mut self, page_table: Arc<PageTable>) {
+        self.page_tables.push(page_table);
+    }
+
     /// Returns the root page table for the current address space.
     /// 
     /// # Returns
     /// The root page table for the current address space, if it exists.
     pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
-        let idx = get_root_page_table_idx(self.asid);
-        if let Some(root_page_table_idx) = idx {
-            get_page_table(root_page_table_idx)
-        } else {
-            None
-        }
+        get_root_pagetable(self.asid)
     }
 
     /// Translate a virtual address to physical address
@@ -222,6 +231,16 @@ impl VirtualMemoryManager {
             }
         }
         None
+    }
+}
+
+impl Drop for VirtualMemoryManager {
+    /// Drops the virtual memory manager, freeing the address space if it is still in use.
+    fn drop(&mut self) {
+        if self.asid != 0 && is_asid_used(self.asid) {
+            // Free the address space if it is still in use
+            free_virtual_address_space(self.asid);
+        }
     }
 }
 
