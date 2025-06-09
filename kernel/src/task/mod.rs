@@ -546,7 +546,6 @@ impl Task {
     }
 
 
-
     // Set the entry point
     pub fn set_entry_point(&mut self, entry: usize) {
         self.vcpu.set_pc(entry as u64);
