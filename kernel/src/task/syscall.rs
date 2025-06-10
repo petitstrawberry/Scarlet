@@ -12,17 +12,19 @@
 //! - Bind mount operations enable controlled sharing between isolated namespaces
 //! - All filesystem operations are thread-safe and handle concurrent access properly
 
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::str;
 
+use crate::abi::xv6::riscv64::fs::xv6fs::Xv6FSParams;
 use crate::abi::{AbiRegistry, MAX_ABI_LENGTH};
 use crate::device::manager::DeviceManager;
-use crate::fs::{VfsManager, MAX_PATH_LENGTH};
+use crate::fs::{FileType, VfsManager, MAX_PATH_LENGTH};
 use crate::task::elf_loader::load_elf_into_task;
 
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
-use crate::{print, println};
+use crate::print;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::WaitError;
 use crate::vm::{setup_user_stack, setup_trampoline};
