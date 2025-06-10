@@ -1,6 +1,6 @@
 use core::arch::{asm, naked_asm};
 
-use crate::syscall::Syscall;
+use crate::{syscall::Syscall, task::exit};
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
@@ -11,10 +11,21 @@ pub extern "C" fn _entry() {
         .option norvc
         .option norelax
         .align 8
-                j       main
+                j       _start
         ",
         );
     }
+}
+
+unsafe extern "Rust" {
+    fn main() -> i32;
+}
+
+#[unsafe(link_section = ".init")]
+#[unsafe(export_name = "_start")]
+pub fn _start() {
+    let ret = unsafe { main() };
+    exit(ret as i32);
 }
 
 pub fn arch_syscall0(syscall: Syscall) -> usize{
