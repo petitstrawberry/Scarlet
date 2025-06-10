@@ -4,6 +4,7 @@ use crate::syscall::{syscall0, syscall1, syscall3, syscall4, Syscall};
 use crate::vec::Vec;
 use crate::boxed::Box;
 
+#[repr(u64)]
 pub enum CloneFlagsDef {
     Vm      = 0b00000001, // Clone the VM
     Fs      = 0b00000010, // Clone the filesystem
