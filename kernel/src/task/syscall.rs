@@ -86,7 +86,7 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
     
-    trapframe.increment_pc_next(&parent_task); /* Increment the program counter */
+    trapframe.increment_pc_next(parent_task); /* Increment the program counter */
 
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.store(trapframe);
