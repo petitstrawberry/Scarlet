@@ -138,7 +138,7 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
 
             stack_pointer -= argc * 8;
             stack_pointer -= stack_pointer % 16; // Align to 16 bytes
-            
+
             // Push the addresses of the arguments onto the stack
             unsafe {
                 let translated_stack_pointer = task.vm_manager
@@ -423,4 +423,22 @@ pub fn sys_fstat(trapframe: &mut crate::arch::Trapframe) -> usize {
     };
 
     0
+}
+
+pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let path = match get_path_str(path_ptr) {
+        Ok(p) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    // Try to create the directory
+    let vfs = task.vfs.as_mut().unwrap();
+    match vfs.create_dir(&path) {
+        Ok(_) => 0, // Success
+        Err(_) => usize::MAX, // Error
+    }
 }
