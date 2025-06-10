@@ -1,24 +1,68 @@
 use alloc::{boxed::Box, string::ToString, vec::Vec};
-use crate::{abi::xv6::riscv64::fs::xv6fs::Stat, arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager}, task::{elf_loader::load_elf_into_task, mytask}, vm};
+use crate::{abi::xv6::riscv64::fs::xv6fs::Stat, arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager}, library::std::string::{cstring_to_string, StringConversionError}, task::{elf_loader::load_elf_into_task, mytask}, vm};
 
 const MAX_PATH_LENGTH: usize = 128;
 
 pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     // Get arguments from the trapframe
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let path_ptr = task.vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
+        .unwrap() as *const u8;
     
     /* 
      * The second and third arguments are pointers to arrays of pointers to
      * null-terminated strings (char **argv).
      * We will not use them in this implementation.
      */
-    // let argv_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const *const u8;
+    let mut argv_ptr = task.vm_manager
+        .translate_vaddr(trapframe.get_arg(1))
+        .unwrap() as *const *const u8;
     
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
 
     task.vcpu.store(trapframe); // Store the current trapframe in the task's vcpu
+
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => VfsManager::to_absolute_path(&task, &s).unwrap(),
+        Err(_) => {
+            return usize::MAX; // Invalid C string
+        },
+    };
+
+    // Get argv from argv_ptr
+    let mut argv = Vec::new();
+
+    loop {
+        if argv_ptr.is_null() {
+            break; // Stop if we reach a null pointer
+        }
+
+        let translated_argv_ptr = task.vm_manager
+            .translate_vaddr( unsafe { *argv_ptr } as usize )
+            .unwrap_or(0) as *const u8;
+
+        let (arg, _) = match cstring_to_string(translated_argv_ptr, 32) {
+            Ok((s, len)) => (s, len),
+            Err(e) => {
+                match e {
+                    StringConversionError::NullPointer => {
+                        break; // Stop if we reach a null pointer
+                    }
+                    _ => {
+                        return usize::MAX; // Invalid C string in argv
+                    }
+                }
+            },
+        };
+
+        if arg.is_empty() {
+            break; // Stop if we reach a null pointer
+        }
+        argv.push(arg);
+        argv_ptr = unsafe { argv_ptr.add(1) };
+    }
     
     // Backup the managed pages
     let mut backup_pages = Vec::new();
@@ -28,44 +72,7 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     // Backing up the size
     let backup_text_size = task.text_size;
     let backup_data_size = task.data_size;
-    
-    // Parse path as a null-terminated C string
-    let mut path_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *path_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            path_bytes.push(byte);
-            i += 1;
-            
-            // Safety check to prevent infinite loop
-            if i > MAX_PATH_LENGTH {
-                // Restore the managed pages, memory mapping and sizes
-                task.managed_pages = backup_pages; // Restore the pages
-                task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-                task.text_size = backup_text_size; // Restore the text size
-                task.data_size = backup_data_size; // Restore the data size
-                return usize::MAX; // Path too long
-            }
-        }
-    }
-    
-    // Convert path bytes to string
-    let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => VfsManager::to_absolute_path(&task, s).unwrap(),
-        Err(_) => {
-            // Restore the managed pages, memory mapping and sizes
-            task.managed_pages = backup_pages; // Restore the pages
-            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-            task.text_size = backup_text_size; // Restore the text size
-            task.data_size = backup_data_size; // Restore the data size
-            return usize::MAX // Invalid UTF-8
-        },
-    };
-    
+        
     // Try to open the executable file
     let file = match task.vfs.as_ref() {
         Some(vfs) => vfs.open(path_str.as_str(), 0),
@@ -106,7 +113,41 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
             // Setup the trapframe
             vm::setup_trampoline(&mut task.vm_manager);
             // Setup the stack
-            let stack_pointer = vm::setup_user_stack(task);
+            let (_, stack_top) = vm::setup_user_stack(task);
+            let mut stack_pointer = stack_top as usize;
+
+            let mut arg_ptrs: Vec<u64> = Vec::new();
+            for arg in argv.iter() {
+                let arg_bytes = arg.as_bytes();
+                stack_pointer -= arg_bytes.len() + 1; // +1 for null terminator
+                stack_pointer -= stack_pointer % 16; // Align to 16 bytes
+
+                unsafe {
+                    let translated_stack_pointer = task.vm_manager
+                        .translate_vaddr(stack_pointer)
+                        .unwrap();
+                    let stack_slice = core::slice::from_raw_parts_mut(translated_stack_pointer as *mut u8, arg_bytes.len() + 1);
+                    stack_slice[..arg_bytes.len()].copy_from_slice(arg_bytes);
+                    stack_slice[arg_bytes.len()] = 0; // Null terminator
+                }
+
+                arg_ptrs.push(stack_pointer as u64); // Store the address of the argument
+            }
+
+            let argc = arg_ptrs.len();
+
+            stack_pointer -= argc * 8;
+            stack_pointer -= stack_pointer % 16; // Align to 16 bytes
+            
+            // Push the addresses of the arguments onto the stack
+            unsafe {
+                let translated_stack_pointer = task.vm_manager
+                    .translate_vaddr(stack_pointer)
+                    .unwrap() as *mut u64;
+                for (i, &arg_ptr) in arg_ptrs.iter().enumerate() {
+                    *(translated_stack_pointer.add(i)) = arg_ptr;
+                }
+            }
 
             // Set the new entry point for the task
             task.set_entry_point(entry_point as usize);
@@ -115,12 +156,13 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
             task.vcpu.regs = Registers::new();
             // Set the stack pointer
             task.vcpu.set_sp(stack_pointer);
+            task.vcpu.regs.reg[11] = stack_pointer as usize; // Set the return value (a0) to 0 in the new proc
 
             // Switch to the new task
             task.vcpu.switch(trapframe);
             
-            // Return 0 on success (though this should never actually return)
-            0
+            // Return argc as the return value (a0)
+            argc
         },
         Err(_) => {
             // Restore the managed pages, memory mapping and sizes
