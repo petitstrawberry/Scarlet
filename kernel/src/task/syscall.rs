@@ -229,7 +229,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             // Setup the trapframe
             setup_trampoline(&mut task.vm_manager);
             // Setup the stack
-            let stack_pointer = setup_user_stack(task);
+            let stack_pointer = setup_user_stack(task).1;
 
             // Set the new entry point for the task
             task.set_entry_point(entry_point as usize);

@@ -181,15 +181,15 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     setup_trampoline(&mut task.vm_manager);
 }
 
-pub fn setup_user_stack(task: &mut Task) -> usize{
+pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
     /* User stack page */
     let num_of_stack_page = 2; // 2 pages for user stack
-    let stack_start = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
-    task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
+    let stack_base = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
+    task.allocate_stack_pages(stack_base, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
     /* Guard page */
-    task.allocate_guard_pages(stack_start - PAGE_SIZE, 1).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
+    task.allocate_guard_pages(stack_base - PAGE_SIZE, 1).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
     
-    USER_STACK_TOP
+    (stack_base, USER_STACK_TOP)
 }
 
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
