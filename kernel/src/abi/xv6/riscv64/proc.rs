@@ -1,4 +1,4 @@
-use crate::{arch::{get_cpu, Trapframe}, fs::{helper::get_path_str, File, FileType, VfsManager}, sched::scheduler::get_scheduler, task::{mytask, WaitError}};
+use crate::{arch::{get_cpu, Trapframe}, fs::{helper::get_path_str, File, FileType, VfsManager}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags, WaitError}};
 
 pub fn sys_fork(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
@@ -9,7 +9,7 @@ pub fn sys_fork(trapframe: &mut Trapframe) -> usize {
     parent_task.vcpu.store(trapframe);
     
     /* Clone the task */
-    match parent_task.clone_task() {
+    match parent_task.clone_task(CloneFlags::default()) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
             child_task.vcpu.regs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
