@@ -1,17 +1,75 @@
+use core::clone;
+
 use crate::syscall::{syscall0, syscall1, syscall3, syscall4, Syscall};
 use crate::vec::Vec;
 use crate::boxed::Box;
 
-// use crate::string::String;
+pub enum CloneFlagsDef {
+    Vm      = 0b00000001, // Clone the VM
+    Fs      = 0b00000010, // Clone the filesystem
+    Files   = 0b00000100, // Clone the file descriptors
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CloneFlags {
+    raw: u64,
+}
+
+impl CloneFlags {
+    pub fn new() -> Self {
+        CloneFlags { raw: 0 }
+    }
+
+    pub fn from_raw(raw: u64) -> Self {
+        CloneFlags { raw }
+    }
+
+    pub fn set(&mut self, flag: CloneFlagsDef) {
+        self.raw |= flag as u64;
+    }
+
+    pub fn clear(&mut self, flag: CloneFlagsDef) {
+        self.raw &= !(flag as u64);
+    }
+
+    pub fn is_set(&self, flag: CloneFlagsDef) -> bool {
+        (self.raw & (flag as u64)) != 0
+    }
+
+    pub fn get_raw(&self) -> u64 {
+        self.raw
+    }
+}
+
+impl Default for CloneFlags {
+    fn default() -> Self {
+        let raw = CloneFlagsDef::Fs as u64 | CloneFlagsDef::Files as u64;
+        CloneFlags { raw }
+    }
+}
 
 /// Clones the current process.
+/// 
+/// # Arguments
+/// * `flags` - Flags to control the behavior of the clone operation.
 /// 
 /// # Return Value
 /// - In the parent process: the ID of the child process
 /// - In the child process: 0
 /// - On error: -1
-pub fn clone() -> i32 {
-    syscall0(Syscall::Clone) as i32
+pub fn clone(flags: CloneFlags) -> i32 {
+    syscall1(Syscall::Clone, flags.get_raw() as usize) as i32
+}
+
+/// Fork the current process.
+/// 
+/// # Return Value
+/// - In the parent process: the ID of the child process
+/// - In the child process: 0
+/// - On error: -1
+pub fn fork() -> i32 {
+    let clone_flags = CloneFlags::default();
+    clone(clone_flags)
 }
 
 /// Exits the current process.

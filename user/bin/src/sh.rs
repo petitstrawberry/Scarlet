@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::{print, println, string::String, task::{clone, execve, exit, waitpid}};
+use std::{print, println, string::String, task::{execve, exit, fork, waitpid}};
 
 
 #[unsafe(no_mangle)]
@@ -46,7 +46,7 @@ pub extern "C" fn main() -> i32 {
             continue;
         }
 
-        match clone() {
+        match fork() {
             0 => {
                 // Execute the shell program
                 if execve(&inputs, &[], &[]) != 0 {
