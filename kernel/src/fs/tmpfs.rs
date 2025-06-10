@@ -440,25 +440,23 @@ impl TmpFileHandle {
     fn get_fs(&self) -> &TmpFS {
         unsafe { &*self.fs }
     }
-}
 
-impl FileHandle for TmpFileHandle {
-    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
-        // Handle device files
+    fn read_device(&self, buffer: &mut [u8]) -> Result<usize> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.device();
-            let mut device_write = device_guard_ref.write();
+            let mut device_read = device_guard_ref.write();
             
-            match device_write.device_type() {
+            match device_read.device_type() {
                 DeviceType::Char => {
-                    if let Some(char_device) = device_write.as_char_device() {
+                    if let Some(char_device) = device_read.as_char_device() {
                         let mut bytes_read = 0;
-                        for i in 0..buffer.len() {
-                            if let Some(byte) = char_device.read_byte() {
-                                buffer[i] = byte;
-                                bytes_read += 1;
-                            } else {
-                                break;
+                        for byte in buffer.iter_mut() {
+                            match char_device.read_byte() {
+                                Some(b) => {
+                                    *byte = b;
+                                    bytes_read += 1;
+                                },
+                                None => break,
                             }
                         }
                         return Ok(bytes_read);
@@ -470,14 +468,15 @@ impl FileHandle for TmpFileHandle {
                     }
                 },
                 DeviceType::Block => {
-                    if let Some(block_device) = device_write.as_block_device() {
+                    if let Some(block_device) = device_read.as_block_device() {
+                        // For block devices, we can read a single sector
                         let request = Box::new(crate::device::block::request::BlockIORequest {
                             request_type: crate::device::block::request::BlockIORequestType::Read,
                             sector: 0,
                             sector_count: 1,
                             head: 0,
                             cylinder: 0,
-                            buffer: vec![0; buffer.len().min(512)],
+                            buffer: buffer.to_vec(),
                         });
                         
                         block_device.enqueue_request(request);
@@ -485,11 +484,7 @@ impl FileHandle for TmpFileHandle {
                         
                         if let Some(result) = results.first() {
                             match &result.result {
-                                Ok(_) => {
-                                    let bytes_to_copy = buffer.len().min(result.request.buffer.len());
-                                    buffer[..bytes_to_copy].copy_from_slice(&result.request.buffer[..bytes_to_copy]);
-                                    return Ok(bytes_to_copy);
-                                },
+                                Ok(_) => return Ok(buffer.len()),
                                 Err(e) => {
                                     return Err(FileSystemError {
                                         kind: FileSystemErrorKind::IoError,
@@ -515,7 +510,13 @@ impl FileHandle for TmpFileHandle {
             }
         }
 
-        // Handle regular files
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "No device guard available".to_string(),
+        })
+    }
+
+    fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize> {
         let fs = self.get_fs();
         let mut position = self.position.write();
         
@@ -546,38 +547,7 @@ impl FileHandle for TmpFileHandle {
         }
     }
 
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
-        let fs = self.get_fs();
-        
-        if let Some(node) = fs.find_node(&self.path) {
-            if node.file_type != FileType::Directory {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotADirectory,
-                    message: "Not a directory".to_string(),
-                });
-            }
-            
-            let mut entries = Vec::new();
-            for (name, child) in node.children.entries() {
-                entries.push(DirectoryEntry {
-                    name: name.clone(),
-                    file_type: child.file_type.clone(),
-                    size: child.metadata.size,
-                    metadata: Some(child.metadata.clone()),
-                });
-            }
-            
-            Ok(entries)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "Directory not found".to_string(),
-            })
-        }
-    }
-    
-    fn write(&self, buffer: &[u8]) -> Result<usize> {
-        // Handle device files
+    fn write_device(&self, buffer: &[u8]) -> Result<usize> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.device();
             let mut device_write = device_guard_ref.write();
@@ -640,39 +610,128 @@ impl FileHandle for TmpFileHandle {
                     });
                 }
             }
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "No device guard available".to_string(),
+            })
         }
+    }
 
-        // Handle regular files
+    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize> {
         let fs = self.get_fs();
         let mut position = self.position.write();
         
         // Check memory limit before writing
         fs.check_memory_limit(buffer.len())?;
         
-        if let Some(result) = fs.find_node_mut(&self.path, |node| {
-            let old_size = node.content.len();
+        match fs.find_node_mut(&self.path, |n| {
+            let old_size = n.content.len();
             let new_position = *position as usize + buffer.len();
             
             // Expand file if necessary
-            if new_position > node.content.len() {
-                node.content.resize(new_position, 0);
+            if new_position > n.content.len() {
+                n.content.resize(new_position, 0);
             }
             
             // Write data
-            node.content[*position as usize..new_position].copy_from_slice(buffer);
-            node.update_size(node.content.len());
+            n.content[*position as usize..new_position].copy_from_slice(buffer);
+            n.update_size(n.content.len());
             
-            let size_increase = node.content.len().saturating_sub(old_size);
+            let size_increase = n.content.len().saturating_sub(old_size);
             size_increase
         }) {
-            *position += buffer.len() as u64;
-            fs.add_memory_usage(result);
-            Ok(buffer.len())
+            Some(_) => {
+                *position += buffer.len() as u64;
+                fs.add_memory_usage(buffer.len());
+                Ok(buffer.len())
+            },
+            None => {
+                Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotFound,
+                    message: "File not found".to_string(),
+                })
+            }
+        }
+    }
+}
+
+impl FileHandle for TmpFileHandle {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+        match self.file_type {
+            FileType::CharDevice(_) | FileType::BlockDevice(_) => {
+                // Handle device files
+                self.read_device(buffer)
+            },
+            FileType::RegularFile => {
+                self.read_regular_file(buffer)
+            }
+            FileType::Directory => {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::IsADirectory,
+                    message: "Cannot read from a directory".to_string(),
+                });
+            },
+            _ => {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: "Unsupported file type".to_string(),
+                });
+            }
+        }
+    }
+
+     fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
+        let fs = self.get_fs();
+        
+        if let Some(node) = fs.find_node(&self.path) {
+            if node.file_type != FileType::Directory {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotADirectory,
+                    message: "Not a directory".to_string(),
+                });
+            }
+            
+            let mut entries = Vec::new();
+            for (name, child) in node.children.entries() {
+                entries.push(DirectoryEntry {
+                    name: name.clone(),
+                    file_type: child.file_type.clone(),
+                    size: child.metadata.size,
+                    metadata: Some(child.metadata.clone()),
+                });
+            }
+            
+            Ok(entries)
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
+                message: "Directory not found".to_string(),
             })
+        }
+    }
+    
+    fn write(&self, buffer: &[u8]) -> Result<usize> {
+        match self.file_type {
+            FileType::CharDevice(_) | FileType::BlockDevice(_) => {
+                // Handle device files
+                self.write_device(buffer)
+            },
+            FileType::RegularFile => {
+                self.write_regular_file(buffer)
+            }
+            FileType::Directory => {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::IsADirectory,
+                    message: "Cannot write to a directory".to_string(),
+                });
+            },
+            _ => {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: "Unsupported file type".to_string(),
+                });
+            }
         }
     }
     
@@ -731,7 +790,6 @@ impl FileHandle for TmpFileHandle {
 impl FileOperations for TmpFS {
     fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileHandle>> {
         let normalized = self.normalize_path(path);
-        
         if let Some(node) = self.find_node(&normalized) {
             match node.file_type {
                 FileType::RegularFile | FileType::Directory => {
