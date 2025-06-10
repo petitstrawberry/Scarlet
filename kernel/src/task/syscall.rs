@@ -32,7 +32,7 @@ use super::mytask;
 pub fn sys_brk(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let brk = trapframe.get_arg(0);
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
     match task.set_brk(brk) {
         Ok(_) => task.get_brk(),
         Err(_) => usize::MAX, /* -1 */
@@ -43,7 +43,7 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0);
     let brk = task.get_brk();
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
     match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
         Ok(_) => brk,
         Err(_) => usize::MAX, /* -1 */
@@ -52,7 +52,8 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
     let c = trapframe.get_arg(0) as u32;
-    trapframe.epc += 4;
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
     if let Some(ch) = char::from_u32(c) {
         print!("{}", ch);
     } else {
@@ -63,7 +64,8 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
     let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0).unwrap();
-    trapframe.epc += 4;
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
     
     if let Some(byte) = serial.get() {
         byte as usize
@@ -84,7 +86,7 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
     
-    trapframe.epc += 4; /* Increment the program counter */
+    trapframe.increment_pc_next(&parent_task); /* Increment the program counter */
 
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.store(trapframe);
@@ -118,7 +120,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // let envp_ptr = trapframe.get_arg(2) as *const *const u8;
     
     // Increment PC to avoid infinite loop if execve fails
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
     
     // Get the current task
     let task = mytask().unwrap();
@@ -257,7 +259,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
 
     let abi_str_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(3)).unwrap() as *const u8;
     let mut abi_bytes = Vec::new();
@@ -273,7 +275,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
             
             // Safety check to prevent infinite loop
             if i > MAX_ABI_LENGTH {
-                trapframe.epc += 4;
+                trapframe.increment_pc_next(task);
                 return usize::MAX; // Path too long
             }
         }
@@ -285,7 +287,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     };
     let abi = AbiRegistry::instantiate(abi_str);
     if abi.is_none() {
-        trapframe.epc += 4;
+        trapframe.increment_pc_next(task);
         return usize::MAX; // ABI not found
     }
     let abi = abi.unwrap();
@@ -324,14 +326,14 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                             *status_ptr = status;
                         }
                     }
-                    trapframe.epc += 4;
+                    trapframe.increment_pc_next(task);
                     return pid;
                 },
                 Err(error) => {
                     match error {
                         WaitError::ChildNotExited(_) => continue,
                         _ => {
-                            trapframe.epc += 4;
+                            trapframe.increment_pc_next(task);
                             return usize::MAX;
                         },
                     }
@@ -339,7 +341,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             }
         }
         // Any child process has exited
-        trapframe.epc += 4;
+        trapframe.increment_pc_next(task);
         return usize::MAX;
     }
     
@@ -352,17 +354,17 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     *status_ptr = status;
                 }
             }
-            trapframe.epc += 4;
+            trapframe.increment_pc_next(task);
             pid as usize
         }
         Err(error) => {
             match error {
                 WaitError::NoSuchChild(_) => {
-                    trapframe.epc += 4;
+                    trapframe.increment_pc_next(task);
                     usize::MAX
                 },
                 WaitError::ChildTaskNotFound(_) => {
-                    trapframe.epc += 4;
+                    trapframe.increment_pc_next(task);
                     usize::MAX
                 },
                 WaitError::ChildNotExited(_) => {
@@ -377,12 +379,12 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
     task.get_id() as usize
 }
 
 pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    trapframe.epc += 4;
+    trapframe.increment_pc_next(task);
     task.get_parent_id().unwrap_or(task.get_id()) as usize
 }
