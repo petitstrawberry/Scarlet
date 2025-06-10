@@ -1,4 +1,4 @@
-use crate::{arch::{get_cpu, Trapframe}, sched::scheduler::get_scheduler, task::{mytask, WaitError}};
+use crate::{arch::{get_cpu, Trapframe}, fs::{helper::get_path_str, File, FileType, VfsManager}, sched::scheduler::get_scheduler, task::{mytask, WaitError}};
 
 pub fn sys_fork(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
@@ -83,4 +83,33 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
         Ok(_) => brk,
         Err(_) => usize::MAX, /* -1 */
     }
+}
+
+pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0) as usize).unwrap() as *const u8;
+    let path = match get_path_str(path_ptr) {
+        Ok(p) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, /* -1 */
+    };
+
+    // Try to open the file
+    let file: Result<File, _> = match task.vfs.as_ref() {
+        Some(vfs) => vfs.open(&path, 0),
+        None => return usize::MAX, // VFS not initialized
+    };
+    if file.is_err() {
+        return usize::MAX; // -1
+    }
+    let file = file.unwrap();
+    // Check if the file is a directory
+    if file.metadata().unwrap().file_type != FileType::Directory {
+        return usize::MAX; // -1
+    }
+
+    task.cwd = Some(path); // Update the current working directory
+
+    0
 }
