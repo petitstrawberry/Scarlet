@@ -113,3 +113,9 @@ pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
 
     0
 }
+
+pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    task.get_id()
+}
