@@ -9,7 +9,7 @@ use std::{println, task::{execve, exit, waitpid}};
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     println!("init: I'm the init process: PID={}", std::task::getpid());
-    match std::task::clone() {
+    match std::task::fork() {
         0 => {
             // Execute the shell program
             if execve("/bin/sh", &[], &[]) != 0 {

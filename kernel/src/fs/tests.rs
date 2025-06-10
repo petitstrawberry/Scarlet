@@ -24,7 +24,7 @@ use crate::device::block::mockblk::MockBlockDevice;
 use crate::fs::testfs::{TestFileSystem, TestFileSystemDriver};
 use crate::fs::tmpfs::TmpFS;
 use crate::println;
-use crate::task::new_user_task;
+use crate::task::{new_user_task, CloneFlags};
 
 // Test cases
 #[test_case]
@@ -871,7 +871,7 @@ fn test_container_rootfs_switching_demo() {
     // 8. Test VfsManager inheritance during task cloning
     
     // Clone container 1 task and verify VfsManager inheritance
-    let cloned_container1_task = container1_task.clone_task()
+    let cloned_container1_task = container1_task.clone_task(CloneFlags::default())
         .expect("Failed to clone container1 task");
     
     // Verify that cloned task uses same VfsManager

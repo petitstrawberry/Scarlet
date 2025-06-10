@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, VfsManager}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, VfsManager}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 
 /// The maximum number of file descriptors a task can have.
@@ -97,6 +97,50 @@ pub struct Task {
 pub struct ManagedPage {
     pub vaddr: usize,
     pub page: Box<Page>,
+}
+
+pub enum CloneFlagsDef {
+    Vm      = 0b00000001, // Clone the VM
+    Fs      = 0b00000010, // Clone the filesystem
+    Files   = 0b00000100, // Clone the file descriptors
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CloneFlags {
+    raw: u64,
+}
+
+impl CloneFlags {
+    pub fn new() -> Self {
+        CloneFlags { raw: 0 }
+    }
+
+    pub fn from_raw(raw: u64) -> Self {
+        CloneFlags { raw }
+    }
+
+    pub fn set(&mut self, flag: CloneFlagsDef) {
+        self.raw |= flag as u64;
+    }
+
+    pub fn clear(&mut self, flag: CloneFlagsDef) {
+        self.raw &= !(flag as u64);
+    }
+
+    pub fn is_set(&self, flag: CloneFlagsDef) -> bool {
+        (self.raw & (flag as u64)) != 0
+    }
+
+    pub fn get_raw(&self) -> u64 {
+        self.raw
+    }
+}
+
+impl Default for CloneFlags {
+    fn default() -> Self {
+        let raw = CloneFlagsDef::Fs as u64 | CloneFlagsDef::Files as u64;
+        CloneFlags { raw }
+    }
 }
 
 static TASK_ID: Mutex<usize> = Mutex::new(1);
@@ -731,13 +775,15 @@ impl Task {
 
     /// Clone this task, creating a near-identical copy
     /// 
+    /// # Arguments
+    /// 
     /// # Returns
     /// The cloned task
     /// 
     /// # Errors 
     /// If the task cannot be cloned, an error is returned.
     ///
-    pub fn clone_task(&mut self) -> Result<Task, &'static str> {
+    pub fn clone_task(&mut self, flags: CloneFlags) -> Result<Task, &'static str> {
         // Create a new task (but don't call init() yet)
         let mut child = Task::new(
             self.name.clone(),
@@ -752,83 +798,86 @@ impl Task {
                 child.init();
             },
             TaskType::User => {
-                // For user tasks, manually set up VM without calling init()
-                // to avoid creating new stack that would overwrite parent's stack content
-                use crate::arch::vm::alloc_virtual_address_space;
-                let asid = alloc_virtual_address_space();
-                child.vm_manager.set_asid(asid);
-                child.state = TaskState::Ready;
-            }
-        }
-        
-        // Copy or share memory maps from parent to child
-        for mmap in self.vm_manager.get_memmap() {
-            let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-            let vaddr = mmap.vmarea.start;
-            
-            if num_pages > 0 {
-                if mmap.is_shared {
-                    // Shared memory regions: just reference the same physical pages
-                    let shared_mmap = VirtualMemoryMap {
-                        pmarea: mmap.pmarea, // Same physical memory
-                        vmarea: mmap.vmarea, // Same virtual addresses
-                        permissions: mmap.permissions,
-                        is_shared: true,
-                    };
-                    // Add the shared memory map directly to the child task
-                    child.vm_manager.add_memory_map(shared_mmap)
-                        .map_err(|_| "Failed to add shared memory map to child task")?;
-
-                    // TODO: Add logic to determine if the memory map is a trampoline
-                    // If the memory map is the trampoline, pre-map it
-                    if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                        // Pre-map the trampoline page
-                        let root_pagetable = child.vm_manager.get_root_page_table().unwrap();
-                        root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)?;
-                    }
-
-                } else {
-                    // Private memory regions: allocate new pages and copy contents
-                    let permissions = mmap.permissions;
-                    let pages = allocate_raw_pages(num_pages);
-                    let size = num_pages * PAGE_SIZE;
-                    let paddr = pages as usize;
-                    let new_mmap = VirtualMemoryMap {
-                        pmarea: MemoryArea {
-                            start: paddr,
-                            end: paddr + (size - 1),
-                        },
-                        vmarea: MemoryArea {
-                            start: vaddr,
-                            end: vaddr + (size - 1),
-                        },
-                        permissions,
-                        is_shared: false,
-                    };
-                    
-                    // Copy the contents of the original memory (including stack contents)
-                    for i in 0..num_pages {
-                        let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
-                        let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                src_page_addr as *const u8,
-                                dst_page_addr as *mut u8,
-                                PAGE_SIZE
-                            );
-                        }
-                        // Manage the new pages in the child task
-                        child.add_managed_page(ManagedPage {
-                            vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
-                            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
-                        });
-                    }
-                    // Add the new memory map to the child task
-                    child.vm_manager.add_memory_map(new_mmap)
-                        .map_err(|_| "Failed to add memory map to child task")?;
+                if !flags.is_set(CloneFlagsDef::Vm) {
+                    // For user tasks, manually set up VM without calling init()
+                    // to avoid creating new stack that would overwrite parent's stack content
+                    let asid = alloc_virtual_address_space();
+                    child.vm_manager.set_asid(asid);
                 }
             }
         }
+        
+        if !flags.is_set(CloneFlagsDef::Vm) {
+            // Copy or share memory maps from parent to child
+            for mmap in self.vm_manager.get_memmap() {
+                let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                let vaddr = mmap.vmarea.start;
+                
+                if num_pages > 0 {
+                    if mmap.is_shared {
+                        // Shared memory regions: just reference the same physical pages
+                        let shared_mmap = VirtualMemoryMap {
+                            pmarea: mmap.pmarea, // Same physical memory
+                            vmarea: mmap.vmarea, // Same virtual addresses
+                            permissions: mmap.permissions,
+                            is_shared: true,
+                        };
+                        // Add the shared memory map directly to the child task
+                        child.vm_manager.add_memory_map(shared_mmap)
+                            .map_err(|_| "Failed to add shared memory map to child task")?;
+
+                        // TODO: Add logic to determine if the memory map is a trampoline
+                        // If the memory map is the trampoline, pre-map it
+                        if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
+                            // Pre-map the trampoline page
+                            let root_pagetable = child.vm_manager.get_root_page_table().unwrap();
+                            root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)?;
+                        }
+
+                    } else {
+                        // Private memory regions: allocate new pages and copy contents
+                        let permissions = mmap.permissions;
+                        let pages = allocate_raw_pages(num_pages);
+                        let size = num_pages * PAGE_SIZE;
+                        let paddr = pages as usize;
+                        let new_mmap = VirtualMemoryMap {
+                            pmarea: MemoryArea {
+                                start: paddr,
+                                end: paddr + (size - 1),
+                            },
+                            vmarea: MemoryArea {
+                                start: vaddr,
+                                end: vaddr + (size - 1),
+                            },
+                            permissions,
+                            is_shared: false,
+                        };
+                        
+                        // Copy the contents of the original memory (including stack contents)
+                        for i in 0..num_pages {
+                            let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
+                            let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    src_page_addr as *const u8,
+                                    dst_page_addr as *mut u8,
+                                    PAGE_SIZE
+                                );
+                            }
+                            // Manage the new pages in the child task
+                            child.add_managed_page(ManagedPage {
+                                vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
+                                page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+                            });
+                        }
+                        // Add the new memory map to the child task
+                        child.vm_manager.add_memory_map(new_mmap)
+                            .map_err(|_| "Failed to add memory map to child task")?;
+                    }
+                }
+            }
+        }
+
         // Copy register states
         child.vcpu.regs = self.vcpu.regs.clone();
         
@@ -844,27 +893,24 @@ impl Task {
         child.entry = self.entry;
         child.vcpu.set_pc(self.vcpu.get_pc());
 
-        // Copy file descriptors
-        child.fd_table = self.fd_table.clone();
-        child.files = self.files.clone();
-
-        // Clone vfs manager pointer
-        if let Some(vfs) = &self.vfs {
-            child.vfs = Some(vfs.clone());
-        } else {
-            child.vfs = None;
+        if flags.is_set(CloneFlagsDef::Files) {
+            // Copy file descriptors
+            child.fd_table = self.fd_table.clone();
+            child.files = self.files.clone();
         }
-
-        // Copy the ABI
-        if let Some(abi) = &self.abi {
-            child.abi = Some(abi.clone());
-        } else {
-            child.abi = None;
-        }
-
-        // Copy the current working directory
-        child.cwd = self.cwd.clone();
         
+        if flags.is_set(CloneFlagsDef::Fs) {
+            // Clone the filesystem manager
+            if let Some(vfs) = &self.vfs {
+                child.vfs = Some(vfs.clone());
+                // Copy the current working directory
+                child.cwd = self.cwd.clone();
+            } else {
+                child.vfs = None;
+                child.cwd = None; // No filesystem manager, no current working directory
+            }
+        }
+
         // Set the state to Ready
         child.state = self.state;
 
@@ -981,6 +1027,8 @@ pub fn mytask() -> Option<&'static mut Task> {
 mod tests {
     use alloc::string::ToString;
 
+    use crate::task::CloneFlags;
+
     #[test_case]
     fn test_set_brk() {
         let mut task = super::new_user_task("Task0".to_string(), 0);
@@ -1055,7 +1103,7 @@ mod tests {
         let parent_id = parent_task.get_id();
 
         // Clone the parent task
-        let child_task = parent_task.clone_task().unwrap();
+        let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Get child memory map count after cloning
         let child_memmap_count = child_task.vm_manager.get_memmap().len();
@@ -1161,7 +1209,7 @@ mod tests {
         }
 
         // Clone the parent task
-        let child_task = parent_task.clone_task().unwrap();
+        let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the corresponding stack memory map in child
         let child_stack_mmap = child_task.vm_manager.get_memmap().iter()
@@ -1250,7 +1298,7 @@ mod tests {
         }
 
         // Clone the parent task
-        let child_task = parent_task.clone_task().unwrap();
+        let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the shared memory map in child
         let child_shared_mmap = child_task.vm_manager.get_memmap().iter()

@@ -26,7 +26,7 @@ use crate::task::elf_loader::load_elf_into_task;
 use crate::arch::{get_cpu, vm, Registers, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
-use crate::task::WaitError;
+use crate::task::{CloneFlags, WaitError};
 use crate::vm::{setup_user_stack, setup_trampoline};
 
 use super::mytask;
@@ -87,14 +87,13 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
-    
     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
-
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.store(trapframe);
-    
+    let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
+
     /* Clone the task */
-    match parent_task.clone_task() {
+    match parent_task.clone_task(clone_flags) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
             child_task.vcpu.regs.reg[10] = 0; /* Set the return value to 0 in the child task */
