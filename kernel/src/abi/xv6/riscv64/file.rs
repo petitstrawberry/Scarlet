@@ -177,36 +177,26 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+#[repr(i32)]
+enum OpenMode {
+    ReadOnly  = 0x000,
+    WriteOnly = 0x001,
+    ReadWrite = 0x002,
+    Create    = 0x200,
+    Truncate  = 0x400,
+}
+
 pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let _flags = trapframe.get_arg(1) as i32;
-    let _mode = trapframe.get_arg(2) as i32;
+    let mode = trapframe.get_arg(1) as i32;
 
     // Increment PC to avoid infinite loop if open fails
     trapframe.increment_pc_next(task);
 
-    // Parse path as a null-terminated C string
-    let mut path_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *path_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            path_bytes.push(byte);
-            i += 1;
-
-            if i > MAX_PATH_LENGTH {
-                return usize::MAX; // Path too long
-            }
-        }
-    }
-
     // Convert path bytes to string
-    let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => VfsManager::to_absolute_path(&task, s).unwrap(),
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => VfsManager::to_absolute_path(&task, &path).unwrap(),
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
@@ -227,7 +217,27 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
             fd.unwrap() as usize
         }
         Err(e) =>{
-            usize::MAX // File open error
+            // If the file does not exist and we are trying to create it
+            if mode & OpenMode::Create as i32 != 0 {
+                let vfs = task.vfs.as_ref().unwrap();
+                let res = vfs.create_file(&path_str, FileType::RegularFile);
+                if res.is_err() {
+                    return usize::MAX; // File creation error
+                }
+                match vfs.open(&path_str, 0) {
+                    Ok(file) => {
+                        // Register the file with the task
+                        let fd = task.add_file(file);
+                        if fd.is_err() {
+                            return usize::MAX; // File descriptor error
+                        }
+                        fd.unwrap() as usize
+                    }
+                    Err(_) => usize::MAX, // File open error
+                }
+            } else {
+                return usize::MAX; // VFS not initialized
+            }
         }
     }
 }
