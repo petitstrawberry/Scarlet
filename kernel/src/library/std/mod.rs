@@ -6,3 +6,4 @@
 
 pub mod print;
 pub mod defer;
+pub mod string;
