@@ -7,7 +7,7 @@ use std::{print, println, string::String, task::{clone, execve, exit, waitpid}};
 
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main() {
+pub extern "C" fn main() -> i32 {
     let mut inputs = String::new();
 
     println!("Scarlet Shell");
@@ -62,5 +62,5 @@ pub extern "C" fn main() {
             }
         }
     }
-    exit(0);
+    return 0;
 }
