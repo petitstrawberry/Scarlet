@@ -9,7 +9,7 @@ pub mod fs;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use proc::{sys_exit, sys_fork, sys_wait, sys_kill, sys_getpid};
 
-use crate::{abi::{xv6::riscv64::{file::{sys_close, sys_fstat, sys_mkdir, sys_read}, proc::{sys_chdir, sys_sbrk}}, AbiModule}, early_initcall, fs::VfsManager, register_abi};
+use crate::{abi::{xv6::riscv64::{file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink}, proc::{sys_chdir, sys_sbrk}}, AbiModule}, early_initcall, fs::VfsManager, register_abi};
 
 
 #[derive(Default)]
@@ -57,8 +57,8 @@ syscall_table! {
     Open = 15 => sys_open,
     Write = 16 => sys_write,
     Mknod = 17 => sys_mknod,
-    // Unlink = 18 => sys_unlink,
-    // Link = 19 => sys_link,
+    Unlink = 18 => sys_unlink,
+    Link = 19 => sys_link,
     Mkdir = 20 => sys_mkdir,
     Close = 21 => sys_close,
 }

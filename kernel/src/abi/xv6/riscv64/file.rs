@@ -450,3 +450,45 @@ pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
         Err(_) => usize::MAX, // Error
     }
 }
+
+pub fn sys_unlink(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((p, _)) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    // Try to remove the file or directory
+    let vfs = task.vfs.as_mut().unwrap();
+    match vfs.remove(&path) {
+        Ok(_) => 0, // Success
+        Err(_) => usize::MAX, // Error
+    }
+}
+
+pub fn sys_link(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    
+    let src_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let dst_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+
+    let src_path = match cstring_to_string(src_path_ptr, MAX_PATH_LENGTH) {
+        Ok((p, _)) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    let dst_path = match cstring_to_string(dst_path_ptr, MAX_PATH_LENGTH) {
+        Ok((p, _)) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    let vfs = task.vfs.as_mut().unwrap();
+    match vfs.create_hardlink(&src_path, &dst_path) {
+        Ok(_) => 0, // Success
+        Err(_) => usize::MAX, // Error
+    }
+}
