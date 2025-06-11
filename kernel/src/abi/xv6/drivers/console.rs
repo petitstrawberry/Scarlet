@@ -46,13 +46,19 @@ impl Device for ConsoleDevice {
 impl CharDevice for ConsoleDevice {
     fn read_byte(&mut self) -> Option<u8> {
         let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0)?;
-        serial.get().map(|c| {
-            if c == '\r' {
-                serial.put('\n').ok(); // Convert carriage return to newline
-            }
-            serial.put(c).ok(); // Echo back the character
-            c as u8
-        })
+        let mut c = serial.get();
+
+        while c.is_none() {
+            // Wait for input
+            // This is a blocking read, in a real implementation you might want to handle this differently
+            c = serial.get();
+        }
+        let c = c.unwrap();
+        if c == '\r' {
+            serial.put('\n').ok(); // Convert carriage return to newline
+        }
+        serial.put(c).ok(); // Echo back the character
+        Some(c as u8)
     }
 
     fn write_byte(&mut self, byte: u8) -> Result<(), &'static str> {

@@ -290,9 +290,7 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     match file.read(buffer) {
         Ok(n) => {
             // Increment PC to avoid infinite loop if read fails
-            if n != 0 {
-                trapframe.increment_pc_next(task);
-            }
+            trapframe.increment_pc_next(task);
             n
         }
         Err(_) => {
