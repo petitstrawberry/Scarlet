@@ -225,6 +225,20 @@ impl FileSystem for Cpiofs {
     }
 }
 
+impl Cpiofs {
+    /// Calculate file_id from path (for hardlink support)
+    /// 
+    /// CPIO doesn't natively support hardlinks, so we use path hash as file_id
+    fn calculate_file_id(&self, path: &str) -> u64 {
+        // Simple hash function since we don't have DefaultHasher in no_std
+        let mut hash: u64 = 0;
+        for byte in path.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+        }
+        hash
+    }
+}
+
 impl FileOperations for Cpiofs {
     fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn crate::fs::FileHandle>> {
         let path = self.normalize_path(path);
@@ -259,6 +273,7 @@ impl FileOperations for Cpiofs {
                         name: file_name.to_string(),
                         file_type: e.file_type,
                         size: e.size,
+                        file_id: self.calculate_file_id(&e.name), // Use path hash as file_id
                         metadata: None,
                     })
                 } else {
@@ -314,6 +329,8 @@ impl FileOperations for Cpiofs {
                 created_time: 0,
                 modified_time: entry.modified_time,
                 accessed_time: 0,
+                file_id: self.calculate_file_id(&path),
+                link_count: 1, // CPIO doesn't support hardlinks, so always 1
             })
         } else {
             Err(FileSystemError {
@@ -405,6 +422,8 @@ impl FileHandle for CpiofsFileHandle {
             created_time: 0,
             modified_time: 0,
             accessed_time: 0,
+            file_id: 0, // CPIO file handle doesn't know the path, so use 0
+            link_count: 1,
         })
     }
 }

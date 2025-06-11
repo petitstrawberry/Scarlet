@@ -103,6 +103,9 @@ pub mod tmpfs;
 pub mod params;
 pub mod mount_tree;
 
+#[cfg(test)]
+pub mod hardlink_test;
+
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
@@ -217,6 +220,13 @@ pub struct FileMetadata {
     pub created_time: u64,
     pub modified_time: u64,
     pub accessed_time: u64,
+    /// Unique file identifier within the filesystem
+    /// Used for hard link management - multiple directory entries
+    /// can share the same file_id to point to the same file data
+    pub file_id: u64,
+    /// Number of hard links pointing to this file
+    /// File data is only deleted when link_count reaches zero
+    pub link_count: u32,
 }
 
 #[derive(Clone)]
@@ -315,6 +325,9 @@ pub struct DirectoryEntry {
     pub name: String,
     pub file_type: FileType,
     pub size: usize,
+    /// Unique file identifier - same as the file_id in FileMetadata
+    /// Multiple directory entries with the same file_id represent hard links
+    pub file_id: u64,
     pub metadata: Option<FileMetadata>,
 }
 
@@ -414,10 +427,42 @@ pub trait FileOperations: Send + Sync {
     fn create_dir(&self, path: &str) -> Result<()>;
     
     /// Remove a file/directory
+    /// 
+    /// This method should handle link count management internally.
+    /// For hardlinks, it decrements link_count and only removes
+    /// actual file data when link_count reaches zero.
+    /// For directories, implementation may require them to be empty.
     fn remove(&self, path: &str) -> Result<()>;
     
     /// Get the metadata
     fn metadata(&self, path: &str) -> Result<FileMetadata>;
+
+    /// Create a hard link
+    /// 
+    /// Creates a new directory entry that points to the same file data
+    /// as the target. Both entries will have the same file_id and the
+    /// link_count will be incremented.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `target_path` - Path to the existing file to link to
+    /// * `link_path` - Path where the new hard link should be created
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the hard link was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the target doesn't exist, link creation fails,
+    ///   or hard links are not supported by this filesystem
+    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+        let _ = (target_path, link_path);
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "Hard links not supported by this filesystem".to_string(),
+        })
+    }
 
     /// Get the root directory of the file system
     fn root_dir(&self) -> Result<Directory>;
@@ -1765,6 +1810,8 @@ impl VfsManager {
     /// Remove a file or directory
     /// 
     /// This method removes a file or directory from the filesystem.
+    /// For files with hard links, this decrements the link_count and only
+    /// removes the actual file data when link_count reaches zero.
     /// For directories, the behavior depends on the filesystem implementation
     /// (some may require the directory to be empty).
     /// 
@@ -1783,7 +1830,7 @@ impl VfsManager {
     /// # Examples
     /// 
     /// ```rust
-    /// // Remove a file
+    /// // Remove a file (or decrement hard link count)
     /// vfs.remove("/tmp/old_file.txt")?;
     /// 
     /// // Remove a directory
@@ -1819,6 +1866,50 @@ impl VfsManager {
     /// ```
     pub fn metadata(&self, path: &str) -> Result<FileMetadata> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().metadata(relative_path))
+    }
+
+    /// Create a hard link
+    /// 
+    /// Creates a hard link from an existing file to a new path.
+    /// Both paths will refer to the same file_id and file content.
+    /// The link_count will be incremented for the target file.
+    /// 
+    /// Hard links must be created within the same filesystem.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `target_path` - Path to the existing file
+    /// * `link_path` - Path where the hard link should be created
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<()>` - Ok if the hard link was created successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the target doesn't exist, link creation fails,
+    ///   or hard links are not supported by the filesystem
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a hard link
+    /// vfs.create_hardlink("/home/user/file.txt", "/tmp/link_to_file.txt")?;
+    /// ```
+    pub fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+        // Resolve both paths to ensure they're on the same filesystem
+        let (target_fs, target_relative) = self.resolve_path(target_path)?;
+        let (link_fs, link_relative) = self.resolve_path(link_path)?;
+        
+        // Hard links must be on the same filesystem
+        if !Arc::ptr_eq(&target_fs, &link_fs) {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Hard links cannot span different filesystems".to_string(),
+            });
+        }
+        
+        target_fs.read().create_hardlink(&target_relative, &link_relative)
     }
 
     /// Create a regular file

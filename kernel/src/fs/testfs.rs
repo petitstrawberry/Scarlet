@@ -18,6 +18,18 @@ pub struct TestFileSystem {
     mount_point: String,
     // Simulate a simple directory structure
     directories: Mutex<Vec<(String, Vec<DirectoryEntry>)>>,
+    // File ID management for hardlink support
+    next_file_id: Mutex<u64>,
+    file_data_table: Mutex<BTreeMap<u64, FileData>>,
+}
+
+/// Internal file data structure for hardlink management
+#[derive(Debug, Clone)]
+struct FileData {
+    content: Vec<u8>,
+    link_count: u32,
+    file_type: FileType,
+    metadata: FileMetadata,
 }
 
 impl TestFileSystem {
@@ -31,12 +43,14 @@ impl TestFileSystem {
                     name: "test.txt".to_string(),
                     file_type: FileType::RegularFile,
                     size: 10,
+                    file_id: 1,
                     metadata: None,
                 },
                 DirectoryEntry {
                     name: "testdir".to_string(),
                     file_type: FileType::Directory,
                     size: 0,
+                    file_id: 2,
                     metadata: None,
                 },
             ],
@@ -49,7 +63,17 @@ impl TestFileSystem {
             mounted: false,
             mount_point: String::new(),
             directories: Mutex::new(dirs),
+            next_file_id: Mutex::new(3), // Start from 3 since 1,2 are used
+            file_data_table: Mutex::new(BTreeMap::new()),
         }
+    }
+    
+    /// Generate the next file ID
+    fn generate_file_id(&self) -> u64 {
+        let mut next_id = self.next_file_id.lock();
+        let id = *next_id;
+        *next_id += 1;
+        id
     }
     
     // Helper method for path normalization
@@ -346,6 +370,8 @@ impl FileHandle for TestFileHandle {
             created_time: 0,
             modified_time: 0,
             accessed_time: 0,
+            file_id: 0, // TestFileHandle doesn't know file_id
+            link_count: 1,
         })
     }
 }
@@ -477,6 +503,7 @@ impl FileOperations for TestFileSystem {
                     name: file_name.to_string(),
                     file_type,
                     size: 0,
+                    file_id: 0, // TestFileSystem doesn't implement proper file_id yet
                     metadata: Some(FileMetadata {
                         file_type: file_type.clone(),
                         size: 0,
@@ -488,6 +515,8 @@ impl FileOperations for TestFileSystem {
                         created_time: 0,
                         modified_time: 0,
                         accessed_time: 0,
+                        file_id: 0,
+                        link_count: 1,
                     }),
                 });
                 
@@ -527,6 +556,7 @@ impl FileOperations for TestFileSystem {
                     name: dir_name.to_string(),
                     file_type: FileType::Directory,
                     size: 0,
+                    file_id: self.generate_file_id(),
                     metadata: None,
                 });
                 break;
@@ -634,6 +664,8 @@ impl FileOperations for TestFileSystem {
                 created_time: 0,
                 modified_time: 0,
                 accessed_time: 0,
+                file_id: 1, // Root directory has fixed file_id = 1
+                link_count: 1,
             });
         }
         
@@ -657,6 +689,8 @@ impl FileOperations for TestFileSystem {
                             created_time: 0,
                             modified_time: 0,
                             accessed_time: 0,
+                            file_id: entry.file_id,
+                            link_count: 1,
                         })
                     )
                 }
@@ -741,6 +775,8 @@ mod device_tests {
             created_time: 0,
             modified_time: 0,
             accessed_time: 0,
+            file_id: 1, // Test file_id
+            link_count: 1,
         };
 
         assert_eq!(metadata.file_type, FileType::CharDevice(device_info));
@@ -775,6 +811,8 @@ mod device_tests {
             created_time: 0,
             modified_time: 0,
             accessed_time: 0,
+            file_id: 2, // Test file_id
+            link_count: 1,
         };
 
         assert_eq!(metadata.file_type, FileType::BlockDevice(device_info));
@@ -817,6 +855,8 @@ mod device_tests {
             created_time: 0,
             modified_time: 0,
             accessed_time: 0,
+            file_id: 3, // Test file_id
+            link_count: 1,
         };
 
         // Test that the device file info contains correct data
