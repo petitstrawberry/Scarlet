@@ -81,45 +81,35 @@ pub const T_FILE: u16 = 2;   // File
 pub const T_DEVICE: u16 = 3; // Device
 
 /// Directory entries collection for xv6fs
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Xv6DirectoryEntries {
-    entries: BTreeMap<String, Xv6Node>,
-    inode_counter: u16,
+    entries: BTreeMap<String, Arc<Xv6Node>>,
 }
 
 impl Xv6DirectoryEntries {
     fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
-            inode_counter: 2, // Start from 2 (0 is invalid, 1 is root)
         }
     }
 
-    fn insert(&mut self, name: String, mut node: Xv6Node) -> Option<Xv6Node> {
-        if !self.entries.contains_key(&name) {
-            node.inode_number = self.inode_counter;
-            self.inode_counter += 1;
-        }
+    fn insert(&mut self, name: String, node: Arc<Xv6Node>) -> Option<Arc<Xv6Node>> {
         self.entries.insert(name, node)
     }
 
-    fn remove(&mut self, name: &str) -> Option<Xv6Node> {
+    fn remove(&mut self, name: &str) -> Option<Arc<Xv6Node>> {
         self.entries.remove(name)
     }
 
-    fn get(&self, name: &str) -> Option<&Xv6Node> {
+    fn get(&self, name: &str) -> Option<&Arc<Xv6Node>> {
         self.entries.get(name)
-    }
-
-    fn get_mut(&mut self, name: &str) -> Option<&mut Xv6Node> {
-        self.entries.get_mut(name)
     }
 
     fn contains_key(&self, name: &str) -> bool {
         self.entries.contains_key(name)
     }
 
-    fn entries(&self) -> impl Iterator<Item = (&String, &Xv6Node)> {
+    fn entries(&self) -> impl Iterator<Item = (&String, &Arc<Xv6Node>)> {
         self.entries.iter()
     }
 
@@ -132,24 +122,22 @@ impl Xv6DirectoryEntries {
     }
 }
 
-/// Node in the xv6fs filesystem
-#[derive(Clone)]
+/// Node in the xv6fs filesystem  
 struct Xv6Node {
-    name: String,
-    file_type: FileType,
-    content: Vec<u8>,
-    metadata: FileMetadata,
-    children: Xv6DirectoryEntries,
-    inode_number: u16,
+    name: RwLock<String>,
+    file_type: RwLock<FileType>,
+    content: RwLock<Vec<u8>>,
+    metadata: RwLock<FileMetadata>,
+    children: RwLock<Xv6DirectoryEntries>,
 }
 
 impl Xv6Node {
-    fn new_file(name: String) -> Self {
-        Self {
-            name: name.clone(),
-            file_type: FileType::RegularFile,
-            content: Vec::new(),
-            metadata: FileMetadata {
+    fn new_file(name: String) -> Arc<Self> {
+        Arc::new(Self {
+            name: RwLock::new(name.clone()),
+            file_type: RwLock::new(FileType::RegularFile),
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
                 permissions: FilePermission {
@@ -160,18 +148,19 @@ impl Xv6Node {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-            },
-            children: Xv6DirectoryEntries::new(),
-            inode_number: 0, // Will be set when added to parent
-        }
+                file_id: 0, // Will be set when added to filesystem
+                link_count: 1,
+            }),
+            children: RwLock::new(Xv6DirectoryEntries::new()),
+        })
     }
 
-    fn new_directory(name: String) -> Self {
-        Self {
-            name: name.clone(),
-            file_type: FileType::Directory,
-            content: Vec::new(),
-            metadata: FileMetadata {
+    fn new_directory(name: String) -> Arc<Self> {
+        Arc::new(Self {
+            name: RwLock::new(name.clone()),
+            file_type: RwLock::new(FileType::Directory),
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermission {
@@ -182,18 +171,19 @@ impl Xv6Node {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-            },
-            children: Xv6DirectoryEntries::new(),
-            inode_number: 0, // Will be set when added to parent
-        }
+                file_id: 0, // Will be set when added to filesystem
+                link_count: 1,
+            }),
+            children: RwLock::new(Xv6DirectoryEntries::new()),
+        })
     }
 
-    fn new_device(name: String, file_type: FileType) -> Self {
-        Self {
-            name: name.clone(),
-            file_type: file_type.clone(),
-            content: Vec::new(),
-            metadata: FileMetadata {
+    fn new_device(name: String, file_type: FileType) -> Arc<Self> {
+        Arc::new(Self {
+            name: RwLock::new(name.clone()),
+            file_type: RwLock::new(file_type.clone()),
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type,
                 size: 0,
                 permissions: FilePermission {
@@ -204,10 +194,11 @@ impl Xv6Node {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-            },
-            children: Xv6DirectoryEntries::new(),
-            inode_number: 0, // Will be set when added to parent
-        }
+                file_id: 0, // Will be set when added to filesystem
+                link_count: 1,
+            }),
+            children: RwLock::new(Xv6DirectoryEntries::new()),
+        })
     }
 
     /// Generate directory content as serialized Dirent entries
@@ -215,7 +206,7 @@ impl Xv6Node {
         let mut content = Vec::new();
         
         // Add "." entry (current directory)
-        let current_dirent = Dirent::new(self.inode_number, ".");
+        let current_dirent = Dirent::new(self.metadata.read().file_id as u16, ".");
         content.extend_from_slice(current_dirent.as_bytes());
         
         // Add ".." entry (parent directory)
@@ -223,8 +214,9 @@ impl Xv6Node {
         content.extend_from_slice(parent_dirent.as_bytes());
         
         // Add all child entries
-        for (name, child) in self.children.entries() {
-            let dirent = Dirent::new(child.inode_number, name);
+        let children = self.children.read();
+        for (name, child) in children.entries() {
+            let dirent = Dirent::new(child.metadata.read().file_id as u16, name);
             content.extend_from_slice(dirent.as_bytes());
         }
         
@@ -232,9 +224,10 @@ impl Xv6Node {
     }
 
     /// Update file size and modification time
-    fn update_size(&mut self, new_size: usize) {
-        self.metadata.size = new_size;
-        self.metadata.modified_time = crate::time::current_time();
+    fn update_size(&self, new_size: usize) {
+        let mut metadata = self.metadata.write();
+        metadata.size = new_size;
+        metadata.modified_time = crate::time::current_time();
     }
 }
 
@@ -242,22 +235,37 @@ impl Xv6Node {
 pub struct Xv6FS {
     mounted: bool,
     mount_point: String,
-    root: RwLock<Xv6Node>,
+    root: Arc<Xv6Node>,
     max_memory: usize,
     current_memory: Mutex<usize>,
+    next_inode_number: Mutex<u32>, // For generating unique inode numbers
 }
 
 impl Xv6FS {
     pub fn new(max_memory: usize) -> Self {
-        let mut root = Xv6Node::new_directory("/".to_string());
-        root.inode_number = 1; // Root directory always has inode 1
+        let root = Xv6Node::new_directory("/".to_string());
+        *root.metadata.write() = FileMetadata {
+            file_type: FileType::Directory,
+            size: 0,
+            permissions: FilePermission {
+                read: true,
+                write: true,
+                execute: true,
+            },
+            created_time: crate::time::current_time(),
+            modified_time: crate::time::current_time(),
+            accessed_time: crate::time::current_time(),
+            file_id: 1, // Root always has file_id 1
+            link_count: 1,
+        };
         
         Self {
             mounted: false,
             mount_point: String::new(),
-            root: RwLock::new(root),
+            root,
             max_memory,
             current_memory: Mutex::new(0),
+            next_inode_number: Mutex::new(2), // Start from 2 (0 is invalid, 1 is root)
         }
     }
 
@@ -288,56 +296,68 @@ impl Xv6FS {
         }
     }
 
-    fn find_node(&self, path: &str) -> Option<Xv6Node> {
+    fn generate_inode_number(&self) -> u32 {
+        let mut next = self.next_inode_number.lock();
+        let inode_number = *next;
+        *next += 1;
+        inode_number
+    }
+
+    fn find_node(&self, path: &str) -> Option<Arc<Xv6Node>> {
         let normalized = self.normalize_path(path);
         
         if normalized == "/" {
-            return Some(self.root.read().clone());
+            return Some(Arc::clone(&self.root));
         }
 
         let parts: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
-        let root = self.root.read();
-        let mut current = &*root;
+        let mut current = Arc::clone(&self.root);
 
         for part in parts {
-            if let Some(child) = current.children.get(part) {
-                current = child;
+            let child = {
+                let children = current.children.read();
+                children.get(part).cloned()
+            };
+            if let Some(child_node) = child {
+                current = child_node;
             } else {
                 return None;
             }
         }
 
-        Some(current.clone())
+        Some(current)
     }
 
     /// Find a mutable reference to a node by path
     fn find_node_mut<F, R>(&self, path: &str, f: F) -> Option<R>
     where
-        F: FnOnce(&mut Xv6Node) -> R,
+        F: FnOnce(&Arc<Xv6Node>) -> R,
     {
         let normalized = self.normalize_path(path);
         
         if normalized == "/" {
-            let mut root = self.root.write();
-            return Some(f(&mut *root));
+            return Some(f(&self.root));
         }
 
         let parts: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
-        let mut root = self.root.write();
-        let mut current = &mut *root;
+        let mut current = Arc::clone(&self.root);
 
         for part in parts {
-            if let Some(child) = current.children.get_mut(part) {
-                current = child;
+            let child = {
+                let children = current.children.read();
+                children.get(part).cloned()
+            };
+            if let Some(child_node) = child {
+                current = child_node;
             } else {
                 return None;
             }
         }
 
-        Some(f(current))
+        Some(f(&current))
     }
 
-    fn find_parent_and_name(&self, path: &str) -> Option<(Xv6Node, String)> {
+    fn find_parent_and_name(&self, path: &str) -> Option<(Arc<Xv6Node>, String)> {
         let normalized = self.normalize_path(path);
         
         if normalized == "/" {
@@ -415,61 +435,56 @@ impl FileSystem for Xv6FS {
 
 /// File handle for Xv6FS files
 struct Xv6FileHandle {
-    path: String,
+    node: Arc<Xv6Node>,
     position: RwLock<u64>,
-    file_type: FileType,
     device_guard: Option<BorrowedDeviceGuard>,
     fs: *const Xv6FS,
     /// Cached directory content for directory files
     directory_content: Option<RwLock<Vec<u8>>>,
-    inode_number: u16,
 }
 
 unsafe impl Send for Xv6FileHandle {}
 unsafe impl Sync for Xv6FileHandle {}
 
 impl Xv6FileHandle {
-    fn new(path: String, file_type: FileType, inode_number: u16, fs: &Xv6FS) -> Self {
-        let directory_content = if matches!(file_type, FileType::Directory) {
-            // Generate directory content when handle is created
-            let node = fs.find_node(&path).unwrap();
-            let parent_inum = if path == "/" { 1 } else {
-                fs.find_parent_and_name(&path)
-                    .map(|(parent, _)| parent.inode_number)
-                    .unwrap_or(1)
-            };
-            let content = node.generate_directory_content(parent_inum);
-            Some(RwLock::new(content))
-        } else {
-            None
+    fn new(node: Arc<Xv6Node>, fs: &Xv6FS) -> Self {
+        let directory_content = {
+            let file_type = node.file_type.read();
+            if matches!(*file_type, FileType::Directory) {
+                // Generate directory content when handle is created
+                let parent_inum = if *node.name.read() == "/" { 
+                    1 
+                } else {
+                    // For non-root directories, we need to find the parent inode
+                    1 // Simplified for now, could be improved
+                };
+                let content = node.generate_directory_content(parent_inum);
+                Some(RwLock::new(content))
+            } else {
+                None
+            }
         };
 
         Self {
-            path,
+            node,
             position: RwLock::new(0),
-            file_type,
             device_guard: None,
             fs: fs as *const Xv6FS,
             directory_content,
-            inode_number,
         }
     }
 
     fn new_with_device(
-        path: String,
-        file_type: FileType,
-        inode_number: u16,
+        node: Arc<Xv6Node>,
         device_guard: BorrowedDeviceGuard,
         fs: &Xv6FS,
     ) -> Self {
         Self {
-            path,
+            node,
             position: RwLock::new(0),
-            file_type,
             device_guard: Some(device_guard),
             fs: fs as *const Xv6FS,
             directory_content: None,
-            inode_number,
         }
     }
 
@@ -553,26 +568,19 @@ impl Xv6FileHandle {
     }
 
     fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize> {
-        let fs = self.fs();
         let mut position = self.position.write();
         
-        if let Some(node) = fs.find_node(&self.path) {            
-            if *position as usize >= node.content.len() {
-                return Ok(0); // EOF
-            }
-            
-            let available = node.content.len() - *position as usize;
-            let to_read = buffer.len().min(available);
-            
-            buffer[..to_read].copy_from_slice(&node.content[*position as usize..*position as usize + to_read]);
-            *position += to_read as u64;
-            Ok(to_read)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
-            })
+        let content = self.node.content.read();
+        if *position as usize >= content.len() {
+            return Ok(0); // EOF
         }
+        
+        let available = content.len() - *position as usize;
+        let to_read = buffer.len().min(available);
+        
+        buffer[..to_read].copy_from_slice(&content[*position as usize..*position as usize + to_read]);
+        *position += to_read as u64;
+        Ok(to_read)
     }
 
     fn write_device(&self, buffer: &[u8]) -> Result<usize> {
@@ -653,40 +661,33 @@ impl Xv6FileHandle {
         // Check memory limit before writing
         fs.check_memory_limit(buffer.len())?;
         
-        match fs.find_node_mut(&self.path, |n| {
-            let old_size = n.content.len();
-            let new_position = *position as usize + buffer.len();
-            
-            // Expand file if necessary
-            if new_position > n.content.len() {
-                n.content.resize(new_position, 0);
-            }
-            
-            // Write data
-            n.content[*position as usize..new_position].copy_from_slice(buffer);
-            n.update_size(n.content.len());
-            
-            let size_increase = n.content.len().saturating_sub(old_size);
-            size_increase
-        }) {
-            Some(_) => {
-                *position += buffer.len() as u64;
-                fs.add_memory_usage(buffer.len());
-                Ok(buffer.len())
-            },
-            None => {
-                Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotFound,
-                    message: "File not found".to_string(),
-                })
-            }
+        let mut content = self.node.content.write();
+        let old_size = content.len();
+        let new_position = *position as usize + buffer.len();
+        
+        // Expand file if necessary
+        if new_position > content.len() {
+            content.resize(new_position, 0);
         }
+        
+        // Write data
+        content[*position as usize..new_position].copy_from_slice(buffer);
+        let new_size = content.len();
+        drop(content); // Release the lock before updating size
+        
+        self.node.update_size(new_size);
+        
+        let size_increase = new_size.saturating_sub(old_size);
+        *position += buffer.len() as u64;
+        fs.add_memory_usage(size_increase);
+        Ok(buffer.len())
     }
 }
 
 impl FileHandle for Xv6FileHandle {
     fn read(&self, buffer: &mut [u8]) -> Result<usize> {
-        match self.file_type {
+        let file_type = self.node.file_type.read();
+        match &*file_type {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 // Handle device files
                 self.read_device(buffer)
@@ -727,61 +728,56 @@ impl FileHandle for Xv6FileHandle {
     }
 
     fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
-        if !matches!(self.file_type, FileType::Directory) {
+        let file_type = self.node.file_type.read();
+        if !matches!(*file_type, FileType::Directory) {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotADirectory,
                 message: "Not a directory".to_string(),
             });
         }
 
-        if let Some(node) = self.fs().find_node(&self.path) {
-            let mut entries = Vec::new();
-            
-            // Add "." entry
+        let mut entries = Vec::new();
+        
+        // Add "." entry
+        let metadata = self.node.metadata.read();
+        entries.push(DirectoryEntry {
+            name: ".".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            metadata: Some(metadata.clone()),
+            file_id: metadata.file_id,
+        });
+        
+        // Add ".." entry - simplified parent metadata
+        entries.push(DirectoryEntry {
+            name: "..".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            metadata: Some(metadata.clone()),
+            file_id: metadata.file_id,
+        });
+        drop(metadata);
+        
+        // Add child entries
+        let children = self.node.children.read();
+        for (name, child) in children.entries() {
+            let child_metadata = child.metadata.read();
+            let child_file_type = child.file_type.read();
             entries.push(DirectoryEntry {
-                name: ".".to_string(),
-                file_type: FileType::Directory,
-                size: 0,
-                metadata: Some(node.metadata.clone()),
+                name: name.clone(),
+                file_type: child_file_type.clone(),
+                size: child_metadata.size,
+                metadata: Some(child_metadata.clone()),
+                file_id: child_metadata.file_id,
             });
-            
-            // Add ".." entry
-            let parent_metadata = if self.path == "/" {
-                node.metadata.clone()
-            } else {
-                self.fs().find_parent_and_name(&self.path)
-                    .map(|(parent, _)| parent.metadata)
-                    .unwrap_or(node.metadata.clone())
-            };
-            
-            entries.push(DirectoryEntry {
-                name: "..".to_string(),
-                file_type: FileType::Directory,
-                size: 0,
-                metadata: Some(parent_metadata),
-            });
-            
-            // Add child entries
-            for (name, child) in node.children.entries() {
-                entries.push(DirectoryEntry {
-                    name: name.clone(),
-                    file_type: child.file_type.clone(),
-                    size: child.metadata.size,
-                    metadata: Some(child.metadata.clone()),
-                });
-            }
-            
-            Ok(entries)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "Directory not found".to_string(),
-            })
         }
+        
+        Ok(entries)
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize> {
-        match self.file_type {
+        let file_type = self.node.file_type.read();
+        match &*file_type {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 // Handle device files
                 self.write_device(buffer)
@@ -824,13 +820,11 @@ impl FileHandle for Xv6FileHandle {
                 Ok(*position)
             }
             SeekFrom::End(offset) => {
-                let size = match &self.file_type {
+                let file_type = self.node.file_type.read();
+                let size = match &*file_type {
                     FileType::RegularFile => {
-                        if let Some(node) = self.fs().find_node(&self.path) {
-                            node.content.len() as i64
-                        } else {
-                            0
-                        }
+                        let content = self.node.content.read();
+                        content.len() as i64
                     }
                     FileType::Directory => {
                         if let Some(dir_content) = &self.directory_content {
@@ -861,14 +855,8 @@ impl FileHandle for Xv6FileHandle {
     }
 
     fn metadata(&self) -> Result<FileMetadata> {
-        if let Some(node) = self.fs().find_node(&self.path) {
-            Ok(node.metadata)
-        } else {
-            Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
-            })
-        }
+        let metadata = self.node.metadata.read();
+        Ok(metadata.clone())
     }
 }
 
@@ -877,22 +865,22 @@ impl FileOperations for Xv6FS {
         let normalized = self.normalize_path(path);
         
         if let Some(node) = self.find_node(&normalized) {
-            match node.file_type {
+            let file_type = node.file_type.read();
+            match &*file_type {
                 FileType::RegularFile | FileType::Directory => {
+                    drop(file_type);
                     Ok(Arc::new(Xv6FileHandle::new(
-                        normalized,
-                        node.file_type,
-                        node.inode_number,
+                        Arc::clone(&node),
                         self,
                     )))
                 }
-                FileType::CharDevice(ref info) | FileType::BlockDevice(ref info) => {
-                    match DeviceManager::get_manager().borrow_device(info.device_id) {
+                FileType::CharDevice(info) | FileType::BlockDevice(info) => {
+                    let device_id = info.device_id;
+                    drop(file_type);
+                    match DeviceManager::get_manager().borrow_device(device_id) {
                         Ok(guard) => {
                             Ok(Arc::new(Xv6FileHandle::new_with_device(
-                                normalized,
-                                node.file_type,
-                                node.inode_number,
+                                Arc::clone(&node),
                                 guard,
                                 self,
                             )))
@@ -920,7 +908,8 @@ impl FileOperations for Xv6FS {
         let normalized = self.normalize_path(path);
         
         if let Some(node) = self.find_node(&normalized) {
-            if !matches!(node.file_type, FileType::Directory) {
+            let file_type = node.file_type.read();
+            if !matches!(*file_type, FileType::Directory) {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::NotADirectory,
                     message: "Not a directory".to_string(),
@@ -930,36 +919,36 @@ impl FileOperations for Xv6FS {
             let mut entries = Vec::new();
             
             // Add "." entry
+            let metadata = node.metadata.read();
             entries.push(DirectoryEntry {
                 name: ".".to_string(),
                 file_type: FileType::Directory,
                 size: 0,
-                metadata: Some(node.metadata.clone()),
+                metadata: Some(metadata.clone()),
+                file_id: metadata.file_id,
             });
             
-            // Add ".." entry
-            let parent_metadata = if normalized == "/" {
-                node.metadata.clone()
-            } else {
-                self.find_parent_and_name(&normalized)
-                    .map(|(parent, _)| parent.metadata)
-                    .unwrap_or(node.metadata.clone())
-            };
-            
+            // Add ".." entry - simplified parent metadata
             entries.push(DirectoryEntry {
                 name: "..".to_string(),
                 file_type: FileType::Directory,
                 size: 0,
-                metadata: Some(parent_metadata),
+                metadata: Some(metadata.clone()),
+                file_id: metadata.file_id,
             });
+            drop(metadata);
             
             // Add child entries
-            for (name, child) in node.children.entries() {
+            let children = node.children.read();
+            for (name, child) in children.entries() {
+                let child_metadata = child.metadata.read();
+                let child_file_type = child.file_type.read();
                 entries.push(DirectoryEntry {
                     name: name.clone(),
-                    file_type: child.file_type.clone(),
-                    size: child.metadata.size,
-                    metadata: Some(child.metadata.clone()),
+                    file_type: child_file_type.clone(),
+                    size: child_metadata.size,
+                    metadata: Some(child_metadata.clone()),
+                    file_id: child_metadata.file_id,
                 });
             }
             
@@ -976,47 +965,26 @@ impl FileOperations for Xv6FS {
         let normalized = self.normalize_path(path);
         
         if let Some((parent, name)) = self.find_parent_and_name(&normalized) {
-            if parent.children.contains_key(&name) {
+            let children = parent.children.read();
+            if children.contains_key(&name) {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::AlreadyExists,
                     message: "File already exists".to_string(),
                 });
             }
+            drop(children);
             
             let new_node = match file_type {
                 FileType::RegularFile => Xv6Node::new_file(name.clone()),
                 FileType::Directory => Xv6Node::new_directory(name.clone()),
                 _ => Xv6Node::new_device(name.clone(), file_type),
             };
+
+            new_node.metadata.write().file_id = self.generate_inode_number() as u64;
             
-            // Update the filesystem
-            let mut root = self.root.write();
-            let parent_path = if normalized == format!("/{}", name) {
-                "/"
-            } else {
-                &normalized[..normalized.rfind('/').unwrap()]
-            };
-            
-            if parent_path == "/" {
-                root.children.insert(name, new_node);
-            } else {
-                // Navigate to parent and insert
-                let parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
-                let mut current = &mut *root;
-                
-                for part in parts {
-                    if let Some(child) = current.children.get_mut(part) {
-                        current = child;
-                    } else {
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::NotFound,
-                            message: "Parent directory not found".to_string(),
-                        });
-                    }
-                }
-                
-                current.children.insert(name, new_node);
-            }
+            // Update the filesystem using the parent directly
+            let mut parent_children = parent.children.write();
+            parent_children.insert(name, new_node);
             
             Ok(())
         } else {
@@ -1041,50 +1009,25 @@ impl FileOperations for Xv6FS {
             });
         }
         
-        if let Some((_parent, name)) = self.find_parent_and_name(&normalized) {
-            let mut root = self.root.write();
-            let parent_path = &normalized[..normalized.rfind('/').unwrap()];
-            let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
-            
-            if parent_path == "/" {
-                if let Some(removed_node) = root.children.remove(&name) {
-                    if matches!(removed_node.file_type, FileType::Directory) && !removed_node.children.is_empty() {
-                        // Put it back and return error
-                        root.children.insert(name, removed_node);
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::DirectoryNotEmpty,
-                            message: "Directory not empty".to_string(),
-                        });
-                    }
-                    self.subtract_memory_usage(removed_node.content.len());
-                }
-            } else {
-                // Navigate to parent and remove
-                let parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
-                let mut current = &mut *root;
+        if let Some((parent, name)) = self.find_parent_and_name(&normalized) {
+            let mut parent_children = parent.children.write();
+            if let Some(removed_node) = parent_children.remove(&name) {
+                let file_type = removed_node.file_type.read();
+                let children = removed_node.children.read();
+                let is_dir_not_empty = matches!(*file_type, FileType::Directory) && !children.is_empty();
+                drop(file_type);
+                drop(children);
                 
-                for part in parts {
-                    if let Some(child) = current.children.get_mut(part) {
-                        current = child;
-                    } else {
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::NotFound,
-                            message: "Parent directory not found".to_string(),
-                        });
-                    }
+                if is_dir_not_empty {
+                    // Put it back and return error
+                    parent_children.insert(name, removed_node);
+                    return Err(FileSystemError {
+                        kind: FileSystemErrorKind::DirectoryNotEmpty,
+                        message: "Directory not empty".to_string(),
+                    });
                 }
-                
-                if let Some(removed_node) = current.children.remove(&name) {
-                    if matches!(removed_node.file_type, FileType::Directory) && !removed_node.children.is_empty() {
-                        // Put it back and return error
-                        current.children.insert(name, removed_node);
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::DirectoryNotEmpty,
-                            message: "Directory not empty".to_string(),
-                        });
-                    }
-                    self.subtract_memory_usage(removed_node.content.len());
-                }
+                let content_len = removed_node.content.read().len();
+                self.subtract_memory_usage(content_len);
             }
             
             Ok(())
@@ -1100,7 +1043,8 @@ impl FileOperations for Xv6FS {
         let normalized = self.normalize_path(path);
         
         if let Some(node) = self.find_node(&normalized) {
-            Ok(node.metadata)
+            let metadata = node.metadata.read();
+            Ok(metadata.clone())
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,

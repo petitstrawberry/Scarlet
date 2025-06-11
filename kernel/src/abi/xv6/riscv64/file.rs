@@ -418,7 +418,7 @@ pub fn sys_fstat(trapframe: &mut crate::arch::Trapframe) -> usize {
 
     *stat = Stat {
         dev: 0,
-        ino: 0,
+        ino: metadata.file_id as u32,
         file_type: match metadata.file_type {
             FileType::Directory => 1, // T_DIR
             FileType::RegularFile => 2,      // T_FILE
