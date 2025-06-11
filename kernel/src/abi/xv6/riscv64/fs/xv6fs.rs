@@ -163,7 +163,7 @@ impl Xv6Node {
             content: RwLock::new(Vec::new()),
             metadata: RwLock::new(FileMetadata {
                 file_type: FileType::Directory,
-                size: 0,
+                size: 1024, // Initial size for directory entries
                 permissions: FilePermission {
                     read: true,
                     write: true,
@@ -247,7 +247,7 @@ impl Xv6FS {
         let root = Xv6Node::new_directory("/".to_string(), 1);
         *root.metadata.write() = FileMetadata {
             file_type: FileType::Directory,
-            size: 0,
+            size: 1024,
             permissions: FilePermission {
                 read: true,
                 write: true,
