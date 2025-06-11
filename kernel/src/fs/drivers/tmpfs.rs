@@ -17,7 +17,7 @@ use alloc::sync::Arc;
 use spin::rwlock::RwLock;
 use spin::Mutex;
 
-use super::*;
+use crate::fs::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::DeviceType;
 
@@ -108,17 +108,6 @@ struct TmpNode {
     metadata: RwLock<FileMetadata>,
     /// For directories: child nodes
     children: RwLock<DirectoryEntries>,
-}
-
-impl Drop for TmpNode {
-    fn drop(&mut self) {
-        let link_count = {
-            let metadata_guard = self.metadata.read();
-            metadata_guard.link_count
-        };
-
-        crate::println!("Dropping TmpNode: {}, link_count: {}", self.name, link_count);
-    }
 }
 
 impl TmpNode {

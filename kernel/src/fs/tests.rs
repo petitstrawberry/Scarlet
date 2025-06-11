@@ -22,8 +22,6 @@ use alloc::{boxed::Box, sync::Arc};
 use super::*;
 use crate::device::block::mockblk::MockBlockDevice;
 use crate::fs::testfs::{TestFileSystem, TestFileSystemDriver};
-use crate::fs::tmpfs::TmpFS;
-use crate::println;
 use crate::task::{new_user_task, CloneFlags};
 
 // Test cases
@@ -949,7 +947,7 @@ fn test_structured_parameters_tmpfs() {
     use crate::fs::params::TmpFSParams;
     
     // Register TmpFS driver
-    get_fs_driver_manager().register_driver(Box::new(crate::fs::tmpfs::TmpFSDriver));
+    get_fs_driver_manager().register_driver(Box::new(crate::fs::drivers::tmpfs::TmpFSDriver));
     
     let mut manager = VfsManager::new();
     

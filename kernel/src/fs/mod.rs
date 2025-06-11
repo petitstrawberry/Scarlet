@@ -99,7 +99,6 @@
 pub mod drivers;
 pub mod syscall;
 pub mod helper;
-pub mod tmpfs;
 pub mod params;
 pub mod mount_tree;
 
