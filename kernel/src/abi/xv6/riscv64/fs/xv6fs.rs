@@ -10,6 +10,7 @@ use core::any::Any;
 use core::mem;
 extern crate alloc;
 
+use crate::abi::xv6::riscv64::file;
 use crate::fs::params::FileSystemParams;
 use crate::fs::*;
 use crate::device::block::BlockDevice;
@@ -26,7 +27,7 @@ pub struct Dirent {
 
 impl Dirent {
     pub const DIRENT_SIZE: usize = mem::size_of::<Dirent>();
-    
+
     pub fn new(inum: u16, name: &str) -> Self {
         let mut dirent = Dirent {
             inum,
@@ -132,7 +133,7 @@ struct Xv6Node {
 }
 
 impl Xv6Node {
-    fn new_file(name: String) -> Arc<Self> {
+    fn new_file(name: String, file_id: u32) -> Arc<Self> {
         Arc::new(Self {
             name: RwLock::new(name.clone()),
             file_type: RwLock::new(FileType::RegularFile),
@@ -148,14 +149,14 @@ impl Xv6Node {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-                file_id: 0, // Will be set when added to filesystem
+                file_id: file_id as u64,
                 link_count: 1,
             }),
             children: RwLock::new(Xv6DirectoryEntries::new()),
         })
     }
 
-    fn new_directory(name: String) -> Arc<Self> {
+    fn new_directory(name: String, file_id: u32) -> Arc<Self> {
         Arc::new(Self {
             name: RwLock::new(name.clone()),
             file_type: RwLock::new(FileType::Directory),
@@ -171,14 +172,14 @@ impl Xv6Node {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-                file_id: 0, // Will be set when added to filesystem
+                file_id: file_id as u64,
                 link_count: 1,
             }),
             children: RwLock::new(Xv6DirectoryEntries::new()),
         })
     }
 
-    fn new_device(name: String, file_type: FileType) -> Arc<Self> {
+    fn new_device(name: String, file_type: FileType, file_id: u32) -> Arc<Self> {
         Arc::new(Self {
             name: RwLock::new(name.clone()),
             file_type: RwLock::new(file_type.clone()),
@@ -194,7 +195,7 @@ impl Xv6Node {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-                file_id: 0, // Will be set when added to filesystem
+                file_id: file_id as u64,
                 link_count: 1,
             }),
             children: RwLock::new(Xv6DirectoryEntries::new()),
@@ -202,7 +203,7 @@ impl Xv6Node {
     }
 
     /// Generate directory content as serialized Dirent entries
-    fn generate_directory_content(&self, parent_inum: u16) -> Vec<u8> {
+    fn generate_directory_content(&self, parent_inum: u32) -> Vec<u8> {
         let mut content = Vec::new();
         
         // Add "." entry (current directory)
@@ -210,7 +211,7 @@ impl Xv6Node {
         content.extend_from_slice(current_dirent.as_bytes());
         
         // Add ".." entry (parent directory)
-        let parent_dirent = Dirent::new(parent_inum, "..");
+        let parent_dirent = Dirent::new(parent_inum as u16, "..");
         content.extend_from_slice(parent_dirent.as_bytes());
         
         // Add all child entries
@@ -243,7 +244,7 @@ pub struct Xv6FS {
 
 impl Xv6FS {
     pub fn new(max_memory: usize) -> Self {
-        let root = Xv6Node::new_directory("/".to_string());
+        let root = Xv6Node::new_directory("/".to_string(), 1);
         *root.metadata.write() = FileMetadata {
             file_type: FileType::Directory,
             size: 0,
@@ -973,14 +974,14 @@ impl FileOperations for Xv6FS {
                 });
             }
             drop(children);
+
+            let file_id = self.generate_inode_number();
             
             let new_node = match file_type {
-                FileType::RegularFile => Xv6Node::new_file(name.clone()),
-                FileType::Directory => Xv6Node::new_directory(name.clone()),
-                _ => Xv6Node::new_device(name.clone(), file_type),
+                FileType::RegularFile => Xv6Node::new_file(name.clone(), file_id),
+                FileType::Directory => Xv6Node::new_directory(name.clone(), file_id),
+                _ => Xv6Node::new_device(name.clone(), file_type, file_id),
             };
-
-            new_node.metadata.write().file_id = self.generate_inode_number() as u64;
             
             // Update the filesystem using the parent directly
             let mut parent_children = parent.children.write();
@@ -997,6 +998,50 @@ impl FileOperations for Xv6FS {
 
     fn create_dir(&self, path: &str) -> Result<()> {
         self.create_file(path, FileType::Directory)
+    }
+
+    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+        let normalized_target = self.normalize_path(target_path);
+        let normalized_link = self.normalize_path(link_path);
+        
+        if normalized_target == normalized_link {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::InvalidData,
+                message: "Cannot create hard link to itself".to_string(),
+            });
+        }
+        
+        if let Some(target_node) = self.find_node(&normalized_target) {
+            if let Some((parent, name)) = self.find_parent_and_name(&normalized_link) {
+                let children = parent.children.read();
+                if children.contains_key(&name) {
+                    return Err(FileSystemError {
+                        kind: FileSystemErrorKind::AlreadyExists,
+                        message: "Link already exists".to_string(),
+                    });
+                }
+                drop(children);
+                
+                // Create the hard link
+                let new_node = Arc::clone(&target_node);
+                new_node.metadata.write().link_count += 1; // Increment link count
+                
+                let mut parent_children = parent.children.write();
+                parent_children.insert(name, new_node);
+                
+                Ok(())
+            } else {
+                Err(FileSystemError {
+                    kind: FileSystemErrorKind::NotFound,
+                    message: "Parent directory not found".to_string(),
+                })
+            }
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: "Target file not found".to_string(),
+            })
+        }
     }
 
     fn remove(&self, path: &str) -> Result<()> {
