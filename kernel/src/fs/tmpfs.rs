@@ -384,11 +384,11 @@ impl FileSystem for TmpFS {
 
 /// File handle for TmpFS files
 struct TmpFileHandle {
-    path: String,
+    node: Option<Arc<TmpNode>>, // Direct reference to the node (None for device files)
     position: RwLock<u64>,
     file_type: FileType,
     device_guard: Option<BorrowedDeviceGuard>,
-    fs: *const TmpFS, // Weak reference to filesystem
+    fs: *const TmpFS, // Weak pointer to the filesystem
 }
 
 // Safety: TmpFileHandle is safe to send between threads as long as the filesystem outlives it
@@ -396,9 +396,9 @@ unsafe impl Send for TmpFileHandle {}
 unsafe impl Sync for TmpFileHandle {}
 
 impl TmpFileHandle {
-    fn new(path: String, file_type: FileType, fs: &TmpFS) -> Self {
+    fn new(node: Arc<TmpNode>, file_type: FileType, fs: &TmpFS) -> Self {
         Self {
-            path,
+            node: Some(node),
             position: RwLock::new(0),
             file_type,
             device_guard: None,
@@ -406,9 +406,9 @@ impl TmpFileHandle {
         }
     }
 
-    fn new_with_device(path: String, file_type: FileType, device_guard: BorrowedDeviceGuard, fs: &TmpFS) -> Self {
+    fn new_with_device(file_type: FileType, device_guard: BorrowedDeviceGuard, fs: &TmpFS) -> Self {
         Self {
-            path,
+            node: None,
             position: RwLock::new(0),
             file_type,
             device_guard: Some(device_guard),
@@ -496,22 +496,10 @@ impl TmpFileHandle {
     }
 
     fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize> {
-        let fs = self.get_fs();
         let mut position = self.position.write();
         
-        // First get the file_id of the file we're reading from
-        let _file_id = if let Some(node) = fs.find_node(&self.path) {
-            let metadata_guard = node.metadata.read();
-            metadata_guard.file_id
-        } else {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
-            });
-        };
-        
-        // Read from the shared node directly
-        if let Some(node_arc) = fs.find_node(&self.path) {
+        // Use the direct node reference instead of finding it by path
+        if let Some(node_arc) = &self.node {
             let content_guard = node_arc.content.write();
             node_arc.update_access_time();
             
@@ -528,8 +516,8 @@ impl TmpFileHandle {
             Ok(to_read)
         } else {
             Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Trying to read regular file from device handle".to_string(),
             })
         }
     }
@@ -612,8 +600,8 @@ impl TmpFileHandle {
         // Check memory limit before writing
         fs.check_memory_limit(buffer.len())?;
         
-        // Find the node and write directly to it
-        if let Some(node_arc) = fs.find_node(&self.path) {
+        // Use the direct node reference instead of finding it by path
+        if let Some(node_arc) = &self.node {
             let mut content_guard = node_arc.content.write();
             let old_size = content_guard.len();
             let new_position = *position as usize + buffer.len();
@@ -636,8 +624,8 @@ impl TmpFileHandle {
             Ok(buffer.len())
         } else {
             Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Trying to write regular file to device handle".to_string(),
             })
         }
     }
@@ -669,9 +657,8 @@ impl FileHandle for TmpFileHandle {
     }
 
      fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
-        let fs = self.get_fs();
-        
-        if let Some(node) = fs.find_node(&self.path) {
+        // Use the direct node reference instead of finding it by path
+        if let Some(node) = &self.node {
             if node.file_type != FileType::Directory {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::NotADirectory,
@@ -694,8 +681,8 @@ impl FileHandle for TmpFileHandle {
             Ok(entries)
         } else {
             Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "Directory not found".to_string(),
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Cannot read directory from device handle".to_string(),
             })
         }
     }
@@ -725,7 +712,6 @@ impl FileHandle for TmpFileHandle {
     }
     
     fn seek(&self, whence: SeekFrom) -> Result<u64> {
-        let fs = self.get_fs();
         let mut position = self.position.write();
         
         match whence {
@@ -740,7 +726,7 @@ impl FileHandle for TmpFileHandle {
                 }
             },
             SeekFrom::End(offset) => {
-                if let Some(node) = fs.find_node(&self.path) {
+                if let Some(node) = &self.node {
                     let end = node.content.read().len() as u64;
                     if offset >= 0 {
                         *position = end.saturating_add(offset as u64);
@@ -749,8 +735,8 @@ impl FileHandle for TmpFileHandle {
                     }
                 } else {
                     return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotFound,
-                        message: "File not found".to_string(),
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Cannot seek in device file".to_string(),
                     });
                 }
             },
@@ -764,14 +750,13 @@ impl FileHandle for TmpFileHandle {
     }
     
     fn metadata(&self) -> Result<FileMetadata> {
-        let fs = self.get_fs();
-        if let Some(node) = fs.find_node(&self.path) {
+        if let Some(node) = &self.node {
             let metadata_guard = node.metadata.read();
             Ok(metadata_guard.clone())
         } else {
             Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Cannot get metadata from device handle".to_string(),
             })
         }
     }
@@ -783,13 +768,13 @@ impl FileOperations for TmpFS {
         if let Some(node) = self.find_node(&normalized) {
             match node.file_type {
                 FileType::RegularFile | FileType::Directory => {
-                    Ok(Arc::new(TmpFileHandle::new(normalized, node.file_type, self)))
+                    Ok(Arc::new(TmpFileHandle::new(node.clone(), node.file_type.clone(), self)))
                 },
                 FileType::CharDevice(ref info) | FileType::BlockDevice(ref info) => {
                     // Try to borrow the device from DeviceManager
                     match DeviceManager::get_manager().borrow_device(info.device_id) {
                         Ok(guard) => {
-                            Ok(Arc::new(TmpFileHandle::new_with_device(normalized, node.file_type, guard, self)))
+                            Ok(Arc::new(TmpFileHandle::new_with_device(node.file_type.clone(), guard, self)))
                         },
                         Err(_) => {
                             Err(FileSystemError {
