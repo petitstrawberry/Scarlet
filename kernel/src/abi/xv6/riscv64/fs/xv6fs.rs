@@ -220,9 +220,24 @@ impl Xv6Node {
             let dirent = Dirent::new(child.metadata.read().file_id as u16, name);
             content.extend_from_slice(dirent.as_bytes());
         }
+
+        // Sort content by dirent entries (assuming fixed size)
+        const DIRENT_SIZE: usize = core::mem::size_of::<Dirent>();
+        let mut entries: Vec<_> = content.chunks_exact(DIRENT_SIZE).collect();
+        entries.sort_by_key(|chunk| {
+            // Safety: We know each chunk is exactly DIRENT_SIZE bytes
+            let dirent = unsafe { &*(chunk.as_ptr() as *const Dirent) };
+            dirent.inum
+        });
         
-        content
-    }
+        // Rebuild content from sorted entries into a new vector
+        let mut sorted_content = Vec::with_capacity(content.len());
+        for entry in entries {
+            sorted_content.extend_from_slice(entry);
+        }
+        
+        sorted_content
+        }
 
     /// Update file size and modification time
     fn update_size(&self, new_size: usize) {
