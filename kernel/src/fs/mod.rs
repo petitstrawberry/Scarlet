@@ -103,9 +103,6 @@ pub mod tmpfs;
 pub mod params;
 pub mod mount_tree;
 
-#[cfg(test)]
-pub mod hardlink_test;
-
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
 use core::fmt;
