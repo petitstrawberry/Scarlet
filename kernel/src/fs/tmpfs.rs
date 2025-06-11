@@ -21,10 +21,10 @@ use super::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::DeviceType;
 
-/// Directory entries collection with type-safe operations
+/// Directory entries collection with Arc-based node sharing
 #[derive(Clone, Default)]
 struct DirectoryEntries {
-    entries: BTreeMap<String, TmpNode>,
+    entries: BTreeMap<String, Arc<TmpNode>>,
 }
 
 impl DirectoryEntries {
@@ -36,22 +36,22 @@ impl DirectoryEntries {
     }
 
     /// Add a new entry to the directory
-    fn insert(&mut self, name: String, node: TmpNode) -> Option<TmpNode> {
+    fn insert(&mut self, name: String, node: Arc<TmpNode>) -> Option<Arc<TmpNode>> {
         self.entries.insert(name, node)
     }
 
     /// Remove an entry from the directory
-    fn remove(&mut self, name: &str) -> Option<TmpNode> {
+    fn remove(&mut self, name: &str) -> Option<Arc<TmpNode>> {
         self.entries.remove(name)
     }
 
     /// Get a reference to an entry
-    fn get(&self, name: &str) -> Option<&TmpNode> {
+    fn get(&self, name: &str) -> Option<&Arc<TmpNode>> {
         self.entries.get(name)
     }
 
     /// Get a mutable reference to an entry
-    fn get_mut(&mut self, name: &str) -> Option<&mut TmpNode> {
+    fn get_mut(&mut self, name: &str) -> Option<&mut Arc<TmpNode>> {
         self.entries.get_mut(name)
     }
 
@@ -71,12 +71,12 @@ impl DirectoryEntries {
     }
 
     /// Get all entries
-    fn entries(&self) -> impl Iterator<Item = (&String, &TmpNode)> {
+    fn entries(&self) -> impl Iterator<Item = (&String, &Arc<TmpNode>)> {
         self.entries.iter()
     }
 
     /// Get mutable iterator over entries
-    fn entries_mut(&mut self) -> impl Iterator<Item = (&String, &mut TmpNode)> {
+    fn entries_mut(&mut self) -> impl Iterator<Item = (&String, &mut Arc<TmpNode>)> {
         self.entries.iter_mut()
     }
 
@@ -97,18 +97,17 @@ impl DirectoryEntries {
 }
 
 /// Node in the tmpfs filesystem
-#[derive(Clone)]
 struct TmpNode {
     /// File name
     name: String,
     /// File type and associated data
     file_type: FileType,
     /// File content (only for regular files)
-    content: Vec<u8>,
+    content: RwLock<Vec<u8>>,
     /// File metadata
-    metadata: FileMetadata,
+    metadata: RwLock<FileMetadata>,
     /// For directories: child nodes
-    children: DirectoryEntries,
+    children: RwLock<DirectoryEntries>,
 }
 
 impl TmpNode {
@@ -117,8 +116,8 @@ impl TmpNode {
         Self {
             name: name.clone(),
             file_type: FileType::RegularFile,
-            content: Vec::new(),
-            metadata: FileMetadata {
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
                 permissions: FilePermission {
@@ -131,8 +130,8 @@ impl TmpNode {
                 accessed_time: crate::time::current_time(),
                 file_id,
                 link_count: 1,
-            },
-            children: DirectoryEntries::new(),
+            }),
+            children: RwLock::new(DirectoryEntries::new()),
         }
     }
 
@@ -141,8 +140,8 @@ impl TmpNode {
         Self {
             name: name.clone(),
             file_type: FileType::Directory,
-            content: Vec::new(),
-            metadata: FileMetadata {
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermission {
@@ -155,8 +154,8 @@ impl TmpNode {
                 accessed_time: crate::time::current_time(),
                 file_id,
                 link_count: 1,
-            },
-            children: DirectoryEntries::new(),
+            }),
+            children: RwLock::new(DirectoryEntries::new()),
         }
     }
 
@@ -165,8 +164,8 @@ impl TmpNode {
         Self {
             name: name.clone(),
             file_type: file_type.clone(),
-            content: Vec::new(),
-            metadata: FileMetadata {
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type,
                 size: 0,
                 permissions: FilePermission {
@@ -179,20 +178,22 @@ impl TmpNode {
                 accessed_time: crate::time::current_time(),
                 file_id,
                 link_count: 1,
-            },
-            children: DirectoryEntries::new(),
+            }),
+            children: RwLock::new(DirectoryEntries::new()),
         }
     }
 
     /// Update file size and modification time
-    fn update_size(&mut self, new_size: usize) {
-        self.metadata.size = new_size;
-        self.metadata.modified_time = crate::time::current_time();
+    fn update_size(&self, new_size: usize) {
+        let mut metadata = self.metadata.write();
+        metadata.size = new_size;
+        metadata.modified_time = crate::time::current_time();
     }
 
     /// Update access time
-    fn update_access_time(&mut self) {
-        self.metadata.accessed_time = crate::time::current_time();
+    fn update_access_time(&self) {
+        let mut metadata = self.metadata.write();
+        metadata.accessed_time = crate::time::current_time();
     }
 }
 
@@ -201,33 +202,28 @@ pub struct TmpFS {
     mounted: bool,
     mount_point: String,
     /// Root directory of the filesystem
-    root: RwLock<TmpNode>,
+    root: Arc<TmpNode>,
     /// Maximum memory usage in bytes (0 = unlimited)
     max_memory: usize,
     /// Current memory usage in bytes
     current_memory: Mutex<usize>,
     /// Next file ID to assign
     next_file_id: Mutex<u64>,
-    /// Map from file_id to TmpNode for hardlink management
-    file_id_to_node: Mutex<BTreeMap<u64, Arc<RwLock<TmpNode>>>>,
 }
 
 impl TmpFS {
     /// Create a new TmpFS instance
     pub fn new(max_memory: usize) -> Self {
         let root = TmpNode::new_directory("/".to_string(), 1); // Root always has file_id = 1
-        let mut file_id_to_node = BTreeMap::new();
-        let root_arc = Arc::new(RwLock::new(root.clone()));
-        file_id_to_node.insert(1, root_arc);
+        let root_arc = Arc::new(root);
         
         Self {
             mounted: false,
             mount_point: String::new(),
-            root: RwLock::new(root),
+            root: root_arc,
             max_memory,
             current_memory: Mutex::new(0),
             next_file_id: Mutex::new(2), // Start from 2 since root is 1
-            file_id_to_node: Mutex::new(file_id_to_node),
         }
     }
 
@@ -277,60 +273,37 @@ impl TmpFS {
         *current = current.saturating_sub(bytes);
     }
 
-    /// Find a node by path
-    fn find_node(&self, path: &str) -> Option<TmpNode> {
+    /// Find a node by path and return Arc reference
+    fn find_node(&self, path: &str) -> Option<Arc<TmpNode>> {
         let normalized = self.normalize_path(path);
         
         if normalized == "/" {
-            return Some(self.root.read().clone());
+            return Some(self.root.clone());
         }
 
         let parts: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
-        let root = self.root.read();
-        let mut current = &*root;
+        let mut current = self.root.clone();
 
         for part in parts {
-            if let Some(child) = current.children.get(part) {
-                current = child;
+            let next = {
+                let children_guard = current.children.read();
+                children_guard.get(part).cloned()
+            };
+            
+            if let Some(next_node) = next {
+                current = next_node;
             } else {
                 return None;
             }
         }
 
-        Some(current.clone())
+        Some(current)
     }
 
-    /// Find a mutable reference to a node by path
-    fn find_node_mut<F, R>(&self, path: &str, f: F) -> Option<R>
+    /// Find parent node Arc and call function with it
+    fn find_parent_arc<F, R>(&self, path: &str, f: F) -> Result<R>
     where
-        F: FnOnce(&mut TmpNode) -> R,
-    {
-        let normalized = self.normalize_path(path);
-        
-        if normalized == "/" {
-            let mut root = self.root.write();
-            return Some(f(&mut *root));
-        }
-
-        let parts: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
-        let mut root = self.root.write();
-        let mut current = &mut *root;
-
-        for part in parts {
-            if let Some(child) = current.children.get_mut(part) {
-                current = child;
-            } else {
-                return None;
-            }
-        }
-
-        Some(f(current))
-    }
-
-    /// Find parent node and return mutable reference
-    fn find_parent_mut<F, R>(&self, path: &str, f: F) -> Result<R>
-    where
-        F: FnOnce(&mut TmpNode, &str) -> R,
+        F: FnOnce(Arc<TmpNode>, &str) -> Result<R>,
     {
         let normalized = self.normalize_path(path);
         let (parent_path, filename) = if let Some(pos) = normalized.rfind('/') {
@@ -344,72 +317,13 @@ impl TmpFS {
             });
         };
 
-        if parent_path == "/" {
-            let mut root = self.root.write();
-            return Ok(f(&mut *root, filename));
-        }
-
-        let parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
-        let mut root = self.root.write();
-        let mut current = &mut *root;
-
-        for part in parts {
-            if let Some(child) = current.children.get_mut(part) {
-                if child.file_type != FileType::Directory {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotADirectory,
-                        message: "Parent path is not a directory".to_string(),
-                    });
-                }
-                current = child;
-            } else {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotFound,
-                    message: "Parent directory not found".to_string(),
-                });
-            }
-        }
-
-        Ok(f(current, filename))
-    }
-    
-    /// Synchronize all directory entries that reference a specific file_id with the shared node
-    fn sync_all_nodes_with_file_id(&self, file_id: u64) -> Result<()> {
-        // Get the current state of the shared node
-        let shared_content = {
-            let file_id_to_node = self.file_id_to_node.lock();
-            if let Some(shared_node_arc) = file_id_to_node.get(&file_id) {
-                let shared_node = shared_node_arc.read();
-                shared_node.clone()
-            } else {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotFound,
-                    message: "Shared node not found for file_id".to_string(),
-                });
-            }
-        };
-        
-        // Update all nodes in the directory tree that have this file_id
-        self.sync_node_recursive(&mut self.root.write(), &shared_content);
-        
-        Ok(())
-    }
-    
-    /// Recursive helper to sync nodes with matching file_id
-    fn sync_node_recursive(&self, node: &mut TmpNode, shared_content: &TmpNode) {
-        // Check all children
-        for (_name, child) in node.children.entries_mut() {
-            if child.metadata.file_id == shared_content.metadata.file_id {
-                // Update this child with shared content (but preserve name)
-                let original_name = child.name.clone();
-                *child = shared_content.clone();
-                child.name = original_name;
-            }
-            
-            // Recursively check children if this is a directory
-            if child.file_type == FileType::Directory {
-                self.sync_node_recursive(child, shared_content);
-            }
+        if let Some(parent_arc) = self.find_node(parent_path) {
+            f(parent_arc, filename)
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: "Parent directory not found".to_string(),
+            })
         }
     }
 
@@ -455,12 +369,9 @@ impl FileSystem for TmpFS {
         self.mounted = false;
         self.mount_point = String::new();
         
-        // Clear all data to free memory
-        *self.root.write() = TmpNode::new_directory("/".to_string(), 1);
+        // Create new root to replace old one (this drops all references)
+        self.root = Arc::new(TmpNode::new_directory("/".to_string(), 1));
         *self.current_memory.lock() = 0;
-        
-        // Clear file_id mapping and reset next_file_id
-        self.file_id_to_node.lock().clear();
         *self.next_file_id.lock() = 2;
         
         Ok(())
@@ -589,8 +500,9 @@ impl TmpFileHandle {
         let mut position = self.position.write();
         
         // First get the file_id of the file we're reading from
-        let file_id = if let Some(node) = fs.find_node(&self.path) {
-            node.metadata.file_id
+        let _file_id = if let Some(node) = fs.find_node(&self.path) {
+            let metadata_guard = node.metadata.read();
+            metadata_guard.file_id
         } else {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
@@ -598,27 +510,26 @@ impl TmpFileHandle {
             });
         };
         
-        // Read from the shared node in file_id_to_node map
-        let file_id_to_node = fs.file_id_to_node.lock();
-        if let Some(shared_node_arc) = file_id_to_node.get(&file_id) {
-            let mut shared_node = shared_node_arc.write();
-            shared_node.update_access_time();
+        // Read from the shared node directly
+        if let Some(node_arc) = fs.find_node(&self.path) {
+            let content_guard = node_arc.content.write();
+            node_arc.update_access_time();
             
-            if *position as usize >= shared_node.content.len() {
+            if *position as usize >= content_guard.len() {
                 return Ok(0); // EOF
             }
             
-            let available = shared_node.content.len() - *position as usize;
+            let available = content_guard.len() - *position as usize;
             let to_read = buffer.len().min(available);
             
-            buffer[..to_read].copy_from_slice(&shared_node.content[*position as usize..*position as usize + to_read]);
+            buffer[..to_read].copy_from_slice(&content_guard[*position as usize..*position as usize + to_read]);
             *position += to_read as u64;
             
             Ok(to_read)
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
-                message: "Shared node not found".to_string(),
+                message: "File not found".to_string(),
             })
         }
     }
@@ -701,49 +612,34 @@ impl TmpFileHandle {
         // Check memory limit before writing
         fs.check_memory_limit(buffer.len())?;
         
-        // First get the file_id of the file we're writing to
-        let file_id = if let Some(node) = fs.find_node(&self.path) {
-            node.metadata.file_id
+        // Find the node and write directly to it
+        if let Some(node_arc) = fs.find_node(&self.path) {
+            let mut content_guard = node_arc.content.write();
+            let old_size = content_guard.len();
+            let new_position = *position as usize + buffer.len();
+            
+            // Expand file if necessary
+            if new_position > content_guard.len() {
+                content_guard.resize(new_position, 0);
+            }
+            
+            // Write data
+            content_guard[*position as usize..new_position].copy_from_slice(buffer);
+            let new_size = content_guard.len();
+            
+            // Update metadata
+            node_arc.update_size(new_size);
+            
+            let size_increase = new_size.saturating_sub(old_size);
+            *position += buffer.len() as u64;
+            fs.add_memory_usage(size_increase);
+            Ok(buffer.len())
         } else {
-            return Err(FileSystemError {
+            Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: "File not found".to_string(),
-            });
-        };
-        
-        // Update the shared node in file_id_to_node map
-        let size_increase = {
-            let file_id_to_node = fs.file_id_to_node.lock();
-            if let Some(shared_node_arc) = file_id_to_node.get(&file_id) {
-                let mut shared_node = shared_node_arc.write();
-                let old_size = shared_node.content.len();
-                let new_position = *position as usize + buffer.len();
-                
-                // Expand file if necessary
-                if new_position > shared_node.content.len() {
-                    shared_node.content.resize(new_position, 0);
-                }
-                
-                // Write data
-                shared_node.content[*position as usize..new_position].copy_from_slice(buffer);
-                let new_size = shared_node.content.len();
-                shared_node.update_size(new_size);
-                
-                new_size.saturating_sub(old_size)
-            } else {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotFound,
-                    message: "Shared node not found".to_string(),
-                });
-            }
-        };
-        
-        // Note: We don't need to sync directory entries because they reference
-        // the shared node via file_id, and the content is stored in file_id_to_node
-        
-        *position += buffer.len() as u64;
-        fs.add_memory_usage(size_increase);
-        Ok(buffer.len())
+            })
+        }
     }
 }
 
@@ -784,13 +680,14 @@ impl FileHandle for TmpFileHandle {
             }
             
             let mut entries = Vec::new();
-            for (name, child) in node.children.entries() {
+            for (name, child) in node.children.read().entries() {
+                let metadata = child.metadata.read();
                 entries.push(DirectoryEntry {
                     name: name.clone(),
                     file_type: child.file_type.clone(),
-                    size: child.metadata.size,
-                    file_id: child.metadata.file_id,
-                    metadata: Some(child.metadata.clone()),
+                    size: metadata.size,
+                    file_id: metadata.file_id,
+                    metadata: Some(metadata.clone()),
                 });
             }
             
@@ -844,7 +741,7 @@ impl FileHandle for TmpFileHandle {
             },
             SeekFrom::End(offset) => {
                 if let Some(node) = fs.find_node(&self.path) {
-                    let end = node.content.len() as u64;
+                    let end = node.content.read().len() as u64;
                     if offset >= 0 {
                         *position = end.saturating_add(offset as u64);
                     } else {
@@ -869,17 +766,8 @@ impl FileHandle for TmpFileHandle {
     fn metadata(&self) -> Result<FileMetadata> {
         let fs = self.get_fs();
         if let Some(node) = fs.find_node(&self.path) {
-            let file_id = node.metadata.file_id;
-            
-            // Get the most up-to-date metadata from the shared node
-            let file_id_to_node = fs.file_id_to_node.lock();
-            if let Some(shared_node_arc) = file_id_to_node.get(&file_id) {
-                let shared_node = shared_node_arc.read();
-                Ok(shared_node.metadata.clone())
-            } else {
-                // Fallback to the directory tree metadata (shouldn't happen for valid files)
-                Ok(node.metadata)
-            }
+            let metadata_guard = node.metadata.read();
+            Ok(metadata_guard.clone())
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
@@ -938,13 +826,14 @@ impl FileOperations for TmpFS {
             }
             
             let mut entries = Vec::new();
-            for (name, child) in node.children.entries() {
+            for (name, child) in node.children.read().entries() {
+                let metadata = child.metadata.read();
                 entries.push(DirectoryEntry {
                     name: name.clone(),
                     file_type: child.file_type.clone(),
-                    size: child.metadata.size,
-                    file_id: child.metadata.file_id,
-                    metadata: Some(child.metadata.clone()),
+                    size: metadata.size,
+                    file_id: metadata.file_id,
+                    metadata: Some(metadata.clone()),
                 });
             }
             
@@ -958,8 +847,10 @@ impl FileOperations for TmpFS {
     }
     
     fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
-        self.find_parent_mut(path, |parent, filename| {
-            if parent.children.contains_key(filename) {
+        self.find_parent_arc(path, |parent_arc, filename| {
+            let mut parent_children = parent_arc.children.write();
+            
+            if parent_children.contains_key(filename) {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::AlreadyExists,
                     message: "File already exists".to_string(),
@@ -983,15 +874,19 @@ impl FileOperations for TmpFS {
                 }
             };
             
-            // Register file_id -> node mapping for hardlink support
-            let node_arc = Arc::new(RwLock::new(node.clone()));
-            self.file_id_to_node.lock().insert(file_id, node_arc);
+            // Create Arc for the new node
+            let node_arc = Arc::new(node);
             
-            parent.children.insert(filename.to_string(), node);
-            parent.metadata.modified_time = crate::time::current_time();
+            parent_children.insert(filename.to_string(), node_arc);
+            
+            // Update parent metadata
+            {
+                let mut parent_metadata = parent_arc.metadata.write();
+                parent_metadata.modified_time = crate::time::current_time();
+            }
             
             Ok(())
-        })?
+        })
     }
     
     fn create_dir(&self, path: &str) -> Result<()> {
@@ -999,72 +894,59 @@ impl FileOperations for TmpFS {
     }
     
     fn remove(&self, path: &str) -> Result<()> {
-        self.find_parent_mut(path, |parent, filename| {
-            if let Some(node) = parent.children.get(filename) {
+        self.find_parent_arc(path, |parent_arc, filename| {
+            let mut parent_children = parent_arc.children.write();
+            
+            if let Some(node_arc) = parent_children.get(filename) {
                 // Check if directory is empty
-                if node.file_type == FileType::Directory && !node.children.is_empty() {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotSupported,
-                        message: "Cannot remove non-empty directory".to_string(),
-                    });
-                }
-                
-                let file_id = node.metadata.file_id;
-                let mut should_free_memory = false;
-                let mut memory_freed = 0;
-                
-                // Update link count in the shared node
-                {
-                    let mut file_id_to_node = self.file_id_to_node.lock();
-                    if let Some(shared_node_arc) = file_id_to_node.get(&file_id) {
-                        let mut shared_node = shared_node_arc.write();
-                        shared_node.metadata.link_count -= 1;
-                        
-                        // If link count reaches 0, mark for data deletion
-                        if shared_node.metadata.link_count == 0 {
-                            should_free_memory = true;
-                            memory_freed = shared_node.content.len(); // Get actual content size
-                            // Drop the reference before removing from map
-                            drop(shared_node);
-                            file_id_to_node.remove(&file_id);
-                        }
+                if node_arc.file_type == FileType::Directory {
+                    let children_guard = node_arc.children.read();
+                    if !children_guard.is_empty() {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Cannot remove non-empty directory".to_string(),
+                        });
                     }
                 }
-                
-                // Remove directory entry
-                parent.children.remove(filename);
-                parent.metadata.modified_time = crate::time::current_time();
-                
-                // Free memory only when link count reaches 0
-                if should_free_memory {
-                    self.subtract_memory_usage(memory_freed);
+
+                {
+                    // Decrement link_count
+                    let mut metadata = node_arc.metadata.write();
+                    metadata.link_count -= 1;
+                    
+                    // If link_count == 0, free memory
+                    if metadata.link_count == 0 {
+                        let content_guard = node_arc.content.read();
+                        let memory_freed = content_guard.len();
+                        self.subtract_memory_usage(memory_freed);
+                        // In practice, memory is freed when Arc<TmpNode> reference count reaches 0
+                        // No explicit memory deallocation is needed here
+                    }
                 }
-                
+
+                // Remove from directory entries
+                parent_children.remove(filename);
+
+                // Update parent directory's modification time
+                {
+                    let mut parent_metadata = parent_arc.metadata.write();
+                    parent_metadata.modified_time = crate::time::current_time();
+                }
+
                 Ok(())
             } else {
                 Err(FileSystemError {
                     kind: FileSystemErrorKind::NotFound,
-                    message: "File or directory not found".to_string(),
+                    message: "File not found".to_string(),
                 })
             }
-        })?
+        })
     }
     
     fn metadata(&self, path: &str) -> Result<FileMetadata> {
-        let normalized = self.normalize_path(path);
-        
-        if let Some(node) = self.find_node(&normalized) {
-            let file_id = node.metadata.file_id;
-            
-            // Get the most up-to-date metadata from the shared node
-            let file_id_to_node = self.file_id_to_node.lock();
-            if let Some(shared_node_arc) = file_id_to_node.get(&file_id) {
-                let shared_node = shared_node_arc.read();
-                Ok(shared_node.metadata.clone())
-            } else {
-                // Fallback to the directory tree metadata (shouldn't happen for valid files)
-                Ok(node.metadata)
-            }
+        if let Some(node_arc) = self.find_node(path) {
+            let metadata_guard = node_arc.metadata.read();
+            Ok(metadata_guard.clone())
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
@@ -1074,102 +956,54 @@ impl FileOperations for TmpFS {
     }
     
     fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
-        // First, verify target exists and get its file_id
-        let target_metadata = self.metadata(target_path)?;
-        let target_file_id = target_metadata.file_id;
-        
-        // Hardlinks to directories are not allowed
-        if target_metadata.file_type == FileType::Directory {
+        // 1. Get target node as Arc
+        let target_node = self.find_node(target_path).ok_or_else(|| FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: "Target file not found".to_string(),
+        })?;
+
+        // 2. Hard links to directories are prohibited
+        if target_node.file_type == FileType::Directory {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
                 message: "Hard links to directories are not supported".to_string(),
             });
         }
-        
-        // Find the shared node by file_id
-        let shared_node_arc = {
-            let file_id_to_node = self.file_id_to_node.lock();
-            file_id_to_node.get(&target_file_id).cloned()
-        };
-        
-        let shared_node_arc = shared_node_arc.ok_or_else(|| FileSystemError {
-            kind: FileSystemErrorKind::NotFound,
-            message: "Target file node not found in registry".to_string(),
-        })?;
-        
-        // Create new directory entry pointing to the same node
-        let _ = self.find_parent_mut(link_path, |parent, filename| {
-            if parent.children.contains_key(filename) {
+
+        // 3. Add the same Arc to parent directory of link_path
+        self.find_parent_arc(link_path, |parent_arc, filename| {
+            let mut parent_children = parent_arc.children.write();
+            
+            if parent_children.contains_key(filename) {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::AlreadyExists,
                     message: "Link path already exists".to_string(),
                 });
             }
-            
-            // Get the shared node and increment link count
-            let mut shared_node = shared_node_arc.write();
-            shared_node.metadata.link_count += 1;
-            let updated_metadata = shared_node.metadata.clone();
-            
-            // Create a new local copy for this directory entry
-            let mut new_node = shared_node.clone();
-            new_node.name = filename.to_string();
-            
-            // Add to parent directory
-            parent.children.insert(filename.to_string(), new_node);
-            parent.metadata.modified_time = crate::time::current_time();
-            
-            // Release the shared node lock
-            drop(shared_node);
-            
-            Ok(updated_metadata)
+
+            // 4. Increment link_count
+            {
+                let mut target_metadata = target_node.metadata.write();
+                target_metadata.link_count += 1;
+            }
+
+            // 5. Add the same Arc with new name
+            parent_children.insert(filename.to_string(), target_node.clone());
+
+            // 6. Update parent directory's modification time
+            {
+                let mut parent_metadata = parent_arc.metadata.write();
+                parent_metadata.modified_time = crate::time::current_time();
+            }
+
+            Ok(())
         })?;
-        
-        // Update all existing directory entries that point to the same file_id
-        // This ensures that metadata() calls return consistent link_count
-        self.update_all_nodes_with_file_id(target_file_id)?;
         
         Ok(())
     }
     
     fn root_dir(&self) -> Result<Directory> {
         Ok(Directory::open("/".to_string()))
-    }
-}
-
-impl TmpFS {
-    /// Update all directory entries that have the same file_id with the latest metadata
-    fn update_all_nodes_with_file_id(&self, file_id: u64) -> Result<()> {
-        // Get the latest metadata from the shared node
-        let latest_metadata = {
-            let file_id_to_node = self.file_id_to_node.lock();
-            if let Some(shared_node_arc) = file_id_to_node.get(&file_id) {
-                let shared_node = shared_node_arc.read();
-                shared_node.metadata.clone()
-            } else {
-                return Ok(()); // Node not found, nothing to update
-            }
-        };
-        
-        // Update root directory entries
-        self.update_nodes_in_directory(&mut self.root.write(), file_id, &latest_metadata);
-        
-        Ok(())
-    }
-    
-    /// Recursively update nodes in a directory tree
-    fn update_nodes_in_directory(&self, node: &mut TmpNode, target_file_id: u64, latest_metadata: &FileMetadata) {
-        // Update direct children
-        for (_, child) in node.children.entries_mut() {
-            if child.metadata.file_id == target_file_id {
-                child.metadata = latest_metadata.clone();
-            }
-            
-            // Recursively update subdirectories
-            if child.file_type == FileType::Directory {
-                self.update_nodes_in_directory(child, target_file_id, latest_metadata);
-            }
-        }
     }
 }
 
