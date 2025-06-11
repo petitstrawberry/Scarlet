@@ -13,17 +13,18 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use spin::rwlock::RwLock;
 use spin::Mutex;
 
-use super::*;
+use crate::fs::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::DeviceType;
 
-/// Directory entries collection with type-safe operations
-#[derive(Clone, Default)]
+/// Directory entries collection with Arc-based node sharing
+#[derive(Default)]
 struct DirectoryEntries {
-    entries: BTreeMap<String, TmpNode>,
+    entries: BTreeMap<String, Arc<TmpNode>>,
 }
 
 impl DirectoryEntries {
@@ -35,22 +36,22 @@ impl DirectoryEntries {
     }
 
     /// Add a new entry to the directory
-    fn insert(&mut self, name: String, node: TmpNode) -> Option<TmpNode> {
+    fn insert(&mut self, name: String, node: Arc<TmpNode>) -> Option<Arc<TmpNode>> {
         self.entries.insert(name, node)
     }
 
     /// Remove an entry from the directory
-    fn remove(&mut self, name: &str) -> Option<TmpNode> {
+    fn remove(&mut self, name: &str) -> Option<Arc<TmpNode>> {
         self.entries.remove(name)
     }
 
     /// Get a reference to an entry
-    fn get(&self, name: &str) -> Option<&TmpNode> {
+    fn get(&self, name: &str) -> Option<&Arc<TmpNode>> {
         self.entries.get(name)
     }
 
     /// Get a mutable reference to an entry
-    fn get_mut(&mut self, name: &str) -> Option<&mut TmpNode> {
+    fn get_mut(&mut self, name: &str) -> Option<&mut Arc<TmpNode>> {
         self.entries.get_mut(name)
     }
 
@@ -70,12 +71,12 @@ impl DirectoryEntries {
     }
 
     /// Get all entries
-    fn entries(&self) -> impl Iterator<Item = (&String, &TmpNode)> {
+    fn entries(&self) -> impl Iterator<Item = (&String, &Arc<TmpNode>)> {
         self.entries.iter()
     }
 
     /// Get mutable iterator over entries
-    fn entries_mut(&mut self) -> impl Iterator<Item = (&String, &mut TmpNode)> {
+    fn entries_mut(&mut self) -> impl Iterator<Item = (&String, &mut Arc<TmpNode>)> {
         self.entries.iter_mut()
     }
 
@@ -96,28 +97,27 @@ impl DirectoryEntries {
 }
 
 /// Node in the tmpfs filesystem
-#[derive(Clone)]
 struct TmpNode {
     /// File name
     name: String,
     /// File type and associated data
     file_type: FileType,
     /// File content (only for regular files)
-    content: Vec<u8>,
+    content: RwLock<Vec<u8>>,
     /// File metadata
-    metadata: FileMetadata,
+    metadata: RwLock<FileMetadata>,
     /// For directories: child nodes
-    children: DirectoryEntries,
+    children: RwLock<DirectoryEntries>,
 }
 
 impl TmpNode {
     /// Create a new regular file node
-    fn new_file(name: String) -> Self {
+    fn new_file(name: String, file_id: u64) -> Self {
         Self {
             name: name.clone(),
             file_type: FileType::RegularFile,
-            content: Vec::new(),
-            metadata: FileMetadata {
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
                 permissions: FilePermission {
@@ -128,18 +128,20 @@ impl TmpNode {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-            },
-            children: DirectoryEntries::new(),
+                file_id,
+                link_count: 1,
+            }),
+            children: RwLock::new(DirectoryEntries::new()),
         }
     }
 
     /// Create a new directory node
-    fn new_directory(name: String) -> Self {
+    fn new_directory(name: String, file_id: u64) -> Self {
         Self {
             name: name.clone(),
             file_type: FileType::Directory,
-            content: Vec::new(),
-            metadata: FileMetadata {
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
                 permissions: FilePermission {
@@ -150,18 +152,20 @@ impl TmpNode {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-            },
-            children: DirectoryEntries::new(),
+                file_id,
+                link_count: 1,
+            }),
+            children: RwLock::new(DirectoryEntries::new()),
         }
     }
 
     /// Create a new device file node
-    fn new_device(name: String, file_type: FileType) -> Self {
+    fn new_device(name: String, file_type: FileType, file_id: u64) -> Self {
         Self {
             name: name.clone(),
             file_type: file_type.clone(),
-            content: Vec::new(),
-            metadata: FileMetadata {
+            content: RwLock::new(Vec::new()),
+            metadata: RwLock::new(FileMetadata {
                 file_type,
                 size: 0,
                 permissions: FilePermission {
@@ -172,20 +176,24 @@ impl TmpNode {
                 created_time: crate::time::current_time(),
                 modified_time: crate::time::current_time(),
                 accessed_time: crate::time::current_time(),
-            },
-            children: DirectoryEntries::new(),
+                file_id,
+                link_count: 1,
+            }),
+            children: RwLock::new(DirectoryEntries::new()),
         }
     }
 
     /// Update file size and modification time
-    fn update_size(&mut self, new_size: usize) {
-        self.metadata.size = new_size;
-        self.metadata.modified_time = crate::time::current_time();
+    fn update_size(&self, new_size: usize) {
+        let mut metadata = self.metadata.write();
+        metadata.size = new_size;
+        metadata.modified_time = crate::time::current_time();
     }
 
     /// Update access time
-    fn update_access_time(&mut self) {
-        self.metadata.accessed_time = crate::time::current_time();
+    fn update_access_time(&self) {
+        let mut metadata = self.metadata.write();
+        metadata.accessed_time = crate::time::current_time();
     }
 }
 
@@ -194,25 +202,37 @@ pub struct TmpFS {
     mounted: bool,
     mount_point: String,
     /// Root directory of the filesystem
-    root: RwLock<TmpNode>,
+    root: Arc<TmpNode>,
     /// Maximum memory usage in bytes (0 = unlimited)
     max_memory: usize,
     /// Current memory usage in bytes
     current_memory: Mutex<usize>,
+    /// Next file ID to assign
+    next_file_id: Mutex<u64>,
 }
 
 impl TmpFS {
     /// Create a new TmpFS instance
     pub fn new(max_memory: usize) -> Self {
-        let root = TmpNode::new_directory("/".to_string());
+        let root = TmpNode::new_directory("/".to_string(), 1); // Root always has file_id = 1
+        let root_arc = Arc::new(root);
         
         Self {
             mounted: false,
             mount_point: String::new(),
-            root: RwLock::new(root),
+            root: root_arc,
             max_memory,
             current_memory: Mutex::new(0),
+            next_file_id: Mutex::new(2), // Start from 2 since root is 1
         }
+    }
+
+    /// Generate the next file ID
+    fn generate_file_id(&self) -> u64 {
+        let mut next_id = self.next_file_id.lock();
+        let id = *next_id;
+        *next_id += 1;
+        id
     }
 
     /// Get current memory usage
@@ -253,60 +273,37 @@ impl TmpFS {
         *current = current.saturating_sub(bytes);
     }
 
-    /// Find a node by path
-    fn find_node(&self, path: &str) -> Option<TmpNode> {
+    /// Find a node by path and return Arc reference
+    fn find_node(&self, path: &str) -> Option<Arc<TmpNode>> {
         let normalized = self.normalize_path(path);
         
         if normalized == "/" {
-            return Some(self.root.read().clone());
+            return Some(self.root.clone());
         }
 
         let parts: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
-        let root = self.root.read();
-        let mut current = &*root;
+        let mut current = self.root.clone();
 
         for part in parts {
-            if let Some(child) = current.children.get(part) {
-                current = child;
+            let next = {
+                let children_guard = current.children.read();
+                children_guard.get(part).cloned()
+            };
+            
+            if let Some(next_node) = next {
+                current = next_node;
             } else {
                 return None;
             }
         }
 
-        Some(current.clone())
+        Some(current)
     }
 
-    /// Find a mutable reference to a node by path
-    fn find_node_mut<F, R>(&self, path: &str, f: F) -> Option<R>
+    /// Find parent node Arc and call function with it
+    fn find_parent_arc<F, R>(&self, path: &str, f: F) -> Result<R>
     where
-        F: FnOnce(&mut TmpNode) -> R,
-    {
-        let normalized = self.normalize_path(path);
-        
-        if normalized == "/" {
-            let mut root = self.root.write();
-            return Some(f(&mut *root));
-        }
-
-        let parts: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
-        let mut root = self.root.write();
-        let mut current = &mut *root;
-
-        for part in parts {
-            if let Some(child) = current.children.get_mut(part) {
-                current = child;
-            } else {
-                return None;
-            }
-        }
-
-        Some(f(current))
-    }
-
-    /// Find parent node and return mutable reference
-    fn find_parent_mut<F, R>(&self, path: &str, f: F) -> Result<R>
-    where
-        F: FnOnce(&mut TmpNode, &str) -> R,
+        F: FnOnce(Arc<TmpNode>, &str) -> Result<R>,
     {
         let normalized = self.normalize_path(path);
         let (parent_path, filename) = if let Some(pos) = normalized.rfind('/') {
@@ -320,33 +317,14 @@ impl TmpFS {
             });
         };
 
-        if parent_path == "/" {
-            let mut root = self.root.write();
-            return Ok(f(&mut *root, filename));
+        if let Some(parent_arc) = self.find_node(parent_path) {
+            f(parent_arc, filename)
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: "Parent directory not found".to_string(),
+            })
         }
-
-        let parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
-        let mut root = self.root.write();
-        let mut current = &mut *root;
-
-        for part in parts {
-            if let Some(child) = current.children.get_mut(part) {
-                if child.file_type != FileType::Directory {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotADirectory,
-                        message: "Parent path is not a directory".to_string(),
-                    });
-                }
-                current = child;
-            } else {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotFound,
-                    message: "Parent directory not found".to_string(),
-                });
-            }
-        }
-
-        Ok(f(current, filename))
     }
 
     /// Normalize path for consistent handling
@@ -391,9 +369,10 @@ impl FileSystem for TmpFS {
         self.mounted = false;
         self.mount_point = String::new();
         
-        // Clear all data to free memory
-        *self.root.write() = TmpNode::new_directory("/".to_string());
+        // Create new root to replace old one (this drops all references)
+        self.root = Arc::new(TmpNode::new_directory("/".to_string(), 1));
         *self.current_memory.lock() = 0;
+        *self.next_file_id.lock() = 2;
         
         Ok(())
     }
@@ -405,11 +384,11 @@ impl FileSystem for TmpFS {
 
 /// File handle for TmpFS files
 struct TmpFileHandle {
-    path: String,
+    node: Option<Arc<TmpNode>>, // Direct reference to the node (None for device files)
     position: RwLock<u64>,
     file_type: FileType,
     device_guard: Option<BorrowedDeviceGuard>,
-    fs: *const TmpFS, // Weak reference to filesystem
+    fs: *const TmpFS, // Weak pointer to the filesystem
 }
 
 // Safety: TmpFileHandle is safe to send between threads as long as the filesystem outlives it
@@ -417,9 +396,9 @@ unsafe impl Send for TmpFileHandle {}
 unsafe impl Sync for TmpFileHandle {}
 
 impl TmpFileHandle {
-    fn new(path: String, file_type: FileType, fs: &TmpFS) -> Self {
+    fn new(node: Arc<TmpNode>, file_type: FileType, fs: &TmpFS) -> Self {
         Self {
-            path,
+            node: Some(node),
             position: RwLock::new(0),
             file_type,
             device_guard: None,
@@ -427,9 +406,9 @@ impl TmpFileHandle {
         }
     }
 
-    fn new_with_device(path: String, file_type: FileType, device_guard: BorrowedDeviceGuard, fs: &TmpFS) -> Self {
+    fn new_with_device(file_type: FileType, device_guard: BorrowedDeviceGuard, fs: &TmpFS) -> Self {
         Self {
-            path,
+            node: None,
             position: RwLock::new(0),
             file_type,
             device_guard: Some(device_guard),
@@ -517,32 +496,28 @@ impl TmpFileHandle {
     }
 
     fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize> {
-        let fs = self.get_fs();
         let mut position = self.position.write();
         
-        if let Some(mut node) = fs.find_node(&self.path) {
-            node.update_access_time();
+        // Use the direct node reference instead of finding it by path
+        if let Some(node_arc) = &self.node {
+            let content_guard = node_arc.content.write();
+            node_arc.update_access_time();
             
-            if *position as usize >= node.content.len() {
+            if *position as usize >= content_guard.len() {
                 return Ok(0); // EOF
             }
             
-            let available = node.content.len() - *position as usize;
+            let available = content_guard.len() - *position as usize;
             let to_read = buffer.len().min(available);
             
-            buffer[..to_read].copy_from_slice(&node.content[*position as usize..*position as usize + to_read]);
+            buffer[..to_read].copy_from_slice(&content_guard[*position as usize..*position as usize + to_read]);
             *position += to_read as u64;
-            
-            // Update the node's access time in the filesystem
-            fs.find_node_mut(&self.path, |n| {
-                n.update_access_time();
-            });
             
             Ok(to_read)
         } else {
             Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Trying to read regular file from device handle".to_string(),
             })
         }
     }
@@ -625,33 +600,33 @@ impl TmpFileHandle {
         // Check memory limit before writing
         fs.check_memory_limit(buffer.len())?;
         
-        match fs.find_node_mut(&self.path, |n| {
-            let old_size = n.content.len();
+        // Use the direct node reference instead of finding it by path
+        if let Some(node_arc) = &self.node {
+            let mut content_guard = node_arc.content.write();
+            let old_size = content_guard.len();
             let new_position = *position as usize + buffer.len();
             
             // Expand file if necessary
-            if new_position > n.content.len() {
-                n.content.resize(new_position, 0);
+            if new_position > content_guard.len() {
+                content_guard.resize(new_position, 0);
             }
             
             // Write data
-            n.content[*position as usize..new_position].copy_from_slice(buffer);
-            n.update_size(n.content.len());
+            content_guard[*position as usize..new_position].copy_from_slice(buffer);
+            let new_size = content_guard.len();
             
-            let size_increase = n.content.len().saturating_sub(old_size);
-            size_increase
-        }) {
-            Some(_) => {
-                *position += buffer.len() as u64;
-                fs.add_memory_usage(buffer.len());
-                Ok(buffer.len())
-            },
-            None => {
-                Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotFound,
-                    message: "File not found".to_string(),
-                })
-            }
+            // Update metadata
+            node_arc.update_size(new_size);
+            
+            let size_increase = new_size.saturating_sub(old_size);
+            *position += buffer.len() as u64;
+            fs.add_memory_usage(size_increase);
+            Ok(buffer.len())
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Trying to write regular file to device handle".to_string(),
+            })
         }
     }
 }
@@ -682,9 +657,8 @@ impl FileHandle for TmpFileHandle {
     }
 
      fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
-        let fs = self.get_fs();
-        
-        if let Some(node) = fs.find_node(&self.path) {
+        // Use the direct node reference instead of finding it by path
+        if let Some(node) = &self.node {
             if node.file_type != FileType::Directory {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::NotADirectory,
@@ -693,20 +667,22 @@ impl FileHandle for TmpFileHandle {
             }
             
             let mut entries = Vec::new();
-            for (name, child) in node.children.entries() {
+            for (name, child) in node.children.read().entries() {
+                let metadata = child.metadata.read();
                 entries.push(DirectoryEntry {
                     name: name.clone(),
                     file_type: child.file_type.clone(),
-                    size: child.metadata.size,
-                    metadata: Some(child.metadata.clone()),
+                    size: metadata.size,
+                    file_id: metadata.file_id,
+                    metadata: Some(metadata.clone()),
                 });
             }
             
             Ok(entries)
         } else {
             Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "Directory not found".to_string(),
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Cannot read directory from device handle".to_string(),
             })
         }
     }
@@ -736,7 +712,6 @@ impl FileHandle for TmpFileHandle {
     }
     
     fn seek(&self, whence: SeekFrom) -> Result<u64> {
-        let fs = self.get_fs();
         let mut position = self.position.write();
         
         match whence {
@@ -751,8 +726,8 @@ impl FileHandle for TmpFileHandle {
                 }
             },
             SeekFrom::End(offset) => {
-                if let Some(node) = fs.find_node(&self.path) {
-                    let end = node.content.len() as u64;
+                if let Some(node) = &self.node {
+                    let end = node.content.read().len() as u64;
                     if offset >= 0 {
                         *position = end.saturating_add(offset as u64);
                     } else {
@@ -760,8 +735,8 @@ impl FileHandle for TmpFileHandle {
                     }
                 } else {
                     return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotFound,
-                        message: "File not found".to_string(),
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Cannot seek in device file".to_string(),
                     });
                 }
             },
@@ -775,13 +750,13 @@ impl FileHandle for TmpFileHandle {
     }
     
     fn metadata(&self) -> Result<FileMetadata> {
-        let fs = self.get_fs();
-        if let Some(node) = fs.find_node(&self.path) {
-            Ok(node.metadata)
+        if let Some(node) = &self.node {
+            let metadata_guard = node.metadata.read();
+            Ok(metadata_guard.clone())
         } else {
             Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File not found".to_string(),
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Cannot get metadata from device handle".to_string(),
             })
         }
     }
@@ -793,13 +768,13 @@ impl FileOperations for TmpFS {
         if let Some(node) = self.find_node(&normalized) {
             match node.file_type {
                 FileType::RegularFile | FileType::Directory => {
-                    Ok(Arc::new(TmpFileHandle::new(normalized, node.file_type, self)))
+                    Ok(Arc::new(TmpFileHandle::new(node.clone(), node.file_type.clone(), self)))
                 },
                 FileType::CharDevice(ref info) | FileType::BlockDevice(ref info) => {
                     // Try to borrow the device from DeviceManager
                     match DeviceManager::get_manager().borrow_device(info.device_id) {
                         Ok(guard) => {
-                            Ok(Arc::new(TmpFileHandle::new_with_device(normalized, node.file_type, guard, self)))
+                            Ok(Arc::new(TmpFileHandle::new_with_device(node.file_type.clone(), guard, self)))
                         },
                         Err(_) => {
                             Err(FileSystemError {
@@ -836,12 +811,14 @@ impl FileOperations for TmpFS {
             }
             
             let mut entries = Vec::new();
-            for (name, child) in node.children.entries() {
+            for (name, child) in node.children.read().entries() {
+                let metadata = child.metadata.read();
                 entries.push(DirectoryEntry {
                     name: name.clone(),
                     file_type: child.file_type.clone(),
-                    size: child.metadata.size,
-                    metadata: Some(child.metadata.clone()),
+                    size: metadata.size,
+                    file_id: metadata.file_id,
+                    metadata: Some(metadata.clone()),
                 });
             }
             
@@ -855,19 +832,24 @@ impl FileOperations for TmpFS {
     }
     
     fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
-        self.find_parent_mut(path, |parent, filename| {
-            if parent.children.contains_key(filename) {
+        self.find_parent_arc(path, |parent_arc, filename| {
+            let mut parent_children = parent_arc.children.write();
+            
+            if parent_children.contains_key(filename) {
                 return Err(FileSystemError {
                     kind: FileSystemErrorKind::AlreadyExists,
                     message: "File already exists".to_string(),
                 });
             }
             
+            // Generate new file_id for this file
+            let file_id = self.generate_file_id();
+            
             let node = match file_type {
-                FileType::RegularFile => TmpNode::new_file(filename.to_string()),
-                FileType::Directory => TmpNode::new_directory(filename.to_string()),
+                FileType::RegularFile => TmpNode::new_file(filename.to_string(), file_id),
+                FileType::Directory => TmpNode::new_directory(filename.to_string(), file_id),
                 FileType::CharDevice(_) | FileType::BlockDevice(_) => {
-                    TmpNode::new_device(filename.to_string(), file_type)
+                    TmpNode::new_device(filename.to_string(), file_type, file_id)
                 },
                 _ => {
                     return Err(FileSystemError {
@@ -877,11 +859,19 @@ impl FileOperations for TmpFS {
                 }
             };
             
-            parent.children.insert(filename.to_string(), node);
-            parent.metadata.modified_time = crate::time::current_time();
+            // Create Arc for the new node
+            let node_arc = Arc::new(node);
+            
+            parent_children.insert(filename.to_string(), node_arc);
+            
+            // Update parent metadata
+            {
+                let mut parent_metadata = parent_arc.metadata.write();
+                parent_metadata.modified_time = crate::time::current_time();
+            }
             
             Ok(())
-        })?
+        })
     }
     
     fn create_dir(&self, path: &str) -> Result<()> {
@@ -889,47 +879,112 @@ impl FileOperations for TmpFS {
     }
     
     fn remove(&self, path: &str) -> Result<()> {
-        self.find_parent_mut(path, |parent, filename| {
-            if let Some(node) = parent.children.get(filename) {
+        self.find_parent_arc(path, |parent_arc, filename| {
+            let mut parent_children = parent_arc.children.write();
+            
+            if let Some(node_arc) = parent_children.get(filename) {
                 // Check if directory is empty
-                if node.file_type == FileType::Directory && !node.children.is_empty() {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotSupported,
-                        message: "Cannot remove non-empty directory".to_string(),
-                    });
+                if node_arc.file_type == FileType::Directory {
+                    let children_guard = node_arc.children.read();
+                    if !children_guard.is_empty() {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Cannot remove non-empty directory".to_string(),
+                        });
+                    }
                 }
-                
-                // Calculate memory to free
-                let memory_freed = node.content.len();
-                
-                // Remove the node
-                parent.children.remove(filename);
-                parent.metadata.modified_time = crate::time::current_time();
-                
-                // Update memory usage
-                self.subtract_memory_usage(memory_freed);
-                
+
+                {
+                    // Decrement link_count
+                    let mut metadata = node_arc.metadata.write();
+                    metadata.link_count -= 1;
+                    
+                    // If link_count == 0, free memory
+                    if metadata.link_count == 0 {
+                        let content_guard = node_arc.content.read();
+                        let memory_freed = content_guard.len();
+                        self.subtract_memory_usage(memory_freed);
+                        // In practice, memory is freed when Arc<TmpNode> reference count reaches 0
+                        // No explicit memory deallocation is needed here
+                    }
+                }
+
+                // Remove from directory entries
+                parent_children.remove(filename);
+
+                // Update parent directory's modification time
+                {
+                    let mut parent_metadata = parent_arc.metadata.write();
+                    parent_metadata.modified_time = crate::time::current_time();
+                }
+
                 Ok(())
             } else {
                 Err(FileSystemError {
                     kind: FileSystemErrorKind::NotFound,
-                    message: "File or directory not found".to_string(),
+                    message: "File not found".to_string(),
                 })
             }
-        })?
+        })
     }
     
     fn metadata(&self, path: &str) -> Result<FileMetadata> {
-        let normalized = self.normalize_path(path);
-        
-        if let Some(node) = self.find_node(&normalized) {
-            Ok(node.metadata)
+        if let Some(node_arc) = self.find_node(path) {
+            let metadata_guard = node_arc.metadata.read();
+            Ok(metadata_guard.clone())
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
                 message: "File or directory not found".to_string(),
             })
         }
+    }
+    
+    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+        // 1. Get target node as Arc
+        let target_node = self.find_node(target_path).ok_or_else(|| FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: "Target file not found".to_string(),
+        })?;
+
+        // 2. Hard links to directories are prohibited
+        if target_node.file_type == FileType::Directory {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Hard links to directories are not supported".to_string(),
+            });
+        }
+
+        // 3. Add the same Arc to parent directory of link_path
+        self.find_parent_arc(link_path, |parent_arc, filename| {
+            let mut parent_children = parent_arc.children.write();
+            
+            if parent_children.contains_key(filename) {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::AlreadyExists,
+                    message: "Link path already exists".to_string(),
+                });
+            }
+
+            // 4. Increment link_count
+            {
+                let mut target_metadata = target_node.metadata.write();
+                target_metadata.link_count += 1;
+            }
+
+            // 5. Add the same Arc with new name
+            parent_children.insert(filename.to_string(), target_node.clone());
+
+            // 6. Update parent directory's modification time
+            {
+                let mut parent_metadata = parent_arc.metadata.write();
+                parent_metadata.modified_time = crate::time::current_time();
+            }
+
+            Ok(())
+        })?;
+        
+        Ok(())
     }
     
     fn root_dir(&self) -> Result<Directory> {
@@ -1294,5 +1349,145 @@ mod tests {
         assert_eq!(root_entries.len(), 1);
         assert_eq!(root_entries[0].name, "empty");
         assert_eq!(root_entries[0].file_type, FileType::Directory);
+    }
+
+    /// Test basic hardlink creation and verification
+    #[test_case]
+    fn test_hardlink_creation() {
+        // Create TmpFS instance directly (not wrapped in Arc<RwLock>)
+        let tmpfs = TmpFS::new(1024 * 1024); // 1MB limit
+        let manager = VfsManager::new();
+        
+        // Register and mount filesystem
+        let fs_id = manager.register_fs(Box::new(tmpfs));
+        manager.mount(fs_id, "/tmp").expect("Failed to mount tmpfs");
+        
+        // Create original file
+        manager.create_regular_file("/tmp/original.txt").expect("Failed to create original file");
+        
+        // Write some data
+        let mut file = manager.open("/tmp/original.txt", 0).expect("Failed to open original file");
+        file.write(b"Hello, hardlink test!").expect("Failed to write to file");
+        drop(file);
+        
+        // Create hardlink
+        manager.create_hardlink("/tmp/original.txt", "/tmp/link.txt").expect("Failed to create hardlink");
+        
+        // Debug: Check if files actually exist and have content
+        let original_metadata = manager.metadata("/tmp/original.txt").expect("Failed to get original metadata");
+        let link_metadata = manager.metadata("/tmp/link.txt").expect("Failed to get link metadata");
+        
+        // Should have same file_id and link_count = 2
+        assert_eq!(original_metadata.file_id, link_metadata.file_id);
+        assert_eq!(original_metadata.link_count, 2);
+        assert_eq!(link_metadata.link_count, 2);
+        
+        // Content should be identical
+        let mut original_file = manager.open("/tmp/original.txt", 0).expect("Failed to open original");
+        let mut link_file = manager.open("/tmp/link.txt", 0).expect("Failed to open link");
+        
+        let original_content = original_file.read_all().expect("Failed to read original");
+        let link_content = link_file.read_all().expect("Failed to read link");
+
+        assert_eq!(original_content, link_content);
+        assert_eq!(original_content, b"Hello, hardlink test!");
+    }
+
+    /// Test hardlink removal behavior
+    #[test_case]
+    fn test_hardlink_removal() {
+        let tmpfs = TmpFS::new(1024 * 1024);
+        let manager = VfsManager::new();
+        
+        let fs_id = manager.register_fs(Box::new(tmpfs));
+        manager.mount(fs_id, "/tmp").expect("Failed to mount tmpfs");
+        
+        // Create file and hardlink
+        manager.create_regular_file("/tmp/file.txt").expect("Failed to create file");
+        
+        let mut file = manager.open("/tmp/file.txt", 0).expect("Failed to open file");
+        file.write(b"test data").expect("Failed to write data");
+        drop(file);
+        
+        manager.create_hardlink("/tmp/file.txt", "/tmp/link1.txt").expect("Failed to create link1");
+        manager.create_hardlink("/tmp/file.txt", "/tmp/link2.txt").expect("Failed to create link2");
+        
+        // Verify link_count = 3
+        let metadata = manager.metadata("/tmp/file.txt").expect("Failed to get metadata");
+        assert_eq!(metadata.link_count, 3);
+        
+        // Remove one link
+        manager.remove("/tmp/link1.txt").expect("Failed to remove link1");
+        
+        // Verify link_count = 2, other files still exist
+        let metadata = manager.metadata("/tmp/file.txt").expect("Failed to get metadata after removal");
+        assert_eq!(metadata.link_count, 2);
+        
+        // link1 should be gone
+        assert!(manager.metadata("/tmp/link1.txt").is_err());
+        
+        // file.txt and link2.txt should still exist
+        assert!(manager.metadata("/tmp/file.txt").is_ok());
+        assert!(manager.metadata("/tmp/link2.txt").is_ok());
+        
+        // Content should still be accessible
+        let mut remaining_file = manager.open("/tmp/link2.txt", 0).expect("Failed to open remaining link");
+        let content = remaining_file.read_all().expect("Failed to read content");
+        assert_eq!(content, b"test data");
+
+        // Remove the original file
+        manager.remove("/tmp/file.txt").expect("Failed to remove original file");
+        manager.remove("/tmp/link2.txt").expect("Failed to remove remaining link");
+
+        // Verify all links are gone
+        assert!(manager.metadata("/tmp/file.txt").is_err());
+        assert!(manager.metadata("/tmp/link2.txt").is_err());
+        assert!(manager.metadata("/tmp/link1.txt").is_err());
+    }
+
+    /// Test that hardlink to directory fails
+    #[test_case]
+    fn test_hardlink_directory_fails() {
+        let tmpfs = TmpFS::new(1024 * 1024);
+        let manager = VfsManager::new();
+        
+        let fs_id = manager.register_fs(Box::new(tmpfs));
+        manager.mount(fs_id, "/tmp").expect("Failed to mount tmpfs");
+        
+        // Create directory
+        manager.create_dir("/tmp/testdir").expect("Failed to create directory");
+        
+        // Try to create hardlink to directory - should fail
+        let result = manager.create_hardlink("/tmp/testdir", "/tmp/dirlink");
+        assert!(result.is_err());
+        
+        if let Err(error) = result {
+            assert_eq!(error.kind, FileSystemErrorKind::NotSupported);
+        }
+    }
+
+    /// Test cross-filesystem hardlink fails
+    #[test_case]
+    fn test_cross_filesystem_hardlink_fails() {
+        let tmpfs1 = TmpFS::new(1024 * 1024);
+        let tmpfs2 = TmpFS::new(1024 * 1024);
+        let manager = VfsManager::new();
+        
+        // Mount two different filesystems
+        let fs1_id = manager.register_fs(Box::new(tmpfs1));
+        let fs2_id = manager.register_fs(Box::new(tmpfs2));
+        manager.mount(fs1_id, "/tmp1").expect("Failed to mount tmpfs1");
+        manager.mount(fs2_id, "/tmp2").expect("Failed to mount tmpfs2");
+        
+        // Create file in first filesystem
+        manager.create_regular_file("/tmp1/file.txt").expect("Failed to create file");
+        
+        // Try to create hardlink in second filesystem - should fail
+        let result = manager.create_hardlink("/tmp1/file.txt", "/tmp2/link.txt");
+        assert!(result.is_err());
+        
+        if let Err(error) = result {
+            assert_eq!(error.kind, FileSystemErrorKind::NotSupported);
+        }
     }
 }
