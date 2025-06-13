@@ -209,14 +209,14 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         task.data_size = backup_data_size; // Restore the data size
         return usize::MAX; // File open error
     }
-    let mut file = file.unwrap();
+    let file_obj = file.unwrap();
 
     task.text_size = 0;
     task.data_size = 0;
     task.stack_size = 0;
     
     // Load the ELF file and replace the current process
-    match load_elf_into_task(&mut file, task) {
+    match load_elf_into_task(file_obj.as_ref(), task) {
         Ok(entry_point) => {
             // Set the name
             task.name = path_str;

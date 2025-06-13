@@ -58,6 +58,7 @@ impl Drop for KernelObject {
     }
 }
 
+#[derive(Clone)]
 pub struct HandleTable {
     /// Fixed-size handle table
     handles: [Option<KernelObject>; Self::MAX_HANDLES],

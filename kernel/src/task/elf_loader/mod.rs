@@ -32,7 +32,7 @@
 use core::num;
 
 use crate::environment::PAGE_SIZE;
-use crate::fs::{File, SeekFrom};
+use crate::fs::{FileObject, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
@@ -276,14 +276,14 @@ pub struct LoadedSegment {
 /// * `ElfLoaderError`: If any error occurs during the loading process, such as file read errors,
 ///  parsing errors, or memory allocation errors
 /// 
-pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLoaderError> {
+pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
     // Move to the beginning of the file
-    file.seek(SeekFrom::Start(0)).map_err(|e| ElfLoaderError {
+    file_obj.seek(SeekFrom::Start(0)).map_err(|e| ElfLoaderError {
         message: format!("Failed to seek to start of file: {:?}", e),
     })?;
     // Read the ELF header
     let mut header_buffer = vec![0u8; 64]; // 64-bit ELF header size
-    file.read(&mut header_buffer).map_err(|e| ElfLoaderError {
+    file_obj.read(&mut header_buffer).map_err(|e| ElfLoaderError {
         message: format!("Failed to read ELF header: {:?}", e),
     })?;
     
@@ -297,13 +297,13 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
     for i in 0..header.e_phnum {
         // Seek to the program header position
         let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
-        file.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
+        file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
             message: format!("Failed to seek to program header: {:?}", e),
         })?;
 
         // Read program header
         let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
-        file.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
+        file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
             message: format!("Failed to read program header: {:?}", e),
         })?;
         
@@ -359,12 +359,12 @@ pub fn load_elf_into_task(file: &mut File, task: &mut Task) -> Result<u64, ElfLo
             let mut segment_data = vec![0u8; ph.p_filesz as usize];
             
             // Seek to segment data position
-            file.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
+            file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
                 message: format!("Failed to seek to segment data: {:?}", e),
             })?;
 
             // Read segment data
-            file.read(&mut segment_data).map_err(|e| ElfLoaderError {
+            file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
                 message: format!("Failed to read segment data: {:?}", e),
             })?;
             
