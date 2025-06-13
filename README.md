@@ -192,7 +192,7 @@ Scarlet implements a highly flexible Virtual File System (VFS) layer designed fo
 - **Thread-Safe File Access**: Concurrent file operations with RwLock protection and proper handle sharing through Arc
 - **Standard Operations**: Complete support for open, read, write, seek, close operations with resource safety guarantees
 - **Directory Operations**: Full directory manipulation including creation, deletion, listing with metadata support
-- **Handle Management**: Arc-based file handle sharing with automatic cleanup and reference counting
+- **Handle Management**: Arc-based file object sharing with automatic cleanup and reference counting
 
 ### Storage & Device Integration
 

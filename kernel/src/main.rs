@@ -35,7 +35,7 @@
 //!   with no virtual dispatch cost when statically resolvable.
 //!
 //! - **RAII Resource Management**: Kernel resources are automatically cleaned up when they go out of scope, including:
-//!   - File handles that automatically close when dropped
+//!   - File objects that automatically close when dropped
 //!   - Memory allocations that are properly freed
 //!   - Device resources that are released when no longer needed
 //!
@@ -104,7 +104,7 @@
 //!
 //! - **RAII Resource Safety**: Files automatically close when dropped, preventing resource leaks
 //! - **Thread-Safe File Access**: Concurrent file operations with proper locking
-//! - **Handle Management**: Arc-based file handle sharing with automatic cleanup
+//! - **Handle Management**: Arc-based file object sharing with automatic cleanup
 //! - **Directory Operations**: Complete directory manipulation with metadata support
 //!
 //! ### Storage Integration
@@ -184,6 +184,7 @@ pub mod initcall;
 pub mod syscall;
 pub mod device;
 pub mod fs;
+pub mod object;
 
 #[cfg(test)]
 pub mod test;
