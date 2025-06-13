@@ -383,7 +383,7 @@ impl FileSystem for TmpFS {
     }
 }
 
-/// File handle for TmpFS files
+/// File object for TmpFS files
 struct TmpFileObject {
     node: Option<Arc<TmpNode>>, // Direct reference to the node (None for device files)
     position: RwLock<u64>,
@@ -678,7 +678,7 @@ impl FileObject for TmpFileObject {
             }))
         }
     }
-    
+
     fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
         // Use the direct node reference instead of finding it by path
         if let Some(node) = &self.node {

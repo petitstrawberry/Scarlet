@@ -137,7 +137,7 @@ impl FileSystem for TestFileSystem {
     }
 }
 
-// File handle for testing
+// File object for testing
 struct TestFileObject {
     path: String,
     position: RwLock<u64>,

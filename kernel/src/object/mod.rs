@@ -26,9 +26,9 @@ impl KernelObject {
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
-            KernelObject::File(file_handle) => {
+            KernelObject::File(file_object) => {
                 // FileObject automatically implements StreamOps
-                let stream_ops: &dyn StreamOps = file_handle.as_ref();
+                let stream_ops: &dyn StreamOps = file_object.as_ref();
                 Some(stream_ops)
             }
         }
@@ -37,10 +37,10 @@ impl KernelObject {
     /// Try to get FileObject that provides file-like operations and stream capabilities
     pub fn as_file(&self) -> Option<&dyn FileObject> {
         match self {
-            KernelObject::File(file_handle) => {
-                // FileObject automatically implements FileStreamOps
-                let file_stream_ops: &dyn FileObject = file_handle.as_ref();
-                Some(file_stream_ops)
+            KernelObject::File(file_object) => {
+                // FileObject automatically implements StreamOps
+                let file_ops: &dyn FileObject = file_object.as_ref();
+                Some(file_ops)
             }
         }
     }
@@ -50,8 +50,8 @@ impl Drop for KernelObject {
     fn drop(&mut self) {
         // Release resources when KernelObject is dropped
         match self {
-            KernelObject::File(file_handle) => {
-                let stream: &dyn StreamOps = file_handle.as_ref();
+            KernelObject::File(file_object) => {
+                let stream: &dyn StreamOps = file_object.as_ref();
                 stream.release();
             }
         }

@@ -385,7 +385,10 @@ pub enum SeekFrom {
     End(i64),
 }
 
-/// Trait for file object (Old FileObject)
+/// Trait for file object
+/// 
+/// This trait represents a file-like object that supports both stream operations
+/// and file-specific operations like seeking, metadata access, and directory reading.
 pub trait FileObject: StreamOps {
     /// Seek to a position in the file stream
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
@@ -1734,7 +1737,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<File, FileSystemError>` - A file handle for performing I/O operations
+    /// * `Result<File, FileSystemError>` - A file object for performing I/O operations
     /// 
     /// # Errors
     /// 

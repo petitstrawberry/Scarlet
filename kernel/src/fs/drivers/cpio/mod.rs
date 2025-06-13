@@ -414,11 +414,11 @@ impl FileObject for CpiofsFileObject {
             created_time: 0,
             modified_time: 0,
             accessed_time: 0,
-            file_id: 0, // CPIO file handle doesn't know the path, so use 0
+            file_id: 0, // CPIO file object doesn't know the path, so use 0
             link_count: 1,
         })
     }
-    
+
     fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
         Err(StreamError::NotSupported)
     }

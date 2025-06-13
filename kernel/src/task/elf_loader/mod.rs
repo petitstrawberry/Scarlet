@@ -14,7 +14,7 @@
 //!
 //! # Main Functions
 //!
-//! - `load_elf_into_task`: Loads an ELF file from a file handle into a task's memory space
+//! - `load_elf_into_task`: Loads an ELF file from a file object into a task's memory space
 //! - `map_elf_segment`: Maps an ELF segment into a task's virtual memory
 //!
 //! # Constants
@@ -263,7 +263,7 @@ pub struct LoadedSegment {
 /// 
 /// # Arguments
 /// 
-/// * `file`: A mutable reference to a file handle containing the ELF file
+/// * `file`: A mutable reference to a file object containing the ELF file
 /// * `task`: A mutable reference to the task into which the ELF file will be loaded
 /// 
 /// # Returns
