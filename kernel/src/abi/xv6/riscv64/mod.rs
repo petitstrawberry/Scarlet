@@ -45,7 +45,7 @@ syscall_table! {
     Wait = 3 => sys_wait,
     // Pipe = 4 => sys_pipe,
     Read = 5 => sys_read,
-    Kill = 6 => sys_kill,
+    // Kill = 6 => sys_kill,
     Exec = 7 => sys_exec,
     Fstat = 8 => sys_fstat,
     Chdir = 9 => sys_chdir,
