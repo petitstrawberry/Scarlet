@@ -20,7 +20,7 @@
 //!
 //! - `CpiofsEntry`: Represents an individual file or directory within the archive
 //! - `Cpiofs`: The main filesystem implementation handling mounting and file operations
-//! - `CpiofsFileHandle`: Handles file read operations and seeking
+//! - `CpiofsFileObject`: Handles file read operations and seeking
 //! - `CpiofsDriver`: Driver that creates CPIO filesystems from memory areas
 //!
 //! # Usage
@@ -37,8 +37,8 @@ use alloc::{boxed::Box, format, string::{String, ToString}, sync::Arc, vec::Vec}
 use spin::{Mutex, RwLock};
 
 use crate::{driver_initcall, fs::{
-    get_fs_driver_manager, Directory, DirectoryEntry, FileHandle, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, Result, VirtualFileSystem
-}, vm::vmem::MemoryArea};
+    get_fs_driver_manager, Directory, DirectoryEntry, FileObject, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, VirtualFileSystem, SeekFrom
+}, vm::vmem::MemoryArea, object::capability::{StreamOps, FileStreamOps, StreamError}};
 
 /// Structure representing an Initramfs entry
 #[derive(Debug, Clone)]
@@ -70,7 +70,7 @@ impl Cpiofs {
     /// 
     /// A result containing the created Cpiofs instance or an error
     /// 
-    pub fn new(name: &'static str, cpio_data: &[u8]) -> Result<Self> {
+    pub fn new(name: &'static str, cpio_data: &[u8]) -> Result<Self, FileSystemError> {
         let entries = Self::parse_cpio(cpio_data)?;
         Ok(Self {
             name,
@@ -90,7 +90,7 @@ impl Cpiofs {
     /// 
     /// A result containing a vector of CpiofsEntry or an error
     /// 
-    fn parse_cpio(cpio_data: &[u8]) -> Result<Vec<CpiofsEntry>> {
+    fn parse_cpio(cpio_data: &[u8]) -> Result<Vec<CpiofsEntry>, FileSystemError> {
         let mut entries = Vec::new();
         let mut offset = 0;
 
@@ -196,7 +196,7 @@ impl Cpiofs {
 }
 
 impl FileSystem for Cpiofs {
-    fn mount(&mut self, mount_point: &str) -> Result<()> {
+    fn mount(&mut self, mount_point: &str) -> Result<(), FileSystemError> {
         if self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
@@ -208,7 +208,7 @@ impl FileSystem for Cpiofs {
         Ok(())
     }
 
-    fn unmount(&mut self) -> Result<()> {
+    fn unmount(&mut self) -> Result<(), FileSystemError> {
         if !self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
@@ -240,11 +240,11 @@ impl Cpiofs {
 }
 
 impl FileOperations for Cpiofs {
-    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn crate::fs::FileHandle>> {
+    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn crate::fs::FileObject>, FileSystemError> {
         let path = self.normalize_path(path);
         let entries = self.entries.lock();
         if let Some(entry) = entries.iter().find(|e| e.name == path) {
-            Ok(Arc::new(CpiofsFileHandle {
+            Ok(Arc::new(CpiofsFileObject {
                 content: RwLock::new(entry.data.clone().unwrap_or_default()),
                 position: RwLock::new(0),
             }))
@@ -256,7 +256,7 @@ impl FileOperations for Cpiofs {
         }
     }
 
-    fn read_dir(&self, _path: &str) -> Result<Vec<DirectoryEntry>> {
+    fn read_dir(&self, _path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
         let path = self.normalize_path(_path);
         let entries = self.entries.lock();
     
@@ -293,28 +293,28 @@ impl FileOperations for Cpiofs {
         Ok(filtered_entries)
     }
 
-    fn create_file(&self, _path: &str, _file_type: FileType) -> Result<()> {
+    fn create_file(&self, _path: &str, _file_type: FileType) -> Result<(), FileSystemError> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
             message: "Initramfs is read-only".to_string(),
         })
     }
 
-    fn create_dir(&self, _path: &str) -> Result<()> {
+    fn create_dir(&self, _path: &str) -> Result<(), FileSystemError> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
             message: "Initramfs is read-only".to_string(),
         })
     }
 
-    fn remove(&self, _path: &str) -> Result<()> {
+    fn remove(&self, _path: &str) -> Result<(), FileSystemError> {
         Err(FileSystemError {
             kind: FileSystemErrorKind::ReadOnly,
             message: "Initramfs is read-only".to_string(),
         })
     }
 
-    fn metadata(&self, path: &str) -> Result<FileMetadata> {
+    fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         let path = self.normalize_path(path);
         let entries = self.entries.lock();
         if let Some(entry) = entries.iter().find(|e| e.name == path) {
@@ -340,18 +340,18 @@ impl FileOperations for Cpiofs {
         }
     }
     
-    fn root_dir(&self) -> Result<crate::fs::Directory> {
+    fn root_dir(&self) -> Result<crate::fs::Directory, FileSystemError> {
         Ok(Directory::open(self.mount_point.clone() + "/"))
     }
 }
 
-struct CpiofsFileHandle {
+struct CpiofsFileObject {
     content: RwLock<Vec<u8>>,
     position: RwLock<usize>,
 }
 
-impl FileHandle for CpiofsFileHandle {
-    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+impl StreamOps for CpiofsFileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let content = self.content.read();
         let mut position = self.position.write();
         let available = content.len() - *position;
@@ -361,26 +361,22 @@ impl FileHandle for CpiofsFileHandle {
         Ok(to_read)
     }
 
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
-        Err(FileSystemError {
-            kind: FileSystemErrorKind::NotSupported,
-            message: "CpiofsFileHandle does not support readdir".to_string(),
-        })
+    fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::NotSupported)
     }
 
-    fn write(&self, _buffer: &[u8]) -> Result<usize> {
-        Err(FileSystemError {
-            kind: FileSystemErrorKind::ReadOnly,
-            message: "Initramfs is read-only".to_string(),
-        })
+    fn release(&self) -> Result<(), StreamError> {
+        Ok(())
     }
+}
 
-    fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64> {
+impl FileStreamOps for CpiofsFileObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
         let content = self.content.read();
         let new_pos = match whence {
-            crate::fs::SeekFrom::Start(offset) => offset as usize,
-            crate::fs::SeekFrom::Current(offset) => {
+            SeekFrom::Start(offset) => offset as usize,
+            SeekFrom::Current(offset) => {
                 if offset < 0 && *position < offset.abs() as usize {
                     0
                 } else if offset < 0 {
@@ -389,7 +385,7 @@ impl FileHandle for CpiofsFileHandle {
                     *position + offset as usize
                 }
             },
-            crate::fs::SeekFrom::End(offset) => {
+            SeekFrom::End(offset) => {
                 let end = content.len();
                 if offset < 0 && end < offset.abs() as usize {
                     0
@@ -405,11 +401,7 @@ impl FileHandle for CpiofsFileHandle {
         Ok(*position as u64)
     }
 
-    fn release(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn metadata(&self) -> Result<FileMetadata> {
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
         let content = self.content.read();
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
@@ -425,6 +417,12 @@ impl FileHandle for CpiofsFileHandle {
             file_id: 0, // CPIO file handle doesn't know the path, so use 0
             link_count: 1,
         })
+    }
+}
+
+impl FileObject for CpiofsFileObject {
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
+        Err(StreamError::NotSupported)
     }
 }
 
@@ -453,7 +451,7 @@ impl FileSystemDriver for CpiofsDriver {
     /// 
     /// A result containing a boxed CPIO filesystem or an error
     /// 
-    fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         let data = unsafe { memory_area.as_slice() };
         // Create the Cpiofs from the memory data
         match Cpiofs::new("cpiofs", data) {
@@ -465,7 +463,7 @@ impl FileSystemDriver for CpiofsDriver {
         }
     }
     
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         use crate::fs::params::*;
         
         // Try to downcast to CpioFSParams

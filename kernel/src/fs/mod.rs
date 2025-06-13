@@ -106,6 +106,7 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString
 use alloc::vec;
 use core::fmt;
 use crate::{device::{block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, DeviceType}, task::Task, vm::vmem::MemoryArea};
+use crate::object::capability::{StreamOps, FileStreamOps, StreamError};
 
 use spin::{Mutex, RwLock};
 use mount_tree::{MountTree, MountPoint as TreeMountPoint, MountType, MountOptions};
@@ -134,6 +135,7 @@ pub enum FileSystemErrorKind {
     DirectoryNotEmpty,
 }
 
+#[derive(Clone)]
 pub struct FileSystemError {
     pub kind: FileSystemErrorKind,
     pub message: String,
@@ -144,9 +146,6 @@ impl fmt::Debug for FileSystemError {
         write!(f, "FileSystemError {{ kind: {:?}, message: {} }}", self.kind, self.message)
     }
 }
-
-/// Result type for file system operations
-pub type Result<T> = core::result::Result<T, FileSystemError>;
 
 /// Information about device files in the filesystem
 /// 
@@ -228,7 +227,7 @@ pub struct FileMetadata {
 #[derive(Clone)]
 pub struct File {
     // pub path: String,
-    handle: Arc<dyn FileHandle>,
+    handle: Arc<dyn FileObject>,
 }
 impl File {
     /// Open a file using a specific VFS manager
@@ -240,9 +239,9 @@ impl File {
     /// 
     /// # Returns
     /// 
-    /// * `Result<File>` - The opened file object
+    /// * `Result<File, FileSystemError>` - The opened file object
     /// 
-    pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self> {
+    pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self, FileSystemError> {
         manager.open(&path, 0)
     }
 
@@ -254,14 +253,26 @@ impl File {
     /// 
     /// # Returns
     /// 
-    /// * `Result<usize>` - The number of bytes read
+    /// * `Result<usize, FileSystemError>` - The number of bytes read
     /// 
-    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        self.handle.read(buffer)
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
+        self.handle.read(buffer).map_err(|e| match e {
+            StreamError::FileSystemError(fs_err) => fs_err,
+            _ => FileSystemError {
+                kind: FileSystemErrorKind::IoError,
+                message: format!("Stream error: {:?}", e),
+            }
+        })
     }
 
-    pub fn readdir(&mut self) -> Result<Vec<DirectoryEntry>> {
-        self.handle.readdir()
+    pub fn readdir(&mut self) -> Result<Vec<DirectoryEntry>, FileSystemError> {
+        self.handle.readdir().map_err(|e| match e {
+            StreamError::FileSystemError(fs_err) => fs_err,
+            _ => FileSystemError {
+                kind: FileSystemErrorKind::IoError,
+                message: format!("Stream error: {:?}", e),
+            }
+        })
     }
     
     /// Write data to the file
@@ -272,30 +283,48 @@ impl File {
     /// 
     /// # Returns
     /// 
-    /// * `Result<usize>` - The number of bytes written
+    /// * `Result<usize, FileSystemError>` - The number of bytes written
     /// 
-    pub fn write(&mut self, buffer: &[u8]) -> Result<usize> { 
-        self.handle.write(buffer)
+    pub fn write(&mut self, buffer: &[u8]) -> Result<usize, FileSystemError> { 
+        self.handle.write(buffer).map_err(|e| match e {
+            StreamError::FileSystemError(fs_err) => fs_err,
+            _ => FileSystemError {
+                kind: FileSystemErrorKind::IoError,
+                message: format!("Stream error: {:?}", e),
+            }
+        })
     }
     
     /// Change the position within the file
-    pub fn seek(&mut self, whence: SeekFrom) -> Result<u64> {
-        self.handle.seek(whence)
+    pub fn seek(&mut self, whence: SeekFrom) -> Result<u64, FileSystemError> {
+        self.handle.seek(whence).map_err(|e| match e {
+            StreamError::FileSystemError(fs_err) => fs_err,
+            _ => FileSystemError {
+                kind: FileSystemErrorKind::IoError,
+                message: format!("Stream error: {:?}", e),
+            }
+        })
     }
     
     /// Get the metadata of the file
-    pub fn metadata(&self) -> Result<FileMetadata> {
-        self.handle.metadata()
+    pub fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
+        self.handle.metadata().map_err(|e| match e {
+            StreamError::FileSystemError(fs_err) => fs_err,
+            _ => FileSystemError {
+                kind: FileSystemErrorKind::IoError,
+                message: format!("Stream error: {:?}", e),
+            }
+        })
     }
     
     /// Get the size of the file
-    pub fn size(&self) -> Result<usize> {
+    pub fn size(&self) -> Result<usize, FileSystemError> {
         let metadata = self.metadata()?;
         Ok(metadata.size)
     }
     
     /// Read the entire contents of the file
-    pub fn read_all(&mut self) -> Result<Vec<u8>> {
+    pub fn read_all(&mut self) -> Result<Vec<u8>, FileSystemError> {
         let size = self.size()?;
         let mut buffer = vec![0u8; size];
         
@@ -305,7 +334,7 @@ impl File {
         if read_bytes != size {
             buffer.truncate(read_bytes);
         }
-        
+
         Ok(buffer)
     }
 }
@@ -356,35 +385,47 @@ pub enum SeekFrom {
     End(i64),
 }
 
-/// Trait for file handlers
-pub trait FileHandle: Send + Sync {
-    /// Read from the file
-    fn read(&self, buffer: &mut [u8]) -> Result<usize>;
+/// Trait for file object (Old FileObject)
+pub trait FileObject: FileStreamOps {
 
     /// Read directory entries
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>>;
-    
-    /// Write to the file
-    fn write(&self, buffer: &[u8]) -> Result<usize>;
-    
-    /// Move the position within the file
-    fn seek(&self, whence: SeekFrom) -> Result<u64>;
-    
-    /// Release the file resource
-    fn release(&self) -> Result<()>;
-    
-    /// Get the metadata
-    fn metadata(&self) -> Result<FileMetadata>;
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError>;
 }
+
+// /// FileObject -> StreamOps のblanket implementation
+// impl<T: FileObject + ?Sized> StreamOps for T {
+//     fn read(&self, buffer: &mut [u8]) -> core::result::Result<usize, StreamError> {
+//         FileObject::read_legacy(self, buffer).map_err(StreamError::from)
+//     }
+    
+//     fn write(&self, buffer: &[u8]) -> core::result::Result<usize, StreamError> {
+//         FileObject::write_legacy(self, buffer).map_err(StreamError::from)
+//     }
+    
+//     fn release(&self) -> core::result::Result<(), StreamError> {
+//         FileObject::release(self).map_err(StreamError::from)
+//     }
+// }
+
+// /// FileObject -> FileStreamOps のblanket implementation
+// impl<T: FileObject + ?Sized> FileStreamOps for T {
+//     fn seek(&self, whence: SeekFrom) -> core::result::Result<u64, StreamError> {
+//         FileObject::seek_legacy(self, whence).map_err(StreamError::from)
+//     }
+    
+//     fn metadata(&self) -> core::result::Result<FileMetadata, StreamError> {
+//         FileObject::metadata_legacy(self).map_err(StreamError::from)
+//     }
+// }
 
 /// Trait defining basic file system operations
 pub trait FileSystem: Send + Sync {
     /// Mount operation
-    fn mount(&mut self, mount_point: &str) -> Result<()>;
+    fn mount(&mut self, mount_point: &str) -> Result<(), FileSystemError>;
 
     /// Unmount operation
-    fn unmount(&mut self) -> Result<()>;
-    
+    fn unmount(&mut self) -> Result<(), FileSystemError>;
+
     /// Get the name of the file system
     fn name(&self) -> &str;
 }
@@ -392,10 +433,10 @@ pub trait FileSystem: Send + Sync {
 /// Trait defining file operations
 pub trait FileOperations: Send + Sync {
     /// Open a file
-    fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileHandle>>;
-    
+    fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError>;
+
     /// Read directory entries
-    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>>;
+    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError>;
     
     /// Create a file with the specified type.
     /// 
@@ -416,22 +457,22 @@ pub trait FileOperations: Send + Sync {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - `Ok` if the file was created successfully, or an error if the operation failed. Errors may include `PermissionDenied`, `InvalidPath`, or `DeviceError` for device files.
-    fn create_file(&self, path: &str, file_type: FileType) -> Result<()>;
+    /// * `Result<(), FileSystemError>` - `Ok` if the file was created successfully, or an error if the operation failed. Errors may include `PermissionDenied`, `InvalidPath`, or `DeviceError` for device files.
+    fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError>;
     
     /// Create a directory
-    fn create_dir(&self, path: &str) -> Result<()>;
-    
+    fn create_dir(&self, path: &str) -> Result<(), FileSystemError>;
+
     /// Remove a file/directory
     /// 
     /// This method should handle link count management internally.
     /// For hardlinks, it decrements link_count and only removes
     /// actual file data when link_count reaches zero.
     /// For directories, implementation may require them to be empty.
-    fn remove(&self, path: &str) -> Result<()>;
-    
+    fn remove(&self, path: &str) -> Result<(), FileSystemError>;
+
     /// Get the metadata
-    fn metadata(&self, path: &str) -> Result<FileMetadata>;
+    fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError>;
 
     /// Create a hard link
     /// 
@@ -446,13 +487,13 @@ pub trait FileOperations: Send + Sync {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the hard link was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the hard link was created successfully
     /// 
     /// # Errors
     /// 
     /// * `FileSystemError` - If the target doesn't exist, link creation fails,
     ///   or hard links are not supported by this filesystem
-    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<(), FileSystemError> {
         let _ = (target_path, link_path);
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotSupported,
@@ -461,7 +502,12 @@ pub trait FileOperations: Send + Sync {
     }
 
     /// Get the root directory of the file system
-    fn root_dir(&self) -> Result<Directory>;
+    fn root_dir(&self) -> Result<Directory, FileSystemError> {
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "Root directory not supported by this filesystem".to_string(),
+        })
+    }
 }
 
 /// Trait combining the complete VFS interface
@@ -507,7 +553,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// * `_block_device` - The block device to use for creating the file system
     /// * `_block_size` - The block size of the device
     /// 
-    fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         if self.filesystem_type() == FileSystemType::Memory || self.filesystem_type() == FileSystemType::Virtual {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
@@ -537,9 +583,9 @@ pub trait FileSystemDriver: Send + Sync {
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// * `Result<Box<dyn VirtualFileSystem>, FileSystemError>` - The created file system
     /// 
-    fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         if self.filesystem_type() == FileSystemType::Block {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
@@ -553,7 +599,7 @@ pub trait FileSystemDriver: Send + Sync {
         })
     }
 
-    fn create(&self) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create(&self) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         // Default implementation that can be overridden by specific drivers
         // This is a convenience method for drivers that do not need to handle block or memory creation
         Err(FileSystemError {
@@ -574,14 +620,14 @@ pub trait FileSystemDriver: Send + Sync {
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>>` - The created file system
+    /// * `Result<Box<dyn VirtualFileSystem>, FileSystemError>` - The created file system
     /// 
     /// # Note
     /// 
     /// This method uses dynamic dispatch for parameter handling to support
     /// future dynamic filesystem module loading while maintaining type safety.
     /// 
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         // Default implementation falls back to create()
         let _ = params; // Suppress unused parameter warning
         self.create()
@@ -766,7 +812,7 @@ impl FileSystemDriverManager {
         driver_name: &str,
         block_device: Box<dyn BlockDevice>,
         block_size: usize,
-    ) -> Result<Box<dyn VirtualFileSystem>> {
+    ) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         let binding = self.drivers.read();
         let driver = binding.get(driver_name).ok_or(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
@@ -815,7 +861,7 @@ impl FileSystemDriverManager {
         &self,
         driver_name: &str,
         memory_area: &MemoryArea,
-    ) -> Result<Box<dyn VirtualFileSystem>> {
+    ) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         let binding = self.drivers.read();
         let driver = binding.get(driver_name).ok_or(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
@@ -875,7 +921,7 @@ impl FileSystemDriverManager {
         &self, 
         driver_name: &str, 
         params: &dyn crate::fs::params::FileSystemParams
-    ) -> Result<Box<dyn VirtualFileSystem>> {
+    ) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         let binding = self.drivers.read();
         let driver = binding.get(driver_name)
             .ok_or_else(|| FileSystemError {
@@ -1081,7 +1127,7 @@ impl VfsManager {
         driver_name: &str,
         block_device: Box<dyn BlockDevice>,
         block_size: usize,
-    ) -> Result<usize> {
+    ) -> Result<usize, FileSystemError> {
         
         // Create the file system using the driver manager
         let fs = get_fs_driver_manager().create_from_block(driver_name, block_device, block_size)?;
@@ -1116,7 +1162,7 @@ impl VfsManager {
         &self,
         driver_name: &str,
         memory_area: &crate::vm::vmem::MemoryArea,
-    ) -> Result<usize> {
+    ) -> Result<usize, FileSystemError> {
         
         // Create the file system using the driver manager
         let fs = get_fs_driver_manager().create_from_memory(driver_name, memory_area)?;
@@ -1137,7 +1183,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<usize>` - The ID of the registered file system
+    /// * `Result<usize, FileSystemError>` - The ID of the registered file system
     /// 
     /// # Errors
     /// 
@@ -1155,7 +1201,7 @@ impl VfsManager {
         &self,
         driver_name: &str,
         params: &dyn crate::fs::params::FileSystemParams,
-    ) -> Result<usize> {
+    ) -> Result<usize, FileSystemError> {
         
         // Create the file system using the driver manager with structured parameters
         let fs = get_fs_driver_manager().create_with_params(driver_name, params)?;
@@ -1172,9 +1218,9 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the mount was successful, Err if there was an error
+    /// * `Result<(), FileSystemError>` - Ok if the mount was successful, Err if there was an error
     /// 
-    pub fn mount(&self, fs_id: usize, mount_point: &str) -> Result<()> {
+    pub fn mount(&self, fs_id: usize, mount_point: &str) -> Result<(), FileSystemError> {
         let mut filesystems = self.filesystems.write();
         // Remove the file system from available pool using BTreeMap
         let fs = filesystems.remove(&fs_id)
@@ -1216,9 +1262,9 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the unmount was successful, Err if there was an error
+    /// * `Result<(), FileSystemError>` - Ok if the unmount was successful, Err if there was an error
     /// 
-    pub fn unmount(&self, mount_point: &str) -> Result<()> {
+    pub fn unmount(&self, mount_point: &str) -> Result<(), FileSystemError> {
         // Remove the mount point from MountTree
         let mp = self.mount_tree.write().remove(mount_point)?;
     
@@ -1254,7 +1300,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    /// * `Result<(), FileSystemError>` - Ok if the bind mount was successful, Err otherwise
     /// 
     /// # Example
     /// 
@@ -1262,7 +1308,7 @@ impl VfsManager {
     /// // Bind mount /mnt/source to /mnt/target as read-only
     /// vfs_manager.bind_mount("/mnt/source", "/mnt/target", true)?;
     /// ```
-    pub fn bind_mount(&self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
+    pub fn bind_mount(&self, source_path: &str, target_path: &str, read_only: bool) -> Result<(), FileSystemError> {
         let normalized_source = Self::normalize_path(source_path);
         let normalized_target = Self::normalize_path(target_path);
 
@@ -1315,7 +1361,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
+    /// * `Result<(), FileSystemError>` - Ok if the bind mount was successful, Err otherwise
     /// 
     /// # Example
     /// 
@@ -1329,7 +1375,7 @@ impl VfsManager {
         source_path: &str, 
         target_path: &str, 
         read_only: bool
-    ) -> Result<()> {
+    ) -> Result<(), FileSystemError> {
         let normalized_source = Self::normalize_path(source_path);
         let normalized_target = Self::normalize_path(target_path);
         
@@ -1380,8 +1426,8 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the shared bind mount was successful, Err otherwise
-    pub fn bind_mount_shared(&self, source_path: &str, target_path: &str) -> Result<()> {
+    /// * `Result<(), FileSystemError>` - Ok if the shared bind mount was successful, Err otherwise
+    pub fn bind_mount_shared(&self, source_path: &str, target_path: &str) -> Result<(), FileSystemError> {
         // Normalize the source path to prevent directory traversal
         let normalized_source_path = Self::normalize_path(source_path);
         
@@ -1421,8 +1467,8 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the bind mount was successful, Err otherwise
-    pub fn bind_mount_shared_ref(&self, source_path: &str, target_path: &str, read_only: bool) -> Result<()> {
+    /// * `Result<(), FileSystemError>` - Ok if the bind mount was successful, Err otherwise
+    pub fn bind_mount_shared_ref(&self, source_path: &str, target_path: &str, read_only: bool) -> Result<(), FileSystemError> {
         // Normalize the source path to prevent directory traversal
         let normalized_source_path = Self::normalize_path(source_path);
         
@@ -1547,15 +1593,15 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<T>` - The result of the function execution
+    /// * `Result<T, FileSystemError>` - The result of the function execution
     /// 
     /// # Errors
     /// 
     /// * `FileSystemError` - If no file system is mounted for the specified path
     /// 
-    fn with_resolve_path<F, T>(&self, path: &str, f: F) -> Result<T>
+    fn with_resolve_path<F, T>(&self, path: &str, f: F) -> Result<T, FileSystemError>
     where
-        F: FnOnce(&FileSystemRef, &str) -> Result<T>
+        F: FnOnce(&FileSystemRef, &str) -> Result<T, FileSystemError>
     {
         let (fs, relative_path) = self.resolve_path(path)?;
         f(&fs, &relative_path)
@@ -1579,7 +1625,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<(FileSystemRef, String)>` - Tuple containing:
+    /// * `Result<(FileSystemRef, String), FileSystemError>` - Tuple containing:
     ///   - `FileSystemRef`: Arc-wrapped filesystem that handles this path
     ///   - `String`: Path relative to the filesystem root (always starts with `/`)
     /// 
@@ -1617,13 +1663,13 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<(FileSystemRef, String)>` - The resolved file system and relative path
+    /// * `Result<(FileSystemRef, String), FileSystemError>` - The resolved file system and relative path
     /// 
     /// # Errors
     /// 
     /// * `FileSystemError` - If no file system is mounted for the specified path
     /// 
-    fn resolve_path(&self, path: &str) -> Result<(FileSystemRef, String)> {
+    fn resolve_path(&self, path: &str) -> Result<(FileSystemRef, String), FileSystemError> {
         // Check if the path is absolute
         if !path.starts_with('/') {
             return Err(FileSystemError {
@@ -1660,7 +1706,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<String>` - The absolute path ready for VFS operations
+    /// * `Result<String, FileSystemError>` - The absolute path ready for VFS operations
     /// 
     /// # Examples
     /// 
@@ -1673,7 +1719,7 @@ impl VfsManager {
     /// let abs_path = VfsManager::to_absolute_path(&task, "/etc/config")?;
     /// assert_eq!(abs_path, "/etc/config");
     /// ```
-    pub fn to_absolute_path(task: &Task, path: &str) -> Result<String> {
+    pub fn to_absolute_path(task: &Task, path: &str) -> Result<String, FileSystemError> {
         if path.starts_with('/') {
             // If the path is already absolute, return it as is
             Ok(path.to_string())
@@ -1709,7 +1755,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<File>` - A file handle for performing I/O operations
+    /// * `Result<File, FileSystemError>` - A file handle for performing I/O operations
     /// 
     /// # Errors
     /// 
@@ -1724,7 +1770,7 @@ impl VfsManager {
     /// // Create and open a new file for writing
     /// let file = vfs.open("/tmp/output.txt", OpenFlags::WRONLY | OpenFlags::CREATE)?;
     /// ```
-    pub fn open(&self, path: &str, flags: u32) -> Result<File> {
+    pub fn open(&self, path: &str, flags: u32) -> Result<File, FileSystemError> {
         let handle = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags));
         match handle {
             Ok(handle) => Ok(File { handle }),
@@ -1742,7 +1788,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<Vec<DirectoryEntry>>` - Vector of directory entries
+    /// * `Result<Vec<DirectoryEntry>, FileSystemError>` - Vector of directory entries
     /// 
     /// # Errors
     /// 
@@ -1757,7 +1803,7 @@ impl VfsManager {
     ///     println!("{}: {:?}", entry.name, entry.file_type);
     /// }
     /// ```
-    pub fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
+    pub fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().read_dir(relative_path))
     }
     
@@ -1770,8 +1816,8 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the file was created successfully, Err otherwise
-    pub fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
+    /// * `Result<(), FileSystemError>` - Ok if the file was created successfully, Err otherwise
+    pub fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path, file_type))
     }
     /// Create a directory at the specified path
@@ -1785,7 +1831,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the directory was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the directory was created successfully
     /// 
     /// # Errors
     /// 
@@ -1800,7 +1846,7 @@ impl VfsManager {
     /// // Create nested directories (if supported by filesystem)
     /// vfs.create_dir("/tmp/path/to/directory")?;
     /// ```
-    pub fn create_dir(&self, path: &str) -> Result<()> {
+    pub fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().create_dir(relative_path))
     }
     /// Remove a file or directory
@@ -1817,7 +1863,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the item was removed successfully
+    /// * `Result<(), FileSystemError>` - Ok if the item was removed successfully
     /// 
     /// # Errors
     /// 
@@ -1832,7 +1878,7 @@ impl VfsManager {
     /// // Remove a directory
     /// vfs.remove("/tmp/empty_directory")?;
     /// ```
-    pub fn remove(&self, path: &str) -> Result<()> {
+    pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().remove(relative_path))
     }
     /// Get file or directory metadata
@@ -1846,7 +1892,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<FileMetadata>` - Metadata structure containing file information
+    /// * `Result<FileMetadata, FileSystemError>` - Metadata structure containing file information
     /// 
     /// # Errors
     /// 
@@ -1860,7 +1906,7 @@ impl VfsManager {
     /// println!("File size: {} bytes", metadata.size);
     /// println!("File type: {:?}", metadata.file_type);
     /// ```
-    pub fn metadata(&self, path: &str) -> Result<FileMetadata> {
+    pub fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().metadata(relative_path))
     }
 
@@ -1879,7 +1925,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the hard link was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the hard link was created successfully
     /// 
     /// # Errors
     /// 
@@ -1892,7 +1938,7 @@ impl VfsManager {
     /// // Create a hard link
     /// vfs.create_hardlink("/home/user/file.txt", "/tmp/link_to_file.txt")?;
     /// ```
-    pub fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+    pub fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<(), FileSystemError> {
         // Resolve both paths to ensure they're on the same filesystem
         let (target_fs, target_relative) = self.resolve_path(target_path)?;
         let (link_fs, link_relative) = self.resolve_path(link_path)?;
@@ -1919,7 +1965,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the file was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the file was created successfully
     /// 
     /// # Errors
     /// 
@@ -1931,7 +1977,7 @@ impl VfsManager {
     /// // Create a new regular file
     /// vfs.create_regular_file("/tmp/new_file.txt")?;
     /// ```
-    pub fn create_regular_file(&self, path: &str) -> Result<()> {
+    pub fn create_regular_file(&self, path: &str) -> Result<(), FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().create_file(relative_path, FileType::RegularFile))
     }
     
@@ -1952,7 +1998,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the device file was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the device file was created successfully
     /// 
     /// # Errors
     /// 
@@ -1968,7 +2014,7 @@ impl VfsManager {
     /// };
     /// vfs.create_char_device("/dev/tty", device_info)?;
     /// ```
-    pub fn create_char_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
+    pub fn create_char_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::CharDevice(device_info))
     }
     
@@ -1989,7 +2035,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the device file was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the device file was created successfully
     /// 
     /// # Errors
     /// 
@@ -2005,7 +2051,7 @@ impl VfsManager {
     /// };
     /// vfs.create_block_device("/dev/sda", device_info)?;
     /// ```
-    pub fn create_block_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
+    pub fn create_block_device(&self, path: &str, device_info: DeviceFileInfo) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::BlockDevice(device_info))
     }
 
@@ -2020,7 +2066,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the pipe was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the pipe was created successfully
     /// 
     /// # Errors
     /// 
@@ -2032,7 +2078,7 @@ impl VfsManager {
     /// // Create a named pipe for IPC
     /// vfs.create_pipe("/tmp/my_pipe")?;
     /// ```
-    pub fn create_pipe(&self, path: &str) -> Result<()> {
+    pub fn create_pipe(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::Pipe)
     }
 
@@ -2047,7 +2093,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the symbolic link was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the symbolic link was created successfully
     /// 
     /// # Errors
     /// 
@@ -2059,7 +2105,7 @@ impl VfsManager {
     /// // Create a symbolic link
     /// vfs.create_symlink("/tmp/link_to_file")?;
     /// ```
-    pub fn create_symlink(&self, path: &str) -> Result<()> {
+    pub fn create_symlink(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::SymbolicLink)
     }
 
@@ -2074,7 +2120,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the socket file was created successfully
+    /// * `Result<(), FileSystemError>` - Ok if the socket file was created successfully
     /// 
     /// # Errors
     /// 
@@ -2086,7 +2132,7 @@ impl VfsManager {
     /// // Create a Unix domain socket
     /// vfs.create_socket("/tmp/my_socket")?;
     /// ```
-    pub fn create_socket(&self, path: &str) -> Result<()> {
+    pub fn create_socket(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::Socket)
     }
 
@@ -2102,7 +2148,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the device file was created successfully, Err otherwise
+    /// * `Result<(), FileSystemError>` - Ok if the device file was created successfully, Err otherwise
     /// 
     /// # Example
     /// 
@@ -2116,7 +2162,7 @@ impl VfsManager {
     /// 
     /// vfs_manager.create_device_file("/dev/tty0", device_info)?;
     /// ```
-    pub fn create_device_file(&self, path: &str, device_info: DeviceFileInfo) -> Result<()> {
+    pub fn create_device_file(&self, path: &str, device_info: DeviceFileInfo) -> Result<(), FileSystemError> {
         match device_info.device_type {
             crate::device::DeviceType::Char => {
                 self.create_file(path, FileType::CharDevice(device_info))
@@ -2238,9 +2284,9 @@ impl GenericFileSystem {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the block was read successfully
+    /// * `Result<(), FileSystemError>` - Ok if the block was read successfully
     #[allow(dead_code)]
-    fn read_block_internal(&self, block_idx: usize, buffer: &mut [u8]) -> Result<()> {
+    fn read_block_internal(&self, block_idx: usize, buffer: &mut [u8]) -> Result<(), FileSystemError> {
         let mut device = self.block_device.lock();
         
         // Create the request
@@ -2294,9 +2340,9 @@ impl GenericFileSystem {
     /// 
     /// # Returns
     /// 
-    /// * `Result<()>` - Ok if the block was written successfully
+    /// * `Result<(), FileSystemError>` - Ok if the block was written successfully
     #[allow(dead_code)]
-    fn write_block_internal(&self, block_idx: usize, buffer: &[u8]) -> Result<()> {
+    fn write_block_internal(&self, block_idx: usize, buffer: &[u8]) -> Result<(), FileSystemError> {
         let mut device = self.block_device.lock();
         
         // Create the request
@@ -2333,7 +2379,7 @@ impl GenericFileSystem {
 }
 
 impl FileSystem for GenericFileSystem {
-    fn mount(&mut self, mount_point: &str) -> Result<()> {
+    fn mount(&mut self, mount_point: &str) -> Result<(), FileSystemError> {
         if self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
@@ -2345,7 +2391,7 @@ impl FileSystem for GenericFileSystem {
         Ok(())
     }
 
-    fn unmount(&mut self) -> Result<()> {
+    fn unmount(&mut self) -> Result<(), FileSystemError> {
         if !self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,

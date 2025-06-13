@@ -184,6 +184,7 @@ pub mod initcall;
 pub mod syscall;
 pub mod device;
 pub mod fs;
+pub mod object;
 
 #[cfg(test)]
 pub mod test;

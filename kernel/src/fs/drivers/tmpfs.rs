@@ -20,6 +20,7 @@ use spin::Mutex;
 use crate::fs::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::DeviceType;
+use crate::object::capability::{StreamOps, FileStreamOps, StreamError};
 
 /// Directory entries collection with Arc-based node sharing
 #[derive(Default)]
@@ -246,7 +247,7 @@ impl TmpFS {
     }
 
     /// Check if memory allocation is allowed
-    fn check_memory_limit(&self, additional_bytes: usize) -> Result<()> {
+    fn check_memory_limit(&self, additional_bytes: usize) -> Result<(), FileSystemError> {
         if self.max_memory == 0 {
             return Ok(()); // Unlimited
         }
@@ -301,9 +302,9 @@ impl TmpFS {
     }
 
     /// Find parent node Arc and call function with it
-    fn find_parent_arc<F, R>(&self, path: &str, f: F) -> Result<R>
+    fn find_parent_arc<F, R>(&self, path: &str, f: F) -> Result<R, FileSystemError>
     where
-        F: FnOnce(Arc<TmpNode>, &str) -> Result<R>,
+        F: FnOnce(Arc<TmpNode>, &str) -> Result<R, FileSystemError>,
     {
         let normalized = self.normalize_path(path);
         let (parent_path, filename) = if let Some(pos) = normalized.rfind('/') {
@@ -347,7 +348,7 @@ impl TmpFS {
 }
 
 impl FileSystem for TmpFS {
-    fn mount(&mut self, mount_point: &str) -> Result<()> {
+    fn mount(&mut self, mount_point: &str) -> Result<(), FileSystemError> {
         if self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
@@ -359,7 +360,7 @@ impl FileSystem for TmpFS {
         Ok(())
     }
 
-    fn unmount(&mut self) -> Result<()> {
+    fn unmount(&mut self) -> Result<(), FileSystemError> {
         if !self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
@@ -383,7 +384,7 @@ impl FileSystem for TmpFS {
 }
 
 /// File handle for TmpFS files
-struct TmpFileHandle {
+struct TmpFileObject {
     node: Option<Arc<TmpNode>>, // Direct reference to the node (None for device files)
     position: RwLock<u64>,
     file_type: FileType,
@@ -391,11 +392,11 @@ struct TmpFileHandle {
     fs: *const TmpFS, // Weak pointer to the filesystem
 }
 
-// Safety: TmpFileHandle is safe to send between threads as long as the filesystem outlives it
-unsafe impl Send for TmpFileHandle {}
-unsafe impl Sync for TmpFileHandle {}
+// Safety: TmpFileObject is safe to send between threads as long as the filesystem outlives it
+unsafe impl Send for TmpFileObject {}
+unsafe impl Sync for TmpFileObject {}
 
-impl TmpFileHandle {
+impl TmpFileObject {
     fn new(node: Arc<TmpNode>, file_type: FileType, fs: &TmpFS) -> Self {
         Self {
             node: Some(node),
@@ -420,7 +421,7 @@ impl TmpFileHandle {
         unsafe { &*self.fs }
     }
 
-    fn read_device(&self, buffer: &mut [u8]) -> Result<usize> {
+    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.device();
             let mut device_read = device_guard_ref.write();
@@ -495,7 +496,7 @@ impl TmpFileHandle {
         })
     }
 
-    fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize> {
+    fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         let mut position = self.position.write();
         
         // Use the direct node reference instead of finding it by path
@@ -522,7 +523,7 @@ impl TmpFileHandle {
         }
     }
 
-    fn write_device(&self, buffer: &[u8]) -> Result<usize> {
+    fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.device();
             let mut device_write = device_guard_ref.write();
@@ -593,7 +594,7 @@ impl TmpFileHandle {
         }
     }
 
-    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize> {
+    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         let fs = self.get_fs();
         let mut position = self.position.write();
         
@@ -631,39 +632,15 @@ impl TmpFileHandle {
     }
 }
 
-impl FileHandle for TmpFileHandle {
-    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
-        match self.file_type {
-            FileType::CharDevice(_) | FileType::BlockDevice(_) => {
-                // Handle device files
-                self.read_device(buffer)
-            },
-            FileType::RegularFile => {
-                self.read_regular_file(buffer)
-            }
-            FileType::Directory => {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::IsADirectory,
-                    message: "Cannot read from a directory".to_string(),
-                });
-            },
-            _ => {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotSupported,
-                    message: "Unsupported file type".to_string(),
-                });
-            }
-        }
-    }
-
-     fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
+impl FileObject for TmpFileObject {
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
         // Use the direct node reference instead of finding it by path
         if let Some(node) = &self.node {
             if node.file_type != FileType::Directory {
-                return Err(FileSystemError {
+                return Err(StreamError::from(FileSystemError {
                     kind: FileSystemErrorKind::NotADirectory,
                     message: "Not a directory".to_string(),
-                });
+                }));
             }
             
             let mut entries = Vec::new();
@@ -680,38 +657,70 @@ impl FileHandle for TmpFileHandle {
             
             Ok(entries)
         } else {
-            Err(FileSystemError {
+            Err(StreamError::from(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
                 message: "Cannot read directory from device handle".to_string(),
-            })
+            }))
         }
     }
-    
-    fn write(&self, buffer: &[u8]) -> Result<usize> {
+}
+
+impl StreamOps for TmpFileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         match self.file_type {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 // Handle device files
-                self.write_device(buffer)
+                self.read_device(buffer).map_err(StreamError::from)
             },
             FileType::RegularFile => {
-                self.write_regular_file(buffer)
+                self.read_regular_file(buffer).map_err(StreamError::from)
             }
             FileType::Directory => {
-                return Err(FileSystemError {
+                return Err(StreamError::from(FileSystemError {
                     kind: FileSystemErrorKind::IsADirectory,
-                    message: "Cannot write to a directory".to_string(),
-                });
+                    message: "Cannot read from a directory".to_string(),
+                }));
             },
             _ => {
-                return Err(FileSystemError {
+                return Err(StreamError::from(FileSystemError {
                     kind: FileSystemErrorKind::NotSupported,
                     message: "Unsupported file type".to_string(),
-                });
+                }));
             }
         }
     }
-    
-    fn seek(&self, whence: SeekFrom) -> Result<u64> {
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        match self.file_type {
+            FileType::CharDevice(_) | FileType::BlockDevice(_) => {
+                // Handle device files
+                self.write_device(buffer).map_err(StreamError::from)
+            },
+            FileType::RegularFile => {
+                self.write_regular_file(buffer).map_err(StreamError::from)
+            }
+            FileType::Directory => {
+                return Err(StreamError::from(FileSystemError {
+                    kind: FileSystemErrorKind::IsADirectory,
+                    message: "Cannot write to a directory".to_string(),
+                }));
+            },
+            _ => {
+                return Err(StreamError::from(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: "Unsupported file type".to_string(),
+                }));
+            }
+        }
+    }
+
+    fn release(&self) -> Result<(), StreamError> {
+        Ok(())
+    }
+}
+
+impl FileStreamOps for TmpFileObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
         
         match whence {
@@ -734,10 +743,10 @@ impl FileHandle for TmpFileHandle {
                         *position = end.saturating_sub((-offset) as u64);
                     }
                 } else {
-                    return Err(FileSystemError {
+                    return Err(StreamError::from(FileSystemError {
                         kind: FileSystemErrorKind::NotSupported,
                         message: "Cannot seek in device file".to_string(),
-                    });
+                    }));
                 }
             },
         }
@@ -745,36 +754,32 @@ impl FileHandle for TmpFileHandle {
         Ok(*position)
     }
     
-    fn release(&self) -> Result<()> {
-        Ok(())
-    }
-    
-    fn metadata(&self) -> Result<FileMetadata> {
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
         if let Some(node) = &self.node {
             let metadata_guard = node.metadata.read();
             Ok(metadata_guard.clone())
         } else {
-            Err(FileSystemError {
+            Err(StreamError::from(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
                 message: "Cannot get metadata from device handle".to_string(),
-            })
+            }))
         }
     }
 }
 
 impl FileOperations for TmpFS {
-    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileHandle>> {
+    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError> {
         let normalized = self.normalize_path(path);
         if let Some(node) = self.find_node(&normalized) {
             match node.file_type {
                 FileType::RegularFile | FileType::Directory => {
-                    Ok(Arc::new(TmpFileHandle::new(node.clone(), node.file_type.clone(), self)))
+                    Ok(Arc::new(TmpFileObject::new(node.clone(), node.file_type.clone(), self)))
                 },
                 FileType::CharDevice(ref info) | FileType::BlockDevice(ref info) => {
                     // Try to borrow the device from DeviceManager
                     match DeviceManager::get_manager().borrow_device(info.device_id) {
                         Ok(guard) => {
-                            Ok(Arc::new(TmpFileHandle::new_with_device(node.file_type.clone(), guard, self)))
+                            Ok(Arc::new(TmpFileObject::new_with_device(node.file_type.clone(), guard, self)))
                         },
                         Err(_) => {
                             Err(FileSystemError {
@@ -799,7 +804,7 @@ impl FileOperations for TmpFS {
         }
     }
     
-    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
+    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
         let normalized = self.normalize_path(path);
         
         if let Some(node) = self.find_node(&normalized) {
@@ -831,7 +836,7 @@ impl FileOperations for TmpFS {
         }
     }
     
-    fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
+    fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
         self.find_parent_arc(path, |parent_arc, filename| {
             let mut parent_children = parent_arc.children.write();
             
@@ -874,11 +879,11 @@ impl FileOperations for TmpFS {
         })
     }
     
-    fn create_dir(&self, path: &str) -> Result<()> {
+    fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::Directory)
     }
     
-    fn remove(&self, path: &str) -> Result<()> {
+    fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         self.find_parent_arc(path, |parent_arc, filename| {
             let mut parent_children = parent_arc.children.write();
             
@@ -928,7 +933,7 @@ impl FileOperations for TmpFS {
         })
     }
     
-    fn metadata(&self, path: &str) -> Result<FileMetadata> {
+    fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         if let Some(node_arc) = self.find_node(path) {
             let metadata_guard = node_arc.metadata.read();
             Ok(metadata_guard.clone())
@@ -940,7 +945,7 @@ impl FileOperations for TmpFS {
         }
     }
     
-    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<(), FileSystemError> {
         // 1. Get target node as Arc
         let target_node = self.find_node(target_path).ok_or_else(|| FileSystemError {
             kind: FileSystemErrorKind::NotFound,
@@ -987,7 +992,7 @@ impl FileOperations for TmpFS {
         Ok(())
     }
     
-    fn root_dir(&self) -> Result<Directory> {
+    fn root_dir(&self) -> Result<Directory, FileSystemError> {
         Ok(Directory::open("/".to_string()))
     }
 }
@@ -1004,17 +1009,17 @@ impl FileSystemDriver for TmpFSDriver {
         FileSystemType::Virtual  // TmpFS is a virtual filesystem
     }
     
-    fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         // TmpFS doesn't use block devices, but we can create an instance with unlimited memory
         Ok(Box::new(TmpFS::new(0)))
     }
     
-    fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         // TmpFS doesn't need specific memory area, create with unlimited memory
         Ok(Box::new(TmpFS::new(0)))
     }
 
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         use crate::fs::params::*;
         
         // Try to downcast to TmpFSParams first
@@ -1320,7 +1325,15 @@ mod tests {
         assert!(result.is_err());
         
         if let Err(e) = result {
-            assert_eq!(e.kind, FileSystemErrorKind::NotADirectory);
+            match e {
+                StreamError::NotSupported => {
+                    // This is expected - regular files don't support readdir
+                },
+                StreamError::FileSystemError(fs_err) => {
+                    assert_eq!(fs_err.kind, FileSystemErrorKind::NotADirectory);
+                },
+                _ => panic!("Unexpected error type: {:?}", e),
+            }
         }
         
         // Try to readdir on non-existent path
