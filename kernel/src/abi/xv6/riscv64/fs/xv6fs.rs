@@ -215,19 +215,23 @@ impl Xv6Node {
         let parent_dirent = Dirent::new(parent_inum as u16, "..");
         content.extend_from_slice(parent_dirent.as_bytes());
         
-        // Collect child entries and sort them by name for consistent ordering
+        // Collect child entries and sort them by inode number for consistent ordering
         let children = self.children.read();
         let mut child_entries: Vec<_> = children.entries().collect();
-        child_entries.sort_by(|a, b| a.0.cmp(b.0));
+        child_entries.sort_by(|a, b| {
+            let a_file_id = a.1.metadata.read().file_id;
+            let b_file_id = b.1.metadata.read().file_id;
+            a_file_id.cmp(&b_file_id)
+        });
         
-        // Add all child entries in sorted order
+        // Add all child entries in inode order
         for (name, child) in child_entries {
             let dirent = Dirent::new(child.metadata.read().file_id as u16, name);
             content.extend_from_slice(dirent.as_bytes());
         }
         
         content
-        }
+    }
 
     /// Update file size and modification time
     fn update_size(&self, new_size: usize) {
@@ -845,9 +849,15 @@ impl FileObject for Xv6FileObject {
         });
         drop(metadata);
         
-        // Add child entries
+        // Add child entries, sorted by inode number
         let children = self.node.children.read();
-        for (name, child) in children.entries() {
+        let mut child_entries: Vec<_> = children.entries().collect();
+        // Sort by inode number (file_id)
+        child_entries.sort_by_key(|(_, child)| {
+            child.metadata.read().file_id
+        });
+        
+        for (name, child) in child_entries {
             let child_metadata = child.metadata.read();
             let child_file_type = child.file_type.read();
             entries.push(DirectoryEntry {
