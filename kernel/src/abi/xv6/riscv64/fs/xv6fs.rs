@@ -16,6 +16,7 @@ use crate::fs::*;
 use crate::device::block::BlockDevice;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::DeviceType;
+use crate::object::capability::{StreamOps, StreamError};
 
 /// xv6-style directory entry
 #[derive(Debug, Clone, Copy)]
@@ -206,37 +207,26 @@ impl Xv6Node {
     fn generate_directory_content(&self, parent_inum: u32) -> Vec<u8> {
         let mut content = Vec::new();
         
-        // Add "." entry (current directory)
+        // Add "." entry (current directory) - MUST be first
         let current_dirent = Dirent::new(self.metadata.read().file_id as u16, ".");
         content.extend_from_slice(current_dirent.as_bytes());
         
-        // Add ".." entry (parent directory)
+        // Add ".." entry (parent directory) - MUST be second
         let parent_dirent = Dirent::new(parent_inum as u16, "..");
         content.extend_from_slice(parent_dirent.as_bytes());
         
-        // Add all child entries
+        // Collect child entries and sort them by name for consistent ordering
         let children = self.children.read();
-        for (name, child) in children.entries() {
+        let mut child_entries: Vec<_> = children.entries().collect();
+        child_entries.sort_by(|a, b| a.0.cmp(b.0));
+        
+        // Add all child entries in sorted order
+        for (name, child) in child_entries {
             let dirent = Dirent::new(child.metadata.read().file_id as u16, name);
             content.extend_from_slice(dirent.as_bytes());
         }
-
-        // Sort content by dirent entries (assuming fixed size)
-        const DIRENT_SIZE: usize = core::mem::size_of::<Dirent>();
-        let mut entries: Vec<_> = content.chunks_exact(DIRENT_SIZE).collect();
-        entries.sort_by_key(|chunk| {
-            // Safety: We know each chunk is exactly DIRENT_SIZE bytes
-            let dirent = unsafe { &*(chunk.as_ptr() as *const Dirent) };
-            dirent.inum
-        });
         
-        // Rebuild content from sorted entries into a new vector
-        let mut sorted_content = Vec::with_capacity(content.len());
-        for entry in entries {
-            sorted_content.extend_from_slice(entry);
-        }
-        
-        sorted_content
+        content
         }
 
     /// Update file size and modification time
@@ -395,7 +385,7 @@ impl Xv6FS {
         Some((parent, parts.last().unwrap().to_string()))
     }
 
-    fn check_memory_limit(&self, additional_bytes: usize) -> Result<()> {
+    fn check_memory_limit(&self, additional_bytes: usize) -> Result<(), FileSystemError> {
         if self.max_memory > 0 {
             let current = *self.current_memory.lock();
             if current + additional_bytes > self.max_memory {
@@ -420,7 +410,7 @@ impl Xv6FS {
 }
 
 impl FileSystem for Xv6FS {
-    fn mount(&mut self, mount_point: &str) -> Result<()> {
+    fn mount(&mut self, mount_point: &str) -> Result<(), FileSystemError> {
         if self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
@@ -432,7 +422,7 @@ impl FileSystem for Xv6FS {
         Ok(())
     }
 
-    fn unmount(&mut self) -> Result<()> {
+    fn unmount(&mut self) -> Result<(), FileSystemError> {
         if !self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
@@ -450,7 +440,7 @@ impl FileSystem for Xv6FS {
 }
 
 /// File handle for Xv6FS files
-struct Xv6FileHandle {
+struct Xv6FileObject {
     node: Arc<Xv6Node>,
     position: RwLock<u64>,
     device_guard: Option<BorrowedDeviceGuard>,
@@ -459,10 +449,10 @@ struct Xv6FileHandle {
     directory_content: Option<RwLock<Vec<u8>>>,
 }
 
-unsafe impl Send for Xv6FileHandle {}
-unsafe impl Sync for Xv6FileHandle {}
+unsafe impl Send for Xv6FileObject {}
+unsafe impl Sync for Xv6FileObject {}
 
-impl Xv6FileHandle {
+impl Xv6FileObject {
     fn new(node: Arc<Xv6Node>, fs: &Xv6FS) -> Self {
         let directory_content = {
             let file_type = node.file_type.read();
@@ -508,7 +498,7 @@ impl Xv6FileHandle {
         unsafe { &*self.fs }
     }
 
-    fn read_device(&self, buffer: &mut [u8]) -> Result<usize> {
+    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.device();
             let mut device_read = device_guard_ref.write();
@@ -583,7 +573,7 @@ impl Xv6FileHandle {
         })
     }
 
-    fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize> {
+    fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         let mut position = self.position.write();
         
         let content = self.node.content.read();
@@ -599,7 +589,7 @@ impl Xv6FileHandle {
         Ok(to_read)
     }
 
-    fn write_device(&self, buffer: &[u8]) -> Result<usize> {
+    fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.device();
             let mut device_write = device_guard_ref.write();
@@ -670,7 +660,7 @@ impl Xv6FileHandle {
         }
     }
 
-    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize> {
+    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         let fs = self.fs();
         let mut position = self.position.write();
         
@@ -700,16 +690,16 @@ impl Xv6FileHandle {
     }
 }
 
-impl FileHandle for Xv6FileHandle {
-    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+impl StreamOps for Xv6FileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let file_type = self.node.file_type.read();
         match &*file_type {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 // Handle device files
-                self.read_device(buffer)
+                self.read_device(buffer).map_err(StreamError::from)
             },
             FileType::RegularFile => {
-                self.read_regular_file(buffer)
+                self.read_regular_file(buffer).map_err(StreamError::from)
             }
             FileType::Directory => {
                 // For directories, read from cached directory content as Dirent entries
@@ -728,28 +718,109 @@ impl FileHandle for Xv6FileHandle {
                     *position += to_read as u64;
                     Ok(to_read)
                 } else {
-                    return Err(FileSystemError {
+                    return Err(StreamError::from(FileSystemError {
                         kind: FileSystemErrorKind::IsADirectory,
                         message: "Directory content not available".to_string(),
-                    });
+                    }));
                 }
             },
             _ => {
-                return Err(FileSystemError {
+                return Err(StreamError::from(FileSystemError {
                     kind: FileSystemErrorKind::NotSupported,
                     message: "Unsupported file type".to_string(),
-                });
+                }));
             }
         }
     }
 
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        let file_type = self.node.file_type.read();
+        match &*file_type {
+            FileType::CharDevice(_) | FileType::BlockDevice(_) => {
+                // Handle device files
+                self.write_device(buffer).map_err(StreamError::from)
+            },
+            FileType::RegularFile => {
+                self.write_regular_file(buffer).map_err(StreamError::from)
+            }
+            FileType::Directory => {
+                return Err(StreamError::from(FileSystemError {
+                    kind: FileSystemErrorKind::IsADirectory,
+                    message: "Cannot write to a directory".to_string(),
+                }));
+            },
+            _ => {
+                return Err(StreamError::from(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: "Unsupported file type".to_string(),
+                }));
+            }
+        }
+    }
+
+    fn release(&self) -> Result<(), StreamError> {
+        // For xv6fs, no special cleanup needed
+        Ok(())
+    }
+}
+
+impl FileObject for Xv6FileObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        let mut position = self.position.write();
+        
+        match whence {
+            SeekFrom::Start(offset) => {
+                *position = offset;
+                Ok(*position)
+            }
+            SeekFrom::Current(offset) => {
+                let new_pos = (*position as i64) + offset;
+                if new_pos < 0 {
+                    return Err(StreamError::from(FileSystemError {
+                        kind: FileSystemErrorKind::InvalidData,
+                        message: "Seek position cannot be negative".to_string(),
+                    }));
+                }
+                *position = new_pos as u64;
+                Ok(*position)
+            }
+            SeekFrom::End(offset) => {
+                let file_type = self.node.file_type.read();
+                let size = match &*file_type {
+                    FileType::RegularFile => {
+                        let content = self.node.content.read();
+                        content.len() as i64
+                    }
+                    FileType::Directory => {
+                        if let Some(dir_content) = &self.directory_content {
+                            dir_content.read().len() as i64
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                };
+                
+                let new_pos = size + offset;
+                if new_pos < 0 {
+                    return Err(StreamError::from(FileSystemError {
+                        kind: FileSystemErrorKind::InvalidData,
+                        message: "Seek position cannot be negative".to_string(),
+                    }));
+                }
+                *position = new_pos as u64;
+                Ok(*position)
+            }
+        }
+    }
+
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
         let file_type = self.node.file_type.read();
         if !matches!(*file_type, FileType::Directory) {
-            return Err(FileSystemError {
+            return Err(StreamError::from(FileSystemError {
                 kind: FileSystemErrorKind::NotADirectory,
                 message: "Not a directory".to_string(),
-            });
+            }));
         }
 
         let mut entries = Vec::new();
@@ -791,93 +862,14 @@ impl FileHandle for Xv6FileHandle {
         Ok(entries)
     }
 
-    fn write(&self, buffer: &[u8]) -> Result<usize> {
-        let file_type = self.node.file_type.read();
-        match &*file_type {
-            FileType::CharDevice(_) | FileType::BlockDevice(_) => {
-                // Handle device files
-                self.write_device(buffer)
-            },
-            FileType::RegularFile => {
-                self.write_regular_file(buffer)
-            }
-            FileType::Directory => {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::IsADirectory,
-                    message: "Cannot write to a directory".to_string(),
-                });
-            },
-            _ => {
-                return Err(FileSystemError {
-                    kind: FileSystemErrorKind::NotSupported,
-                    message: "Unsupported file type".to_string(),
-                });
-            }
-        }
-    }
-
-    fn seek(&self, whence: SeekFrom) -> Result<u64> {
-        let mut position = self.position.write();
-        
-        match whence {
-            SeekFrom::Start(offset) => {
-                *position = offset;
-                Ok(*position)
-            }
-            SeekFrom::Current(offset) => {
-                let new_pos = (*position as i64) + offset;
-                if new_pos < 0 {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::InvalidData,
-                        message: "Seek position cannot be negative".to_string(),
-                    });
-                }
-                *position = new_pos as u64;
-                Ok(*position)
-            }
-            SeekFrom::End(offset) => {
-                let file_type = self.node.file_type.read();
-                let size = match &*file_type {
-                    FileType::RegularFile => {
-                        let content = self.node.content.read();
-                        content.len() as i64
-                    }
-                    FileType::Directory => {
-                        if let Some(dir_content) = &self.directory_content {
-                            dir_content.read().len() as i64
-                        } else {
-                            0
-                        }
-                    }
-                    _ => 0,
-                };
-                
-                let new_pos = size + offset;
-                if new_pos < 0 {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::InvalidData,
-                        message: "Seek position cannot be negative".to_string(),
-                    });
-                }
-                *position = new_pos as u64;
-                Ok(*position)
-            }
-        }
-    }
-
-    fn release(&self) -> Result<()> {
-        // For xv6fs, no special cleanup needed
-        Ok(())
-    }
-
-    fn metadata(&self) -> Result<FileMetadata> {
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
         let metadata = self.node.metadata.read();
         Ok(metadata.clone())
     }
 }
 
 impl FileOperations for Xv6FS {
-    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileHandle>> {
+    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError> {
         let normalized = self.normalize_path(path);
         
         if let Some(node) = self.find_node(&normalized) {
@@ -885,7 +877,7 @@ impl FileOperations for Xv6FS {
             match &*file_type {
                 FileType::RegularFile | FileType::Directory => {
                     drop(file_type);
-                    Ok(Arc::new(Xv6FileHandle::new(
+                    Ok(Arc::new(Xv6FileObject::new(
                         Arc::clone(&node),
                         self,
                     )))
@@ -895,7 +887,7 @@ impl FileOperations for Xv6FS {
                     drop(file_type);
                     match DeviceManager::get_manager().borrow_device(device_id) {
                         Ok(guard) => {
-                            Ok(Arc::new(Xv6FileHandle::new_with_device(
+                            Ok(Arc::new(Xv6FileObject::new_with_device(
                                 Arc::clone(&node),
                                 guard,
                                 self,
@@ -920,7 +912,7 @@ impl FileOperations for Xv6FS {
         }
     }
 
-    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
+    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
         let normalized = self.normalize_path(path);
         
         if let Some(node) = self.find_node(&normalized) {
@@ -977,7 +969,7 @@ impl FileOperations for Xv6FS {
         }
     }
 
-    fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
+    fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
         let normalized = self.normalize_path(path);
         
         if let Some((parent, name)) = self.find_parent_and_name(&normalized) {
@@ -1011,11 +1003,11 @@ impl FileOperations for Xv6FS {
         }
     }
 
-    fn create_dir(&self, path: &str) -> Result<()> {
+    fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::Directory)
     }
 
-    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<()> {
+    fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<(), FileSystemError> {
         let normalized_target = self.normalize_path(target_path);
         let normalized_link = self.normalize_path(link_path);
         
@@ -1059,7 +1051,7 @@ impl FileOperations for Xv6FS {
         }
     }
 
-    fn remove(&self, path: &str) -> Result<()> {
+    fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         let normalized = self.normalize_path(path);
         
         if normalized == "/" {
@@ -1099,7 +1091,7 @@ impl FileOperations for Xv6FS {
         }
     }
 
-    fn metadata(&self, path: &str) -> Result<FileMetadata> {
+    fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         let normalized = self.normalize_path(path);
         
         if let Some(node) = self.find_node(&normalized) {
@@ -1113,7 +1105,7 @@ impl FileOperations for Xv6FS {
         }
     }
 
-    fn root_dir(&self) -> Result<Directory> {
+    fn root_dir(&self) -> Result<Directory, FileSystemError> {
         Ok(Directory::open("/".to_string()))
     }
 }
@@ -1134,7 +1126,7 @@ impl FileSystemDriver for Xv6FSDriver {
         &self,
         _block_device: Box<dyn BlockDevice>,
         _block_size: usize,
-    ) -> Result<Box<dyn VirtualFileSystem>> {
+    ) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         // Xv6FS is memory-based, ignoring block device
         Ok(Box::new(Xv6FS::new(0))) // 0 = unlimited memory
     }
@@ -1142,7 +1134,7 @@ impl FileSystemDriver for Xv6FSDriver {
     fn create_with_params(
         &self,
         params: &dyn crate::fs::params::FileSystemParams,
-    ) -> Result<Box<dyn VirtualFileSystem>> {
+    ) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         if let Some(xv6_params) = params.as_any().downcast_ref::<Xv6FSParams>() {
             Ok(Box::new(Xv6FS::new(xv6_params.memory_limit)))
         } else {

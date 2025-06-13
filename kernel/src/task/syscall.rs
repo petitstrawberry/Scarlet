@@ -298,12 +298,12 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let res = sys_execve(trapframe);
 
     if res != usize::MAX {
-        match abi.init_fs() {
-            Some(vfs) => {
-                task.vfs = Some(Arc::new(vfs));
-            },
-            None => {}
-        }
+        // match abi.init_fs() {
+        //     Some(vfs) => {
+        //         task.vfs = Some(Arc::new(vfs));
+        //     },
+        //     None => {}
+        // }
         task.abi = Some(abi);
     }
 
