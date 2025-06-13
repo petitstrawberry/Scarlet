@@ -38,7 +38,7 @@ use spin::{Mutex, RwLock};
 
 use crate::{driver_initcall, fs::{
     get_fs_driver_manager, Directory, DirectoryEntry, FileObject, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, VirtualFileSystem, SeekFrom
-}, vm::vmem::MemoryArea, object::capability::{StreamOps, FileStreamOps, StreamError}};
+}, vm::vmem::MemoryArea, object::capability::{StreamOps, StreamError}};
 
 /// Structure representing an Initramfs entry
 #[derive(Debug, Clone)]
@@ -370,7 +370,7 @@ impl StreamOps for CpiofsFileObject {
     }
 }
 
-impl FileStreamOps for CpiofsFileObject {
+impl FileObject for CpiofsFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
         let content = self.content.read();
@@ -418,9 +418,7 @@ impl FileStreamOps for CpiofsFileObject {
             link_count: 1,
         })
     }
-}
-
-impl FileObject for CpiofsFileObject {
+    
     fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
         Err(StreamError::NotSupported)
     }

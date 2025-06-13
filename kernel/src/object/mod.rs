@@ -6,8 +6,8 @@
 pub mod capability;
 
 use alloc::sync::Arc;
-use crate::fs::{FileObject, FileSystemError};
-use capability::{StreamOps, FileStreamOps};
+use crate::fs::FileObject;
+use capability::StreamOps;
 
 /// Handle type for referencing kernel objects
 pub type Handle = u32;
@@ -34,12 +34,12 @@ impl KernelObject {
         }
     }
     
-    /// Try to get FileStreamOps capability (seekable streams)
-    pub fn as_file_stream(&self) -> Option<&dyn FileStreamOps> {
+    /// Try to get FileObject that provides file-like operations and stream capabilities
+    pub fn as_file(&self) -> Option<&dyn FileObject> {
         match self {
             KernelObject::File(file_handle) => {
                 // FileObject automatically implements FileStreamOps
-                let file_stream_ops: &dyn FileStreamOps = file_handle.as_ref();
+                let file_stream_ops: &dyn FileObject = file_handle.as_ref();
                 Some(file_stream_ops)
             }
         }

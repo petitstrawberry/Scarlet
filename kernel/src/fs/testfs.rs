@@ -8,7 +8,7 @@ use spin::Mutex;
 use super::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::{Device, DeviceType, char::CharDevice, block::BlockDevice};
-use crate::object::capability::{StreamOps, FileStreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError};
 
 // Simple file system implementation for testing
 pub struct TestFileSystem {
@@ -306,8 +306,9 @@ impl StreamOps for TestFileObject {
     }
 }
 
-impl FileStreamOps for TestFileObject {
-    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+
+impl FileObject for TestFileObject {
+fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
         match whence {
             SeekFrom::Start(offset) => {
@@ -333,6 +334,10 @@ impl FileStreamOps for TestFileObject {
         Ok(*position)
     }
 
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
+        Err(StreamError::NotSupported)
+    }    
+
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
@@ -348,12 +353,6 @@ impl FileStreamOps for TestFileObject {
             file_id: 0, // TestFileObject doesn't know file_id
             link_count: 1,
         })
-    }
-}
-
-impl FileObject for TestFileObject {
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
-        Err(StreamError::NotSupported)
     }
 }
 

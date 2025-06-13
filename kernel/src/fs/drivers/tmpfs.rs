@@ -20,7 +20,7 @@ use spin::Mutex;
 use crate::fs::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::DeviceType;
-use crate::object::capability::{StreamOps, FileStreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError};
 
 /// Directory entries collection with Arc-based node sharing
 #[derive(Default)]
@@ -633,6 +633,52 @@ impl TmpFileObject {
 }
 
 impl FileObject for TmpFileObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        let mut position = self.position.write();
+        
+        match whence {
+            SeekFrom::Start(offset) => {
+                *position = offset;
+            },
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    *position = position.saturating_add(offset as u64);
+                } else {
+                    *position = position.saturating_sub((-offset) as u64);
+                }
+            },
+            SeekFrom::End(offset) => {
+                if let Some(node) = &self.node {
+                    let end = node.content.read().len() as u64;
+                    if offset >= 0 {
+                        *position = end.saturating_add(offset as u64);
+                    } else {
+                        *position = end.saturating_sub((-offset) as u64);
+                    }
+                } else {
+                    return Err(StreamError::from(FileSystemError {
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Cannot seek in device file".to_string(),
+                    }));
+                }
+            },
+        }
+        
+        Ok(*position)
+    }
+    
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        if let Some(node) = &self.node {
+            let metadata_guard = node.metadata.read();
+            Ok(metadata_guard.clone())
+        } else {
+            Err(StreamError::from(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "Cannot get metadata from device handle".to_string(),
+            }))
+        }
+    }
+    
     fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
         // Use the direct node reference instead of finding it by path
         if let Some(node) = &self.node {
@@ -716,54 +762,6 @@ impl StreamOps for TmpFileObject {
 
     fn release(&self) -> Result<(), StreamError> {
         Ok(())
-    }
-}
-
-impl FileStreamOps for TmpFileObject {
-    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
-        let mut position = self.position.write();
-        
-        match whence {
-            SeekFrom::Start(offset) => {
-                *position = offset;
-            },
-            SeekFrom::Current(offset) => {
-                if offset >= 0 {
-                    *position = position.saturating_add(offset as u64);
-                } else {
-                    *position = position.saturating_sub((-offset) as u64);
-                }
-            },
-            SeekFrom::End(offset) => {
-                if let Some(node) = &self.node {
-                    let end = node.content.read().len() as u64;
-                    if offset >= 0 {
-                        *position = end.saturating_add(offset as u64);
-                    } else {
-                        *position = end.saturating_sub((-offset) as u64);
-                    }
-                } else {
-                    return Err(StreamError::from(FileSystemError {
-                        kind: FileSystemErrorKind::NotSupported,
-                        message: "Cannot seek in device file".to_string(),
-                    }));
-                }
-            },
-        }
-        
-        Ok(*position)
-    }
-    
-    fn metadata(&self) -> Result<FileMetadata, StreamError> {
-        if let Some(node) = &self.node {
-            let metadata_guard = node.metadata.read();
-            Ok(metadata_guard.clone())
-        } else {
-            Err(StreamError::from(FileSystemError {
-                kind: FileSystemErrorKind::NotSupported,
-                message: "Cannot get metadata from device handle".to_string(),
-            }))
-        }
     }
 }
 

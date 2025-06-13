@@ -106,7 +106,7 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString
 use alloc::vec;
 use core::fmt;
 use crate::{device::{block::{request::{BlockIORequest, BlockIORequestType}, BlockDevice}, DeviceType}, task::Task, vm::vmem::MemoryArea};
-use crate::object::capability::{StreamOps, FileStreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError};
 
 use spin::{Mutex, RwLock};
 use mount_tree::{MountTree, MountPoint as TreeMountPoint, MountType, MountOptions};
@@ -386,37 +386,16 @@ pub enum SeekFrom {
 }
 
 /// Trait for file object (Old FileObject)
-pub trait FileObject: FileStreamOps {
+pub trait FileObject: StreamOps {
+    /// Seek to a position in the file stream
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
 
     /// Read directory entries
     fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError>;
+    
+    /// Get metadata about the file
+    fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
 }
-
-// /// FileObject -> StreamOps のblanket implementation
-// impl<T: FileObject + ?Sized> StreamOps for T {
-//     fn read(&self, buffer: &mut [u8]) -> core::result::Result<usize, StreamError> {
-//         FileObject::read_legacy(self, buffer).map_err(StreamError::from)
-//     }
-    
-//     fn write(&self, buffer: &[u8]) -> core::result::Result<usize, StreamError> {
-//         FileObject::write_legacy(self, buffer).map_err(StreamError::from)
-//     }
-    
-//     fn release(&self) -> core::result::Result<(), StreamError> {
-//         FileObject::release(self).map_err(StreamError::from)
-//     }
-// }
-
-// /// FileObject -> FileStreamOps のblanket implementation
-// impl<T: FileObject + ?Sized> FileStreamOps for T {
-//     fn seek(&self, whence: SeekFrom) -> core::result::Result<u64, StreamError> {
-//         FileObject::seek_legacy(self, whence).map_err(StreamError::from)
-//     }
-    
-//     fn metadata(&self) -> core::result::Result<FileMetadata, StreamError> {
-//         FileObject::metadata_legacy(self).map_err(StreamError::from)
-//     }
-// }
 
 /// Trait defining basic file system operations
 pub trait FileSystem: Send + Sync {

@@ -59,15 +59,3 @@ pub trait StreamOps: Send + Sync {
     /// Release any resources associated with this stream
     fn release(&self) -> Result<(), StreamError>;
 }
-
-/// File-specific stream operations capability
-/// 
-/// This trait extends StreamOps with file-specific operations like seeking
-/// and metadata access.
-pub trait FileStreamOps: StreamOps {
-    /// Seek to a position in the file stream
-    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
-    
-    /// Get metadata about the file
-    fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
-}
