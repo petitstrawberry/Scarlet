@@ -91,7 +91,7 @@ impl MountNode {
     /// * `Ok(Arc<MountPoint>)` - The mount point if it exists.
     /// * `Err(FileSystemError)` - If no mount point is found.
     /// 
-    pub fn get_mount_point(&self) -> Result<Arc<MountPoint>> {
+    pub fn get_mount_point(&self) -> Result<Arc<MountPoint>, FileSystemError> {
         let mount_guard = self.mount_point.read();
         if let Some(mount_point) = &*mount_guard {
             Ok(mount_point.clone())
@@ -121,7 +121,7 @@ impl MountNode {
     /// * `Ok(None)` - If this node is the final target (self-resolution).
     /// * `Err(FileSystemError)` - If the path is invalid or no mount point is found.
     /// 
-    fn resolve_internal(self_arc: Arc<MountNode>, components: &[String], depth: usize) -> Result<Option<(Arc<MountNode>, String)>> {
+    fn resolve_internal(self_arc: Arc<MountNode>, components: &[String], depth: usize) -> Result<Option<(Arc<MountNode>, String)>, FileSystemError> {
         // Prevent infinite recursion in bind mount chains
         if depth > 32 {
             return Err(FileSystemError {
@@ -278,7 +278,7 @@ impl MountNode {
     /// * `Ok(None)` - If this node is the final target (self-resolution).
     /// * `Err(FileSystemError)` - If the path is invalid or no mount point is found.
     /// 
-    fn resolve_non_transparent_internal(self_arc: Arc<MountNode>, components: &[String]) -> Result<Option<(Arc<MountNode>, String)>> {
+    fn resolve_non_transparent_internal(self_arc: Arc<MountNode>, components: &[String]) -> Result<Option<(Arc<MountNode>, String)>, FileSystemError> {
         // If no components left, check if this node is a mount point
         if components.is_empty() {
             let mount_guard = self_arc.mount_point.read();
@@ -408,7 +408,7 @@ impl MountPoint {
     /// 
     /// This method only supports Regular, Tmpfs, and Overlay mounts.
     /// Bind mounts are resolved transparently to their source filesystems.
-    pub fn resolve_fs(&self, relative_path: &str) -> Result<(super::FileSystemRef, String)> {
+    pub fn resolve_fs(&self, relative_path: &str) -> Result<(super::FileSystemRef, String), FileSystemError> {
         self.resolve_fs_with_depth(relative_path, 0)
     }
     
@@ -426,7 +426,7 @@ impl MountPoint {
     /// 
     /// * `Ok((FileSystemRef, String))` - The actual filesystem and resolved path
     /// * `Err(FileSystemError)` - If recursion limit exceeded or resolution fails
-    fn resolve_fs_with_depth(&self, relative_path: &str, depth: usize) -> Result<(super::FileSystemRef, String)> {
+    fn resolve_fs_with_depth(&self, relative_path: &str, depth: usize) -> Result<(super::FileSystemRef, String), FileSystemError> {
         // Prevent circular references
         if depth > 32 {
             return Err(FileSystemError {
@@ -578,7 +578,7 @@ impl MountTree {
     /// 
     /// * `Ok(())` - Mount operation succeeded
     /// * `Err(FileSystemError)` - If path is invalid or mount point already exists
-    pub fn mount(&mut self, path: &str, mount_point: MountPoint) -> Result<()> {
+    pub fn mount(&mut self, path: &str, mount_point: MountPoint) -> Result<(), FileSystemError> {
         self.insert(path, mount_point)
     }
     
@@ -596,7 +596,7 @@ impl MountTree {
     /// 
     /// * `Ok(())` - Mount point successfully added
     /// * `Err(FileSystemError)` - If mount point already exists at the path
-    pub fn insert(&mut self, path: &str, mount_point: MountPoint) -> Result<()> {
+    pub fn insert(&mut self, path: &str, mount_point: MountPoint) -> Result<(), FileSystemError> {
         let normalized = Self::normalize_path(path)?;
         let components = self.split_path(&normalized);
         
@@ -641,7 +641,7 @@ impl MountTree {
     /// * `Ok((Arc<MountNode>, String))` - A tuple containing the resolved mount node and the relative path.
     /// * `Err(FileSystemError)` - If the path is invalid or no mount point is found.
     /// 
-    pub fn resolve(&self, path: &str) -> Result<(Arc<MountNode>, String)> {
+    pub fn resolve(&self, path: &str) -> Result<(Arc<MountNode>, String), FileSystemError> {
         let normalized = Self::normalize_path(path)?;
         let components = self.split_path(&normalized);
         
@@ -668,7 +668,7 @@ impl MountTree {
     /// * `Ok((Arc<MountNode>, String))` - A tuple containing the mount node and the relative path.
     /// * `Err(FileSystemError)` - If the path is invalid or no mount point is found.
     /// 
-    pub fn resolve_non_transparent(&self, path: &str) -> Result<(Arc<MountNode>, String)> {
+    pub fn resolve_non_transparent(&self, path: &str) -> Result<(Arc<MountNode>, String), FileSystemError> {
         let normalized = Self::normalize_path(path)?;
         let components = self.split_path(&normalized);
         
@@ -696,7 +696,7 @@ impl MountTree {
     /// 
     /// * `Ok(Arc<MountPoint>)` - The removed mount point
     /// * `Err(FileSystemError)` - If no mount point exists at the path
-    pub fn remove(&mut self, path: &str) -> Result<Arc<MountPoint>> {
+    pub fn remove(&mut self, path: &str) -> Result<Arc<MountPoint>, FileSystemError> {
         let normalized = Self::normalize_path(path)?;
         let components = self.split_path(&normalized);
         
@@ -785,7 +785,7 @@ impl MountTree {
     /// assert_eq!(MountTree::normalize_path("/a/./b")?, "/a/b");
     /// assert_eq!(MountTree::normalize_path("/../..")?, "/");
     /// ```
-    pub fn normalize_path(path: &str) -> Result<String> {
+    pub fn normalize_path(path: &str) -> Result<String, FileSystemError> {
         if !path.starts_with('/') {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::InvalidPath,

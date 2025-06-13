@@ -723,7 +723,7 @@ impl Task {
     /// Add a file to the task
     /// 
     /// # Arguments
-    /// * `file` - The file handle to add
+    /// * `file` - The file object to add
     /// 
     /// # Returns
     /// The file descriptor of the file, or an error message if the file descriptor table is full

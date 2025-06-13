@@ -8,6 +8,7 @@ use spin::Mutex;
 use super::*;
 use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
 use crate::device::{Device, DeviceType, char::CharDevice, block::BlockDevice};
+use crate::object::capability::{StreamOps, StreamError};
 
 // Simple file system implementation for testing
 pub struct TestFileSystem {
@@ -107,7 +108,7 @@ impl TestFileSystem {
 }
 
 impl FileSystem for TestFileSystem {
-    fn mount(&mut self, mount_point: &str) -> Result<()> {
+    fn mount(&mut self, mount_point: &str) -> Result<(), FileSystemError> {
         if self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,
@@ -119,7 +120,7 @@ impl FileSystem for TestFileSystem {
         Ok(())
     }
 
-    fn unmount(&mut self) -> Result<()> {
+    fn unmount(&mut self) -> Result<(), FileSystemError> {
         if !self.mounted {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,
@@ -136,8 +137,8 @@ impl FileSystem for TestFileSystem {
     }
 }
 
-// File handle for testing
-struct TestFileHandle {
+// File object for testing
+struct TestFileObject {
     path: String,
     position: RwLock<u64>,
     content: RwLock<Vec<u8>>,
@@ -146,11 +147,11 @@ struct TestFileHandle {
     fs: *const TestFileSystem, // Pointer to the file system for device access
 }
 
-unsafe impl Send for TestFileHandle {}
-unsafe impl Sync for TestFileHandle {}
+unsafe impl Send for TestFileObject {}
+unsafe impl Sync for TestFileObject {}
 
-impl FileHandle for TestFileHandle {
-    fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+impl StreamOps for TestFileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         // Handle device files
         if let Some(ref device_guard) = self.device_guard {
             // For device files, delegate to the device's read operation
@@ -171,10 +172,7 @@ impl FileHandle for TestFileHandle {
                         }
                         return Ok(bytes_read);
                     } else {
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::NotSupported,
-                            message: "Device is not a character device".to_string(),
-                        });
+                        return Err(StreamError::NotSupported);
                     }
                 },
                 DeviceType::Block => {
@@ -199,27 +197,18 @@ impl FileHandle for TestFileHandle {
                                     buffer[..bytes_to_copy].copy_from_slice(&result.request.buffer[..bytes_to_copy]);
                                     return Ok(bytes_to_copy);
                                 },
-                                Err(e) => {
-                                    return Err(FileSystemError {
-                                        kind: FileSystemErrorKind::IoError,
-                                        message: format!("Block device read failed: {}", e),
-                                    });
+                                Err(_) => {
+                                    return Err(StreamError::IoError);
                                 }
                             }
                         }
                         return Ok(0);
                     } else {
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::NotSupported,
-                            message: "Device is not a block device".to_string(),
-                        });
+                        return Err(StreamError::NotSupported);
                     }
                 },
                 _ => {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotSupported,
-                        message: "Unsupported device type".to_string(),
-                    });
+                    return Err(StreamError::NotSupported);
                 }
             }
         }
@@ -240,11 +229,7 @@ impl FileHandle for TestFileHandle {
         Ok(to_read)
     }
 
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>> {
-        todo!("readdir not implemented for TestFileHandle");
-    }
-
-    fn write(&self, buffer: &[u8]) -> Result<usize> {
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         // Handle device files
         if let Some(ref device_guard) = self.device_guard {
             // For device files, delegate to the device's write operation
@@ -263,10 +248,7 @@ impl FileHandle for TestFileHandle {
                         }
                         return Ok(bytes_written);
                     } else {
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::NotSupported,
-                            message: "Device is not a character device".to_string(),
-                        });
+                        return Err(StreamError::NotSupported);
                     }
                 },
                 DeviceType::Block => {
@@ -287,27 +269,18 @@ impl FileHandle for TestFileHandle {
                         if let Some(result) = results.first() {
                             match &result.result {
                                 Ok(_) => return Ok(buffer.len()),
-                                Err(e) => {
-                                    return Err(FileSystemError {
-                                        kind: FileSystemErrorKind::IoError,
-                                        message: format!("Block device write failed: {}", e),
-                                    });
+                                Err(_) => {
+                                    return Err(StreamError::IoError);
                                 }
                             }
                         }
                         return Ok(0);
                     } else {
-                        return Err(FileSystemError {
-                            kind: FileSystemErrorKind::NotSupported,
-                            message: "Device is not a block device".to_string(),
-                        });
+                        return Err(StreamError::NotSupported);
                     }
                 },
                 _ => {
-                    return Err(FileSystemError {
-                        kind: FileSystemErrorKind::NotSupported,
-                        message: "Unsupported device type".to_string(),
-                    });
+                    return Err(StreamError::NotSupported);
                 }
             }
         }
@@ -327,8 +300,15 @@ impl FileHandle for TestFileHandle {
         
         Ok(buffer.len())
     }
-    
-    fn seek(&self, whence: SeekFrom) -> Result<u64> {
+
+    fn release(&self) -> Result<(), StreamError> {
+        Ok(())
+    }
+}
+
+
+impl FileObject for TestFileObject {
+fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
         match whence {
             SeekFrom::Start(offset) => {
@@ -353,12 +333,12 @@ impl FileHandle for TestFileHandle {
         
         Ok(*position)
     }
-    
-    fn release(&self) -> Result<()> {
-        Ok(())
-    }
-    
-    fn metadata(&self) -> Result<FileMetadata> {
+
+    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
+        Err(StreamError::NotSupported)
+    }    
+
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
             size: self.content.read().len(),
@@ -370,19 +350,19 @@ impl FileHandle for TestFileHandle {
             created_time: 0,
             modified_time: 0,
             accessed_time: 0,
-            file_id: 0, // TestFileHandle doesn't know file_id
+            file_id: 0, // TestFileObject doesn't know file_id
             link_count: 1,
         })
     }
 }
 
 impl FileOperations for TestFileSystem {
-    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileHandle>> {
+    fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError> {
         let normalized = self.normalize_path(path);
         
         // Simple implementation for testing (only check the beginning of the path)
         if normalized == "/test.txt" {
-            return Ok(Arc::new(TestFileHandle {
+            return Ok(Arc::new(TestFileObject {
                 path: normalized,
                 position: RwLock::new(0),
                 content: RwLock::new(b"Hello, world!".to_vec()),
@@ -401,7 +381,7 @@ impl FileOperations for TestFileSystem {
             if dir_path == parent_path {
                 // Check if it's a regular file
                 if let Some(entry) = entries.iter().find(|e| e.name == name && (e.file_type == FileType::RegularFile || e.file_type == FileType::Directory)) {
-                    return Ok(Arc::new(TestFileHandle {
+                    return Ok(Arc::new(TestFileObject {
                         path: normalized,
                         position: RwLock::new(0),
                         content: RwLock::new(Vec::new()), // Newly created files are empty
@@ -424,7 +404,7 @@ impl FileOperations for TestFileSystem {
                     // Try to borrow the device from DeviceManager
                     match DeviceManager::get_manager().borrow_device(device_id) {
                         Ok(guard) => {
-                            return Ok(Arc::new(TestFileHandle {
+                            return Ok(Arc::new(TestFileObject {
                                 path: normalized,
                                 position: RwLock::new(0),
                                 content: RwLock::new(Vec::new()), // Device files don't have content
@@ -450,7 +430,7 @@ impl FileOperations for TestFileSystem {
         })
     }
     
-    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>> {
+    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
         let normalized = self.normalize_path(path);
     
         // First check if the path is a file
@@ -459,7 +439,7 @@ impl FileOperations for TestFileSystem {
         let name = normalized.rfind('/').map_or(normalized.as_str(), |idx| &normalized[idx + 1..]);
         
         // Check if there is a file with the same name in the parent directory
-        for (dir_path, entries) in self.directories.lock().iter() {
+        for (dir_path, entries) in self.directories.lock().iter_mut() {
             if dir_path == parent_path {
                 if let Some(_) = entries.iter().find(|e| e.name == name && e.file_type != FileType::Directory) {
                     return Err(FileSystemError {
@@ -480,7 +460,7 @@ impl FileOperations for TestFileSystem {
         }
     }
     
-    fn create_file(&self, path: &str, file_type: FileType) -> Result<()> {
+    fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
         let normalized = self.normalize_path(path);
         let parent_path = normalized.rfind('/').map_or("/", |idx| &normalized[..idx]);
         let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
@@ -530,7 +510,7 @@ impl FileOperations for TestFileSystem {
         })
     }
     
-    fn create_dir(&self, path: &str) -> Result<()> {
+    fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         let normalized = self.normalize_path(path);
         let parent_path = normalized.rfind('/').map_or("/", |idx| &normalized[..idx]);
         let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
@@ -577,7 +557,7 @@ impl FileOperations for TestFileSystem {
         })
     }
     
-    fn remove(&self, path: &str) -> Result<()> {
+    fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         let normalized = self.normalize_path(path);
         let parent_path = normalized.rfind('/').map_or("/", |idx| &normalized[..idx]);
         let parent_path = if parent_path.is_empty() { "/" } else { parent_path };
@@ -648,7 +628,7 @@ impl FileOperations for TestFileSystem {
         })
     }
     
-    fn metadata(&self, path: &str) -> Result<FileMetadata> {
+    fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         let normalized = self.normalize_path(path);
         
         // Special handling for the root directory
@@ -703,7 +683,7 @@ impl FileOperations for TestFileSystem {
         })
     }
     
-    fn root_dir(&self) -> Result<Directory> {
+    fn root_dir(&self) -> Result<Directory, FileSystemError> {
         Ok(Directory::open("/".to_string()))
     }
 }
@@ -720,11 +700,11 @@ impl FileSystemDriver for TestFileSystemDriver {
         FileSystemType::Block  // This driver is for block device based filesystem
     }
     
-    fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_from_block(&self, block_device: Box<dyn BlockDevice>, block_size: usize) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         Ok(Box::new(TestFileSystem::new("testfs", block_device, block_size)))
     }
     
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>> {
+    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         use crate::fs::params::*;
         use crate::device::block::mockblk::MockBlockDevice;
         
