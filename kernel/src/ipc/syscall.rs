@@ -3,12 +3,9 @@
 //! This module provides system call implementations for IPC operations
 //! such as pipe creation, message passing, and shared memory.
 
-use alloc::sync::Arc;
-
 use crate::{
     arch::Trapframe,
     task::mytask,
-    object::KernelObject,
     ipc::pipe::UnidirectionalPipe,
 };
 
@@ -43,11 +40,7 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
     
     // Create pipe pair with default buffer size (4KB)
     const DEFAULT_PIPE_BUFFER_SIZE: usize = 4096;
-    let (read_end, write_end) = UnidirectionalPipe::create_pair(DEFAULT_PIPE_BUFFER_SIZE);
-    
-    // Wrap in KernelObjects
-    let read_obj = KernelObject::from_pipe_object(Arc::new(read_end));
-    let write_obj = KernelObject::from_pipe_object(Arc::new(write_end));
+    let (read_obj, write_obj) = UnidirectionalPipe::create_pair(DEFAULT_PIPE_BUFFER_SIZE);
     
     // Insert into handle table
     let read_handle = match task.handle_table.insert(read_obj) {
