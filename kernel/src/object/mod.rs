@@ -23,6 +23,11 @@ pub enum KernelObject {
 }
 
 impl KernelObject {
+    /// Create a KernelObject from a FileObject
+    pub fn from_file_object(file_object: Arc<dyn FileObject>) -> Self {
+        KernelObject::File(file_object)
+    }
+    
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -58,6 +63,7 @@ impl Drop for KernelObject {
     }
 }
 
+#[derive(Clone)]
 pub struct HandleTable {
     /// Fixed-size handle table
     handles: [Option<KernelObject>; Self::MAX_HANDLES],

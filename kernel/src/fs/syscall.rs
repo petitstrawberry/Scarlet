@@ -1,8 +1,8 @@
-use alloc::{string::ToString, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::{arch::Trapframe, task::mytask};
 
-use super::{File, SeekFrom, VfsManager, MAX_PATH_LENGTH};
+use super::{SeekFrom, VfsManager, MAX_PATH_LENGTH};
 
 pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
@@ -42,15 +42,15 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
-    let file = vfs.open(&path_str, 0);
-    match file {
-        Ok(file) => {
-            // Register the file with the task
-            let fd = task.add_file(file);
-            if fd.is_err() {
-                return usize::MAX; // File descriptor error
+    let file_obj = vfs.open(&path_str, 0);
+    match file_obj {
+        Ok(kernel_obj) => {
+            // file_obj is already a KernelObject::File
+            let handle = task.handle_table.insert(kernel_obj);
+            match handle {
+                Ok(handle) => handle as usize,
+                Err(_) => usize::MAX, // Handle table full
             }
-            fd.unwrap() as usize
         }
         Err(_) => usize::MAX, // File open error
     }
@@ -58,9 +58,9 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_close(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
+    let fd = trapframe.get_arg(0) as u32; // Handle is u32
     trapframe.increment_pc_next(task);
-    if task.remove_file(fd).is_ok() {
+    if task.handle_table.remove(fd).is_some() {
         0
     } else {
         usize::MAX // -1
@@ -69,23 +69,28 @@ pub fn sys_close(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
+    let fd = trapframe.get_arg(0) as u32; // Handle is u32
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if read fails
     trapframe.increment_pc_next(task);
 
-    let file = task.get_mut_file(fd);
-    if file.is_none() {
+    let kernel_obj = task.handle_table.get(fd);
+    if kernel_obj.is_none() {
         return usize::MAX; // Invalid file descriptor
     }
 
-    let file = file.unwrap();
+    let kernel_obj = kernel_obj.unwrap();
+    let stream = kernel_obj.as_stream();
+    if stream.is_none() {
+        return usize::MAX; // Object doesn't support stream operations
+    }
 
+    let stream = stream.unwrap();
     let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
     
-    match file.read(buffer) {
+    match stream.read(buffer) {
         Ok(n) => {
             n
         }
@@ -97,23 +102,28 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_write(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
+    let fd = trapframe.get_arg(0) as u32; // Handle is u32
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
     let count = trapframe.get_arg(2) as usize;
 
     // Increment PC to avoid infinite loop if write fails
     trapframe.increment_pc_next(task);
 
-    let file = task.get_mut_file(fd);
-    if file.is_none() {
+    let kernel_obj = task.handle_table.get(fd);
+    if kernel_obj.is_none() {
         return usize::MAX; // Invalid file descriptor
     }
 
-    let file = file.unwrap();
+    let kernel_obj = kernel_obj.unwrap();
+    let stream = kernel_obj.as_stream();
+    if stream.is_none() {
+        return usize::MAX; // Object doesn't support stream operations
+    }
 
+    let stream = stream.unwrap();
     let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
     
-    match file.write(buffer) {
+    match stream.write(buffer) {
         Ok(n) => {
             n
         }
@@ -125,20 +135,26 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
+    let fd = trapframe.get_arg(0) as u32; // Handle is u32
     let offset = trapframe.get_arg(1) as i64;
     let whence = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if lseek fails
     trapframe.increment_pc_next(task);
 
-    let file = task.get_mut_file(fd);
-    if file.is_none() {
+    let kernel_obj = task.handle_table.get(fd);
+    if kernel_obj.is_none() {
         return usize::MAX; // Invalid file descriptor
     }
 
+    let kernel_obj = kernel_obj.unwrap();
+    let file = kernel_obj.as_file();
+    if file.is_none() {
+        return usize::MAX; // Object doesn't support file operations
+    }
+
     let file = file.unwrap();
-    let whence  = match whence {
+    let whence = match whence {
         0 => SeekFrom::Start(offset as u64),
         1 => SeekFrom::Current(offset),
         2 => SeekFrom::End(offset),

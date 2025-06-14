@@ -175,27 +175,66 @@ fn test_task_handle_table_clone_behavior() {
 
     assert_eq!(parent_task.handle_table.open_count(), 2);
 
-    // Clone the task (this should create a new handle table)
+    // Clone the task (this should clone the handle table)
     let mut child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
-    // Child should have its own empty handle table
-    assert_eq!(child_task.handle_table.open_count(), 0);
+    // Child should inherit parent's handle table (Linux fork() behavior)
+    assert_eq!(child_task.handle_table.open_count(), 2);
     
     // Parent's handle table should be unaffected
     assert_eq!(parent_task.handle_table.open_count(), 2);
     assert!(parent_task.handle_table.is_valid_handle(handle1));
     assert!(parent_task.handle_table.is_valid_handle(handle2));
 
-    // Child and parent should have independent handle tables
+    // Child should have inherited the same handles
+    assert!(child_task.handle_table.is_valid_handle(handle1));
+    assert!(child_task.handle_table.is_valid_handle(handle2));
+
+    // Verify that child and parent have independent handle tables (closing in one doesn't affect the other)
+    child_task.handle_table.remove(handle1);
+    assert_eq!(child_task.handle_table.open_count(), 1);
+    assert_eq!(parent_task.handle_table.open_count(), 2); // Parent still has both handles
+    assert!(parent_task.handle_table.is_valid_handle(handle1)); // Parent's handle1 still valid
+
+    // Child and parent should have independent handle tables for new allocations
     let mock_child_file = Arc::new(MockTaskFileObject::new(b"child_file".to_vec()));
     let child_kernel_obj = KernelObject::File(mock_child_file);
     let child_handle = child_task.handle_table.insert(child_kernel_obj).unwrap();
 
-    assert_eq!(child_task.handle_table.open_count(), 1);
-    assert_eq!(parent_task.handle_table.open_count(), 2);
+    assert_eq!(child_task.handle_table.open_count(), 2); // handle2 + new child_handle
+    assert_eq!(parent_task.handle_table.open_count(), 2); // Still has both original handles
     
-    // Child's handle should not conflict with parent's handles
-    assert_eq!(child_handle, 0); // Should start from 0 in child
+    // New child handle should reuse the freed handle1 slot
+    assert_eq!(child_handle, handle1); // Should reuse handle1 (0)
+
+    // Verify that the file objects are still accessible from both tasks
+    // and contain the same data (Arc sharing), but positions are also shared
+    if let Some(parent_obj) = parent_task.handle_table.get(handle2) {
+        if let Some(child_obj) = child_task.handle_table.get(handle2) {
+            if let (Some(parent_stream), Some(child_stream)) = (parent_obj.as_stream(), child_obj.as_stream()) {
+                // Read from parent first - this will advance the shared position
+                let mut parent_buffer = [0u8; 13];
+                let parent_bytes = parent_stream.read(&mut parent_buffer).unwrap();
+                assert_eq!(parent_bytes, 13);
+                assert_eq!(&parent_buffer, b"parent_file_2");
+                
+                // Now try to read from child - position should have advanced, so it returns 0
+                let mut child_buffer = [0u8; 13];
+                let child_bytes = child_stream.read(&mut child_buffer).unwrap();
+                assert_eq!(child_bytes, 0); // No more data to read because position is at EOF
+                
+                // Reset position using parent's file object and try again
+                if let Some(parent_file) = parent_obj.as_file() {
+                    parent_file.seek(SeekFrom::Start(0)).unwrap(); // Reset to beginning
+                    
+                    // Now child should be able to read from the beginning
+                    let child_bytes = child_stream.read(&mut child_buffer).unwrap();
+                    assert_eq!(child_bytes, 13);
+                    assert_eq!(&child_buffer, b"parent_file_2");
+                }
+            }
+        }
+    }
 }
 
 #[test_case]
