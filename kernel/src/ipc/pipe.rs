@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::object::capability::{StreamOps, StreamError};
+use crate::object::KernelObject;
 use super::{IpcObject, IpcError};
 
 /// Pipe-specific operations
@@ -303,8 +304,28 @@ pub struct UnidirectionalPipe {
 }
 
 impl UnidirectionalPipe {
-    /// Create a new pipe pair (read_end, write_end)
-    pub fn create_pair(buffer_size: usize) -> (Self, Self) {
+    /// Create a new pipe pair (read_end, write_end) as KernelObjects
+    pub fn create_pair(buffer_size: usize) -> (KernelObject, KernelObject) {
+        let state = Arc::new(Mutex::new(PipeState::new(buffer_size)));
+        
+        let read_end = Self {
+            endpoint: PipeEndpoint::new(state.clone(), true, false, "unidirectional_read".into()),
+        };
+        
+        let write_end = Self {
+            endpoint: PipeEndpoint::new(state.clone(), false, true, "unidirectional_write".into()),
+        };
+        
+        // Wrap in KernelObjects
+        let read_obj = KernelObject::from_pipe_object(Arc::new(read_end));
+        let write_obj = KernelObject::from_pipe_object(Arc::new(write_end));
+        
+        (read_obj, write_obj)
+    }
+
+    /// Create a new pipe pair for internal testing (returns raw pipes)
+    #[cfg(test)]
+    fn create_pair_raw(buffer_size: usize) -> (Self, Self) {
         let state = Arc::new(Mutex::new(PipeState::new(buffer_size)));
         
         let read_end = Self {
@@ -401,7 +422,7 @@ mod tests {
     
     #[test_case]
     fn test_pipe_creation() {
-        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(1024);
         
         assert!(read_end.is_readable());
         assert!(!read_end.is_writable());
@@ -414,7 +435,7 @@ mod tests {
     
     #[test_case]
     fn test_pipe_basic_io() {
-        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(1024);
         
         let data = b"Hello, Pipe!";
         let written = write_end.write(data).unwrap();
@@ -428,7 +449,7 @@ mod tests {
     
     #[test_case]
     fn test_pipe_reference_counting() {
-        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(1024);
         
         // Initially: 1 reader, 1 writer
         assert_eq!(read_end.peer_count(), 1); // 1 writer peer
@@ -484,7 +505,7 @@ mod tests {
     
     #[test_case]
     fn test_pipe_broken_pipe_detection() {
-        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(1024);
         
         // Initially both ends are connected
         assert!(read_end.is_connected());
@@ -506,7 +527,7 @@ mod tests {
     
     #[test_case]
     fn test_pipe_write_to_closed_pipe() {
-        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(1024);
         
         // Drop the read end (no more readers)
         drop(read_end);
@@ -527,7 +548,7 @@ mod tests {
     
     #[test_case]
     fn test_pipe_clone_independent_operations() {
-        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(1024);
         
         // Clone both ends
         let read_clone = read_end.clone();
@@ -561,7 +582,7 @@ mod tests {
     
     #[test_case]
     fn test_pipe_buffer_management() {
-        let (read_end, write_end) = UnidirectionalPipe::create_pair(10); // Small buffer
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(10); // Small buffer
         
         // Test buffer size reporting
         assert_eq!(read_end.buffer_size(), 10);
