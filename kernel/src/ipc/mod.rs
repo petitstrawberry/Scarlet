@@ -72,4 +72,4 @@ pub trait SocketObject: IpcObject {
 }
 
 // Re-export commonly used types
-pub use pipe::{UnidirectionalPipe, PipeError, PipeObject};
+pub use pipe::{PipeEndpoint, UnidirectionalPipe, PipeError, PipeObject};
