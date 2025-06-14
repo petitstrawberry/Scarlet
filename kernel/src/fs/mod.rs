@@ -1632,8 +1632,9 @@ impl VfsManager {
     /// // Create and open a new file for writing
     /// let file_obj = vfs.open("/tmp/output.txt", OpenFlags::WRONLY | OpenFlags::CREATE)?;
     /// ```
-    pub fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError> {
-        self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))
+    pub fn open(&self, path: &str, flags: u32) -> Result<crate::object::KernelObject, FileSystemError> {
+        let file_object = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))?;
+        Ok(crate::object::KernelObject::File(file_object))
     }
     /// Read directory entries
     /// 

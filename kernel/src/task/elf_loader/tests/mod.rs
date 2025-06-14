@@ -94,7 +94,7 @@ fn test_parse_program_headers() {
 
 #[test_case]
 fn test_load_elf() {
-    use crate::fs::{FileObject, VfsManager};
+    use crate::fs::{VfsManager};
     use crate::task::elf_loader::load_elf_into_task;
 
     let mut manager = VfsManager::new();
@@ -104,7 +104,8 @@ fn test_load_elf() {
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test.elf";
     manager.create_regular_file(file_path).expect("Failed to create test file");
-    let file = manager.open(file_path, 0).expect("Failed to open file");
+    let kernel_obj = manager.open(file_path, 0).expect("Failed to open file");
+    let file = kernel_obj.as_file().expect("Failed to get file reference");
     file.write(include_bytes!("test.elf")).expect("Failed to write test ELF file");
     
     // Seek to beginning for reading
@@ -114,7 +115,7 @@ fn test_load_elf() {
     let mut task = new_user_task("test".to_string(), 0);
     
     // Load the ELF file into the task
-    let entry_point = load_elf_into_task(file.as_ref(), &mut task).expect("Failed to load ELF file");
+    let entry_point = load_elf_into_task(file, &mut task).expect("Failed to load ELF file");
     
     // Translate the entry point virtual address to a physical address
     let paddr = task.vm_manager.translate_vaddr(entry_point as usize).expect(format!("Failed to translate entry point address: {:#x}", entry_point).as_str());
@@ -134,7 +135,7 @@ fn test_load_elf() {
 
 #[test_case]
 fn test_load_elf_invalid_magic() {
-    use crate::fs::{FileObject, VfsManager};
+    use crate::fs::{VfsManager};
     use crate::task::elf_loader::load_elf_into_task;
 
     let mut manager = VfsManager::new();
@@ -147,7 +148,8 @@ fn test_load_elf_invalid_magic() {
 
     // Create a mock ELF file with an invalid magic number
     let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
-    let file = manager.open("/invalid.elf", 0).unwrap();
+    let kernel_obj = manager.open("/invalid.elf", 0).unwrap();
+    let file = kernel_obj.as_file().expect("Failed to get file reference");
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
     file.seek(crate::fs::SeekFrom::Start(0)).expect("Failed to seek to start");
 
@@ -155,7 +157,7 @@ fn test_load_elf_invalid_magic() {
     let mut task = new_user_task("test_invalid_magic".to_string(), 0);
 
     // Attempt to load the invalid ELF file
-    let result = load_elf_into_task(file.as_ref(), &mut task);
+    let result = load_elf_into_task(file, &mut task);
 
     // Assert that the result is an error
     assert!(result.is_err(), "Expected error when loading ELF with invalid magic number");
@@ -199,14 +201,15 @@ fn test_load_elf_invalid_alignment() {
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_memsz
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
 
-    let mut file = manager.open("/invalid_align.elf", 0o777).map_err(|_| "Failed to create file").unwrap();
+    let kernel_obj = manager.open("/invalid_align.elf", 0o777).map_err(|_| "Failed to create file").unwrap();
+    let file = kernel_obj.as_file().expect("Failed to get file reference");
     file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
 
     // Create a new task
     let mut task = new_user_task("test_invalid_alignment".to_string(), 0);
 
     // Attempt to load the invalid ELF file
-    let result = load_elf_into_task(file.as_ref(), &mut task);
+    let result = load_elf_into_task(file, &mut task);
 
     // Assert that the result is an error
     assert!(result.is_err(), "Expected error when loading ELF with invalid alignment");
@@ -223,7 +226,8 @@ fn test_load_elf_bss_zeroed() {
     manager.mount(fs_id, "/").expect("Failed to mount test filesystem");
     let file_path = "/test_bss.elf";
     manager.create_regular_file(file_path).expect("Failed to create test file");
-    let mut file = manager.open(file_path, 0o777).map_err(|_| "Failed to create file").unwrap();
+    let kernel_obj = manager.open(file_path, 0o777).map_err(|_| "Failed to create file").unwrap();
+    let file = kernel_obj.as_file().expect("Failed to get file reference");
 
     // Create a mock ELF file with a .bss section
     let mut elf_data = vec![0u8; 64];
@@ -257,7 +261,7 @@ fn test_load_elf_bss_zeroed() {
     let mut task = new_user_task("test_bss_zeroed".to_string(), 0);
 
     // Load the ELF file into the task
-    load_elf_into_task(file.as_ref(), &mut task).expect("Failed to load ELF file");
+    load_elf_into_task(file, &mut task).expect("Failed to load ELF file");
 
     // Verify that the .bss section is zeroed
     let bss_start = 0x1000; // Virtual address of .bss section (aligned to PAGE_SIZE)

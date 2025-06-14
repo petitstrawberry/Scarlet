@@ -290,13 +290,18 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     task.vfs = Some(Arc::new(manager));
     task.cwd = Some("/".to_string());
     let file_obj = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
-        Ok(file_obj) => file_obj,
+        Ok(kernel_obj) => kernel_obj,
         Err(e) => {
             panic!("Failed to open init file: {:?}", e);
         },
     };
+    // file_obj is already a KernelObject::File
+    let file_ref = match file_obj.as_file() {
+        Some(file) => file,
+        None => panic!("Failed to get file reference"),
+    };
 
-    match load_elf_into_task(file_obj.as_ref(), &mut task) {
+    match load_elf_into_task(file_ref, &mut task) {
         Ok(_) => {
             for map in task.vm_manager.get_memmap() {
                 early_println!("[Scarlet Kernel] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);

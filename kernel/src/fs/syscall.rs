@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::{arch::Trapframe, task::mytask, object::KernelObject};
+use crate::{arch::Trapframe, task::mytask};
 
 use super::{SeekFrom, VfsManager, MAX_PATH_LENGTH};
 
@@ -44,9 +44,8 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     };
     let file_obj = vfs.open(&path_str, 0);
     match file_obj {
-        Ok(file_obj) => {
-            // Create KernelObject and add to handle table
-            let kernel_obj = KernelObject::File(file_obj);
+        Ok(kernel_obj) => {
+            // file_obj is already a KernelObject::File
             let handle = task.handle_table.insert(kernel_obj);
             match handle {
                 Ok(handle) => handle as usize,

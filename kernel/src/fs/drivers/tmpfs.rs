@@ -1377,9 +1377,10 @@ mod tests {
         manager.create_regular_file("/tmp/original.txt").expect("Failed to create original file");
         
         // Write some data
-        let mut file = manager.open("/tmp/original.txt", 0).expect("Failed to open original file");
+        let kernel_obj = manager.open("/tmp/original.txt", 0).expect("Failed to open original file");
+        let file = kernel_obj.as_file().expect("Failed to get file reference");
         file.write(b"Hello, hardlink test!").expect("Failed to write to file");
-        drop(file);
+        drop(kernel_obj);
         
         // Create hardlink
         manager.create_hardlink("/tmp/original.txt", "/tmp/link.txt").expect("Failed to create hardlink");
@@ -1394,8 +1395,10 @@ mod tests {
         assert_eq!(link_metadata.link_count, 2);
         
         // Content should be identical
-        let original_file = manager.open("/tmp/original.txt", 0).expect("Failed to open original");
-        let link_file = manager.open("/tmp/link.txt", 0).expect("Failed to open link");
+        let original_kernel_obj = manager.open("/tmp/original.txt", 0).expect("Failed to open original");
+        let original_file = original_kernel_obj.as_file().expect("Failed to get original file reference");
+        let link_kernel_obj = manager.open("/tmp/link.txt", 0).expect("Failed to open link");
+        let link_file = link_kernel_obj.as_file().expect("Failed to get link file reference");
         
         let mut original_content = vec![0u8; 1024];
         let original_size = original_file.read(&mut original_content).expect("Failed to read original");
@@ -1421,9 +1424,10 @@ mod tests {
         // Create file and hardlink
         manager.create_regular_file("/tmp/file.txt").expect("Failed to create file");
         
-        let mut file = manager.open("/tmp/file.txt", 0).expect("Failed to open file");
+        let kernel_obj = manager.open("/tmp/file.txt", 0).expect("Failed to open file");
+        let file = kernel_obj.as_file().expect("Failed to get file reference");
         file.write(b"test data").expect("Failed to write data");
-        drop(file);
+        drop(kernel_obj);
         
         manager.create_hardlink("/tmp/file.txt", "/tmp/link1.txt").expect("Failed to create link1");
         manager.create_hardlink("/tmp/file.txt", "/tmp/link2.txt").expect("Failed to create link2");
@@ -1447,7 +1451,8 @@ mod tests {
         assert!(manager.metadata("/tmp/link2.txt").is_ok());
         
         // Content should still be accessible
-        let remaining_file = manager.open("/tmp/link2.txt", 0).expect("Failed to open remaining link");
+        let remaining_kernel_obj = manager.open("/tmp/link2.txt", 0).expect("Failed to open remaining link");
+        let remaining_file = remaining_kernel_obj.as_file().expect("Failed to get file reference");
         let mut content = vec![0u8; 1024];
         let size = remaining_file.read(&mut content).expect("Failed to read content");
         content.truncate(size);
