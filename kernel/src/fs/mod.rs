@@ -1608,7 +1608,8 @@ impl VfsManager {
     /// 
     /// This method opens a file through the VFS layer, automatically resolving
     /// the path to the appropriate filesystem and handling mount points and
-    /// bind mounts transparently.
+    /// bind mounts transparently. The returned KernelObject provides unified
+    /// resource management and automatic cleanup through its Drop implementation.
     /// 
     /// # Arguments
     /// 
@@ -1617,7 +1618,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<Arc<dyn FileObject>, FileSystemError>` - A file object for performing I/O operations
+    /// * `Result<KernelObject, FileSystemError>` - A kernel object wrapping the file for performing I/O operations
     /// 
     /// # Errors
     /// 
@@ -1627,10 +1628,16 @@ impl VfsManager {
     /// 
     /// ```rust
     /// // Open an existing file for reading
-    /// let file_obj = vfs.open("/etc/config.txt", OpenFlags::RDONLY)?;
+    /// let kernel_obj = vfs.open("/etc/config.txt", 0)?;
+    /// let file = kernel_obj.as_file().unwrap();
+    /// 
+    /// // Use the file for I/O operations
+    /// let mut buffer = [0u8; 1024];
+    /// let bytes_read = file.read(&mut buffer)?;
     /// 
     /// // Create and open a new file for writing
-    /// let file_obj = vfs.open("/tmp/output.txt", OpenFlags::WRONLY | OpenFlags::CREATE)?;
+    /// let kernel_obj = vfs.open("/tmp/output.txt", O_WRONLY | O_CREATE)?;
+    /// let file = kernel_obj.as_file().unwrap();
     /// ```
     pub fn open(&self, path: &str, flags: u32) -> Result<crate::object::KernelObject, FileSystemError> {
         let file_object = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))?;
