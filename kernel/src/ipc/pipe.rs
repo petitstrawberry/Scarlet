@@ -402,12 +402,6 @@ impl PipeObject for UnidirectionalPipe {
     }
 }
 
-impl Drop for UnidirectionalPipe {
-    fn drop(&mut self) {
-        // PipeEndpointのDropが呼ばれるので、ここでは何もしない
-    }
-}
-
 impl Clone for UnidirectionalPipe {
     fn clone(&self) -> Self {
         Self {
