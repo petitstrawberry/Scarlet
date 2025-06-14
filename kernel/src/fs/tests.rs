@@ -91,7 +91,8 @@ fn test_file_operations() {
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // Open file
-    let mut file = manager.open("/mnt/test.txt", 0).unwrap();
+    let kernel_obj = manager.open("/mnt/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     
     // Read test
     let mut buffer = [0u8; 20];
@@ -231,7 +232,7 @@ fn test_file_open_close() {
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // Create and open a file object
-    let file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
+    let file = manager.open("/mnt/test.txt", 0o777);
     
     // Open the file
     assert!(file.is_ok());
@@ -247,7 +248,8 @@ fn test_file_read_write() {
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
-    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let kernel_obj = manager.open("/mnt/test.txt", 0o777).unwrap();
+    let file = kernel_obj.as_file().unwrap();
 
     // Read test
     let mut buffer = [0u8; 20];
@@ -278,7 +280,8 @@ fn test_file_seek() {
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
-    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let kernel_obj = manager.open("/mnt/test.txt", 0o777).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     
     // Seek from the start
     let pos = file.seek(SeekFrom::Start(5)).unwrap();
@@ -307,7 +310,8 @@ fn test_file_metadata_and_size() {
     let fs_id = manager.register_fs(fs); // Get fs_id
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
-    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let kernel_obj = manager.open("/mnt/test.txt", 0o777).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     
     // Get metadata (possible even when not open)
     let metadata = file.metadata().unwrap();
@@ -316,9 +320,9 @@ fn test_file_metadata_and_size() {
     // Write
     file.write(b"Hello, world!").unwrap();
     
-    // Get size
-    let size = file.size().unwrap();
-    assert_eq!(size, 13); // Length of "Hello, world!"
+    // Get size from metadata
+    let metadata = file.metadata().unwrap();
+    assert_eq!(metadata.size, 13); // Length of "Hello, world!"
 }
 
 #[test_case]
@@ -332,12 +336,24 @@ fn test_file_read_all() {
     let _ = manager.mount(fs_id, "/mnt"); // Use fs_id
     
     // let mut file = File::new("/mnt/test.txt".to_string(), 0);
-    let mut file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager).unwrap();
+    let kernel_obj = manager.open("/mnt/test.txt", 0o777).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     // Write
     file.write(b"Hello, world!").unwrap();
     
-    // Read the entire file
-    let content = file.read_all().unwrap();
+    // Seek to beginning for reading
+    file.seek(SeekFrom::Start(0)).unwrap();
+    
+    // Read the entire file - use buffer approach since read_all is not available
+    let mut content = Vec::new();
+    let mut buffer = [0u8; 64];
+    loop {
+        let bytes_read = file.read(&mut buffer).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        content.extend_from_slice(&buffer[..bytes_read]);
+    }
     assert_eq!(content, b"Hello, world!");
     
     // Modify part of the file and read again
@@ -346,7 +362,16 @@ fn test_file_read_all() {
     file.write(b"world!").unwrap();
     
     file.seek(SeekFrom::Start(0)).unwrap();
-    let modified_content = file.read_all().unwrap();
+    // Read the entire file after modification - use buffer approach since read_all is not available
+    let mut modified_content = Vec::new();
+    let mut buffer = [0u8; 64];
+    loop {
+        let bytes_read = file.read(&mut buffer).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        modified_content.extend_from_slice(&buffer[..bytes_read]);
+    }
     assert_eq!(modified_content, b"Modified, world!");
 }
 
@@ -363,14 +388,14 @@ fn test_file_auto_close() {
     // Open a file within a scope
     {
         // let mut file = File::new("/mnt/test.txt".to_string(), 0);
-        let file = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
+        let file = manager.open("/mnt/test.txt", 0o777);
         assert!(file.is_ok());
         
         // Exiting the scope will automatically close the file due to the Drop trait
     }
     
     // Verify that a new file object can be created and opened
-    let file2 = File::open_with_manager("/mnt/test.txt".to_string(), &mut manager);
+    let file2 = manager.open("/mnt/test.txt", 0o777);
     assert!(file2.is_ok());
 }
 
@@ -1089,7 +1114,8 @@ fn test_basic_bind_mount() {
     assert!(manager.is_bind_mount("/target/bind"));
     
     // Test file access through bind mount
-    let mut file = manager.open("/target/bind/test.txt", 0).unwrap();
+    let kernel_obj = manager.open("/target/bind/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     let entries = manager.read_dir("/target/bind").unwrap();
     assert!(entries.iter().any(|e| e.name == "test.txt"));
     let mut buffer = [0u8; 20];
@@ -1127,7 +1153,8 @@ fn test_readonly_bind_mount() {
     assert!(manager.is_bind_mount("/readonly"));
     
     // Test read access through bind mount
-    let mut file = manager.open("/readonly/test.txt", 0).unwrap();
+    let kernel_obj = manager.open("/readonly/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     let mut buffer = [0u8; 20];
     let bytes_read = file.read(&mut buffer).unwrap();
     assert_eq!(bytes_read, 13);
@@ -1174,7 +1201,8 @@ fn test_bind_mount_from_another_vfs() {
     assert!(container_vfs.is_bind_mount("/shared"));
     
     // Test access through cross-VFS bind mount
-    let mut file = container_vfs.open("/shared/test.txt", 0).unwrap();
+    let kernel_obj = container_vfs.open("/shared/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     let mut buffer = [0u8; 20];
     let bytes_read = file.read(&mut buffer).unwrap();
     assert_eq!(bytes_read, 13);
@@ -1221,7 +1249,8 @@ fn test_nested_bind_mounts() {
     assert!(manager.is_bind_mount("/target/second"));
     
     // Test access through nested bind mounts
-    let mut file = manager.open("/target/second/test.txt", 0).unwrap();
+    let kernel_obj = manager.open("/target/second/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
     let mut buffer = [0u8; 20];
     let bytes_read = file.read(&mut buffer).unwrap();
     assert_eq!(bytes_read, 13);

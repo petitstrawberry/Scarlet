@@ -193,7 +193,7 @@ extern crate alloc;
 use alloc::{string::ToString, sync::Arc};
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use environment::PAGE_SIZE;
-use fs::{drivers::initramfs::{init_initramfs, relocate_initramfs}, File, VfsManager};
+use fs::{drivers::initramfs::{init_initramfs, relocate_initramfs}, VfsManager};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
@@ -289,14 +289,19 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     task.init();
     task.vfs = Some(Arc::new(manager));
     task.cwd = Some("/".to_string());
-    let mut file = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
-        Ok(file) => file,
+    let file_obj = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
+        Ok(kernel_obj) => kernel_obj,
         Err(e) => {
             panic!("Failed to open init file: {:?}", e);
         },
     };
+    // file_obj is already a KernelObject::File
+    let file_ref = match file_obj.as_file() {
+        Some(file) => file,
+        None => panic!("Failed to get file reference"),
+    };
 
-    match load_elf_into_task(&mut file, &mut task) {
+    match load_elf_into_task(file_ref, &mut task) {
         Ok(_) => {
             for map in task.vm_manager.get_memmap() {
                 early_println!("[Scarlet Kernel] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);

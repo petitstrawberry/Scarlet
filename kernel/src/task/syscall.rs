@@ -212,14 +212,26 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
         task.data_size = backup_data_size; // Restore the data size
         return usize::MAX; // File open error
     }
-    let mut file = file.unwrap();
+    let file_obj = file.unwrap();
+    // file_obj is already a KernelObject::File
+    let file_ref = match file_obj.as_file() {
+        Some(file) => file,
+        None => {
+            // Restore the managed pages, memory mapping and sizes
+            task.managed_pages = backup_pages;
+            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap();
+            task.text_size = backup_text_size;
+            task.data_size = backup_data_size;
+            return usize::MAX; // Failed to get file reference
+        }
+    };
 
     task.text_size = 0;
     task.data_size = 0;
     task.stack_size = 0;
     
     // Load the ELF file and replace the current process
-    match load_elf_into_task(&mut file, task) {
+    match load_elf_into_task(file_ref, task) {
         Ok(entry_point) => {
             // Set the name
             task.name = path_str;

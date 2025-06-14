@@ -224,126 +224,6 @@ pub struct FileMetadata {
     pub link_count: u32,
 }
 
-#[derive(Clone)]
-pub struct File {
-    // pub path: String,
-    handle: Arc<dyn FileObject>,
-}
-impl File {
-    /// Open a file using a specific VFS manager
-    /// 
-    /// # Arguments
-    /// 
-    /// * `path` - The path to the file
-    /// * `manager` - The VFS manager to use
-    /// 
-    /// # Returns
-    /// 
-    /// * `Result<File, FileSystemError>` - The opened file object
-    /// 
-    pub fn open_with_manager(path: String, manager: &VfsManager) -> Result<Self, FileSystemError> {
-        manager.open(&path, 0)
-    }
-
-    /// Read data from the file
-    /// 
-    /// # Arguments
-    /// 
-    /// * `buffer` - The buffer to read data into
-    /// 
-    /// # Returns
-    /// 
-    /// * `Result<usize, FileSystemError>` - The number of bytes read
-    /// 
-    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
-        self.handle.read(buffer).map_err(|e| match e {
-            StreamError::FileSystemError(fs_err) => fs_err,
-            _ => FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: format!("Stream error: {:?}", e),
-            }
-        })
-    }
-
-    pub fn readdir(&mut self) -> Result<Vec<DirectoryEntry>, FileSystemError> {
-        self.handle.readdir().map_err(|e| match e {
-            StreamError::FileSystemError(fs_err) => fs_err,
-            _ => FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: format!("Stream error: {:?}", e),
-            }
-        })
-    }
-    
-    /// Write data to the file
-    /// 
-    /// # Arguments
-    /// 
-    /// * `buffer` - The buffer containing data to write
-    /// 
-    /// # Returns
-    /// 
-    /// * `Result<usize, FileSystemError>` - The number of bytes written
-    /// 
-    pub fn write(&mut self, buffer: &[u8]) -> Result<usize, FileSystemError> { 
-        self.handle.write(buffer).map_err(|e| match e {
-            StreamError::FileSystemError(fs_err) => fs_err,
-            _ => FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: format!("Stream error: {:?}", e),
-            }
-        })
-    }
-    
-    /// Change the position within the file
-    pub fn seek(&mut self, whence: SeekFrom) -> Result<u64, FileSystemError> {
-        self.handle.seek(whence).map_err(|e| match e {
-            StreamError::FileSystemError(fs_err) => fs_err,
-            _ => FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: format!("Stream error: {:?}", e),
-            }
-        })
-    }
-    
-    /// Get the metadata of the file
-    pub fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
-        self.handle.metadata().map_err(|e| match e {
-            StreamError::FileSystemError(fs_err) => fs_err,
-            _ => FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: format!("Stream error: {:?}", e),
-            }
-        })
-    }
-    
-    /// Get the size of the file
-    pub fn size(&self) -> Result<usize, FileSystemError> {
-        let metadata = self.metadata()?;
-        Ok(metadata.size)
-    }
-    
-    /// Read the entire contents of the file
-    pub fn read_all(&mut self) -> Result<Vec<u8>, FileSystemError> {
-        let size = self.size()?;
-        let mut buffer = vec![0u8; size];
-        
-        self.seek(SeekFrom::Start(0))?;
-        let read_bytes = self.read(&mut buffer)?;
-        
-        if read_bytes != size {
-            buffer.truncate(read_bytes);
-        }
-
-        Ok(buffer)
-    }
-}
-
-impl Drop for File {
-    fn drop(&mut self) {
-        self.handle.release().unwrap();
-    }
-}
 /// Structure representing a directory entry
 #[derive(Debug, Clone)]
 pub struct DirectoryEntry {
@@ -1728,7 +1608,8 @@ impl VfsManager {
     /// 
     /// This method opens a file through the VFS layer, automatically resolving
     /// the path to the appropriate filesystem and handling mount points and
-    /// bind mounts transparently.
+    /// bind mounts transparently. The returned KernelObject provides unified
+    /// resource management and automatic cleanup through its Drop implementation.
     /// 
     /// # Arguments
     /// 
@@ -1737,7 +1618,7 @@ impl VfsManager {
     /// 
     /// # Returns
     /// 
-    /// * `Result<File, FileSystemError>` - A file object for performing I/O operations
+    /// * `Result<KernelObject, FileSystemError>` - A kernel object wrapping the file for performing I/O operations
     /// 
     /// # Errors
     /// 
@@ -1747,17 +1628,20 @@ impl VfsManager {
     /// 
     /// ```rust
     /// // Open an existing file for reading
-    /// let file = vfs.open("/etc/config.txt", OpenFlags::RDONLY)?;
+    /// let kernel_obj = vfs.open("/etc/config.txt", 0)?;
+    /// let file = kernel_obj.as_file().unwrap();
+    /// 
+    /// // Use the file for I/O operations
+    /// let mut buffer = [0u8; 1024];
+    /// let bytes_read = file.read(&mut buffer)?;
     /// 
     /// // Create and open a new file for writing
-    /// let file = vfs.open("/tmp/output.txt", OpenFlags::WRONLY | OpenFlags::CREATE)?;
+    /// let kernel_obj = vfs.open("/tmp/output.txt", O_WRONLY | O_CREATE)?;
+    /// let file = kernel_obj.as_file().unwrap();
     /// ```
-    pub fn open(&self, path: &str, flags: u32) -> Result<File, FileSystemError> {
-        let handle = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags));
-        match handle {
-            Ok(handle) => Ok(File { handle }),
-            Err(e) => Err(e),
-        }
+    pub fn open(&self, path: &str, flags: u32) -> Result<crate::object::KernelObject, FileSystemError> {
+        let file_object = self.with_resolve_path(path, |fs, relative_path| fs.read().open(relative_path, flags))?;
+        Ok(crate::object::KernelObject::File(file_object))
     }
     /// Read directory entries
     /// 
