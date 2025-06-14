@@ -1,0 +1,600 @@
+//! Pipe implementation for inter-process communication
+//! 
+//! This module provides unidirectional pipe implementations for data streaming between processes:
+//! - PipeEndpoint: Basic pipe endpoint with read/write capabilities
+//! - UnidirectionalPipe: Traditional unidirectional pipe (read-only or write-only)
+
+use alloc::{collections::VecDeque, string::String, sync::Arc, format};
+#[cfg(test)]
+use alloc::vec::Vec;
+use spin::Mutex;
+
+use crate::object::capability::{StreamOps, StreamError};
+use super::{IpcObject, IpcError};
+
+/// Pipe-specific operations
+/// 
+/// This trait extends IpcObject with pipe-specific functionality.
+pub trait PipeObject: IpcObject {
+    /// Check if there are readers on the other end
+    fn has_readers(&self) -> bool;
+    
+    /// Check if there are writers on the other end
+    fn has_writers(&self) -> bool;
+    
+    /// Get the buffer size of the pipe
+    fn buffer_size(&self) -> usize;
+    
+    /// Get the number of bytes currently in the pipe buffer
+    fn available_bytes(&self) -> usize;
+    
+    /// Check if this end of the pipe is readable
+    fn is_readable(&self) -> bool;
+    
+    /// Check if this end of the pipe is writable
+    fn is_writable(&self) -> bool;
+}
+
+/// Represents errors specific to pipe operations
+#[derive(Debug, Clone)]
+pub enum PipeError {
+    /// The pipe is broken (no readers or writers)
+    BrokenPipe,
+    /// The pipe buffer is full
+    BufferFull,
+    /// The pipe buffer is empty
+    BufferEmpty,
+    /// Invalid pipe state
+    InvalidState,
+    /// General IPC error
+    IpcError(IpcError),
+}
+
+impl From<IpcError> for PipeError {
+    fn from(ipc_err: IpcError) -> Self {
+        PipeError::IpcError(ipc_err)
+    }
+}
+
+impl From<StreamError> for PipeError {
+    fn from(stream_err: StreamError) -> Self {
+        PipeError::IpcError(IpcError::StreamError(stream_err))
+    }
+}
+
+/// Internal shared state of a pipe
+struct PipeState {
+    /// Ring buffer for pipe data
+    buffer: VecDeque<u8>,
+    /// Maximum buffer size
+    max_size: usize,
+    /// Number of active readers
+    reader_count: usize,
+    /// Number of active writers
+    writer_count: usize,
+    /// Whether the pipe has been closed
+    closed: bool,
+}
+
+impl PipeState {
+    fn new(buffer_size: usize) -> Self {
+        Self {
+            buffer: VecDeque::with_capacity(buffer_size),
+            max_size: buffer_size,
+            reader_count: 0,
+            writer_count: 0,
+            closed: false,
+        }
+    }
+}
+
+/// A generic pipe endpoint
+/// 
+/// This represents the basic building block for all pipe types.
+/// It can be configured for read-only, write-only, or bidirectional access.
+pub struct PipeEndpoint {
+    /// Shared pipe state
+    state: Arc<Mutex<PipeState>>,
+    /// Whether this endpoint can read
+    can_read: bool,
+    /// Whether this endpoint can write
+    can_write: bool,
+    /// Unique identifier for debugging
+    id: String,
+}
+
+impl PipeEndpoint {
+    /// Create a new pipe endpoint with specified capabilities
+    fn new(state: Arc<Mutex<PipeState>>, can_read: bool, can_write: bool, id: String) -> Self {
+        // Register this endpoint in the state
+        {
+            let mut pipe_state = state.lock();
+            if can_read {
+                pipe_state.reader_count += 1;
+            }
+            if can_write {
+                pipe_state.writer_count += 1;
+            }
+        }
+        
+        Self {
+            state,
+            can_read,
+            can_write,
+            id,
+        }
+    }
+}
+
+impl StreamOps for PipeEndpoint {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if !self.can_read {
+            return Err(StreamError::NotSupported);
+        }
+        
+        let mut state = self.state.lock();
+        
+        if state.closed {
+            return Err(StreamError::Closed);
+        }
+        
+        if state.buffer.is_empty() {
+            if state.writer_count == 0 {
+                // No writers left, return EOF
+                return Ok(0);
+            } else {
+                // Writers exist but no data available
+                return Err(StreamError::WouldBlock);
+            }
+        }
+        
+        let bytes_to_read = buffer.len().min(state.buffer.len());
+        for i in 0..bytes_to_read {
+            buffer[i] = state.buffer.pop_front().unwrap();
+        }
+        
+        Ok(bytes_to_read)
+    }
+    
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        if !self.can_write {
+            return Err(StreamError::NotSupported);
+        }
+        
+        let mut state = self.state.lock();
+        
+        if state.closed {
+            return Err(StreamError::Closed);
+        }
+        
+        if state.reader_count == 0 {
+            return Err(StreamError::BrokenPipe);
+        }
+        
+        let available_space = state.max_size - state.buffer.len();
+        if available_space == 0 {
+            return Err(StreamError::WouldBlock);
+        }
+        
+        let bytes_to_write = buffer.len().min(available_space);
+        for &byte in &buffer[..bytes_to_write] {
+            state.buffer.push_back(byte);
+        }
+        
+        Ok(bytes_to_write)
+    }
+    
+    fn release(&self) -> Result<(), StreamError> {
+        let mut state = self.state.lock();
+        
+        if self.can_read {
+            state.reader_count = state.reader_count.saturating_sub(1);
+        }
+        if self.can_write {
+            state.writer_count = state.writer_count.saturating_sub(1);
+        }
+        
+        if state.reader_count == 0 && state.writer_count == 0 {
+            state.closed = true;
+            state.buffer.clear();
+        }
+        
+        Ok(())
+    }
+}
+
+impl IpcObject for PipeEndpoint {
+    fn is_connected(&self) -> bool {
+        let state = self.state.lock();
+        !state.closed && (state.reader_count > 0 || state.writer_count > 0)
+    }
+    
+    fn peer_count(&self) -> usize {
+        // This is a generic implementation - specific pipe types may override this
+        let state = self.state.lock();
+        
+        match (self.can_read, self.can_write) {
+            (true, false) => state.writer_count,     // Reader: count writers
+            (false, true) => state.reader_count,     // Writer: count readers
+            (false, false) => 0,                     // Invalid endpoint
+            (true, true) => {
+                // This should not happen for unidirectional pipes
+                // Return total peers minus self
+                (state.reader_count + state.writer_count).saturating_sub(2)
+            },
+        }
+    }
+    
+    fn description(&self) -> String {
+        let access = match (self.can_read, self.can_write) {
+            (true, true) => "read/write",
+            (true, false) => "read-only",
+            (false, true) => "write-only",
+            (false, false) => "no-access",
+        };
+        
+        format!("{}({})", self.id, access)
+    }
+}
+
+impl PipeObject for PipeEndpoint {
+    fn has_readers(&self) -> bool {
+        let state = self.state.lock();
+        state.reader_count > 0
+    }
+    
+    fn has_writers(&self) -> bool {
+        let state = self.state.lock();
+        state.writer_count > 0
+    }
+    
+    fn buffer_size(&self) -> usize {
+        let state = self.state.lock();
+        state.max_size
+    }
+    
+    fn available_bytes(&self) -> usize {
+        let state = self.state.lock();
+        state.buffer.len()
+    }
+    
+    fn is_readable(&self) -> bool {
+        self.can_read
+    }
+    
+    fn is_writable(&self) -> bool {
+        self.can_write
+    }
+}
+
+impl Drop for PipeEndpoint {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
+impl Clone for PipeEndpoint {
+    fn clone(&self) -> Self {
+        let new_pipe = Self {
+            state: self.state.clone(),
+            can_read: self.can_read,
+            can_write: self.can_write,
+            id: format!("{}_clone", self.id),
+        };
+        
+        // Increment reference counts
+        {
+            let mut state = self.state.lock();
+            if self.can_read {
+                state.reader_count += 1;
+            }
+            if self.can_write {
+                state.writer_count += 1;
+            }
+        }
+        
+        new_pipe
+    }
+}
+
+/// A unidirectional pipe (read-only or write-only endpoint)
+pub struct UnidirectionalPipe {
+    endpoint: PipeEndpoint,
+}
+
+impl UnidirectionalPipe {
+    /// Create a new pipe pair (read_end, write_end)
+    pub fn create_pair(buffer_size: usize) -> (Self, Self) {
+        let state = Arc::new(Mutex::new(PipeState::new(buffer_size)));
+        
+        let read_end = Self {
+            endpoint: PipeEndpoint::new(state.clone(), true, false, "unidirectional_read".into()),
+        };
+        
+        let write_end = Self {
+            endpoint: PipeEndpoint::new(state.clone(), false, true, "unidirectional_write".into()),
+        };
+        
+        (read_end, write_end)
+    }
+}
+
+// Delegate all traits to the underlying endpoint
+impl StreamOps for UnidirectionalPipe {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.endpoint.read(buffer)
+    }
+    
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.endpoint.write(buffer)
+    }
+    
+    fn release(&self) -> Result<(), StreamError> {
+        self.endpoint.release()
+    }
+}
+
+impl IpcObject for UnidirectionalPipe {
+    fn is_connected(&self) -> bool {
+        self.endpoint.is_connected()
+    }
+    
+    fn peer_count(&self) -> usize {
+        // Unidirectional pipe specific peer_count implementation
+        let state = self.endpoint.state.lock();
+        
+        match (self.endpoint.can_read, self.endpoint.can_write) {
+            (true, false) => state.writer_count,     // Reader: count writers
+            (false, true) => state.reader_count,     // Writer: count readers
+            _ => 0, // Unidirectional pipes should not have both capabilities
+        }
+    }
+    
+    fn description(&self) -> String {
+        self.endpoint.description()
+    }
+}
+
+impl PipeObject for UnidirectionalPipe {
+    fn has_readers(&self) -> bool {
+        self.endpoint.has_readers()
+    }
+    
+    fn has_writers(&self) -> bool {
+        self.endpoint.has_writers()
+    }
+    
+    fn buffer_size(&self) -> usize {
+        self.endpoint.buffer_size()
+    }
+    
+    fn available_bytes(&self) -> usize {
+        self.endpoint.available_bytes()
+    }
+    
+    fn is_readable(&self) -> bool {
+        self.endpoint.is_readable()
+    }
+    
+    fn is_writable(&self) -> bool {
+        self.endpoint.is_writable()
+    }
+}
+
+impl Drop for UnidirectionalPipe {
+    fn drop(&mut self) {
+        // PipeEndpointのDropが呼ばれるので、ここでは何もしない
+    }
+}
+
+impl Clone for UnidirectionalPipe {
+    fn clone(&self) -> Self {
+        Self {
+            endpoint: self.endpoint.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test_case]
+    fn test_pipe_creation() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        
+        assert!(read_end.is_readable());
+        assert!(!read_end.is_writable());
+        assert!(!write_end.is_readable());
+        assert!(write_end.is_writable());
+        
+        assert!(read_end.has_writers());
+        assert!(write_end.has_readers());
+    }
+    
+    #[test_case]
+    fn test_pipe_basic_io() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        
+        let data = b"Hello, Pipe!";
+        let written = write_end.write(data).unwrap();
+        assert_eq!(written, data.len());
+        
+        let mut buffer = [0u8; 1024];
+        let read = read_end.read(&mut buffer).unwrap();
+        assert_eq!(read, data.len());
+        assert_eq!(&buffer[..read], data);
+    }
+    
+    #[test_case]
+    fn test_pipe_reference_counting() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        
+        // Initially: 1 reader, 1 writer
+        assert_eq!(read_end.peer_count(), 1); // 1 writer peer
+        assert_eq!(write_end.peer_count(), 1); // 1 reader peer
+        assert!(read_end.has_writers());
+        assert!(write_end.has_readers());
+        
+        // Debug: Check internal state
+        {
+            let state = read_end.endpoint.state.lock();
+            assert_eq!(state.reader_count, 1);
+            assert_eq!(state.writer_count, 1);
+        }
+        
+        // Clone the read end (should increment reader count)
+        let read_end_clone = read_end.clone();
+        
+        // Debug: Check internal state after clone
+        {
+            let state = read_end.endpoint.state.lock();
+            assert_eq!(state.reader_count, 2); // Should be 2 after clone
+            assert_eq!(state.writer_count, 1); // Should remain 1
+        }
+        
+        assert_eq!(read_end.peer_count(), 1); // Reader: 1 writer peer
+        assert_eq!(write_end.peer_count(), 2); // Writer: 2 reader peers (read_end + read_end_clone)
+        assert_eq!(read_end_clone.peer_count(), 1); // Reader: 1 writer peer
+        
+        // Clone the write end (should increment writer count)
+        let write_end_clone = write_end.clone();
+        
+        // Debug: Check internal state after write clone
+        {
+            let state = read_end.endpoint.state.lock();
+            assert_eq!(state.reader_count, 2); // Still 2 readers
+            assert_eq!(state.writer_count, 2); // Now 2 writers
+        }
+        
+        assert_eq!(read_end.peer_count(), 2); // Reader: 2 writer peers (write_end + write_end_clone)
+        assert_eq!(write_end.peer_count(), 2); // Writer: 2 reader peers (read_end + read_end_clone)
+        assert_eq!(write_end_clone.peer_count(), 2); // Writer: 2 reader peers (read_end + read_end_clone)
+        
+        // Drop one reader (should decrement reader count)
+        drop(read_end_clone);
+        assert_eq!(read_end.peer_count(), 2); // Reader: 2 writer peers (write_end + write_end_clone)
+        assert_eq!(write_end.peer_count(), 1); // Writer: 1 reader peer (read_end only)
+        
+        // Drop one writer (should decrement writer count)
+        drop(write_end_clone);
+        assert_eq!(read_end.peer_count(), 1); // Reader: 1 writer peer (write_end only)
+        assert_eq!(write_end.peer_count(), 1); // Writer: 1 reader peer (read_end only)
+    }
+    
+    #[test_case]
+    fn test_pipe_broken_pipe_detection() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        
+        // Initially both ends are connected
+        assert!(read_end.is_connected());
+        assert!(write_end.is_connected());
+        assert!(read_end.has_writers());
+        assert!(write_end.has_readers());
+        
+        // Drop the write end (should break the pipe for readers)
+        drop(write_end);
+        
+        // Read end should detect that writers are gone
+        assert!(!read_end.has_writers());
+        
+        // Reading should return EOF (0 bytes) when no writers remain
+        let mut buffer = [0u8; 10];
+        let bytes_read = read_end.read(&mut buffer).unwrap();
+        assert_eq!(bytes_read, 0); // EOF
+    }
+    
+    #[test_case]
+    fn test_pipe_write_to_closed_pipe() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        
+        // Drop the read end (no more readers)
+        drop(read_end);
+        
+        // Write end should detect that readers are gone
+        assert!(!write_end.has_readers());
+        
+        // Writing should fail with BrokenPipe error
+        let data = b"Should fail";
+        let result = write_end.write(data);
+        assert!(result.is_err());
+        if let Err(StreamError::BrokenPipe) = result {
+            // Expected error
+        } else {
+            panic!("Expected BrokenPipe error, got: {:?}", result);
+        }
+    }
+    
+    #[test_case]
+    fn test_pipe_clone_independent_operations() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair(1024);
+        
+        // Clone both ends
+        let read_clone = read_end.clone();
+        let write_clone = write_end.clone();
+        
+        // Write from original write end
+        let data1 = b"From original";
+        write_end.write(data1).unwrap();
+        
+        // Write from cloned write end
+        let data2 = b" and clone";
+        write_clone.write(data2).unwrap();
+        
+        // Read all data from original read end
+        let mut buffer1 = [0u8; 50];
+        let bytes1 = read_end.read(&mut buffer1).unwrap();
+        let total_expected = data1.len() + data2.len();
+        assert_eq!(bytes1, total_expected);
+        
+        // The data should be concatenated in the order of writes
+        let mut expected_data = Vec::new();
+        expected_data.extend_from_slice(data1);
+        expected_data.extend_from_slice(data2);
+        assert_eq!(&buffer1[..bytes1], &expected_data);
+        
+        // Buffer should now be empty - trying to read should block or return EOF
+        let mut buffer2 = [0u8; 10];
+        let bytes2 = read_clone.read(&mut buffer2);
+        assert!(bytes2.is_err() || bytes2.unwrap() == 0);
+    }
+    
+    #[test_case]
+    fn test_pipe_buffer_management() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair(10); // Small buffer
+        
+        // Test buffer size reporting
+        assert_eq!(read_end.buffer_size(), 10);
+        assert_eq!(write_end.buffer_size(), 10);
+        assert_eq!(read_end.available_bytes(), 0);
+        
+        // Fill buffer partially
+        let data = b"12345";
+        write_end.write(data).unwrap();
+        assert_eq!(read_end.available_bytes(), 5);
+        assert_eq!(write_end.available_bytes(), 5);
+        
+        // Fill buffer completely
+        let more_data = b"67890";
+        write_end.write(more_data).unwrap();
+        assert_eq!(read_end.available_bytes(), 10);
+        
+        // Buffer should be full, next write should fail or partial
+        let overflow_data = b"X";
+        let result = write_end.write(overflow_data);
+        assert!(result.is_err() || result.unwrap() == 0);
+        
+        // Read some data to make space
+        let mut buffer = [0u8; 3];
+        let bytes_read = read_end.read(&mut buffer).unwrap();
+        assert_eq!(bytes_read, 3);
+        assert_eq!(&buffer, b"123");
+        assert_eq!(read_end.available_bytes(), 7);
+        
+        // Now writing should work again
+        let new_data = b"XYZ";
+        let bytes_written = write_end.write(new_data).unwrap();
+        assert_eq!(bytes_written, 3);
+        assert_eq!(read_end.available_bytes(), 10);
+    }
+}
