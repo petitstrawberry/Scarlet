@@ -1,4 +1,4 @@
-use crate::{arch::{get_cpu, Trapframe}, fs::{helper::get_path_str, File, FileType, VfsManager}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags, WaitError}};
+use crate::{arch::{get_cpu, Trapframe}, fs::{helper::get_path_str, FileType, VfsManager}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags, WaitError}};
 
 pub fn sys_fork(trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
@@ -96,16 +96,17 @@ pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
     };
 
     // Try to open the file
-    let file: Result<File, _> = match task.vfs.as_ref() {
+    let file = match task.vfs.as_ref() {
         Some(vfs) => vfs.open(&path, 0),
         None => return usize::MAX, // VFS not initialized
     };
     if file.is_err() {
         return usize::MAX; // -1
     }
-    let file = file.unwrap();
+    let kernel_obj = file.unwrap();
+    let file_handle = kernel_obj.as_file().unwrap();
     // Check if the file is a directory
-    if file.metadata().unwrap().file_type != FileType::Directory {
+    if file_handle.metadata().unwrap().file_type != FileType::Directory {
         return usize::MAX; // -1
     }
 

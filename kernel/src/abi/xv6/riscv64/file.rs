@@ -95,14 +95,15 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
         return usize::MAX; // File open error
     }
 
-    let mut file = file.unwrap();
+    let file = file.unwrap();
 
     task.text_size = 0;
     task.data_size = 0;
     task.stack_size = 0;
     
     // Load the ELF file and replace the current process
-    match load_elf_into_task(&mut file, task) {
+    let file_obj = file.as_file().unwrap();
+    match load_elf_into_task(file_obj, task) {
         Ok(entry_point) => {
             // Set the name
             task.name = path_str.to_string();
@@ -207,16 +208,16 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     };
 
     match file {
-        Ok(file) => {
-            // Register the file with the task
-            let fd = task.add_file(file);
-            // println!("Opened file: {} with fd: {}", path_str, fd.unwrap_or(usize::MAX));
-            if fd.is_err() {
-                return usize::MAX; // File descriptor error
+        Ok(kernel_obj) => {
+            // Register the file with the task using HandleTable
+            let handle = task.handle_table.insert(kernel_obj);
+            // println!("Opened file: {} with fd: {}", path_str, handle.unwrap_or(usize::MAX));
+            match handle {
+                Ok(handle) => handle as usize,
+                Err(_) => usize::MAX, // Handle table full
             }
-            fd.unwrap() as usize
         }
-        Err(e) =>{
+        Err(_) =>{
             // If the file does not exist and we are trying to create it
             if mode & OpenMode::Create as i32 != 0 {
                 let vfs = task.vfs.as_ref().unwrap();
@@ -225,13 +226,13 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
                     return usize::MAX; // File creation error
                 }
                 match vfs.open(&path_str, 0) {
-                    Ok(file) => {
-                        // Register the file with the task
-                        let fd = task.add_file(file);
-                        if fd.is_err() {
-                            return usize::MAX; // File descriptor error
+                    Ok(kernel_obj) => {
+                        // Register the file with the task using HandleTable
+                        let handle = task.handle_table.insert(kernel_obj);
+                        match handle {
+                            Ok(handle) => handle as usize,
+                            Err(_) => usize::MAX, // Handle table full
                         }
-                        fd.unwrap() as usize
                     }
                     Err(_) => usize::MAX, // File open error
                 }
@@ -247,23 +248,23 @@ pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
 
-    if let Some(old_file) = task.get_file(fd) {
-        let file = old_file.clone();
-        let new_fd = task.add_file(file);
-        if new_fd.is_ok() {
-            return new_fd.unwrap() as usize;
-        } else {
-            return usize::MAX; // File descriptor error
+    if let Some(old_kernel_obj) = task.handle_table.get(fd as u32) {
+        let kernel_obj = old_kernel_obj.clone();
+        let handle = task.handle_table.insert(kernel_obj);
+        match handle {
+            Ok(handle) => handle as usize,
+            Err(_) => usize::MAX, // Handle table full
         }
+    } else {
+        usize::MAX // Invalid file descriptor
     }
-    usize::MAX // -1
 }
 
 pub fn sys_close(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
-    if task.remove_file(fd).is_ok() {
+    if task.handle_table.remove(fd as u32).is_some() {
         0
     } else {
         usize::MAX // -1
@@ -276,28 +277,24 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
-    let file = task.get_mut_file(fd);
-    if file.is_none() {
-        // Increment PC to avoid infinite loop if read fails
-        trapframe.increment_pc_next(task);
-        return usize::MAX; // Invalid file descriptor
-    }
+    // Increment PC to avoid infinite loop if read fails
+    trapframe.increment_pc_next(task);
 
-    let file = file.unwrap();
+    let kernel_obj = match task.handle_table.get(fd as u32) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => return usize::MAX, // Not a file object
+    };
 
     let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
     
     match file.read(buffer) {
-        Ok(n) => {
-            // Increment PC to avoid infinite loop if read fails
-            trapframe.increment_pc_next(task);
-            n
-        }
-        Err(_) => {
-            // Increment PC to avoid infinite loop if read fails
-            trapframe.increment_pc_next(task);
-            usize::MAX // Read error;
-        }
+        Ok(n) => n,
+        Err(_) => usize::MAX, // Read error
     }
 }
 
@@ -310,22 +307,21 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop if write fails
     trapframe.increment_pc_next(task);
 
-    let file = task.get_mut_file(fd);
-    if file.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
+    let kernel_obj = match task.handle_table.get(fd as u32) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid file descriptor
+    };
 
-    let file = file.unwrap();
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => return usize::MAX, // Not a file object
+    };
 
     let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
     
     match file.write(buffer) {
-        Ok(n) => {
-            n
-        }
-        Err(_) => {
-            return usize::MAX; // Write error
-        }
+        Ok(n) => n,
+        Err(_) => usize::MAX, // Write error
     }
 }
 
@@ -338,13 +334,17 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop if lseek fails
     trapframe.increment_pc_next(task);
 
-    let file = task.get_mut_file(fd);
-    if file.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
+    let kernel_obj = match task.handle_table.get(fd as u32) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid file descriptor
+    };
 
-    let file = file.unwrap();
-    let whence  = match whence {
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => return usize::MAX, // Not a file object
+    };
+
+    let whence = match whence {
         0 => SeekFrom::Start(offset as u64),
         1 => SeekFrom::Current(offset),
         2 => SeekFrom::End(offset),
@@ -352,12 +352,8 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
     };
 
     match file.seek(whence) {
-        Ok(pos) => {
-            pos as usize
-        }
-        Err(_) => {
-            return usize::MAX; // Lseek error
-        }
+        Ok(pos) => pos as usize,
+        Err(_) => usize::MAX, // Lseek error
     }
 }
 
@@ -403,10 +399,16 @@ pub fn sys_fstat(trapframe: &mut crate::arch::Trapframe) -> usize {
 
     let stat_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1) as usize)
         .expect("sys_fstat: Failed to translate stat pointer") as *mut Stat;
-    let file = match task.get_file(fd) {
-        Some(file) => file,
+    let kernel_obj = match task.handle_table.get(fd as u32) {
+        Some(obj) => obj,
         None => return usize::MAX, // Return -1 on error
     };
+
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => return usize::MAX, // Not a file object
+    };
+
     let metadata = file.metadata()
         .expect("sys_fstat: Failed to get file metadata");
 
