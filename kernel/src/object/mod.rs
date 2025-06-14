@@ -7,6 +7,7 @@ pub mod capability;
 
 use alloc::{sync::Arc, vec::Vec};
 use crate::fs::FileObject;
+use crate::ipc::pipe::PipeObject;
 use capability::StreamOps;
 
 /// Handle type for referencing kernel objects
@@ -16,8 +17,8 @@ pub type Handle = u32;
 #[derive(Clone)]
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
+    Pipe(Arc<dyn PipeObject>),
     // Future variants will be added here:
-    // Pipe(Arc<dyn PipeObject>),
     // CharDevice(Arc<dyn CharDevice>),
     // Socket(Arc<dyn SocketObject>),
 }
@@ -28,12 +29,22 @@ impl KernelObject {
         KernelObject::File(file_object)
     }
     
+    /// Create a KernelObject from a PipeObject
+    pub fn from_pipe_object(pipe_object: Arc<dyn PipeObject>) -> Self {
+        KernelObject::Pipe(pipe_object)
+    }
+    
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
             KernelObject::File(file_object) => {
                 // FileObject automatically implements StreamOps
                 let stream_ops: &dyn StreamOps = file_object.as_ref();
+                Some(stream_ops)
+            }
+            KernelObject::Pipe(pipe_object) => {
+                // PipeObject automatically implements StreamOps
+                let stream_ops: &dyn StreamOps = pipe_object.as_ref();
                 Some(stream_ops)
             }
         }
@@ -47,6 +58,24 @@ impl KernelObject {
                 let file_ops: &dyn FileObject = file_object.as_ref();
                 Some(file_ops)
             }
+            KernelObject::Pipe(_) => {
+                // Pipes don't provide file operations
+                None
+            }
+        }
+    }
+    
+    /// Try to get PipeObject that provides pipe-specific operations
+    pub fn as_pipe(&self) -> Option<&dyn PipeObject> {
+        match self {
+            KernelObject::File(_) => {
+                // Files don't provide pipe operations
+                None
+            }
+            KernelObject::Pipe(pipe_object) => {
+                let pipe_ops: &dyn PipeObject = pipe_object.as_ref();
+                Some(pipe_ops)
+            }
         }
     }
 }
@@ -57,6 +86,10 @@ impl Drop for KernelObject {
         match self {
             KernelObject::File(file_object) => {
                 let stream: &dyn StreamOps = file_object.as_ref();
+                let _ = stream.release();
+            }
+            KernelObject::Pipe(pipe_object) => {
+                let stream: &dyn StreamOps = pipe_object.as_ref();
                 let _ = stream.release();
             }
         }
