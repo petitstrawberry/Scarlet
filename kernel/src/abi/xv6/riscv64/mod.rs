@@ -3,13 +3,14 @@ mod macros;
 mod proc;
 mod file;
 pub mod fs;
+mod pipe;
 
 // pub mod drivers;
 
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use proc::{sys_exit, sys_fork, sys_wait, sys_kill, sys_getpid};
 
-use crate::{abi::{xv6::riscv64::{file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink}, proc::{sys_chdir, sys_sbrk}}, AbiModule}, early_initcall, fs::VfsManager, register_abi};
+use crate::{abi::{xv6::riscv64::{file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink}, pipe::sys_pipe, proc::{sys_chdir, sys_sbrk}}, AbiModule}, early_initcall, fs::VfsManager, register_abi};
 
 
 #[derive(Default)]
@@ -43,7 +44,7 @@ syscall_table! {
     Fork = 1 => sys_fork,
     Exit = 2 => sys_exit,
     Wait = 3 => sys_wait,
-    // Pipe = 4 => sys_pipe,
+    Pipe = 4 => sys_pipe,
     Read = 5 => sys_read,
     // Kill = 6 => sys_kill,
     Exec = 7 => sys_exec,

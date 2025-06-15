@@ -62,12 +62,6 @@ pub fn sys_wait(trapframe: &mut Trapframe) -> usize {
     return trapframe.get_return_value();
 }
 
-pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
-    // Implement the pipe syscall
-    // This is a placeholder implementation
-    0
-}
-
 pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
     // Implement the kill syscall
     // This is a placeholder implementation
