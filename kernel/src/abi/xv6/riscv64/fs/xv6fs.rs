@@ -700,7 +700,12 @@ impl StreamOps for Xv6FileObject {
         match &*file_type {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 // Handle device files
-                self.read_device(buffer).map_err(StreamError::from)
+                // self.read_device(buffer).map_err(StreamError::from)
+                let res = self.read_device(buffer).map_err(StreamError::from).unwrap();
+                if res == 0 {
+                    return Err(StreamError::WouldBlock);
+                }
+                return Ok(res);
             },
             FileType::RegularFile => {
                 self.read_regular_file(buffer).map_err(StreamError::from)
@@ -760,11 +765,6 @@ impl StreamOps for Xv6FileObject {
                 }));
             }
         }
-    }
-
-    fn release(&self) -> Result<(), StreamError> {
-        // For xv6fs, no special cleanup needed
-        Ok(())
     }
 }
 
