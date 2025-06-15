@@ -2,11 +2,31 @@
 //! 
 //! This module provides a unified abstraction for all kernel-managed resources
 //! including files, pipes, devices, and other IPC mechanisms.
+//!
+//! ## Design Notes
+//!
+//! ### Clone Semantics (`dup` operation)
+//! 
+//! Different kernel objects have different requirements for duplication:
+//! 
+//! - **Files**: Share state (file position) between duplicated handles. 
+//!   `Arc::clone` is sufficient as it shares the same underlying file object.
+//! 
+//! - **Pipes**: Require custom clone logic to properly increment reader/writer counts.
+//!   `Arc::clone` alone would bypass the custom `Clone` implementation, breaking
+//!   pipe protocol semantics (broken pipe detection, EOF handling).
+//! 
+//! To solve this, `KernelObject::clone()` uses the `clone_pipe()` method on `PipeObject`
+//! to ensure proper duplication semantics for pipes while maintaining efficient
+//! `Arc::clone` behavior for files.
+//!
+//! This approach provides correct `dup` semantics for both file and pipe objects
+//! while maintaining performance and avoiding the complexity of a complete redesign.
 
 pub mod capability;
 
 use alloc::{sync::Arc, vec::Vec};
-use crate::fs::FileObject;
+use crate::{fs::FileObject, object::capability::CloneOps};
 use crate::ipc::pipe::PipeObject;
 use capability::StreamOps;
 
@@ -14,7 +34,6 @@ use capability::StreamOps;
 pub type Handle = u32;
 
 /// Unified representation of all kernel-managed resources
-#[derive(Clone)]
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
@@ -78,6 +97,20 @@ impl KernelObject {
             }
         }
     }
+    
+    /// Try to get CloneOps capability
+    pub fn as_cloneable(&self) -> Option<&dyn CloneOps> {
+        match self {
+            KernelObject::File(_) => {
+                None // Files do not implement CloneOps, use Arc::clone directly
+            }
+            KernelObject::Pipe(pipe_object) => {
+                // Check if PipeObject implements CloneOps
+                let cloneable: &dyn CloneOps = pipe_object.as_ref();
+                Some(cloneable)
+            }
+        }
+    }
 }
 
 impl Drop for KernelObject {
@@ -95,6 +128,23 @@ impl Drop for KernelObject {
         }
     }
 }
+
+impl Clone for KernelObject {
+    fn clone(&self) -> Self {
+        // Try to use CloneOps capability first
+        if let Some(cloneable) = self.as_cloneable() {
+            cloneable.custom_clone()
+        } else {
+            // Fallback to Arc::clone
+            match self {
+                KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
+                KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
+            }
+        }
+    }
+}
+
+
 
 #[derive(Clone)]
 pub struct HandleTable {

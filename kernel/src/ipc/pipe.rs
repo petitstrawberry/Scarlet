@@ -9,14 +9,14 @@ use alloc::{collections::VecDeque, string::String, sync::Arc, format};
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError, CloneOps};
 use crate::object::KernelObject;
 use super::{IpcObject, IpcError};
 
 /// Pipe-specific operations
 /// 
 /// This trait extends IpcObject with pipe-specific functionality.
-pub trait PipeObject: IpcObject {
+pub trait PipeObject: IpcObject + CloneOps {
     /// Check if there are readers on the other end
     fn has_readers(&self) -> bool;
     
@@ -238,6 +238,14 @@ impl IpcObject for PipeEndpoint {
     }
 }
 
+impl CloneOps for PipeEndpoint {
+    fn custom_clone(&self) -> KernelObject {
+        // Create a new PipeEndpoint by cloning the state and capabilities
+        let cloned = self.clone();
+        KernelObject::from_pipe_object(Arc::new(cloned))
+    }
+}
+
 impl PipeObject for PipeEndpoint {
     fn has_readers(&self) -> bool {
         let state = self.state.lock();
@@ -325,7 +333,7 @@ impl UnidirectionalPipe {
 
     /// Create a new pipe pair for internal testing (returns raw pipes)
     #[cfg(test)]
-    fn create_pair_raw(buffer_size: usize) -> (Self, Self) {
+    pub fn create_pair_raw(buffer_size: usize) -> (Self, Self) {
         let state = Arc::new(Mutex::new(PipeState::new(buffer_size)));
         
         let read_end = Self {
@@ -338,6 +346,7 @@ impl UnidirectionalPipe {
         
         (read_end, write_end)
     }
+
 }
 
 // Delegate all traits to the underlying endpoint
@@ -373,6 +382,14 @@ impl IpcObject for UnidirectionalPipe {
     
     fn description(&self) -> String {
         self.endpoint.description()
+    }
+}
+
+impl CloneOps for UnidirectionalPipe {
+    fn custom_clone(&self) -> KernelObject {
+        // Create a new UnidirectionalPipe by cloning the endpoint
+        let cloned = self.clone();
+        KernelObject::from_pipe_object(Arc::new(cloned))
     }
 }
 
