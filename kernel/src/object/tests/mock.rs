@@ -38,10 +38,6 @@ impl StreamOps for MockFileObject {
         // Mock implementation - just return the buffer length
         Ok(buffer.len())
     }
-    
-    fn release(&self) -> Result<(), StreamError> {
-        Ok(())
-    }
 }
 
 impl crate::fs::FileObject for MockFileObject {
@@ -122,10 +118,6 @@ impl StreamOps for MockTaskFileObject {
     
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         Ok(buffer.len())
-    }
-    
-    fn release(&self) -> Result<(), StreamError> {
-        Ok(())
     }
 }
 

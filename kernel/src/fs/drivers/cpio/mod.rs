@@ -364,10 +364,6 @@ impl StreamOps for CpiofsFileObject {
     fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
         Err(StreamError::NotSupported)
     }
-
-    fn release(&self) -> Result<(), StreamError> {
-        Ok(())
-    }
 }
 
 impl FileObject for CpiofsFileObject {

@@ -300,10 +300,6 @@ impl StreamOps for TestFileObject {
         
         Ok(buffer.len())
     }
-
-    fn release(&self) -> Result<(), StreamError> {
-        Ok(())
-    }
 }
 
 
