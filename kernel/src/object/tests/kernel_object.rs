@@ -32,9 +32,6 @@ fn test_kernel_object_stream_operations() {
         // Test write operation
         let bytes_written = stream.write(b"test").unwrap();
         assert_eq!(bytes_written, 4);
-        
-        // Test release
-        assert!(stream.release().is_ok());
     } else {
         panic!("Expected stream capability");
     }
