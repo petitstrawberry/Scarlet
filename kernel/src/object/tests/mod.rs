@@ -8,4 +8,3 @@ mod mock;
 mod kernel_object;
 mod handle_table;
 mod task_integration;
-mod dup_semantics;

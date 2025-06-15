@@ -115,17 +115,9 @@ impl KernelObject {
 
 impl Drop for KernelObject {
     fn drop(&mut self) {
-        // Release resources when KernelObject is dropped
-        match self {
-            KernelObject::File(file_object) => {
-                let stream: &dyn StreamOps = file_object.as_ref();
-                let _ = stream.release();
-            }
-            KernelObject::Pipe(pipe_object) => {
-                let stream: &dyn StreamOps = pipe_object.as_ref();
-                let _ = stream.release();
-            }
-        }
+        // When a KernelObject is dropped, it will automatically drop the underlying
+        // Arc reference, which will call the Drop implementation of FileObject or PipeObject.
+        // No additional cleanup is needed here.
     }
 }
 

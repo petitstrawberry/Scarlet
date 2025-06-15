@@ -184,24 +184,6 @@ impl StreamOps for PipeEndpoint {
         
         Ok(bytes_to_write)
     }
-    
-    fn release(&self) -> Result<(), StreamError> {
-        let mut state = self.state.lock();
-        
-        if self.can_read {
-            state.reader_count = state.reader_count.saturating_sub(1);
-        }
-        if self.can_write {
-            state.writer_count = state.writer_count.saturating_sub(1);
-        }
-        
-        if state.reader_count == 0 && state.writer_count == 0 {
-            state.closed = true;
-            state.buffer.clear();
-        }
-        
-        Ok(())
-    }
 }
 
 impl IpcObject for PipeEndpoint {
@@ -240,9 +222,9 @@ impl IpcObject for PipeEndpoint {
 
 impl CloneOps for PipeEndpoint {
     fn custom_clone(&self) -> KernelObject {
-        // Create a new PipeEndpoint by cloning the state and capabilities
-        let cloned = self.clone();
-        KernelObject::from_pipe_object(Arc::new(cloned))
+        // Clone this endpoint directly (which properly increments counters)
+        // and wrap the result in the SAME Arc structure to maintain proper Drop behavior
+        KernelObject::from_pipe_object(Arc::new(self.clone()))
     }
 }
 
@@ -278,7 +260,19 @@ impl PipeObject for PipeEndpoint {
 
 impl Drop for PipeEndpoint {
     fn drop(&mut self) {
-        let _ = self.release();
+        let mut state = self.state.lock();
+        
+        if self.can_read {
+            state.reader_count = state.reader_count.saturating_sub(1);
+        }
+        if self.can_write {
+            state.writer_count = state.writer_count.saturating_sub(1);
+        }
+        
+        if state.reader_count == 0 && state.writer_count == 0 {
+            state.closed = true;
+            state.buffer.clear();
+        }
     }
 }
 
@@ -358,10 +352,6 @@ impl StreamOps for UnidirectionalPipe {
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         self.endpoint.write(buffer)
     }
-    
-    fn release(&self) -> Result<(), StreamError> {
-        self.endpoint.release()
-    }
 }
 
 impl IpcObject for UnidirectionalPipe {
@@ -387,9 +377,9 @@ impl IpcObject for UnidirectionalPipe {
 
 impl CloneOps for UnidirectionalPipe {
     fn custom_clone(&self) -> KernelObject {
-        // Create a new UnidirectionalPipe by cloning the endpoint
-        let cloned = self.clone();
-        KernelObject::from_pipe_object(Arc::new(cloned))
+        // Clone this pipe directly (which properly increments counters)
+        // and wrap the result in a new Arc
+        KernelObject::from_pipe_object(Arc::new(self.clone()))
     }
 }
 
@@ -628,5 +618,203 @@ mod tests {
         let bytes_written = write_end.write(new_data).unwrap();
         assert_eq!(bytes_written, 3);
         assert_eq!(read_end.available_bytes(), 10);
+    }
+    
+    // === DUP SEMANTICS TESTS ===
+    // These tests verify correct dup() behavior for pipes at the KernelObject level
+    
+    #[test_case]
+    fn test_kernel_object_pipe_dup_semantics() {
+        // Create pipe through KernelObject interface
+        let (read_obj, write_obj) = UnidirectionalPipe::create_pair(1024);
+        
+        // Verify initial state through KernelObject interface
+        if let Some(read_pipe) = read_obj.as_pipe() {
+            if let Some(write_pipe) = write_obj.as_pipe() {
+                // Initially: 1 reader, 1 writer
+                assert_eq!(read_pipe.peer_count(), 1); // 1 writer
+                assert_eq!(write_pipe.peer_count(), 1); // 1 reader
+                assert!(read_pipe.has_writers());
+                assert!(write_pipe.has_readers());
+            } else {
+                panic!("write_obj should be a pipe");
+            }
+        } else {
+            panic!("read_obj should be a pipe");
+        }
+        
+        // Clone the read end using KernelObject::clone (simulates dup syscall)
+        let read_obj_cloned = read_obj.clone();
+        
+        // Verify that the clone operation correctly updated peer counts
+        if let Some(read_pipe) = read_obj.as_pipe() {
+            if let Some(write_pipe) = write_obj.as_pipe() {
+                if let Some(read_pipe_cloned) = read_obj_cloned.as_pipe() {
+                    // After dup: 2 readers, 1 writer
+                    assert_eq!(write_pipe.peer_count(), 2); // 2 readers now!
+                    assert_eq!(read_pipe.peer_count(), 1); // 1 writer
+                    assert_eq!(read_pipe_cloned.peer_count(), 1); // 1 writer
+                    
+                    // All endpoints should still be connected
+                    assert!(read_pipe.has_writers());
+                    assert!(write_pipe.has_readers());
+                    assert!(read_pipe_cloned.has_writers());
+                } else {
+                    panic!("read_obj_cloned should be a pipe");
+                }
+            }
+        }
+    }
+    
+    #[test_case]
+    fn test_kernel_object_pipe_write_dup_semantics() {
+        // Create pipe through KernelObject interface
+        let (read_obj, write_obj) = UnidirectionalPipe::create_pair(1024);
+        
+        // Clone the write end using KernelObject::clone (simulates dup syscall)
+        let write_obj_cloned = write_obj.clone();
+        
+        // Verify that the clone operation correctly updated peer counts
+        if let Some(read_pipe) = read_obj.as_pipe() {
+            if let Some(write_pipe) = write_obj.as_pipe() {
+                if let Some(write_pipe_cloned) = write_obj_cloned.as_pipe() {
+                    // After dup: 1 reader, 2 writers
+                    assert_eq!(read_pipe.peer_count(), 2); // 2 writers now!
+                    assert_eq!(write_pipe.peer_count(), 1); // 1 reader
+                    assert_eq!(write_pipe_cloned.peer_count(), 1); // 1 reader
+                    
+                    // All endpoints should still be connected
+                    assert!(read_pipe.has_writers());
+                    assert!(write_pipe.has_readers());
+                    assert!(write_pipe_cloned.has_readers());
+                } else {
+                    panic!("write_obj_cloned should be a pipe");
+                }
+            }
+        }
+    }
+    
+    #[test_case]
+    fn test_kernel_object_pipe_dup_io_operations() {
+        // Create pipe through KernelObject interface
+        let (read_obj, write_obj) = UnidirectionalPipe::create_pair(1024);
+        
+        // Clone both ends
+        let read_obj_cloned = read_obj.clone();
+        let write_obj_cloned = write_obj.clone();
+        
+        // Write from original write end
+        if let Some(write_stream) = write_obj.as_stream() {
+            let data1 = b"Hello from original writer";
+            let written = write_stream.write(data1).unwrap();
+            assert_eq!(written, data1.len());
+        }
+        
+        // Write from cloned write end
+        if let Some(write_stream_cloned) = write_obj_cloned.as_stream() {
+            let data2 = b" and cloned writer";
+            let written = write_stream_cloned.write(data2).unwrap();
+            assert_eq!(written, data2.len());
+        }
+        
+        // Read from original read end
+        if let Some(read_stream) = read_obj.as_stream() {
+            let mut buffer = [0u8; 100];
+            let bytes_read = read_stream.read(&mut buffer).unwrap();
+            let total_expected = b"Hello from original writer and cloned writer".len();
+            assert_eq!(bytes_read, total_expected);
+            assert_eq!(&buffer[..bytes_read], b"Hello from original writer and cloned writer");
+        }
+        
+        // Buffer should now be empty
+        if let Some(read_stream_cloned) = read_obj_cloned.as_stream() {
+            let mut buffer = [0u8; 10];
+            let result = read_stream_cloned.read(&mut buffer);
+            // Should either return 0 (EOF) or WouldBlock since buffer is empty
+            assert!(result.is_err() || result.unwrap() == 0);
+        }
+    }
+    
+    #[test_case]
+    fn test_kernel_object_pipe_dup_broken_pipe_detection() {
+        // Create pipe through KernelObject interface
+        let (read_obj, write_obj) = UnidirectionalPipe::create_pair(1024);
+        
+        // Clone the read end
+        let read_obj_cloned = read_obj.clone();
+        
+        // Initially, write end should see 2 readers
+        if let Some(write_pipe) = write_obj.as_pipe() {
+            assert_eq!(write_pipe.peer_count(), 2);
+        }
+        
+        // Drop one read end
+        drop(read_obj);
+        
+        // Write end should still see 1 reader
+        if let Some(write_pipe) = write_obj.as_pipe() {
+            assert_eq!(write_pipe.peer_count(), 1);
+            assert!(write_pipe.has_readers());
+        }
+        
+        // Writing should still work
+        if let Some(write_stream) = write_obj.as_stream() {
+            let data = b"Still works";
+            let written = write_stream.write(data).unwrap();
+            assert_eq!(written, data.len());
+        }
+        
+        // Drop the last read end
+        drop(read_obj_cloned);
+        
+        // Now write end should see no readers
+        if let Some(write_pipe) = write_obj.as_pipe() {
+            assert_eq!(write_pipe.peer_count(), 0);
+            assert!(!write_pipe.has_readers());
+        }
+        
+        // Writing should now fail with BrokenPipe
+        if let Some(write_stream) = write_obj.as_stream() {
+            let data = b"Should fail";
+            let result = write_stream.write(data);
+            assert!(result.is_err());
+            if let Err(StreamError::BrokenPipe) = result {
+                // Expected error
+            } else {
+                panic!("Expected BrokenPipe error, got: {:?}", result);
+            }
+        }
+    }
+    
+    #[test_case]
+    fn test_kernel_object_pipe_dup_vs_arc_clone_comparison() {
+        // This test demonstrates the difference between KernelObject::clone (correct dup)
+        // and Arc::clone (incorrect for pipes)
+        
+        let (read_obj, write_obj) = UnidirectionalPipe::create_pair(1024);
+        
+        // === Correct way: KernelObject::clone (uses CloneOps) ===
+        let _read_obj_dup = read_obj.clone();
+        
+        // This should correctly increment reader count
+        if let Some(write_pipe) = write_obj.as_pipe() {
+            assert_eq!(write_pipe.peer_count(), 2); // 2 readers after dup
+        }
+        
+        // === Demonstrate what would happen with Arc::clone (incorrect) ===
+        // We can't directly test Arc::clone without exposing the internal Arc,
+        // but we can verify that our CloneOps implementation is being used
+        
+        if let Some(cloneable) = read_obj.as_cloneable() {
+            // This should be Some for pipes (they implement CloneOps)
+            let _custom_cloned = cloneable.custom_clone();
+            
+            // Verify the custom clone also works correctly
+            if let Some(write_pipe) = write_obj.as_pipe() {
+                assert_eq!(write_pipe.peer_count(), 3); // 3 readers now
+            }
+        } else {
+            panic!("Pipe should implement CloneOps capability");
+        }
     }
 }

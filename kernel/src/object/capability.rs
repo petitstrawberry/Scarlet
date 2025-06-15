@@ -55,9 +55,6 @@ pub trait StreamOps: Send + Sync {
     
     /// Write data to the stream
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError>;
-    
-    /// Release any resources associated with this stream
-    fn release(&self) -> Result<(), StreamError>;
 }
 
 /// Clone operations capability

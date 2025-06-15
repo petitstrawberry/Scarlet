@@ -759,10 +759,6 @@ impl StreamOps for TmpFileObject {
             }
         }
     }
-
-    fn release(&self) -> Result<(), StreamError> {
-        Ok(())
-    }
 }
 
 impl FileOperations for TmpFS {
