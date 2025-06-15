@@ -202,7 +202,7 @@ Scarlet implements a highly flexible Virtual File System (VFS) layer designed fo
 - **Hybrid Filesystem Support**: Filesystems that can operate on both block devices and memory regions for maximum flexibility
 - **Driver Framework**: Extensible system for adding new filesystem implementations with proper type safety and error handling
 
-The VFS implementation enables flexible deployment scenarios from simple shared filesystems to complete filesystem isolation with selective resource sharing, making it ideal for containerized applications, microkernel architectures, and security-conscious environments.
+The VFS implementation enables flexible deployment scenarios from simple shared filesystems to complete filesystem isolation with selective resource sharing, making it ideal for containerized applications, modular system architectures, and security-conscious environments.
 
 ## Contributing
 
