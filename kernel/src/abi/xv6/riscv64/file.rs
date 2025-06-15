@@ -1,5 +1,5 @@
 use alloc::{boxed::Box, string::ToString, vec::Vec};
-use crate::{abi::xv6::riscv64::fs::xv6fs::Stat, arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager}, library::std::string::{cstring_to_string, StringConversionError}, task::{elf_loader::load_elf_into_task, mytask}, vm};
+use crate::{abi::xv6::riscv64::fs::xv6fs::Stat, arch::{self, Registers, Trapframe}, device::manager::DeviceManager, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager}, library::std::string::{cstring_to_string, StringConversionError}, object::capability::StreamError, sched::scheduler::get_scheduler, task::{elf_loader::load_elf_into_task, mytask}, vm};
 
 const MAX_PATH_LENGTH: usize = 128;
 
@@ -211,7 +211,6 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
         Ok(kernel_obj) => {
             // Register the file with the task using HandleTable
             let handle = task.handle_table.insert(kernel_obj);
-            // println!("Opened file: {} with fd: {}", path_str, handle.unwrap_or(usize::MAX));
             match handle {
                 Ok(handle) => handle as usize,
                 Err(_) => usize::MAX, // Handle table full
@@ -277,6 +276,8 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
+    let epc = trapframe.epc;
+
     // Increment PC to avoid infinite loop if read fails
     trapframe.increment_pc_next(task);
 
@@ -285,16 +286,31 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Invalid file descriptor
     };
 
-    let file = match kernel_obj.as_file() {
-        Some(file) => file,
-        None => return usize::MAX, // Not a file object
+    let stream = match kernel_obj.as_stream() {
+        Some(stream) => stream,
+        None => return usize::MAX, // Not a stream object
     };
 
     let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-    
-    match file.read(buffer) {
+
+    match stream.read(buffer) {
         Ok(n) => n,
-        Err(_) => usize::MAX, // Read error
+        Err(e) => {
+            match e {
+                StreamError:: EndOfStream => 0, // EOF
+                StreamError::WouldBlock  => {
+                    // If the stream would block, we need to set the trapframe's EPC
+                    trapframe.epc = epc;
+                    task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
+                    get_scheduler().schedule(trapframe); // Yield to the scheduler
+                    trapframe.get_return_value() // Return the value from the trapframe
+                },
+                _ => {
+                    // Other errors, return -1
+                    usize::MAX
+                }
+            }
+        }
     }
 }
 
@@ -312,14 +328,14 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Invalid file descriptor
     };
 
-    let file = match kernel_obj.as_file() {
-        Some(file) => file,
-        None => return usize::MAX, // Not a file object
+    let stream = match kernel_obj.as_stream() {
+        Some(stream) => stream,
+        None => return usize::MAX, // Not a stream object
     };
 
     let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-    
-    match file.write(buffer) {
+
+    match stream.write(buffer) {
         Ok(n) => n,
         Err(_) => usize::MAX, // Write error
     }
