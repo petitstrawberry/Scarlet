@@ -25,6 +25,8 @@ use crate::print;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::{CloneFlags, WaitError};
 
+const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
+
 use super::mytask;
 
 pub fn sys_brk(trapframe: &mut Trapframe) -> usize {
@@ -124,12 +126,12 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     };
     
     // Parse argv and envp
-    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH) {
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
         Ok(args) => args,
         Err(_) => return usize::MAX, // argv parsing error
     };
     
-    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH) {
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
         Ok(env) => env,
         Err(_) => return usize::MAX, // envp parsing error
     };
