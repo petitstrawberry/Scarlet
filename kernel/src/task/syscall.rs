@@ -15,19 +15,19 @@
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::str;
 
-use crate::abi::xv6::riscv64::fs::xv6fs::Xv6FSParams;
-use crate::abi::{AbiRegistry, MAX_ABI_LENGTH};
+use crate::abi::MAX_ABI_LENGTH;
 use crate::device::manager::DeviceManager;
-use crate::fs::{FileType, VfsManager, MAX_PATH_LENGTH};
-use crate::task::elf_loader::load_elf_into_task;
+use crate::executor::executor::TransparentExecutor;
+use crate::fs::{VfsManager, MAX_PATH_LENGTH};
+use crate::library::std::string::{parse_c_string_from_userspace, parse_string_array_from_userspace};
 
-use crate::arch::{get_cpu, vm, Registers, Trapframe};
+use crate::arch::{get_cpu, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::{CloneFlags, WaitError};
-use crate::vm::{setup_user_stack, setup_trampoline};
+
+const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 
 use super::mytask;
 
@@ -109,217 +109,118 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    // Get arguments from the trapframe
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    
-    /* 
-     * The second and third arguments are pointers to arrays of pointers to
-     * null-terminated strings (char **argv, char **envp).
-     * We will not use them in this implementation.
-     */
-    // let argv_ptr = trapframe.get_arg(1) as *const *const u8;
-    // let envp_ptr = trapframe.get_arg(2) as *const *const u8;
     
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
     
-    // Get the current task
-    let task = mytask().unwrap();
-
-    // Backup the managed pages
-    let mut backup_pages = Vec::new();
-    backup_pages.append(&mut task.managed_pages); // Move the pages to the backup
-    // Backup the vm mapping
-    let backup_vm_mapping = task.vm_manager.remove_all_memory_maps(); // Move the memory mapping to the backup
-    // Backing up the size
-    let backup_text_size = task.text_size;
-    let backup_data_size = task.data_size;
+    // Get arguments from trapframe
+    let path_ptr = trapframe.get_arg(0);
+    let argv_ptr = trapframe.get_arg(1);
+    let envp_ptr = trapframe.get_arg(2);
     
-    // Parse path as a null-terminated C string
-    let mut path_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *path_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            path_bytes.push(byte);
-            i += 1;
-            
-            // Safety check to prevent infinite loop
-            if i > MAX_PATH_LENGTH {
-                // Restore the managed pages, memory mapping and sizes
-                task.managed_pages = backup_pages; // Restore the pages
-                task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-                task.text_size = backup_text_size; // Restore the text size
-                task.data_size = backup_data_size; // Restore the data size
-                return usize::MAX; // Path too long
-            }
-        }
-    }
+    // Parse path
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => match VfsManager::to_absolute_path(&task, &path) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX, // Path error
+        },
+        Err(_) => return usize::MAX, // Path parsing error
+    };
     
-    // Convert path bytes to string
-    let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => match VfsManager::to_absolute_path(&task, s) {
-            Ok(path) => path,
-            Err(_) => {
-                // Restore the managed pages, memory mapping and sizes
-                task.managed_pages = backup_pages; // Restore the pages
-                task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-                task.text_size = backup_text_size; // Restore the text size
-                task.data_size = backup_data_size; // Restore the data size
-                return usize::MAX; // Path error
-            }
+    // Parse argv and envp
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        Ok(args) => args,
+        Err(_) => return usize::MAX, // argv parsing error
+    };
+    
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        Ok(env) => env,
+        Err(_) => return usize::MAX, // envp parsing error
+    };
+    
+    // Convert Vec<String> to Vec<&str> for TransparentExecutor
+    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
+    
+    // Use TransparentExecutor for cross-ABI execution
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe) {
+        Ok(_) => {
+            // execve normally should not return on success - the process is replaced
+            // However, if ABI module sets trapframe return value and returns here,
+            // we should respect that value instead of hardcoding 0
+            trapframe.get_return_value()
         },
         Err(_) => {
-            // Restore the managed pages, memory mapping and sizes
-            task.managed_pages = backup_pages; // Restore the pages
-            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-            task.text_size = backup_text_size; // Restore the text size
-            task.data_size = backup_data_size; // Restore the data size
-            return usize::MAX // Invalid UTF-8
-        },
-    };
-    
-    // Ensure that task.vfs is initialized before proceeding.
-    if task.vfs.is_none() {
-        // Restore the managed pages, memory mapping and sizes
-        task.managed_pages = backup_pages; // Restore the pages
-        task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-        task.text_size = backup_text_size; // Restore the text size
-        task.data_size = backup_data_size; // Restore the data size
-        return usize::MAX; // VFS not initialized
-    }
-    
-    // Try to open the executable file
-    let file = match task.vfs.as_ref() {
-        Some(vfs) => vfs.open(&path_str, 0),
-        None => {
-            // Restore the managed pages, memory mapping and sizes
-            task.managed_pages = backup_pages; // Restore the pages
-            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-            task.text_size = backup_text_size; // Restore the text size
-            task.data_size = backup_data_size; // Restore the data size
-            return usize::MAX; // VFS uninitialized
-        }
-    };
-    if file.is_err() {
-        // Restore the managed pages, memory mapping and sizes
-        task.managed_pages = backup_pages; // Restore the pages
-        task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-        task.text_size = backup_text_size; // Restore the text size
-        task.data_size = backup_data_size; // Restore the data size
-        return usize::MAX; // File open error
-    }
-    let file_obj = file.unwrap();
-    // file_obj is already a KernelObject::File
-    let file_ref = match file_obj.as_file() {
-        Some(file) => file,
-        None => {
-            // Restore the managed pages, memory mapping and sizes
-            task.managed_pages = backup_pages;
-            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap();
-            task.text_size = backup_text_size;
-            task.data_size = backup_data_size;
-            return usize::MAX; // Failed to get file reference
-        }
-    };
-
-    task.text_size = 0;
-    task.data_size = 0;
-    task.stack_size = 0;
-    
-    // Load the ELF file and replace the current process
-    match load_elf_into_task(file_ref, task) {
-        Ok(entry_point) => {
-            // Set the name
-            task.name = path_str;
-            // Clear page table entries
-            let root_page_table  = vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
-            root_page_table.unmap_all();
-            // Setup the trapframe
-            setup_trampoline(&mut task.vm_manager);
-            // Setup the stack
-            let stack_pointer = setup_user_stack(task).1;
-
-            // Set the new entry point for the task
-            task.set_entry_point(entry_point as usize);
-            
-            // Reset task's registers (except for those needed for arguments)
-            task.vcpu.regs = Registers::new();
-            // Set the stack pointer
-            task.vcpu.set_sp(stack_pointer);
-
-            // Switch to the new task
-            task.vcpu.switch(trapframe);
-            
-            // Return 0 on success (though this should never actually return)
-            0
-        },
-        Err(_) => {
-            // Restore the managed pages, memory mapping and sizes
-            task.managed_pages = backup_pages; // Restore the pages
-            task.vm_manager.restore_memory_maps(backup_vm_mapping).unwrap(); // Restore the memory mapping
-            task.text_size = backup_text_size; // Restore the text size
-            task.data_size = backup_data_size; // Restore the data size
-
-            // Return error code
-            usize::MAX
+            // Execution failed - return error code
+            // The trap handler will automatically set trapframe return value from our return
+            usize::MAX // Error return value
         }
     }
 }
 
 pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    
+    // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
 
-    let abi_str_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(3)).unwrap() as *const u8;
-    let mut abi_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *abi_str_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            abi_bytes.push(byte);
-            i += 1;
-            
-            // Safety check to prevent infinite loop
-            if i > MAX_ABI_LENGTH {
-                trapframe.increment_pc_next(task);
-                return usize::MAX; // Path too long
-            }
+    // Get arguments from trapframe
+    let path_ptr = trapframe.get_arg(0);
+    let argv_ptr = trapframe.get_arg(1);
+    let envp_ptr = trapframe.get_arg(2);
+    let abi_str_ptr = trapframe.get_arg(3);
+    
+    // Parse path
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => match VfsManager::to_absolute_path(&task, &path) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX, // Path error
+        },
+        Err(_) => return usize::MAX, // Path parsing error
+    };
+    
+    // Parse ABI string
+    let abi_str = match parse_c_string_from_userspace(task, abi_str_ptr, MAX_ABI_LENGTH) {
+        Ok(abi) => abi,
+        Err(_) => return usize::MAX, // ABI parsing error
+    };
+    
+    // Parse argv and envp
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH) {
+        Ok(args) => args,
+        Err(_) => return usize::MAX, // argv parsing error
+    };
+    
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH) {
+        Ok(env) => env,
+        Err(_) => return usize::MAX, // envp parsing error
+    };
+    
+    // Convert Vec<String> to Vec<&str> for TransparentExecutor
+    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
+
+    // Use TransparentExecutor for ABI-aware execution
+    match TransparentExecutor::execute_with_abi(
+        &path_str,
+        &argv_refs,
+        &envp_refs,
+        &abi_str,
+        task,
+        trapframe,
+    ) {
+        Ok(()) => {
+            // execve normally should not return on success - the process is replaced
+            // However, if ABI module sets trapframe return value and returns here,
+            // we should respect that value instead of hardcoding 0
+            trapframe.get_return_value()
+        }
+        Err(_) => {
+            // Execution failed - return error code
+            // The trap handler will automatically set trapframe return value from our return
+            usize::MAX // Error return value
         }
     }
-    // Convert abi bytes to string
-    let abi_str = match str::from_utf8(&abi_bytes) {
-        Ok(s) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
-    let abi = AbiRegistry::instantiate(abi_str);
-    if abi.is_none() {
-        trapframe.increment_pc_next(task);
-        return usize::MAX; // ABI not found
-    }
-    let abi = abi.unwrap();
-    // let backup_abi = task.abi.take();
-    // let backup_vfs = task.vfs.take();
-
-    let res = sys_execve(trapframe);
-
-    if res != usize::MAX {
-        // match abi.init_fs() {
-        //     Some(vfs) => {
-        //         task.vfs = Some(Arc::new(vfs));
-        //     },
-        //     None => {}
-        // }
-        task.abi = Some(abi);
-    }
-
-    res
 }
 
 pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
@@ -401,3 +302,4 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
     task.get_parent_id().unwrap_or(task.get_id()) as usize
 }
+

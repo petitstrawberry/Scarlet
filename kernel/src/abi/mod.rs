@@ -30,12 +30,70 @@ pub trait AbiModule: 'static + Send + Sync {
     where
         Self: Sized;
     fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
-    fn init(&self) {
-        // Default implementation does nothing
+    
+    /// Determine if a binary can be executed by this ABI
+    /// 
+    /// This method reads binary content directly from the file object and
+    /// executes ABI-specific detection logic (magic bytes, header structure, etc.).
+    /// 
+    /// # Arguments
+    /// * `file_object` - Binary file to check (in KernelObject format)
+    /// * `file_path` - File path (for auxiliary detection like file extensions)
+    /// 
+    /// # Returns
+    /// * `Some(confidence)` - Confidence level (0-100) if executable
+    /// * `None` - Not executable by this ABI
+    /// 
+    /// # Implementation Notes
+    /// - Use file_object.as_file() to access FileObject
+    /// - Use StreamOps::read() to directly read file content
+    /// - Check ABI-specific magic bytes or header structures
+    /// - Combine with path extensions to determine confidence level
+    fn can_execute_binary(&self, _file_object: &crate::object::KernelObject, _file_path: &str) -> Option<u8> {
+        // Default implementation: cannot determine
+        None
     }
-    fn init_fs(&self, _vfs: &mut VfsManager) {
-        // Default implementation does nothing
+    
+    /// Handle conversion when switching ABIs
+    fn initialize_from_existing_handles(&self, _task: &crate::task::Task) -> Result<(), &'static str> {
+        Ok(()) // Default: no conversion needed
     }
+    
+    /// Binary execution (each ABI supports its own binary format)
+    /// 
+    /// This method actually executes a binary that has already been verified
+    /// by can_execute_binary. Use file_object.as_file() to access FileObject,
+    /// and call ABI-specific loaders (ELF, PE, etc.) to load and execute the binary.
+    /// 
+    /// # Arguments
+    /// * `file_object` - Binary file to execute (already opened, in KernelObject format)
+    /// * `argv` - Command line arguments
+    /// * `envp` - Environment variables
+    /// * `task` - Target task (modified by this method)
+    /// * `trapframe` - Execution context (modified by this method)
+    /// 
+    /// # Implementation Notes
+    /// - Use file_object.as_file() to get FileObject
+    /// - Use ABI-specific loaders (e.g., task::elf_loader)
+    /// - Set task's memory space, registers, and entry point
+    /// - Update trapframe registers (PC, SP) for the new process
+    /// - Recommended to restore original state on execution failure
+    /// 
+    /// # Return Value Handling in Syscall Context
+    /// The Scarlet syscall mechanism works as follows:
+    /// 1. sys_execve() calls this method
+    /// 2. sys_execve() returns usize to syscall_handler()
+    /// 3. syscall_handler() returns Ok(usize) to syscall_dispatcher()
+    /// 4. syscall_dispatcher() returns Ok(usize) to trap handler
+    /// 5. Trap handler calls trapframe.set_return_value(usize) automatically
+    fn execute_binary(
+        &self,
+        file_object: &crate::object::KernelObject,
+        argv: &[&str], 
+        envp: &[&str],
+        task: &mut crate::task::Task,
+        trapframe: &mut Trapframe
+    ) -> Result<(), &'static str>;
 }
 
 
@@ -86,10 +144,40 @@ impl AbiRegistry {
         let registry = Self::global().lock();
         if let Some(factory) = registry.factories.get(name) {
             let abi = factory();
-            abi.init();
             return Some(abi);
         }
         None
+    }
+
+    /// Detect the best ABI for a binary from all registered ABI modules
+    /// 
+    /// # Arguments
+    /// * `file_object` - Binary file to check
+    /// * `file_path` - File path
+    /// 
+    /// # Returns
+    /// * `Some((abi_name, confidence))` - Best ABI name and confidence level
+    /// * `None` - No executable ABI found
+    pub fn detect_best_abi(file_object: &crate::object::KernelObject, file_path: &str) -> Option<(String, u8)> {
+        let registry = Self::global().lock();
+        let mut best_match: Option<(String, u8)> = None;
+        
+        // Try all ABI modules and select the one with highest confidence
+        for (name, factory) in &registry.factories {
+            let abi = factory();
+            if let Some(confidence) = abi.can_execute_binary(file_object, file_path) {
+                match &best_match {
+                    None => best_match = Some((name.clone(), confidence)),
+                    Some((_, best_confidence)) => {
+                        if confidence > *best_confidence {
+                            best_match = Some((name.clone(), confidence));
+                        }
+                    }
+                }
+            }
+        }
+        
+        best_match
     }
 }
 
