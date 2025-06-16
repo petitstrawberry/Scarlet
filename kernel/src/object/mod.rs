@@ -2,33 +2,13 @@
 //! 
 //! This module provides a unified abstraction for all kernel-managed resources
 //! including files, pipes, devices, and other IPC mechanisms.
-//!
-//! ## Design Notes
-//!
-//! ### Clone Semantics (`dup` operation)
-//! 
-//! Different kernel objects have different requirements for duplication:
-//! 
-//! - **Files**: Share state (file position) between duplicated handles. 
-//!   `Arc::clone` is sufficient as it shares the same underlying file object.
-//! 
-//! - **Pipes**: Require custom clone logic to properly increment reader/writer counts.
-//!   `Arc::clone` alone would bypass the custom `Clone` implementation, breaking
-//!   pipe protocol semantics (broken pipe detection, EOF handling).
-//! 
-//! To solve this, `KernelObject::clone()` uses the `clone_pipe()` method on `PipeObject`
-//! to ensure proper duplication semantics for pipes while maintaining efficient
-//! `Arc::clone` behavior for files.
-//!
-//! This approach provides correct `dup` semantics for both file and pipe objects
-//! while maintaining performance and avoiding the complexity of a complete redesign.
 
 pub mod capability;
 
 use alloc::{sync::Arc, vec::Vec};
-use crate::{fs::FileObject, object::capability::CloneOps};
+use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
-use capability::StreamOps;
+use capability::{StreamOps, CloneOps};
 
 /// Handle type for referencing kernel objects
 pub type Handle = u32;
@@ -113,35 +93,49 @@ impl KernelObject {
     }
 }
 
-impl Drop for KernelObject {
-    fn drop(&mut self) {
-        // When a KernelObject is dropped, it will automatically drop the underlying
-        // Arc reference, which will call the Drop implementation of FileObject or PipeObject.
-        // No additional cleanup is needed here.
-    }
-}
-
 impl Clone for KernelObject {
     fn clone(&self) -> Self {
         // Try to use CloneOps capability first
         if let Some(cloneable) = self.as_cloneable() {
             cloneable.custom_clone()
         } else {
-            // Fallback to Arc::clone
+            // Default: Use Arc::clone for direct cloning
             match self {
-                KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
-                KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
+                KernelObject::File(file_object) => {
+                    KernelObject::File(Arc::clone(file_object))
+                }
+                KernelObject::Pipe(pipe_object) => {
+                    KernelObject::Pipe(Arc::clone(pipe_object))
+                }
             }
         }
     }
 }
 
-
+impl Drop for KernelObject {
+    fn drop(&mut self) {
+        // Release resources when KernelObject is dropped
+        match self {
+            KernelObject::File(_file_object) => {
+                // TODO: Implement proper cleanup if needed
+                // let stream: &dyn StreamOps = file_object.as_ref();
+                // let _ = stream.release();
+            }
+            KernelObject::Pipe(_pipe_object) => {
+                // TODO: Implement proper cleanup if needed
+                // let stream: &dyn StreamOps = pipe_object.as_ref();
+                // let _ = stream.release();
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct HandleTable {
     /// Fixed-size handle table
     handles: [Option<KernelObject>; Self::MAX_HANDLES],
+    /// Metadata for each handle
+    metadata: [Option<HandleMetadata>; Self::MAX_HANDLES],
     /// Stack of available handle numbers for O(1) allocation
     free_handles: Vec<Handle>,
 }
@@ -158,17 +152,39 @@ impl HandleTable {
         
         Self {
             handles: [const { None }; Self::MAX_HANDLES],
+            metadata: [const { None }; Self::MAX_HANDLES],
             free_handles,
         }
     }
     
-    /// O(1) allocation
+    /// O(1) allocation with automatic metadata inference
     pub fn insert(&mut self, obj: KernelObject) -> Result<Handle, &'static str> {
+        let metadata = Self::infer_metadata_from_object(&obj);
+        self.insert_with_metadata(obj, metadata)
+    }
+    
+    /// O(1) allocation with explicit metadata
+    pub fn insert_with_metadata(&mut self, obj: KernelObject, metadata: HandleMetadata) -> Result<Handle, &'static str> {
         if let Some(handle) = self.free_handles.pop() {
             self.handles[handle as usize] = Some(obj);
+            self.metadata[handle as usize] = Some(metadata);
             Ok(handle)
         } else {
             Err("Too many open KernelObjects, limit reached")
+        }
+    }
+    
+    /// Infer metadata from KernelObject type
+    fn infer_metadata_from_object(object: &KernelObject) -> HandleMetadata {
+        let handle_type = match object {
+            KernelObject::Pipe(_) => HandleType::IpcChannel,  // Pipes are clearly IPC
+            _ => HandleType::Regular,  // Everything else defaults to Regular
+        };
+
+        HandleMetadata {
+            handle_type,
+            access_mode: AccessMode::ReadWrite,  // Default value
+            special_semantics: None,             // Normal behavior (inherit on exec, etc.)
         }
     }
     
@@ -187,6 +203,7 @@ impl HandleTable {
         }
 
         if let Some(obj) = self.handles[handle as usize].take() {
+            self.metadata[handle as usize] = None; // Clear metadata too
             self.free_handles.push(handle); // Return to free pool
             Some(obj)
         } else {
@@ -219,6 +236,7 @@ impl HandleTable {
         for (i, handle) in self.handles.iter_mut().enumerate() {
             if let Some(_obj) = handle.take() {
                 // obj is automatically dropped, calling its Drop implementation
+                self.metadata[i] = None; // Clear metadata too
                 self.free_handles.push(i as Handle);
             }
         }
@@ -231,11 +249,78 @@ impl HandleTable {
         }
         self.handles[handle as usize].is_some()
     }
+    
+    /// Get metadata for a handle
+    pub fn get_metadata(&self, handle: Handle) -> Option<&HandleMetadata> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return None;
+        }
+        self.metadata[handle as usize].as_ref()
+    }
+    
+    /// Iterator over handles with their objects and metadata
+    pub fn iter_with_metadata(&self) -> impl Iterator<Item = (Handle, &KernelObject, &HandleMetadata)> {
+        self.handles.iter().enumerate()
+            .filter_map(|(i, obj)| {
+                obj.as_ref().and_then(|o| {
+                    self.metadata[i].as_ref().map(|m| (i as Handle, o, m))
+                })
+            })
+    }
 }
 
 impl Default for HandleTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Handle metadata for managing special semantics and ABI conversion
+#[derive(Clone, Debug)]
+pub struct HandleMetadata {
+    pub handle_type: HandleType,
+    pub access_mode: AccessMode,
+    pub special_semantics: Option<SpecialSemantics>,
+}
+
+/// Role-based handle classification
+#[derive(Clone, Debug, PartialEq)]
+pub enum HandleType {
+    StandardStream(StandardStreamType),  // stdin/stdout/stderr role
+    IpcChannel,                         // Inter-process communication
+    Regular,                            // Default for other handles
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StandardStreamType {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccessMode {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+/// Special behaviors that differ from default Unix semantics
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpecialSemantics {
+    CloseOnExec,        // Close on exec (O_CLOEXEC)
+    NonBlocking,        // Non-blocking mode (O_NONBLOCK)
+    Append,             // Append mode (O_APPEND)
+    Sync,               // Synchronous writes (O_SYNC)
+}
+
+impl Default for HandleMetadata {
+    fn default() -> Self {
+        Self {
+            handle_type: HandleType::Regular,
+            access_mode: AccessMode::ReadWrite,
+            special_semantics: None,
+        }
     }
 }
 
