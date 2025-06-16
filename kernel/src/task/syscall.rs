@@ -13,12 +13,12 @@
 //! - All filesystem operations are thread-safe and handle concurrent access properly
 
 use alloc::vec::Vec;
-use core::str;
 
 use crate::abi::MAX_ABI_LENGTH;
 use crate::device::manager::DeviceManager;
-use crate::executor::TransparentExecutor;
+use crate::executor::executor::TransparentExecutor;
 use crate::fs::{VfsManager, MAX_PATH_LENGTH};
+use crate::library::std::string::{parse_c_string_from_userspace, parse_string_array_from_userspace};
 
 use crate::arch::{get_cpu, Trapframe};
 use crate::print;
@@ -105,53 +105,41 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    // Get arguments from the trapframe
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    
-    /* 
-     * The second and third arguments are pointers to arrays of pointers to
-     * null-terminated strings (char **argv, char **envp).
-     * We will not use them in this implementation.
-     */
-    // let argv_ptr = trapframe.get_arg(1) as *const *const u8;
-    // let envp_ptr = trapframe.get_arg(2) as *const *const u8;
     
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
     
-    // Parse path as a null-terminated C string
-    let mut path_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *path_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            path_bytes.push(byte);
-            i += 1;
-            
-            // Safety check to prevent infinite loop
-            if i > MAX_PATH_LENGTH {
-                return usize::MAX; // Path too long
-            }
-        }
-    }
+    // Get arguments from trapframe
+    let path_ptr = trapframe.get_arg(0);
+    let argv_ptr = trapframe.get_arg(1);
+    let envp_ptr = trapframe.get_arg(2);
     
-    // Convert path bytes to string
-    let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => match VfsManager::to_absolute_path(&task, s) {
-            Ok(path) => path,
+    // Parse path
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => match VfsManager::to_absolute_path(&task, &path) {
+            Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX, // Path error
         },
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX, // Path parsing error
     };
     
-    // Use TransparentExecutor for cross-ABI execution
-    let argv = []; // TODO: Parse argv from trapframe.get_arg(1)
-    let envp = []; // TODO: Parse envp from trapframe.get_arg(2)
+    // Parse argv and envp
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH) {
+        Ok(args) => args,
+        Err(_) => return usize::MAX, // argv parsing error
+    };
     
-    match TransparentExecutor::execute_binary(&path_str, &argv, &envp, task, trapframe) {
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH) {
+        Ok(env) => env,
+        Err(_) => return usize::MAX, // envp parsing error
+    };
+    
+    // Convert Vec<String> to Vec<&str> for TransparentExecutor
+    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
+    
+    // Use TransparentExecutor for cross-ABI execution
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe) {
         Ok(_) => {
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
@@ -168,62 +156,52 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    
+    // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
 
     // Get arguments from trapframe
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let abi_str_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(3)).unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(0);
+    let argv_ptr = trapframe.get_arg(1);
+    let envp_ptr = trapframe.get_arg(2);
+    let abi_str_ptr = trapframe.get_arg(3);
     
-    // Parse path as a null-terminated C string
-    let mut path_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *path_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            path_bytes.push(byte);
-            i += 1;
-            
-            if i > MAX_PATH_LENGTH {
-                return usize::MAX; // Path too long
-            }
-        }
-    }
-    let path = match str::from_utf8(&path_bytes) {
-        Ok(s) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
+    // Parse path
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => match VfsManager::to_absolute_path(&task, &path) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX, // Path error
+        },
+        Err(_) => return usize::MAX, // Path parsing error
     };
-
+    
     // Parse ABI string
-    let mut abi_bytes = Vec::new();
-    let mut i = 0;
-    unsafe {
-        loop {
-            let byte = *abi_str_ptr.add(i);
-            if byte == 0 {
-                break;
-            }
-            abi_bytes.push(byte);
-            i += 1;
-            
-            if i > MAX_ABI_LENGTH {
-                return usize::MAX; // ABI name too long
-            }
-        }
-    }
-    let abi_str = match str::from_utf8(&abi_bytes) {
-        Ok(s) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
+    let abi_str = match parse_c_string_from_userspace(task, abi_str_ptr, MAX_ABI_LENGTH) {
+        Ok(abi) => abi,
+        Err(_) => return usize::MAX, // ABI parsing error
     };
+    
+    // Parse argv and envp
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH) {
+        Ok(args) => args,
+        Err(_) => return usize::MAX, // argv parsing error
+    };
+    
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH) {
+        Ok(env) => env,
+        Err(_) => return usize::MAX, // envp parsing error
+    };
+    
+    // Convert Vec<String> to Vec<&str> for TransparentExecutor
+    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
 
     // Use TransparentExecutor for ABI-aware execution
     match TransparentExecutor::execute_with_abi(
-        path,
-        &[], // TODO: Parse argv from trapframe.get_arg(1)
-        &[], // TODO: Parse envp from trapframe.get_arg(2)
-        abi_str,
+        &path_str,
+        &argv_refs,
+        &envp_refs,
+        &abi_str,
         task,
         trapframe,
     ) {
@@ -320,3 +298,4 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
     task.get_parent_id().unwrap_or(task.get_id()) as usize
 }
+

@@ -5,7 +5,9 @@
 //! and interacting with the Scarlet kernel.
 //! 
 
-use crate::{arch::Trapframe, early_initcall, register_abi, syscall::syscall_handler};
+use alloc::string::ToString;
+
+use crate::{arch::{vm, Registers, Trapframe}, early_initcall, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -61,37 +63,47 @@ impl AbiModule for ScarletAbi {
     fn execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
-        _argv: &[&str], 
-        _envp: &[&str],
-        _task: &mut crate::task::Task,
-        _trapframe: &mut Trapframe
+        argv: &[&str], 
+        envp: &[&str],
+        task: &mut crate::task::Task,
+        trapframe: &mut Trapframe
     ) -> Result<(), &'static str> {
         // Get file object from KernelObject::File
         match file_object.as_file() {
-            Some(_file_obj) => {
-                // TODO: Use ELF loader to load and execute binary
-                // This part will use the task::elf_loader module to
-                // parse and load ELF files
+            Some(file_obj) => {
+                task.text_size = 0;
+                task.data_size = 0;
+                task.stack_size = 0;
                 
-                // Complete implementation should:
-                // 1. Load ELF into task memory space
-                // 2. Set task entry point and stack
-                // 3. Update trapframe registers (PC, SP)
-                // 4. Set trapframe.set_return_value(0) for success (optional)
-                // 5. Either return Ok(()) to let syscall chain handle return value,
-                //    or perform direct context switch here
-                
-                // Implementation example:
-                // use crate::task::elf_loader;
-                // let elf_data = elf_loader::load_elf_from_file(file_obj)?;
-                // elf_loader::map_elf_to_task(elf_data, task)?;
-                // trapframe.set_pc(elf_data.entry_point);
-                // trapframe.set_sp(new_stack_pointer);
-                // trapframe.set_return_value(0); // Optional: set success return value
-                // // sys_execve() will use trapframe.get_return_value() as its return
-                // task.vcpu.switch(trapframe); // Optional: direct switch
-                
-                Err("ELF loading not yet implemented")
+                // Load the ELF file and replace the current process
+                match load_elf_into_task(file_obj, task) {
+                    Ok(entry_point) => {
+                        // Set the name
+                        task.name = argv.get(0).map_or("Unnamed Task".to_string(), |s| s.to_string());
+                        // Clear page table entries
+                        let root_page_table  = vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
+                        root_page_table.unmap_all();
+                        // Setup the trapframe
+                        setup_trampoline(&mut task.vm_manager);
+                        // Setup the stack
+                        let stack_pointer = setup_user_stack(task);
+
+                        // Set the new entry point for the task
+                        task.set_entry_point(entry_point as usize);
+                        
+                        // Reset task's registers (except for those needed for arguments)
+                        task.vcpu.regs = Registers::new();
+                        // Set the stack pointer
+                        task.vcpu.set_sp(stack_pointer);
+
+                        // Switch to the new task
+                        task.vcpu.switch(trapframe);
+                        Ok(())
+                    },
+                    Err(_e) => {
+                        Err("Failed to load ELF binary")
+                    }
+                }
             },
             None => Err("Invalid file object type for binary execution"),
         }
