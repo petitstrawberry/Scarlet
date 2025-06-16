@@ -35,7 +35,7 @@ pub type Trapframe = Riscv64;
 static mut TRAPFRAME: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
 
 #[repr(align(4))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Riscv64 {
     pub regs: Registers,
     pub epc: u64,
