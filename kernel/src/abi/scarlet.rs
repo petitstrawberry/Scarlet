@@ -64,7 +64,7 @@ impl AbiModule for ScarletAbi {
         &self,
         file_object: &crate::object::KernelObject,
         argv: &[&str], 
-        envp: &[&str],
+        _envp: &[&str], // Not implemented yet
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str> {
@@ -78,29 +78,38 @@ impl AbiModule for ScarletAbi {
                 // Load the ELF file and replace the current process
                 match load_elf_into_task(file_obj, task) {
                     Ok(entry_point) => {
-                        // Set the name
+                        // Set the name from argv[0] or use default
                         task.name = argv.get(0).map_or("Unnamed Task".to_string(), |s| s.to_string());
-                        // Clear page table entries
-                        let root_page_table  = vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
+                        
+                        // Clear old page table entries
+                        let root_page_table = vm::get_root_pagetable(task.vm_manager.get_asid()).unwrap();
                         root_page_table.unmap_all();
-                        // Setup the trapframe
+                        
+                        // Setup the new memory environment
                         setup_trampoline(&mut task.vm_manager);
-                        // Setup the stack
                         let stack_pointer = setup_user_stack(task);
 
-                        // Set the new entry point for the task
+                        // Set the new entry point
                         task.set_entry_point(entry_point as usize);
                         
-                        // Reset task's registers (except for those needed for arguments)
+                        // Reset task's registers for clean start
                         task.vcpu.regs = Registers::new();
-                        // Set the stack pointer
                         task.vcpu.set_sp(stack_pointer);
+
+                        // TODO: Setup argv/envp on stack for program arguments
+                        // This would involve:
+                        // 1. Calculate stack space needed for argv/envp strings
+                        // 2. Copy strings to stack memory
+                        // 3. Set up argv/envp pointer arrays
+                        // 4. Set a0 (argc) and a1 (argv) registers
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);
                         Ok(())
                     },
-                    Err(_e) => {
+                    Err(e) => {
+                        // エラーの詳細をログに出力
+                        crate::early_println!("ELF loading failed: {}", e.message);
                         Err("Failed to load ELF binary")
                     }
                 }
