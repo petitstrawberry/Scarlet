@@ -112,24 +112,6 @@ impl Clone for KernelObject {
     }
 }
 
-impl Drop for KernelObject {
-    fn drop(&mut self) {
-        // Release resources when KernelObject is dropped
-        match self {
-            KernelObject::File(_file_object) => {
-                // TODO: Implement proper cleanup if needed
-                // let stream: &dyn StreamOps = file_object.as_ref();
-                // let _ = stream.release();
-            }
-            KernelObject::Pipe(_pipe_object) => {
-                // TODO: Implement proper cleanup if needed
-                // let stream: &dyn StreamOps = pipe_object.as_ref();
-                // let _ = stream.release();
-            }
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct HandleTable {
     /// Fixed-size handle table
