@@ -7,10 +7,20 @@ mod pipe;
 
 // pub mod drivers;
 
+use alloc::{string::ToString, vec::Vec};
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use proc::{sys_exit, sys_fork, sys_wait, sys_kill, sys_getpid};
 
-use crate::{abi::{xv6::riscv64::{file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink}, pipe::sys_pipe, proc::{sys_chdir, sys_sbrk}}, AbiModule}, early_initcall, fs::VfsManager, register_abi};
+use crate::{
+    abi::{
+        xv6::riscv64::{
+            file::{sys_close, sys_fstat, sys_link, sys_mkdir, sys_read, sys_unlink}, 
+            pipe::sys_pipe, 
+            proc::{sys_chdir, sys_sbrk}
+        }, 
+        AbiModule
+    }, arch::{self, Registers}, early_initcall, executor::executor::TransparentExecutor, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+};
 
 
 #[derive(Default)]
@@ -25,15 +35,129 @@ impl AbiModule for Xv6Riscv64Abi {
         syscall_handler(trapframe)
     }
 
-    fn init(&self) {
-        // crate::println!("Xv6Riscv64 ABI initialized");
+    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str) -> Option<u8> {
+        // Basic scoring based on file extension and XV6 conventions
+        let path_score = if file_path.contains("xv6") || file_path.ends_with(".xv6") {
+            40 // Strong XV6 indicator
+        } else if file_path.ends_with(".elf") {
+            20 // ELF files may be XV6 compatible
+        } else {
+            10 // Default score for any binary
+        };
+        
+        // Magic byte detection from file content
+        let magic_score = match file_object.as_file() {
+            Some(file_obj) => {
+                // Check ELF magic bytes (XV6 uses ELF format)
+                let mut magic_buffer = [0u8; 4];
+                match file_obj.read(&mut magic_buffer) {
+                    Ok(bytes_read) if bytes_read >= 4 => {
+                        if magic_buffer == [0x7F, b'E', b'L', b'F'] {
+                            50 // ELF magic bytes match (XV6 is ELF-based)
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0 // Read failed or insufficient size
+                }
+            }
+            None => 0 // Not a file object
+        };
+        
+        let total_score = path_score + magic_score;
+        
+        // XV6 should have lower priority than Scarlet native ABI
+        if total_score > 20 {
+            Some((total_score * 80 / 100).min(85)) // Scale down to give Scarlet priority
+        } else {
+            None // Not executable by this ABI
+        }
     }
 
-    fn init_fs(&self, vfs: &mut VfsManager) {
-        crate::println!("[Xv6Riscv64 Module] Initializing tmpfs for Xv6Riscv64 ABI");
-        // let id = vfs.create_and_register_fs_with_params("tmpfs", &TmpFSParams::default())
-        //     .expect("Failed to create tmpfs");
-        // let _ = vfs.mount(id, "/");
+    fn execute_binary(
+        &self,
+        file_object: &crate::object::KernelObject,
+        argv: &[&str], 
+        _envp: &[&str],
+        task: &mut crate::task::Task,
+        trapframe: &mut crate::arch::Trapframe
+    ) -> Result<(), &'static str> {
+        match file_object.as_file() {
+            Some(file_obj) => {
+                // Reset task state for XV6 execution
+                task.text_size = 0;
+                task.data_size = 0;
+                task.stack_size = 0;
+                
+                // Load ELF using XV6-compatible method
+                match load_elf_into_task(file_obj, task) {
+                    Ok(entry_point) => {
+                        // Set the name
+                        task.name = argv.get(0).map_or("xv6".to_string(), |s| s.to_string());
+                        // Clear page table entries
+                        let idx = arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
+                        let root_page_table = arch::vm::get_pagetable(idx).unwrap();
+                        root_page_table.unmap_all();
+                        // Setup the trapframe
+                        setup_trampoline(&mut task.vm_manager);
+                        // Setup the stack
+                        let (_, stack_top) = setup_user_stack(task);
+                        let mut stack_pointer = stack_top as usize;
+
+                        let mut arg_ptrs: Vec<u64> = Vec::new();
+                        for arg in argv.iter() {
+                            let arg_bytes = arg.as_bytes();
+                            stack_pointer -= arg_bytes.len() + 1; // +1 for null terminator
+                            stack_pointer -= stack_pointer % 16; // Align to 16 bytes
+
+                            unsafe {
+                                let translated_stack_pointer = task.vm_manager
+                                    .translate_vaddr(stack_pointer)
+                                    .unwrap();
+                                let stack_slice = core::slice::from_raw_parts_mut(translated_stack_pointer as *mut u8, arg_bytes.len() + 1);
+                                stack_slice[..arg_bytes.len()].copy_from_slice(arg_bytes);
+                                stack_slice[arg_bytes.len()] = 0; // Null terminator
+                            }
+
+                            arg_ptrs.push(stack_pointer as u64); // Store the address of the argument
+                        }
+
+                        let argc = arg_ptrs.len();
+
+                        stack_pointer -= argc * 8;
+                        stack_pointer -= stack_pointer % 16; // Align to 16 bytes
+
+                        // Push the addresses of the arguments onto the stack
+                        unsafe {
+                            let translated_stack_pointer = task.vm_manager
+                                .translate_vaddr(stack_pointer)
+                                .unwrap() as *mut u64;
+                            for (i, &arg_ptr) in arg_ptrs.iter().enumerate() {
+                                *(translated_stack_pointer.add(i)) = arg_ptr;
+                            }
+                        }
+
+                        // Set the new entry point for the task
+                        task.set_entry_point(entry_point as usize);
+                        
+                        // Reset task's registers (except for those needed for arguments)
+                        task.vcpu.regs = Registers::new();
+                        // Set the stack pointer
+                        task.vcpu.set_sp(stack_pointer);
+                        task.vcpu.regs.reg[11] = stack_pointer as usize; // Set the return value (a0) to 0 in the new proc
+                        task.vcpu.regs.reg[10] = argc; // Set argc in a0
+
+                        // Switch to the new task
+                        task.vcpu.switch(trapframe);
+                        Ok(())
+                    },
+                    Err(e) => {
+                        Err("Failed to load XV6 ELF binary")
+                    }
+                }
+            },
+            None => Err("Invalid file object type for XV6 binary execution"),
+        }
     }
 }
 
