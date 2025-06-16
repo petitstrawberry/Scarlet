@@ -68,7 +68,7 @@ impl AbiModule for Xv6Riscv64Abi {
         
         // XV6 should have lower priority than Scarlet native ABI
         if total_score > 20 {
-            Some((total_score * 80 / 100).min(85)) // Scale down to give Scarlet priority
+            Some(((total_score / 100) * 80).min(85)) // Scale down to give Scarlet priority
         } else {
             None // Not executable by this ABI
         }

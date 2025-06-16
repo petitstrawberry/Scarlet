@@ -13,7 +13,6 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
     let argv_ptr = trapframe.get_arg(1);
-    let envp_ptr = trapframe.get_arg(2);
     
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
@@ -30,17 +29,11 @@ pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // argv parsing error
     };
     
-    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(env) => env,
-        Err(_) => return usize::MAX, // envp parsing error
-    };
-    
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
-    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
     
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe) {
         Ok(_) => {
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
