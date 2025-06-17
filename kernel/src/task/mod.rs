@@ -60,29 +60,31 @@ pub struct Task {
     // Current working directory
     pub cwd: Option<String>,
 
+    /// Base Virtual File System Manager (Clean Base)
+    /// 
+    /// This contains the pure, unmodified filesystem shared across ABI transitions.
+    /// It serves as the foundation for all ABI-specific VFS configurations and is
+    /// preserved during exec() calls to maintain consistency across ABI boundaries.
+    /// 
+    /// This VFS contains only shared resources like user data directories, system
+    /// configurations, and mounted filesystems, without any ABI-specific bind mounts.
+    pub base_vfs: Option<Arc<VfsManager>>,
+
     /// Virtual File System Manager
     /// 
-    /// Each task can have its own isolated VfsManager instance for containerization
-    /// and namespace isolation. The VfsManager provides:
+    /// This is the unified VFS used for all filesystem operations. It contains:
+    /// 1. Base filesystem hierarchy (common across all ABIs)
+    /// 2. ABI-specific bind mounts overlaid on top
     /// 
-    /// - **Filesystem Isolation**: Independent mount point namespaces allowing
-    ///   complete filesystem isolation between tasks or containers
-    /// - **Selective Sharing**: Arc-based filesystem object sharing enables
-    ///   controlled resource sharing while maintaining namespace independence
-    /// - **Bind Mount Support**: Advanced bind mount capabilities for flexible
-    ///   directory mapping and container orchestration scenarios
-    /// - **Security**: Path normalization and validation preventing directory
-    ///   traversal attacks and unauthorized filesystem access
+    /// During ABI transitions:
+    /// 1. Start with base VFS (shared filesystem)
+    /// 2. Apply ABI-specific bind mounts (e.g., /lib -> /lib/abi-name)
+    /// 3. Result is a unified VFS tree with proper precedence
     /// 
-    /// # Usage Patterns
-    /// 
-    /// - `None`: Task uses global filesystem namespace (traditional Unix-like behavior)
-    /// - `Some(Arc<VfsManager>)`: Task has isolated filesystem namespace (container-like behavior)
-    /// 
-    /// # Thread Safety
-    /// 
-    /// VfsManager is thread-safe and can be shared between tasks using Arc.
-    /// All internal operations use RwLock for concurrent access protection.
+    /// Path resolution is straightforward:
+    /// - /etc/foo -> checks ABI-specific bind mount first
+    /// - If not found, falls back to base filesystem
+    /// - Single VFS tree handles everything transparently
     pub vfs: Option<Arc<VfsManager>>,
 
     // KernelObject table
@@ -169,6 +171,7 @@ impl Task {
             exit_status: None,
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             cwd: None,
+            base_vfs: None,
             vfs: None,
             handle_table: HandleTable::new(),
         };
@@ -783,15 +786,24 @@ impl Task {
         }
         
         if flags.is_set(CloneFlagsDef::Fs) {
-            // Clone the filesystem manager
+            // Clone the filesystem managers
+            // Base VFS contains the clean filesystem without ABI-specific bind mounts
+            if let Some(base_vfs) = &self.base_vfs {
+                child.base_vfs = Some(base_vfs.clone());
+            } else {
+                child.base_vfs = None;
+            }
+            
+            // Active VFS is inherited for fork() and will be reconstructed during exec()
+            // with new ABI-specific bind mounts applied to base_vfs
             if let Some(vfs) = &self.vfs {
                 child.vfs = Some(vfs.clone());
-                // Copy the current working directory
-                child.cwd = self.cwd.clone();
             } else {
                 child.vfs = None;
-                child.cwd = None; // No filesystem manager, no current working directory
             }
+            
+            // Copy the current working directory
+            child.cwd = self.cwd.clone();
         }
 
         // Set the state to Ready
@@ -852,6 +864,36 @@ impl Task {
             Err(WaitError::ChildTaskNotFound("Child task not found".to_string()))
         }
     }
+
+    // VFS Helper Methods
+    
+    /// Set the base VFS manager (clean filesystem without ABI bind mounts)
+    /// 
+    /// # Arguments
+    /// * `vfs` - The VfsManager to set as the base VFS
+    pub fn set_base_vfs(&mut self, vfs: Arc<VfsManager>) {
+        self.base_vfs = Some(vfs);
+    }
+    
+    /// Set the active VFS manager (with ABI-specific bind mounts)
+    /// 
+    /// # Arguments
+    /// * `vfs` - The VfsManager to set as the active VFS
+    pub fn set_vfs(&mut self, vfs: Arc<VfsManager>) {
+        self.vfs = Some(vfs);
+    }
+    
+    /// Get a reference to the base VFS (clean filesystem)
+    pub fn get_base_vfs(&self) -> Option<&Arc<VfsManager>> {
+        self.base_vfs.as_ref()
+    }
+    
+    /// Get a reference to the active VFS (with ABI bind mounts)
+    pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
+        self.vfs.as_ref()
+    }
+
+    // ...existing methods...
 }
 
 pub enum WaitError {
@@ -1004,7 +1046,7 @@ mod tests {
         assert_eq!(child_task.stack_size, parent_task.stack_size);
         assert_eq!(child_task.data_size, parent_task.data_size);
         assert_eq!(child_task.text_size, parent_task.text_size);
-
+        
         // Find the corresponding memory map in child that matches our test allocation
         let child_memmaps = child_task.vm_manager.get_memmap();
         let child_mmap = child_memmaps.iter()

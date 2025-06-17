@@ -289,7 +289,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
-    task.vfs = Some(Arc::new(manager));
+    let manager_arc = Arc::new(manager);
+    task.base_vfs = Some(manager_arc.clone());
+    task.vfs = Some(manager_arc);
     task.cwd = Some("/".to_string());
     let file_obj = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
         Ok(kernel_obj) => kernel_obj,

@@ -37,8 +37,8 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    // Try to open the file
-    let vfs = match task.vfs.as_ref() {
+    // Try to open the file using VFS
+    let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };

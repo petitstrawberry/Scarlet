@@ -21,4 +21,7 @@ pub mod executor;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod vfs_tests;
+
 pub use executor::TransparentExecutor;

@@ -5,7 +5,7 @@
 //! and interacting with the Scarlet kernel.
 //! 
 
-use alloc::string::ToString;
+use alloc::{boxed::Box, string::ToString, sync::Arc};
 
 use crate::{arch::{vm, Registers, Trapframe}, early_initcall, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
 
@@ -17,6 +17,10 @@ pub struct ScarletAbi;
 impl AbiModule for ScarletAbi {
     fn name() -> &'static str {
         "scarlet"
+    }
+
+    fn get_name(&self) -> alloc::string::String {
+        Self::name().to_string()
     }
 
     fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
@@ -109,13 +113,43 @@ impl AbiModule for ScarletAbi {
                     },
                     Err(e) => {
                         // エラーの詳細をログに出力
-                        crate::early_println!("ELF loading failed: {}", e.message);
+                        crate::println!("ELF loading failed: {}", e.message);
                         Err("Failed to load ELF binary")
                     }
                 }
             },
             None => Err("Invalid file object type for binary execution"),
         }
+    }
+    
+    fn create_initial_vfs(&self) -> Result<alloc::sync::Arc<crate::fs::VfsManager>, &'static str> {
+        // Create a new VFS manager
+        let vfs = crate::fs::VfsManager::new();
+        
+        // Mount a tmpfs as the root
+        let tmpfs = Box::new(crate::fs::drivers::tmpfs::TmpFS::new(64 * 1024 * 1024)); // 64MB
+        let fs_id = vfs.register_fs(tmpfs);
+        vfs.mount(fs_id, "/").map_err(|_| "Failed to mount root filesystem")?;
+        
+        // Create standard directories
+        let standard_dirs = ["/home", "/tmp", "/etc", "/var", "/usr", "/usr/share"];
+        for dir in standard_dirs.iter() {
+            if let Err(_) = vfs.create_dir(dir) {
+                crate::println!("Warning: Failed to create directory {}", dir);
+            }
+        }
+        
+        Ok(Arc::new(vfs))
+    }
+    
+
+    
+    fn setup_vfs_environment(&self, _vfs: &mut crate::fs::VfsManager) -> Result<(), &'static str> {
+        Ok(())
+    }
+    
+    fn get_default_cwd(&self) -> &str {
+        "/"
     }
 }
 
