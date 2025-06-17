@@ -436,7 +436,7 @@ impl MountPoint {
         }
         
         match &self.mount_type {
-            MountType::Regular | MountType::Overlay { .. } => {
+            MountType::Regular => {
                 // Regular mount: return filesystem as-is
                 Ok((self.fs.clone(), relative_path.to_string()))
             }
@@ -487,19 +487,6 @@ pub enum MountType {
         source_relative_path: String,
         /// Type of bind mount (read-only, read-write, shared)
         bind_type: BindType,
-    },
-    
-    /// Overlay filesystem mount
-    /// 
-    /// Combines multiple filesystem layers into a unified view,
-    /// typically used for container images and copy-on-write scenarios.
-    Overlay {
-        /// Lower filesystem layers (read-only)
-        lower_layers: Vec<String>,
-        /// Upper layer for writes
-        upper_layer: String,
-        /// Working directory for overlay operations
-        work_dir: String,
     },
 }
 
