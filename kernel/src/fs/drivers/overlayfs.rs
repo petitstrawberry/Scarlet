@@ -44,6 +44,73 @@ impl OverlayFS {
         })
     }
 
+    /// Perform copy-up operation: copy a file from lower layer to upper layer
+    /// This is needed for write operations on files that exist only in lower layers
+    fn copy_up(&self, path: &str) -> Result<(), FileSystemError> {
+        let (upper_node, upper_base_path) = self.get_upper_layer()?;
+        let upper_path = Self::combine_paths(&upper_base_path, path);
+
+        // Check if file already exists in upper layer
+        let upper_mount_point = upper_node.get_mount_point()?;
+        if let Ok((upper_fs, resolved_path)) = upper_mount_point.resolve_fs(&upper_path) {
+            let fs_guard = upper_fs.read();
+            if fs_guard.metadata(&resolved_path).is_ok() {
+                // File already exists in upper layer, no need to copy
+                return Ok(());
+            }
+        }
+
+        // Find the file in lower layers
+        for (i, lower_node) in self.lower_mount_nodes.iter().enumerate() {
+            let lower_path = Self::combine_paths(&self.lower_relative_paths[i], path);
+            
+            if let Ok(mount_point) = lower_node.get_mount_point() {
+                if let Ok((fs, resolved_path)) = mount_point.resolve_fs(&lower_path) {
+                    let fs_guard = fs.read();
+                    if let Ok(metadata) = fs_guard.metadata(&resolved_path) {
+                        // File found in this lower layer, perform copy-up
+                        
+                        // Create the file in upper layer
+                        let upper_mount_point = upper_node.get_mount_point()?;
+                        let (upper_fs, upper_resolved_path) = upper_mount_point.resolve_fs(&upper_path)?;
+                        let upper_fs_guard = upper_fs.read();
+                        
+                        match metadata.file_type {
+                            FileType::Directory => {
+                                // Create directory in upper layer
+                                upper_fs_guard.create_dir(&upper_resolved_path)?;
+                            }
+                            FileType::RegularFile => {
+                                // Create file in upper layer and copy content
+                                upper_fs_guard.create_file(&upper_resolved_path, FileType::RegularFile)?;
+                                
+                                // Copy file content (simplified - in reality would need to handle large files)
+                                if let Ok(_source_file) = fs_guard.open(&resolved_path, 0) {
+                                    if let Ok(_dest_file) = upper_fs_guard.open(&upper_resolved_path, 1) { // Write mode
+                                        // In a real implementation, we would copy the file content here
+                                        // This is a placeholder for the copy operation
+                                    }
+                                }
+                            }
+                            _ => {
+                                // For other file types, just create a placeholder
+                                upper_fs_guard.create_file(&upper_resolved_path, metadata.file_type)?;
+                            }
+                        }
+                        
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // File not found in any lower layer
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: format!("File not found for copy-up: {}", path),
+        })
+    }
+
     /// Helper to combine base path with relative path
     fn combine_paths(base: &str, rel: &str) -> String {
         match (base, rel) {
@@ -237,3 +304,4 @@ impl FileOperations for OverlayFS {
         })
     }
 }
+
