@@ -1009,3 +1009,208 @@ pub fn test_debug_write_behavior() {
         }
     }
 }
+
+/// Test whiteout functionality
+/// 
+/// This test verifies that files can be hidden from lower layers using whiteout files
+/// when they are removed through the overlay.
+#[test_case]
+pub fn test_whiteout_basic() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    
+    // Create a file in lower layer only
+    let _ = lower_fs.create_file("/hidden_file.txt", FileType::RegularFile);
+    if let Ok(lower_file) = lower_fs.open("/hidden_file.txt", 1) { // O_WRONLY
+        let _ = lower_file.write(b"file in lower layer");
+    }
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Phase 1: Verify file is visible through overlay initially
+        assert!(manager.open("/overlay/hidden_file.txt", 0).is_ok(), 
+               "File should be visible through overlay initially");
+        assert!(manager.open("/lower/hidden_file.txt", 0).is_ok(), 
+               "File should exist in lower layer");
+        assert!(manager.open("/upper/hidden_file.txt", 0).is_err(), 
+               "File should not exist in upper layer initially");
+        
+        // Phase 2: Remove file through overlay (should create whiteout)
+        let remove_result = manager.remove("/overlay/hidden_file.txt");
+        assert!(remove_result.is_ok(), "Should be able to remove file through overlay");
+        
+        // Phase 3: Verify file is no longer visible through overlay
+        assert!(manager.open("/overlay/hidden_file.txt", 0).is_err(), 
+               "File should be hidden after removal");
+        
+        // Phase 4: Verify file still exists in lower layer
+        assert!(manager.open("/lower/hidden_file.txt", 0).is_ok(), 
+               "File should still exist in lower layer");
+        
+        // Phase 5: Verify whiteout file exists in upper layer
+        // Whiteout files are named ".wh.<original_name>"
+        assert!(manager.open("/upper/.wh.hidden_file.txt", 0).is_ok(), 
+               "Whiteout file should exist in upper layer");
+    }
+}
+
+/// Test whiteout with directory listing
+/// 
+/// This test verifies that removed files don't appear in directory listings
+/// even though they still exist in lower layers.
+#[test_case]
+pub fn test_whiteout_directory_listing() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    
+    // Create multiple files in lower layer
+    let _ = lower_fs.create_file("/visible.txt", FileType::RegularFile);
+    let _ = lower_fs.create_file("/to_be_hidden.txt", FileType::RegularFile);
+    let _ = lower_fs.create_file("/also_visible.txt", FileType::RegularFile);
+    
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Phase 1: Verify all files are visible initially
+        if let Ok(entries) = manager.read_dir("/overlay/") {
+            assert_eq!(entries.len(), 3, "Should see all 3 files initially");
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"visible.txt"));
+            assert!(names.contains(&"to_be_hidden.txt"));
+            assert!(names.contains(&"also_visible.txt"));
+        }
+        
+        // Phase 2: Remove one file (should create whiteout)
+        let remove_result = manager.remove("/overlay/to_be_hidden.txt");
+        assert!(remove_result.is_ok(), "Should be able to remove file");
+        
+        // Phase 3: Verify directory listing excludes removed file
+        if let Ok(entries) = manager.read_dir("/overlay/") {
+            assert_eq!(entries.len(), 2, "Should see only 2 files after removal");
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"visible.txt"));
+            assert!(!names.contains(&"to_be_hidden.txt"), "Removed file should not appear");
+            assert!(names.contains(&"also_visible.txt"));
+        }
+        
+        // Phase 4: Verify lower layer still has all files
+        if let Ok(entries) = manager.read_dir("/lower/") {
+            assert_eq!(entries.len(), 3, "Lower layer should still have all files");
+        }
+        
+        // Phase 5: Verify whiteout doesn't appear in overlay listing
+        if let Ok(entries) = manager.read_dir("/overlay/") {
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(!names.iter().any(|name| name.starts_with(".wh.")), 
+                   "Whiteout files should not appear in overlay listing");
+        }
+    }
+}
+
+/// Test removal of file that exists in upper layer
+/// 
+/// This test verifies that files existing in the upper layer are simply
+/// removed without creating whiteout files.
+#[test_case]
+pub fn test_remove_upper_layer_file() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Phase 1: Create file directly in upper layer through overlay
+        let create_result = manager.create_regular_file("/overlay/upper_file.txt");
+        assert!(create_result.is_ok(), "Should be able to create file in overlay");
+        
+        // Verify file exists in upper layer
+        assert!(manager.open("/upper/upper_file.txt", 0).is_ok(), 
+               "File should exist in upper layer");
+        assert!(manager.open("/overlay/upper_file.txt", 0).is_ok(), 
+               "File should be visible through overlay");
+        
+        // Phase 2: Remove file (should just delete from upper, no whiteout needed)
+        let remove_result = manager.remove("/overlay/upper_file.txt");
+        assert!(remove_result.is_ok(), "Should be able to remove file");
+        
+        // Phase 3: Verify file is completely gone
+        assert!(manager.open("/upper/upper_file.txt", 0).is_err(), 
+               "File should not exist in upper layer after removal");
+        assert!(manager.open("/overlay/upper_file.txt", 0).is_err(), 
+               "File should not be visible through overlay after removal");
+        
+        // Phase 4: Verify no whiteout file was created
+        assert!(manager.open("/upper/.wh.upper_file.txt", 0).is_err(), 
+               "No whiteout file should be created for upper layer file");
+    }
+}
+
+/// Test attempting to remove non-existent file
+/// 
+/// This test verifies that removing a file that doesn't exist in any layer
+/// returns an appropriate error.
+#[test_case]
+pub fn test_remove_nonexistent_file() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Attempt to remove non-existent file
+        let remove_result = manager.remove("/overlay/nonexistent.txt");
+        assert!(remove_result.is_err(), "Should fail to remove non-existent file");
+        
+        // Verify error is appropriate (file not found)
+        if let Err(e) = remove_result {
+            assert_eq!(e.kind, FileSystemErrorKind::NotFound, 
+                      "Should return NotFound error for non-existent file");
+        }
+    }
+}
