@@ -278,6 +278,28 @@ pub trait FileObject: StreamOps {
     
     /// Get metadata about the file
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
+
+    /// Truncate the file to the specified size
+    /// 
+    /// This method changes the size of the file to the specified length.
+    /// If the new size is smaller than the current size, the file is truncated.
+    /// If the new size is larger, the file is extended with zero bytes.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `size` - New size of the file in bytes
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), StreamError>` - Ok if the file was truncated successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `StreamError` - If the file is a directory or the operation is not supported
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        let _ = size;
+        Err(StreamError::NotSupported)
+    }
 }
 
 /// Trait defining basic file system operations
@@ -335,6 +357,33 @@ pub trait FileOperations: Send + Sync {
 
     /// Get the metadata
     fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError>;
+
+    /// Truncate a file to the specified size
+    /// 
+    /// This method changes the size of a file to the specified length.
+    /// If the new size is smaller than the current size, the file is truncated.
+    /// If the new size is larger, the file is extended with zero bytes.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Path to the file to truncate
+    /// * `size` - New size of the file in bytes
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), FileSystemError>` - Ok if the file was truncated successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the file doesn't exist, is a directory,
+    ///   or the operation is not supported by this filesystem
+    fn truncate(&self, path: &str, size: u64) -> Result<(), FileSystemError> {
+        let _ = (path, size);
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "Truncate not supported by this filesystem".to_string(),
+        })
+    }
 
     /// Create a hard link
     /// 
@@ -1747,7 +1796,44 @@ impl VfsManager {
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().remove(relative_path))
     }
-    /// Get file or directory metadata
+
+    /// Truncate a file to the specified size
+    /// 
+    /// This method changes the size of a file to the specified length.
+    /// If the new size is smaller than the current size, the file is truncated.
+    /// If the new size is larger, the file is extended with zero bytes.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path to the file to truncate
+    /// * `size` - New size of the file in bytes
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), FileSystemError>` - Ok if the file was truncated successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the file doesn't exist, is a directory,
+    ///   or the operation is not supported by the filesystem
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Truncate a file to 1024 bytes
+    /// vfs.truncate("/tmp/large_file.txt", 1024)?;
+    /// 
+    /// // Extend a file to 2048 bytes (fills with zeros)
+    /// vfs.truncate("/tmp/small_file.txt", 2048)?;
+    /// 
+    /// // Truncate a file to 0 bytes (empty the file)
+    /// vfs.truncate("/tmp/file.txt", 0)?;
+    /// ```
+    pub fn truncate(&self, path: &str, size: u64) -> Result<(), FileSystemError> {
+        self.with_resolve_path(path, |fs, relative_path| fs.read().truncate(relative_path, size))
+    }
+
+    /// Get metadata about a file or directory
     /// 
     /// This method retrieves metadata information about a file or directory,
     /// including file type, size, permissions, and timestamps.
@@ -1956,9 +2042,7 @@ impl VfsManager {
     /// # Arguments
     /// 
     /// * `path` - The absolute path where the symbolic link should be created
-
-
-    /// /// 
+    /// 
     /// # Returns
     /// 
     /// * `Result<(), FileSystemError>` - Ok if the symbolic link was created successfully
