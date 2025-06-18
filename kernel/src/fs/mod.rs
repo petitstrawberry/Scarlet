@@ -278,6 +278,28 @@ pub trait FileObject: StreamOps {
     
     /// Get metadata about the file
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
+
+    /// Truncate the file to the specified size
+    /// 
+    /// This method changes the size of the file to the specified length.
+    /// If the new size is smaller than the current size, the file is truncated.
+    /// If the new size is larger, the file is extended with zero bytes.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `size` - New size of the file in bytes
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), StreamError>` - Ok if the file was truncated successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `StreamError` - If the file is a directory or the operation is not supported
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        let _ = size;
+        Err(StreamError::NotSupported)
+    }
 }
 
 /// Trait defining basic file system operations
@@ -335,6 +357,33 @@ pub trait FileOperations: Send + Sync {
 
     /// Get the metadata
     fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError>;
+
+    /// Truncate a file to the specified size
+    /// 
+    /// This method changes the size of a file to the specified length.
+    /// If the new size is smaller than the current size, the file is truncated.
+    /// If the new size is larger, the file is extended with zero bytes.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Path to the file to truncate
+    /// * `size` - New size of the file in bytes
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), FileSystemError>` - Ok if the file was truncated successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the file doesn't exist, is a directory,
+    ///   or the operation is not supported by this filesystem
+    fn truncate(&self, path: &str, size: u64) -> Result<(), FileSystemError> {
+        let _ = (path, size);
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "Truncate not supported by this filesystem".to_string(),
+        })
+    }
 
     /// Create a hard link
     /// 
@@ -1747,7 +1796,44 @@ impl VfsManager {
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         self.with_resolve_path(path, |fs, relative_path| fs.read().remove(relative_path))
     }
-    /// Get file or directory metadata
+
+    /// Truncate a file to the specified size
+    /// 
+    /// This method changes the size of a file to the specified length.
+    /// If the new size is smaller than the current size, the file is truncated.
+    /// If the new size is larger, the file is extended with zero bytes.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - The absolute path to the file to truncate
+    /// * `size` - New size of the file in bytes
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), FileSystemError>` - Ok if the file was truncated successfully
+    /// 
+    /// # Errors
+    /// 
+    /// * `FileSystemError` - If the file doesn't exist, is a directory,
+    ///   or the operation is not supported by the filesystem
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Truncate a file to 1024 bytes
+    /// vfs.truncate("/tmp/large_file.txt", 1024)?;
+    /// 
+    /// // Extend a file to 2048 bytes (fills with zeros)
+    /// vfs.truncate("/tmp/small_file.txt", 2048)?;
+    /// 
+    /// // Truncate a file to 0 bytes (empty the file)
+    /// vfs.truncate("/tmp/file.txt", 0)?;
+    /// ```
+    pub fn truncate(&self, path: &str, size: u64) -> Result<(), FileSystemError> {
+        self.with_resolve_path(path, |fs, relative_path| fs.read().truncate(relative_path, size))
+    }
+
+    /// Get metadata about a file or directory
     /// 
     /// This method retrieves metadata information about a file or directory,
     /// including file type, size, permissions, and timestamps.
@@ -2059,8 +2145,216 @@ impl VfsManager {
     pub fn list_mount_points(&self) -> Vec<String> {
         self.mount_tree.read().list_all()
     }
-}
 
+    /// Create an overlay mount from multiple source VFS managers
+    /// 
+    /// This creates an overlay filesystem that combines multiple layers into a unified view.
+    /// The overlay uses MountNode references for clean isolation and no global VFS dependency.
+    /// OverlayFS is treated as a regular filesystem (MountType::Regular) for simplicity.
+    /// 
+    /// # Overlay Semantics
+    /// 
+    /// - **Upper Layer**: Read-write layer for new files and modifications (optional for read-only overlays)
+    /// - **Lower Layers**: Read-only layers with decreasing priority (highest priority first)
+    /// - **Copy-on-Write**: Files from lower layers are copied to upper layer when modified
+    /// - **Directory Merging**: Directory listings merge all layers with upper taking precedence
+    /// 
+    /// # Arguments
+    /// 
+    /// * `upper_vfs` - VFS manager containing the upper layer (None for read-only overlay)
+    /// * `upper_path` - Path within the upper VFS (ignored if upper_vfs is None)
+    /// * `lower_vfs_list` - List of (VFS manager, path) tuples for lower layers (highest priority first)
+    /// * `target_path` - Target mount point in this VFS
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), FileSystemError>` - Ok if the overlay mount was successful, Err otherwise
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a read-write overlay with one lower layer
+    /// container_vfs.overlay_mount_from(
+    ///     Some(&upper_vfs), "/upper/data",
+    ///     vec![(&base_vfs, "/base/data")],
+    ///     "/overlay"
+    /// )?;
+    /// 
+    /// // Create a read-only overlay with multiple lower layers
+    /// container_vfs.overlay_mount_from(
+    ///     None, "",
+    ///     vec![(&layer1_vfs, "/layer1"), (&layer2_vfs, "/layer2")],
+    ///     "/readonly_overlay"
+    /// )?;
+    /// ```
+    pub fn overlay_mount_from(
+        &self,
+        upper_vfs: Option<&Arc<VfsManager>>,
+        upper_path: &str,
+        lower_vfs_list: Vec<(&Arc<VfsManager>, &str)>,
+        target_path: &str,
+    ) -> Result<(), FileSystemError> {
+        let normalized_target = Self::normalize_path(target_path);
+
+        // Resolve upper layer if present
+        let (upper_mount_node, upper_relative_path) = if let Some(upper_vfs_ref) = upper_vfs {
+            let normalized_upper = Self::normalize_path(upper_path);
+            let mount_tree = upper_vfs_ref.mount_tree.read();
+            let (node, relative) = mount_tree.resolve(&normalized_upper)?;
+            drop(mount_tree);
+            (Some(node), relative)
+        } else {
+            (None, String::new())
+        };
+
+        // Resolve lower layers
+        let mut lower_mount_nodes = Vec::new();
+        let mut lower_relative_paths = Vec::new();
+
+        for (lower_vfs_ref, lower_path) in lower_vfs_list {
+            let normalized_lower = Self::normalize_path(lower_path);
+            let lower_mount_tree = lower_vfs_ref.mount_tree.read();
+            let (node, relative) = lower_mount_tree.resolve(&normalized_lower)?;
+            drop(lower_mount_tree);
+            
+            lower_mount_nodes.push(node);
+            lower_relative_paths.push(relative);
+        }
+
+        // Create the OverlayFS instance
+        let overlay_fs = drivers::overlayfs::OverlayFS::new(
+            upper_mount_node,
+            upper_relative_path,
+            lower_mount_nodes,
+            lower_relative_paths,
+        )?;
+
+        // Wrap the overlay filesystem in the VirtualFileSystem trait
+        let overlay_fs_boxed: Box<dyn VirtualFileSystem> = Box::new(overlay_fs);
+        let overlay_fs_arc = Arc::new(spin::RwLock::new(overlay_fs_boxed));
+
+        // Create the overlay mount point as a regular filesystem
+        let overlay_mount_point = mount_tree::MountPoint {
+            path: normalized_target.clone(),
+            fs: overlay_fs_arc,
+            fs_id: 0, // Overlay filesystems don't need a registered ID
+            mount_type: mount_tree::MountType::Regular,
+            mount_options: mount_tree::MountOptions {
+                read_only: upper_vfs.is_none(), // Read-only if no upper layer
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0,
+        };
+
+        // Insert the overlay mount into the MountTree
+        self.mount_tree.write().insert(&normalized_target, overlay_mount_point)?;
+
+        Ok(())
+    }
+
+    /// Create an overlay mount within the same VFS manager
+    /// 
+    /// This method creates an overlay filesystem by combining an upper directory
+    /// (for writes) with one or more lower directories (read-only) within the
+    /// same VFS manager. This is useful for creating overlay mounts within a
+    /// single filesystem namespace.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `upper_path` - Optional path to the upper directory (writable layer). If None, creates read-only overlay.
+    /// * `lower_paths` - List of paths to lower directories (read-only layers), in order of priority
+    /// * `target_path` - Path where the overlay should be mounted
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(())` - Overlay mount was successful
+    /// * `Err(FileSystemError)` - If any path doesn't exist, or mount operation fails
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a writable overlay with one lower layer
+    /// vfs_manager.overlay_mount(
+    ///     Some("/upper"),
+    ///     vec!["/lower"],
+    ///     "/overlay"
+    /// )?;
+    /// 
+    /// // Create a read-only overlay with multiple lower layers
+    /// vfs_manager.overlay_mount(
+    ///     None,
+    ///     vec!["/layer1", "/layer2"],
+    ///     "/readonly_overlay"
+    /// )?;
+    /// ```
+    pub fn overlay_mount(
+        &self,
+        upper_path: Option<&str>,
+        lower_paths: Vec<&str>,
+        target_path: &str,
+    ) -> Result<(), FileSystemError> {
+        let normalized_target = Self::normalize_path(target_path);
+
+        // Resolve upper layer if present
+        let (upper_mount_node, upper_relative_path) = if let Some(upper_path_str) = upper_path {
+            let normalized_upper = Self::normalize_path(upper_path_str);
+            let mount_tree_guard = self.mount_tree.read();
+            let (node, relative) = mount_tree_guard.resolve(&normalized_upper)?;
+            drop(mount_tree_guard);
+            (Some(node), relative)
+        } else {
+            (None, String::new())
+        };
+
+        // Resolve lower layers
+        let mut lower_mount_nodes = Vec::new();
+        let mut lower_relative_paths = Vec::new();
+
+        for lower_path in lower_paths {
+            let normalized_lower = Self::normalize_path(lower_path);
+            let mount_tree_guard = self.mount_tree.read();
+            let (node, relative) = mount_tree_guard.resolve(&normalized_lower)?;
+            drop(mount_tree_guard);
+            
+            lower_mount_nodes.push(node);
+            lower_relative_paths.push(relative);
+        }
+
+        // Create the OverlayFS instance
+        let overlay_fs = drivers::overlayfs::OverlayFS::new(
+            upper_mount_node,
+            upper_relative_path,
+            lower_mount_nodes,
+            lower_relative_paths,
+        )?;
+
+        // Wrap the overlay filesystem in the VirtualFileSystem trait
+        let overlay_fs_boxed: Box<dyn VirtualFileSystem> = Box::new(overlay_fs);
+        let overlay_fs_arc = Arc::new(spin::RwLock::new(overlay_fs_boxed));
+
+        // Create the overlay mount point as a regular filesystem
+        let overlay_mount_point = mount_tree::MountPoint {
+            path: normalized_target.clone(),
+            fs: overlay_fs_arc,
+            fs_id: 0, // Overlay filesystems don't need a registered ID
+            mount_type: mount_tree::MountType::Regular,
+            mount_options: mount_tree::MountOptions {
+                read_only: upper_path.is_none(), // Read-only if no upper layer
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0,
+        };
+
+        // Insert the overlay mount into the MountTree
+        self.mount_tree.write().insert(&normalized_target, overlay_mount_point)?;
+
+        Ok(())
+    }
+}
 
 /// Template for a basic block device-based file system implementation
 /// 
