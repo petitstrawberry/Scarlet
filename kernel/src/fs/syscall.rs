@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::{arch::Trapframe, task::mytask};
+use crate::{arch::Trapframe, library::std::string::cstring_to_string, task::mytask};
 
 use super::{SeekFrom, VfsManager, MAX_PATH_LENGTH};
 
@@ -168,5 +168,57 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
         Err(_) => {
             return usize::MAX; // Lseek error
         }
+    }
+}
+
+pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let length = trapframe.get_arg(1) as u64;
+    
+    trapframe.increment_pc_next(task);
+
+    // Convert path bytes to string
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match VfsManager::to_absolute_path(&task, &s) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+    
+    match vfs.truncate(&path_str, length) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX, // -1
+    }
+}
+
+pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as u32;
+    let length = trapframe.get_arg(1) as u64;
+    
+    trapframe.increment_pc_next(task);
+    
+    let kernel_obj = task.handle_table.get(fd);
+    if kernel_obj.is_none() {
+        return usize::MAX; // Invalid file descriptor
+    }
+    
+    let kernel_obj = kernel_obj.unwrap();
+    let file = kernel_obj.as_file();
+    if file.is_none() {
+        return usize::MAX; // Object doesn't support file operations
+    }
+    
+    let file = file.unwrap();
+    match file.truncate(length) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX, // -1
     }
 }
