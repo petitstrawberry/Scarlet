@@ -87,6 +87,9 @@ impl OverlayFS {
                                 // Copy file content
                                 if let Ok(source_file) = fs_guard.open(&resolved_path, 0) { // Read-only
                                     if let Ok(dest_file) = upper_fs_guard.open(&upper_resolved_path, 1) { // Write-only
+                                        // Ensure we start writing from the beginning
+                                        let _ = dest_file.seek(SeekFrom::Start(0));
+                                        
                                         // Copy file content in chunks
                                         let mut buffer = [0u8; 4096]; // 4KB buffer
                                         
