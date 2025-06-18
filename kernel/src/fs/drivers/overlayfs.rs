@@ -191,6 +191,32 @@ impl OverlayFS {
         fs_guard.create_file(&resolved_path, FileType::RegularFile)
     }
 
+    fn remove_whiteout(&self, path: &str) -> Result<(), FileSystemError> {
+        let (upper_node, upper_base_path) = self.get_upper_layer()?;
+        
+        // Whiteout files are named with a special prefix
+        let whiteout_name = format!(".wh.{}", 
+            path.split('/').last().unwrap_or(path));
+        let parent_path = if let Some(pos) = path.rfind('/') {
+            &path[..pos]
+        } else {
+            ""
+        };
+        let whiteout_path = if parent_path.is_empty() {
+            whiteout_name
+        } else {
+            format!("{}/{}", parent_path, whiteout_name)
+        };
+        
+        let upper_full_path = Self::combine_paths(&upper_base_path, &whiteout_path);
+        let upper_mount_point = upper_node.get_mount_point()?;
+        let (upper_fs, resolved_path) = upper_mount_point.resolve_fs(&upper_full_path)?;
+        
+        let fs_guard = upper_fs.read();
+        // Remove the whiteout file
+        fs_guard.remove(&resolved_path)
+    }
+
     /// Check if a file is hidden by a whiteout file
     fn is_whiteout(&self, path: &str) -> bool {
         if let Some(ref upper_node) = self.upper_mount_node {
@@ -384,11 +410,19 @@ impl FileOperations for OverlayFS {
     }
 
     fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
-        // If file exists in lower layer only, copy it up first
-        if self.file_exists_in_lower_only(path) {
-            self.copy_up(path)?;
+        let entries = self.read_dir(path)?;
+        if entries.iter().any(|e| e.name == path) {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::AlreadyExists,
+                message: format!("File already exists: {}", path),
+            });
         }
-        
+
+        if self.is_whiteout(path) {
+            // Remove the whiteout file if it exists
+            self.remove_whiteout(path)?;
+        }
+     
         let (upper_node, upper_base_path) = self.get_upper_layer()?;
         let upper_path = Self::combine_paths(&upper_base_path, path);
         
@@ -396,6 +430,12 @@ impl FileOperations for OverlayFS {
         let (upper_fs, resolved_path) = upper_mount_point.resolve_fs(&upper_path)?;
         
         let fs_guard = upper_fs.read();
+
+        let entries = fs_guard.read_dir(&upper_base_path)?;
+        for entry in entries {
+            crate::println!("Entry in upper layer: {}", entry.name);
+        }
+
         fs_guard.create_file(&resolved_path, file_type)
     }
 

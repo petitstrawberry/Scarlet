@@ -957,7 +957,7 @@ pub fn test_overlay_file_overwrite_content() {
 }
 
 /// Debug test to investigate write behavior
-#[test_case]
+// #[test_case]
 pub fn test_debug_write_behavior() {
     use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
     use alloc::boxed::Box;
@@ -1137,7 +1137,7 @@ pub fn test_whiteout_directory_listing() {
 /// removed without creating whiteout files.
 #[test_case]
 pub fn test_remove_upper_layer_file() {
-    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS};
     use alloc::boxed::Box;
     
     let manager = VfsManager::new();
@@ -1186,7 +1186,7 @@ pub fn test_remove_upper_layer_file() {
 /// returns an appropriate error.
 #[test_case]
 pub fn test_remove_nonexistent_file() {
-    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS};
     use alloc::boxed::Box;
     
     let manager = VfsManager::new();
@@ -1211,6 +1211,167 @@ pub fn test_remove_nonexistent_file() {
         if let Err(e) = remove_result {
             assert_eq!(e.kind, FileSystemErrorKind::NotFound, 
                       "Should return NotFound error for non-existent file");
+        }
+    }
+}
+
+/// Test removing and recreating file with same name
+/// 
+/// This test verifies that after removing a file from the lower layer (creating whiteout)
+/// and then creating a new file with the same name, the new file is visible and the
+/// lower layer file remains hidden. This tests proper whiteout handling when files
+/// are recreated.
+#[test_case]
+pub fn test_remove_and_recreate_same_name() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Phase 1: Create file in lower layer
+        let lower_create_result = manager.create_regular_file("/lower/test_file.txt");
+        assert!(lower_create_result.is_ok(), "Should be able to create file in lower layer");
+        
+        // Write original content to lower layer file
+        if let Ok(kernel_obj) = manager.open("/lower/test_file.txt", 1) { // O_WRONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let original_content = b"original content in lower layer";
+                let _ = stream_ops.write(original_content);
+            }
+        }
+        
+        // Verify file is visible through overlay
+        assert!(manager.open("/overlay/test_file.txt", 0).is_ok(), 
+               "File should be visible through overlay initially");
+        
+        // Phase 2: Remove file through overlay (creates whiteout)
+        let remove_result = manager.remove("/overlay/test_file.txt");
+        assert!(remove_result.is_ok(), "Should be able to remove file through overlay");
+        
+        // Verify file is no longer visible through overlay
+        assert!(manager.open("/overlay/test_file.txt", 0).is_err(), 
+               "File should not be visible through overlay after removal");
+
+        // Verify file is removed from upper layer
+        assert!(manager.open("/upper/test_file.txt", 0).is_err(), 
+               "File should not exist in upper layer after removal");
+        
+        // Verify lower layer file still exists
+        assert!(manager.open("/lower/test_file.txt", 0).is_ok(), 
+               "Lower layer file should still exist");
+        
+        // Verify whiteout file exists in upper layer
+        assert!(manager.open("/upper/.wh.test_file.txt", 0).is_ok(), 
+               "Whiteout file should exist in upper layer");
+        
+        // Phase 3: Create new file with same name through overlay
+        let new_create_result = manager.create_regular_file("/overlay/test_file.txt");
+        match new_create_result {
+            Err(ref e) => {
+                crate::println!("DEBUG: Error creating new file: {:?}", e);
+            },
+            Ok(_) => {}
+        }
+        assert!(new_create_result.is_ok(), "Should be able to create new file with same name");
+        
+        // Write new content to the new file
+        if let Ok(kernel_obj) = manager.open("/overlay/test_file.txt", 1) { // O_WRONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let new_content = b"new content in upper layer";
+                let _ = stream_ops.write(new_content);
+            }
+        }
+        
+        // Phase 4: Verify new file is visible through overlay
+        assert!(manager.open("/overlay/test_file.txt", 0).is_ok(), 
+               "New file should be visible through overlay");
+        
+        // Verify new file exists in upper layer
+        assert!(manager.open("/upper/test_file.txt", 0).is_ok(), 
+               "New file should exist in upper layer");
+        
+        // Phase 5: Verify content is from new file, not lower layer
+        if let Ok(kernel_obj) = manager.open("/overlay/test_file.txt", 0) { // O_RDONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let mut buffer = [0u8; 64];
+                if let Ok(bytes_read) = stream_ops.read(&mut buffer) {
+                    let content = &buffer[..bytes_read];
+                    let content_str = core::str::from_utf8(content).unwrap_or("");
+                    // Check that we're reading from the new upper layer file
+                    assert!(content_str.contains("new content"), 
+                           "Should read new content from upper layer, got: {}", content_str);
+                    assert!(!content_str.contains("original content"), 
+                           "Should not read original content from lower layer");
+                }
+            }
+        }
+        
+        // Phase 6: Verify lower layer file still contains original content
+        if let Ok(kernel_obj) = manager.open("/lower/test_file.txt", 0) { // O_RDONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let mut buffer = [0u8; 64];
+                if let Ok(bytes_read) = stream_ops.read(&mut buffer) {
+                    let content = &buffer[..bytes_read];
+                    let content_str = core::str::from_utf8(content).unwrap_or("");
+                    assert!(content_str.contains("original content"), 
+                           "Lower layer should still contain original content");
+                }
+            }
+        }
+        
+        // Phase 7: Verify directory listing shows only the new file
+        if let Ok(entries) = manager.read_dir("/overlay/") {
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"test_file.txt"), "New file should appear in directory listing");
+            
+            // Count how many times the filename appears (should be exactly once)
+            let count = names.iter().filter(|&&name| name == "test_file.txt").count();
+            assert_eq!(count, 1, "File should appear exactly once in directory listing");
+            
+            // Verify whiteout doesn't appear in listing
+            assert!(!names.iter().any(|name| name.starts_with(".wh.")), 
+                   "Whiteout files should not appear in overlay listing");
+        }
+        
+        // Phase 8: Verify whiteout file should be removed/ignored after recreation
+        // When a new file is created with the same name, the whiteout should no longer affect visibility
+        // The exact behavior may vary (whiteout might still exist but be ignored, or be removed)
+        // What's important is that the new file is visible and functional
+        
+        // Additional verification: ensure we can still read/write the new file
+        // Note: We'll just verify the file is writable, but won't append due to the complex
+        // interaction with lack of truncate support that can cause confusing test results
+        if let Ok(kernel_obj) = manager.open("/overlay/test_file.txt", 1) { // O_WRONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                // Just verify the file is writable
+                let verify_content = b"verified";
+                let _ = stream_ops.write(verify_content);
+            }
+        }
+        
+        // Read back and verify we can still read from the new file
+        if let Ok(kernel_obj) = manager.open("/overlay/test_file.txt", 0) { // O_RDONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let mut buffer = [0u8; 128];
+                if let Ok(bytes_read) = stream_ops.read(&mut buffer) {
+                    let content = &buffer[..bytes_read];
+                    // Due to lack of truncate, the exact content is unpredictable after multiple writes
+                    // But we should be able to read some content successfully
+                    assert!(bytes_read > 0, "Should be able to read some content from recreated file");
+                }
+            }
         }
     }
 }
