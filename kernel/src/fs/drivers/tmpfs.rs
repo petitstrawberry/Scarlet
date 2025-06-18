@@ -987,6 +987,45 @@ impl FileOperations for TmpFS {
             })
         }
     }
+
+    fn truncate(&self, path: &str, size: u64) -> Result<(), FileSystemError> {
+        if let Some(node_arc) = self.find_node(path) {
+            if node_arc.file_type != FileType::RegularFile {
+                return Err(FileSystemError {
+                    kind: FileSystemErrorKind::IsADirectory,
+                    message: "Cannot truncate a directory".to_string(),
+                });
+            }
+            
+            let fs = self;
+            let mut content_guard = node_arc.content.write();
+            let old_size = content_guard.len();
+            let new_size = size as usize;
+            
+            // Check memory limit for expansion
+            fs.check_memory_limit(new_size.saturating_sub(old_size))?;
+            
+            if new_size > old_size {
+                // Expand file with zeros
+                content_guard.resize(new_size, 0);
+                fs.add_memory_usage(new_size - old_size);
+            } else if new_size < old_size {
+                // Truncate file
+                content_guard.truncate(new_size);
+                fs.subtract_memory_usage(old_size - new_size);
+            }
+            
+            // Update metadata
+            node_arc.update_size(new_size);
+            
+            Ok(())
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: "File not found".to_string(),
+            })
+        }
+    }
     
     fn create_hardlink(&self, target_path: &str, link_path: &str) -> Result<(), FileSystemError> {
         // 1. Get target node as Arc
