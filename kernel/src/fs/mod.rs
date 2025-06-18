@@ -1957,6 +1957,7 @@ impl VfsManager {
     /// 
     /// * `path` - The absolute path where the symbolic link should be created
 
+
     /// /// 
     /// # Returns
     /// 
@@ -2114,9 +2115,9 @@ impl VfsManager {
         // Resolve upper layer if present
         let (upper_mount_node, upper_relative_path) = if let Some(upper_vfs_ref) = upper_vfs {
             let normalized_upper = Self::normalize_path(upper_path);
-            let upper_mount_tree = upper_vfs_ref.mount_tree.read();
-            let (node, relative) = upper_mount_tree.resolve(&normalized_upper)?;
-            drop(upper_mount_tree);
+            let mount_tree = upper_vfs_ref.mount_tree.read();
+            let (node, relative) = mount_tree.resolve(&normalized_upper)?;
+            drop(mount_tree);
             (Some(node), relative)
         } else {
             (None, String::new())
@@ -2156,6 +2157,107 @@ impl VfsManager {
             mount_type: mount_tree::MountType::Regular,
             mount_options: mount_tree::MountOptions {
                 read_only: upper_vfs.is_none(), // Read-only if no upper layer
+                ..Default::default()
+            },
+            parent: None,
+            children: Vec::new(),
+            mount_time: 0,
+        };
+
+        // Insert the overlay mount into the MountTree
+        self.mount_tree.write().insert(&normalized_target, overlay_mount_point)?;
+
+        Ok(())
+    }
+
+    /// Create an overlay mount within the same VFS manager
+    /// 
+    /// This method creates an overlay filesystem by combining an upper directory
+    /// (for writes) with one or more lower directories (read-only) within the
+    /// same VFS manager. This is useful for creating overlay mounts within a
+    /// single filesystem namespace.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `upper_path` - Optional path to the upper directory (writable layer). If None, creates read-only overlay.
+    /// * `lower_paths` - List of paths to lower directories (read-only layers), in order of priority
+    /// * `target_path` - Path where the overlay should be mounted
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(())` - Overlay mount was successful
+    /// * `Err(FileSystemError)` - If any path doesn't exist, or mount operation fails
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// // Create a writable overlay with one lower layer
+    /// vfs_manager.overlay_mount(
+    ///     Some("/upper"),
+    ///     vec!["/lower"],
+    ///     "/overlay"
+    /// )?;
+    /// 
+    /// // Create a read-only overlay with multiple lower layers
+    /// vfs_manager.overlay_mount(
+    ///     None,
+    ///     vec!["/layer1", "/layer2"],
+    ///     "/readonly_overlay"
+    /// )?;
+    /// ```
+    pub fn overlay_mount(
+        &self,
+        upper_path: Option<&str>,
+        lower_paths: Vec<&str>,
+        target_path: &str,
+    ) -> Result<(), FileSystemError> {
+        let normalized_target = Self::normalize_path(target_path);
+
+        // Resolve upper layer if present
+        let (upper_mount_node, upper_relative_path) = if let Some(upper_path_str) = upper_path {
+            let normalized_upper = Self::normalize_path(upper_path_str);
+            let mount_tree_guard = self.mount_tree.read();
+            let (node, relative) = mount_tree_guard.resolve(&normalized_upper)?;
+            drop(mount_tree_guard);
+            (Some(node), relative)
+        } else {
+            (None, String::new())
+        };
+
+        // Resolve lower layers
+        let mut lower_mount_nodes = Vec::new();
+        let mut lower_relative_paths = Vec::new();
+
+        for lower_path in lower_paths {
+            let normalized_lower = Self::normalize_path(lower_path);
+            let mount_tree_guard = self.mount_tree.read();
+            let (node, relative) = mount_tree_guard.resolve(&normalized_lower)?;
+            drop(mount_tree_guard);
+            
+            lower_mount_nodes.push(node);
+            lower_relative_paths.push(relative);
+        }
+
+        // Create the OverlayFS instance
+        let overlay_fs = drivers::overlayfs::OverlayFS::new(
+            upper_mount_node,
+            upper_relative_path,
+            lower_mount_nodes,
+            lower_relative_paths,
+        )?;
+
+        // Wrap the overlay filesystem in the VirtualFileSystem trait
+        let overlay_fs_boxed: Box<dyn VirtualFileSystem> = Box::new(overlay_fs);
+        let overlay_fs_arc = Arc::new(spin::RwLock::new(overlay_fs_boxed));
+
+        // Create the overlay mount point as a regular filesystem
+        let overlay_mount_point = mount_tree::MountPoint {
+            path: normalized_target.clone(),
+            fs: overlay_fs_arc,
+            fs_id: 0, // Overlay filesystems don't need a registered ID
+            mount_type: mount_tree::MountType::Regular,
+            mount_options: mount_tree::MountOptions {
+                read_only: upper_path.is_none(), // Read-only if no upper layer
                 ..Default::default()
             },
             parent: None,
