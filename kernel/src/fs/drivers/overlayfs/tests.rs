@@ -3,8 +3,11 @@
 //! These tests validate the OverlayFS functionality including layer management,
 //! file operations, and read-only behavior enforcement.
 
-use super::overlayfs::OverlayFS;
-use super::super::*;
+use crate::fs::FileSystem;
+
+use super::OverlayFS;
+use super::*;
+use alloc::vec;
 use alloc::{string::String, vec::Vec};
 
 /// Test basic OverlayFS creation
@@ -1367,9 +1370,9 @@ pub fn test_remove_and_recreate_same_name() {
                 let mut buffer = [0u8; 128];
                 if let Ok(bytes_read) = stream_ops.read(&mut buffer) {
                     let content = &buffer[..bytes_read];
-                    // Due to lack of truncate, the exact content is unpredictable after multiple writes
-                    // But we should be able to read some content successfully
-                    assert!(bytes_read > 0, "Should be able to read some content from recreated file");
+                    let content_str = core::str::from_utf8(content).unwrap_or("");
+                    assert!(content_str.starts_with("verified"), 
+                           "Should read back the verification content, got: {}", content_str);
                 }
             }
         }

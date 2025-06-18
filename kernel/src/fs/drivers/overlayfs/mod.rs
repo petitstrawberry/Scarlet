@@ -522,3 +522,5 @@ impl FileOperations for OverlayFS {
     }
 }
 
+#[cfg(test)]
+mod tests;
