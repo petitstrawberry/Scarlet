@@ -13,7 +13,7 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::fs::syscall::{sys_close, sys_lseek, sys_open, sys_read, sys_write};
+use crate::fs::syscall::{sys_close, sys_lseek, sys_open, sys_read, sys_truncate, sys_write};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
 
 #[macro_use]
@@ -41,4 +41,5 @@ syscall_table! {
     Read = 22 => sys_read,
     Write = 23 => sys_write,
     Lseek = 24 => sys_lseek,
+    Truncate = 25 => sys_truncate,
 }
