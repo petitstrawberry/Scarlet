@@ -709,6 +709,55 @@ impl FileObject for TmpFileObject {
             }))
         }
     }
+
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        match self.file_type {
+            FileType::RegularFile => {
+                if let Some(node_arc) = &self.node {
+                    let fs = self.get_fs();
+                    let mut content_guard = node_arc.content.write();
+                    let old_size = content_guard.len();
+                    let new_size = size as usize;
+                    
+                    if new_size > old_size {
+                        // Check memory limit for expansion
+                        fs.check_memory_limit(new_size - old_size)
+                            .map_err(StreamError::from)?;
+                        
+                        // Expand file with zeros
+                        content_guard.resize(new_size, 0);
+                        fs.add_memory_usage(new_size - old_size);
+                    } else if new_size < old_size {
+                        // Truncate file
+                        content_guard.truncate(new_size);
+                        fs.subtract_memory_usage(old_size - new_size);
+                    }
+                    
+                    // Update metadata
+                    node_arc.update_size(new_size);
+                    
+                    // Adjust position if it's beyond the new size
+                    let mut position = self.position.write();
+                    if *position > size {
+                        *position = size;
+                    }
+                    
+                    Ok(())
+                } else {
+                    Err(StreamError::NotSupported)
+                }
+            },
+            FileType::Directory => {
+                Err(StreamError::from(FileSystemError {
+                    kind: FileSystemErrorKind::IsADirectory,
+                    message: "Cannot truncate a directory".to_string(),
+                }))
+            },
+            _ => {
+                Err(StreamError::NotSupported)
+            }
+        }
+    }
 }
 
 impl StreamOps for TmpFileObject {
