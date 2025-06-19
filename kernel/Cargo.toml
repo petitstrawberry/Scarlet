@@ -17,3 +17,6 @@ hashbrown = "0.15"
 syn = { version = "2.0.1", features = ["full", "visit"] }
 quote = "1.0"
 walkdir = "2"
+proc-macro2 = "1.0.95"
+prettyplease = "0.2.34"
+heck = "0.5"
