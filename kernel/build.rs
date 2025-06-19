@@ -5,22 +5,31 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use quote::quote;
+use serde::Serialize;
+use serde_json;
+use prettyplease;
 use syn::{
-    File, FnArg, ImplItem, Item, ItemFn, ItemImpl, ItemMod, Pat, PatType, PathArguments,
-    ReturnType, Signature, Type, TypePath, Visibility, visit::Visit,
+    FnArg, ImplItem, ItemFn, ItemImpl, ItemMod, PathArguments,
+    ReturnType, Signature, Type, Visibility, visit::Visit,
 };
-// heckクレートをインポートし、スネークケースへの変換を利用する
 use heck::ToSnakeCase;
 
-/// A struct to hold information about a found public API item.
+// Add serde::Serialize
 #[derive(Clone)]
 struct ApiFunction {
-    // The signature needs to be mutable to handle method-to-function conversion.
     signature: Signature,
     full_path: String,
+    // The type this method belongs to, if any.
+    self_type: Option<String>,
 }
 
-/// A visitor that extracts public API items and submodule declarations from a single file.
+#[derive(Serialize)]
+struct SerializableApiFunction {
+    signature_str: String,
+    full_path: String,
+    self_type: Option<String>,
+}
+
 #[derive(Default)]
 struct FileVisitor {
     pub_functions: Vec<ApiFunction>,
@@ -29,44 +38,31 @@ struct FileVisitor {
     module_path: String,
 }
 
-/// Checks if a function signature is compatible with `extern "C"` ABI.
+// is_abi_safe and is_type_abi_safe functions remain the same...
 fn is_abi_safe(sig: &syn::Signature) -> bool {
-    // 1. Check for any generics (type, lifetime, const) or a where clause.
-    if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
-        return false;
-    }
-    // 2. Check for `async` functions.
-    if sig.asyncness.is_some() {
-        return false;
-    }
-    // 3. Check arguments and return type for FFI-unsafe patterns.
+    if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() { return false; }
+    if sig.asyncness.is_some() { return false; }
     for arg in &sig.inputs {
         if let syn::FnArg::Typed(pat_type) = arg {
-            if !is_type_abi_safe(&pat_type.ty) {
-                return false;
-            }
+            if !is_type_abi_safe(&pat_type.ty) { return false; }
         }
     }
     if let ReturnType::Type(_, ty) = &sig.output {
-        if !is_type_abi_safe(ty) {
-            return false;
-        }
+        if !is_type_abi_safe(ty) { return false; }
     }
     true
 }
 
-/// Checks if a type can be safely passed across an FFI boundary.
 fn is_type_abi_safe(ty: &Type) -> bool {
     match ty {
         Type::ImplTrait(_) => false,
         Type::Path(type_path) => {
             if let Some(segment) = type_path.path.segments.last() {
-                // Heuristic check for types that are not FFI-safe by default.
                 if segment.ident == "Arguments" { return false; }
                 if segment.ident == "Box" {
                     if let PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(Type::TraitObject(_))) = args.args.first() {
-                            return false; // Box<dyn Trait> is not FFI-safe.
+                            return false;
                         }
                     }
                 }
@@ -76,6 +72,7 @@ fn is_type_abi_safe(ty: &Type) -> bool {
         _ => true,
     }
 }
+
 
 impl<'ast> Visit<'ast> for FileVisitor {
     fn visit_item_mod(&mut self, i: &'ast ItemMod) {
@@ -124,26 +121,18 @@ impl<'ast> Visit<'ast> for FileVisitor {
             self.pub_functions.push(ApiFunction {
                 signature: sig.clone(),
                 full_path,
+                self_type: None, // This is a free-standing function
             });
         }
     }
 
     fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
-        if i.trait_.is_some() { return; } // Skip trait impls
-
-        // --- NEW: Generic Impl Block Exclusion ---
-        // If the impl block itself has generics (e.g., `impl<'a> MyType<'a>`),
-        // its methods are not FFI-safe. Skip the entire block.
+        if i.trait_.is_some() { return; } 
         if !i.generics.params.is_empty() {
             let self_ty_str = quote!(#i.self_ty).to_string();
-            println!(
-                "cargo:warning=>>> Skipping all methods for generic impl: impl<{}> {}",
-                quote!(#i.generics.params).to_string(),
-                self_ty_str
-            );
+            println!("cargo:warning=>>> Skipping all methods for generic impl: impl<{}> {}", quote!(#i.generics.params), self_ty_str);
             return;
         }
-
 
         let self_ty = &i.self_ty;
         let self_ty_str = quote!(#self_ty).to_string();
@@ -164,33 +153,20 @@ impl<'ast> Visit<'ast> for FileVisitor {
                         continue;
                     }
                     
-                    // --- Receiver Transformation Logic ---
                     let mut transformed_sig = sig.clone();
+                    let mut self_type_for_func = None;
                     if let Some(FnArg::Receiver(receiver)) = transformed_sig.inputs.first_mut() {
                         if receiver.reference.is_none() && receiver.mutability.is_none() {
-                             println!("cargo:warning=Skipping method taking 'self' by value from CoreApiTable: {}", &full_path);
+                             println!("cargo:warning=Skipping method taking 'self' by value: {}", &full_path);
                              continue;
                         }
-
-                        let receiver_ty = if receiver.mutability.is_some() {
-                            quote! { *mut #self_ty }
-                        } else {
-                            quote! { *const #self_ty }
-                        };
-                        
-                        let fn_arg = FnArg::Typed(PatType {
-                            attrs: Vec::new(),
-                            pat: Box::new(syn::parse_quote! { this }),
-                            colon_token: Default::default(),
-                            ty: Box::new(syn::parse_str(&receiver_ty.to_string()).unwrap()),
-                        });
-                        
-                        transformed_sig.inputs[0] = fn_arg;
+                        self_type_for_func = Some(self_ty_str.clone());
                     }
 
                     self.pub_functions.push(ApiFunction {
-                        signature: transformed_sig,
+                        signature: sig.clone(), // Store original signature
                         full_path,
+                        self_type: self_type_for_func,
                     });
                 }
             }
@@ -217,7 +193,7 @@ fn main() {
 
     while let Some(path) = files_to_process.pop() {
         if !processed_files.insert(path.clone()) { continue; }
-        
+        // ... (rest of the file processing logic is the same) ...
         println!("cargo:rerun-if-changed={}", path.to_str().unwrap());
         let code = match fs::read_to_string(&path) { Ok(c) => c, Err(_) => continue };
         let ast = match syn::parse_file(&code) {
@@ -249,24 +225,43 @@ fn main() {
     }
 
     // --- Code Generation Phase ---
-    let mut table_fields = Vec::new();
-    let mut table_inits = Vec::new();
-    
     let mut sorted_functions: Vec<_> = all_pub_functions.values().collect();
     sorted_functions.sort_by_key(|f| &f.full_path);
 
-    for func in sorted_functions {
+    // --- Generate CoreApiTable for kernel ---
+    generate_api_table_for_kernel(&sorted_functions);
+    
+    // --- Generate JSON for macros ---
+    generate_json_for_macros(&sorted_functions);
+}
+
+fn generate_api_table_for_kernel(functions: &[&ApiFunction]) {
+    let mut table_fields = Vec::new();
+    let mut table_inits = Vec::new();
+
+    for func in functions {
         let field_name_str = func.full_path
-            .strip_prefix("crate::")
-            .unwrap_or(&func.full_path)
-            .replace("::", "_")
-            .to_snake_case();
+            .strip_prefix("crate::").unwrap_or(&func.full_path)
+            .replace("::", "_").to_snake_case();
         let field_name = syn::Ident::new(&field_name_str, proc_macro2::Span::call_site());
         
         let mut fn_sig = func.signature.clone();
+        
+        // Transform `&self` etc. into an explicit pointer for the function pointer type
+        if let Some(FnArg::Receiver(receiver)) = fn_sig.inputs.first_mut() {
+             if receiver.reference.is_none() && receiver.mutability.is_none() { continue; }
+             let self_ty: Type = syn::parse_str(&func.self_type.as_ref().unwrap()).unwrap();
+             let receiver_ty = if receiver.mutability.is_some() {
+                 quote! { *mut #self_ty }
+             } else {
+                 quote! { *const #self_ty }
+             };
+             fn_sig.inputs[0] = syn::parse_quote! { this: #receiver_ty };
+        }
+        
         fn_sig.abi = Some(syn::parse_quote!(extern "C"));
         fn_sig.unsafety = Some(syn::parse_quote!(unsafe));
-
+        
         let inputs = &fn_sig.inputs;
         let output = &fn_sig.output;
         let fn_pointer_type = quote! { fn(#inputs) #output };
@@ -278,40 +273,46 @@ fn main() {
     }
 
     let generated_code = quote! {
-        /// この構造体はビルド時に自動生成されます。
-        /// カーネル内の全ての`pub fn`（C-ABI互換のもの）への関数ポインタを含みます。
         #[repr(C)]
-        pub struct CoreApiTable {
-            #(#table_fields,)*
-        }
-
-        /// APIテーブルの唯一の静的インスタンス。
-        /// `api-only`ビルドではこの部分はコンパイルされません。
-        #[cfg(not(feature = "api-only"))]
-        static KERNEL_CORE_API: CoreApiTable = CoreApiTable {
-            #(#table_inits,)*
-        };
+        pub struct CoreApiTable { #(#table_fields,)* }
         
-        /// コアモジュールがAPIテーブルへのポインタを取得するための、公開された唯一の関数。
+        #[cfg(not(feature = "api-only"))]
+        static KERNEL_CORE_API: CoreApiTable = CoreApiTable { #(#table_inits,)* };
+        
         #[no_mangle]
         #[cfg(not(feature = "api-only"))]
-        pub extern "C" fn get_core_api_table() -> *const CoreApiTable {
-            &KERNEL_CORE_API
-        }
+        pub extern "C" fn get_core_api_table() -> *const CoreApiTable { &KERNEL_CORE_API }
     };
-
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let dest_path = Path::new(&out_dir).join("core_api_generated.rs");
     
-    let generated_file = match syn::parse2::<syn::File>(generated_code.clone()) {
-        Ok(file) => file,
-        Err(e) => {
-            panic!("Failed to parse generated code. This is a bug in build.rs. Error: {e}\n--- Generated Code ---\n{generated_code}");
-        }
-    };
-
-    let formatted_code = prettyplease::unparse(&generated_file);
-    fs::write(dest_path, formatted_code).unwrap();
-
-    println!("cargo:warning=CoreApiTable generated successfully with proper formatting.");
+    // Parse the generated code into a syntax tree and format it
+    let parsed_file = syn::parse_file(&generated_code.to_string()).unwrap();
+    let formatted_code = prettyplease::unparse(&parsed_file);
+    
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("core_api_table.rs");
+    fs::write(&dest_path, formatted_code).unwrap();
+    println!("cargo:rustc-env=CORE_API_TABLE_PATH={}", dest_path.display());
 }
+
+fn generate_json_for_macros(functions: &[&ApiFunction]) {
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("core_api.json");
+    // Convert to serializable format
+    let serializable_functions: Vec<SerializableApiFunction> = functions.iter().map(|f| {
+        let sig = &f.signature;
+        let sig_tokens = quote!(#sig);
+        let sig_str = sig_tokens.to_string();
+        
+        SerializableApiFunction {
+            signature_str: sig_str,
+            full_path: f.full_path.clone(),
+            self_type: f.self_type.clone(),
+        }
+    }).collect();
+    // Serialize the collected function data to JSON
+    let json_data = serde_json::to_string_pretty(&serializable_functions).unwrap();
+    fs::write(dest_path, json_data).unwrap();
+    // Set an environment variable so the macro crate can find this file
+    println!("cargo:rustc-env=SCARLET_API_JSON_PATH={}", Path::new(&out_dir).join("core_api.json").display());
+}
+
