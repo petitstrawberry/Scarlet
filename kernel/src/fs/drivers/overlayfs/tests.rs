@@ -859,6 +859,34 @@ pub fn test_overlay_file_write_content() {
                         }
                     }
                     
+                    // Test truncate functionality on the new file
+                    let truncate_result = manager.truncate("/overlay/new_file.txt", 5);
+                    assert!(truncate_result.is_ok(), "Should be able to truncate new file");
+                    
+                    // Verify truncated size and content
+                    if let Ok(metadata) = manager.metadata("/overlay/new_file.txt") {
+                        assert_eq!(metadata.size, 5, "File size should be 5 bytes after truncation");
+                    }
+                    
+                    if let Ok(truncated_obj) = manager.open("/overlay/new_file.txt", 0) { // O_RDONLY
+                        if let Some(truncated_stream) = truncated_obj.as_stream() {
+                            let mut buffer = [0u8; 10];
+                            if let Ok(bytes_read) = truncated_stream.read(&mut buffer) {
+                                assert_eq!(bytes_read, 5, "Should read exactly 5 bytes after truncation");
+                                let content = &buffer[..bytes_read];
+                                assert_eq!(content, b"Hello", "Content should be truncated to first 5 characters");
+                            }
+                        }
+                    }
+                    
+                    // Test expanding the file again
+                    let expand_result = manager.truncate("/overlay/new_file.txt", 12);
+                    assert!(expand_result.is_ok(), "Should be able to expand file");
+                    
+                    if let Ok(metadata) = manager.metadata("/overlay/new_file.txt") {
+                        assert_eq!(metadata.size, 12, "File size should be 12 bytes after expansion");
+                    }
+                    
                     // Verify file does not exist in lower layer
                     assert!(manager.open("/lower/new_file.txt", 0).is_err(), 
                            "New file should not exist in lower layer");
@@ -951,6 +979,27 @@ pub fn test_overlay_file_overwrite_content() {
                         if let Ok(bytes_read) = lower_stream.read(&mut buffer) {
                             let content = &buffer[..bytes_read];
                             assert_eq!(content, lower_content, "Lower layer should remain unchanged");
+                        }
+                    }
+                }
+                
+                // Test truncate functionality on the overwritten file
+                let truncate_result = manager.truncate("/overlay/test_overwrite.txt", 10);
+                assert!(truncate_result.is_ok(), "Should be able to truncate overwritten file");
+                
+                // Verify truncated size and content
+                if let Ok(metadata) = manager.metadata("/overlay/test_overwrite.txt") {
+                    assert_eq!(metadata.size, 10, "File size should be 10 bytes after truncation");
+                }
+                
+                if let Ok(truncated_obj) = manager.open("/overlay/test_overwrite.txt", 0) { // O_RDONLY
+                    if let Some(truncated_stream) = truncated_obj.as_stream() {
+                        let mut buffer = [0u8; 32];
+                        if let Ok(bytes_read) = truncated_stream.read(&mut buffer) {
+                            assert_eq!(bytes_read, 10, "Should read exactly 10 bytes after truncation");
+                            let content = &buffer[..bytes_read];
+                            let content_str = core::str::from_utf8(content).unwrap_or("");
+                            assert_eq!(content_str, "completely", "Content should be truncated to first 10 characters");
                         }
                     }
                 }
@@ -1376,5 +1425,286 @@ pub fn test_remove_and_recreate_same_name() {
                 }
             }
         }
+    }
+}
+
+/// Test file truncation functionality in OverlayFS
+/// 
+/// This test verifies that truncate operations work correctly with OverlayFS,
+/// including COW behavior when truncating files that exist only in lower layers.
+#[test_case]
+pub fn test_overlay_truncate_functionality() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Phase 1: Create file in lower layer with initial content
+        let _ = manager.create_file("/lower/test_truncate.txt", FileType::RegularFile);
+        
+        // Write initial content to lower layer (100 bytes)
+        if let Ok(kernel_obj) = manager.open("/lower/test_truncate.txt", 1) { // O_WRONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let initial_content = b"This is a long test content that will be used for truncation testing in the overlay filesystem......";
+                assert_eq!(initial_content.len(), 100, "Initial content should be exactly 100 bytes");
+                let _ = stream_ops.write(initial_content);
+            }
+        }
+        
+        // Verify initial file size through overlay
+        if let Ok(metadata) = manager.metadata("/overlay/test_truncate.txt") {
+            assert_eq!(metadata.size, 100, "Initial file size should be 100 bytes");
+        }
+        
+        // Phase 2: Truncate file to smaller size (triggers COW)
+        let truncate_result = manager.truncate("/overlay/test_truncate.txt", 50);
+        assert!(truncate_result.is_ok(), "Should be able to truncate file through overlay");
+        
+        // Verify file was copied to upper layer and truncated
+        assert!(manager.open("/upper/test_truncate.txt", 0).is_ok(), 
+               "File should exist in upper layer after truncate");
+        
+        // Verify new file size
+        if let Ok(metadata) = manager.metadata("/overlay/test_truncate.txt") {
+            assert_eq!(metadata.size, 50, "File size should be 50 bytes after truncation");
+        }
+        
+        // Verify truncated content
+        if let Ok(kernel_obj) = manager.open("/overlay/test_truncate.txt", 0) { // O_RDONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let mut buffer = [0u8; 100];
+                if let Ok(bytes_read) = stream_ops.read(&mut buffer) {
+                    assert_eq!(bytes_read, 50, "Should read exactly 50 bytes");
+                    let content = &buffer[..bytes_read];
+                    let content_str = core::str::from_utf8(content).unwrap_or("");
+                    assert_eq!(content_str, "This is a long test content that will be used for ", 
+                              "Content should be truncated at 50 characters");
+                }
+            }
+        }
+        
+        // Phase 3: Expand file (truncate to larger size)
+        let expand_result = manager.truncate("/overlay/test_truncate.txt", 80);
+        assert!(expand_result.is_ok(), "Should be able to expand file through overlay");
+        
+        // Verify expanded file size
+        if let Ok(metadata) = manager.metadata("/overlay/test_truncate.txt") {
+            assert_eq!(metadata.size, 80, "File size should be 80 bytes after expansion");
+        }
+        
+        // Verify expanded content (should be padded with zeros)
+        if let Ok(kernel_obj) = manager.open("/overlay/test_truncate.txt", 0) { // O_RDONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let mut buffer = [0u8; 100];
+                if let Ok(bytes_read) = stream_ops.read(&mut buffer) {
+                    assert_eq!(bytes_read, 80, "Should read exactly 80 bytes");
+                    let content = &buffer[..bytes_read];
+                    
+                    // First 50 bytes should be original content
+                    let first_part = &content[..50];
+                    let first_str = core::str::from_utf8(first_part).unwrap_or("");
+                    assert_eq!(first_str, "This is a long test content that will be used for ",
+                              "First 50 bytes should be original content");
+                    
+                    // Remaining 30 bytes should be zeros
+                    let padding = &content[50..];
+                    assert!(padding.iter().all(|&b| b == 0), 
+                           "Padding bytes should all be zeros");
+                }
+            }
+        }
+        
+        // Phase 4: Truncate to zero (empty file)
+        let empty_result = manager.truncate("/overlay/test_truncate.txt", 0);
+        assert!(empty_result.is_ok(), "Should be able to truncate file to zero");
+        
+        // Verify empty file
+        if let Ok(metadata) = manager.metadata("/overlay/test_truncate.txt") {
+            assert_eq!(metadata.size, 0, "File size should be 0 bytes after truncation to zero");
+        }
+        
+        // Verify lower layer file remains unchanged
+        if let Ok(metadata) = manager.metadata("/lower/test_truncate.txt") {
+            assert_eq!(metadata.size, 100, "Lower layer file should remain 100 bytes");
+        }
+    }
+}
+
+/// Test truncation of file that exists only in upper layer
+/// 
+/// This test verifies that truncation works correctly for files that were
+/// created directly in the upper layer (no COW needed).
+#[test_case]
+pub fn test_overlay_truncate_upper_layer_file() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Create file directly in overlay (goes to upper layer)
+        let _ = manager.create_file("/overlay/upper_file.txt", FileType::RegularFile);
+        
+        // Write content to upper layer file
+        if let Ok(kernel_obj) = manager.open("/overlay/upper_file.txt", 1) { // O_WRONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let content = b"This file exists only in upper layer and will be truncated.";
+                let _ = stream_ops.write(content);
+            }
+        }
+        
+        // Verify initial file size
+        if let Ok(metadata) = manager.metadata("/overlay/upper_file.txt") {
+            assert!(metadata.size > 0, "Initial file size should be greater than 0");
+        }
+        
+        // Truncate file
+        let truncate_result = manager.truncate("/overlay/upper_file.txt", 30);
+        assert!(truncate_result.is_ok(), "Should be able to truncate upper layer file");
+        
+        // Verify truncated size
+        if let Ok(metadata) = manager.metadata("/overlay/upper_file.txt") {
+            assert_eq!(metadata.size, 30, "File size should be 30 bytes after truncation");
+        }
+        
+        // Verify file still exists only in upper layer
+        assert!(manager.open("/upper/upper_file.txt", 0).is_ok(), 
+               "File should still exist in upper layer");
+        assert!(manager.open("/lower/upper_file.txt", 0).is_err(), 
+               "File should not exist in lower layer");
+    }
+}
+
+/// Test truncation error handling
+/// 
+/// This test verifies that truncate operations return appropriate errors
+/// for non-existent files and read-only overlays.
+#[test_case]
+pub fn test_overlay_truncate_error_handling() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Test 1: Truncate on read-only overlay
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let lower_fs_id = manager.register_fs(lower_fs);
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(None, vec!["/lower"], "/readonly_overlay") {
+        // Try to truncate on read-only overlay
+        let truncate_result = manager.truncate("/readonly_overlay/nonexistent.txt", 100);
+        assert!(truncate_result.is_err(), "Should fail to truncate on read-only overlay");
+    }
+    
+    // Test 2: Truncate non-existent file on writable overlay
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    let _ = manager.mount(upper_fs_id, "/upper");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Try to truncate non-existent file
+        let truncate_result = manager.truncate("/overlay/does_not_exist.txt", 100);
+        assert!(truncate_result.is_err(), "Should fail to truncate non-existent file");
+    }
+}
+
+/// Test truncation with COW and whiteout interactions
+/// 
+/// This test verifies complex scenarios involving truncation, COW, and whiteout files.
+#[test_case]
+pub fn test_overlay_truncate_with_whiteout() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create filesystems
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
+        // Phase 1: Create file in lower layer
+        let _ = manager.create_file("/lower/whiteout_test.txt", FileType::RegularFile);
+        if let Ok(kernel_obj) = manager.open("/lower/whiteout_test.txt", 1) { // O_WRONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let content = b"This file will be removed and then recreated for truncation test.";
+                let _ = stream_ops.write(content);
+            }
+        }
+        
+        // Phase 2: Remove file through overlay (creates whiteout)
+        let remove_result = manager.remove("/overlay/whiteout_test.txt");
+        assert!(remove_result.is_ok(), "Should be able to remove file through overlay");
+        
+        // Verify file is hidden
+        assert!(manager.open("/overlay/whiteout_test.txt", 0).is_err(), 
+               "File should be hidden after removal");
+        
+        // Phase 3: Recreate file with same name
+        let _ = manager.create_file("/overlay/whiteout_test.txt", FileType::RegularFile);
+        if let Ok(kernel_obj) = manager.open("/overlay/whiteout_test.txt", 1) { // O_WRONLY
+           
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let content = b"This is the new file content after recreation and will be truncated.";
+                let _ = stream_ops.write(content);
+            }
+        }
+        
+        // Phase 4: Truncate the recreated file
+        let truncate_result = manager.truncate("/overlay/whiteout_test.txt", 25);
+        assert!(truncate_result.is_ok(), "Should be able to truncate recreated file");
+        
+        // Verify truncated content
+        if let Ok(metadata) = manager.metadata("/overlay/whiteout_test.txt") {
+            assert_eq!(metadata.size, 25, "File size should be 25 bytes after truncation");
+        }
+        
+        if let Ok(kernel_obj) = manager.open("/overlay/whiteout_test.txt", 0) { // O_RDONLY
+            if let Some(stream_ops) = kernel_obj.as_stream() {
+                let mut buffer = [0u8; 50];
+                if let Ok(bytes_read) = stream_ops.read(&mut buffer) {
+                    assert_eq!(bytes_read, 25, "Should read exactly 25 bytes");
+                    let content = &buffer[..bytes_read];
+                    let content_str = core::str::from_utf8(content).unwrap_or("");
+                    assert_eq!(content_str, "This is the new file cont",
+                              "Content should be truncated at 25 characters");
+                }
+            }
+        }
+        
+        // Verify lower layer file still exists but is hidden
+        assert!(manager.open("/lower/whiteout_test.txt", 0).is_ok(), 
+               "Lower layer file should still exist");
     }
 }
