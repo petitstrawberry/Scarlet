@@ -520,6 +520,57 @@ impl FileOperations for OverlayFS {
             message: format!("Path not found in any layer: {}", path),
         })
     }
+
+    fn truncate(&self, path: &str, size: u64) -> Result<(), FileSystemError> {
+        // If file exists only in lower layer, copy it up first
+        if self.file_exists_in_lower_only(path) {
+            self.copy_up(path)?;
+        }
+
+        // Check if file exists in upper layer first
+        if let Some(ref upper_node) = self.upper_mount_node {
+            let upper_path = Self::combine_paths(&self.upper_relative_path, path);
+            
+            if let Ok(mount_point) = upper_node.get_mount_point() {
+                if let Ok((fs, resolved_path)) = mount_point.resolve_fs(&upper_path) {
+                    let fs_guard = fs.read();
+                    if fs_guard.metadata(&resolved_path).is_ok() {
+                        // File exists in upper layer, truncate it
+                        return fs_guard.truncate(&resolved_path, size);
+                    }
+                }
+            }
+        }
+
+        // File doesn't exist in upper layer, check if it exists in lower layers
+        for (i, lower_node) in self.lower_mount_nodes.iter().enumerate() {
+            let lower_path = Self::combine_paths(&self.lower_relative_paths[i], path);
+            
+            if let Ok(mount_point) = lower_node.get_mount_point() {
+                if let Ok((fs, resolved_path)) = mount_point.resolve_fs(&lower_path) {
+                    let fs_guard = fs.read();
+                    if fs_guard.metadata(&resolved_path).is_ok() {
+                        // File exists in lower layer, copy it up and then truncate
+                        self.copy_up(path)?;
+                        
+                        // Now truncate in upper layer
+                        let (upper_node, upper_base_path) = self.get_upper_layer()?;
+                        let upper_path = Self::combine_paths(&upper_base_path, path);
+                        let upper_mount_point = upper_node.get_mount_point()?;
+                        let (upper_fs, upper_resolved_path) = upper_mount_point.resolve_fs(&upper_path)?;
+                        let upper_fs_guard = upper_fs.read();
+                        return upper_fs_guard.truncate(&upper_resolved_path, size);
+                    }
+                }
+            }
+        }
+
+        // File not found in any layer
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: format!("File not found: {}", path),
+        })
+    }
 }
 
 #[cfg(test)]
