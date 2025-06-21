@@ -8,7 +8,7 @@ use crate::task::Task;
 use crate::arch::Trapframe;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::task::ManagedPage;
-use alloc::{string::{String, ToString}, vec::Vec, boxed::Box};
+use alloc::{string::{String, ToString}, vec::Vec, boxed::Box, sync::Arc};
 use core::fmt;
 
 /// Task state backup for exec rollback
@@ -114,9 +114,9 @@ impl TransparentExecutor {
     /// 
     /// This method:
     /// 1. Backs up current task state (including trapframe) for potential rollback
-    /// 2. Analyzes the binary to detect the appropriate ABI
-    /// 3. Delegates execution to the detected ABI module
-    /// 4. Handles VFS inheritance and resource management
+    /// 2. Opens the binary file and detects the appropriate ABI
+    /// 3. Sets up VFS environment and working directory for the target ABI
+    /// 4. Delegates execution to the detected ABI module
     /// 5. Restores original state (including trapframe) on failure
     /// 
     /// # Arguments
@@ -136,63 +136,7 @@ impl TransparentExecutor {
         task: &mut Task,
         trapframe: &mut Trapframe,
     ) -> ExecutorResult<()> {
-        // Step 1: Create backup of current task state
-        let backup = TaskStateBackup::create_backup(task, trapframe);
-        
-        // Execute with error handling and restoration
-        let result = Self::execute_binary_inner(path, argv, envp, task, trapframe);
-        
-        // If execution failed, restore original state
-        if result.is_err() {
-            if let Err(restore_err) = backup.restore_to_task(task, trapframe) {
-                // Log restore error but don't override original error
-                crate::early_println!("Warning: Failed to restore task state after exec failure: {}", restore_err);
-            }
-        }
-        
-        result
-    }
-    
-    /// Internal execution implementation without state backup
-    fn execute_binary_inner(
-        path: &str,
-        argv: &[&str],
-        envp: &[&str],
-        task: &mut Task,
-        trapframe: &mut Trapframe,
-    ) -> ExecutorResult<()> {
-        // Step 1: Open binary file through unified VFS
-        let file_object = Self::open_binary_file(path, task)?;
-        
-        // Step 2: Detect ABI from binary format using file object
-        let abi_name = Self::detect_abi_from_file(&file_object, path)?;
-        
-        // Step 3: Get ABI module instance
-        let abi = crate::abi::AbiRegistry::instantiate(&abi_name)
-            .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
-
-        let abi_switch_required = if abi_name != task.abi.as_ref().unwrap().get_name() {  
-            // Step 5: Prepare VFS inheritance (extract shared VFS info)
-            // Self::prepare_vfs_inheritance(task, &abi)?;
-            
-            // Step 6: Let ABI module handle its own conversion and execution
-            abi.initialize_from_existing_handles(task)
-                .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
-            true
-        } else {
-            false
-        };
-        
-        // Step 7: Execute binary through ABI module
-        abi.execute_binary(&file_object, argv, envp, task, trapframe)
-            .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
-        
-        // Step 8: Update task's ABI
-        if abi_switch_required {
-            task.abi = Some(abi);
-        }
-        
-        Ok(())
+        Self::execute_with_optional_abi(path, argv, envp, None, task, trapframe)
     }
 
     /// Execute binary with explicit ABI specification
@@ -208,68 +152,82 @@ impl TransparentExecutor {
         task: &mut Task,
         trapframe: &mut Trapframe,
     ) -> ExecutorResult<()> {
+        Self::execute_with_optional_abi(path, argv, envp, Some(abi_name), task, trapframe)
+    }
+
+    /// Unified execution implementation with optional ABI specification
+    /// 
+    /// This method handles both automatic ABI detection and explicit ABI specification
+    /// with unified backup/restore logic and error handling.
+    fn execute_with_optional_abi(
+        path: &str,
+        argv: &[&str],
+        envp: &[&str],
+        explicit_abi: Option<&str>,
+        task: &mut Task,
+        trapframe: &mut Trapframe,
+    ) -> ExecutorResult<()> {
         // Step 1: Create backup of current task state
         let backup = TaskStateBackup::create_backup(task, trapframe);
         
-        // Execute with error handling and restoration
-        let result = Self::execute_with_abi_inner(path, argv, envp, abi_name, task, trapframe);
+        // Execute with unified error handling and restoration
+        let result = Self::execute_implementation(path, argv, envp, explicit_abi, task, trapframe);
         
         // If execution failed, restore original state
         if result.is_err() {
             if let Err(restore_err) = backup.restore_to_task(task, trapframe) {
                 // Log restore error but don't override original error
-                crate::println!("Warning: Failed to restore task state after exec failure: {}", restore_err);
+                crate::early_println!("Warning: Failed to restore task state after exec failure: {}", restore_err);
             }
         }
         
         result
     }
-    
-    /// Internal ABI-specific execution implementation without state backup
-    fn execute_with_abi_inner(
+
+    /// Core execution implementation
+    /// 
+    /// This method contains the actual execution logic without backup/restore handling.
+    fn execute_implementation(
         path: &str,
         argv: &[&str],
         envp: &[&str],
-        abi_name: &str,
+        explicit_abi: Option<&str>,
         task: &mut Task,
         trapframe: &mut Trapframe,
     ) -> ExecutorResult<()> {
-        // Step 1: Open binary file
-        let file_object = Self::open_binary_file(path, task)?;
+        // Step 1: Open binary file and determine ABI
+        let file_object = Self::open_file(path, task)?;
+        let abi_name = match explicit_abi {
+            Some(name) => name.to_string(),
+            None => Self::detect_abi(&file_object, path)?,
+        };
         
         // Step 2: Get ABI module instance
-        let abi = crate::abi::AbiRegistry::instantiate(abi_name)
-            .ok_or(ExecutorError::UnsupportedAbi(abi_name.to_string()))?;
+        let abi = crate::abi::AbiRegistry::instantiate(&abi_name)
+            .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
+
+        // Step 3: Check if ABI switch is required
+        let abi_switch_required = abi_name != task.abi.as_ref().unwrap().get_name();
         
-        // Step 3: Prepare VFS inheritance
-        // Self::prepare_vfs_inheritance(task, &abi)?;
+        if abi_switch_required {
+            // Step 4: Setup complete task environment for new ABI (includes VFS, CWD, and handle conversion)
+            Self::setup_task_environment(task, &abi)?;
+        }
         
-        // Step 4: Let ABI module handle conversion and execution
-        abi.initialize_from_existing_handles(task)
-            .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
-        
+        // Step 5: Execute binary through ABI module
         abi.execute_binary(&file_object, argv, envp, task, trapframe)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
         
-        // Step 5: Update task's ABI
-        task.abi = Some(abi);
+        // Step 6: Update task's ABI if switch occurred
+        if abi_switch_required {
+            task.abi = Some(abi);
+        }
         
         Ok(())
     }
 
-    /// Prepare VFS inheritance for exec with base+active VFS architecture
-    /// 
-    /// This extracts shared VFS information that should be inherited
-    /// across the exec boundary.
-    fn prepare_vfs_inheritance(_task: &Task) -> ExecutorResult<()> {
-        // TODO: Extract shared VFS mounts and prepare BaseVfs
-        // For now, this is a placeholder
-        Ok(())
-    }
-
-    /// Open binary file through unified VFS
-    fn open_binary_file(path: &str, task: &Task) -> ExecutorResult<crate::object::KernelObject> {
-        // Use the unified VFS for file access
+    /// Open binary file through task's VFS
+    fn open_file(path: &str, task: &Task) -> ExecutorResult<crate::object::KernelObject> {
         if let Some(vfs) = task.get_vfs() {
             vfs.open(path, 0) // O_RDONLY
                 .map_err(|_| ExecutorError::ResourceAllocationFailed)
@@ -279,11 +237,68 @@ impl TransparentExecutor {
     }
 
     /// Detect ABI from file object
-    fn detect_abi_from_file(file_object: &crate::object::KernelObject, path: &str) -> ExecutorResult<String> {
-        // Use ABI registry to detect the best ABI directly from file object
+    fn detect_abi(file_object: &crate::object::KernelObject, path: &str) -> ExecutorResult<String> {
         match crate::abi::AbiRegistry::detect_best_abi(file_object, path) {
             Some((abi_name, _confidence)) => Ok(abi_name),
             None => Err(ExecutorError::UnknownBinaryFormat),
         }
+    }
+
+    /// Setup complete task environment for target ABI
+    /// 
+    /// This method ensures the task has proper VFS, working directory, and handle conversion
+    /// for the target ABI. The TransparentExecutor is responsible for providing a clean VFS
+    /// and calling each setup step in the correct order:
+    /// 1. Provide clean VFS (create new VFS with root filesystem)
+    /// 2. Overlay environment setup (overlay filesystem infrastructure)
+    /// 3. Shared resources setup (bind mounts for shared directories)
+    fn setup_task_environment(
+        task: &mut Task, 
+        abi: &Box<dyn crate::abi::AbiModule>
+    ) -> ExecutorResult<()> {
+        // TransparentExecutor provides clean VFS for ABI environment
+        let clean_vfs = Self::create_clean_vfs()
+            .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+        
+        task.vfs = Some(clean_vfs);
+        
+        // Setup ABI-specific environment with the clean VFS
+        if let Some(ref mut vfs_arc) = task.vfs {
+            if let Some(mut_vfs) = Arc::get_mut(vfs_arc) {
+                // Step 1: Overlay environment setup (ABI-specific overlay filesystem)
+                abi.setup_overlay_environment(mut_vfs)
+                    .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+                
+                // Step 2: Shared resources setup (common directories and bind mounts)
+                abi.setup_shared_resources(mut_vfs)
+                    .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+            }
+        }
+        
+        // Set default working directory for the ABI
+        task.cwd = Some(abi.get_default_cwd().to_string());
+        
+        // Let ABI module handle conversion from previous ABI (handles, etc.)
+        abi.initialize_from_existing_handles(task)
+            .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    /// Create a clean VFS with root filesystem
+    /// 
+    /// The TransparentExecutor is responsible for providing clean VFS instances
+    /// that ABI modules can then configure with their specific requirements.
+    fn create_clean_vfs() -> Result<Arc<crate::fs::VfsManager>, &'static str> {
+        let mut vfs = crate::fs::VfsManager::new();
+        
+        // Create root filesystem (tmpfs for clean environment)
+        let params = crate::fs::params::TmpFSParams::default();
+        let rootfs_id = vfs.create_and_register_fs_with_params("tmpfs", &params)
+            .map_err(|_| "Failed to create root filesystem")?;
+        vfs.mount(rootfs_id, "/")
+            .map_err(|_| "Failed to mount root filesystem")?;
+        
+        Ok(Arc::new(vfs))
     }
 }

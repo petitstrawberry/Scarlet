@@ -37,10 +37,9 @@ fn test_vfs_inheritance_basic() {
     // Create a test file using create_file
     vfs.create_file("/home/user/test.txt", FileType::RegularFile).unwrap();
     
-    // Set VFS on task (both base and active)
+    // Set VFS on task
     let vfs_arc = Arc::new(vfs);
-    parent_task.set_base_vfs(vfs_arc.clone());
-    parent_task.set_vfs(vfs_arc);
+    parent_task.vfs = Some(vfs_arc);
     parent_task.cwd = Some("/home/user".to_string());
     
     // Record initial state  

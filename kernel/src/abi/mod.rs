@@ -93,89 +93,67 @@ pub trait AbiModule: 'static {
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str>;
-    
-    /// Setup ABI-specific VFS environment
-    /// 
-    /// This method configures the VFS with ABI-specific directory structures
-    /// and filesystem mounts. It uses the existing VfsManager bind mount
-    /// functionality to create the required environment.
-    /// 
-    /// # Arguments
-    /// * `vfs` - VfsManager to configure (should already have a root filesystem)
-    fn setup_vfs_environment(&self, _vfs: &mut crate::fs::VfsManager) -> Result<(), &'static str> {
-        // Default: Unix-compatible environment (no special setup needed)
-        Ok(())
-    }
-    
 
-    
-    /// Create initial VFS for this ABI
-    fn create_initial_vfs(&self) -> Result<alloc::sync::Arc<crate::fs::VfsManager>, &'static str> {
-        let mut vfs = crate::fs::VfsManager::new();
-        
-        // Create basic root filesystem (tmpfs)
-        let params = crate::fs::params::TmpFSParams::default();
-        let rootfs_id = vfs.create_and_register_fs_with_params("tmpfs", &params)
-            .map_err(|_| "Failed to create root filesystem")?;
-        vfs.mount(rootfs_id, "/")
-            .map_err(|_| "Failed to mount root filesystem")?;
-        
-        // Setup ABI-specific environment
-        self.setup_vfs_environment(&mut vfs)?;
-        
-        Ok(alloc::sync::Arc::new(vfs))
-    }
-    
     /// Get default working directory for this ABI
     fn get_default_cwd(&self) -> &str {
         "/" // Default: root directory
     }
-
-    /// Setup ABI-specific VFS environment
+    
+    /// Setup overlay environment for this ABI (read-only base + writable layer)
     /// 
-    /// This method takes an existing VFS as a reference and creates a new VFS
-    /// with ABI-specific bind mounts applied. In the future, this could be
-    /// implemented as actual bind mounts, but currently creates a new VFS
-    /// with the desired layout.
+    /// This creates the immutable infrastructure overlay:
+    /// - `/system/{abi}` as read-only base layer from global VFS
+    /// - `/data/config/{abi}` as writable persistence layer from global VFS
     /// 
     /// # Arguments
-    /// * `base_vfs` - The existing VFS to use as reference
-    /// 
-    /// # Returns
-    /// A new VfsManager with ABI-specific configuration applied
-    fn setup_abi_vfs(&self, base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>) -> Result<alloc::sync::Arc<crate::fs::VfsManager>, &'static str> {
-        // Default implementation: clone the base VFS without modifications
-        // ABIs can override this to add their specific bind mounts
+    /// * `vfs` - VfsManager to configure with overlay filesystem
+    fn setup_overlay_environment(&self, vfs: &mut crate::fs::VfsManager) -> Result<(), &'static str> {
+        let abi_name = self.get_name();
+        let system_path = alloc::format!("/system/{}", abi_name);
+        let config_path = alloc::format!("/data/config/{}", abi_name);
+        let global_vfs = crate::fs::get_global_vfs();
         
-        // Create a new VFS starting from the base VFS structure
-        let mut abi_vfs = crate::fs::VfsManager::new();
+        // Ensure ABI directories exist in global VFS
+        global_vfs.create_dir(&system_path).ok();
+        global_vfs.create_dir(&config_path).ok();
         
-        // Copy root filesystem from base
-        // TODO: Implement VfsManager::copy_from or similar functionality
-        // For now, create a basic filesystem
-        let params = crate::fs::params::TmpFSParams::default();
-        let rootfs_id = abi_vfs.create_and_register_fs_with_params("tmpfs", &params)
-            .map_err(|_| "Failed to create ABI VFS root filesystem")?;
-        abi_vfs.mount(rootfs_id, "/")
-            .map_err(|_| "Failed to mount ABI VFS root filesystem")?;
-        
-        // Apply ABI-specific bind mounts
-        self.apply_abi_bind_mounts(&mut abi_vfs, base_vfs)?;
-        
-        Ok(alloc::sync::Arc::new(abi_vfs))
+        // Create cross-VFS overlay mount
+        let lower_vfs_list = alloc::vec![(global_vfs, system_path.as_str())];
+        vfs.overlay_mount_from(
+            Some(global_vfs),           // upper_vfs (global VFS)
+            &config_path,               // upperdir (read-write persistent layer)
+            lower_vfs_list,             // lowerdir (read-only base system)
+            "/"                         // target mount point in task VFS
+        ).map_err(|e| {
+            crate::early_println!("Failed to create cross-VFS overlay for ABI {}: {}", abi_name, e.message);
+            "Failed to create overlay environment"
+        })
     }
     
-    /// Apply ABI-specific bind mounts to the VFS
+    /// Setup shared resources accessible across all ABIs
+    /// 
+    /// This bind mounts common directories that should be shared:
+    /// - `/home` - User home directories
+    /// - `/data/shared` - Shared application data
+    /// - `/scarlet` - Official gateway to native Scarlet environment (read-only)
     /// 
     /// # Arguments
-    /// * `abi_vfs` - The VFS to apply bind mounts to
-    /// * `base_vfs` - The base VFS to bind mount from
-    fn apply_abi_bind_mounts(&self, _abi_vfs: &mut crate::fs::VfsManager, _base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>) -> Result<(), &'static str> {
-        // Default: no ABI-specific bind mounts
-        Ok(())
+    /// * `vfs` - VfsManager to configure
+    fn setup_shared_resources(&self, vfs: &mut crate::fs::VfsManager) -> Result<(), &'static str> {
+        let global_vfs = crate::fs::get_global_vfs();
+        
+        // Bind mount shared directories
+        vfs.bind_mount_from(global_vfs, "/home", "/home", false)
+            .map_err(|_| "Failed to bind mount /home")?;
+        
+        vfs.bind_mount_from(global_vfs, "/data/shared", "/data/shared", false)
+            .map_err(|_| "Failed to bind mount /data/shared")?;
+        
+        // Setup official gateway to native Scarlet environment
+        vfs.bind_mount_from(global_vfs, "/", "/scarlet", true) // Read-only for security
+            .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
     }
 }
-
 
 /// ABI registry.
 /// 
@@ -260,7 +238,7 @@ impl AbiRegistry {
 #[macro_export]
 macro_rules! register_abi {
     ($ty:ty) => {
-        $crate::abi::AbiRegistry::register::<$ty>();
+        crate::abi::AbiRegistry::register::<$ty>();
     };
 }
 

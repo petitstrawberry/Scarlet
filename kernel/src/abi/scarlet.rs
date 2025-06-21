@@ -5,7 +5,7 @@
 //! and interacting with the Scarlet kernel.
 //! 
 
-use alloc::{boxed::Box, string::ToString, sync::Arc};
+use alloc::string::ToString;
 
 use crate::{arch::{vm, Registers, Trapframe}, early_initcall, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
 
@@ -120,36 +120,6 @@ impl AbiModule for ScarletAbi {
             },
             None => Err("Invalid file object type for binary execution"),
         }
-    }
-    
-    fn create_initial_vfs(&self) -> Result<alloc::sync::Arc<crate::fs::VfsManager>, &'static str> {
-        // Create a new VFS manager
-        let vfs = crate::fs::VfsManager::new();
-        
-        // Mount a tmpfs as the root
-        let tmpfs = Box::new(crate::fs::drivers::tmpfs::TmpFS::new(64 * 1024 * 1024)); // 64MB
-        let fs_id = vfs.register_fs(tmpfs);
-        vfs.mount(fs_id, "/").map_err(|_| "Failed to mount root filesystem")?;
-        
-        // Create standard directories
-        let standard_dirs = ["/home", "/tmp", "/etc", "/var", "/usr", "/usr/share"];
-        for dir in standard_dirs.iter() {
-            if let Err(_) = vfs.create_dir(dir) {
-                crate::println!("Warning: Failed to create directory {}", dir);
-            }
-        }
-        
-        Ok(Arc::new(vfs))
-    }
-    
-
-    
-    fn setup_vfs_environment(&self, _vfs: &mut crate::fs::VfsManager) -> Result<(), &'static str> {
-        Ok(())
-    }
-    
-    fn get_default_cwd(&self) -> &str {
-        "/"
     }
 }
 
