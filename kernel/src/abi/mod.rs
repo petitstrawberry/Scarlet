@@ -29,6 +29,9 @@ pub trait AbiModule: 'static + Send + Sync {
     fn name() -> &'static str
     where
         Self: Sized;
+
+    fn get_name(&self) -> String;
+
     fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
     
     /// Determine if a binary can be executed by this ABI
@@ -94,8 +97,70 @@ pub trait AbiModule: 'static + Send + Sync {
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str>;
-}
 
+    /// Get default working directory for this ABI
+    fn get_default_cwd(&self) -> &str {
+        "/" // Default: root directory
+    }
+    
+    /// Setup overlay environment for this ABI (read-only base + writable layer)
+    /// 
+    /// Creates overlay filesystem with provided base VFS and paths.
+    /// The TransparentExecutor is responsible for providing base_vfs, paths,
+    /// and verifying that directories exist. This method assumes that required
+    /// directories (/system/{abi}, /data/config/{abi}) have been prepared
+    /// by the user/administrator as part of system setup.
+    /// 
+    /// # Arguments
+    /// * `target_vfs` - VfsManager to configure with overlay filesystem
+    /// * `base_vfs` - Base VFS containing system and config directories
+    /// * `system_path` - Path to read-only base layer (e.g., "/system/scarlet")
+    /// * `config_path` - Path to writable persistence layer (e.g., "/data/config/scarlet")
+    fn setup_overlay_environment(
+        &self,
+        target_vfs: &mut crate::fs::VfsManager,
+        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+        system_path: &str,
+        config_path: &str,
+    ) -> Result<(), &'static str> {
+        // Create cross-VFS overlay mount with provided paths
+        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
+        target_vfs.overlay_mount_from(
+            Some(base_vfs),             // upper_vfs (base VFS)
+            config_path,                // upperdir (read-write persistent layer)
+            lower_vfs_list,             // lowerdir (read-only base system)
+            "/"                         // target mount point in task VFS
+        ).map_err(|e| {
+            crate::println!("Failed to create cross-VFS overlay for ABI: {}", e.message);
+            "Failed to create overlay environment"
+        })
+    }
+    
+    /// Setup shared resources accessible across all ABIs
+    /// 
+    /// Bind mounts common directories that should be shared from base VFS.
+    /// The TransparentExecutor is responsible for providing base_vfs.
+    /// 
+    /// # Arguments
+    /// * `target_vfs` - VfsManager to configure
+    /// * `base_vfs` - Base VFS containing shared directories
+    fn setup_shared_resources(
+        &self,
+        target_vfs: &mut crate::fs::VfsManager,
+        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+    ) -> Result<(), &'static str> {
+        // Bind mount shared directories from base VFS
+        target_vfs.bind_mount_from(base_vfs, "/home", "/home", false)
+            .map_err(|_| "Failed to bind mount /home")?;
+        
+        target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared", false)
+            .map_err(|_| "Failed to bind mount /data/shared")?;
+        
+        // Setup official gateway to native Scarlet environment
+        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet", true) // Read-only for security
+            .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
+    }
+}
 
 /// ABI registry.
 /// 
@@ -184,7 +249,7 @@ impl AbiRegistry {
 #[macro_export]
 macro_rules! register_abi {
     ($ty:ty) => {
-        $crate::abi::AbiRegistry::register::<$ty>();
+        crate::abi::AbiRegistry::register::<$ty>();
     };
 }
 

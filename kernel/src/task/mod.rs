@@ -859,6 +859,21 @@ impl Task {
             Err(WaitError::ChildTaskNotFound("Child task not found".to_string()))
         }
     }
+
+    // VFS Helper Methods
+    
+    /// Set the VFS manager
+    /// 
+    /// # Arguments
+    /// * `vfs` - The VfsManager to set as the VFS
+    pub fn set_vfs(&mut self, vfs: Arc<VfsManager>) {
+        self.vfs = Some(vfs);
+    }
+    
+    /// Get a reference to the VFS
+    pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
+        self.vfs.as_ref()
+    }
 }
 
 pub enum WaitError {

@@ -22,6 +22,7 @@ use alloc::{boxed::Box, sync::Arc};
 use super::*;
 use crate::device::block::mockblk::MockBlockDevice;
 use crate::fs::testfs::{TestFileSystem, TestFileSystemDriver};
+use crate::fs::drivers::tmpfs::TmpFS;
 use crate::task::{new_user_task, CloneFlags};
 
 // Test cases
@@ -1492,7 +1493,10 @@ fn test_bind_mount_chain_with_nested_mounts() {
     // - Host directories are bind mounted into containers
     // - Containers then create additional bind mounts for application isolation
     // - The underlying host directories may themselves contain nested mount points
-    // This ensures the VFS can handle arbitrarily complex mount topologies.
+    // - Multiple levels of indirection are needed for security and organization
+    // 
+    // This ensures the VFS can handle production container environments with complex
+    // mount topologies spanning multiple filesystem namespaces.
 }
 
 #[test_case]
@@ -1588,7 +1592,6 @@ fn test_cross_vfs_bind_mount_chain_with_nested_mounts() {
     // 2. Handle nested mounts within cross-VFS bind mounts
     // 3. Maintain proper bind mount chains across VFS boundaries
     // 4. Correctly resolve complex mount hierarchies through multiple redirection levels
-    // 5. Preserve filesystem semantics through the entire cross-VFS resolution chain
     // 
     // Such scenarios are common in container orchestration where:
     // - Host directories with complex mount structures are shared into containers
@@ -1598,4 +1601,132 @@ fn test_cross_vfs_bind_mount_chain_with_nested_mounts() {
     // 
     // This ensures the VFS can handle production container environments with complex
     // mount topologies spanning multiple filesystem namespaces.
+}
+
+// Comprehensive tests for truncate functionality using TmpFS
+#[test_case]
+fn test_truncate_file() {
+    let manager = VfsManager::new();
+    let tmpfs = Box::new(TmpFS::new(1024 * 1024)); // 1MB limit
+    
+    let fs_id = manager.register_fs(tmpfs);
+    let _ = manager.mount(fs_id, "/tmp");
+    
+    // Create a file and write some data
+    manager.create_file("/tmp/test.txt", FileType::RegularFile).unwrap();
+    let kernel_obj = manager.open("/tmp/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
+    
+    let test_data = b"Hello, World! This is a long text for testing truncate.";
+    file.write(test_data).unwrap();
+    
+    // Test 1: Truncate to smaller size
+    file.truncate(5).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut buffer = [0u8; 10];
+    let bytes_read = file.read(&mut buffer).unwrap();
+    assert_eq!(bytes_read, 5);
+    assert_eq!(&buffer[..5], b"Hello");
+    
+    // Test 2: Truncate to larger size (should pad with zeros)
+    file.truncate(10).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut buffer = [0u8; 15];
+    let bytes_read = file.read(&mut buffer).unwrap();
+    assert_eq!(bytes_read, 10);
+    assert_eq!(&buffer[..5], b"Hello");
+    assert_eq!(&buffer[5..10], &[0u8; 5]);
+    
+    // Test 3: Truncate to zero (empty file)
+    file.truncate(0).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut buffer = [0u8; 10];
+    let bytes_read = file.read(&mut buffer).unwrap();
+    assert_eq!(bytes_read, 0);
+    
+    // Test 4: Write after truncate
+    file.write(b"New content").unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut buffer = [0u8; 15];
+    let bytes_read = file.read(&mut buffer).unwrap();
+    assert_eq!(bytes_read, 11);
+    assert_eq!(&buffer[..11], b"New content");
+}
+
+#[test_case]
+fn test_truncate_via_vfs_manager() {
+    let manager = VfsManager::new();
+    let tmpfs = Box::new(TmpFS::new(1024 * 1024)); // 1MB limit
+    
+    let fs_id = manager.register_fs(tmpfs);
+    let _ = manager.mount(fs_id, "/tmp");
+    
+    // Create a file with data using VFS manager
+    manager.create_file("/tmp/test.txt", FileType::RegularFile).unwrap();
+    let kernel_obj = manager.open("/tmp/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
+    file.write(b"Initial content for VFS truncate test").unwrap();
+    
+    // Test truncate via VFS manager
+    let result = manager.truncate("/tmp/test.txt", 7);
+    assert!(result.is_ok());
+    
+    // Verify truncation worked
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut buffer = [0u8; 20];
+    let bytes_read = file.read(&mut buffer).unwrap();
+    assert_eq!(bytes_read, 7);
+    assert_eq!(&buffer[..7], b"Initial");
+}
+
+#[test_case]
+fn test_truncate_error_cases() {
+    let manager = VfsManager::new();
+    let tmpfs = Box::new(TmpFS::new(1024 * 1024)); // 1MB limit
+    
+    let fs_id = manager.register_fs(tmpfs);
+    let _ = manager.mount(fs_id, "/tmp");
+    
+    // Test 1: Truncate non-existent file
+    let result = manager.truncate("/tmp/nonexistent.txt", 10);
+    assert!(result.is_err());
+    
+    // Test 2: Truncate directory (should fail)
+    manager.create_dir("/tmp/testdir").unwrap();
+    let result = manager.truncate("/tmp/testdir", 10);
+    assert!(result.is_err());
+    
+    // Test 3: Truncate with invalid path
+    let result = manager.truncate("/invalid/path/file.txt", 10);
+    assert!(result.is_err());
+}
+
+#[test_case]
+fn test_truncate_position_adjustment() {
+    let manager = VfsManager::new();
+    let tmpfs = Box::new(TmpFS::new(1024 * 1024)); // 1MB limit
+    
+    let fs_id = manager.register_fs(tmpfs);
+    let _ = manager.mount(fs_id, "/tmp");
+    
+    // Create a file and write some data
+    manager.create_file("/tmp/test.txt", FileType::RegularFile).unwrap();
+    let kernel_obj = manager.open("/tmp/test.txt", 0).unwrap();
+    let file = kernel_obj.as_file().unwrap();
+    
+    // Write some data and seek to middle
+    file.write(b"0123456789").unwrap();
+    file.seek(SeekFrom::Start(7)).unwrap();
+    
+    // Truncate to size smaller than current position
+    file.truncate(5).unwrap();
+    
+    // Position should be adjusted to the new end of file
+    let pos = file.seek(SeekFrom::Current(0)).unwrap();
+    assert_eq!(pos, 5);
+    
+    // Verify we can't read beyond the truncated size
+    let mut buffer = [0u8; 10];
+    let bytes_read = file.read(&mut buffer).unwrap();
+    assert_eq!(bytes_read, 0);
 }

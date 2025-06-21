@@ -208,6 +208,8 @@ use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 
+use crate::fs::{get_global_vfs, init_global_vfs};
+
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -280,16 +282,20 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     get_kernel_timer().init();
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
+    /* Initialize global VFS */
+    println!("[Scarlet Kernel] Initializing global VFS...");
+    init_global_vfs().expect("Failed to initialize global VFS");
     /* Initialize initramfs */
     println!("[Scarlet Kernel] Initializing initramfs...");
-    let mut manager = VfsManager::new();
-    init_initramfs(&mut manager);
+    let manager = get_global_vfs();
+    init_initramfs(manager);
     /* Make init task */
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
-    task.vfs = Some(Arc::new(manager));
+    let manager_arc = manager.clone();
+    task.vfs = Some(manager_arc);
     task.cwd = Some("/".to_string());
     let file_obj = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
         Ok(kernel_obj) => kernel_obj,

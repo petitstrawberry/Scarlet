@@ -19,6 +19,10 @@ impl AbiModule for ScarletAbi {
         "scarlet"
     }
 
+    fn get_name(&self) -> alloc::string::String {
+        Self::name().to_string()
+    }
+
     fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
         syscall_handler(trapframe)
     }
@@ -109,7 +113,7 @@ impl AbiModule for ScarletAbi {
                     },
                     Err(e) => {
                         // エラーの詳細をログに出力
-                        crate::early_println!("ELF loading failed: {}", e.message);
+                        crate::println!("ELF loading failed: {}", e.message);
                         Err("Failed to load ELF binary")
                     }
                 }

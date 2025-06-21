@@ -9,6 +9,8 @@
 
 use core::ptr;
 
+use alloc::sync::Arc;
+
 use crate::device::fdt::FdtManager;
 use crate::fs::VfsManager;
 use crate::early_println;
@@ -67,12 +69,12 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
 /// and mounts it at the root ("/") mount point.
 ///
 /// # Arguments
-/// * `manager` - A mutable reference to the VFS manager. 
+/// * `manager` - A reference to the VFS manager.
 /// * `initramfs` - The memory area of the initramfs.
 ///
 /// # Returns
 /// Result<(), FileSystemError>: Ok if mounting was successful, Err otherwise.
-fn mount_initramfs(manager: &mut VfsManager, initramfs: MemoryArea) -> Result<(), FileSystemError> {
+fn mount_initramfs(manager: &Arc<VfsManager>, initramfs: MemoryArea) -> Result<(), FileSystemError> {
     early_println!("[InitRamFS] Initializing initramfs");
     
     early_println!("[InitRamFS] Using initramfs at address: {:#x}, size: {} bytes", 
@@ -95,7 +97,7 @@ fn mount_initramfs(manager: &mut VfsManager, initramfs: MemoryArea) -> Result<()
 }
 
 #[allow(static_mut_refs)]
-pub fn init_initramfs(manager: &mut VfsManager) {
+pub fn init_initramfs(manager: &Arc<VfsManager>) {
     let initramfs_ptr = unsafe { INITRAMFS_AREA.as_ref().map(|area| area.start as *const u8).unwrap_or(core::ptr::null()) };
     if !initramfs_ptr.is_null() {
         let initramfs = unsafe { *INITRAMFS_AREA.as_ref().unwrap() };
