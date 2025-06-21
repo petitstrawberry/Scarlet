@@ -314,15 +314,7 @@ impl TransparentExecutor {
     /// The TransparentExecutor is responsible for providing clean VFS instances
     /// that ABI modules can then configure with their specific requirements.
     fn create_clean_vfs() -> Result<Arc<crate::fs::VfsManager>, &'static str> {
-        let mut vfs = crate::fs::VfsManager::new();
-        
-        // Create root filesystem (tmpfs for clean environment)
-        let params = crate::fs::params::TmpFSParams::default();
-        let rootfs_id = vfs.create_and_register_fs_with_params("tmpfs", &params)
-            .map_err(|_| "Failed to create root filesystem")?;
-        vfs.mount(rootfs_id, "/")
-            .map_err(|_| "Failed to mount root filesystem")?;
-        
+        let vfs = crate::fs::VfsManager::new();
         Ok(Arc::new(vfs))
     }
 }
