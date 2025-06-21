@@ -431,11 +431,6 @@ impl FileOperations for OverlayFS {
         
         let fs_guard = upper_fs.read();
 
-        let entries = fs_guard.read_dir(&upper_base_path)?;
-        for entry in entries {
-            crate::println!("Entry in upper layer: {}", entry.name);
-        }
-
         fs_guard.create_file(&resolved_path, file_type)
     }
 
