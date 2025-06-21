@@ -62,19 +62,27 @@ pub struct Task {
 
     /// Virtual File System Manager
     /// 
-    /// This is the unified VFS used for all filesystem operations. It contains:
-    /// 1. Base filesystem hierarchy (common across all ABIs)
-    /// 2. ABI-specific bind mounts overlaid on top
+    /// Each task can have its own isolated VfsManager instance for containerization
+    /// and namespace isolation. The VfsManager provides:
     /// 
-    /// During ABI transitions:
-    /// 1. Start with base VFS (shared filesystem)
-    /// 2. Apply ABI-specific bind mounts (e.g., /lib -> /lib/abi-name)
-    /// 3. Result is a unified VFS tree with proper precedence
+    /// - **Filesystem Isolation**: Independent mount point namespaces allowing
+    ///   complete filesystem isolation between tasks or containers
+    /// - **Selective Sharing**: Arc-based filesystem object sharing enables
+    ///   controlled resource sharing while maintaining namespace independence
+    /// - **Bind Mount Support**: Advanced bind mount capabilities for flexible
+    ///   directory mapping and container orchestration scenarios
+    /// - **Security**: Path normalization and validation preventing directory
+    ///   traversal attacks and unauthorized filesystem access
     /// 
-    /// Path resolution is straightforward:
-    /// - /etc/foo -> checks ABI-specific bind mount first
-    /// - If not found, falls back to base filesystem
-    /// - Single VFS tree handles everything transparently
+    /// # Usage Patterns
+    /// 
+    /// - `None`: Task uses global filesystem namespace (traditional Unix-like behavior)
+    /// - `Some(Arc<VfsManager>)`: Task has isolated filesystem namespace (container-like behavior)
+    /// 
+    /// # Thread Safety
+    /// 
+    /// VfsManager is thread-safe and can be shared between tasks using Arc.
+    /// All internal operations use RwLock for concurrent access protection.
     pub vfs: Option<Arc<VfsManager>>,
 
     // KernelObject table
@@ -775,15 +783,15 @@ impl Task {
         }
         
         if flags.is_set(CloneFlagsDef::Fs) {
-            // Clone the VFS manager (unified VFS architecture)
+            // Clone the filesystem manager
             if let Some(vfs) = &self.vfs {
                 child.vfs = Some(vfs.clone());
+                // Copy the current working directory
+                child.cwd = self.cwd.clone();
             } else {
                 child.vfs = None;
+                child.cwd = None; // No filesystem manager, no current working directory
             }
-            
-            // Copy the current working directory
-            child.cwd = self.cwd.clone();
         }
 
         // Set the state to Ready
@@ -847,7 +855,7 @@ impl Task {
 
     // VFS Helper Methods
     
-    /// Set the VFS manager (unified VFS architecture)
+    /// Set the VFS manager
     /// 
     /// # Arguments
     /// * `vfs` - The VfsManager to set as the VFS
@@ -855,12 +863,10 @@ impl Task {
         self.vfs = Some(vfs);
     }
     
-    /// Get a reference to the VFS (unified filesystem)
+    /// Get a reference to the VFS
     pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
         self.vfs.as_ref()
     }
-
-    // ...existing methods...
 }
 
 pub enum WaitError {
@@ -1013,7 +1019,7 @@ mod tests {
         assert_eq!(child_task.stack_size, parent_task.stack_size);
         assert_eq!(child_task.data_size, parent_task.data_size);
         assert_eq!(child_task.text_size, parent_task.text_size);
-        
+
         // Find the corresponding memory map in child that matches our test allocation
         let child_memmaps = child_task.vm_manager.get_memmap();
         let child_mmap = child_memmaps.iter()
