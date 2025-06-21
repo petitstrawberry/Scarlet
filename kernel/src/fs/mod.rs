@@ -933,6 +933,44 @@ pub enum ManagerRef<'a> {
 /// All internal data structures use RwLock for thread-safe concurrent access.
 /// VfsManager can be shared between threads using Arc for cases requiring
 /// shared filesystem access across multiple tasks.
+
+/// Global VFS manager instance for system-wide filesystem operations
+/// 
+/// This provides a unified namespace for:
+/// - System directories (`/system/{abi}/`)
+/// - Configuration data (`/data/config/{abi}/`)
+/// - Shared resources that span across all ABIs
+/// 
+/// ABI modules use cross-VFS operations to overlay/bind mount from global_vfs
+/// into their task-specific VFS instances.
+static GLOBAL_VFS: spin::Once<Arc<VfsManager>> = spin::Once::new();
+
+/// Initialize the global VFS with system directories
+/// 
+/// This should be called during kernel initialization to set up the system-wide
+/// filesystem structure before any ABIs or tasks are created.
+pub fn init_global_vfs() -> Result<(), FileSystemError> {
+    let global_vfs = VfsManager::new();
+    // Initialize the global singleton
+    GLOBAL_VFS.call_once(|| Arc::new(global_vfs));
+    
+    Ok(())
+}
+
+/// Get reference to the global VFS instance
+/// 
+/// Returns the system-wide VFS manager that contains:
+/// - System image directories (`/system/{abi}/`)
+/// - Configuration overlay directories (`/data/config/{abi}/`)
+/// - Shared directories accessible to all ABIs
+/// 
+/// # Panics
+/// 
+/// Panics if called before `init_global_vfs()` has been called.
+pub fn get_global_vfs() -> &'static Arc<VfsManager> {
+    GLOBAL_VFS.get().expect("Global VFS not initialized - call init_global_vfs() first")
+}
+
 pub struct VfsManager {
     filesystems: RwLock<BTreeMap<usize, FileSystemRef>>,
     mount_tree: RwLock<MountTree>,

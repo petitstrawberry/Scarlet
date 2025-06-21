@@ -60,16 +60,6 @@ pub struct Task {
     // Current working directory
     pub cwd: Option<String>,
 
-    /// Base Virtual File System Manager (Clean Base)
-    /// 
-    /// This contains the pure, unmodified filesystem shared across ABI transitions.
-    /// It serves as the foundation for all ABI-specific VFS configurations and is
-    /// preserved during exec() calls to maintain consistency across ABI boundaries.
-    /// 
-    /// This VFS contains only shared resources like user data directories, system
-    /// configurations, and mounted filesystems, without any ABI-specific bind mounts.
-    pub base_vfs: Option<Arc<VfsManager>>,
-
     /// Virtual File System Manager
     /// 
     /// This is the unified VFS used for all filesystem operations. It contains:
@@ -171,7 +161,6 @@ impl Task {
             exit_status: None,
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             cwd: None,
-            base_vfs: None,
             vfs: None,
             handle_table: HandleTable::new(),
         };
@@ -786,16 +775,7 @@ impl Task {
         }
         
         if flags.is_set(CloneFlagsDef::Fs) {
-            // Clone the filesystem managers
-            // Base VFS contains the clean filesystem without ABI-specific bind mounts
-            if let Some(base_vfs) = &self.base_vfs {
-                child.base_vfs = Some(base_vfs.clone());
-            } else {
-                child.base_vfs = None;
-            }
-            
-            // Active VFS is inherited for fork() and will be reconstructed during exec()
-            // with new ABI-specific bind mounts applied to base_vfs
+            // Clone the VFS manager (unified VFS architecture)
             if let Some(vfs) = &self.vfs {
                 child.vfs = Some(vfs.clone());
             } else {
@@ -867,28 +847,15 @@ impl Task {
 
     // VFS Helper Methods
     
-    /// Set the base VFS manager (clean filesystem without ABI bind mounts)
+    /// Set the VFS manager (unified VFS architecture)
     /// 
     /// # Arguments
-    /// * `vfs` - The VfsManager to set as the base VFS
-    pub fn set_base_vfs(&mut self, vfs: Arc<VfsManager>) {
-        self.base_vfs = Some(vfs);
-    }
-    
-    /// Set the active VFS manager (with ABI-specific bind mounts)
-    /// 
-    /// # Arguments
-    /// * `vfs` - The VfsManager to set as the active VFS
+    /// * `vfs` - The VfsManager to set as the VFS
     pub fn set_vfs(&mut self, vfs: Arc<VfsManager>) {
         self.vfs = Some(vfs);
     }
     
-    /// Get a reference to the base VFS (clean filesystem)
-    pub fn get_base_vfs(&self) -> Option<&Arc<VfsManager>> {
-        self.base_vfs.as_ref()
-    }
-    
-    /// Get a reference to the active VFS (with ABI bind mounts)
+    /// Get a reference to the VFS (unified filesystem)
     pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
         self.vfs.as_ref()
     }
