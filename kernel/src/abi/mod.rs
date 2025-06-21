@@ -101,56 +101,59 @@ pub trait AbiModule: 'static {
     
     /// Setup overlay environment for this ABI (read-only base + writable layer)
     /// 
-    /// This creates the immutable infrastructure overlay:
-    /// - `/system/{abi}` as read-only base layer from global VFS
-    /// - `/data/config/{abi}` as writable persistence layer from global VFS
+    /// Creates overlay filesystem with provided base VFS and paths.
+    /// The TransparentExecutor is responsible for providing base_vfs, paths,
+    /// and verifying that directories exist. This method assumes that required
+    /// directories (/system/{abi}, /data/config/{abi}) have been prepared
+    /// by the user/administrator as part of system setup.
     /// 
     /// # Arguments
-    /// * `vfs` - VfsManager to configure with overlay filesystem
-    fn setup_overlay_environment(&self, vfs: &mut crate::fs::VfsManager) -> Result<(), &'static str> {
-        let abi_name = self.get_name();
-        let system_path = alloc::format!("/system/{}", abi_name);
-        let config_path = alloc::format!("/data/config/{}", abi_name);
-        let global_vfs = crate::fs::get_global_vfs();
-        
-        // Ensure ABI directories exist in global VFS
-        global_vfs.create_dir(&system_path).ok();
-        global_vfs.create_dir(&config_path).ok();
-        
-        // Create cross-VFS overlay mount
-        let lower_vfs_list = alloc::vec![(global_vfs, system_path.as_str())];
-        vfs.overlay_mount_from(
-            Some(global_vfs),           // upper_vfs (global VFS)
-            &config_path,               // upperdir (read-write persistent layer)
+    /// * `target_vfs` - VfsManager to configure with overlay filesystem
+    /// * `base_vfs` - Base VFS containing system and config directories
+    /// * `system_path` - Path to read-only base layer (e.g., "/system/scarlet")
+    /// * `config_path` - Path to writable persistence layer (e.g., "/data/config/scarlet")
+    fn setup_overlay_environment(
+        &self,
+        target_vfs: &mut crate::fs::VfsManager,
+        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+        system_path: &str,
+        config_path: &str,
+    ) -> Result<(), &'static str> {
+        // Create cross-VFS overlay mount with provided paths
+        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
+        target_vfs.overlay_mount_from(
+            Some(base_vfs),             // upper_vfs (base VFS)
+            config_path,                // upperdir (read-write persistent layer)
             lower_vfs_list,             // lowerdir (read-only base system)
             "/"                         // target mount point in task VFS
         ).map_err(|e| {
-            crate::early_println!("Failed to create cross-VFS overlay for ABI {}: {}", abi_name, e.message);
+            crate::println!("Failed to create cross-VFS overlay for ABI: {}", e.message);
             "Failed to create overlay environment"
         })
     }
     
     /// Setup shared resources accessible across all ABIs
     /// 
-    /// This bind mounts common directories that should be shared:
-    /// - `/home` - User home directories
-    /// - `/data/shared` - Shared application data
-    /// - `/scarlet` - Official gateway to native Scarlet environment (read-only)
+    /// Bind mounts common directories that should be shared from base VFS.
+    /// The TransparentExecutor is responsible for providing base_vfs.
     /// 
     /// # Arguments
-    /// * `vfs` - VfsManager to configure
-    fn setup_shared_resources(&self, vfs: &mut crate::fs::VfsManager) -> Result<(), &'static str> {
-        let global_vfs = crate::fs::get_global_vfs();
-        
-        // Bind mount shared directories
-        vfs.bind_mount_from(global_vfs, "/home", "/home", false)
+    /// * `target_vfs` - VfsManager to configure
+    /// * `base_vfs` - Base VFS containing shared directories
+    fn setup_shared_resources(
+        &self,
+        target_vfs: &mut crate::fs::VfsManager,
+        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+    ) -> Result<(), &'static str> {
+        // Bind mount shared directories from base VFS
+        target_vfs.bind_mount_from(base_vfs, "/home", "/home", false)
             .map_err(|_| "Failed to bind mount /home")?;
         
-        vfs.bind_mount_from(global_vfs, "/data/shared", "/data/shared", false)
+        target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared", false)
             .map_err(|_| "Failed to bind mount /data/shared")?;
         
         // Setup official gateway to native Scarlet environment
-        vfs.bind_mount_from(global_vfs, "/", "/scarlet", true) // Read-only for security
+        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet", true) // Read-only for security
             .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
     }
 }

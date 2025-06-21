@@ -247,11 +247,13 @@ impl TransparentExecutor {
     /// Setup complete task environment for target ABI
     /// 
     /// This method ensures the task has proper VFS, working directory, and handle conversion
-    /// for the target ABI. The TransparentExecutor is responsible for providing a clean VFS
-    /// and calling each setup step in the correct order:
-    /// 1. Provide clean VFS (create new VFS with root filesystem)
-    /// 2. Overlay environment setup (overlay filesystem infrastructure)
-    /// 3. Shared resources setup (bind mounts for shared directories)
+    /// for the target ABI. The TransparentExecutor is responsible for:
+    /// 1. Providing clean VFS and base VFS references
+    /// 2. Verifying that ABI directories exist in base VFS (user should prepare them)
+    /// 3. Calling ABI setup methods with proper parameters
+    /// 
+    /// Design principle: ABI directories (/system/{abi}, /data/config/{abi}) should be
+    /// prepared by the user/administrator beforehand as part of system setup.
     fn setup_task_environment(
         task: &mut Task, 
         abi: &Box<dyn crate::abi::AbiModule>
@@ -262,15 +264,37 @@ impl TransparentExecutor {
         
         task.vfs = Some(clean_vfs);
         
+        // Get base VFS (global VFS) for overlay and shared resources
+        let base_vfs = crate::fs::get_global_vfs();
+        
+        // Prepare ABI-specific directories in base VFS
+        let abi_name = abi.get_name();
+        let system_path = alloc::format!("/system/{}", abi_name);
+        let config_path = alloc::format!("/data/config/{}", abi_name);
+        
+        // Verify that ABI directories already exist in base VFS
+        // User should have prepared the environment beforehand
+        if base_vfs.metadata(&system_path).is_err() {
+            return Err(ExecutorError::ExecutionFailed(
+                alloc::format!("System directory /system/{} does not exist - please prepare ABI environment first", abi_name)
+            ));
+        }
+        
+        if base_vfs.metadata(&config_path).is_err() {
+            return Err(ExecutorError::ExecutionFailed(
+                alloc::format!("Config directory /data/config/{} does not exist - please prepare ABI environment first", abi_name)
+            ));
+        }
+        
         // Setup ABI-specific environment with the clean VFS
         if let Some(ref mut vfs_arc) = task.vfs {
             if let Some(mut_vfs) = Arc::get_mut(vfs_arc) {
-                // Step 1: Overlay environment setup (ABI-specific overlay filesystem)
-                abi.setup_overlay_environment(mut_vfs)
+                // Step 1: Overlay environment setup with prepared paths
+                abi.setup_overlay_environment(mut_vfs, &base_vfs, &system_path, &config_path)
                     .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
                 
-                // Step 2: Shared resources setup (common directories and bind mounts)
-                abi.setup_shared_resources(mut_vfs)
+                // Step 2: Shared resources setup with base VFS
+                abi.setup_shared_resources(mut_vfs, &base_vfs)
                     .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
             }
         }
