@@ -1,6 +1,6 @@
 use alloc::{string::String, vec::Vec, string::ToString, sync::Arc};
 
-use crate::{arch::Trapframe, library::std::string::cstring_to_string, task::mytask};
+use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_string, task::mytask};
 
 use super::{SeekFrom, VfsManager, MAX_PATH_LENGTH};
 
@@ -218,6 +218,59 @@ pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
     
     let file = file.unwrap();
     match file.truncate(length) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX, // -1
+    }
+}
+
+pub fn sys_mkfile(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let mode = trapframe.get_arg(1) as i32;
+
+    trapframe.increment_pc_next(task);
+
+    // Convert path bytes to string
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match VfsManager::to_absolute_path(&task, &s) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+
+    match vfs.create_file(&path_str, FileType::RegularFile) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX, // -1
+    }
+}
+
+pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    
+    trapframe.increment_pc_next(task);
+
+    // Convert path bytes to string
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match VfsManager::to_absolute_path(&task, &s) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+    
+    match vfs.create_dir(&path_str) {
         Ok(_) => 0,
         Err(_) => usize::MAX, // -1
     }

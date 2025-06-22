@@ -97,6 +97,46 @@ pub fn lseek(fd: i32, offset: i64, whence: u32) -> i32 {
     res as i32
 }
 
+/// Create a new file
+/// 
+/// This function creates a new file at the specified path with the given mode.
+/// 
+/// # Arguments
+/// * `path` - Path to the file to create
+/// * `mode` - Permissions for the new file (e.g., 0o644)
+/// 
+/// # Return Value
+/// * `0` on success, `-1` on error
+/// 
+pub fn mkfile(path: &str, mode: u32) -> i32 {
+    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let res = syscall2(Syscall::Mkfile, path_ptr, mode as usize);
+    // Free the allocated memory
+    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) };
+    // Return the result of the syscall
+    res as i32
+}
+
+/// Create a directory
+/// 
+/// This function creates a new directory at the specified path with the given mode.
+/// 
+/// # Arguments
+/// * `path` - Path to the directory to create
+/// * `mode` - Permissions for the new directory (e.g., 0o755)
+/// 
+/// # Return Value
+/// * `0` on success, `-1` on error
+/// 
+pub fn mkdir(path: &str, mode: u32) -> i32 {
+    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let res = syscall2(Syscall::Mkdir, path_ptr, mode as usize);
+    // Free the allocated memory
+    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) };
+    // Return the result of the syscall
+    res as i32
+}
+
 /// Mount a filesystem
 /// 
 /// This function provides a POSIX-like mount interface that internally uses

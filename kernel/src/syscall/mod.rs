@@ -13,7 +13,7 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::fs::syscall::{sys_close, sys_ftruncate, sys_lseek, sys_mount, sys_open, sys_pivot_root, sys_read, sys_truncate, sys_umount, sys_write};
+use crate::fs::syscall::{sys_close, sys_ftruncate, sys_lseek, sys_mkdir, sys_mkfile, sys_mount, sys_open, sys_pivot_root, sys_read, sys_truncate, sys_umount, sys_write};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
 
 #[macro_use]
@@ -44,7 +44,10 @@ syscall_table! {
     Ftruncate = 25 => sys_ftruncate,
     Truncate = 26 => sys_truncate,
     // Filesystem operations
-    Mount = 30 => sys_mount,
-    Umount = 31 => sys_umount,
-    PivotRoot = 32 => sys_pivot_root,
+    Mkfile = 30 => sys_mkfile,
+    Mkdir = 31 => sys_mkdir,
+    // Mount operations
+    Mount = 32 => sys_mount,
+    Umount = 33 => sys_umount,
+    PivotRoot = 34 => sys_pivot_root,
 }
