@@ -24,10 +24,13 @@ pub enum Syscall {
     Lseek = 24,
     Ftruncate = 25,
     Truncate = 26,
+    // Filesystem operations
+    Mkfile = 30,
+    Mkdir = 31,
     // Mount operations
-    Mount = 30,
-    Umount = 31,
-    PivotRoot = 32,
+    Mount = 32,
+    Umount = 33,
+    PivotRoot = 34,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
