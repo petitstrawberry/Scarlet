@@ -451,7 +451,9 @@ fn create_pivoted_vfs(
     new_vfs.bind_mount_from(current_vfs, new_root_path, "/", false)?;
 
     // Convert old_root_path to old_root_path in the new VFS
-    let old_root_path = if old_root_path.starts_with(new_root_path) {
+    let old_root_path = if old_root_path == new_root_path {
+        return Err(super::FileSystemError::InvalidPath); // Handle identical paths explicitly
+    } else if old_root_path.starts_with(new_root_path) {
         &old_root_path[new_root_path.len()..]
     } else {
         old_root_path
