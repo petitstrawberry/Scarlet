@@ -112,7 +112,7 @@ impl AbiModule for ScarletAbi {
                         Ok(())
                     },
                     Err(e) => {
-                        // エラーの詳細をログに出力
+                        // Log error details
                         crate::println!("ELF loading failed: {}", e.message);
                         Err("Failed to load ELF binary")
                     }

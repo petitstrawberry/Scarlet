@@ -469,3 +469,9 @@ fn create_pivoted_vfs(
 
     Ok(Arc::new(new_vfs))
 }
+
+pub fn sys_readdir(trapframe: &mut Trapframe) -> usize {
+    // sys_readdir is actually the same implementation as sys_read
+    // Reading from a directory file automatically returns directory entries
+    sys_read(trapframe)
+}

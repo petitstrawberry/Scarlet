@@ -18,7 +18,7 @@ pub struct TestFileSystem {
     mounted: bool,
     mount_point: String,
     // Simulate a simple directory structure
-    directories: Mutex<Vec<(String, Vec<DirectoryEntry>)>>,
+    directories: Mutex<Vec<(String, Vec<DirectoryEntryInternal>)>>,
     // File ID management for hardlink support
     next_file_id: Mutex<u64>,
     file_data_table: Mutex<BTreeMap<u64, FileData>>,
@@ -40,14 +40,14 @@ impl TestFileSystem {
         dirs.push((
             "/".to_string(),
             vec![
-                DirectoryEntry {
+                DirectoryEntryInternal {
                     name: "test.txt".to_string(),
                     file_type: FileType::RegularFile,
                     size: 10,
                     file_id: 1,
                     metadata: None,
                 },
-                DirectoryEntry {
+                DirectoryEntryInternal {
                     name: "testdir".to_string(),
                     file_type: FileType::Directory,
                     size: 0,
@@ -96,7 +96,7 @@ impl TestFileSystem {
     }
     
     // Helper method for directory search
-    fn find_directory(&self, path: &str) -> Option<Vec<DirectoryEntry>> {
+    fn find_directory(&self, path: &str) -> Option<Vec<DirectoryEntryInternal>> {
         let normalized = self.normalize_path(path);
         for (dir_path, entries) in self.directories.lock().iter() {
             if *dir_path == normalized {
@@ -330,10 +330,6 @@ fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         Ok(*position)
     }
 
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
-        Err(StreamError::NotSupported)
-    }    
-
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
@@ -426,7 +422,7 @@ impl FileOperations for TestFileSystem {
         })
     }
     
-    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
+    fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         let normalized = self.normalize_path(path);
     
         // First check if the path is a file
@@ -475,7 +471,7 @@ impl FileOperations for TestFileSystem {
                 }
                 
                 // Add the new file to the entries with specified type
-                entries.push(DirectoryEntry {
+                entries.push(DirectoryEntryInternal {
                     name: file_name.to_string(),
                     file_type,
                     size: 0,
@@ -528,7 +524,7 @@ impl FileOperations for TestFileSystem {
                 }
                 
                 // Add the new directory to the entries
-                entries.push(DirectoryEntry {
+                entries.push(DirectoryEntryInternal {
                     name: dir_name.to_string(),
                     file_type: FileType::Directory,
                     size: 0,

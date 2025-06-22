@@ -1,6 +1,7 @@
 use crate::utils::str_to_cstr_bytes;
 use crate::boxed::Box;
 use crate::syscall::{syscall2, syscall3, syscall5, Syscall};
+use crate::string::String;
 
 // Mount flags (similar to Linux mount flags)
 pub const MS_RDONLY: u32 = 1;        // Mount read-only
@@ -310,4 +311,103 @@ pub fn pivot_root(new_root: &str, old_root: &str) -> i32 {
     let _ = unsafe { Box::from_raw(old_root_ptr as *mut u8) };
     
     res as i32
+}
+
+/// Read directory entries.
+/// 
+/// This is equivalent to calling read() on a directory file descriptor.
+/// Each read() call returns one directory entry in binary format.
+/// 
+/// # Arguments
+/// * `fd` - File descriptor of an opened directory
+/// * `buf` - Buffer to store directory entry
+/// * `count` - Size of the buffer (should be at least 280 bytes for safety)
+/// 
+/// # Return Value
+/// - On success: number of bytes read (size of one directory entry)
+/// - On error: -1
+/// - On EOF: 0
+/// 
+/// # Directory Entry Format
+/// Each entry has the following format:
+/// - file_id (8 bytes, little-endian)
+/// - size (8 bytes, little-endian)
+/// - file_type (1 byte)
+/// - name_length (1 byte)
+/// - name (name_length bytes)
+/// 
+pub fn readdir(fd: i32, buf: &mut [u8]) -> i32 {
+    // readdir is now just a wrapper around read() for directory files
+    read(fd, buf)
+}
+
+/// Directory entry structure (must match kernel definition)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DirectoryEntry {
+    /// Unique file identifier
+    pub file_id: u64,
+    /// File size in bytes
+    pub size: u64,
+    /// File type as a byte value
+    pub file_type: u8,
+    /// Length of the file name
+    pub name_len: u8,
+    /// Reserved bytes for alignment
+    pub _reserved: [u8; 6],
+    /// File name (null-terminated, max 255 characters)
+    pub name: [u8; 256],
+}
+
+impl DirectoryEntry {
+    /// Get the name as a string
+    pub fn name_str(&self) -> Result<&str, core::str::Utf8Error> {
+        let name_bytes = &self.name[..self.name_len as usize];
+        core::str::from_utf8(name_bytes)
+    }
+}
+
+/// Helper function to parse directory entries from readdir buffer.
+/// 
+/// # Arguments
+/// * `buf` - Buffer containing directory entry from readdir
+/// * `bytes_read` - Number of bytes actually read
+/// 
+/// # Return Value
+/// Option containing the parsed directory entry
+/// 
+pub fn parse_dir_entry_safe(buf: &[u8], bytes_read: usize) -> Option<(crate::string::String, u8, u64, u64)> {
+    use crate::string::String;
+    
+    if bytes_read == 0 {
+        return None; // EOF
+    }
+    
+    if let Some(entry) = parse_dir_entry(&buf[..bytes_read]) {
+        if let Ok(name) = entry.name_str() {
+            let mut owned_name = String::new();
+            for c in name.chars() {
+                owned_name.push(c);
+            }
+            return Some((
+                owned_name,
+                entry.file_type,
+                entry.file_id,
+                entry.size
+            ));
+        }
+    }
+    
+    None
+}
+
+/// Parse a single directory entry from buffer
+pub fn parse_dir_entry(buf: &[u8]) -> Option<DirectoryEntry> {
+    if buf.len() < core::mem::size_of::<DirectoryEntry>() {
+        return None;
+    }
+    
+    unsafe {
+        Some(*(buf.as_ptr() as *const DirectoryEntry))
+    }
 }

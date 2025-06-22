@@ -37,7 +37,7 @@ use alloc::{boxed::Box, format, string::{String, ToString}, sync::Arc, vec::Vec}
 use spin::{Mutex, RwLock};
 
 use crate::{driver_initcall, fs::{
-    get_fs_driver_manager, Directory, DirectoryEntry, FileObject, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, VirtualFileSystem, SeekFrom
+    get_fs_driver_manager, Directory, DirectoryEntryInternal, FileObject, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, VirtualFileSystem, SeekFrom
 }, vm::vmem::MemoryArea, object::capability::{StreamOps, StreamError}};
 
 /// Structure representing an Initramfs entry
@@ -256,12 +256,12 @@ impl FileOperations for Cpiofs {
         }
     }
 
-    fn read_dir(&self, _path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
+    fn readdir(&self, _path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         let path = self.normalize_path(_path);
         let entries = self.entries.lock();
     
         // Filter entries in the specified directory
-        let filtered_entries: Vec<DirectoryEntry> = entries
+        let filtered_entries: Vec<DirectoryEntryInternal> = entries
             .iter()
             .filter_map(|e| {
                 // Determine entries within the directory
@@ -269,7 +269,7 @@ impl FileOperations for Cpiofs {
                 if parent_path == path {
                     // Extract only the file name
                     let file_name = e.name.rfind('/').map_or(&e.name[..], |idx| &e.name[idx + 1..]);
-                    Some(DirectoryEntry {
+                    Some(DirectoryEntryInternal {
                         name: file_name.to_string(),
                         file_type: e.file_type,
                         size: e.size,
@@ -413,10 +413,6 @@ impl FileObject for CpiofsFileObject {
             file_id: 0, // CPIO file object doesn't know the path, so use 0
             link_count: 1,
         })
-    }
-
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
-        Err(StreamError::NotSupported)
     }
 }
 

@@ -26,12 +26,12 @@ fn test_initramfs_mount_and_unmount() {
 }
 
 #[test_case]
-fn test_initramfs_read_dir() {
+fn test_initramfs_readdir() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
     let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Read the contents of the root directory
-    let entries = initramfs.read_dir("/").unwrap();
+    let entries = initramfs.readdir("/").unwrap();
 
     // Verify the entries
     assert!(entries.iter().any(|e| e.name == "file1.txt"));
@@ -107,24 +107,24 @@ fn test_initramfs_metadata() {
 }
 
 #[test_case]
-fn test_read_dir() {
+fn test_readdir() {
     let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
     let initramfs = Cpiofs::new( "initramfs", cpio_data).unwrap();
 
     // Get entries in the root directory
-    let root_entries = initramfs.read_dir("/").unwrap();
+    let root_entries = initramfs.readdir("/").unwrap();
     assert!(!root_entries.is_empty());
     assert!(root_entries.iter().any(|e| e.name == "file1.txt"));
 
     // Get entries in a subdirectory
-    let subdir_entries = initramfs.read_dir("/subdir").unwrap();
+    let subdir_entries = initramfs.readdir("/subdir").unwrap();
     assert!(subdir_entries.iter().any(|e| e.name == "file1.txt"));
 
-    let subsubdir_entries = initramfs.read_dir("/subdir/subsubdir").unwrap();
+    let subsubdir_entries = initramfs.readdir("/subdir/subsubdir").unwrap();
     assert!(subsubdir_entries.iter().any(|e| e.name == "file1.txt"));
 
     // Specify a nonexistent directory
-    let result = initramfs.read_dir("/nonexistent");
+    let result = initramfs.readdir("/nonexistent");
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotFound);
 }
