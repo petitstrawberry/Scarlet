@@ -1635,3 +1635,77 @@ fn parse_tmpfs_size_option(options: &str) -> Option<usize> {
     }
     None
 }
+
+#[cfg(test)]
+mod parse_tmpfs_size_tests {
+    use super::*;
+
+    #[test_case]
+    fn test_parse_tmpfs_size_bytes() {
+        // Test parsing size in bytes
+        let result = parse_tmpfs_size_option("size=1048576");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 1048576);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_kilobytes() {
+        // Test parsing size in kilobytes
+        let result = parse_tmpfs_size_option("size=10K");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 10 * 1024);
+
+        let result = parse_tmpfs_size_option("size=5k");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 5 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_megabytes() {
+        // Test parsing size in megabytes
+        let result = parse_tmpfs_size_option("size=64M");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 64 * 1024 * 1024);
+
+        let result = parse_tmpfs_size_option("size=128m");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 128 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_gigabytes() {
+        // Test parsing size in gigabytes
+        let result = parse_tmpfs_size_option("size=2G");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 2 * 1024 * 1024 * 1024);
+
+        let result = parse_tmpfs_size_option("size=1g");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 1 * 1024 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_multiple_options() {
+        // Test parsing size with multiple options
+        let result = parse_tmpfs_size_option("nodev,size=32M,noexec");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 32 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_no_size() {
+        // Test parsing without size option (should return None)
+        let result = parse_tmpfs_size_option("nodev,noexec");
+        assert!(result.is_none());
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_invalid() {
+        // Test parsing invalid size
+        let result = parse_tmpfs_size_option("size=invalid");
+        assert!(result.is_none());
+
+        let result = parse_tmpfs_size_option("size=");
+        assert!(result.is_none());
+    }
+}
