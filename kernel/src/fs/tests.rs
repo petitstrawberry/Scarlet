@@ -979,7 +979,7 @@ fn test_structured_parameters_tmpfs() {
     
     // Create TmpFS with specific parameters
     let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB limit
-    let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params).unwrap();
+    let fs_id = manager.create_and_register_fs_from_params("tmpfs", &params).unwrap();
     
     // Mount the filesystem
     let result = manager.mount(fs_id, "/tmp");
@@ -1006,7 +1006,7 @@ fn test_structured_parameters_testfs() {
     let params = BasicFSParams::new()
         .with_block_size(1024)
         .with_read_only(false);
-    let fs_id = manager.create_and_register_fs_with_params("testfs", &params).unwrap();
+    let fs_id = manager.create_and_register_fs_from_params("testfs", &params).unwrap();
     
     // Mount the filesystem
     let result = manager.mount(fs_id, "/test");
@@ -1031,7 +1031,7 @@ fn test_structured_parameters_cpio_error() {
     
     // Try to create CPIO filesystem with parameters (should fail)
     let params = CpioFSParams::new();
-    let result = manager.create_and_register_fs_with_params("cpiofs", &params);
+    let result = manager.create_and_register_fs_from_params("cpiofs", &params);
     
     // Should fail because CPIO requires memory area
     assert!(result.is_err());
@@ -1063,7 +1063,7 @@ fn test_structured_parameters_backward_compatibility() {
     
     // Test that structured parameters also work for the same driver
     let params = BasicFSParams::new();
-    let fs_id2 = manager.create_and_register_fs_with_params("testfs", &params).unwrap();
+    let fs_id2 = manager.create_and_register_fs_from_params("testfs", &params).unwrap();
     
     let result = manager.mount(fs_id2, "/structured");
     assert!(result.is_ok());
@@ -1080,7 +1080,7 @@ fn test_structured_parameters_driver_not_found() {
     
     // Try to create filesystem with non-existent driver
     let params = BasicFSParams::new();
-    let result = manager.create_and_register_fs_with_params("nonexistent", &params);
+    let result = manager.create_and_register_fs_from_params("nonexistent", &params);
     
     assert!(result.is_err());
     if let Err(e) = result {

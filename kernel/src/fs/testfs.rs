@@ -700,7 +700,7 @@ impl FileSystemDriver for TestFileSystemDriver {
         Ok(Box::new(TestFileSystem::new("testfs", block_device, block_size)))
     }
     
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         use crate::fs::params::*;
         use crate::device::block::mockblk::MockBlockDevice;
         

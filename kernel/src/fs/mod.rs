@@ -828,7 +828,7 @@ impl FileSystemDriverManager {
     /// 
     /// This method uses dynamic dispatch for parameter handling to support
     /// future dynamic filesystem module loading while maintaining type safety.
-    pub fn create_with_params(
+    pub fn create_from_params(
         &self, 
         driver_name: &str, 
         params: &dyn crate::fs::params::FileSystemParams
@@ -841,7 +841,7 @@ impl FileSystemDriverManager {
             })?;
 
         // Use dynamic dispatch for structured parameters
-        driver.create_with_params(params)
+        driver.create_from_params(params)
     }
 
     /// Get filesystem driver information by name
@@ -1144,16 +1144,16 @@ impl VfsManager {
     /// use crate::fs::params::TmpFSParams;
     /// 
     /// let params = TmpFSParams::with_memory_limit(1048576); // 1MB limit
-    /// let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params)?;
+    /// let fs_id = manager.create_and_register_fs_from_params("tmpfs", &params)?;
     /// ```
-    pub fn create_and_register_fs_with_params(
+    pub fn create_and_register_fs_from_params(
         &self,
         driver_name: &str,
         params: &dyn crate::fs::params::FileSystemParams,
     ) -> Result<usize, FileSystemError> {
         
         // Create the file system using the driver manager with structured parameters
-        let fs = get_fs_driver_manager().create_with_params(driver_name, params)?;
+        let fs = get_fs_driver_manager().create_from_params(driver_name, params)?;
 
         Ok(self.register_fs(fs))
     }

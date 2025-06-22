@@ -457,7 +457,7 @@ impl FileSystemDriver for CpiofsDriver {
         }
     }
     
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         use crate::fs::params::*;
         
         // Try to downcast to CpioFSParams
