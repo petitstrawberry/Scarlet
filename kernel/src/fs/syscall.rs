@@ -356,3 +356,32 @@ fn create_filesystem_and_mount(
     
     Ok(())
 }
+
+pub fn sys_umount(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let _flags = trapframe.get_arg(1) as u32; // Reserved for future use
+
+    trapframe.increment_pc_next(task);
+
+    // Convert target path to string
+    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match VfsManager::to_absolute_path(&task, &s) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    // Get VFS reference
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    // Perform umount operation
+    match vfs.unmount(&target_str) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX,
+    }
+}

@@ -24,6 +24,7 @@ pub enum Syscall {
     Lseek = 24,
     // Mount operations
     Mount = 30,
+    Umount = 31,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

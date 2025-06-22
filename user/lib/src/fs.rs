@@ -238,3 +238,52 @@ pub fn overlay_mount(upperdir: Option<&str>, lowerdirs: &[&str], target: &str) -
     let data = options.join(",");
     mount("overlay", target, "overlay", 0, Some(&data))
 }
+
+/// Unmount a filesystem
+/// 
+/// This function unmounts a filesystem from the specified mount point.
+/// All files and directories under the mount point will become inaccessible
+/// after the unmount operation completes.
+/// 
+/// # Arguments
+/// 
+/// * `target` - Mount point path to unmount
+/// * `flags` - Unmount flags (for future extension, currently unused)
+/// 
+/// # Returns
+/// 
+/// * `0` on success, `-1` on error
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// use crate::fs::umount;
+/// 
+/// // Unmount a filesystem
+/// let result = umount("/mnt", 0);
+/// if result == 0 {
+///     println!("Filesystem unmounted successfully");
+/// } else {
+///     println!("Failed to unmount filesystem");
+/// }
+/// 
+/// // Unmount a bind mount
+/// let result = umount("/target", 0);
+/// if result == 0 {
+///     println!("Bind mount unmounted successfully");
+/// }
+/// ```
+pub fn umount(target: &str, flags: u32) -> i32 {
+    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
+    
+    let res = syscall2(
+        Syscall::Umount,
+        target_ptr,
+        flags as usize
+    );
+    
+    // Free allocated memory
+    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
+    
+    res as i32
+}
