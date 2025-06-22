@@ -286,8 +286,18 @@ pub fn umount(target: &str, flags: u32) -> i32 {
 /// }
 /// ```
 pub fn pivot_root(new_root: &str, old_root: &str) -> i32 {
-    let new_root_ptr = Box::into_raw(str_to_cstr_bytes(new_root).unwrap().into_boxed_slice()) as *const u8 as usize;
-    let old_root_ptr = Box::into_raw(str_to_cstr_bytes(old_root).unwrap().into_boxed_slice()) as *const u8 as usize;
+    // Convert the new_root and old_root strings to C-style strings
+    let new_root = match str_to_cstr_bytes(new_root) {
+        Ok(bytes) => bytes,
+        Err(_) => return -1, // Return -1 if conversion fails
+    };
+    let old_root = match str_to_cstr_bytes(old_root) {
+        Ok(bytes) => bytes,
+        Err(_) => return -1, // Return -1 if conversion fails
+    };
+    
+    let new_root_ptr = Box::into_raw(new_root.into_boxed_slice()) as *const u8 as usize;
+    let old_root_ptr = Box::into_raw(old_root.into_boxed_slice()) as *const u8 as usize;
     
     let res = syscall2(
         Syscall::PivotRoot,
