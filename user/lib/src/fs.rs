@@ -179,66 +179,6 @@ pub fn mount(source: &str, target: &str, fstype: &str, flags: u32, data: Option<
     res as i32
 }
 
-/// Bind mount a directory or file to another location.
-/// 
-/// This is a convenience wrapper around mount() for bind mounts.
-/// 
-/// # Arguments
-/// * `source` - Source path to bind
-/// * `target` - Target mount point
-/// * `readonly` - Whether the bind mount should be read-only
-/// 
-/// # Return Value
-/// - On success: 0
-/// - On error: -1
-/// 
-pub fn bind_mount(source: &str, target: &str, readonly: bool) -> i32 {
-    let flags = MS_BIND | if readonly { MS_RDONLY } else { 0 };
-    mount(source, target, "bind", flags, None)
-}
-
-/// Create an overlay mount with upper and lower directories.
-/// 
-/// This is a convenience wrapper around mount() for overlay mounts.
-/// 
-/// # Arguments
-/// * `upperdir` - Upper directory for writes (optional)
-/// * `lowerdirs` - Lower directories for reads (in priority order)
-/// * `target` - Target mount point
-/// 
-/// # Return Value
-/// - On success: 0
-/// - On error: -1
-/// 
-pub fn overlay_mount(upperdir: Option<&str>, lowerdirs: &[&str], target: &str) -> i32 {
-    use crate::string::String;
-    use crate::vec::Vec;
-    
-    let mut options = Vec::new();
-    
-    // Add lower directories
-    if !lowerdirs.is_empty() {
-        let lowerdir_str = lowerdirs.join(":");
-        let mut lowerdir_option = String::new();
-        lowerdir_option.push_str("lowerdir=");
-        lowerdir_option.push_str(&lowerdir_str);
-        options.push(lowerdir_option);
-    } else {
-        return -1; // At least one lowerdir is required
-    }
-    
-    // Add upper directory if provided
-    if let Some(upper) = upperdir {
-        let mut upperdir_option = String::new();
-        upperdir_option.push_str("upperdir=");
-        upperdir_option.push_str(upper);
-        options.push(upperdir_option);
-    }
-    
-    let data = options.join(",");
-    mount("overlay", target, "overlay", 0, Some(&data))
-}
-
 /// Unmount a filesystem
 /// 
 /// This function unmounts a filesystem from the specified mount point.
