@@ -1289,16 +1289,28 @@ impl VfsManager {
                 // Bind mounts do not need to unmount the underlying filesystem
                 // They are just references to existing filesystems
             },
-            _ => {
+            mount_tree::MountType::Regular => {
                 // For regular mounts, we need to call unmount on the filesystem
                 let mut fs_write = mp.fs.write();
                 fs_write.unmount()?;
 
-                // Return the file system to the registration list using stored fs_id
-                self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
+                // Return the file system to the registration list only if it has a valid fs_id
+                // Overlay filesystems (fs_id = 0) are not returned to the pool
+                if mp.fs_id != 0 {
+                    self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
+                }
+                // If fs_id == 0, this is likely an overlay filesystem that doesn't need
+                // to be returned to the registration pool
+            },
+            mount_tree::MountType::Overlay { .. } => {
+                // For overlay mounts, we need to call unmount on the overlay filesystem
+                let mut fs_write = mp.fs.write();
+                fs_write.unmount()?;
+
+                // Overlay filesystems use fs_id = 0 and are not returned to the pool
+                // They are created dynamically and should be cleaned up after unmount
             }
         }
-        
         
         Ok(())
     }

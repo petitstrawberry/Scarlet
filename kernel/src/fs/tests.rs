@@ -1730,3 +1730,152 @@ fn test_truncate_position_adjustment() {
     let bytes_read = file.read(&mut buffer).unwrap();
     assert_eq!(bytes_read, 0);
 }
+
+// Test bind mount unmount scenarios
+#[test_case]
+fn test_bind_mount_unmount() {
+    let manager = VfsManager::new();
+    
+    // Setup source filesystem
+    let tmpfs = Box::new(TmpFS::new(1024 * 1024));
+    let fs_id = manager.register_fs(tmpfs);
+    manager.mount(fs_id, "/tmp").unwrap();
+    
+    // Create a test file in the source
+    manager.create_file("/tmp/test.txt", FileType::RegularFile).unwrap();
+    
+    // Create bind mount
+    manager.bind_mount("/tmp", "/mnt/bind", false).unwrap();
+    assert_eq!(manager.mount_count(), 2);
+    
+    // Verify the bind mount works
+    let file = manager.open("/mnt/bind/test.txt", 0).unwrap();
+    assert!(file.as_file().is_some());
+    
+    // Unmount the bind mount
+    let result = manager.unmount("/mnt/bind");
+    assert!(result.is_ok());
+    assert_eq!(manager.mount_count(), 1);
+    
+    // Verify original mount still exists
+    let file = manager.open("/tmp/test.txt", 0).unwrap();
+    assert!(file.as_file().is_some());
+    
+    // Verify bind mount is gone
+    let result = manager.open("/mnt/bind/test.txt", 0);
+    assert!(result.is_err());
+}
+
+#[test_case]
+fn test_read_only_bind_mount_unmount() {
+    let manager = VfsManager::new();
+    
+    // Setup source filesystem
+    let tmpfs = Box::new(TmpFS::new(1024 * 1024));
+    let fs_id = manager.register_fs(tmpfs);
+    manager.mount(fs_id, "/tmp").unwrap();
+    
+    // Create a test file
+    manager.create_file("/tmp/test.txt", FileType::RegularFile).unwrap();
+    
+    // Create read-only bind mount
+    manager.bind_mount("/tmp", "/mnt/readonly", true).unwrap();
+    assert_eq!(manager.mount_count(), 2);
+    
+    // Verify read access works
+    let file = manager.open("/mnt/readonly/test.txt", 0).unwrap();
+    assert!(file.as_file().is_some());
+    
+    // Unmount the read-only bind mount
+    let result = manager.unmount("/mnt/readonly");
+    assert!(result.is_ok());
+    assert_eq!(manager.mount_count(), 1);
+    
+    // Verify original mount still accessible
+    let file = manager.open("/tmp/test.txt", 0).unwrap();
+    assert!(file.as_file().is_some());
+}
+
+#[test_case]
+fn test_nested_mount_unmount() {
+    let manager = VfsManager::new();
+    
+    // Setup base filesystem
+    let tmpfs1 = Box::new(TmpFS::new(1024 * 1024));
+    let fs_id1 = manager.register_fs(tmpfs1);
+    manager.mount(fs_id1, "/base").unwrap();
+    
+    // Setup nested filesystem
+    let tmpfs2 = Box::new(TmpFS::new(1024 * 1024));
+    let fs_id2 = manager.register_fs(tmpfs2);
+    manager.mount(fs_id2, "/base/nested").unwrap();
+    
+    // Create bind mount of nested
+    manager.bind_mount("/base/nested", "/mnt/bind_nested", false).unwrap();
+    
+    assert_eq!(manager.mount_count(), 3);
+    
+    // Unmount bind mount first
+    manager.unmount("/mnt/bind_nested").unwrap();
+    assert_eq!(manager.mount_count(), 2);
+    
+    // Unmount nested filesystem
+    manager.unmount("/base/nested").unwrap();
+    assert_eq!(manager.mount_count(), 1);
+    
+    // Unmount base filesystem
+    manager.unmount("/base").unwrap();
+    assert_eq!(manager.mount_count(), 0);
+    
+    // Verify all filesystems returned to registry
+    assert_eq!(manager.filesystems.read().len(), 2);
+}
+
+#[test_case]
+fn test_unmount_nonexistent_mount() {
+    let manager = VfsManager::new();
+    
+    // Try to unmount a non-existent mount point
+    let result = manager.unmount("/nonexistent");
+    assert!(result.is_err());
+    match result {
+        Err(e) => {
+            assert_eq!(e.kind, FileSystemErrorKind::NotFound);
+        }
+        Ok(_) => panic!("Expected error when unmounting non-existent mount point"),
+    }
+}
+
+#[test_case] 
+fn test_unmount_preserves_filesystem_order() {
+    let manager = VfsManager::new();
+    
+    // Create multiple filesystems
+    let tmpfs1 = Box::new(TmpFS::new(1024 * 1024));
+    let tmpfs2 = Box::new(TmpFS::new(1024 * 1024));
+    let tmpfs3 = Box::new(TmpFS::new(1024 * 1024));
+    
+    let fs_id1 = manager.register_fs(tmpfs1);
+    let fs_id2 = manager.register_fs(tmpfs2);
+    let fs_id3 = manager.register_fs(tmpfs3);
+    
+    // Mount them
+    manager.mount(fs_id1, "/mnt1").unwrap();
+    manager.mount(fs_id2, "/mnt2").unwrap();
+    manager.mount(fs_id3, "/mnt3").unwrap();
+    
+    assert_eq!(manager.mount_count(), 3);
+    assert_eq!(manager.filesystems.read().len(), 0);
+    
+    // Unmount middle one
+    manager.unmount("/mnt2").unwrap();
+    assert_eq!(manager.mount_count(), 2);
+    assert_eq!(manager.filesystems.read().len(), 1);
+    
+    // Unmount all
+    manager.unmount("/mnt1").unwrap();
+    manager.unmount("/mnt3").unwrap();
+    
+    assert_eq!(manager.mount_count(), 0);
+    assert_eq!(manager.filesystems.read().len(), 3);
+}
