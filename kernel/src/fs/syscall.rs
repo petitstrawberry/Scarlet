@@ -271,7 +271,7 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
     // Handle different mount types
     match fstype_str.as_str() {
         "bind" => {
-            // Handle bind mount
+            // Handle bind mount - this is a special case handled by VFS
             let read_only = (flags & 1) != 0; // MS_RDONLY
             match vfs.bind_mount(&source_str, &target_str, read_only) {
                 Ok(_) => 0,
@@ -279,7 +279,7 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
             }
         },
         "overlay" => {
-            // Handle overlay mount - parse data for upperdir/lowerdir
+            // Handle overlay mount - this is a special case handled by VFS
             if let Some(data) = data_str {
                 match parse_overlay_options(&data) {
                     Ok((upperdir, lowerdirs)) => {
@@ -295,46 +295,10 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
                 usize::MAX // Overlay requires options
             }
         },
-        "tmpfs" => {
-            // Handle tmpfs mount
-            let memory_limit = if let Some(data) = data_str {
-                parse_tmpfs_size(&data).unwrap_or(64 * 1024 * 1024) // Default 64MB
-            } else {
-                64 * 1024 * 1024 // Default 64MB
-            };
-            
-            // Create tmpfs using the filesystem parameter system
-            match create_tmpfs_and_mount(vfs, &target_str, memory_limit) {
-                Ok(_) => 0,
-                Err(_) => usize::MAX,
-            }
-        },
-        "cpiofs" => {
-            // Handle memory-based filesystem (initramfs, etc.)
-            if let Some(data) = data_str {
-                match parse_memory_range(&data) {
-                    Ok((start, end)) => {
-                        let memory_area = crate::vm::vmem::MemoryArea::new(start, end - start);
-                        match vfs.create_and_register_memory_fs("cpiofs", &memory_area) {
-                            Ok(fs_id) => {
-                                match vfs.mount(fs_id, &target_str) {
-                                    Ok(_) => 0,
-                                    Err(_) => usize::MAX,
-                                }
-                            },
-                            Err(_) => usize::MAX,
-                        }
-                    },
-                    Err(_) => usize::MAX,
-                }
-            } else {
-                usize::MAX // Memory FS requires data with memory range
-            }
-        },
         _ => {
-            // Handle block device mount (ext4, etc.)
-            // For now, assume it's a block device mount
-            match create_block_fs_and_mount(vfs, &fstype_str, &source_str, &target_str) {
+            // Handle filesystem creation using drivers
+            let options = data_str.unwrap_or_default();
+            match create_filesystem_and_mount(vfs, &fstype_str, &target_str, &options) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
             }
@@ -435,6 +399,34 @@ fn create_block_fs_and_mount(_vfs: &VfsManager, _fstype: &str, _device_path: &st
         kind: super::FileSystemErrorKind::NotFound,
         message: "Block device filesystem creation not fully implemented".to_string(),
     })
+}
+
+/// Create a filesystem using the driver and mount it
+/// 
+/// This function uses the new driver-based approach where option parsing
+/// is delegated to the filesystem driver, and registration is handled
+/// by sys_mount.
+fn create_filesystem_and_mount(
+    vfs: &crate::fs::VfsManager,
+    fstype: &str,
+    target: &str,
+    options: &str,
+) -> Result<(), crate::fs::FileSystemError> {
+    use crate::fs::get_fs_driver_manager;
+    
+    // Get the filesystem driver manager
+    let driver_manager = get_fs_driver_manager();
+    
+    // Create filesystem using the driver
+    let filesystem = driver_manager.create_from_option_string(fstype, options)?;
+    
+    // Register the filesystem with VFS and get fs_id
+    let fs_id = vfs.register_fs(filesystem);
+    
+    // Mount the filesystem at the target path
+    vfs.mount(fs_id, target)?;
+    
+    Ok(())
 }
 
 #[cfg(test)]

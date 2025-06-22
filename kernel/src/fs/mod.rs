@@ -519,6 +519,31 @@ pub trait FileSystemDriver: Send + Sync {
         })
     }
 
+    /// Create a file system with option string
+    /// 
+    /// This method creates a filesystem instance based on an option string, which
+    /// is typically passed from the mount() system call. The option string format
+    /// is filesystem-specific and should be parsed by the individual driver.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `options` - Option string containing filesystem-specific parameters
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>, FileSystemError>` - The created file system
+    /// 
+    /// # Note
+    /// 
+    /// This method allows the filesystem driver to handle its own option parsing,
+    /// keeping the mount syscall generic and delegating filesystem-specific logic
+    /// to the appropriate driver.
+    fn create_from_option_string(&self, options: &str) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+        let _ = options; // Suppress unused parameter warning
+        // Default implementation falls back to create()
+        self.create()
+    }
+
     /// Create a file system with structured parameters
     /// 
     /// This method creates file systems using type-safe structured parameters
@@ -538,7 +563,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// This method uses dynamic dispatch for parameter handling to support
     /// future dynamic filesystem module loading while maintaining type safety.
     /// 
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         // Default implementation falls back to create()
         let _ = params; // Suppress unused parameter warning
         self.create()
@@ -842,6 +867,48 @@ impl FileSystemDriverManager {
 
         // Use dynamic dispatch for structured parameters
         driver.create_from_params(params)
+    }
+
+    /// Create a filesystem from option string
+    /// 
+    /// Creates a new filesystem instance using the specified driver and option string.
+    /// This method delegates option parsing to the individual filesystem driver,
+    /// allowing each driver to handle its own specific option format.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The name of the registered driver to use
+    /// * `options` - Option string containing filesystem-specific parameters
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Err(FileSystemError)` - If driver not found or creation fails
+    /// 
+    /// # Errors
+    /// 
+    /// - `NotFound` - Driver with the specified name is not registered
+    /// - Driver-specific option parsing or creation errors
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// let fs = manager.create_from_option_string("tmpfs", "size=64M")?;
+    /// let fs = manager.create_from_option_string("overlay", "upperdir=/upper,lowerdir=/lower1:/lower2")?;
+    /// ```
+    pub fn create_from_option_string(
+        &self,
+        driver_name: &str,
+        options: &str,
+    ) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+        let binding = self.drivers.read();
+        let driver = binding.get(driver_name)
+            .ok_or_else(|| FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: format!("File system driver '{}' not found", driver_name),
+            })?;
+
+        driver.create_from_option_string(options)
     }
 
     /// Get filesystem driver information by name
@@ -1920,7 +1987,7 @@ impl VfsManager {
     /// # Errors
     /// 
     /// * `FileSystemError` - If the target doesn't exist, link creation fails,
-    ///   or hard links are not supported by the filesystem
+    ///   or hard links are not supported by this filesystem
     /// 
     /// # Examples
     /// 
