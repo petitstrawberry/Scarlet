@@ -457,6 +457,11 @@ impl MountPoint {
                 let source_mount_point = source_mount_node.get_mount_point()?;
                 source_mount_point.resolve_fs_with_depth(&full_source_path, depth + 1)
             }
+            
+            MountType::Overlay { .. } => {
+                // Overlay mount: return filesystem as-is (OverlayFS handles the layer resolution)
+                Ok((self.fs.clone(), relative_path.to_string()))
+            }
         }
     }
 }
@@ -487,6 +492,18 @@ pub enum MountType {
         source_relative_path: String,
         /// Type of bind mount (read-only, read-write, shared)
         bind_type: BindType,
+    },
+    
+    /// Overlay mount - union filesystem combining multiple layers
+    /// 
+    /// Overlay mounts create a unified view of multiple directory trees,
+    /// typically with one writable upper layer and one or more read-only
+    /// lower layers. This is commonly used for container images.
+    Overlay {
+        /// Optional upper layer for writes (if None, the overlay is read-only)
+        upper_path: Option<String>,
+        /// Lower layers for reads (in priority order)
+        lower_paths: Vec<String>,
     },
 }
 

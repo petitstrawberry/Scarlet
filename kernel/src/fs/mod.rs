@@ -519,6 +519,31 @@ pub trait FileSystemDriver: Send + Sync {
         })
     }
 
+    /// Create a file system with option string
+    /// 
+    /// This method creates a filesystem instance based on an option string, which
+    /// is typically passed from the mount() system call. The option string format
+    /// is filesystem-specific and should be parsed by the individual driver.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `options` - Option string containing filesystem-specific parameters
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<Box<dyn VirtualFileSystem>, FileSystemError>` - The created file system
+    /// 
+    /// # Note
+    /// 
+    /// This method allows the filesystem driver to handle its own option parsing,
+    /// keeping the mount syscall generic and delegating filesystem-specific logic
+    /// to the appropriate driver.
+    fn create_from_option_string(&self, options: &str) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+        let _ = options; // Suppress unused parameter warning
+        // Default implementation falls back to create()
+        self.create()
+    }
+
     /// Create a file system with structured parameters
     /// 
     /// This method creates file systems using type-safe structured parameters
@@ -538,7 +563,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// This method uses dynamic dispatch for parameter handling to support
     /// future dynamic filesystem module loading while maintaining type safety.
     /// 
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         // Default implementation falls back to create()
         let _ = params; // Suppress unused parameter warning
         self.create()
@@ -828,7 +853,7 @@ impl FileSystemDriverManager {
     /// 
     /// This method uses dynamic dispatch for parameter handling to support
     /// future dynamic filesystem module loading while maintaining type safety.
-    pub fn create_with_params(
+    pub fn create_from_params(
         &self, 
         driver_name: &str, 
         params: &dyn crate::fs::params::FileSystemParams
@@ -841,7 +866,49 @@ impl FileSystemDriverManager {
             })?;
 
         // Use dynamic dispatch for structured parameters
-        driver.create_with_params(params)
+        driver.create_from_params(params)
+    }
+
+    /// Create a filesystem from option string
+    /// 
+    /// Creates a new filesystem instance using the specified driver and option string.
+    /// This method delegates option parsing to the individual filesystem driver,
+    /// allowing each driver to handle its own specific option format.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver_name` - The name of the registered driver to use
+    /// * `options` - Option string containing filesystem-specific parameters
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Err(FileSystemError)` - If driver not found or creation fails
+    /// 
+    /// # Errors
+    /// 
+    /// - `NotFound` - Driver with the specified name is not registered
+    /// - Driver-specific option parsing or creation errors
+    /// 
+    /// # Example
+    /// 
+    /// ```rust
+    /// let fs = manager.create_from_option_string("tmpfs", "size=64M")?;
+    /// let fs = manager.create_from_option_string("overlay", "upperdir=/upper,lowerdir=/lower1:/lower2")?;
+    /// ```
+    pub fn create_from_option_string(
+        &self,
+        driver_name: &str,
+        options: &str,
+    ) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+        let binding = self.drivers.read();
+        let driver = binding.get(driver_name)
+            .ok_or_else(|| FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: format!("File system driver '{}' not found", driver_name),
+            })?;
+
+        driver.create_from_option_string(options)
     }
 
     /// Get filesystem driver information by name
@@ -1144,16 +1211,16 @@ impl VfsManager {
     /// use crate::fs::params::TmpFSParams;
     /// 
     /// let params = TmpFSParams::with_memory_limit(1048576); // 1MB limit
-    /// let fs_id = manager.create_and_register_fs_with_params("tmpfs", &params)?;
+    /// let fs_id = manager.create_and_register_fs_from_params("tmpfs", &params)?;
     /// ```
-    pub fn create_and_register_fs_with_params(
+    pub fn create_and_register_fs_from_params(
         &self,
         driver_name: &str,
         params: &dyn crate::fs::params::FileSystemParams,
     ) -> Result<usize, FileSystemError> {
         
         // Create the file system using the driver manager with structured parameters
-        let fs = get_fs_driver_manager().create_with_params(driver_name, params)?;
+        let fs = get_fs_driver_manager().create_from_params(driver_name, params)?;
 
         Ok(self.register_fs(fs))
     }
@@ -1222,16 +1289,28 @@ impl VfsManager {
                 // Bind mounts do not need to unmount the underlying filesystem
                 // They are just references to existing filesystems
             },
-            _ => {
+            mount_tree::MountType::Regular => {
                 // For regular mounts, we need to call unmount on the filesystem
                 let mut fs_write = mp.fs.write();
                 fs_write.unmount()?;
 
-                // Return the file system to the registration list using stored fs_id
-                self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
+                // Return the file system to the registration list only if it has a valid fs_id
+                // Overlay filesystems (fs_id = 0) are not returned to the pool
+                if mp.fs_id != 0 {
+                    self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
+                }
+                // If fs_id == 0, this is likely an overlay filesystem that doesn't need
+                // to be returned to the registration pool
+            },
+            mount_tree::MountType::Overlay { .. } => {
+                // For overlay mounts, we need to call unmount on the overlay filesystem
+                let mut fs_write = mp.fs.write();
+                fs_write.unmount()?;
+
+                // Overlay filesystems use fs_id = 0 and are not returned to the pool
+                // They are created dynamically and should be cleaned up after unmount
             }
         }
-        
         
         Ok(())
     }
@@ -1920,7 +1999,7 @@ impl VfsManager {
     /// # Errors
     /// 
     /// * `FileSystemError` - If the target doesn't exist, link creation fails,
-    ///   or hard links are not supported by the filesystem
+    ///   or hard links are not supported by this filesystem
     /// 
     /// # Examples
     /// 

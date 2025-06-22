@@ -1101,7 +1101,7 @@ impl FileSystemDriver for TmpFSDriver {
         Ok(Box::new(TmpFS::new(0)))
     }
 
-    fn create_with_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
         use crate::fs::params::*;
         
         // Try to downcast to TmpFSParams first
@@ -1119,6 +1119,12 @@ impl FileSystemDriver for TmpFSDriver {
             kind: FileSystemErrorKind::NotSupported,
             message: "TmpFS requires TmpFSParams or BasicFSParams parameter type".to_string(),
         })
+    }
+
+    fn create_from_option_string(&self, options: &str) -> Result<Box<dyn VirtualFileSystem>, FileSystemError> {
+        // Parse tmpfs options (e.g., "size=64M")
+        let memory_limit = parse_tmpfs_size_option(options).unwrap_or(64 * 1024 * 1024); // Default 64MB
+        Ok(Box::new(TmpFS::new(memory_limit)))
     }
 }
 
@@ -1596,5 +1602,110 @@ mod tests {
         if let Err(error) = result {
             assert_eq!(error.kind, FileSystemErrorKind::NotSupported);
         }
+    }
+}
+
+/// Parse tmpfs size option from option string
+/// 
+/// Parses size option in the format "size=64M", "size=1G", etc.
+/// Returns the size in bytes, or None if no valid size option is found.
+fn parse_tmpfs_size_option(options: &str) -> Option<usize> {
+    for option in options.split(',') {
+        if let Some(size_str) = option.strip_prefix("size=") {
+            // Parse size with suffix (K, M, G)
+            let size_str = size_str.trim();
+            if size_str.is_empty() {
+                continue;
+            }
+            
+            let (number_part, multiplier) = if size_str.ends_with('K') || size_str.ends_with('k') {
+                (&size_str[..size_str.len()-1], 1024)
+            } else if size_str.ends_with('M') || size_str.ends_with('m') {
+                (&size_str[..size_str.len()-1], 1024 * 1024)
+            } else if size_str.ends_with('G') || size_str.ends_with('g') {
+                (&size_str[..size_str.len()-1], 1024 * 1024 * 1024)
+            } else {
+                (size_str, 1)
+            };
+            
+            if let Ok(number) = number_part.parse::<usize>() {
+                return Some(number * multiplier);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod parse_tmpfs_size_tests {
+    use super::*;
+
+    #[test_case]
+    fn test_parse_tmpfs_size_bytes() {
+        // Test parsing size in bytes
+        let result = parse_tmpfs_size_option("size=1048576");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 1048576);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_kilobytes() {
+        // Test parsing size in kilobytes
+        let result = parse_tmpfs_size_option("size=10K");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 10 * 1024);
+
+        let result = parse_tmpfs_size_option("size=5k");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 5 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_megabytes() {
+        // Test parsing size in megabytes
+        let result = parse_tmpfs_size_option("size=64M");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 64 * 1024 * 1024);
+
+        let result = parse_tmpfs_size_option("size=128m");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 128 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_gigabytes() {
+        // Test parsing size in gigabytes
+        let result = parse_tmpfs_size_option("size=2G");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 2 * 1024 * 1024 * 1024);
+
+        let result = parse_tmpfs_size_option("size=1g");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 1 * 1024 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_multiple_options() {
+        // Test parsing size with multiple options
+        let result = parse_tmpfs_size_option("nodev,size=32M,noexec");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), 32 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_no_size() {
+        // Test parsing without size option (should return None)
+        let result = parse_tmpfs_size_option("nodev,noexec");
+        assert!(result.is_none());
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_invalid() {
+        // Test parsing invalid size
+        let result = parse_tmpfs_size_option("size=invalid");
+        assert!(result.is_none());
+
+        let result = parse_tmpfs_size_option("size=");
+        assert!(result.is_none());
     }
 }

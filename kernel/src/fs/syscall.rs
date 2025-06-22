@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec, string::ToString};
 
 use crate::{arch::Trapframe, library::std::string::cstring_to_string, task::mytask};
 
@@ -220,5 +220,168 @@ pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
     match file.truncate(length) {
         Ok(_) => 0,
         Err(_) => usize::MAX, // -1
+    }
+}
+
+pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let source_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let fstype_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(2)).unwrap() as *const u8;
+    let flags = trapframe.get_arg(3) as u32;
+    let data_ptr = if trapframe.get_arg(4) == 0 {
+        core::ptr::null()
+    } else {
+        task.vm_manager.translate_vaddr(trapframe.get_arg(4)).unwrap() as *const u8
+    };
+
+    trapframe.increment_pc_next(task);
+
+    // Convert paths and parameters to strings
+    let source_str = match cstring_to_string(source_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX,
+    };
+    
+    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX,
+    };
+    
+    let fstype_str = match cstring_to_string(fstype_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX,
+    };
+    
+    let data_str = if !data_ptr.is_null() {
+        match cstring_to_string(data_ptr, MAX_PATH_LENGTH) {
+            Ok((s, _)) => Some(s),
+            Err(_) => return usize::MAX,
+        }
+    } else {
+        None
+    };
+
+    // Get VFS reference
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    // Handle different mount types
+    match fstype_str.as_str() {
+        "bind" => {
+            // Handle bind mount - this is a special case handled by VFS
+            let read_only = (flags & 1) != 0; // MS_RDONLY
+            match vfs.bind_mount(&source_str, &target_str, read_only) {
+                Ok(_) => 0,
+                Err(_) => usize::MAX,
+            }
+        },
+        "overlay" => {
+            // Handle overlay mount - this is a special case handled by VFS
+            if let Some(data) = data_str {
+                match parse_overlay_options(&data) {
+                    Ok((upperdir, lowerdirs)) => {
+                        let lowerdir_refs: Vec<&str> = lowerdirs.iter().map(|s| s.as_str()).collect();
+                        match vfs.overlay_mount(upperdir.as_deref(), lowerdir_refs, &target_str) {
+                            Ok(_) => 0,
+                            Err(_) => usize::MAX,
+                        }
+                    },
+                    Err(_) => usize::MAX,
+                }
+            } else {
+                usize::MAX // Overlay requires options
+            }
+        },
+        _ => {
+            // Handle filesystem creation using drivers
+            let options = data_str.unwrap_or_default();
+            match create_filesystem_and_mount(vfs, &fstype_str, &target_str, &options) {
+                Ok(_) => 0,
+                Err(_) => usize::MAX,
+            }
+        }
+    }
+}
+
+// Helper function to parse overlay mount options
+fn parse_overlay_options(data: &str) -> Result<(Option<String>, Vec<String>), ()> {
+    let mut upperdir = None;
+    let mut lowerdirs = Vec::new();
+    
+    for option in data.split(',') {
+        if let Some(value) = option.strip_prefix("upperdir=") {
+            upperdir = Some(value.to_string());
+        } else if let Some(value) = option.strip_prefix("lowerdir=") {
+            // Multiple lowerdirs can be separated by ':'
+            for lowerdir in value.split(':') {
+                lowerdirs.push(lowerdir.to_string());
+            }
+        }
+    }
+    
+    if lowerdirs.is_empty() {
+        return Err(()); // At least one lowerdir is required
+    }
+    
+    Ok((upperdir, lowerdirs))
+}
+
+/// Create a filesystem using the driver and mount it
+/// 
+/// This function uses the new driver-based approach where option parsing
+/// is delegated to the filesystem driver, and registration is handled
+/// by sys_mount.
+fn create_filesystem_and_mount(
+    vfs: &crate::fs::VfsManager,
+    fstype: &str,
+    target: &str,
+    options: &str,
+) -> Result<(), crate::fs::FileSystemError> {
+    use crate::fs::get_fs_driver_manager;
+    
+    // Get the filesystem driver manager
+    let driver_manager = get_fs_driver_manager();
+    
+    // Create filesystem using the driver
+    let filesystem = driver_manager.create_from_option_string(fstype, options)?;
+    
+    // Register the filesystem with VFS and get fs_id
+    let fs_id = vfs.register_fs(filesystem);
+    
+    // Mount the filesystem at the target path
+    vfs.mount(fs_id, target)?;
+    
+    Ok(())
+}
+
+pub fn sys_umount(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let _flags = trapframe.get_arg(1) as u32; // Reserved for future use
+
+    trapframe.increment_pc_next(task);
+
+    // Convert target path to string
+    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match VfsManager::to_absolute_path(&task, &s) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    // Get VFS reference
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    // Perform umount operation
+    match vfs.unmount(&target_str) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX,
     }
 }
