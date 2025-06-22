@@ -428,26 +428,7 @@ pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    // Update task's VFS to the new pivoted root
-    // Note: This is a simplified implementation
-    // In a full system, we would need proper synchronization with the scheduler
-    // to safely update the task's VFS while it might be running on other cores
-    
-    // For now, we'll return success but note that the actual VFS update
-    // would need to be implemented with proper task management
-    
-    // TODO: Implement proper task VFS update mechanism
-    // This would require:
-    // 1. Getting a mutable reference to the current task through the scheduler
-    // 2. Atomically updating task.vfs and task.cwd
-    // 3. Ensuring thread safety across multiple CPU cores
-    // Example implementation:
-    // let mut current_task = get_scheduler().get_current_task_mut(cpu_id)?;
-    // current_task.vfs = Some(new_vfs);
-    // current_task.cwd = Some("/".to_string());
-    
-    // For demonstration purposes, we'll consider this a successful operation
-    drop(new_vfs); // We're not actually using it yet
+    task.vfs = Some(new_vfs);
 
     0
 }
