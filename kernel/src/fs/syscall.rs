@@ -452,7 +452,10 @@ fn create_pivoted_vfs(
 
     // Convert old_root_path to old_root_path in the new VFS
     let old_root_path = if old_root_path == new_root_path {
-        return Err(super::FileSystemError::InvalidPath); // Handle identical paths explicitly
+        return Err(super::FileSystemError {
+            kind: super::FileSystemErrorKind::InvalidPath,
+            message: "Old root path cannot be the same as new root path".to_string(),
+        }); // Handle identical paths explicitly
     } else if old_root_path.starts_with(new_root_path) {
         &old_root_path[new_root_path.len()..]
     } else {
