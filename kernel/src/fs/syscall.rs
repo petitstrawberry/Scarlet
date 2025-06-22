@@ -428,26 +428,7 @@ pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    // Update task's VFS to the new pivoted root
-    // Note: This is a simplified implementation
-    // In a full system, we would need proper synchronization with the scheduler
-    // to safely update the task's VFS while it might be running on other cores
-    
-    // For now, we'll return success but note that the actual VFS update
-    // would need to be implemented with proper task management
-    
-    // TODO: Implement proper task VFS update mechanism
-    // This would require:
-    // 1. Getting a mutable reference to the current task through the scheduler
-    // 2. Atomically updating task.vfs and task.cwd
-    // 3. Ensuring thread safety across multiple CPU cores
-    // Example implementation:
-    // let mut current_task = get_scheduler().get_current_task_mut(cpu_id)?;
-    // current_task.vfs = Some(new_vfs);
-    // current_task.cwd = Some("/".to_string());
-    
-    // For demonstration purposes, we'll consider this a successful operation
-    drop(new_vfs); // We're not actually using it yet
+    task.vfs = Some(new_vfs);
 
     0
 }
@@ -468,9 +449,23 @@ fn create_pivoted_vfs(
     
     // Use bind mount to mount the new root as "/" in the new VFS
     new_vfs.bind_mount_from(current_vfs, new_root_path, "/", false)?;
+
+    // Convert old_root_path to old_root_path in the new VFS
+    let old_root_path = if old_root_path == new_root_path {
+        return Err(super::FileSystemError {
+            kind: super::FileSystemErrorKind::InvalidPath,
+            message: "Old root path cannot be the same as new root path".to_string(),
+        }); // Handle identical paths explicitly
+    } else if old_root_path.starts_with(new_root_path) {
+        &old_root_path[new_root_path.len()..]
+    } else {
+        old_root_path
+    };
+
+    new_vfs.create_dir(old_root_path)?;
     
     // Mount the old root at the specified path in the new filesystem
     new_vfs.bind_mount_from(current_vfs, "/", old_root_path, false)?;
-    
+
     Ok(Arc::new(new_vfs))
 }
