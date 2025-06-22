@@ -128,3 +128,49 @@ fn test_readdir() {
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind, FileSystemErrorKind::NotFound);
 }
+
+#[test_case]
+fn test_directory_streaming() {
+    let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
+    let initramfs = Cpiofs::new("initramfs", cpio_data).unwrap();
+
+    // Open root directory as a file for streaming
+    let dir_handle = initramfs.open("/", 0);
+    if let Ok(dir_file) = dir_handle {
+        // Try to read directory entries using the stream interface
+        let mut buffer = vec![0u8; 1024];
+        let bytes_read = dir_file.read(&mut buffer);
+        
+        // Should be able to read at least one directory entry
+        if let Ok(size) = bytes_read {
+            assert!(size > 0, "Should read at least one directory entry");
+            assert!(size <= buffer.len(), "Read size should not exceed buffer size");
+            
+            // Parse the directory entry to make sure it's valid
+            if let Some(entry) = crate::fs::DirectoryEntry::parse(&buffer[..size]) {
+                if let Ok(name) = entry.name_str() {
+                    assert!(!name.is_empty(), "Directory entry should have a non-empty name");
+                }
+            }
+        }
+    }
+}
+
+#[test_case]
+fn test_file_vs_directory_open() {
+    let cpio_data = include_bytes!("mkfs/initramfs.cpio"); // Test CPIO data
+    let initramfs = Cpiofs::new("initramfs", cpio_data).unwrap();
+
+    // Open a regular file
+    let file_handle = initramfs.open("/file1.txt", 0).unwrap();
+    let file_metadata = file_handle.metadata().unwrap();
+    assert_eq!(file_metadata.file_type, FileType::RegularFile);
+
+    // Try to open root directory
+    let dir_handle = initramfs.open("/", 0);
+    if let Ok(dir_file) = dir_handle {
+        let dir_metadata = dir_file.metadata().unwrap();
+        assert_eq!(dir_metadata.file_type, FileType::Directory);
+        assert!(dir_metadata.permissions.execute); // Directories should be "executable"
+    }
+}

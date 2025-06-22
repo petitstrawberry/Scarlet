@@ -24,7 +24,6 @@ pub enum Syscall {
     Lseek = 24,
     Ftruncate = 25,
     Truncate = 26,
-    ReadDir = 27,
     // Mount operations
     Mount = 30,
     Umount = 31,

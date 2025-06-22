@@ -37,7 +37,7 @@ use alloc::{boxed::Box, format, string::{String, ToString}, sync::Arc, vec::Vec}
 use spin::{Mutex, RwLock};
 
 use crate::{driver_initcall, fs::{
-    get_fs_driver_manager, Directory, DirectoryEntryInternal, FileObject, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, VirtualFileSystem, SeekFrom
+    get_fs_driver_manager, Directory, DirectoryEntry, DirectoryEntryInternal, FileObject, FileMetadata, FileOperations, FileSystem, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileSystemType, FileType, VirtualFileSystem, SeekFrom
 }, vm::vmem::MemoryArea, object::capability::{StreamOps, StreamError}};
 
 /// Structure representing an Initramfs entry
@@ -237,16 +237,76 @@ impl Cpiofs {
         }
         hash
     }
+
+    /// Helper method to get directory entries for a given path (assumes lock is already held)
+    fn get_directory_entries_internal(&self, path: &str, entries: &Vec<CpiofsEntry>) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
+        let normalized_path = if path.is_empty() || path == "/" { "" } else { path };
+    
+        // Filter entries in the specified directory
+        let filtered_entries: Vec<DirectoryEntryInternal> = entries
+            .iter()
+            .filter_map(|e| {
+                // Determine entries within the directory
+                let parent_path = e.name.rfind('/').map_or("", |idx| &e.name[..idx]);
+                if parent_path == normalized_path {
+                    // Extract only the file name
+                    let file_name = e.name.rfind('/').map_or(&e.name[..], |idx| &e.name[idx + 1..]);
+                    // Skip empty names
+                    if !file_name.is_empty() {
+                        Some(DirectoryEntryInternal {
+                            name: file_name.to_string(),
+                            file_type: e.file_type,
+                            size: e.size,
+                            file_id: self.calculate_file_id(&e.name), // Use path hash as file_id
+                            metadata: None,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+    
+        // Always return success, even for empty directories
+        Ok(filtered_entries)
+    }
 }
 
 impl FileOperations for Cpiofs {
     fn open(&self, path: &str, _flags: u32) -> Result<Arc<dyn crate::fs::FileObject>, FileSystemError> {
         let path = self.normalize_path(path);
         let entries = self.entries.lock();
+        
         if let Some(entry) = entries.iter().find(|e| e.name == path) {
+            // Found the entry - create appropriate file object
+            if entry.file_type == FileType::Directory {
+                // For directories, prepare directory entries for streaming
+                let dir_entries = self.get_directory_entries_internal(&path, &entries)?;
+                Ok(Arc::new(CpiofsFileObject {
+                    content: RwLock::new(Vec::new()), // Empty content for directories
+                    position: RwLock::new(0),
+                    file_type: FileType::Directory,
+                    directory_entries: Some(dir_entries),
+                }))
+            } else {
+                // For regular files
+                Ok(Arc::new(CpiofsFileObject {
+                    content: RwLock::new(entry.data.clone().unwrap_or_default()),
+                    position: RwLock::new(0),
+                    file_type: FileType::RegularFile,
+                    directory_entries: None,
+                }))
+            }
+        } else if path.is_empty() || path == "/" {
+            // Handle root directory case - even if not explicitly in CPIO entries
+            let dir_entries = self.get_directory_entries_internal(&path, &entries)?;
             Ok(Arc::new(CpiofsFileObject {
-                content: RwLock::new(entry.data.clone().unwrap_or_default()),
+                content: RwLock::new(Vec::new()),
                 position: RwLock::new(0),
+                file_type: FileType::Directory,
+                directory_entries: Some(dir_entries),
             }))
         } else {
             Err(FileSystemError {
@@ -348,17 +408,71 @@ impl FileOperations for Cpiofs {
 struct CpiofsFileObject {
     content: RwLock<Vec<u8>>,
     position: RwLock<usize>,
+    file_type: FileType,
+    directory_entries: Option<Vec<DirectoryEntryInternal>>,
 }
 
 impl StreamOps for CpiofsFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        let content = self.content.read();
-        let mut position = self.position.write();
-        let available = content.len() - *position;
-        let to_read = buffer.len().min(available);
-        buffer[..to_read].copy_from_slice(&content[*position..*position + to_read]);
-        *position += to_read;
-        Ok(to_read)
+        match self.file_type {
+            FileType::RegularFile => {
+                // Handle regular file reading
+                let content = self.content.read();
+                let mut position = self.position.write();
+                let available = content.len() - *position;
+                let to_read = buffer.len().min(available);
+                buffer[..to_read].copy_from_slice(&content[*position..*position + to_read]);
+                *position += to_read;
+                Ok(to_read)
+            },
+            FileType::Directory => {
+                // Handle directory reading by streaming directory entries
+                if let Some(ref dir_entries) = self.directory_entries {
+                    let mut position = self.position.write();
+                    
+                    // Check if we've reached the end
+                    if *position >= dir_entries.len() {
+                        return Ok(0); // EOF
+                    }
+                    
+                    // Get the current entry
+                    let entry = &dir_entries[*position];
+                    
+                    // Convert to DirectoryEntry format
+                    let dir_entry = DirectoryEntry::from_internal(entry);
+                    
+                    // Calculate actual entry size
+                    let entry_size = dir_entry.entry_size();
+                    
+                    // Check buffer size
+                    if buffer.len() < entry_size {
+                        return Err(StreamError::InvalidArgument); // Buffer too small
+                    }
+                    
+                    // Treat struct as byte array
+                    let entry_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &dir_entry as *const _ as *const u8,
+                            entry_size
+                        )
+                    };
+                    
+                    // Copy to buffer
+                    buffer[..entry_size].copy_from_slice(entry_bytes);
+                    
+                    // Move to next entry
+                    *position += 1;
+                    
+                    Ok(entry_size)
+                } else {
+                    Err(StreamError::from(FileSystemError {
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Cannot read directory from file handle".to_string(),
+                    }))
+                }
+            },
+            _ => Err(StreamError::NotSupported),
+        }
     }
 
     fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
@@ -369,7 +483,19 @@ impl StreamOps for CpiofsFileObject {
 impl FileObject for CpiofsFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
-        let content = self.content.read();
+        
+        let max_pos = match self.file_type {
+            FileType::RegularFile => {
+                let content = self.content.read();
+                content.len()
+            },
+            FileType::Directory => {
+                // For directories, position represents entry index
+                self.directory_entries.as_ref().map_or(0, |entries| entries.len())
+            },
+            _ => 0,
+        };
+        
         let new_pos = match whence {
             SeekFrom::Start(offset) => offset as usize,
             SeekFrom::Current(offset) => {
@@ -382,13 +508,12 @@ impl FileObject for CpiofsFileObject {
                 }
             },
             SeekFrom::End(offset) => {
-                let end = content.len();
-                if offset < 0 && end < offset.abs() as usize {
+                if offset < 0 && max_pos < offset.abs() as usize {
                     0
                 } else if offset < 0 {
-                    end - offset.abs() as usize
+                    max_pos - offset.abs() as usize
                 } else {
-                    end + offset as usize
+                    max_pos + offset as usize
                 }
             },
         };
@@ -398,21 +523,56 @@ impl FileObject for CpiofsFileObject {
     }
 
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
-        let content = self.content.read();
-        Ok(FileMetadata {
-            file_type: FileType::RegularFile,
-            size: content.len(),
-            permissions: crate::fs::FilePermission {
-                read: true,
-                write: false,
-                execute: false,
+        match self.file_type {
+            FileType::RegularFile => {
+                let content = self.content.read();
+                Ok(FileMetadata {
+                    file_type: FileType::RegularFile,
+                    size: content.len(),
+                    permissions: crate::fs::FilePermission {
+                        read: true,
+                        write: false,
+                        execute: false,
+                    },
+                    created_time: 0,
+                    modified_time: 0,
+                    accessed_time: 0,
+                    file_id: 0, // CPIO file object doesn't know the path, so use 0
+                    link_count: 1,
+                })
             },
-            created_time: 0,
-            modified_time: 0,
-            accessed_time: 0,
-            file_id: 0, // CPIO file object doesn't know the path, so use 0
-            link_count: 1,
-        })
+            FileType::Directory => {
+                let entry_count = self.directory_entries.as_ref().map_or(0, |entries| entries.len());
+                Ok(FileMetadata {
+                    file_type: FileType::Directory,
+                    size: entry_count, // For directories, size is the number of entries
+                    permissions: crate::fs::FilePermission {
+                        read: true,
+                        write: false,
+                        execute: true, // Directories are "executable" for traversal
+                    },
+                    created_time: 0,
+                    modified_time: 0,
+                    accessed_time: 0,
+                    file_id: 0,
+                    link_count: 1,
+                })
+            },
+            _ => Ok(FileMetadata {
+                file_type: self.file_type,
+                size: 0,
+                permissions: crate::fs::FilePermission {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
+                created_time: 0,
+                modified_time: 0,
+                accessed_time: 0,
+                file_id: 0,
+                link_count: 1,
+            }),
+        }
     }
 }
 

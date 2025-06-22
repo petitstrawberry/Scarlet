@@ -2526,13 +2526,29 @@ impl DirectoryEntry {
         core::str::from_utf8(name_bytes)
     }
 
-    /// Get the actual size of this entry (for variable-length serialization)
+    /// Get the actual size of this entry
     pub fn entry_size(&self) -> usize {
-        // Fixed header size + actual name length (not the full 256 bytes)
-        core::mem::size_of::<u64>() * 2 + // file_id + size
-        core::mem::size_of::<u8>() * 2 + // file_type + name_len  
-        6 + // reserved bytes
-        self.name_len as usize
+        // Fixed size of the entry structure
+        core::mem::size_of::<Self>()  as usize
+    }
+
+    /// Parse a DirectoryEntry from raw bytes
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < core::mem::size_of::<Self>() {
+            return None;
+        }
+
+        // Safety: We've checked the size above
+        let entry = unsafe {
+            core::ptr::read(data.as_ptr() as *const Self)
+        };
+
+        // Basic validation
+        if entry.name_len as usize > 255 {
+            return None;
+        }
+
+        Some(entry)
     }
 }
 
