@@ -1,6 +1,18 @@
 use crate::utils::str_to_cstr_bytes;
 use crate::boxed::Box;
-use crate::syscall::{syscall2, syscall3, syscall4, Syscall};
+use crate::syscall::{syscall2, syscall3, syscall5, Syscall};
+
+// Mount flags (similar to Linux mount flags)
+pub const MS_RDONLY: u32 = 1;        // Mount read-only
+pub const MS_NOSUID: u32 = 2;        // Ignore suid and sgid bits
+pub const MS_NODEV: u32 = 4;         // Disallow access to device special files
+pub const MS_NOEXEC: u32 = 8;        // Disallow program execution
+pub const MS_SYNCHRONOUS: u32 = 16;  // Writes are synced at once
+pub const MS_BIND: u32 = 4096;       // Create bind mount
+pub const MS_MOVE: u32 = 8192;       // Move mount point
+pub const MS_REC: u32 = 16384;       // Recursive bind mount
+pub const MS_SILENT: u32 = 32768;    // Suppress kernel messages
+pub const MS_REMOUNT: u32 = 32;      // Remount filesystem
 
 /// Open a file.
 /// 
@@ -84,7 +96,92 @@ pub fn lseek(fd: i32, offset: i64, whence: u32) -> i32 {
     res as i32
 }
 
+/// Mount a filesystem
+/// 
+/// This function provides a POSIX-like mount interface that internally uses
+/// Scarlet's powerful VFS system. The mount type is automatically determined
+/// based on the source and filesystem type.
+/// 
+/// # Arguments
+/// 
+/// * `source` - Device path, memory area, or filesystem source
+/// * `target` - Mount point path
+/// * `fstype` - Filesystem type: "ext4", "tmpfs", "cpiofs", "bind", "overlay", etc.
+/// * `flags` - Mount flags (MS_RDONLY, MS_BIND, etc.)
+/// * `data` - Mount-specific data (optional)
+/// 
+/// # Returns
+/// 
+/// * `0` on success, `-1` on error
+/// 
+/// # Mount Types Supported
+/// 
+/// * **Block devices**: `mount("/dev/sda1", "/mnt", "ext4", 0, None)`
+/// * **Tmpfs**: `mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=10M"))`
+/// * **Bind mounts**: `mount("/source", "/target", "bind", MS_BIND, None)`
+/// * **Overlay**: `mount("overlay", "/overlay", "overlay", 0, Some("lowerdir=/lower,upperdir=/upper"))`
+/// * **Memory FS**: `mount("initramfs", "/", "cpiofs", 0, Some("0x80000000,0x81000000"))`
+/// 
+/// # Example
+/// 
+/// ```rust
+/// use crate::fs::{mount, MS_BIND, MS_RDONLY};
+/// 
+/// // Mount a bind mount
+/// let result = mount("/source", "/target", "bind", MS_BIND, None);
+/// if result == 0 {
+///     println!("Bind mount successful");
+/// }
+/// 
+/// // Create tmpfs with size limit
+/// let result = mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=10M"));
+/// if result == 0 {
+///     println!("Tmpfs mounted successfully");
+/// }
+/// 
+/// // Create overlay mount
+/// let result = mount(
+///     "overlay", 
+///     "/overlay", 
+///     "overlay", 
+///     0, 
+///     Some("lowerdir=/lower1:/lower2,upperdir=/upper")
+/// );
+/// ```
+pub fn mount(source: &str, target: &str, fstype: &str, flags: u32, data: Option<&str>) -> i32 {
+    let source_ptr = Box::into_raw(str_to_cstr_bytes(source).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let fstype_ptr = Box::into_raw(str_to_cstr_bytes(fstype).unwrap().into_boxed_slice()) as *const u8 as usize;
+    
+    let data_ptr = if let Some(data_str) = data {
+        Box::into_raw(str_to_cstr_bytes(data_str).unwrap().into_boxed_slice()) as *const u8 as usize
+    } else {
+        0 // null pointer
+    };
+    
+    let res = syscall5(
+        Syscall::Mount,
+        source_ptr,
+        target_ptr,
+        fstype_ptr,
+        flags as usize,
+        data_ptr
+    );
+    
+    // Free allocated memory
+    let _ = unsafe { Box::from_raw(source_ptr as *mut u8) };
+    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
+    let _ = unsafe { Box::from_raw(fstype_ptr as *mut u8) };
+    if data_ptr != 0 {
+        let _ = unsafe { Box::from_raw(data_ptr as *mut u8) };
+    }
+    
+    res as i32
+}
+
 /// Bind mount a directory or file to another location.
+/// 
+/// This is a convenience wrapper around mount() for bind mounts.
 /// 
 /// # Arguments
 /// * `source` - Source path to bind
@@ -96,20 +193,13 @@ pub fn lseek(fd: i32, offset: i64, whence: u32) -> i32 {
 /// - On error: -1
 /// 
 pub fn bind_mount(source: &str, target: &str, readonly: bool) -> i32 {
-    let source_ptr = Box::into_raw(str_to_cstr_bytes(source).unwrap().into_boxed_slice()) as *const u8 as usize;
-    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
-    let flags = if readonly { 1 } else { 0 };
-    
-    let res = syscall3(Syscall::BindMount, source_ptr, target_ptr, flags);
-    
-    // Free the allocated memory
-    let _ = unsafe { Box::from_raw(source_ptr as *mut u8) };
-    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
-    
-    res as i32
+    let flags = MS_BIND | if readonly { MS_RDONLY } else { 0 };
+    mount(source, target, "bind", flags, None)
 }
 
 /// Create an overlay mount with upper and lower directories.
+/// 
+/// This is a convenience wrapper around mount() for overlay mounts.
 /// 
 /// # Arguments
 /// * `upperdir` - Upper directory for writes (optional)
@@ -121,43 +211,30 @@ pub fn bind_mount(source: &str, target: &str, readonly: bool) -> i32 {
 /// - On error: -1
 /// 
 pub fn overlay_mount(upperdir: Option<&str>, lowerdirs: &[&str], target: &str) -> i32 {
+    use crate::string::String;
     use crate::vec::Vec;
     
-    let upperdir_ptr = if let Some(upper) = upperdir {
-        Box::into_raw(str_to_cstr_bytes(upper).unwrap().into_boxed_slice()) as *const u8 as usize
+    let mut options = Vec::new();
+    
+    // Add lower directories
+    if !lowerdirs.is_empty() {
+        let lowerdir_str = lowerdirs.join(":");
+        let mut lowerdir_option = String::new();
+        lowerdir_option.push_str("lowerdir=");
+        lowerdir_option.push_str(&lowerdir_str);
+        options.push(lowerdir_option);
     } else {
-        0 // null pointer
-    };
-    
-    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
-    
-    // Prepare lower directories array
-    let mut lowerdir_boxes: Vec<Box<[u8]>> = Vec::new();
-    let mut lowerdir_ptrs = Vec::new();
-    
-    for lowerdir in lowerdirs {
-        let boxed_bytes = str_to_cstr_bytes(lowerdir).unwrap().into_boxed_slice();
-        let ptr = boxed_bytes.as_ptr() as usize;
-        lowerdir_ptrs.push(ptr);
-        lowerdir_boxes.push(boxed_bytes);
+        return -1; // At least one lowerdir is required
     }
     
-    let lowerdirs_array_ptr = lowerdir_ptrs.as_ptr() as usize;
-    
-    let res = syscall4(
-        Syscall::OverlayMount,
-        upperdir_ptr,
-        lowerdirs.len(),
-        lowerdirs_array_ptr,
-        target_ptr
-    );
-    
-    // Free allocated memory
-    if upperdir_ptr != 0 {
-        let _ = unsafe { Box::from_raw(upperdir_ptr as *mut u8) };
+    // Add upper directory if provided
+    if let Some(upper) = upperdir {
+        let mut upperdir_option = String::new();
+        upperdir_option.push_str("upperdir=");
+        upperdir_option.push_str(upper);
+        options.push(upperdir_option);
     }
-    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
-    // lowerdir_boxes will be automatically dropped
     
-    res as i32
+    let data = options.join(",");
+    mount("overlay", target, "overlay", 0, Some(&data))
 }

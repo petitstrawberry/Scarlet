@@ -1,4 +1,4 @@
-use alloc::{string::String, vec::Vec, vec};
+use alloc::{string::String, vec::Vec, string::ToString};
 
 use crate::{arch::Trapframe, library::std::string::cstring_to_string, task::mytask};
 
@@ -223,74 +223,425 @@ pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_bind_mount(trapframe: &mut Trapframe) -> usize {
+pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let source_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
-    let flags = trapframe.get_arg(2) as u32;
+    let fstype_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(2)).unwrap() as *const u8;
+    let flags = trapframe.get_arg(3) as u32;
+    let data_ptr = if trapframe.get_arg(4) == 0 {
+        core::ptr::null()
+    } else {
+        task.vm_manager.translate_vaddr(trapframe.get_arg(4)).unwrap() as *const u8
+    };
 
     trapframe.increment_pc_next(task);
 
-    // Convert source and target paths to strings
+    // Convert paths and parameters to strings
     let source_str = match cstring_to_string(source_ptr, MAX_PATH_LENGTH) {
         Ok((s, _)) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX,
     };
     
     let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
         Ok((s, _)) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return usize::MAX,
+    };
+    
+    let fstype_str = match cstring_to_string(fstype_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX,
+    };
+    
+    let data_str = if !data_ptr.is_null() {
+        match cstring_to_string(data_ptr, MAX_PATH_LENGTH) {
+            Ok((s, _)) => Some(s),
+            Err(_) => return usize::MAX,
+        }
+    } else {
+        None
     };
 
-    // Perform the bind mount using VFS
+    // Get VFS reference
     let vfs = match task.vfs.as_ref() {
         Some(vfs) => vfs,
-        None => return usize::MAX, // VFS not initialized
+        None => return usize::MAX,
     };
 
-    match vfs.bind_mount(&source_str, &target_str, flags == 1) { // Assuming 1 means read-only
-        Ok(_) => 0,
-        Err(_) => usize::MAX, // -1
+    // Handle different mount types
+    match fstype_str.as_str() {
+        "bind" => {
+            // Handle bind mount
+            let read_only = (flags & 1) != 0; // MS_RDONLY
+            match vfs.bind_mount(&source_str, &target_str, read_only) {
+                Ok(_) => 0,
+                Err(_) => usize::MAX,
+            }
+        },
+        "overlay" => {
+            // Handle overlay mount - parse data for upperdir/lowerdir
+            if let Some(data) = data_str {
+                match parse_overlay_options(&data) {
+                    Ok((upperdir, lowerdirs)) => {
+                        let lowerdir_refs: Vec<&str> = lowerdirs.iter().map(|s| s.as_str()).collect();
+                        match vfs.overlay_mount(upperdir.as_deref(), lowerdir_refs, &target_str) {
+                            Ok(_) => 0,
+                            Err(_) => usize::MAX,
+                        }
+                    },
+                    Err(_) => usize::MAX,
+                }
+            } else {
+                usize::MAX // Overlay requires options
+            }
+        },
+        "tmpfs" => {
+            // Handle tmpfs mount
+            let memory_limit = if let Some(data) = data_str {
+                parse_tmpfs_size(&data).unwrap_or(64 * 1024 * 1024) // Default 64MB
+            } else {
+                64 * 1024 * 1024 // Default 64MB
+            };
+            
+            // Create tmpfs using the filesystem parameter system
+            match create_tmpfs_and_mount(vfs, &target_str, memory_limit) {
+                Ok(_) => 0,
+                Err(_) => usize::MAX,
+            }
+        },
+        "cpiofs" => {
+            // Handle memory-based filesystem (initramfs, etc.)
+            if let Some(data) = data_str {
+                match parse_memory_range(&data) {
+                    Ok((start, end)) => {
+                        let memory_area = crate::vm::vmem::MemoryArea::new(start, end - start);
+                        match vfs.create_and_register_memory_fs("cpiofs", &memory_area) {
+                            Ok(fs_id) => {
+                                match vfs.mount(fs_id, &target_str) {
+                                    Ok(_) => 0,
+                                    Err(_) => usize::MAX,
+                                }
+                            },
+                            Err(_) => usize::MAX,
+                        }
+                    },
+                    Err(_) => usize::MAX,
+                }
+            } else {
+                usize::MAX // Memory FS requires data with memory range
+            }
+        },
+        _ => {
+            // Handle block device mount (ext4, etc.)
+            // For now, assume it's a block device mount
+            match create_block_fs_and_mount(vfs, &fstype_str, &source_str, &target_str) {
+                Ok(_) => 0,
+                Err(_) => usize::MAX,
+            }
+        }
     }
 }
 
-pub fn sys_overlay_mount(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let upperdir_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let lowerdir_count = trapframe.get_arg(1) as usize;
-    let lowerdirs_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(2)).unwrap() as *const u8;
-    let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(3)).unwrap() as *const u8;
-
-    trapframe.increment_pc_next(task);
-
-    // Convert paths to strings
-    let upperdir_str = match cstring_to_string(upperdir_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
-    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
-        Ok((s, _)) => s,
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
-    // Collect lower directories
+// Helper function to parse overlay mount options
+fn parse_overlay_options(data: &str) -> Result<(Option<String>, Vec<String>), ()> {
+    let mut upperdir = None;
     let mut lowerdirs = Vec::new();
-    for i in 0..lowerdir_count {
-        let lowerdir = unsafe { lowerdirs_ptr.add(i * MAX_PATH_LENGTH) };
-        match cstring_to_string(lowerdir, MAX_PATH_LENGTH) {
-            Ok((s, _)) => lowerdirs.push(s),
-            Err(_) => return usize::MAX, // Invalid UTF-8
+    
+    for option in data.split(',') {
+        if let Some(value) = option.strip_prefix("upperdir=") {
+            upperdir = Some(value.to_string());
+        } else if let Some(value) = option.strip_prefix("lowerdir=") {
+            // Multiple lowerdirs can be separated by ':'
+            for lowerdir in value.split(':') {
+                lowerdirs.push(lowerdir.to_string());
+            }
         }
     }
+    
+    if lowerdirs.is_empty() {
+        return Err(()); // At least one lowerdir is required
+    }
+    
+    Ok((upperdir, lowerdirs))
+}
 
-    // Perform the overlay mount using VFS
-    let vfs = match task.vfs.as_ref() {
-        Some(vfs) => vfs,
-        None => return usize::MAX, // VFS not initialized
+// Helper function to parse tmpfs size option
+fn parse_tmpfs_size(data: &str) -> Result<usize, ()> {
+    for option in data.split(',') {
+        if let Some(size_str) = option.strip_prefix("size=") {
+            // Parse size with suffix (K, M, G)
+            let size_str = size_str.trim();
+            if size_str.is_empty() {
+                continue;
+            }
+            
+            let (number_part, multiplier) = if size_str.ends_with('K') || size_str.ends_with('k') {
+                (&size_str[..size_str.len()-1], 1024)
+            } else if size_str.ends_with('M') || size_str.ends_with('m') {
+                (&size_str[..size_str.len()-1], 1024 * 1024)
+            } else if size_str.ends_with('G') || size_str.ends_with('g') {
+                (&size_str[..size_str.len()-1], 1024 * 1024 * 1024)
+            } else {
+                (size_str, 1)
+            };
+            
+            if let Ok(number) = number_part.parse::<usize>() {
+                return Ok(number * multiplier);
+            }
+        }
+    }
+    Err(())
+}
+
+// Helper function to parse memory range (start,end)
+fn parse_memory_range(data: &str) -> Result<(usize, usize), ()> {
+    let parts: Vec<&str> = data.split(',').collect();
+    if parts.len() != 2 {
+        return Err(());
+    }
+    
+    let start = if parts[0].starts_with("0x") {
+        usize::from_str_radix(&parts[0][2..], 16).map_err(|_| ())?
+    } else {
+        parts[0].parse().map_err(|_| ())?
     };
+    
+    let end = if parts[1].starts_with("0x") {
+        usize::from_str_radix(&parts[1][2..], 16).map_err(|_| ())?
+    } else {
+        parts[1].parse().map_err(|_| ())?
+    };
+    
+    Ok((start, end))
+}
 
-    let lowerdirs_refs: Vec<&str> = lowerdirs.iter().map(|s| s.as_str()).collect();
-    return match vfs.overlay_mount(Some(&upperdir_str), lowerdirs_refs, &target_str) {
-        Ok(_) => 0,
-        Err(_) => usize::MAX, // -1
+// Helper function to create and mount tmpfs
+fn create_tmpfs_and_mount(_vfs: &VfsManager, _mount_point: &str, _memory_limit: usize) -> Result<(), super::FileSystemError> {
+    // This would typically create tmpfs params and use create_and_register_fs_with_params
+    // For now, simplified implementation
+    // TODO: Implement proper tmpfs parameter handling
+    Err(super::FileSystemError {
+        kind: super::FileSystemErrorKind::NotFound,
+        message: "Tmpfs creation not fully implemented".to_string(),
+    })
+}
+
+// Helper function to create and mount block filesystem
+fn create_block_fs_and_mount(_vfs: &VfsManager, _fstype: &str, _device_path: &str, _mount_point: &str) -> Result<(), super::FileSystemError> {
+    // This would typically open the block device and create filesystem
+    // For now, simplified implementation
+    // TODO: Implement proper block device handling
+    Err(super::FileSystemError {
+        kind: super::FileSystemErrorKind::NotFound,
+        message: "Block device filesystem creation not fully implemented".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_parse_overlay_options_basic() {
+        // Test basic overlay options with single lowerdir
+        let result = parse_overlay_options("lowerdir=/lower");
+        assert!(result.is_ok());
+        let (upperdir, lowerdirs) = result.unwrap();
+        assert!(upperdir.is_none());
+        assert_eq!(lowerdirs.len(), 1);
+        assert_eq!(lowerdirs[0], "/lower");
+    }
+
+    #[test_case]
+    fn test_parse_overlay_options_with_upper() {
+        // Test overlay options with upperdir and lowerdir
+        let result = parse_overlay_options("upperdir=/upper, lowerdir=/lower");
+        assert!(result.is_ok());
+        let (upperdir, lowerdirs) = result.unwrap();
+        assert!(upperdir.is_some());
+        assert_eq!(upperdir.unwrap(), "/upper");
+        assert_eq!(lowerdirs.len(), 1);
+        assert_eq!(lowerdirs[0], "/lower");
+    }
+
+    #[test_case]
+    fn test_parse_overlay_options_multiple_lower() {
+        // Test overlay options with multiple lowerdirs
+        let result = parse_overlay_options("lowerdir=/lower1:/lower2:/lower3");
+        assert!(result.is_ok());
+        let (upperdir, lowerdirs) = result.unwrap();
+        assert!(upperdir.is_none());
+        assert_eq!(lowerdirs.len(), 3);
+        assert_eq!(lowerdirs[0], "/lower1");
+        assert_eq!(lowerdirs[1], "/lower2");
+        assert_eq!(lowerdirs[2], "/lower3");
+    }
+
+    #[test_case]
+    fn test_parse_overlay_options_complex() {
+        // Test complex overlay options
+        let result = parse_overlay_options("upperdir=/upper,lowerdir=/lower1:/lower2,workdir=/work");
+        assert!(result.is_ok());
+        let (upperdir, lowerdirs) = result.unwrap();
+        assert!(upperdir.is_some());
+        assert_eq!(upperdir.unwrap(), "/upper");
+        assert_eq!(lowerdirs.len(), 2);
+        assert_eq!(lowerdirs[0], "/lower1");
+        assert_eq!(lowerdirs[1], "/lower2");
+    }
+
+    #[test_case]
+    fn test_parse_overlay_options_no_lowerdir() {
+        // Test overlay options without lowerdir (should fail)
+        let result = parse_overlay_options("upperdir=/upper");
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_parse_overlay_options_empty() {
+        // Test empty options (should fail)
+        let result = parse_overlay_options("");
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_bytes() {
+        // Test parsing size in bytes
+        let result = parse_tmpfs_size("size=1048576");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1048576);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_kilobytes() {
+        // Test parsing size in kilobytes
+        let result = parse_tmpfs_size("size=10K");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10 * 1024);
+
+        let result = parse_tmpfs_size("size=5k");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_megabytes() {
+        // Test parsing size in megabytes
+        let result = parse_tmpfs_size("size=64M");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 64 * 1024 * 1024);
+
+        let result = parse_tmpfs_size("size=128m");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 128 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_gigabytes() {
+        // Test parsing size in gigabytes
+        let result = parse_tmpfs_size("size=2G");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 2 * 1024 * 1024 * 1024);
+
+        let result = parse_tmpfs_size("size=1g");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1 * 1024 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_multiple_options() {
+        // Test parsing size with multiple options
+        let result = parse_tmpfs_size("nodev,size=32M,noexec");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 32 * 1024 * 1024);
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_no_size() {
+        // Test parsing without size option (should fail)
+        let result = parse_tmpfs_size("nodev,noexec");
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_parse_tmpfs_size_invalid() {
+        // Test parsing invalid size
+        let result = parse_tmpfs_size("size=invalid");
+        assert!(result.is_err());
+
+        let result = parse_tmpfs_size("size=");
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_parse_memory_range_decimal() {
+        // Test parsing memory range in decimal
+        let result = parse_memory_range("134217728,268435456");
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(start, 134217728);
+        assert_eq!(end, 268435456);
+    }
+
+    #[test_case]
+    fn test_parse_memory_range_hex() {
+        // Test parsing memory range in hexadecimal
+        let result = parse_memory_range("0x80000000,0x81000000");
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(start, 0x80000000);
+        assert_eq!(end, 0x81000000);
+    }
+
+    #[test_case]
+    fn test_parse_memory_range_mixed() {
+        // Test parsing memory range with mixed formats
+        let result = parse_memory_range("0x80000000,268435456");
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(start, 0x80000000);
+        assert_eq!(end, 268435456);
+    }
+
+    #[test_case]
+    fn test_parse_memory_range_invalid_format() {
+        // Test parsing invalid memory range formats
+        let result = parse_memory_range("0x80000000");
+        assert!(result.is_err());
+
+        let result = parse_memory_range("0x80000000,0x81000000,extra");
+        assert!(result.is_err());
+
+        let result = parse_memory_range("");
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_parse_memory_range_invalid_numbers() {
+        // Test parsing invalid numbers
+        let result = parse_memory_range("invalid,0x81000000");
+        assert!(result.is_err());
+
+        let result = parse_memory_range("0x80000000,invalid");
+        assert!(result.is_err());
+
+        let result = parse_memory_range("0xinvalid,0x81000000");
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_parse_memory_range_boundary_cases() {
+        // Test boundary cases
+        let result = parse_memory_range("0,1");
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 1);
+
+        let result = parse_memory_range("0x0,0xffffffff");
+        assert!(result.is_ok());
+        let (start, end) = result.unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 0xffffffff);
     }
 }
