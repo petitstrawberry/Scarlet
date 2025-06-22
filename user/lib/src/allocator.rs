@@ -100,11 +100,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // Only decrement the allocation count
         if self.allocations.fetch_sub(1, Ordering::SeqCst) == 1 {
             // If all allocations are freed, reset the heap to the initial position
-            let start = self.heap_start.load(Ordering::SeqCst);
-            unsafe { *self.next.get() = start };
-
-            // Use brk to reset the program break to the initial position
-            brk(start);
+            unsafe { self.init(); }
         }
     }
 }
