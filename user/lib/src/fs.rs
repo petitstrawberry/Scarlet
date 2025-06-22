@@ -109,11 +109,10 @@ pub fn lseek(fd: i32, offset: i64, whence: u32) -> i32 {
 /// * `0` on success, `-1` on error
 /// 
 pub fn mkfile(path: &str, mode: u32) -> i32 {
-    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let path_boxed = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
+    let path_ptr = path_boxed.as_ptr() as usize;
     let res = syscall2(Syscall::Mkfile, path_ptr, mode as usize);
-    // Free the allocated memory
-    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) };
-    // Return the result of the syscall
+    // The allocated memory will be safely dropped when `path_boxed` goes out of scope
     res as i32
 }
 
