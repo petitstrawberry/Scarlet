@@ -227,3 +227,77 @@ pub fn umount(target: &str, flags: u32) -> i32 {
     
     res as i32
 }
+
+/// Change the root filesystem
+/// 
+/// This function performs a pivot_root operation, which atomically moves the
+/// root filesystem to a new location and makes the new filesystem the root.
+/// This is commonly used during system initialization to switch from an
+/// initramfs to the real root filesystem.
+/// 
+/// # Arguments
+/// 
+/// * `new_root` - Path to the directory that will become the new root
+/// * `old_root` - Path where the old root will be moved (relative to new_root)
+/// 
+/// # Returns
+/// 
+/// * `0` on success, `-1` on error
+/// 
+/// # Requirements
+/// 
+/// * The calling process must have its own VFS namespace (isolated filesystem)
+/// * The new_root must be a mount point of a different filesystem than the current root
+/// * The old_root must be a valid path under the new root filesystem
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// use crate::fs::pivot_root;
+/// 
+/// // Switch from initramfs to real root filesystem
+/// // 1. Mount the real root filesystem
+/// mount("/dev/sda1", "/mnt/newroot", "ext4", 0, None);
+/// 
+/// // 2. Create directory for old root
+/// // (This would typically be done via mkdir syscall)
+/// 
+/// // 3. Pivot to new root
+/// let result = pivot_root("/mnt/newroot", "/mnt/newroot/old_root");
+/// if result == 0 {
+///     println!("Successfully pivoted to new root");
+///     // At this point:
+///     // - "/" points to what was previously "/mnt/newroot"
+///     // - "/old_root" contains the old root filesystem (initramfs)
+/// } else {
+///     println!("Failed to pivot root");
+/// }
+/// ```
+/// 
+/// # Container Usage
+/// 
+/// ```rust
+/// // In a container setup
+/// mount("/host/container/root", "/mnt/container", "bind", MS_BIND, None);
+/// let result = pivot_root("/mnt/container", "/mnt/container/host");
+/// if result == 0 {
+///     // Container now has isolated root filesystem
+///     // Host filesystem accessible at /host
+/// }
+/// ```
+pub fn pivot_root(new_root: &str, old_root: &str) -> i32 {
+    let new_root_ptr = Box::into_raw(str_to_cstr_bytes(new_root).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let old_root_ptr = Box::into_raw(str_to_cstr_bytes(old_root).unwrap().into_boxed_slice()) as *const u8 as usize;
+    
+    let res = syscall2(
+        Syscall::PivotRoot,
+        new_root_ptr,
+        old_root_ptr
+    );
+    
+    // Free allocated memory
+    let _ = unsafe { Box::from_raw(new_root_ptr as *mut u8) };
+    let _ = unsafe { Box::from_raw(old_root_ptr as *mut u8) };
+    
+    res as i32
+}

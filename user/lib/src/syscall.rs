@@ -25,6 +25,7 @@ pub enum Syscall {
     // Mount operations
     Mount = 30,
     Umount = 31,
+    PivotRoot = 32,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
