@@ -22,6 +22,8 @@ pub enum Syscall {
     Read = 22,
     Write = 23,
     Lseek = 24,
+    BindMount = 31,
+    OverlayMount = 32,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

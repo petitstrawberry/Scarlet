@@ -1,6 +1,6 @@
 use crate::utils::str_to_cstr_bytes;
 use crate::boxed::Box;
-use crate::syscall::{syscall2, syscall3, Syscall};
+use crate::syscall::{syscall2, syscall3, syscall4, Syscall};
 
 /// Open a file.
 /// 
@@ -81,5 +81,83 @@ pub fn write(fd: i32, buf: &[u8]) -> i32 {
 pub fn lseek(fd: i32, offset: i64, whence: u32) -> i32 {
     let res = syscall3(Syscall::Lseek, fd as usize, offset as usize, whence as usize);
     // Return the result of the syscall
+    res as i32
+}
+
+/// Bind mount a directory or file to another location.
+/// 
+/// # Arguments
+/// * `source` - Source path to bind
+/// * `target` - Target mount point
+/// * `readonly` - Whether the bind mount should be read-only
+/// 
+/// # Return Value
+/// - On success: 0
+/// - On error: -1
+/// 
+pub fn bind_mount(source: &str, target: &str, readonly: bool) -> i32 {
+    let source_ptr = Box::into_raw(str_to_cstr_bytes(source).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let flags = if readonly { 1 } else { 0 };
+    
+    let res = syscall3(Syscall::BindMount, source_ptr, target_ptr, flags);
+    
+    // Free the allocated memory
+    let _ = unsafe { Box::from_raw(source_ptr as *mut u8) };
+    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
+    
+    res as i32
+}
+
+/// Create an overlay mount with upper and lower directories.
+/// 
+/// # Arguments
+/// * `upperdir` - Upper directory for writes (optional)
+/// * `lowerdirs` - Lower directories for reads (in priority order)
+/// * `target` - Target mount point
+/// 
+/// # Return Value
+/// - On success: 0
+/// - On error: -1
+/// 
+pub fn overlay_mount(upperdir: Option<&str>, lowerdirs: &[&str], target: &str) -> i32 {
+    use crate::vec::Vec;
+    
+    let upperdir_ptr = if let Some(upper) = upperdir {
+        Box::into_raw(str_to_cstr_bytes(upper).unwrap().into_boxed_slice()) as *const u8 as usize
+    } else {
+        0 // null pointer
+    };
+    
+    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
+    
+    // Prepare lower directories array
+    let mut lowerdir_boxes: Vec<Box<[u8]>> = Vec::new();
+    let mut lowerdir_ptrs = Vec::new();
+    
+    for lowerdir in lowerdirs {
+        let boxed_bytes = str_to_cstr_bytes(lowerdir).unwrap().into_boxed_slice();
+        let ptr = boxed_bytes.as_ptr() as usize;
+        lowerdir_ptrs.push(ptr);
+        lowerdir_boxes.push(boxed_bytes);
+    }
+    
+    let lowerdirs_array_ptr = lowerdir_ptrs.as_ptr() as usize;
+    
+    let res = syscall4(
+        Syscall::OverlayMount,
+        upperdir_ptr,
+        lowerdirs.len(),
+        lowerdirs_array_ptr,
+        target_ptr
+    );
+    
+    // Free allocated memory
+    if upperdir_ptr != 0 {
+        let _ = unsafe { Box::from_raw(upperdir_ptr as *mut u8) };
+    }
+    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
+    // lowerdir_boxes will be automatically dropped
+    
     res as i32
 }

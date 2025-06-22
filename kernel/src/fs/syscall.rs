@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec, vec};
 
 use crate::{arch::Trapframe, library::std::string::cstring_to_string, task::mytask};
 
@@ -218,6 +218,78 @@ pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
     
     let file = file.unwrap();
     match file.truncate(length) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX, // -1
+    }
+}
+
+pub fn sys_bind_mount(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let source_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let flags = trapframe.get_arg(2) as u32;
+
+    trapframe.increment_pc_next(task);
+
+    // Convert source and target paths to strings
+    let source_str = match cstring_to_string(source_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    // Perform the bind mount using VFS
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+
+    match vfs.bind_mount(&source_str, &target_str, flags == 1) { // Assuming 1 means read-only
+        Ok(_) => 0,
+        Err(_) => usize::MAX, // -1
+    }
+}
+
+pub fn sys_overlay_mount(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let upperdir_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let lowerdir_count = trapframe.get_arg(1) as usize;
+    let lowerdirs_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(2)).unwrap() as *const u8;
+    let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(3)).unwrap() as *const u8;
+
+    trapframe.increment_pc_next(task);
+
+    // Convert paths to strings
+    let upperdir_str = match cstring_to_string(upperdir_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    // Collect lower directories
+    let mut lowerdirs = Vec::new();
+    for i in 0..lowerdir_count {
+        let lowerdir = unsafe { lowerdirs_ptr.add(i * MAX_PATH_LENGTH) };
+        match cstring_to_string(lowerdir, MAX_PATH_LENGTH) {
+            Ok((s, _)) => lowerdirs.push(s),
+            Err(_) => return usize::MAX, // Invalid UTF-8
+        }
+    }
+
+    // Perform the overlay mount using VFS
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+
+    let lowerdirs_refs: Vec<&str> = lowerdirs.iter().map(|s| s.as_str()).collect();
+    return match vfs.overlay_mount(Some(&upperdir_str), lowerdirs_refs, &target_str) {
         Ok(_) => 0,
         Err(_) => usize::MAX, // -1
     }
