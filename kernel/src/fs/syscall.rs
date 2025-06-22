@@ -449,9 +449,18 @@ fn create_pivoted_vfs(
     
     // Use bind mount to mount the new root as "/" in the new VFS
     new_vfs.bind_mount_from(current_vfs, new_root_path, "/", false)?;
+
+    // Convert old_root_path to old_root_path in the new VFS
+    let old_root_path = if old_root_path.starts_with(new_root_path) {
+        &old_root_path[new_root_path.len()..]
+    } else {
+        old_root_path
+    };
+
+    new_vfs.create_dir(old_root_path)?;
     
     // Mount the old root at the specified path in the new filesystem
     new_vfs.bind_mount_from(current_vfs, "/", old_root_path, false)?;
-    
+
     Ok(Arc::new(new_vfs))
 }
