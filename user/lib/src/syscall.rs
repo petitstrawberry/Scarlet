@@ -22,6 +22,15 @@ pub enum Syscall {
     Read = 22,
     Write = 23,
     Lseek = 24,
+    Ftruncate = 25,
+    Truncate = 26,
+    // Filesystem operations
+    Mkfile = 30,
+    Mkdir = 31,
+    // Mount operations
+    Mount = 32,
+    Umount = 33,
+    PivotRoot = 34,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
@@ -42,4 +51,8 @@ pub fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usiz
 
 pub fn syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize) -> usize {
     arch_syscall4(syscall, arg1, arg2, arg3, arg4)
+}
+
+pub fn syscall5(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> usize {
+    arch_syscall5(syscall, arg1, arg2, arg3, arg4, arg5)
 }

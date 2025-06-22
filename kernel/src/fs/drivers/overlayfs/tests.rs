@@ -135,9 +135,9 @@ pub fn test_cow_logic_components() {
     let metadata_result = overlay.metadata("/any_file.txt");
     assert!(metadata_result.is_err(), "Should fail when no layers exist");
     
-    // read_dir should also fail when no layers exist (consistent with other operations)
-    let read_dir_result = overlay.read_dir("/");
-    assert!(read_dir_result.is_err(), "Should fail when no layers exist");
+    // readdir should also fail when no layers exist (consistent with other operations)
+    let readdir_result = overlay.readdir("/");
+    assert!(readdir_result.is_err(), "Should fail when no layers exist");
     
     // The internal helper functions are private, but their effects are testable
     // through the public interface. The logic ensures that:
@@ -1148,7 +1148,7 @@ pub fn test_whiteout_directory_listing() {
     
     if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
         // Phase 1: Verify all files are visible initially
-        if let Ok(entries) = manager.read_dir("/overlay/") {
+        if let Ok(entries) = manager.readdir("/overlay/") {
             assert_eq!(entries.len(), 3, "Should see all 3 files initially");
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"visible.txt"));
@@ -1161,7 +1161,7 @@ pub fn test_whiteout_directory_listing() {
         assert!(remove_result.is_ok(), "Should be able to remove file");
         
         // Phase 3: Verify directory listing excludes removed file
-        if let Ok(entries) = manager.read_dir("/overlay/") {
+        if let Ok(entries) = manager.readdir("/overlay/") {
             assert_eq!(entries.len(), 2, "Should see only 2 files after removal");
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"visible.txt"));
@@ -1170,12 +1170,12 @@ pub fn test_whiteout_directory_listing() {
         }
         
         // Phase 4: Verify lower layer still has all files
-        if let Ok(entries) = manager.read_dir("/lower/") {
+        if let Ok(entries) = manager.readdir("/lower/") {
             assert_eq!(entries.len(), 3, "Lower layer should still have all files");
         }
         
         // Phase 5: Verify whiteout doesn't appear in overlay listing
-        if let Ok(entries) = manager.read_dir("/overlay/") {
+        if let Ok(entries) = manager.readdir("/overlay/") {
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
             assert!(!names.iter().any(|name| name.starts_with(".wh.")), 
                    "Whiteout files should not appear in overlay listing");
@@ -1384,7 +1384,7 @@ pub fn test_remove_and_recreate_same_name() {
         }
         
         // Phase 7: Verify directory listing shows only the new file
-        if let Ok(entries) = manager.read_dir("/overlay/") {
+        if let Ok(entries) = manager.readdir("/overlay/") {
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"test_file.txt"), "New file should appear in directory listing");
             
