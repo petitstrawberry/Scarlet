@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use spin::Mutex;
 use crate::object::capability::{StreamOps, StreamError, CloneOps};
-use crate::fs::{FileType, FileMetadata, DirectoryEntry, SeekFrom};
+use crate::fs::{FileType, FileMetadata, SeekFrom};
 
 /// Mock FileObject for testing purposes
 pub struct MockFileObject {
@@ -84,10 +84,6 @@ impl crate::fs::FileObject for MockFileObject {
         Ok(new_pos as u64)
     }
     
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
-        Err(StreamError::NotSupported)
-    }
-    
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
@@ -163,10 +159,6 @@ impl crate::fs::FileObject for MockTaskFileObject {
         
         *pos = new_pos;
         Ok(new_pos as u64)
-    }
-    
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError> {
-        Err(StreamError::NotSupported)
     }
     
     fn metadata(&self) -> Result<FileMetadata, StreamError> {

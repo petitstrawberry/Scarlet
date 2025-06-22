@@ -1,6 +1,7 @@
 use crate::utils::str_to_cstr_bytes;
 use crate::boxed::Box;
 use crate::syscall::{syscall2, syscall3, syscall5, Syscall};
+use crate::string::String;
 
 // Mount flags (similar to Linux mount flags)
 pub const MS_RDONLY: u32 = 1;        // Mount read-only
@@ -310,4 +311,285 @@ pub fn pivot_root(new_root: &str, old_root: &str) -> i32 {
     let _ = unsafe { Box::from_raw(old_root_ptr as *mut u8) };
     
     res as i32
+}
+
+/// Read directory entries.
+/// 
+/// This function reads directory entries one at a time from an opened directory.
+/// Each call returns the next directory entry or None if end of directory is reached.
+/// 
+/// # Arguments
+/// * `fd` - File descriptor of an opened directory
+/// 
+/// # Return Value
+/// - `Ok(Some(entry))` - Successfully read a directory entry
+/// - `Ok(None)` - End of directory reached (EOF)
+/// - `Err(errno)` - Error occurred (errno value from kernel)
+/// 
+/// # Example
+/// ```rust
+/// let dir_fd = open("/tmp", 0);
+/// if dir_fd >= 0 {
+///     loop {
+///         match readdir(dir_fd) {
+///             Ok(Some(entry)) => {
+///                 if let Ok(name) = entry.name_str() {
+///                     println!("Found: {} (type: {})", name, entry.file_type);
+///                 }
+///             }
+///             Ok(None) => break, // End of directory
+///             Err(errno) => {
+///                 println!("Error reading directory: {}", errno);
+///                 break;
+///             }
+///         }
+///     }
+///     close(dir_fd);
+/// }
+/// ```
+pub fn readdir(fd: i32) -> Result<Option<DirectoryEntry>, i32> {
+    let mut buf = [0u8; core::mem::size_of::<DirectoryEntryRaw>()];
+    let bytes_read = read(fd, &mut buf);
+    
+    if bytes_read < 0 {
+        return Err(bytes_read); // Return error code
+    }
+    
+    if bytes_read == 0 {
+        return Ok(None); // EOF - no more entries
+    }
+    
+    // Parse the directory entry
+    if let Some(entry) = parse_dir_entry(&buf[..bytes_read as usize]) {
+        Ok(Some(DirectoryEntry::from_raw(entry)))
+    } else {
+        Err(-1) // Parse error
+    }
+}
+
+/// Raw Directory entry structure (must match kernel definition)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DirectoryEntryRaw {
+    /// Unique file identifier
+    pub file_id: u64,
+    /// File size in bytes
+    pub size: u64,
+    /// File type as a byte value
+    pub file_type: u8,
+    /// Length of the file name
+    pub name_len: u8,
+    /// Reserved bytes for alignment
+    pub _reserved: [u8; 6],
+    /// File name (null-terminated, max 255 characters)
+    pub name: [u8; 256],
+}
+
+impl DirectoryEntryRaw {
+    /// Get the name as a string
+    pub fn name_str(&self) -> Result<&str, core::str::Utf8Error> {
+        let name_bytes = &self.name[..self.name_len as usize];
+        core::str::from_utf8(name_bytes)
+    }
+    
+    /// Get the name as an owned String
+    pub fn name_string(&self) -> Result<crate::string::String, core::str::Utf8Error> {
+        let name_str = self.name_str()?;
+        let mut owned_name = crate::string::String::new();
+        for c in name_str.chars() {
+            owned_name.push(c);
+        }
+        Ok(owned_name)
+    }
+    
+    /// Check if this entry is a directory
+    pub fn is_directory(&self) -> bool {
+        self.file_type == 1 // FileType::Directory as u8
+    }
+    
+    /// Check if this entry is a regular file
+    pub fn is_file(&self) -> bool {
+        self.file_type == 0 // FileType::RegularFile as u8
+    }
+    
+    /// Check if this entry is a symbolic link
+    pub fn is_symlink(&self) -> bool {
+        self.file_type == 2 // FileType::SymbolicLink as u8
+    }
+    
+    /// Get file type as a human-readable string
+    pub fn file_type_str(&self) -> &'static str {
+        match self.file_type {
+            0 => "file",
+            1 => "directory",
+            2 => "symlink",
+            3 => "device",
+            4 => "pipe",
+            5 => "socket",
+            _ => "unknown",
+        }
+    }
+}
+
+/// Directory entry structure for user space
+/// This structure is a higher-level representation of a directory entry
+/// that can be used in user space
+
+#[derive(Debug, Clone)]
+pub struct DirectoryEntry {
+    /// Unique file identifier
+    pub file_id: u64,
+    /// File size in bytes
+    pub size: u64,
+    /// File type as a byte value
+    pub file_type: u8,
+    /// File name
+    pub name: String,
+}
+
+impl DirectoryEntry {
+    /// Create a new DirectoryEntry from raw data
+    pub fn from_raw(entry: DirectoryEntryRaw) -> Self {
+        Self {
+            file_id: entry.file_id,
+            size: entry.size,
+            file_type: entry.file_type,
+            name: entry.name_string().unwrap_or_else(|_| String::new()),
+        }
+    }
+    
+    /// Get the name as a string slice
+    pub fn name_str(&self) -> &str {
+        &self.name
+    }
+    
+    /// Check if this entry is a directory
+    pub fn is_directory(&self) -> bool {
+        self.file_type == 1 // FileType::Directory as u8
+    }
+    
+    /// Check if this entry is a regular file
+    pub fn is_file(&self) -> bool {
+        self.file_type == 0 // FileType::RegularFile as u8
+    }
+}
+
+/// Helper function to parse directory entries from readdir buffer (backward compatibility).
+/// 
+/// This function is kept for backward compatibility. Consider using the new
+/// `readdir()` function instead, which handles parsing automatically.
+/// 
+/// # Arguments
+/// * `buf` - Buffer containing directory entry from readdir
+/// * `bytes_read` - Number of bytes actually read
+/// 
+/// # Return Value
+/// Option containing the parsed directory entry data as a tuple
+/// 
+pub fn parse_dir_entry_safe(buf: &[u8], bytes_read: usize) -> Option<(crate::string::String, u8, u64, u64)> {
+    if bytes_read == 0 {
+        return None; // EOF
+    }
+    
+    if let Some(entry) = parse_dir_entry(&buf[..bytes_read]) {
+        if let Ok(owned_name) = entry.name_string() {
+            return Some((
+                owned_name,
+                entry.file_type,
+                entry.file_id,
+                entry.size
+            ));
+        }
+    }
+    
+    None
+}
+
+/// Parse a single directory entry from buffer (low-level function)
+pub fn parse_dir_entry(buf: &[u8]) -> Option<DirectoryEntryRaw> {
+    if buf.len() < core::mem::size_of::<DirectoryEntryRaw>() {
+        return None;
+    }
+    
+    unsafe {
+        Some(*(buf.as_ptr() as *const DirectoryEntryRaw))
+    }
+}
+
+/// Example: List all files in a directory
+/// 
+/// This is a demonstration of how to use the new readdir API to collect
+/// all entries in a directory.
+/// 
+/// # Arguments
+/// * `path` - Path to the directory to list
+/// 
+/// # Returns
+/// * `Ok(entries)` - Vector of directory entries on success
+/// * `Err(errno)` - Error code on failure
+/// 
+pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>, i32> {
+    use crate::vec::Vec;
+    
+    let dir_fd = open(path, 0);
+    if dir_fd < 0 {
+        return Err(dir_fd);
+    }
+    
+    let mut entries = Vec::new();
+    
+    loop {
+        match readdir(dir_fd) {
+            Ok(Some(entry)) => {
+                entries.push(entry);
+            }
+            Ok(None) => break, // End of directory
+            Err(errno) => {
+                close(dir_fd);
+                return Err(errno);
+            }
+        }
+    }
+    
+    close(dir_fd);
+    Ok(entries)
+}
+
+/// Example: Count files and directories
+/// 
+/// # Arguments
+/// * `path` - Path to the directory to analyze
+/// 
+/// # Returns
+/// * `Ok((file_count, dir_count))` on success
+/// * `Err(errno)` on error
+/// 
+pub fn count_directory_entries(path: &str) -> Result<(usize, usize), i32> {
+    let dir_fd = open(path, 0);
+    if dir_fd < 0 {
+        return Err(dir_fd);
+    }
+    
+    let mut file_count = 0;
+    let mut dir_count = 0;
+    
+    loop {
+        match readdir(dir_fd) {
+            Ok(Some(entry)) => {
+                if entry.is_file() {
+                    file_count += 1;
+                } else if entry.is_directory() {
+                    dir_count += 1;
+                }
+            }
+            Ok(None) => break,
+            Err(errno) => {
+                close(dir_fd);
+                return Err(errno);
+            }
+        }
+    }
+    
+    close(dir_fd);
+    Ok((file_count, dir_count))
 }

@@ -349,7 +349,7 @@ impl FileOperations for OverlayFS {
         })
     }
 
-    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
+    fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         let mut entries = Vec::new();
         let mut seen_names = BTreeSet::new();
         let mut found_any_layer = false;
@@ -360,9 +360,9 @@ impl FileOperations for OverlayFS {
             
             if let Ok(mount_point) = upper_node.get_mount_point() {
                 if let Ok((fs, resolved_path)) = mount_point.resolve_fs(&upper_path) {
-                    // Since VirtualFileSystem auto-implements FileOperations, we can call read_dir directly
+                    // Since VirtualFileSystem auto-implements FileOperations, we can call readdir directly
                     let fs_guard = fs.read();
-                    if let Ok(upper_entries) = fs_guard.read_dir(&resolved_path) {
+                    if let Ok(upper_entries) = fs_guard.readdir(&resolved_path) {
                         found_any_layer = true;
                         for entry in upper_entries {
                             // Skip whiteout files themselves
@@ -384,7 +384,7 @@ impl FileOperations for OverlayFS {
             if let Ok(mount_point) = lower_node.get_mount_point() {
                 if let Ok((fs, resolved_path)) = mount_point.resolve_fs(&lower_path) {
                     let fs_guard = fs.read();
-                    if let Ok(lower_entries) = fs_guard.read_dir(&resolved_path) {
+                    if let Ok(lower_entries) = fs_guard.readdir(&resolved_path) {
                         found_any_layer = true;
                         for entry in lower_entries {
                             // Only add if not already seen in a higher layer and not hidden by whiteout
@@ -410,7 +410,7 @@ impl FileOperations for OverlayFS {
     }
 
     fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
-        let entries = self.read_dir(path)?;
+        let entries = self.readdir(path)?;
         if entries.iter().any(|e| e.name == path) {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::AlreadyExists,

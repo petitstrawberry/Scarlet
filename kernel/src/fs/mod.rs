@@ -224,9 +224,9 @@ pub struct FileMetadata {
     pub link_count: u32,
 }
 
-/// Structure representing a directory entry
+/// Structure representing a directory entry (internal representation)
 #[derive(Debug, Clone)]
-pub struct DirectoryEntry {
+pub struct DirectoryEntryInternal {
     pub name: String,
     pub file_type: FileType,
     pub size: usize,
@@ -268,13 +268,11 @@ pub enum SeekFrom {
 /// Trait for file object
 /// 
 /// This trait represents a file-like object that supports both stream operations
-/// and file-specific operations like seeking, metadata access, and directory reading.
+/// and file-specific operations like seeking and metadata access.
+/// Directory reading is handled through normal read() operations.
 pub trait FileObject: StreamOps {
     /// Seek to a position in the file stream
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
-
-    /// Read directory entries
-    fn readdir(&self) -> Result<Vec<DirectoryEntry>, StreamError>;
     
     /// Get metadata about the file
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
@@ -320,7 +318,7 @@ pub trait FileOperations: Send + Sync {
     fn open(&self, path: &str, flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError>;
 
     /// Read directory entries
-    fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError>;
+    fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError>;
     
     /// Create a file with the specified type.
     /// 
@@ -827,7 +825,7 @@ impl FileSystemDriverManager {
     /// # Arguments
     /// 
     /// * `driver_name` - The name of the registered driver to use
-    /// * `params` - Parameter structure implementing FileSystemParams trait
+    /// * `params` - Parameter structure implementing FileSystemParams
     /// 
     /// # Returns
     /// 
@@ -1300,7 +1298,7 @@ impl VfsManager {
                     self.filesystems.write().insert(mp.fs_id, mp.fs.clone());
                 }
                 // If fs_id == 0, this is likely an overlay filesystem that doesn't need
-                // to be returned to the registration pool
+                // to be returned to the pool
             },
             mount_tree::MountType::Overlay { .. } => {
                 // For overlay mounts, we need to call unmount on the overlay filesystem
@@ -1830,13 +1828,13 @@ impl VfsManager {
     /// 
     /// ```rust
     /// // List files in a directory
-    /// let entries = vfs.read_dir("/home/user")?;
+    /// let entries = vfs.readdir("/home/user")?;
     /// for entry in entries {
     ///     println!("{}: {:?}", entry.name, entry.file_type);
     /// }
     /// ```
-    pub fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, FileSystemError> {
-        self.with_resolve_path(path, |fs, relative_path| fs.read().read_dir(relative_path))
+    pub fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
+        self.with_resolve_path(path, |fs, relative_path| fs.read().readdir(relative_path))
     }
     
     /// Create a file with specified type
@@ -2473,215 +2471,84 @@ impl VfsManager {
     }
 }
 
-/// Template for a basic block device-based file system implementation
-/// 
-/// `GenericFileSystem` provides a foundation for implementing filesystems
-/// that operate on block devices. It handles common filesystem operations
-/// including mounting, block I/O, and basic filesystem state management.
-/// 
-/// This is primarily used as a base for filesystem drivers and testing,
-/// not intended for direct use in production filesystems.
-/// 
-/// # Architecture
-/// 
-/// - **Block Device Integration**: Direct interface with block devices for storage
-/// - **Mount State Management**: Tracks filesystem mount status and mount points
-/// - **Thread-Safe Block I/O**: Mutex-protected access to the underlying block device
-/// - **Extensible Design**: Can be extended by specific filesystem implementations
-/// 
-/// # Usage
-/// 
-/// ```rust
-/// // Create a generic filesystem on a block device
-/// let block_device = Box::new(SomeBlockDevice::new());
-/// let fs = GenericFileSystem::new("myfs", block_device, 512);
-/// 
-/// // Register with VFS
-/// let fs_id = vfs_manager.register_fs(Box::new(fs));
-/// vfs_manager.mount(fs_id, "/mnt")?;
-/// ```
-pub struct GenericFileSystem {
-    /// Name of the filesystem instance
-    name: &'static str,
-    /// Block device for storage operations (mutex-protected for thread safety)
-    #[allow(dead_code)]
-    block_device: Mutex<Box<dyn BlockDevice>>,
-    /// Block size for I/O operations
-    #[allow(dead_code)]
-    block_size: usize,
-    /// Mount status of the filesystem
-    mounted: bool,
-    /// Current mount point path
-    mount_point: String,
+/// Binary representation of directory entry for system call interface
+/// This structure has a fixed layout for efficient copying between kernel and user space
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DirectoryEntry {
+    /// Unique file identifier
+    pub file_id: u64,
+    /// File size in bytes
+    pub size: u64,
+    /// File type as a byte value
+    pub file_type: u8,
+    /// Length of the file name
+    pub name_len: u8,
+    /// Reserved bytes for alignment
+    pub _reserved: [u8; 6],
+    /// File name (null-terminated, max 255 characters)
+    pub name: [u8; 256],
 }
 
-impl GenericFileSystem {
-    /// Create a new generic filesystem instance
-    /// 
-    /// This method initializes a new filesystem instance that operates on a block device.
-    /// The filesystem starts in an unmounted state and can be mounted later through
-    /// the VFS layer.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `name` - A static string identifier for this filesystem instance
-    /// * `block_device` - The block device that will provide storage for this filesystem
-    /// * `block_size` - The block size to use for I/O operations (typically 512, 1024, 4096)
-    /// 
-    /// # Returns
-    /// 
-    /// * `Self` - A new GenericFileSystem instance ready for registration
-    /// 
-    /// # Examples
-    /// 
-    /// ```rust
-    /// let device = Box::new(SomeBlockDevice::new());
-    /// let fs = GenericFileSystem::new("myfs", device, 512);
-    /// ```
-    pub fn new(name: &'static str, block_device: Box<dyn BlockDevice>, block_size: usize) -> Self {
+impl DirectoryEntry {
+    /// Create a DirectoryEntry from internal representation
+    pub fn from_internal(internal: &DirectoryEntryInternal) -> Self {
+        let file_type_byte = match internal.file_type {
+            FileType::RegularFile => 0u8,
+            FileType::Directory => 1u8,
+            FileType::SymbolicLink => 2u8,
+            FileType::CharDevice(_) => 3u8,
+            FileType::BlockDevice(_) => 4u8,
+            FileType::Pipe => 5u8,
+            FileType::Socket => 6u8,
+            FileType::Unknown => 7u8,
+        };
+
+        let name_bytes = internal.name.as_bytes();
+        let mut name_array = [0u8; 256];
+        let copy_len = core::cmp::min(name_bytes.len(), 255); // Reserve 1 byte for null terminator
+        name_array[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        name_array[copy_len] = 0; // Null terminator
+
         Self {
-            name,
-            block_device: Mutex::new(block_device),
-            block_size,
-            mounted: false,
-            mount_point: String::new(),
+            file_id: internal.file_id,
+            size: internal.size as u64,
+            file_type: file_type_byte,
+            name_len: copy_len as u8,
+            _reserved: [0; 6],
+            name: name_array,
         }
-    }
-    
-    /// Internal method for reading blocks from the underlying block device
-    /// 
-    /// This method provides a low-level interface for reading data blocks
-    /// from the filesystem's block device. It handles device locking and
-    /// error conversion for filesystem operations.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `block_idx` - The index of the block to read
-    /// * `buffer` - Buffer to store the read data
-    /// 
-    /// # Returns
-    /// 
-    /// * `Result<(), FileSystemError>` - Ok if the block was read successfully
-    #[allow(dead_code)]
-    fn read_block_internal(&self, block_idx: usize, buffer: &mut [u8]) -> Result<(), FileSystemError> {
-        let mut device = self.block_device.lock();
-        
-        // Create the request
-        
-        let request = Box::new(BlockIORequest {
-            request_type: BlockIORequestType::Read,
-            sector: block_idx,
-            sector_count: 1,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0; self.block_size],
-        });
-        
-        // Send the request
-        device.enqueue_request(request);
-        
-        // Get the result
-        let results = device.process_requests();
-        
-        if results.len() != 1 {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: format!("Failed to process block request for block index {}", block_idx), // Updated
-            });
-        }
-        
-        match &results[0].result {
-            Ok(_) => {
-                // Copy the data to the buffer
-                let request = &results[0].request;
-                buffer.copy_from_slice(&request.buffer);
-                Ok(())
-            },
-            Err(msg) => Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: msg.to_string(),
-            }),
-        }
-    }
-    
-    /// Internal method for writing blocks to the underlying block device
-    /// 
-    /// This method provides a low-level interface for writing data blocks
-    /// to the filesystem's block device. It handles device locking and
-    /// error conversion for filesystem operations.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `block_idx` - The index of the block to write
-    /// * `buffer` - Buffer containing the data to write
-    /// 
-    /// # Returns
-    /// 
-    /// * `Result<(), FileSystemError>` - Ok if the block was written successfully
-    #[allow(dead_code)]
-    fn write_block_internal(&self, block_idx: usize, buffer: &[u8]) -> Result<(), FileSystemError> {
-        let mut device = self.block_device.lock();
-        
-        // Create the request
-        let request = Box::new(BlockIORequest {
-            request_type: BlockIORequestType::Write,
-            sector: block_idx,
-            sector_count: 1,
-            head: 0,
-            cylinder: 0,
-            buffer: buffer.to_vec(),
-        });
-        
-        // Send the request
-        device.enqueue_request(request);
-        
-        // Get the result
-        let results = device.process_requests();
-        
-        if results.len() != 1 {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: format!("Failed to process block write request for block index {}", block_idx), // Updated
-            });
-        }
-        
-        match &results[0].result {
-            Ok(_) => Ok(()),
-            Err(msg) => Err(FileSystemError {
-                kind: FileSystemErrorKind::IoError,
-                message: msg.to_string(),
-            }),
-        }
-    }
-}
-
-impl FileSystem for GenericFileSystem {
-    fn mount(&mut self, mount_point: &str) -> Result<(), FileSystemError> {
-        if self.mounted {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::AlreadyExists,
-                message: "File system already mounted".to_string(),
-            });
-        }
-        self.mounted = true;
-        self.mount_point = mount_point.to_string();
-        Ok(())
     }
 
-    fn unmount(&mut self) -> Result<(), FileSystemError> {
-        if !self.mounted {
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: "File system not mounted".to_string(),
-            });
-        }
-        self.mounted = false;
-        self.mount_point = String::new();
-        Ok(())
+    /// Get the name as a string
+    pub fn name_str(&self) -> Result<&str, core::str::Utf8Error> {
+        let name_bytes = &self.name[..self.name_len as usize];
+        core::str::from_utf8(name_bytes)
     }
-    
-    fn name(&self) -> &str {
-        self.name
+
+    /// Get the actual size of this entry
+    pub fn entry_size(&self) -> usize {
+        // Fixed size of the entry structure
+        core::mem::size_of::<Self>()  as usize
+    }
+
+    /// Parse a DirectoryEntry from raw bytes
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < core::mem::size_of::<Self>() {
+            return None;
+        }
+
+        // Safety: We've checked the size above
+        let entry = unsafe {
+            core::ptr::read(data.as_ptr() as *const Self)
+        };
+
+        // Basic validation
+        if entry.name_len as usize > 255 {
+            return None;
+        }
+
+        Some(entry)
     }
 }
 
