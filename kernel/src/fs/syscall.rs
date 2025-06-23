@@ -516,18 +516,13 @@ fn pivot_root_in_place(
     temp_vfs.bind_mount_from(vfs, "/", old_root_path, false)?;
     
     // Now we need to atomically replace the mount_tree in the original VfsManager
-    // Since we can't add new methods to VfsManager, we need to access the mount_tree field directly
-    // This requires unsafe code to replace the contents of the RwLock
-    let temp_mount_tree = {
-        let temp_mount_tree_guard = temp_vfs.mount_tree.read();
-        temp_mount_tree_guard.clone()
-    };
-    
-    // Replace the mount tree in the original VfsManager
+    // Use core::mem::swap to avoid expensive cloning of the entire mount tree
     {
-        let mut mount_tree_guard = vfs.mount_tree.write();
-        *mount_tree_guard = temp_mount_tree;
+        let mut original_guard = vfs.mount_tree.write();
+        let mut temp_guard = temp_vfs.mount_tree.write();
+        core::mem::swap(&mut *original_guard, &mut *temp_guard);
     }
+    // temp_vfs will be dropped here, automatically freeing the old mount tree
     
     Ok(())
 }
