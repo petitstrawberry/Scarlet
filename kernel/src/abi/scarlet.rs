@@ -7,7 +7,7 @@
 
 use alloc::{boxed::Box, string::ToString};
 
-use crate::{arch::{vm, Registers, Trapframe}, early_initcall, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
+use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::SeekFrom, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -44,6 +44,7 @@ impl AbiModule for ScarletAbi {
             Some(file_obj) => {
                 // Check ELF magic bytes (0x7F, 'E', 'L', 'F')
                 let mut magic_buffer = [0u8; 4];
+                file_obj.seek(SeekFrom::Start(0)).ok(); // Reset to start
                 match file_obj.read(&mut magic_buffer) {
                     Ok(bytes_read) if bytes_read >= 4 => {
                         if magic_buffer == [0x7F, b'E', b'L', b'F'] {
