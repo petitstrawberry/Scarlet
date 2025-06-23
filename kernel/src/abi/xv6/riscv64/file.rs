@@ -268,7 +268,7 @@ pub fn sys_mknod(trapframe: &mut Trapframe) -> usize {
                     device_type: crate::device::DeviceType::Char,
                 }
             ));
-            // println!("Created console device at {}", path);
+            crate::println!("Created console device at {}", path);
         },
         _ => {},
     }

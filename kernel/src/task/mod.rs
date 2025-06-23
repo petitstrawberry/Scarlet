@@ -800,7 +800,7 @@ impl Task {
 
         // Set the ABI
         if let Some(abi) = &self.abi {
-            child.abi = Some(abi.clone());
+            child.abi = Some(abi.clone_boxed());
         } else {
             child.abi = None; // No ABI set
         }

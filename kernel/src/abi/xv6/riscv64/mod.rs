@@ -7,9 +7,9 @@ mod pipe;
 
 // pub mod drivers;
 
-use alloc::{string::ToString, vec::Vec};
+use alloc::{boxed::Box, string::ToString, vec::Vec};
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
-use proc::{sys_exit, sys_fork, sys_wait, sys_kill, sys_getpid};
+use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
     abi::{
@@ -19,16 +19,25 @@ use crate::{
             proc::{sys_chdir, sys_sbrk}
         }, 
         AbiModule
-    }, arch::{self, Registers}, early_initcall, executor::executor::TransparentExecutor, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    }, arch::{self, Registers}, early_initcall, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack},
+    fs::SeekFrom,
 };
 
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Xv6Riscv64Abi;
 
 impl AbiModule for Xv6Riscv64Abi {
     fn name() -> &'static str {
         "xv6-riscv64"
+    }
+    
+    fn get_name(&self) -> alloc::string::String {
+        Self::name().to_string()
+    }
+
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule> {
+        Box::new(self.clone()) // Xv6Riscv64Abi is Copy, so we can dereference and copy
     }
     
     fn handle_syscall(&self, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
@@ -49,6 +58,7 @@ impl AbiModule for Xv6Riscv64Abi {
         let magic_score = match file_object.as_file() {
             Some(file_obj) => {
                 // Check ELF magic bytes (XV6 uses ELF format)
+                file_obj.seek(SeekFrom::Start(0)).ok(); // Reset to start
                 let mut magic_buffer = [0u8; 4];
                 match file_obj.read(&mut magic_buffer) {
                     Ok(bytes_read) if bytes_read >= 4 => {
@@ -68,7 +78,7 @@ impl AbiModule for Xv6Riscv64Abi {
         
         // XV6 should have lower priority than Scarlet native ABI
         if total_score > 20 {
-            Some(((total_score / 100) * 80).min(85)) // Scale down to give Scarlet priority
+            Some(((total_score / 100) * 80).min(70)) // Scale down to give Scarlet priority
         } else {
             None // Not executable by this ABI
         }
@@ -151,13 +161,54 @@ impl AbiModule for Xv6Riscv64Abi {
                         task.vcpu.switch(trapframe);
                         Ok(())
                     },
-                    Err(e) => {
+                    Err(_e) => {
                         Err("Failed to load XV6 ELF binary")
                     }
                 }
             },
             None => Err("Invalid file object type for XV6 binary execution"),
         }
+    }
+
+    fn get_default_cwd(&self) -> &str {
+        "/" // XV6 uses root as default working directory
+    }
+    
+    fn setup_overlay_environment(
+        &self,
+        target_vfs: &mut crate::fs::VfsManager,
+        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+        system_path: &str,
+        config_path: &str,
+    ) -> Result<(), &'static str> {
+        // XV6 ABI uses overlay mount with system XV6 tools and config persistence
+        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
+        target_vfs.overlay_mount_from(
+            Some(base_vfs),             // upper_vfs (base VFS)
+            config_path,                // upperdir (read-write persistent layer for XV6)
+            lower_vfs_list,             // lowerdir (read-only XV6 system)
+            "/"                         // target mount point in task VFS
+        ).map_err(|e| {
+            crate::println!("Failed to create cross-VFS overlay for XV6 ABI: {}", e.message);
+            "Failed to create XV6 overlay environment"
+        })
+    }
+    
+    fn setup_shared_resources(
+        &self,
+        target_vfs: &mut crate::fs::VfsManager,
+        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+    ) -> Result<(), &'static str> {
+        // XV6 shared resource setup: bind mount common directories and Scarlet gateway
+        target_vfs.bind_mount_from(base_vfs, "/home", "/home", false)
+            .map_err(|_| "Failed to bind mount /home for XV6")?;
+        
+        target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared", false)
+            .map_err(|_| "Failed to bind mount /data/shared for XV6")?;
+        
+        // Setup gateway to native Scarlet environment (read-only for security)
+        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet", true)
+            .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet for XV6")
     }
 }
 
