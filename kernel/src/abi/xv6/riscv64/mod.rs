@@ -40,7 +40,7 @@ impl AbiModule for Xv6Riscv64Abi {
         Box::new(self.clone()) // Xv6Riscv64Abi is Copy, so we can dereference and copy
     }
     
-    fn handle_syscall(&self, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
+    fn handle_syscall(&mut self, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
         syscall_handler(trapframe)
     }
 
