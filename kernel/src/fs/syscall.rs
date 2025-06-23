@@ -475,34 +475,29 @@ pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
         },
     };
 
-    // Create new VfsManager for the pivoted root
-    let new_vfs = match create_pivoted_vfs(&current_vfs, &new_root_str, &old_root_str) {
-        Ok(vfs) => vfs,
-        Err(_) => return usize::MAX,
-    };
-
-    task.vfs = Some(new_vfs);
-
-    0
+    // Perform pivot_root by replacing the mount_tree inside the existing VfsManager
+    match pivot_root_in_place(&current_vfs, &new_root_str, &old_root_str) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX,
+    }
 }
 
-/// Create a new VfsManager with pivoted root
-fn create_pivoted_vfs(
-    current_vfs: &Arc<VfsManager>, 
+/// Pivot root by replacing the mount tree inside the existing VfsManager
+/// 
+/// This function implements pivot_root without creating a new VfsManager instance.
+/// Instead, it manipulates the mount_tree directly to achieve the same effect.
+/// This approach preserves the relationship between the init process and the global VFS.
+fn pivot_root_in_place(
+    vfs: &Arc<VfsManager>, 
     new_root_path: &str, 
     old_root_path: &str
-) -> Result<Arc<VfsManager>, super::FileSystemError> {
-    // Create new VfsManager
-    let new_vfs = VfsManager::new();
+) -> Result<(), super::FileSystemError> {
+    // Use bind mount to mount the new root as "/" in the new mount tree
+    // We need to temporarily create a VfsManager with the new mount tree
+    // to use the bind_mount_from functionality
+    let temp_vfs = VfsManager::new();
+    temp_vfs.bind_mount_from(vfs, new_root_path, "/", false)?;
     
-    // Resolve the new root path in the current VFS to get the filesystem
-    let _fs = current_vfs.with_resolve_path(new_root_path, |fs, _rel_path| {
-        Ok(fs.clone())
-    })?;
-    
-    // Use bind mount to mount the new root as "/" in the new VFS
-    new_vfs.bind_mount_from(current_vfs, new_root_path, "/", false)?;
-
     // Convert old_root_path to old_root_path in the new VFS
     let old_root_path = if old_root_path == new_root_path {
         return Err(super::FileSystemError {
@@ -514,11 +509,20 @@ fn create_pivoted_vfs(
     } else {
         old_root_path
     };
-
-    new_vfs.create_dir(old_root_path)?;
+    
+    temp_vfs.create_dir(old_root_path)?;
     
     // Mount the old root at the specified path in the new filesystem
-    new_vfs.bind_mount_from(current_vfs, "/", old_root_path, false)?;
-
-    Ok(Arc::new(new_vfs))
+    temp_vfs.bind_mount_from(vfs, "/", old_root_path, false)?;
+    
+    // Now we need to atomically replace the mount_tree in the original VfsManager
+    // Use core::mem::swap to avoid expensive cloning of the entire mount tree
+    {
+        let mut original_guard = vfs.mount_tree.write();
+        let mut temp_guard = temp_vfs.mount_tree.write();
+        core::mem::swap(&mut *original_guard, &mut *temp_guard);
+    }
+    // temp_vfs will be dropped here, automatically freeing the old mount tree
+    
+    Ok(())
 }
