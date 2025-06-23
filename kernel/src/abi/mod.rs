@@ -38,7 +38,7 @@ pub trait AbiModule: 'static {
     /// allowing each task to have its own independent ABI instance.
     fn clone_boxed(&self) -> Box<dyn AbiModule>;
 
-    fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
+    fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
     
     /// Determine if a binary can be executed by this ABI
     /// 
@@ -261,6 +261,6 @@ macro_rules! register_abi {
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
     let task = mytask().unwrap();
-    let abi = task.abi.as_ref().expect("ABI not set");
+    let abi = task.abi.as_mut().expect("ABI not set");
     abi.handle_syscall(trapframe)
 }

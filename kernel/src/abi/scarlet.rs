@@ -27,7 +27,7 @@ impl AbiModule for ScarletAbi {
         Box::new(*self) // ScarletAbi is Copy, so we can dereference and copy
     }
 
-    fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+    fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
         syscall_handler(trapframe)
     }
 
