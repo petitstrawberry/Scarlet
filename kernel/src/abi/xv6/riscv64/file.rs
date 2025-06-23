@@ -57,7 +57,7 @@ enum OpenMode {
     Truncate  = 0x400,
 }
 
-pub fn sys_open(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_open(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let mode = trapframe.get_arg(1) as i32;
@@ -82,7 +82,12 @@ pub fn sys_open(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
             // Register the file with the task using HandleTable
             let handle = task.handle_table.insert(kernel_obj);
             match handle {
-                Ok(handle) => handle as usize,
+                Ok(handle) => {
+                    match abi.allocate_fd(handle as u32) {
+                        Ok(fd) => fd,
+                        Err(_) => usize::MAX, // Too many open files
+                    }
+                },
                 Err(_) => usize::MAX, // Handle table full
             }
         }
@@ -99,7 +104,12 @@ pub fn sys_open(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
                         // Register the file with the task using HandleTable
                         let handle = task.handle_table.insert(kernel_obj);
                         match handle {
-                            Ok(handle) => handle as usize,
+                            Ok(handle) => {
+                                match abi.allocate_fd(handle as u32) {
+                                    Ok(fd) => fd,
+                                    Err(_) => usize::MAX, // Too many open files
+                                }
+                            },
                             Err(_) => usize::MAX, // Handle table full
                         }
                     }
@@ -112,35 +122,51 @@ pub fn sys_open(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     }
 }
 
-pub fn sys_dup(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_dup(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
 
-    if let Some(old_kernel_obj) = task.handle_table.get(fd as u32) {
-        let kernel_obj = old_kernel_obj.clone();
-        let handle = task.handle_table.insert(kernel_obj);
-        match handle {
-            Ok(handle) => handle as usize,
-            Err(_) => usize::MAX, // Handle table full
+    // Get handle from XV6 fd
+    if let Some(old_handle) = abi.get_handle(fd) {
+        if let Some(old_kernel_obj) = task.handle_table.get(old_handle) {
+            let kernel_obj = old_kernel_obj.clone();
+            let handle = task.handle_table.insert(kernel_obj);
+            match handle {
+                Ok(new_handle) => {
+                    match abi.allocate_fd(new_handle as u32) {
+                        Ok(fd) => fd,
+                        Err(_) => usize::MAX, // Too many open files
+                    }
+                },
+                Err(_) => usize::MAX, // Handle table full
+            }
+        } else {
+            usize::MAX // Handle not found in handle table
         }
     } else {
         usize::MAX // Invalid file descriptor
     }
 }
 
-pub fn sys_close(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_close(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
-    if task.handle_table.remove(fd as u32).is_some() {
-        0
+    
+    // Get handle from XV6 fd and remove mapping
+    if let Some(handle) = abi.remove_fd(fd) {
+        if task.handle_table.remove(handle).is_some() {
+            0 // Success
+        } else {
+            usize::MAX // Handle not found in handle table
+        }
     } else {
-        usize::MAX // -1
+        usize::MAX // Invalid file descriptor
     }
 }
 
-pub fn sys_read(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
@@ -151,7 +177,13 @@ pub fn sys_read(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     // Increment PC to avoid infinite loop if read fails
     trapframe.increment_pc_next(task);
 
-    let kernel_obj = match task.handle_table.get(fd as u32) {
+    // Get handle from XV6 fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Invalid file descriptor
     };
@@ -184,7 +216,7 @@ pub fn sys_read(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     }
 }
 
-pub fn sys_write(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_write(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
@@ -193,7 +225,13 @@ pub fn sys_write(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     // Increment PC to avoid infinite loop if write fails
     trapframe.increment_pc_next(task);
 
-    let kernel_obj = match task.handle_table.get(fd as u32) {
+    // Get handle from XV6 fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Invalid file descriptor
     };
@@ -211,7 +249,7 @@ pub fn sys_write(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     }
 }
 
-pub fn sys_lseek(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_lseek(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let offset = trapframe.get_arg(1) as i64;
@@ -220,7 +258,13 @@ pub fn sys_lseek(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     // Increment PC to avoid infinite loop if lseek fails
     trapframe.increment_pc_next(task);
 
-    let kernel_obj = match task.handle_table.get(fd as u32) {
+    // Get handle from XV6 fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Invalid file descriptor
     };
@@ -262,7 +306,7 @@ pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
             )));
         
             let vfs = task.vfs.as_mut().unwrap();
-            let res = vfs.create_file(&path, FileType::CharDevice(
+            let _res = vfs.create_file(&path, FileType::CharDevice(
                 DeviceFileInfo {
                     device_id: console_dev.unwrap(),
                     device_type: crate::device::DeviceType::Char,
@@ -276,7 +320,7 @@ pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
 }
 
 
-pub fn sys_fstat(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+pub fn sys_fstat(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
     let fd = trapframe.get_arg(0) as usize;
 
     let task = mytask()
@@ -285,7 +329,14 @@ pub fn sys_fstat(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
 
     let stat_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1) as usize)
         .expect("sys_fstat: Failed to translate stat pointer") as *mut Stat;
-    let kernel_obj = match task.handle_table.get(fd as u32) {
+    
+    // Get handle from XV6 fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+    
+    let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Return -1 on error
     };

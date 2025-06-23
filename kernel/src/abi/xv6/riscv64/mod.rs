@@ -23,9 +23,116 @@ use crate::{
     fs::SeekFrom,
 };
 
+const MAX_FDS: usize = 1024; // Maximum number of file descriptors
 
-#[derive(Default, Clone)]
-pub struct Xv6Riscv64Abi;
+#[derive(Clone)]
+pub struct Xv6Riscv64Abi {
+    /// File descriptor to handle mapping table (fd -> handle)
+    /// None means the fd is not allocated
+    fd_to_handle: [Option<u32>; MAX_FDS],
+    /// Free file descriptor list for O(1) allocation/deallocation
+    free_fds: Vec<usize>,
+}
+
+impl Default for Xv6Riscv64Abi {
+    fn default() -> Self {
+        // Initialize free_fds with all available file descriptors (0 to MAX_FDS-1)
+        // Pop from the end so fd 0, 1, 2 are allocated first
+        let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
+        free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
+        Self {
+            fd_to_handle: [None; MAX_FDS],
+            free_fds,
+        }
+    }
+}
+
+impl Xv6Riscv64Abi {
+    /// Allocate a new file descriptor and map it to a handle
+    pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
+        let fd = if let Some(freed_fd) = self.free_fds.pop() {
+            // Reuse a previously freed file descriptor (O(1))
+            freed_fd
+        } else {
+            // No more file descriptors available
+            return Err("Too many open files");
+        };
+        
+        self.fd_to_handle[fd] = Some(handle);
+        Ok(fd)
+    }
+    
+    /// Get handle from file descriptor
+    pub fn get_handle(&self, fd: usize) -> Option<u32> {
+        if fd < MAX_FDS {
+            self.fd_to_handle[fd]
+        } else {
+            None
+        }
+    }
+    
+    /// Remove file descriptor mapping
+    pub fn remove_fd(&mut self, fd: usize) -> Option<u32> {
+        if fd < MAX_FDS {
+            if let Some(handle) = self.fd_to_handle[fd].take() {
+                // Add the freed fd back to the free list for reuse (O(1))
+                self.free_fds.push(fd);
+                Some(handle)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    /// Find file descriptor by handle (linear search)
+    pub fn find_fd_by_handle(&self, handle: u32) -> Option<usize> {
+        for (fd, &mapped_handle) in self.fd_to_handle.iter().enumerate() {
+            if let Some(h) = mapped_handle {
+                if h == handle {
+                    return Some(fd);
+                }
+            }
+        }
+        None
+    }
+    
+    /// Remove handle mapping (requires linear search)
+    pub fn remove_handle(&mut self, handle: u32) -> Option<usize> {
+        if let Some(fd) = self.find_fd_by_handle(handle) {
+            self.fd_to_handle[fd] = None;
+            self.free_fds.push(fd);
+            Some(fd)
+        } else {
+            None
+        }
+    }
+
+    /// Initialize standard file descriptors (stdin, stdout, stderr)
+    pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
+        // XV6 convention: fd 0 = stdin, fd 1 = stdout, fd 2 = stderr
+        self.fd_to_handle[0] = Some(stdin_handle);
+        self.fd_to_handle[1] = Some(stdout_handle);
+        self.fd_to_handle[2] = Some(stderr_handle);
+        
+        // Remove std fds from free list
+        self.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
+    }
+    
+    /// Get total number of allocated file descriptors
+    pub fn fd_count(&self) -> usize {
+        self.fd_to_handle.iter().filter(|&&h| h.is_some()).count()
+    }
+    
+    /// Get the list of allocated file descriptors (for debugging)
+    pub fn allocated_fds(&self) -> Vec<usize> {
+        self.fd_to_handle.iter()
+            .enumerate()
+            .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
+            .collect()
+    }
+}
 
 impl AbiModule for Xv6Riscv64Abi {
     fn name() -> &'static str {
