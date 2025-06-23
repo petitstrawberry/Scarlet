@@ -1038,7 +1038,7 @@ pub fn get_global_vfs() -> &'static Arc<VfsManager> {
 
 pub struct VfsManager {
     filesystems: RwLock<BTreeMap<usize, FileSystemRef>>,
-    mount_tree: RwLock<MountTree>,
+    pub mount_tree: RwLock<MountTree>,
     next_fs_id: RwLock<usize>,
 }
 
