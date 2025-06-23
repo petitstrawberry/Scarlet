@@ -492,7 +492,6 @@ fn pivot_root_in_place(
     new_root_path: &str, 
     old_root_path: &str
 ) -> Result<(), super::FileSystemError> {
-    crate::println!("Pivoting root from '{}' to '{}'", old_root_path, new_root_path);    
     // Use bind mount to mount the new root as "/" in the new mount tree
     // We need to temporarily create a VfsManager with the new mount tree
     // to use the bind_mount_from functionality
