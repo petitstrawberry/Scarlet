@@ -26,9 +26,13 @@ pub const MS_REMOUNT: u32 = 32;      // Remount filesystem
 /// - On error: -1
 /// 
 pub fn open(path: &str, flags: usize) -> i32 {
-    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let path_bytes = str_to_cstr_bytes(path).unwrap();
+    let path_boxed_slice = path_bytes.into_boxed_slice();
+    let path_len = path_boxed_slice.len();
+    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
     let res = syscall2(Syscall::Open, path_ptr, flags);
-    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) }; // Free the allocated memory
+    // Properly free the allocated memory with correct size information
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
     // Return the result of the syscall
     res as i32
 }
@@ -128,10 +132,13 @@ pub fn mkfile(path: &str, mode: u32) -> i32 {
 /// * `0` on success, `-1` on error
 /// 
 pub fn mkdir(path: &str, mode: u32) -> i32 {
-    let path_ptr = Box::into_raw(str_to_cstr_bytes(path).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let path_bytes = str_to_cstr_bytes(path).unwrap();
+    let path_boxed_slice = path_bytes.into_boxed_slice();
+    let path_len = path_boxed_slice.len();
+    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
     let res = syscall2(Syscall::Mkdir, path_ptr, mode as usize);
     // Free the allocated memory
-    let _ = unsafe { Box::from_raw(path_ptr as *mut u8) };
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
     // Return the result of the syscall
     res as i32
 }
@@ -189,14 +196,29 @@ pub fn mkdir(path: &str, mode: u32) -> i32 {
 /// );
 /// ```
 pub fn mount(source: &str, target: &str, fstype: &str, flags: u32, data: Option<&str>) -> i32 {
-    let source_ptr = Box::into_raw(str_to_cstr_bytes(source).unwrap().into_boxed_slice()) as *const u8 as usize;
-    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
-    let fstype_ptr = Box::into_raw(str_to_cstr_bytes(fstype).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let source_bytes = str_to_cstr_bytes(source).unwrap();
+    let source_boxed_slice = source_bytes.into_boxed_slice();
+    let source_len = source_boxed_slice.len();
+    let source_ptr = Box::into_raw(source_boxed_slice) as *const u8 as usize;
     
-    let data_ptr = if let Some(data_str) = data {
-        Box::into_raw(str_to_cstr_bytes(data_str).unwrap().into_boxed_slice()) as *const u8 as usize
+    let target_bytes = str_to_cstr_bytes(target).unwrap();
+    let target_boxed_slice = target_bytes.into_boxed_slice();
+    let target_len = target_boxed_slice.len();
+    let target_ptr = Box::into_raw(target_boxed_slice) as *const u8 as usize;
+    
+    let fstype_bytes = str_to_cstr_bytes(fstype).unwrap();
+    let fstype_boxed_slice = fstype_bytes.into_boxed_slice();
+    let fstype_len = fstype_boxed_slice.len();
+    let fstype_ptr = Box::into_raw(fstype_boxed_slice) as *const u8 as usize;
+    
+    let (data_ptr, data_len) = if let Some(data_str) = data {
+        let data_bytes = str_to_cstr_bytes(data_str).unwrap();
+        let data_boxed_slice = data_bytes.into_boxed_slice();
+        let data_len = data_boxed_slice.len();
+        let data_ptr = Box::into_raw(data_boxed_slice) as *const u8 as usize;
+        (data_ptr, data_len)
     } else {
-        0 // null pointer
+        (0, 0) // null pointer
     };
     
     let res = syscall5(
@@ -209,11 +231,11 @@ pub fn mount(source: &str, target: &str, fstype: &str, flags: u32, data: Option<
     );
     
     // Free allocated memory
-    let _ = unsafe { Box::from_raw(source_ptr as *mut u8) };
-    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
-    let _ = unsafe { Box::from_raw(fstype_ptr as *mut u8) };
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(source_ptr as *mut u8, source_len)) };
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(target_ptr as *mut u8, target_len)) };
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(fstype_ptr as *mut u8, fstype_len)) };
     if data_ptr != 0 {
-        let _ = unsafe { Box::from_raw(data_ptr as *mut u8) };
+        let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(data_ptr as *mut u8, data_len)) };
     }
     
     res as i32
@@ -254,7 +276,10 @@ pub fn mount(source: &str, target: &str, fstype: &str, flags: u32, data: Option<
 /// }
 /// ```
 pub fn umount(target: &str, flags: u32) -> i32 {
-    let target_ptr = Box::into_raw(str_to_cstr_bytes(target).unwrap().into_boxed_slice()) as *const u8 as usize;
+    let target_bytes = str_to_cstr_bytes(target).unwrap();
+    let target_boxed_slice = target_bytes.into_boxed_slice();
+    let target_len = target_boxed_slice.len();
+    let target_ptr = Box::into_raw(target_boxed_slice) as *const u8 as usize;
     
     let res = syscall2(
         Syscall::Umount,
@@ -263,7 +288,7 @@ pub fn umount(target: &str, flags: u32) -> i32 {
     );
     
     // Free allocated memory
-    let _ = unsafe { Box::from_raw(target_ptr as *mut u8) };
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(target_ptr as *mut u8, target_len)) };
     
     res as i32
 }
@@ -327,17 +352,22 @@ pub fn umount(target: &str, flags: u32) -> i32 {
 /// ```
 pub fn pivot_root(new_root: &str, old_root: &str) -> i32 {
     // Convert the new_root and old_root strings to C-style strings
-    let new_root = match str_to_cstr_bytes(new_root) {
+    let new_root_bytes = match str_to_cstr_bytes(new_root) {
         Ok(bytes) => bytes,
         Err(_) => return -1, // Return -1 if conversion fails
     };
-    let old_root = match str_to_cstr_bytes(old_root) {
+    let old_root_bytes = match str_to_cstr_bytes(old_root) {
         Ok(bytes) => bytes,
         Err(_) => return -1, // Return -1 if conversion fails
     };
     
-    let new_root_ptr = Box::into_raw(new_root.into_boxed_slice()) as *const u8 as usize;
-    let old_root_ptr = Box::into_raw(old_root.into_boxed_slice()) as *const u8 as usize;
+    let new_root_boxed_slice = new_root_bytes.into_boxed_slice();
+    let new_root_len = new_root_boxed_slice.len();
+    let new_root_ptr = Box::into_raw(new_root_boxed_slice) as *const u8 as usize;
+    
+    let old_root_boxed_slice = old_root_bytes.into_boxed_slice();
+    let old_root_len = old_root_boxed_slice.len();
+    let old_root_ptr = Box::into_raw(old_root_boxed_slice) as *const u8 as usize;
     
     let res = syscall2(
         Syscall::PivotRoot,
@@ -346,8 +376,8 @@ pub fn pivot_root(new_root: &str, old_root: &str) -> i32 {
     );
     
     // Free allocated memory
-    let _ = unsafe { Box::from_raw(new_root_ptr as *mut u8) };
-    let _ = unsafe { Box::from_raw(old_root_ptr as *mut u8) };
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(new_root_ptr as *mut u8, new_root_len)) };
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(old_root_ptr as *mut u8, old_root_len)) };
     
     res as i32
 }
