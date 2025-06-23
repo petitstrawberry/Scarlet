@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, fs::{self, mkdir, mkfile, mount, open, pivot_root, readdir, umount}, println, task::{execve, exit, waitpid}, vec::Vec};
+use std::{format, fs::{self, close, mkdir, mkfile, mount, open, pivot_root, readdir, umount}, println, task::{execve, exit, waitpid}, vec::Vec};
 
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
@@ -69,6 +69,7 @@ fn copy_dir(src: &str, dest: &str) -> bool {
     if dest_dir < 0 { // If the destination directory does not exist, we should create it
         if std::fs::mkdir(dest, 0) < 0 {
             println!("init: Failed to create destination directory: {}", dest);
+            close(src_dir);
             return false;
         }
     }
@@ -79,6 +80,8 @@ fn copy_dir(src: &str, dest: &str) -> bool {
             Ok(None) => break, // No more entries
             Err(e) => {
                 println!("init: Failed to read directory {}: {}", src, e);
+                close(src_dir);
+                close(dest_dir);
                 return false;
             }
         };
@@ -91,10 +94,15 @@ fn copy_dir(src: &str, dest: &str) -> bool {
             // Recursively copy the directory
             if !copy_dir(&src_path, &dest_path) {
                 println!("init: Failed to copy directory {} to {}", src_path, dest_path);
+                close(src_dir);
+                close(dest_dir);
                 return false;
             }
         }
     }
+
+    close(src_dir);
+    close(dest_dir);
 
     true
 }
@@ -110,6 +118,7 @@ fn copy_file(src: &str, dest: &str) -> bool {
     let dest_fd = open(dest, 0); // Open for writing
     if dest_fd < 0 {
         println!("init: Failed to open destination file: {}", dest);
+        close(src_fd);
         return false;
     }
     
@@ -123,10 +132,14 @@ fn copy_file(src: &str, dest: &str) -> bool {
         let bytes_read = bytes_read as usize;
         if std::fs::write(dest_fd, &buffer[..bytes_read]) != bytes_read as i32 {
             println!("init: Failed to write to destination file: {}", dest);
+            close(src_fd);
+            close(dest_fd);
             return false;
         }
     }
-    
+
+    close(src_fd);
+    close(dest_fd);
     true
 }
 
