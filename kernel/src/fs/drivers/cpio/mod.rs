@@ -47,13 +47,34 @@ pub struct CpiofsEntry {
     pub file_type: FileType,
     pub size: usize,
     pub modified_time: u64,
-    pub data: Option<Vec<u8>>, // File data (None for directories)
+    pub data_offset: usize,  // Offset in the original CPIO data
+    pub data_size: usize,    // Size of the data
+}
+
+/// Shared CPIO data that can be referenced by multiple file objects
+#[derive(Debug)]
+pub struct SharedCpioData {
+    pub raw_data_ptr: *const u8,  // Pointer to original CPIO archive data
+    pub raw_data_size: usize,     // Size of the original CPIO archive data
+}
+
+unsafe impl Send for SharedCpioData {}
+unsafe impl Sync for SharedCpioData {}
+
+impl SharedCpioData {
+    /// Get a slice reference to the raw data
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(self.raw_data_ptr, self.raw_data_size)
+        }
+    }
 }
 
 /// Structure representing the entire Initramfs
 pub struct Cpiofs {
     name: &'static str,
     entries: Mutex<Vec<CpiofsEntry>>, // List of entries
+    shared_data: Arc<SharedCpioData>,  // Shared reference to original CPIO data
     mounted: bool,
     mount_point: String,
 }
@@ -71,10 +92,15 @@ impl Cpiofs {
     /// A result containing the created Cpiofs instance or an error
     /// 
     pub fn new(name: &'static str, cpio_data: &[u8]) -> Result<Self, FileSystemError> {
-        let entries = Self::parse_cpio(cpio_data)?;
+        let shared_data = Arc::new(SharedCpioData {
+            raw_data_ptr: cpio_data.as_ptr(),
+            raw_data_size: cpio_data.len(),
+        });
+        let entries = Self::parse_cpio(shared_data.as_slice())?;
         Ok(Self {
             name,
             entries: Mutex::new(entries),
+            shared_data,
             mounted: false,
             mount_point: String::new(),
         })
@@ -160,21 +186,21 @@ impl Cpiofs {
             )
             .unwrap_or(0);
 
-            // Get the file data
+            // Get the file data offset and size
             let data_offset = (name_offset + name_size + 3) & !3; // Align to 4-byte boundary
             let data_end = data_offset + file_size;
-            let data = if file_size > 0 && data_end <= cpio_data.len() {
-                Some(cpio_data[data_offset..data_end].to_vec())
-            } else {
-                None
-            };
+            
+            if data_end > cpio_data.len() {
+                break; // Exit if data extends beyond the buffer
+            }
 
             entries.push(CpiofsEntry {
                 name,
                 file_type,
                 size: file_size,
                 modified_time,
-                data,
+                data_offset,
+                data_size: file_size,
             });
 
             // Move to the next entry
@@ -285,15 +311,19 @@ impl FileOperations for Cpiofs {
                 // For directories, prepare directory entries for streaming
                 let dir_entries = self.get_directory_entries_internal(&path, &entries)?;
                 Ok(Arc::new(CpiofsFileObject {
-                    content: RwLock::new(Vec::new()), // Empty content for directories
+                    shared_data: Arc::clone(&self.shared_data),
+                    data_offset: 0,  // Not used for directories
+                    data_size: 0,    // Not used for directories
                     position: RwLock::new(0),
                     file_type: FileType::Directory,
                     directory_entries: Some(dir_entries),
                 }))
             } else {
-                // For regular files
+                // For regular files - reference the data instead of cloning
                 Ok(Arc::new(CpiofsFileObject {
-                    content: RwLock::new(entry.data.clone().unwrap_or_default()),
+                    shared_data: Arc::clone(&self.shared_data),
+                    data_offset: entry.data_offset,
+                    data_size: entry.data_size,
                     position: RwLock::new(0),
                     file_type: FileType::RegularFile,
                     directory_entries: None,
@@ -303,7 +333,9 @@ impl FileOperations for Cpiofs {
             // Handle root directory case - even if not explicitly in CPIO entries
             let dir_entries = self.get_directory_entries_internal(&path, &entries)?;
             Ok(Arc::new(CpiofsFileObject {
-                content: RwLock::new(Vec::new()),
+                shared_data: Arc::clone(&self.shared_data),
+                data_offset: 0,
+                data_size: 0,
                 position: RwLock::new(0),
                 file_type: FileType::Directory,
                 directory_entries: Some(dir_entries),
@@ -406,8 +438,10 @@ impl FileOperations for Cpiofs {
 }
 
 struct CpiofsFileObject {
-    content: RwLock<Vec<u8>>,
-    position: RwLock<usize>,
+    shared_data: Arc<SharedCpioData>,   // Reference to shared CPIO data
+    data_offset: usize,                 // Offset in the shared data for this file
+    data_size: usize,                   // Size of this file's data
+    position: RwLock<usize>,            // Current read position
     file_type: FileType,
     directory_entries: Option<Vec<DirectoryEntryInternal>>,
 }
@@ -416,13 +450,18 @@ impl StreamOps for CpiofsFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         match self.file_type {
             FileType::RegularFile => {
-                // Handle regular file reading
-                let content = self.content.read();
+                // Handle regular file reading from shared data
                 let mut position = self.position.write();
-                let available = content.len() - *position;
+                let available = self.data_size - *position;
                 let to_read = buffer.len().min(available);
-                buffer[..to_read].copy_from_slice(&content[*position..*position + to_read]);
-                *position += to_read;
+                
+                if to_read > 0 {
+                    let start_offset = self.data_offset + *position;
+                    let end_offset = start_offset + to_read;
+                    buffer[..to_read].copy_from_slice(&self.shared_data.as_slice()[start_offset..end_offset]);
+                    *position += to_read;
+                }
+                
                 Ok(to_read)
             },
             FileType::Directory => {
@@ -485,10 +524,7 @@ impl FileObject for CpiofsFileObject {
         let mut position = self.position.write();
         
         let max_pos = match self.file_type {
-            FileType::RegularFile => {
-                let content = self.content.read();
-                content.len()
-            },
+            FileType::RegularFile => self.data_size,
             FileType::Directory => {
                 // For directories, position represents entry index
                 self.directory_entries.as_ref().map_or(0, |entries| entries.len())
@@ -525,10 +561,9 @@ impl FileObject for CpiofsFileObject {
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         match self.file_type {
             FileType::RegularFile => {
-                let content = self.content.read();
                 Ok(FileMetadata {
                     file_type: FileType::RegularFile,
-                    size: content.len(),
+                    size: self.data_size,
                     permissions: crate::fs::FilePermission {
                         read: true,
                         write: false,
