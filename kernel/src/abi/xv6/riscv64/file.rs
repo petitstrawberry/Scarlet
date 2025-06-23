@@ -4,7 +4,7 @@ use crate::{abi::xv6::riscv64::fs::xv6fs::Stat, arch::{self, Registers, Trapfram
 const MAX_PATH_LENGTH: usize = 128;
 const MAX_ARG_COUNT: usize = 64;
 
-pub fn sys_exec(trapframe: &mut Trapframe) -> usize {
+pub fn sys_exec(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     
     // Increment PC to avoid infinite loop if execve fails
@@ -57,7 +57,7 @@ enum OpenMode {
     Truncate  = 0x400,
 }
 
-pub fn sys_open(trapframe: &mut Trapframe) -> usize {
+pub fn sys_open(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let mode = trapframe.get_arg(1) as i32;
@@ -112,7 +112,7 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
+pub fn sys_dup(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
@@ -129,7 +129,7 @@ pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_close(trapframe: &mut Trapframe) -> usize {
+pub fn sys_close(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
@@ -140,7 +140,7 @@ pub fn sys_close(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_read(trapframe: &mut Trapframe) -> usize {
+pub fn sys_read(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
@@ -184,7 +184,7 @@ pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_write(trapframe: &mut Trapframe) -> usize {
+pub fn sys_write(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
@@ -211,7 +211,7 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
+pub fn sys_lseek(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let offset = trapframe.get_arg(1) as i64;
@@ -244,7 +244,7 @@ pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
 }
 
 // Create device file
-pub fn sys_mknod(trapframe: &mut Trapframe) -> usize {
+pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     let name_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
@@ -276,7 +276,7 @@ pub fn sys_mknod(trapframe: &mut Trapframe) -> usize {
 }
 
 
-pub fn sys_fstat(trapframe: &mut crate::arch::Trapframe) -> usize {
+pub fn sys_fstat(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
     let fd = trapframe.get_arg(0) as usize;
 
     let task = mytask()
@@ -321,7 +321,7 @@ pub fn sys_fstat(trapframe: &mut crate::arch::Trapframe) -> usize {
     0
 }
 
-pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
+pub fn sys_mkdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     
@@ -339,7 +339,7 @@ pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_unlink(trapframe: &mut Trapframe) -> usize {
+pub fn sys_unlink(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     
@@ -357,7 +357,7 @@ pub fn sys_unlink(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_link(trapframe: &mut Trapframe) -> usize {
+pub fn sys_link(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     

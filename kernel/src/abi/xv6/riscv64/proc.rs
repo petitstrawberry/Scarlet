@@ -1,6 +1,6 @@
 use crate::{arch::{get_cpu, Trapframe}, fs::{helper::get_path_str, FileType, VfsManager}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags, WaitError}};
 
-pub fn sys_fork(trapframe: &mut Trapframe) -> usize {
+pub fn sys_fork(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
     
     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
@@ -23,7 +23,7 @@ pub fn sys_fork(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
+pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
@@ -32,7 +32,7 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     trapframe.get_arg(0) as usize
 }
 
-pub fn sys_wait(trapframe: &mut Trapframe) -> usize {
+pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let status_ptr = trapframe.get_arg(0) as *mut i32;
 
@@ -62,13 +62,13 @@ pub fn sys_wait(trapframe: &mut Trapframe) -> usize {
     return trapframe.get_return_value();
 }
 
-pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
+pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     // Implement the kill syscall
     // This is a placeholder implementation
     0
 }
 
-pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
+pub fn sys_sbrk(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0);
     let brk = task.get_brk();
@@ -79,7 +79,7 @@ pub fn sys_sbrk(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
+pub fn sys_chdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     
@@ -109,7 +109,7 @@ pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
     0
 }
 
-pub fn sys_getpid(trapframe: &mut Trapframe) -> usize {
+pub fn sys_getpid(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     task.get_id()

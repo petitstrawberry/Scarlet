@@ -41,7 +41,7 @@ impl AbiModule for Xv6Riscv64Abi {
     }
     
     fn handle_syscall(&mut self, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
-        syscall_handler(trapframe)
+        syscall_handler(self, trapframe)
     }
 
     fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str) -> Option<u8> {
@@ -213,7 +213,7 @@ impl AbiModule for Xv6Riscv64Abi {
 }
 
 syscall_table! {
-    Invalid = 0 => |_: &mut crate::arch::Trapframe| {
+    Invalid = 0 => |_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
     Fork = 1 => sys_fork,

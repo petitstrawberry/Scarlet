@@ -1,8 +1,6 @@
-use alloc::sync::Arc;
+use crate::{arch::Trapframe, ipc::UnidirectionalPipe, task::mytask};
 
-use crate::{arch::Trapframe, ipc::UnidirectionalPipe, object::KernelObject, task::mytask};
-
-pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
+pub fn sys_pipe(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
