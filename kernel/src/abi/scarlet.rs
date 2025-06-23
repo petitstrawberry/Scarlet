@@ -5,7 +5,7 @@
 //! and interacting with the Scarlet kernel.
 //! 
 
-use alloc::string::ToString;
+use alloc::{boxed::Box, string::ToString};
 
 use crate::{arch::{vm, Registers, Trapframe}, early_initcall, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
 
@@ -21,6 +21,10 @@ impl AbiModule for ScarletAbi {
 
     fn get_name(&self) -> alloc::string::String {
         Self::name().to_string()
+    }
+
+    fn clone_boxed(&self) -> Box<dyn AbiModule> {
+        Box::new(*self) // ScarletAbi is Copy, so we can dereference and copy
     }
 
     fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {

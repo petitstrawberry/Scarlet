@@ -54,7 +54,7 @@ pub struct Task {
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
     /// Dynamic ABI
-    pub abi: Option<Arc<dyn AbiModule>>,
+    pub abi: Option<Box<dyn AbiModule>>,
 
     // Current working directory
     pub cwd: Option<String>,
@@ -166,7 +166,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            abi: Some(Arc::new(ScarletAbi::default())), // Default ABI
+            abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             cwd: None,
             vfs: None,
             handle_table: HandleTable::new(),
@@ -763,6 +763,11 @@ impl Task {
 
         // Copy register states
         child.vcpu.regs = self.vcpu.regs.clone();
+        
+        // Clone ABI module
+        if let Some(abi) = &self.abi {
+            child.abi = Some(abi.clone_boxed());
+        }
         
         // Copy state such as data size
         child.stack_size = self.stack_size;
