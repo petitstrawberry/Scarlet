@@ -764,9 +764,11 @@ impl Task {
         // Copy register states
         child.vcpu.regs = self.vcpu.regs.clone();
         
-        // Clone ABI module
+        // Set the ABI
         if let Some(abi) = &self.abi {
             child.abi = Some(abi.clone_boxed());
+        } else {
+            child.abi = None; // No ABI set
         }
         
         // Copy state such as data size
