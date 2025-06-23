@@ -8,7 +8,6 @@ pub mod elf_loader;
 extern crate alloc;
 
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
-use hashbrown::{HashMap, HashTable};
 use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::{Handle, HandleTable, KernelObject}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
@@ -144,7 +143,7 @@ static TASK_ID: Mutex<usize> = Mutex::new(1);
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
-        let mut task = Task {
+        let task = Task {
             id: *taskid,
             name,
             priority,
