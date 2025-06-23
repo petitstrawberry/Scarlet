@@ -7,7 +7,7 @@
 //! 
 
 use crate::{arch::Trapframe, task::mytask};
-use alloc::{boxed::Box, string::{String, ToString}};
+use alloc::{string::{String, ToString}, sync::Arc};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -164,7 +164,7 @@ pub trait AbiModule: 'static {
 /// of ABI modules in the Scarlet kernel.
 /// 
 pub struct AbiRegistry {
-    factories: HashMap<String, fn() -> Box<dyn AbiModule>>,
+    factories: HashMap<String, fn() -> Arc<dyn AbiModule>>,
 }
 
 impl AbiRegistry {
@@ -198,10 +198,10 @@ impl AbiRegistry {
         let mut registry = Self::global().lock();
         registry
             .factories
-            .insert(T::name().to_string(), || Box::new(T::default()));
+            .insert(T::name().to_string(), || Arc::new(T::default()));
     }
 
-    pub fn instantiate(name: &str) -> Option<Box<dyn AbiModule>> {
+    pub fn instantiate(name: &str) -> Option<Arc<dyn AbiModule>> {
         let registry = Self::global().lock();
         registry.factories.get(name).map(|f| f())
     }
@@ -247,6 +247,6 @@ macro_rules! register_abi {
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
     let task = mytask().unwrap();
-    let abi = task.abi.as_deref_mut().expect("ABI not set");
+    let abi = task.abi.as_ref().expect("ABI not set");
     abi.handle_syscall(trapframe)
 }
