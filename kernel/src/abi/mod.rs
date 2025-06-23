@@ -7,7 +7,7 @@
 //! 
 
 use crate::{arch::Trapframe, task::mytask};
-use alloc::{string::{String, ToString}, sync::Arc};
+use alloc::{boxed::Box, string::{String, ToString}, sync::Arc};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -22,15 +22,21 @@ pub const MAX_ABI_LENGTH: usize = 64;
 /// ABI modules are responsible for handling system calls and providing
 /// the necessary functionality for different application binary interfaces.
 /// 
-/// # Note
-/// You must implement the `Default` trait for your ABI module.
+/// Each ABI module must implement Clone to support task cloning with
+/// independent ABI state per task.
 /// 
-pub trait AbiModule: 'static + Send + Sync {
+pub trait AbiModule: 'static {
     fn name() -> &'static str
     where
         Self: Sized;
 
     fn get_name(&self) -> String;
+
+    /// Clone this ABI module into a boxed trait object
+    /// 
+    /// This method enables cloning ABI modules as trait objects,
+    /// allowing each task to have its own independent ABI instance.
+    fn clone_boxed(&self) -> Box<dyn AbiModule>;
 
     fn handle_syscall(&self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
     
@@ -168,7 +174,7 @@ pub trait AbiModule: 'static + Send + Sync {
 /// of ABI modules in the Scarlet kernel.
 /// 
 pub struct AbiRegistry {
-    factories: HashMap<String, fn() -> Arc<dyn AbiModule>>,
+    factories: HashMap<String, fn() -> Box<dyn AbiModule>>,
 }
 
 impl AbiRegistry {
@@ -202,10 +208,10 @@ impl AbiRegistry {
         let mut registry = Self::global().lock();
         registry
             .factories
-            .insert(T::name().to_string(), || Arc::new(T::default()));
+            .insert(T::name().to_string(), || Box::new(T::default()));
     }
 
-    pub fn instantiate(name: &str) -> Option<Arc<dyn AbiModule>> {
+    pub fn instantiate(name: &str) -> Option<Box<dyn AbiModule>> {
         let registry = Self::global().lock();
         if let Some(factory) = registry.factories.get(name) {
             let abi = factory();

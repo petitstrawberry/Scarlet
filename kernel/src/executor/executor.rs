@@ -8,7 +8,7 @@ use crate::task::Task;
 use crate::arch::Trapframe;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::task::ManagedPage;
-use alloc::{string::{String, ToString}, vec::Vec, sync::Arc};
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec, sync::Arc};
 use core::fmt;
 
 /// Task state backup for exec rollback
@@ -256,7 +256,7 @@ impl TransparentExecutor {
     /// prepared by the user/administrator beforehand as part of system setup.
     fn setup_task_environment(
         task: &mut Task, 
-        abi: &Arc<dyn crate::abi::AbiModule>
+        abi: &Box<dyn crate::abi::AbiModule>
     ) -> ExecutorResult<()> {
         // TransparentExecutor provides clean VFS for ABI environment
         let clean_vfs = Self::create_clean_vfs()
