@@ -151,44 +151,53 @@ impl AbiModule for Xv6Riscv64Abi {
         syscall_handler(self, trapframe)
     }
 
-    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str) -> Option<u8> {
-        // Basic scoring based on file extension and XV6 conventions
-        let path_score = if file_path.contains("xv6") || file_path.ends_with(".xv6") {
-            40 // Strong XV6 indicator
-        } else if file_path.ends_with(".elf") {
-            20 // ELF files may be XV6 compatible
-        } else {
-            10 // Default score for any binary
-        };
-        
-        // Magic byte detection from file content
+    fn can_execute_binary(
+        &self, 
+        file_object: &crate::object::KernelObject, 
+        file_path: &str,
+        current_abi: Option<&dyn AbiModule>
+    ) -> Option<u8> {
+        // Stage 1: Basic format validation (following implementation guidelines)
         let magic_score = match file_object.as_file() {
             Some(file_obj) => {
                 // Check ELF magic bytes (XV6 uses ELF format)
-                file_obj.seek(SeekFrom::Start(0)).ok(); // Reset to start
                 let mut magic_buffer = [0u8; 4];
+                file_obj.seek(SeekFrom::Start(0)).ok(); // Reset to start
                 match file_obj.read(&mut magic_buffer) {
                     Ok(bytes_read) if bytes_read >= 4 => {
                         if magic_buffer == [0x7F, b'E', b'L', b'F'] {
-                            50 // ELF magic bytes match (XV6 is ELF-based)
+                            25 // Basic ELF format compatibility (slightly lower than Scarlet)
                         } else {
-                            0
+                            return None; // Not an ELF file, cannot execute
                         }
                     }
-                    _ => 0 // Read failed or insufficient size
+                    _ => return None // Read failed, cannot determine
                 }
             }
-            None => 0 // Not a file object
+            None => return None // Not a file object
         };
         
-        let total_score = path_score + magic_score;
+        let mut confidence = magic_score;
         
-        // XV6 should have lower priority than Scarlet native ABI
-        if total_score > 20 {
-            Some(((total_score / 100) * 80).min(70)) // Scale down to give Scarlet priority
-        } else {
-            None // Not executable by this ABI
+        // Stage 2: Entry point validation (placeholder - could check ELF header)
+        // TODO: Add ELF header parsing to validate entry point for XV6 compatibility
+        confidence += 10;
+        
+        // Stage 3: File path hints - XV6 specific patterns
+        if file_path.contains("xv6") || file_path.ends_with(".xv6") {
+            confidence += 20; // Strong XV6 indicator
+        } else if file_path.ends_with(".elf") {
+            confidence += 5; // General ELF compatibility
         }
+        
+        // Stage 4: ABI inheritance bonus - moderate priority for same ABI
+        if let Some(abi) = current_abi {
+            if abi.get_name() == self.get_name() {
+                confidence += 15; // Moderate inheritance bonus for XV6
+            }
+        }
+        
+        Some(confidence.min(100)) // Standard 0-100 confidence range
     }
 
     fn execute_binary(
