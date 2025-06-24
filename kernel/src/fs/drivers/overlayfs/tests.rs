@@ -1542,7 +1542,7 @@ pub fn test_overlay_truncate_functionality() {
     }
 }
 
-/// Test truncation of file that exists only in upper layer
+/// Test truncation of file that exists in upper layer
 /// 
 /// This test verifies that truncation works correctly for files that were
 /// created directly in the upper layer (no COW needed).
@@ -1706,5 +1706,237 @@ pub fn test_overlay_truncate_with_whiteout() {
         // Verify lower layer file still exists but is hidden
         assert!(manager.open("/lower/whiteout_test.txt", 0).is_ok(), 
                "Lower layer file should still exist");
+    }
+}
+
+/// Test OverlayFS directory object functionality
+/// 
+/// This test validates that OverlayDirectoryObject correctly merges entries
+/// from multiple layers when a directory is opened and read.
+#[test_case]
+pub fn test_overlay_directory_object() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    // Create VFS manager
+    let manager = VfsManager::new();
+    
+    // Create and register upper TmpFS
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let _ = upper_fs.create_dir("/test_dir");
+    let _ = upper_fs.create_file("/test_dir/upper_file.txt", FileType::RegularFile);
+    let _ = upper_fs.create_file("/test_dir/lower_file1.txt", FileType::RegularFile); // Override lower
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    // Create and register lower TmpFS
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let _ = lower_fs.create_dir("/test_dir");
+    let _ = lower_fs.create_file("/test_dir/lower_file1.txt", FileType::RegularFile);
+    let _ = lower_fs.create_file("/test_dir/lower_file2.txt", FileType::RegularFile);
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount both filesystems
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    // Create overlay mount
+    let overlay_result = manager.overlay_mount(
+        Some("/upper"),
+        vec!["/lower"],
+        "/overlay"
+    );
+    
+    match overlay_result {
+        Ok(()) => {
+            // Open the overlay directory
+            let dir_obj = manager.open("/overlay/test_dir", 0)
+                .expect("Failed to open overlay directory");
+            
+            // Get FileObject from KernelObject
+            if let Some(file) = dir_obj.as_file() {
+                // Read all directory entries
+                let mut buffer = [0u8; 512]; // Increased buffer size for DirectoryEntry
+                let mut entries_read = 0;
+                
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break, // EOF
+                        Ok(_) => entries_read += 1,
+                        Err(e) => panic!("Failed to read directory entry: {:?}", e),
+                    }
+                }
+                
+                // Should read 3 entries: upper_file.txt, lower_file1.txt (from upper), lower_file2.txt
+                assert_eq!(entries_read, 3, "Should read exactly 3 directory entries");
+            } else {
+                panic!("Expected FileObject from directory open");
+            }
+        }
+        Err(e) => panic!("Failed to create overlay mount: {:?}", e),
+    }
+}
+
+/// Test OverlayFS directory object seek operations
+/// 
+/// This test validates that seek operations work correctly on directory objects.
+#[test_case]
+pub fn test_overlay_directory_seek() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create upper and lower filesystems with test files
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let _ = upper_fs.create_dir("/test_dir");
+    let _ = upper_fs.create_file("/test_dir/file1.txt", FileType::RegularFile);
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let _ = lower_fs.create_dir("/test_dir");
+    let _ = lower_fs.create_file("/test_dir/file2.txt", FileType::RegularFile);
+    let _ = lower_fs.create_file("/test_dir/file3.txt", FileType::RegularFile);
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    let overlay_result = manager.overlay_mount(
+        Some("/upper"),
+        vec!["/lower"],
+        "/overlay"
+    );
+    
+    match overlay_result {
+        Ok(()) => {
+            // Open directory
+            let dir_obj = manager.open("/overlay/test_dir", 0)
+                .expect("Failed to open directory");
+            
+            if let Some(file) = dir_obj.as_file() {
+                // Test seek operations
+                assert_eq!(file.seek(SeekFrom::Start(1)).unwrap(), 1, "Seek to start position 1");
+                assert_eq!(file.seek(SeekFrom::Current(1)).unwrap(), 2, "Seek current +1");
+                assert_eq!(file.seek(SeekFrom::End(-1)).unwrap(), 2, "Seek to end-1 (3 entries)");
+            } else {
+                panic!("Expected FileObject from directory open");
+            }
+        }
+        Err(e) => panic!("Failed to create overlay mount: {:?}", e),
+    }
+}
+
+/// Test OverlayFS directory object metadata
+/// 
+/// This test validates that metadata for directory objects is correct.
+#[test_case]
+pub fn test_overlay_directory_metadata() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let _ = upper_fs.create_dir("/test_dir");
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    let _ = manager.mount(upper_fs_id, "/upper");
+    
+    let overlay_result = manager.overlay_mount(
+        Some("/upper"),
+        vec![],
+        "/overlay"
+    );
+    
+    match overlay_result {
+        Ok(()) => {
+            // Open directory
+            let dir_obj = manager.open("/overlay/test_dir", 0)
+                .expect("Failed to open directory");
+            
+            if let Some(file) = dir_obj.as_file() {
+                // Check metadata
+                let metadata = file.metadata().expect("Failed to get metadata");
+                
+                assert_eq!(metadata.file_type, FileType::Directory, "Should be directory type");
+                assert!(metadata.permissions.read, "Directory should be readable");
+                assert!(metadata.permissions.execute, "Directory should be executable for traversal");
+            } else {
+                panic!("Expected FileObject from directory open");
+            }
+        }
+        Err(e) => panic!("Failed to create overlay mount: {:?}", e),
+    }
+}
+
+/// Test OverlayFS directory object with whiteout files
+/// 
+/// This test validates that whiteout files properly hide files from lower layers
+/// when reading directory contents via the directory object.
+#[test_case]
+pub fn test_overlay_directory_whiteout() {
+    use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, FileType};
+    use alloc::boxed::Box;
+    
+    let manager = VfsManager::new();
+    
+    // Create upper filesystem with whiteout
+    let upper_fs = Box::new(TmpFS::new(1024 * 1024));
+    let _ = upper_fs.create_dir("/test_dir");
+    let _ = upper_fs.create_file("/test_dir/.wh.hidden_file.txt", FileType::RegularFile);
+    let upper_fs_id = manager.register_fs(upper_fs);
+    
+    // Create lower filesystem with files
+    let lower_fs = Box::new(TmpFS::new(1024 * 1024));
+    let _ = lower_fs.create_dir("/test_dir");
+    let _ = lower_fs.create_file("/test_dir/hidden_file.txt", FileType::RegularFile);
+    let _ = lower_fs.create_file("/test_dir/visible_file.txt", FileType::RegularFile);
+    let lower_fs_id = manager.register_fs(lower_fs);
+    
+    // Mount and create overlay
+    let _ = manager.mount(upper_fs_id, "/upper");
+    let _ = manager.mount(lower_fs_id, "/lower");
+    
+    let overlay_result = manager.overlay_mount(
+        Some("/upper"),
+        vec!["/lower"],
+        "/overlay"
+    );
+    
+    match overlay_result {
+        Ok(()) => {
+            // First, test readdir directly to see what entries are present
+            let direct_entries = manager.readdir("/overlay/test_dir")
+                .expect("Failed to readdir overlay directory");
+            
+            // Should only see visible_file.txt (hidden_file.txt should be hidden by whiteout)
+            assert_eq!(direct_entries.len(), 1, "readdir should only return 1 visible file");
+            assert_eq!(direct_entries[0].name, "visible_file.txt", "Should only see visible_file.txt");
+            
+            // Open directory
+            let dir_obj = manager.open("/overlay/test_dir", 0)
+                .expect("Failed to open directory");
+            
+            if let Some(file) = dir_obj.as_file() {
+                // Read directory entries
+                let mut buffer = [0u8; 512]; // Increased buffer size
+                let mut entries_read = 0;
+                
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break, // EOF
+                        Ok(_) => entries_read += 1,
+                        Err(e) => panic!("Failed to read directory entry: {:?}", e),
+                    }
+                }
+                
+                // Should match readdir result
+                assert_eq!(entries_read, 1, "Directory object should read same number of entries as readdir");
+            } else {
+                panic!("Expected FileObject from directory open");
+            }
+        }
+        Err(e) => panic!("Failed to create overlay mount: {:?}", e),
     }
 }
