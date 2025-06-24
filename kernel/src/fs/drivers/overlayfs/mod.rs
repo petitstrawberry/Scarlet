@@ -6,6 +6,8 @@
 use alloc::{collections::BTreeSet, string::String, sync::Arc, vec::Vec};
 use super::super::*;
 use crate::fs::mount_tree::MountNode;
+use crate::object::capability::{StreamError, StreamOps};
+use spin::RwLock;
 
 /// OverlayFS implementation
 #[derive(Clone)]
@@ -298,6 +300,14 @@ impl FileOperations for OverlayFS {
             });
         }
 
+        // Check if this is a directory - if so, return OverlayDirectoryObject
+        if let Ok(metadata) = self.metadata(path) {
+            if metadata.file_type == FileType::Directory {
+                let dir_obj = OverlayDirectoryObject::new(self, path)?;
+                return Ok(Arc::new(dir_obj));
+            }
+        }
+
         // Check if this is a write operation (common write flags: 1=write, 2=read/write, etc.)
         let is_write_operation = (flags & 0x3) != 0; // O_WRONLY=1, O_RDWR=2
         
@@ -387,8 +397,15 @@ impl FileOperations for OverlayFS {
                     if let Ok(lower_entries) = fs_guard.readdir(&resolved_path) {
                         found_any_layer = true;
                         for entry in lower_entries {
+                            // Construct full path for whiteout checking
+                            let entry_full_path = if path == "/" {
+                                format!("/{}", entry.name)
+                            } else {
+                                format!("{}/{}", path, entry.name)
+                            };
+                            
                             // Only add if not already seen in a higher layer and not hidden by whiteout
-                            if !seen_names.contains(&entry.name) && !self.is_whiteout(&entry.name) {
+                            if !seen_names.contains(&entry.name) && !self.is_whiteout(&entry_full_path) {
                                 seen_names.insert(entry.name.clone());
                                 entries.push(entry);
                             }
@@ -564,6 +581,106 @@ impl FileOperations for OverlayFS {
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotFound,
             message: format!("File not found: {}", path),
+        })
+    }
+}
+
+/// Directory object for OverlayFS that merges entries from multiple layers
+pub struct OverlayDirectoryObject {
+    /// Merged directory entries from all layers
+    entries: Vec<DirectoryEntryInternal>,
+    /// Current read position
+    position: RwLock<usize>,
+}
+
+impl OverlayDirectoryObject {
+    /// Create a new directory object by merging entries from all layers
+    pub fn new(overlay_fs: &OverlayFS, path: &str) -> Result<Self, FileSystemError> {
+        // Use the same logic as readdir() to merge entries
+        let entries = overlay_fs.readdir(path)?;
+        Ok(Self {
+            entries,
+            position: RwLock::new(0),
+        })
+    }
+}
+
+impl StreamOps for OverlayDirectoryObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let mut position = self.position.write();
+        
+        if *position >= self.entries.len() {
+            return Ok(0); // EOF
+        }
+        
+        let entry = &self.entries[*position];
+        let dir_entry = DirectoryEntry::from_internal(entry);
+        let entry_size = dir_entry.entry_size();
+        
+        if buffer.len() < entry_size {
+            crate::println!("Buffer too small for directory entry: required {}, provided {}", entry_size, buffer.len());
+            return Err(StreamError::InvalidArgument);
+        }
+        
+        // Convert DirectoryEntry to bytes and copy to buffer
+        let entry_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &dir_entry as *const _ as *const u8,
+                entry_size
+            )
+        };
+        buffer[..entry_size].copy_from_slice(entry_bytes);
+        
+        *position += 1;
+        Ok(entry_size)
+    }
+
+    fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::NotSupported)
+    }
+}
+
+impl FileObject for OverlayDirectoryObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        let mut position = self.position.write();
+        
+        let new_pos = match whence {
+            SeekFrom::Start(offset) => offset as usize,
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    *position + offset as usize
+                } else {
+                    position.saturating_sub((-offset) as usize)
+                }
+            }
+            SeekFrom::End(offset) => {
+                let end = self.entries.len();
+                if offset >= 0 {
+                    end + offset as usize
+                } else {
+                    end.saturating_sub((-offset) as usize)
+                }
+            }
+        };
+        
+        *position = new_pos;
+        Ok(new_pos as u64)
+    }
+
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        Ok(FileMetadata {
+            file_type: FileType::Directory,
+            size: self.entries.len(),
+            permissions: FilePermission {
+                read: true,
+                write: false,
+                execute: true, // Directories are "executable" for traversal
+            },
+            created_time: 0,
+            modified_time: 0,
+            accessed_time: 0,
+            file_id: 0,
+            link_count: 1,
         })
     }
 }
