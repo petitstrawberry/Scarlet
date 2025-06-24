@@ -125,11 +125,16 @@ fn test_directory_operations() {
     
     // Get directory entries
     let entries = manager.readdir("/mnt").unwrap();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].name, "test.txt");
-    assert_eq!(entries[1].name, "testdir");
-    assert_eq!(entries[0].file_type, FileType::RegularFile);
-    assert_eq!(entries[1].file_type, FileType::Directory);
+    assert_eq!(entries.len(), 4); // ".", "..", "test.txt", "testdir"
+    // Check that "." and ".." are first, then other entries
+    assert_eq!(entries[0].name, ".");
+    assert_eq!(entries[1].name, "..");
+    // The remaining entries should be sorted by file_id
+    let regular_entries: Vec<_> = entries.iter().skip(2).collect();
+    assert_eq!(regular_entries[0].name, "test.txt");
+    assert_eq!(regular_entries[1].name, "testdir");
+    assert_eq!(regular_entries[0].file_type, FileType::RegularFile);
+    assert_eq!(regular_entries[1].file_type, FileType::Directory);
     
     // Create directory
     let result = manager.create_dir("/mnt/newdir");
@@ -137,8 +142,10 @@ fn test_directory_operations() {
     
     // Verify
     let entries_after = manager.readdir("/mnt").unwrap();
-    assert_eq!(entries_after.len(), 3);
-    assert!(entries_after.iter().any(|e| e.name == "newdir" && e.file_type == FileType::Directory));
+    assert_eq!(entries_after.len(), 5); // ".", "..", "test.txt", "testdir", "newdir"
+    // Skip "." and ".." entries and check the regular entries
+    let regular_entries_after: Vec<_> = entries_after.iter().skip(2).collect();
+    assert!(regular_entries_after.iter().any(|e| e.name == "newdir" && e.file_type == FileType::Directory));
     
     // Create file
     let result = manager.create_regular_file("/mnt/newdir/newfile.txt");
@@ -146,8 +153,10 @@ fn test_directory_operations() {
     
     // Verify
     let dir_entries = manager.readdir("/mnt/newdir").unwrap();
-    assert_eq!(dir_entries.len(), 1);
-    assert_eq!(dir_entries[0].name, "newfile.txt");
+    assert_eq!(dir_entries.len(), 3); // ".", "..", "newfile.txt"
+    // Skip "." and ".." entries
+    let regular_entries: Vec<_> = dir_entries.iter().skip(2).collect();
+    assert_eq!(regular_entries[0].name, "newfile.txt");
     
     // Delete test
     let result = manager.remove("/mnt/newdir/newfile.txt");
