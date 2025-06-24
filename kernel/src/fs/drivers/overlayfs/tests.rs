@@ -1723,14 +1723,14 @@ pub fn test_overlay_directory_object() {
     
     // Create and register upper TmpFS
     let upper_fs = Box::new(TmpFS::new(1024 * 1024));
-    let _ = upper_fs.create_dir("/test_dir");
+    upper_fs.create_dir("/test_dir").expect("Failed to create directory '/test_dir'");
     let _ = upper_fs.create_file("/test_dir/upper_file.txt", FileType::RegularFile);
     let _ = upper_fs.create_file("/test_dir/lower_file1.txt", FileType::RegularFile); // Override lower
     let upper_fs_id = manager.register_fs(upper_fs);
     
     // Create and register lower TmpFS
     let lower_fs = Box::new(TmpFS::new(1024 * 1024));
-    let _ = lower_fs.create_dir("/test_dir");
+    lower_fs.create_dir("/test_dir").expect("Failed to create directory '/test_dir'");
     let _ = lower_fs.create_file("/test_dir/lower_file1.txt", FileType::RegularFile);
     let _ = lower_fs.create_file("/test_dir/lower_file2.txt", FileType::RegularFile);
     let lower_fs_id = manager.register_fs(lower_fs);
