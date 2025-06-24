@@ -764,31 +764,63 @@ impl StreamOps for TmpFileObject {
             FileType::Directory => {
                 // For directories, return entries in struct format
                 if let Some(node) = &self.node {
+                    // We need to reconstruct the path from the node structure
+                    // Since we don't have path stored, use the readdir logic directly
+                    
+                    // Create a vector to store all entries including "." and ".."
+                    let mut all_entries = Vec::new();
+                    
+                    // Add "." entry (current directory)
+                    let current_metadata = node.metadata.read();
+                    all_entries.push(crate::fs::DirectoryEntryInternal {
+                        name: ".".to_string(),
+                        file_type: FileType::Directory,
+                        size: current_metadata.size,
+                        file_id: current_metadata.file_id,
+                        metadata: Some(current_metadata.clone()),
+                    });
+                    
+                    // Add ".." entry (parent directory) - simplified to point to self for now
+                    all_entries.push(crate::fs::DirectoryEntryInternal {
+                        name: "..".to_string(),
+                        file_type: FileType::Directory,
+                        size: current_metadata.size,
+                        file_id: current_metadata.file_id,
+                        metadata: Some(current_metadata.clone()),
+                    });
+                    
+                    // Add regular directory entries and sort by file_id
                     let children = node.children.read();
-                    let entries: Vec<_> = children.entries().collect();
+                    let mut regular_entries = Vec::new();
+                    for (name, child) in children.entries() {
+                        let metadata = child.metadata.read();
+                        regular_entries.push(crate::fs::DirectoryEntryInternal {
+                            name: name.clone(),
+                            file_type: child.file_type.clone(),
+                            size: metadata.size,
+                            file_id: metadata.file_id,
+                            metadata: Some(metadata.clone()),
+                        });
+                    }
+                    
+                    // Sort regular entries by file_id (ascending order)
+                    regular_entries.sort_by_key(|entry| entry.file_id);
+                    
+                    // Append sorted regular entries to the result
+                    all_entries.extend(regular_entries);
                     
                     // position is the entry index
                     let position = *self.position.read() as usize;
                     
-                    if position >= entries.len() {
+                    if position >= all_entries.len() {
                         return Ok(0); // EOF
                     }
                     
-                    // Get current entry
-                    let (name, child) = entries[position];
-                    let metadata = child.metadata.read();
-                    
-                    // Create DirectoryEntryInternal
-                    let internal_entry = crate::fs::DirectoryEntryInternal {
-                        name: name.clone(),
-                        file_type: child.file_type.clone(),
-                        size: metadata.size,
-                        file_id: metadata.file_id,
-                        metadata: Some(metadata.clone()),
-                    };
+                    // Get current entry (already sorted)
+                    let internal_entry = &all_entries[position];
                     
                     // Convert to binary format
-                    let dir_entry = crate::fs::DirectoryEntry::from_internal(&internal_entry);
+                    let dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
                     
                     // Calculate actual entry size
                     let entry_size = dir_entry.entry_size();
@@ -957,10 +989,11 @@ impl FileOperations for TmpFS {
                 }
             }
             
-            // Add regular directory entries
+            // Add regular directory entries and sort by file_id
+            let mut regular_entries = Vec::new();
             for (name, child) in node.children.read().entries() {
                 let metadata = child.metadata.read();
-                entries.push(DirectoryEntryInternal {
+                regular_entries.push(DirectoryEntryInternal {
                     name: name.clone(),
                     file_type: child.file_type.clone(),
                     size: metadata.size,
@@ -968,6 +1001,13 @@ impl FileOperations for TmpFS {
                     metadata: Some(metadata.clone()),
                 });
             }
+            
+            // Sort regular entries by file_id (ascending order)
+            regular_entries.sort_by_key(|entry| entry.file_id);
+            
+            // Append sorted regular entries to the result
+            // (Note: "." and ".." are already at the beginning)
+            entries.extend(regular_entries);
             
             Ok(entries)
         } else {
@@ -1468,13 +1508,32 @@ mod tests {
         
         // Verify directory entries
         entry_names.sort();
-        assert_eq!(entry_names, vec!["file1.txt", "file2.bin", "subdir"]);
+        assert_eq!(entry_names, vec![".", "..", "file1.txt", "file2.bin", "subdir"]);
         
         // Test subdirectory listing
         let subdir_file = tmpfs.open("/subdir", 0).unwrap();
         let mut buffer = [0u8; 1024];
-        let bytes_read = subdir_file.read(&mut buffer).unwrap();
         
+        // Read first entry (should be ".")
+        let bytes_read = subdir_file.read(&mut buffer).unwrap();
+        assert!(bytes_read > 0);
+        let dir_entry = unsafe {
+            &*(buffer.as_ptr() as *const crate::fs::DirectoryEntry)
+        };
+        let name = dir_entry.name_str().unwrap();
+        assert_eq!(name, ".");
+        
+        // Read second entry (should be "..")
+        let bytes_read = subdir_file.read(&mut buffer).unwrap();
+        assert!(bytes_read > 0);
+        let dir_entry = unsafe {
+            &*(buffer.as_ptr() as *const crate::fs::DirectoryEntry)
+        };
+        let name = dir_entry.name_str().unwrap();
+        assert_eq!(name, "..");
+        
+        // Read third entry (should be "nested.txt")
+        let bytes_read = subdir_file.read(&mut buffer).unwrap();
         assert!(bytes_read > 0);
         let dir_entry = unsafe {
             &*(buffer.as_ptr() as *const crate::fs::DirectoryEntry)
@@ -1588,8 +1647,33 @@ mod tests {
         
         // Root directory should contain the empty directory
         let root_file = tmpfs.open("/", 0).unwrap();
+        
+        // Read first entry (should be ".")
+        let mut buffer = [0u8; 1024];
         let bytes_read = root_file.read(&mut buffer).unwrap();
-        assert!(bytes_read > 0); // Should have the "empty" directory entry
+        assert!(bytes_read > 0);
+        
+        let dir_entry = unsafe {
+            &*(buffer.as_ptr() as *const crate::fs::DirectoryEntry)
+        };
+        let name = dir_entry.name_str().unwrap();
+        assert_eq!(name, ".");
+        assert_eq!(dir_entry.file_type, 1u8); // Directory type
+        
+        // Read second entry (should be "..")
+        let bytes_read = root_file.read(&mut buffer).unwrap();
+        assert!(bytes_read > 0);
+        
+        let dir_entry = unsafe {
+            &*(buffer.as_ptr() as *const crate::fs::DirectoryEntry)
+        };
+        let name = dir_entry.name_str().unwrap();
+        assert_eq!(name, "..");
+        assert_eq!(dir_entry.file_type, 1u8); // Directory type
+        
+        // Read third entry (should be "empty")
+        let bytes_read = root_file.read(&mut buffer).unwrap();
+        assert!(bytes_read > 0);
         
         let dir_entry = unsafe {
             &*(buffer.as_ptr() as *const crate::fs::DirectoryEntry)

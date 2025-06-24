@@ -442,8 +442,55 @@ impl FileOperations for TestFileSystem {
             }
         }
 
-        if let Some(entries) = self.find_directory(path) {
-            Ok(entries)
+        if let Some(mut entries) = self.find_directory(path) {
+            // Add "." and ".." entries if they don't already exist
+            let has_dot = entries.iter().any(|e| e.name == ".");
+            let has_dotdot = entries.iter().any(|e| e.name == "..");
+            
+            if !has_dot {
+                entries.insert(0, DirectoryEntryInternal {
+                    name: ".".to_string(),
+                    file_type: FileType::Directory,
+                    size: 0,
+                    file_id: 0, // TestFileSystem doesn't have proper file_id management yet
+                    metadata: None,
+                });
+            }
+            
+            if !has_dotdot {
+                let insert_pos = if has_dot { 1 } else { 1 };
+                entries.insert(insert_pos, DirectoryEntryInternal {
+                    name: "..".to_string(),
+                    file_type: FileType::Directory,
+                    size: 0,
+                    file_id: 0, // TestFileSystem doesn't have proper file_id management yet
+                    metadata: None,
+                });
+            }
+            
+            // Separate "." and ".." entries from regular entries
+            let mut dot_entries = Vec::new();
+            let mut regular_entries = Vec::new();
+            
+            for entry in entries {
+                if entry.name == "." || entry.name == ".." {
+                    dot_entries.push(entry);
+                } else {
+                    regular_entries.push(entry);
+                }
+            }
+            
+            // Sort "." and ".." by their names ("." should come before "..")
+            dot_entries.sort_by(|a, b| a.name.cmp(&b.name));
+            
+            // Sort regular entries by file_id (ascending order)
+            regular_entries.sort_by_key(|entry| entry.file_id);
+            
+            // Combine: "." and ".." first, then regular entries sorted by file_id
+            let mut sorted_entries = dot_entries;
+            sorted_entries.extend(regular_entries);
+            
+            Ok(sorted_entries)
         } else {
             Err(FileSystemError {
                 kind: FileSystemErrorKind::NotFound,

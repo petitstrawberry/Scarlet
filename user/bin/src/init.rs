@@ -88,6 +88,11 @@ fn copy_dir(src: &str, dest: &str) -> bool {
         let src_path = format!("{}/{}", src, entry.name);
         let dest_path = format!("{}/{}", dest, entry.name);
 
+        // Skip the current directory (.) and parent directory (..)
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+
         if entry.is_file() {
             copy_file(&src_path, &dest_path);
         } else if entry.is_directory() {

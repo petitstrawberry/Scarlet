@@ -268,8 +268,36 @@ impl Cpiofs {
     fn get_directory_entries_internal(&self, path: &str, entries: &Vec<CpiofsEntry>) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         let normalized_path = if path.is_empty() || path == "/" { "" } else { path };
     
-        // Filter entries in the specified directory
-        let filtered_entries: Vec<DirectoryEntryInternal> = entries
+        let mut result_entries = Vec::new();
+        
+        // Add "." entry (current directory)
+        result_entries.push(DirectoryEntryInternal {
+            name: ".".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            file_id: self.calculate_file_id(&path), // Use directory path hash as file_id
+            metadata: None,
+        });
+
+        // Add ".." entry (parent directory)
+        let parent_path = if path.is_empty() || path == "/" {
+            "/" // Root's parent is itself
+        } else {
+            path.rfind('/').map_or("/", |idx| {
+                if idx == 0 { "/" } else { &path[..idx] }
+            })
+        };
+        
+        result_entries.push(DirectoryEntryInternal {
+            name: "..".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            file_id: self.calculate_file_id(parent_path), // Use parent directory path hash as file_id
+            metadata: None,
+        });
+
+        // Filter regular entries in the specified directory
+        let mut regular_entries: Vec<DirectoryEntryInternal> = entries
             .iter()
             .filter_map(|e| {
                 // Determine entries within the directory
@@ -295,8 +323,15 @@ impl Cpiofs {
             })
             .collect();
     
+        // Sort regular entries by file_id (ascending order)
+        regular_entries.sort_by_key(|entry| entry.file_id);
+
+        // Append sorted regular entries to the result
+        // (Note: "." and ".." are already at the beginning)
+        result_entries.extend(regular_entries);
+    
         // Always return success, even for empty directories
-        Ok(filtered_entries)
+        Ok(result_entries)
     }
 }
 
@@ -352,8 +387,53 @@ impl FileOperations for Cpiofs {
         let path = self.normalize_path(_path);
         let entries = self.entries.lock();
     
-        // Filter entries in the specified directory
-        let filtered_entries: Vec<DirectoryEntryInternal> = entries
+        // Check if directory exists first
+        let directory_exists = if path.is_empty() || path == "/" {
+            true // Root directory always exists
+        } else {
+            entries.iter().any(|e| {
+                let parent_path = e.name.rfind('/').map_or("", |idx| &e.name[..idx]);
+                parent_path == path || e.name == path
+            })
+        };
+
+        if !directory_exists {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotFound,
+                message: format!("Directory not found: {}", _path),
+            });
+        }
+
+        let mut result_entries = Vec::new();
+
+        // Add "." entry (current directory)
+        result_entries.push(DirectoryEntryInternal {
+            name: ".".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            file_id: self.calculate_file_id(&path), // Use directory path hash as file_id
+            metadata: None,
+        });
+
+        // Add ".." entry (parent directory)
+        let parent_path = if path.is_empty() || path == "/" {
+            "/" // Root's parent is itself
+        } else {
+            path.rfind('/').map_or("/", |idx| {
+                if idx == 0 { "/" } else { &path[..idx] }
+            })
+        };
+        
+        result_entries.push(DirectoryEntryInternal {
+            name: "..".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            file_id: self.calculate_file_id(parent_path), // Use parent directory path hash as file_id
+            metadata: None,
+        });
+
+        // Filter regular entries in the specified directory
+        let mut regular_entries: Vec<DirectoryEntryInternal> = entries
             .iter()
             .filter_map(|e| {
                 // Determine entries within the directory
@@ -373,16 +453,15 @@ impl FileOperations for Cpiofs {
                 }
             })
             .collect();
+
+        // Sort regular entries by file_id (ascending order)
+        regular_entries.sort_by_key(|entry| entry.file_id);
+
+        // Append sorted regular entries to the result
+        // (Note: "." and ".." are already at the beginning)
+        result_entries.extend(regular_entries);
     
-        if filtered_entries.is_empty() && path != "" && path != "/" {
-            // Return an error if the specified directory does not exist
-            return Err(FileSystemError {
-                kind: FileSystemErrorKind::NotFound,
-                message: format!("Directory not found: {}", _path),
-            });
-        }
-    
-        Ok(filtered_entries)
+        Ok(result_entries)
     }
 
     fn create_file(&self, _path: &str, _file_type: FileType) -> Result<(), FileSystemError> {

@@ -423,7 +423,29 @@ impl FileOperations for OverlayFS {
             });
         }
 
-        Ok(entries)
+        // Sort entries by file_id, but keep "." and ".." at the beginning
+        let mut dot_entries = Vec::new();
+        let mut regular_entries = Vec::new();
+        
+        for entry in entries {
+            if entry.name == "." || entry.name == ".." {
+                dot_entries.push(entry);
+            } else {
+                regular_entries.push(entry);
+            }
+        }
+        
+        // Sort "." and ".." by their names ("." should come before "..")
+        dot_entries.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        // Sort regular entries by file_id (ascending order)
+        regular_entries.sort_by_key(|entry| entry.file_id);
+        
+        // Combine: "." and ".." first, then regular entries sorted by file_id
+        let mut sorted_entries = dot_entries;
+        sorted_entries.extend(regular_entries);
+
+        Ok(sorted_entries)
     }
 
     fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
@@ -618,7 +640,6 @@ impl StreamOps for OverlayDirectoryObject {
         let entry_size = dir_entry.entry_size();
         
         if buffer.len() < entry_size {
-            crate::println!("Buffer too small for directory entry: required {}, provided {}", entry_size, buffer.len());
             return Err(StreamError::InvalidArgument);
         }
         
