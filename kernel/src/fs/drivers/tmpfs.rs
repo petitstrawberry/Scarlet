@@ -672,10 +672,31 @@ impl FileObject for TmpFileObject {
             let metadata_guard = node.metadata.read();
             Ok(metadata_guard.clone())
         } else {
-            Err(StreamError::from(FileSystemError {
-                kind: FileSystemErrorKind::NotSupported,
-                message: "Cannot get metadata from device handle".to_string(),
-            }))
+            // For device files, create metadata from file_type and device guard
+            if let Some(ref device_guard) = self.device_guard {
+                let device = device_guard.device();
+                let device_read = device.read();
+                
+                Ok(FileMetadata {
+                    file_type: self.file_type.clone(),
+                    size: 0, // Device files have no size
+                    permissions: FilePermission {
+                        read: true,
+                        write: true,
+                        execute: false,
+                    },
+                    created_time: crate::time::current_time(), // Current time as placeholder
+                    modified_time: crate::time::current_time(),
+                    accessed_time: crate::time::current_time(),
+                    file_id: device_read.id() as u64, // Use device ID as file ID
+                    link_count: 1,
+                })
+            } else {
+                Err(StreamError::from(FileSystemError {
+                    kind: FileSystemErrorKind::NotSupported,
+                    message: "Cannot get metadata from device handle without device guard".to_string(),
+                }))
+            }
         }
     }
 
@@ -1249,6 +1270,18 @@ mod tests {
         let bytes_read = device_file.read(&mut buffer).unwrap();
         assert_eq!(bytes_read, 5);
         assert_eq!(&buffer, b"TMPFS");
+        
+        // Test device file metadata
+        let metadata = device_file.metadata().unwrap();
+        assert_eq!(metadata.file_type, FileType::CharDevice(device_info));
+        assert_eq!(metadata.size, 0); // Device files have no size
+        assert!(metadata.permissions.read);
+        assert!(metadata.permissions.write);
+        assert!(!metadata.permissions.execute);
+        // The file_id should match the device ID used by the device manager
+        // Since device manager assigns IDs independently, we just verify it's non-zero
+        assert!(metadata.file_id > 0);
+        assert_eq!(metadata.link_count, 1);
     }
 
     #[test_case]
