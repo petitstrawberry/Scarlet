@@ -8,7 +8,7 @@
     "emit-debug-gdb-scripts": false,
     "features": "+m,+a,+f,+d,+c",
     "linker": "rust-lld",
-    "linker-flavor": "gnu-lld",
+    "linker-flavor": "ld.lld",
     "llvm-abiname": "lp64d",
     "llvm-target": "riscv64",
     "max-atomic-width": 64,
@@ -20,7 +20,7 @@
     },
     "panic-strategy": "abort",
     "pre-link-args": {
-      "gnu-lld": ["-T", "lds/qemu_virt.ld"]
+      "ld.lld": ["-T", "lds/qemu_virt.ld"]
     },
     "relocation-model": "static",
     "supported-sanitizers": [
