@@ -7,7 +7,7 @@
 //! 
 
 use crate::{arch::Trapframe, task::mytask};
-use alloc::{boxed::Box, string::{String, ToString}, sync::Arc};
+use alloc::{boxed::Box, string::{String, ToString}};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -39,25 +39,57 @@ pub trait AbiModule: 'static {
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
     
-    /// Determine if a binary can be executed by this ABI
+    /// Determine if a binary can be executed by this ABI and return confidence
     /// 
     /// This method reads binary content directly from the file object and
-    /// executes ABI-specific detection logic (magic bytes, header structure, etc.).
+    /// executes ABI-specific detection logic (magic bytes, header structure, 
+    /// entry point validation, etc.).
     /// 
     /// # Arguments
     /// * `file_object` - Binary file to check (in KernelObject format)
     /// * `file_path` - File path (for auxiliary detection like file extensions)
+    /// * `current_abi` - Current task's ABI reference for inheritance/compatibility decisions
     /// 
     /// # Returns
-    /// * `Some(confidence)` - Confidence level (0-100) if executable
+    /// * `Some(confidence)` - Confidence level (0-100) if executable by this ABI
     /// * `None` - Not executable by this ABI
     /// 
-    /// # Implementation Notes
+    /// # Implementation Guidelines
     /// - Use file_object.as_file() to access FileObject
     /// - Use StreamOps::read() to directly read file content
-    /// - Check ABI-specific magic bytes or header structures
-    /// - Combine with path extensions to determine confidence level
-    fn can_execute_binary(&self, _file_object: &crate::object::KernelObject, _file_path: &str) -> Option<u8> {
+    /// - Check ABI-specific magic bytes and header structures
+    /// - Validate entry point and architecture compatibility
+    /// - Consider current_abi for inheritance/compatibility bonus (same ABI = higher confidence)
+    /// - Return confidence based on how well the binary matches this ABI
+    /// - No need for artificial score limitations - let each ABI decide its own confidence
+    /// 
+    /// # Recommended Scoring Guidelines
+    /// - 0-30: Basic compatibility (correct magic bytes, architecture)
+    /// - 31-60: Good match (+ file extension, path hints, valid entry point)
+    /// - 61-80: Strong match (+ ABI-specific headers, symbols, sections)
+    /// - 81-100: Perfect match (+ same ABI inheritance, full validation)
+    /// 
+    /// # Example Scoring Strategy
+    /// ```rust
+    /// let mut confidence = 0;
+    /// 
+    /// // Basic format check
+    /// if self.is_valid_format(file_object) { confidence += 30; }
+    /// 
+    /// // Entry point validation
+    /// if self.is_valid_entry_point(file_object) { confidence += 15; }
+    /// 
+    /// // File path hints
+    /// if file_path.contains(self.get_name()) { confidence += 15; }
+    /// 
+    /// // ABI inheritance bonus
+    /// if let Some(abi) = current_abi {
+    ///     if abi.get_name() == self.get_name() { confidence += 40; }
+    /// }
+    /// 
+    /// Some(confidence.min(100))
+    /// ```
+    fn can_execute_binary(&self, _file_object: &crate::object::KernelObject, _file_path: &str, _current_abi: Option<&dyn AbiModule>) -> Option<u8> {
         // Default implementation: cannot determine
         None
     }
@@ -217,6 +249,10 @@ impl AbiRegistry {
 
     /// Detect the best ABI for a binary from all registered ABI modules
     /// 
+    /// This method tries all registered ABIs and selects the one with the highest
+    /// confidence score. Each ABI internally handles inheritance bonuses and
+    /// compatibility logic based on the current task's ABI.
+    /// 
     /// # Arguments
     /// * `file_object` - Binary file to check
     /// * `file_path` - File path
@@ -226,24 +262,27 @@ impl AbiRegistry {
     /// * `None` - No executable ABI found
     pub fn detect_best_abi(file_object: &crate::object::KernelObject, file_path: &str) -> Option<(String, u8)> {
         let registry = Self::global().lock();
-        let mut best_match: Option<(String, u8)> = None;
         
-        // Try all ABI modules and select the one with highest confidence
-        for (name, factory) in &registry.factories {
-            let abi = factory();
-            if let Some(confidence) = abi.can_execute_binary(file_object, file_path) {
-                match &best_match {
-                    None => best_match = Some((name.clone(), confidence)),
-                    Some((_, best_confidence)) => {
-                        if confidence > *best_confidence {
-                            best_match = Some((name.clone(), confidence));
-                        }
-                    }
-                }
-            }
-        }
+        // Get current task's ABI reference for inheritance consideration
+        let current_abi = if let Some(task) = mytask() {
+            task.abi.as_ref().map(|abi| abi.as_ref())
+        } else {
+            None
+        };
         
-        best_match
+        // Try all ABI modules and find the one with highest confidence
+        // Each ABI decides its own confidence based on:
+        // - Binary format compatibility
+        // - Architecture compatibility 
+        // - Entry point validity
+        // - Inheritance bonus from current ABI
+        registry.factories.iter()
+            .filter_map(|(name, factory)| {
+                let abi = factory();
+                abi.can_execute_binary(file_object, file_path, current_abi)
+                    .map(|confidence| (name.clone(), confidence))
+            })
+            .max_by_key(|(_, confidence)| *confidence)
     }
 }
 

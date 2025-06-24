@@ -31,15 +31,8 @@ impl AbiModule for ScarletAbi {
         syscall_handler(trapframe)
     }
 
-    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str) -> Option<u8> {
-        // Basic scoring based on file extension
-        let path_score = if file_path.ends_with(".elf") || file_path.contains("scarlet") {
-            30 // Basic score from file extension
-        } else {
-            0
-        };
-        
-        // Magic byte detection from file content
+    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str, current_abi: Option<&dyn crate::abi::AbiModule>) -> Option<u8> {
+        // Stage 1: Basic format validation
         let magic_score = match file_object.as_file() {
             Some(file_obj) => {
                 // Check ELF magic bytes (0x7F, 'E', 'L', 'F')
@@ -48,25 +41,36 @@ impl AbiModule for ScarletAbi {
                 match file_obj.read(&mut magic_buffer) {
                     Ok(bytes_read) if bytes_read >= 4 => {
                         if magic_buffer == [0x7F, b'E', b'L', b'F'] {
-                            60 // ELF magic bytes match
+                            30 // Basic ELF format compatibility
                         } else {
-                            0
+                            return None; // Not an ELF file, cannot execute
                         }
                     }
-                    _ => 0 // Read failed or insufficient size
+                    _ => return None // Read failed, cannot determine
                 }
             }
-            None => 0 // Not a file object
+            None => return None // Not a file object
         };
         
-        let total_score = path_score + magic_score;
+        let mut confidence = magic_score;
         
-        // Check minimum score threshold
-        if total_score > 0 {
-            Some(total_score.min(100)) // Limit to 0-100 range
-        } else {
-            None // Not executable by this ABI
+        // Stage 2: Entry point validation (placeholder - could check ELF header)
+        // TODO: Add ELF header parsing to validate entry point
+        confidence += 15;
+        
+        // Stage 3: File path hints
+        if file_path.ends_with(".elf") || file_path.contains("scarlet") {
+            confidence += 15; // Scarlet-specific path indicators
         }
+        
+        // Stage 4: ABI inheritance bonus - high priority for same ABI
+        if let Some(abi) = current_abi {
+            if abi.get_name() == self.get_name() {
+                confidence += 40; // Strong inheritance bonus for Scarlet Native
+            }
+        }
+        
+        Some(confidence.min(100))
     }
 
     fn execute_binary(
