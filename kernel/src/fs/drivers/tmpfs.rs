@@ -685,9 +685,10 @@ impl FileObject for TmpFileObject {
                         write: true,
                         execute: false,
                     },
-                    created_time: crate::time::current_time(), // Current time as placeholder
-                    modified_time: crate::time::current_time(),
-                    accessed_time: crate::time::current_time(),
+                    let current_time = crate::time::current_time(); // Capture current time once
+                    created_time: current_time, // Use captured time
+                    modified_time: current_time,
+                    accessed_time: current_time,
                     file_id: device_read.id() as u64, // Use device ID as file ID
                     link_count: 1,
                 })
