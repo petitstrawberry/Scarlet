@@ -101,6 +101,7 @@ pub mod syscall;
 pub mod helper;
 pub mod params;
 pub mod mount_tree;
+pub mod vfs_v2;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use alloc::vec;
@@ -139,6 +140,15 @@ pub enum FileSystemErrorKind {
 pub struct FileSystemError {
     pub kind: FileSystemErrorKind,
     pub message: String,
+}
+
+impl FileSystemError {
+    pub fn new(kind: FileSystemErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
 }
 
 impl fmt::Debug for FileSystemError {
