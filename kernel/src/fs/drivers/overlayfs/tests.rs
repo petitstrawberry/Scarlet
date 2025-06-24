@@ -1147,31 +1147,33 @@ pub fn test_whiteout_directory_listing() {
     let _ = manager.mount(lower_fs_id, "/lower");
     
     if let Ok(()) = manager.overlay_mount(Some("/upper"), vec!["/lower"], "/overlay") {
-        // Phase 1: Verify all files are visible initially
+        // Phase 1: Verify all files are visible initially (+ . and ..)
         if let Ok(entries) = manager.readdir("/overlay/") {
-            assert_eq!(entries.len(), 3, "Should see all 3 files initially");
+            assert_eq!(entries.len(), 5, "Should see all 5 entries (3 files + . and ..)");
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"visible.txt"));
             assert!(names.contains(&"to_be_hidden.txt"));
             assert!(names.contains(&"also_visible.txt"));
+            assert!(names.contains(&"."));
+            assert!(names.contains(&".."));
         }
         
         // Phase 2: Remove one file (should create whiteout)
         let remove_result = manager.remove("/overlay/to_be_hidden.txt");
         assert!(remove_result.is_ok(), "Should be able to remove file");
         
-        // Phase 3: Verify directory listing excludes removed file
+        // Phase 3: Verify directory listing excludes removed file (4 entries: 2 files + . and ..)
         if let Ok(entries) = manager.readdir("/overlay/") {
-            assert_eq!(entries.len(), 2, "Should see only 2 files after removal");
+            assert_eq!(entries.len(), 4, "Should see only 4 entries after removal (2 files + . and ..)");
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
             assert!(names.contains(&"visible.txt"));
             assert!(!names.contains(&"to_be_hidden.txt"), "Removed file should not appear");
             assert!(names.contains(&"also_visible.txt"));
         }
         
-        // Phase 4: Verify lower layer still has all files
+        // Phase 4: Verify lower layer still has all files (+ . and ..)
         if let Ok(entries) = manager.readdir("/lower/") {
-            assert_eq!(entries.len(), 3, "Lower layer should still have all files");
+            assert_eq!(entries.len(), 5, "Lower layer should still have all 5 entries (3 files + . and ..)");
         }
         
         // Phase 5: Verify whiteout doesn't appear in overlay listing
@@ -1766,8 +1768,8 @@ pub fn test_overlay_directory_object() {
                     }
                 }
                 
-                // Should read 3 entries: upper_file.txt, lower_file1.txt (from upper), lower_file2.txt
-                assert_eq!(entries_read, 3, "Should read exactly 3 directory entries");
+                // Should read 5 entries: ".", "..", upper_file.txt, lower_file1.txt (from upper), lower_file2.txt
+                assert_eq!(entries_read, 5, "Should read exactly 5 directory entries (including . and ..)");
             } else {
                 panic!("Expected FileObject from directory open");
             }
@@ -1815,10 +1817,10 @@ pub fn test_overlay_directory_seek() {
                 .expect("Failed to open directory");
             
             if let Some(file) = dir_obj.as_file() {
-                // Test seek operations
+                // Test seek operations (now 5 entries: ., .., file1.txt, file2.txt, file3.txt)
                 assert_eq!(file.seek(SeekFrom::Start(1)).unwrap(), 1, "Seek to start position 1");
                 assert_eq!(file.seek(SeekFrom::Current(1)).unwrap(), 2, "Seek current +1");
-                assert_eq!(file.seek(SeekFrom::End(-1)).unwrap(), 2, "Seek to end-1 (3 entries)");
+                assert_eq!(file.seek(SeekFrom::End(-1)).unwrap(), 4, "Seek to end-1 (5 entries)");
             } else {
                 panic!("Expected FileObject from directory open");
             }
@@ -1910,9 +1912,15 @@ pub fn test_overlay_directory_whiteout() {
             let direct_entries = manager.readdir("/overlay/test_dir")
                 .expect("Failed to readdir overlay directory");
             
-            // Should only see visible_file.txt (hidden_file.txt should be hidden by whiteout)
-            assert_eq!(direct_entries.len(), 1, "readdir should only return 1 visible file");
-            assert_eq!(direct_entries[0].name, "visible_file.txt", "Should only see visible_file.txt");
+            // Should see 3 entries: ".", "..", visible_file.txt (hidden_file.txt should be hidden by whiteout)
+            assert_eq!(direct_entries.len(), 3, "readdir should return 3 entries (including . and ..)");
+            
+            // Check that only visible_file.txt is among the regular files (excluding . and ..)
+            let regular_files: Vec<_> = direct_entries.iter()
+                .filter(|e| !e.name.starts_with('.') || (e.name != "." && e.name != ".."))
+                .collect();
+            assert_eq!(regular_files.len(), 1, "Should only see 1 regular file");
+            assert_eq!(regular_files[0].name, "visible_file.txt", "Should only see visible_file.txt");
             
             // Open directory
             let dir_obj = manager.open("/overlay/test_dir", 0)
@@ -1931,8 +1939,8 @@ pub fn test_overlay_directory_whiteout() {
                     }
                 }
                 
-                // Should match readdir result
-                assert_eq!(entries_read, 1, "Directory object should read same number of entries as readdir");
+                // Should match readdir result (3 entries: ".", "..", "visible_file.txt")
+                assert_eq!(entries_read, 3, "Directory object should read same number of entries as readdir");
             } else {
                 panic!("Expected FileObject from directory open");
             }
