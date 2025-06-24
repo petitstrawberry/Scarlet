@@ -957,10 +957,11 @@ impl FileOperations for TmpFS {
                 }
             }
             
-            // Add regular directory entries
+            // Add regular directory entries and sort by file_id
+            let mut regular_entries = Vec::new();
             for (name, child) in node.children.read().entries() {
                 let metadata = child.metadata.read();
-                entries.push(DirectoryEntryInternal {
+                regular_entries.push(DirectoryEntryInternal {
                     name: name.clone(),
                     file_type: child.file_type.clone(),
                     size: metadata.size,
@@ -968,6 +969,13 @@ impl FileOperations for TmpFS {
                     metadata: Some(metadata.clone()),
                 });
             }
+            
+            // Sort regular entries by file_id (ascending order)
+            regular_entries.sort_by_key(|entry| entry.file_id);
+            
+            // Append sorted regular entries to the result
+            // (Note: "." and ".." are already at the beginning)
+            entries.extend(regular_entries);
             
             Ok(entries)
         } else {
