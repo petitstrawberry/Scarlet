@@ -1,5 +1,37 @@
-use alloc::{boxed::Box, string::ToString, vec::Vec};
-use crate::{abi::xv6::riscv64::fs::xv6fs::Stat, arch::{self, Registers, Trapframe}, device::manager::DeviceManager, executor::TransparentExecutor, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager}, library::std::string::{cstring_to_string, parse_c_string_from_userspace, parse_string_array_from_userspace, StringConversionError}, object::capability::StreamError, sched::scheduler::get_scheduler, task::{elf_loader::load_elf_into_task, mytask}, vm};
+use alloc::{boxed::Box, string::ToString, vec, vec::Vec};
+use crate::{abi::xv6::riscv64::fs::xv6fs::{Dirent, Stat}, arch::{self, Registers, Trapframe}, device::manager::DeviceManager, executor::TransparentExecutor, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager, DirectoryEntry}, library::std::string::{cstring_to_string, parse_c_string_from_userspace, parse_string_array_from_userspace, StringConversionError}, object::capability::StreamError, sched::scheduler::get_scheduler, task::{elf_loader::load_elf_into_task, mytask}, vm};
+
+/// Convert Scarlet DirectoryEntry to xv6 Dirent and write to buffer
+fn read_directory_as_xv6_dirent(buf_ptr: *mut u8, count: usize, buffer_data: &[u8]) -> usize {
+    if count < Dirent::DIRENT_SIZE {
+        return 0; // Buffer too small for even one entry
+    }
+
+    // Parse DirectoryEntry from buffer data
+    if let Some(dir_entry) = DirectoryEntry::parse(buffer_data) {
+        // Convert Scarlet DirectoryEntry to xv6 Dirent
+        let inum = (dir_entry.file_id & 0xFFFF) as u16; // Use lower 16 bits as inode number
+        let name = dir_entry.name_str().unwrap_or("");
+        
+        let xv6_dirent = Dirent::new(inum, name);
+        
+        // Check if we have enough space
+        if count >= Dirent::DIRENT_SIZE {
+            // Copy the dirent to the buffer
+            let dirent_bytes = xv6_dirent.as_bytes();
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    dirent_bytes.as_ptr(),
+                    buf_ptr,
+                    Dirent::DIRENT_SIZE
+                );
+            }
+            return Dirent::DIRENT_SIZE;
+        }
+    }
+    
+    0 // No data or error
+}
 
 const MAX_PATH_LENGTH: usize = 128;
 const MAX_ARG_COUNT: usize = 64;
@@ -188,28 +220,72 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
         None => return usize::MAX, // Invalid file descriptor
     };
 
+    // Check if this is a directory by getting file metadata
+    let is_directory = if let Some(file_obj) = kernel_obj.as_file() {
+        if let Ok(metadata) = file_obj.metadata() {
+            matches!(metadata.file_type, FileType::Directory)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => return usize::MAX, // Not a stream object
     };
 
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-
-    match stream.read(buffer) {
-        Ok(n) => n,
-        Err(e) => {
-            match e {
-                StreamError:: EndOfStream => 0, // EOF
-                StreamError::WouldBlock  => {
-                    // If the stream would block, we need to set the trapframe's EPC
-                    trapframe.epc = epc;
-                    task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
-                    get_scheduler().schedule(trapframe); // Yield to the scheduler
-                    trapframe.get_return_value() // Return the value from the trapframe
-                },
-                _ => {
-                    // Other errors, return -1
-                    usize::MAX
+    if is_directory {
+        // For directories, we need a larger buffer to read DirectoryEntry, then convert to Dirent
+        let directory_entry_size = core::mem::size_of::<DirectoryEntry>();
+        let mut temp_buffer = vec![0u8; directory_entry_size];
+        
+        match stream.read(&mut temp_buffer) {
+            Ok(n) => {
+                if n > 0 && n >= directory_entry_size {
+                    // Convert DirectoryEntry to xv6 Dirent
+                    let converted_bytes = read_directory_as_xv6_dirent(buf_ptr, count, &temp_buffer[..n]);
+                    if converted_bytes > 0 {
+                        return converted_bytes; // Return converted xv6 dirent size
+                    }
+                }
+                0 // EOF or no valid directory entry
+            },
+            Err(e) => {
+                match e {
+                    StreamError::EndOfStream => 0, // EOF
+                    StreamError::WouldBlock => {
+                        // If the stream would block, we need to set the trapframe's EPC
+                        trapframe.epc = epc;
+                        task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
+                        get_scheduler().schedule(trapframe); // Yield to the scheduler
+                        trapframe.get_return_value() // Return the value from the trapframe
+                    },
+                    _ => usize::MAX, // Other errors
+                }
+            }
+        }
+    } else {
+        // For regular files, use the user-provided buffer directly
+        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+        
+        match stream.read(&mut buffer) {
+            Ok(n) => n, // Return original read size for regular files
+            Err(e) => {
+                match e {
+                    StreamError::EndOfStream => 0, // EOF
+                    StreamError::WouldBlock => {
+                        // If the stream would block, we need to set the trapframe's EPC
+                        trapframe.epc = epc;
+                        task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
+                        get_scheduler().schedule(trapframe); // Yield to the scheduler
+                        trapframe.get_return_value() // Return the value from the trapframe
+                    },
+                    _ => {
+                        // Other errors, return -1
+                        usize::MAX
+                    }
                 }
             }
         }
