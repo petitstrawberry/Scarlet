@@ -676,6 +676,7 @@ impl FileObject for TmpFileObject {
             if let Some(ref device_guard) = self.device_guard {
                 let device = device_guard.device();
                 let device_read = device.read();
+                let current_time = crate::time::current_time(); // Capture current time once
                 
                 Ok(FileMetadata {
                     file_type: self.file_type.clone(),
@@ -685,7 +686,6 @@ impl FileObject for TmpFileObject {
                         write: true,
                         execute: false,
                     },
-                    let current_time = crate::time::current_time(); // Capture current time once
                     created_time: current_time, // Use captured time
                     modified_time: current_time,
                     accessed_time: current_time,
