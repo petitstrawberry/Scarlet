@@ -23,6 +23,7 @@ fn setup_new_root() -> bool {
     // For this demo, we'll assume /mnt/newroot already has the necessary structure
     copy_dir("/bin", "/mnt/newroot/bin");
     copy_dir("/system", "/mnt/newroot/system");
+    copy_dir("/data", "/mnt/newroot/data");
     // mkdir("/mnt/newroot/bin", 0); // Create /bin directory in new root
     // copy_file("/bin/sh", "/mnt/newroot/bin/sh"); // Copy shell binary
     // copy_file("/bin/hello", "/mnt/newroot/bin/hello"); // Copy hello binary
