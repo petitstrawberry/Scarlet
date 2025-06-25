@@ -12,7 +12,7 @@ use alloc::string::ToString;
 use crate::fs::{
     vfs_v2::{
         tmpfs_v2::TmpFS,
-        manager_v2::VfsManager,
+        manager::VfsManager,
     },
     FileType,
 };

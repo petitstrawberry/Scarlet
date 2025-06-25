@@ -13,9 +13,9 @@
 
 pub mod core;
 pub mod tmpfs_v2;
-pub mod cpiofs_v2;
-pub mod manager_v2;
-pub mod mount_tree_v2;
+pub mod cpiofs;
+pub mod manager;
+pub mod mount_tree;
 
 // VFS v2 test modules
 #[cfg(test)]

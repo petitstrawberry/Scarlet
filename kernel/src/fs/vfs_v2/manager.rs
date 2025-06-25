@@ -21,7 +21,7 @@ use crate::object::KernelObject;
 
 use super::{
     core::{VfsEntry, FileSystemOperations, DirectoryEntryInternal},
-    mount_tree_v2::{MountTree, MountOptionsV2},
+    mount_tree::{MountTree, MountOptionsV2},
 };
 
 // Helper function to create FileSystemError

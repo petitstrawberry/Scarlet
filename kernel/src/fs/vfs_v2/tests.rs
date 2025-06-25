@@ -4,8 +4,8 @@
 
 use crate::fs::vfs_v2::{
     core::*,
-    manager_v2::VfsManager,
-    mount_tree_v2::{MountTree, MountPoint, MountType, MountOptionsV2},
+    manager::VfsManager,
+    mount_tree::{MountTree, MountPoint, MountType, MountOptionsV2},
     tmpfs_v2::TmpFS,
 };
 use alloc::{
