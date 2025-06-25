@@ -398,17 +398,27 @@ impl MountTree {
     }
 
     /// Check if a path is a mount point
-    pub fn is_mount_point(&self, path: &str) -> VfsResult<bool> {
-        let mount_point = self.find_mount_point_for_path(path)?;
-        let relative_path = self.get_relative_path(&mount_point, path)?;
-        
-        Ok(mount_point.get_child(&relative_path).is_some())
+    pub fn is_mount_point(&self, entry: VfsEntryRef) -> VfsResult<bool> {
+        // Check if the entry is a mount point by looking up its parent
+        if let Some(parent) = entry.parent() {
+            let parent_mount = self.find_mount_for_entry(&parent)?;
+            Ok(parent_mount.get_child(&entry.name()).is_some())
+        } else {
+            // If no parent, it cannot be a mount point
+            Ok(false)
+        }
     }
 
     /// Get mount information for a path
-    pub fn get_mount_info(&self, path: &str) -> VfsResult<MountId> {
-        let mount_point = self.find_mount_point_for_path(path)?;
-        Ok(mount_point.id)
+    pub fn get_mount_info(&self, entry: VfsEntryRef) -> VfsResult<MountId> {
+        // Check if the entry is a mount point
+        if self.is_mount_point(entry.clone())? {
+            // Find the mount point for this entry
+            let mount = self.find_mount_for_entry(&entry)?;
+            Ok(mount.id)
+        } else {
+            Err(vfs_error(FileSystemErrorKind::NotFound, "Entry is not a mount point"))
+        }
     }
 
     /// List all mounts
@@ -426,22 +436,22 @@ impl MountTree {
         result
     }
 
-    /// Find mount ID for a given path
-    pub fn find_mount_id_by_path(&self, path: &str) -> Option<MountId> {
-        let components = self.parse_path(path);
-        let mut current_mount = self.root_mount.read().clone();
+    // /// Find mount ID for a given path
+    // pub fn find_mount_id_by_path(&self, path: &str) -> Option<MountId> {
+    //     let components = self.parse_path(path);
+    //     let mut current_mount = self.root_mount.read().clone();
 
-        for component in components {
-            if let Some(child_mount) = current_mount.get_child(&component) {
-                current_mount = child_mount;
-            } else {
-                // Path doesn't correspond to a mount point
-                return None;
-            }
-        }
+    //     for component in components {
+    //         if let Some(child_mount) = current_mount.get_child(&component) {
+    //             current_mount = child_mount;
+    //         } else {
+    //             // Path doesn't correspond to a mount point
+    //             return None;
+    //         }
+    //     }
 
-        Some(current_mount.id)
-    }
+    //     Some(current_mount.id)
+    // }
 
     // Helper methods
 

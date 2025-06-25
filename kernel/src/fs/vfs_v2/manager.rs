@@ -102,9 +102,17 @@ impl VfsManager {
     /// Unmount a filesystem from the specified path
     pub fn unmount(&self, mount_point: &str) -> Result<(), FileSystemError> {
         // Find the mount ID for the given path
-        let mount_id = self.mount_tree.find_mount_id_by_path(mount_point)
-            .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Mount point not found"))?;
-        
+        let mount_id = match self.mount_tree.resolve_path(mount_point) {
+            Ok(entry) => {
+                self.mount_tree.get_mount_info(entry)
+            },
+            Err(_) => {
+                return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Mount point not found"));
+            }
+        }.map_err(|_| {
+            vfs_error(FileSystemErrorKind::InvalidPath, "Mount point not found")
+        })?;
+            
         // Use MountTreeV2 for unmounting
         self.mount_tree.unmount(mount_id)?;
         
