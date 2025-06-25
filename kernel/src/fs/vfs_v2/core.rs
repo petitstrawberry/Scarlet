@@ -49,9 +49,6 @@ pub struct VfsEntry {
 
     /// Cache of child VfsEntries for fast lookup (using Weak to prevent memory leaks)
     children: RwLock<BTreeMap<String, Weak<VfsEntry>>>,
-
-    /// Reference to VfsMount if this is a mount point
-    mount: RwLock<Option<Arc<VfsMount>>>,
 }
 
 impl VfsEntry {
@@ -70,7 +67,6 @@ impl VfsEntry {
             name,
             node,
             children: RwLock::new(BTreeMap::new()),
-            mount: RwLock::new(None),
         })
     }
 
@@ -127,21 +123,6 @@ impl VfsEntry {
         let mut children = self.children.write();
         children.retain(|_, weak_ref| weak_ref.strong_count() > 0);
     }
-
-    /// Set mount point information
-    pub fn set_mount(&self, mount: Arc<VfsMount>) {
-        *self.mount.write() = Some(mount);
-    }
-
-    /// Get mount point information
-    pub fn mount(&self) -> Option<Arc<VfsMount>> {
-        self.mount.read().clone()
-    }
-
-    /// Check if this is a mount point
-    pub fn is_mount_point(&self) -> bool {
-        self.mount.read().is_some()
-    }
 }
 
 impl Clone for VfsEntry {
@@ -151,7 +132,6 @@ impl Clone for VfsEntry {
             name: self.name.clone(),
             node: Arc::clone(&self.node),
             children: RwLock::new(self.children.read().clone()),
-            mount: RwLock::new(None), // Don't copy mount info
         }
     }
 }
@@ -160,7 +140,6 @@ impl fmt::Debug for VfsEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VfsEntry")
             .field("name", &self.name)
-            .field("is_mount_point", &self.is_mount_point())
             .field("children_count", &self.children.read().len())
             .finish()
     }
@@ -261,27 +240,5 @@ pub trait FileSystemOperations: Send + Sync {
     /// Check if filesystem is read-only
     fn is_read_only(&self) -> bool {
         false
-    }
-}
-
-/// Mount information for VFS entries
-pub struct VfsMount {
-    /// The mounted filesystem
-    pub filesystem: FileSystemRef,
-    
-    /// Mount flags
-    pub flags: u32,
-    
-    /// Mount point path
-    pub mount_point: String,
-}
-
-impl VfsMount {
-    pub fn new(filesystem: FileSystemRef, flags: u32, mount_point: String) -> Self {
-        Self {
-            filesystem,
-            flags,
-            mount_point,
-        }
     }
 }
