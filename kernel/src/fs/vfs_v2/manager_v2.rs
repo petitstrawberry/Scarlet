@@ -1,7 +1,8 @@
-//! VFS Manager v2 - New VFS architecture implementation
+//! VFS Manager v2 - Enhanced Virtual File System Management
 //!
-//! This module implements the new VFS manager that uses VfsEntry, VfsNode,
-//! and the path_walk algorithm for path resolution.
+//! This module provides the next-generation VFS management system for Scarlet,
+//! built on the improved VFS v2 architecture with enhanced mount tree management,
+//! VfsEntry-based caching, and better isolation support.
 
 use alloc::{
     collections::BTreeMap,
@@ -13,44 +14,55 @@ use alloc::{
 use spin::RwLock;
 
 use crate::fs::{
-    FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, 
+    FileSystemError, FileSystemErrorKind, FileMetadata, FileType, 
     DeviceFileInfo, DirectoryEntryInternal
 };
 use crate::object::KernelObject;
 
-use super::core::{VfsEntry, VfsNode, FileSystemOperations, FileSystemRef, VfsMount};
-use super::path_walk::PathWalkContext;
+use super::{
+    core::{VfsEntry, VfsNode, FileSystemOperations, FileSystemRef},
+    path_walk::PathWalkContext,
+    mount_tree_v2::{MountTree, MountOptionsV2},
+};
 
-/// VFS Manager v2 - New VFS architecture implementation
-pub struct VfsManagerV2 {
-    /// Root VfsEntry for this VFS namespace
-    root: Arc<RwLock<VfsEntry>>,
-    
-    /// Path walking context
-    path_walker: PathWalkContext,
-    
-    /// Mounted filesystems
-    filesystems: RwLock<BTreeMap<String, Arc<dyn FileSystemOperations>>>,
-    
-    /// Current working directory cache
-    cwd: RwLock<Option<Arc<RwLock<VfsEntry>>>>,
+// Helper function to create FileSystemError
+fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
+    FileSystemError::new(kind, message)
 }
 
-impl VfsManagerV2 {
-    /// Create a new VFS manager instance
+/// VFS Manager v2 - Enhanced VFS architecture implementation
+/// 
+/// This manager provides advanced VFS functionality with proper mount tree
+/// management, enhanced caching, and better support for containerization.
+pub struct VfsManager {
+    /// Mount tree for hierarchical mount point management
+    mount_tree: MountTree,
+    
+    /// Path walking context for VfsEntry navigation
+    path_walker: PathWalkContext,
+    
+    /// Registered filesystems by name
+    filesystems: RwLock<BTreeMap<String, Arc<dyn FileSystemOperations>>>,
+    
+    /// Current working directory
+    cwd: RwLock<Option<Arc<VfsEntry>>>,
+}
+
+impl VfsManager {
+    /// Create a new VFS manager instance with a dummy root
     pub fn new() -> Self {
-        // Create a placeholder root node (will be replaced by first mount)
-        let root_node = Arc::new(PlaceholderNode::new());
-        let root_entry = VfsEntry::new(
-            None,
-            String::from("/"),
-            root_node as Arc<dyn VfsNode>,
-        );
+        // Create a dummy root entry for initialization
+        // In practice, this should be replaced with the actual root filesystem
+        use super::tmpfs_v2::TmpFS;
+        let tmpfs = TmpFS::new(0); // 0 = unlimited memory
+        let root_node = tmpfs.root_node();
+        let dummy_root = VfsEntry::new(None, "/".to_string(), root_node);
         
-        let path_walker = PathWalkContext::new(Arc::clone(&root_entry));
+        let mount_tree = MountTree::new(dummy_root.clone());
+        let path_walker = PathWalkContext::new(dummy_root);
         
         Self {
-            root: root_entry,
+            mount_tree,
             path_walker,
             filesystems: RwLock::new(BTreeMap::new()),
             cwd: RwLock::new(None),
@@ -64,36 +76,19 @@ impl VfsManagerV2 {
         mount_point: &str,
         flags: u32,
     ) -> Result<(), FileSystemError> {
-        // Normalize mount point
-        let normalized_path = PathWalkContext::normalize_path(mount_point)?;
+        // Convert flags to mount options (for future use)
+        let _mount_options = MountOptionsV2 {
+            readonly: (flags & 0x01) != 0,
+            flags,
+        };
         
-        if normalized_path == "/" {
-            // Root mount - replace root entry
-            let root_node = filesystem.root_node();
-            let new_root = VfsEntry::new(
-                None,
-                String::from("/"),
-                root_node,
-            );
-            
-            // Set mount information
-            let mount_info = Arc::new(VfsMount::new(
-                Arc::clone(&filesystem),
-                flags,
-                normalized_path.clone(),
-            ));
-            new_root.write().set_mount(mount_info);
-            
-            // Replace root
-            let new_root_entry = new_root.read().clone();
-            *self.root.write() = new_root_entry;
-            
-            // Update path walker
-            // TODO: Update path walker root reference
-        } else {
-            // Non-root mount - create mount point
-            self.create_mount_point(&normalized_path, filesystem.clone(), flags)?;
-        }
+        // Create a root VfsEntry for the filesystem
+        // Note: This is a simplified approach - in reality, you'd need to get the actual root from the filesystem
+        let root_node = filesystem.root_node();
+        let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
+        
+        // Use MountTreeV2 for mounting
+        self.mount_tree.mount(mount_point, root_entry)?;
         
         // Register filesystem
         let fs_name = format!("{}:{}", filesystem.name(), mount_point);
@@ -104,24 +99,26 @@ impl VfsManagerV2 {
     
     /// Unmount a filesystem from the specified path
     pub fn unmount(&self, mount_point: &str) -> Result<(), FileSystemError> {
-        let normalized_path = PathWalkContext::normalize_path(mount_point)?;
+        // Find the mount ID for the given path
+        let mount_id = self.mount_tree.find_mount_id_by_path(mount_point)
+            .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Mount point not found"))?;
         
-        // Find and remove the mount
-        // TODO: Implement unmount logic
+        // Use MountTreeV2 for unmounting
+        self.mount_tree.unmount(mount_id)?;
+        
+        // Remove from filesystem registry
+        self.filesystems.write().retain(|k, _| !k.ends_with(&format!(":{}", mount_point)));
         
         Ok(())
     }
     
     /// Open a file at the specified path
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
-        // Resolve path to VfsEntry
-        let entry = self.path_walker.path_walk(path, self.get_cwd())?;
+        // Use MountTreeV2 for path resolution with mount point handling
+        let entry = self.mount_tree.resolve_path(path)?;
         
         // Get VfsNode from entry
-        let node = {
-            let entry_guard = entry.read();
-            entry_guard.node()
-        };
+        let node = entry.node();
         
         // Get filesystem and open the file
         let filesystem = node.filesystem();
@@ -135,18 +132,15 @@ impl VfsManagerV2 {
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
         
-        // Resolve parent directory
-        let parent_entry = self.path_walker.path_walk(&parent_path, self.get_cwd())?;
-        let parent_node = {
-            let entry_guard = parent_entry.read();
-            entry_guard.node()
-        };
+        // Resolve parent directory using MountTreeV2
+        let parent_entry = self.mount_tree.resolve_path(&parent_path)?;
+        let parent_node = parent_entry.node();
         
         // Create file using filesystem
         let filesystem = parent_node.filesystem();
         let new_node = filesystem.create(
             parent_node,
-            &String::from(&filename),
+            &filename,
             file_type,
             0o644, // Default permissions
         )?;
@@ -154,14 +148,13 @@ impl VfsManagerV2 {
         // Create VfsEntry and add to parent cache
         let new_entry = VfsEntry::new(
             Some(Arc::downgrade(&parent_entry)),
-            String::from(&filename),
+            filename.clone(),
             new_node,
         );
         
-        {
-            let parent_guard = parent_entry.read();
-            parent_guard.add_child(String::from(filename), new_entry);
-        }
+        
+        parent_entry.add_child(filename, new_entry);
+    
         
         Ok(())
     }
@@ -176,23 +169,17 @@ impl VfsManagerV2 {
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
         
-        // Resolve parent directory
-        let parent_entry = self.path_walker.path_walk(&parent_path, self.get_cwd())?;
-        let parent_node = {
-            let entry_guard = parent_entry.read();
-            entry_guard.node()
-        };
+        // Resolve parent directory using MountTreeV2
+        let parent_entry = self.mount_tree.resolve_path(&parent_path)?;
+        let parent_node = parent_entry.node();
         
         // Remove from filesystem
         let filesystem = parent_node.filesystem();
-        filesystem.remove(parent_node, &String::from(&filename))?;
+        filesystem.remove(parent_node, &filename)?;
         
         // Remove from parent cache
-        {
-            let parent_guard = parent_entry.read();
-            parent_guard.remove_child(&String::from(filename));
-        }
-        
+        let _ = parent_entry.remove_child(&filename);
+
         Ok(())
     }
     
@@ -202,10 +189,7 @@ impl VfsManagerV2 {
         let entry = self.path_walker.path_walk(path, self.get_cwd())?;
         
         // Get VfsNode and return metadata
-        let node = {
-            let entry_guard = entry.read();
-            entry_guard.node()
-        };
+        let node =entry.node();
         
         node.metadata()
     }
@@ -216,10 +200,7 @@ impl VfsManagerV2 {
         let entry = self.path_walker.path_walk(path, self.get_cwd())?;
         
         // Get VfsNode
-        let node = {
-            let entry_guard = entry.read();
-            entry_guard.node()
-        };
+        let node = entry.node();
         
         // Check if it's a directory
         if !node.is_directory()? {
@@ -239,10 +220,7 @@ impl VfsManagerV2 {
         let entry = self.path_walker.path_walk(path, self.get_cwd())?;
         
         // Verify it's a directory
-        let node = {
-            let entry_guard = entry.read();
-            entry_guard.node()
-        };
+        let node = entry.node();
         
         if !node.is_directory()? {
             return Err(FileSystemError::new(
@@ -256,7 +234,7 @@ impl VfsManagerV2 {
     }
     
     /// Get current working directory
-    pub fn get_cwd(&self) -> Option<Arc<RwLock<VfsEntry>>> {
+    pub fn get_cwd(&self) -> Option<Arc<VfsEntry>> {
         self.cwd.read().clone()
     }
     
@@ -306,42 +284,5 @@ impl VfsManagerV2 {
             ))
         }
     }
-    
-    /// Create a mount point at the specified path
-    fn create_mount_point(
-        &self,
-        mount_point: &str,
-        filesystem: Arc<dyn FileSystemOperations>,
-        flags: u32,
-    ) -> Result<(), FileSystemError> {
-        // TODO: Implement mount point creation for non-root mounts
-        Ok(())
-    }
 }
 
-/// Placeholder node for uninitialized root
-struct PlaceholderNode;
-
-impl PlaceholderNode {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl VfsNode for PlaceholderNode {
-    fn filesystem(&self) -> FileSystemRef {
-        // This should never be called
-        panic!("PlaceholderNode::filesystem() called - VFS not properly initialized")
-    }
-    
-    fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "PlaceholderNode has no metadata"
-        ))
-    }
-    
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-}

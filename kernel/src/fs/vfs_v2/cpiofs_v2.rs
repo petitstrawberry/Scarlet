@@ -8,9 +8,8 @@ use alloc::{
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
-    boxed::Box,
 };
-use spin::{Mutex, RwLock};
+use spin::RwLock;
 use core::any::Any;
 
 use crate::fs::vfs_v2::core::{
@@ -22,7 +21,7 @@ use crate::fs::{
 use crate::object::capability::{StreamOps, StreamError};
 
 /// CPIO filesystem implementation
-pub struct CpioFSv2 {
+pub struct CpioFS {
     /// Root node of the filesystem
     root_node: Arc<CpioNode>,
     
@@ -45,7 +44,7 @@ pub struct CpioNode {
     children: RwLock<BTreeMap<String, Arc<CpioNode>>>,
     
     /// Reference to filesystem
-    filesystem: RwLock<Option<Arc<CpioFSv2>>>,
+    filesystem: RwLock<Option<Arc<CpioFS>>>,
     
     /// File ID
     file_id: usize,
@@ -118,7 +117,7 @@ impl VfsNode for CpioNode {
     }
 }
 
-impl CpioFSv2 {
+impl CpioFS {
     /// Create a new CpioFS from CPIO archive data
     pub fn new(name: String, cpio_data: &[u8]) -> Result<Arc<Self>, FileSystemError> {
         let root_node = CpioNode::new("/".to_string(), FileType::Directory, Vec::new(), 1);
@@ -150,7 +149,7 @@ impl CpioFSv2 {
     }
 }
 
-impl FileSystemOperations for CpioFSv2 {
+impl FileSystemOperations for CpioFS {
     fn lookup(
         &self,
         parent_node: Arc<dyn VfsNode>,

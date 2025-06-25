@@ -4,9 +4,8 @@
 //! path strings into VfsEntry objects using the path_walk algorithm.
 
 use alloc::{
-    collections::VecDeque, format, string::{String, ToString}, sync::Arc, vec::Vec
+    format, string::{String, ToString}, sync::Arc, vec::Vec
 };
-use spin::RwLock;
 
 use crate::fs::{FileSystemError, FileSystemErrorKind, FileType};
 use super::core::{VfsEntry, VfsNode, FileSystemOperations};
@@ -14,12 +13,12 @@ use super::core::{VfsEntry, VfsNode, FileSystemOperations};
 /// Path walking context for resolving paths to VfsEntry objects
 pub struct PathWalkContext {
     /// Root VfsEntry for this context
-    root: Arc<RwLock<VfsEntry>>,
+    root: Arc<VfsEntry>,
 }
 
 impl PathWalkContext {
     /// Create a new path walking context with the given root
-    pub fn new(root: Arc<RwLock<VfsEntry>>) -> Self {
+    pub fn new(root: Arc<VfsEntry>) -> Self {
         Self { root }
     }
 
@@ -39,8 +38,8 @@ impl PathWalkContext {
     pub fn path_walk(
         &self,
         path: &str,
-        current_working_dir: Option<Arc<RwLock<VfsEntry>>>,
-    ) -> Result<Arc<RwLock<VfsEntry>>, FileSystemError> {
+        current_working_dir: Option<Arc<VfsEntry>>,
+    ) -> Result<Arc<VfsEntry>, FileSystemError> {
         // Phase 1: Initialize starting point
         let starting_entry = if path.starts_with('/') {
             // Absolute path - start from root
@@ -109,15 +108,12 @@ impl PathWalkContext {
     /// Resolve a single component within a parent VfsEntry
     fn resolve_component(
         &self,
-        parent_entry: Arc<RwLock<VfsEntry>>,
+        parent_entry: Arc<VfsEntry>,
         component: &String,
-    ) -> Result<Arc<RwLock<VfsEntry>>, FileSystemError> {
+    ) -> Result<Arc<VfsEntry>, FileSystemError> {
         // Phase 1: Cache lookup (fast path)
-        {
-            let parent_guard = parent_entry.read();
-            if let Some(cached_child) = parent_guard.get_child(component) {
-                return Ok(cached_child);
-            }
+        if let Some(cached_child) = parent_entry.get_child(component) {
+            return Ok(cached_child);
         }
 
         // Phase 2: Cache miss - perform lookup
@@ -127,15 +123,11 @@ impl PathWalkContext {
     /// Perform filesystem lookup when cache misses
     fn perform_lookup(
         &self,
-        parent_entry: Arc<RwLock<VfsEntry>>,
+        parent_entry: Arc<VfsEntry>,
         component: &String,
-    ) -> Result<Arc<RwLock<VfsEntry>>, FileSystemError> {
+    ) -> Result<Arc<VfsEntry>, FileSystemError> {
         // Get parent VfsNode and filesystem
-        let parent_node = {
-            let parent_guard = parent_entry.read();
-            parent_guard.node()
-        };
-
+        let parent_node = parent_entry.node();
         let filesystem = parent_node.filesystem();
 
         // Call filesystem's lookup method
@@ -149,10 +141,7 @@ impl PathWalkContext {
         );
 
         // Add to parent's cache
-        {
-            let parent_guard = parent_entry.read();
-            parent_guard.add_child(component.clone(), Arc::clone(&child_entry));
-        }
+        parent_entry.add_child(component.clone(), Arc::clone(&child_entry));
 
         // Handle special cases
         self.handle_special_nodes(child_entry)
@@ -161,21 +150,17 @@ impl PathWalkContext {
     /// Handle special node types (mount points, symbolic links)
     fn handle_special_nodes(
         &self,
-        entry: Arc<RwLock<VfsEntry>>,
-    ) -> Result<Arc<RwLock<VfsEntry>>, FileSystemError> {
-        let entry_guard = entry.read();
-        
+        entry: Arc<VfsEntry>,
+    ) -> Result<Arc<VfsEntry>, FileSystemError> {
         // Check if this is a mount point
-        if entry_guard.is_mount_point() {
+        if entry.is_mount_point() {
             // TODO: Handle mount point traversal
             // For now, return the entry as-is
-            drop(entry_guard);
             return Ok(entry);
         }
 
         // Check if this is a symbolic link
-        let node = entry_guard.node();
-        drop(entry_guard);
+        let node = entry.node();
 
         if node.is_symlink()? {
             // TODO: Handle symbolic link resolution

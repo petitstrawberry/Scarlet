@@ -135,8 +135,8 @@ mod tests {
         let var = VfsEntry::new(Some(Arc::downgrade(&root)), "var".into(), var_node);
         let log = VfsEntry::new(Some(Arc::downgrade(&var)), "log".into(), log_node);
 
-        root.read().add_child("var".into(), Arc::clone(&var));
-        var.read().add_child("log".into(), Arc::clone(&log));
+        root.add_child("var".into(), Arc::clone(&var));
+        var.add_child("log".into(), Arc::clone(&log));
 
         println!("Root strong count: {}", Arc::strong_count(&root));  // Should be 1
         println!("Var strong count: {}", Arc::strong_count(&var));    // Should be 2 (var + root.children)

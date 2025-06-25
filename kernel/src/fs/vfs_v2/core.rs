@@ -12,6 +12,7 @@ use alloc::{
 };
 use spin::RwLock;
 use core::any::Any;
+use core::fmt;
 
 use crate::fs::{FileSystemError, FileMetadata, FileObject, FileType};
 
@@ -25,9 +26,11 @@ pub type FileSystemRef = Arc<dyn FileSystemOperations>;
 /// - A "name" representation within a directory
 /// - A "link" that constructs parent-child relationships in the VFS graph
 /// - A cache for fast re-access to already resolved paths
+/// 
+/// VfsEntry is designed to be thread-safe and can be shared across threads.
 pub struct VfsEntry {
     /// Weak reference to parent VfsEntry (prevents circular references)
-    parent: Weak<RwLock<VfsEntry>>,
+    parent: Weak<VfsEntry>,
 
     /// Name of this VfsEntry (e.g., "user", "file.txt")
     name: String,
@@ -36,26 +39,26 @@ pub struct VfsEntry {
     node: Arc<dyn VfsNode>,
 
     /// Cache of child VfsEntries for fast lookup (using Weak to prevent memory leaks)
-    children: RwLock<BTreeMap<String, Weak<RwLock<VfsEntry>>>>,
+    children: RwLock<BTreeMap<String, Weak<VfsEntry>>>,
 
     /// Reference to VfsMount if this is a mount point
-    mount: Option<Arc<VfsMount>>,
+    mount: RwLock<Option<Arc<VfsMount>>>,
 }
 
 impl VfsEntry {
     /// Create a new VfsEntry
     pub fn new(
-        parent: Option<Weak<RwLock<VfsEntry>>>,
+        parent: Option<Weak<VfsEntry>>,
         name: String,
         node: Arc<dyn VfsNode>,
-    ) -> Arc<RwLock<Self>> {
-        Arc::new(RwLock::new(Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             parent: parent.unwrap_or_else(|| Weak::new()),
             name,
             node,
             children: RwLock::new(BTreeMap::new()),
-            mount: None,
-        }))
+            mount: RwLock::new(None),
+        })
     }
 
     /// Get the name of this entry
@@ -69,18 +72,18 @@ impl VfsEntry {
     }
 
     /// Get parent VfsEntry if it exists
-    pub fn parent(&self) -> Option<Arc<RwLock<VfsEntry>>> {
+    pub fn parent(&self) -> Option<Arc<VfsEntry>> {
         self.parent.upgrade()
     }
 
     /// Add a child to the cache
-    pub fn add_child(&self, name: String, child: Arc<RwLock<VfsEntry>>) {
+    pub fn add_child(&self, name: String, child: Arc<VfsEntry>) {
         let mut children = self.children.write();
         children.insert(name, Arc::downgrade(&child));
     }
 
     /// Get a child from the cache
-    pub fn get_child(&self, name: &String) -> Option<Arc<RwLock<VfsEntry>>> {
+    pub fn get_child(&self, name: &String) -> Option<Arc<VfsEntry>> {
         let mut children = self.children.write();
         
         // Try to upgrade the weak reference
@@ -97,7 +100,7 @@ impl VfsEntry {
     }
 
     /// Remove a child from the cache
-    pub fn remove_child(&self, name: &String) -> Option<Arc<RwLock<VfsEntry>>> {
+    pub fn remove_child(&self, name: &String) -> Option<Arc<VfsEntry>> {
         let mut children = self.children.write();
         if let Some(weak_ref) = children.remove(name) {
             weak_ref.upgrade()
@@ -113,18 +116,18 @@ impl VfsEntry {
     }
 
     /// Set mount point information
-    pub fn set_mount(&mut self, mount: Arc<VfsMount>) {
-        self.mount = Some(mount);
+    pub fn set_mount(&self, mount: Arc<VfsMount>) {
+        *self.mount.write() = Some(mount);
     }
 
     /// Get mount point information
     pub fn mount(&self) -> Option<Arc<VfsMount>> {
-        self.mount.clone()
+        self.mount.read().clone()
     }
 
     /// Check if this is a mount point
     pub fn is_mount_point(&self) -> bool {
-        self.mount.is_some()
+        self.mount.read().is_some()
     }
 }
 
@@ -135,8 +138,18 @@ impl Clone for VfsEntry {
             name: self.name.clone(),
             node: Arc::clone(&self.node),
             children: RwLock::new(self.children.read().clone()),
-            mount: None, // Don't copy mount info
+            mount: RwLock::new(None), // Don't copy mount info
         }
+    }
+}
+
+impl fmt::Debug for VfsEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VfsEntry")
+            .field("name", &self.name)
+            .field("is_mount_point", &self.is_mount_point())
+            .field("children_count", &self.children.read().len())
+            .finish()
     }
 }
 

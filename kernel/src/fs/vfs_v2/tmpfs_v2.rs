@@ -12,15 +12,15 @@ use core::any::Any;
 
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FilePermission, 
-    FileType, FileObject, DeviceFileInfo, SeekFrom
+    FileType, FileObject
 };
 use crate::object::capability::{StreamOps, StreamError};
-use crate::device::manager::{BorrowedDeviceGuard, DeviceManager};
+use crate::device::manager::BorrowedDeviceGuard;
 
 use super::core::{VfsNode, FileSystemOperations, FileSystemRef};
 
 /// TmpFS v2 - New memory-based filesystem implementation
-pub struct TmpFSv2 {
+pub struct TmpFS {
     /// Root directory node
     root: Arc<TmpNode>,
     
@@ -37,7 +37,7 @@ pub struct TmpFSv2 {
     name: String,
 }
 
-impl TmpFSv2 {
+impl TmpFS {
     /// Create a new TmpFS instance
     pub fn new(memory_limit: usize) -> Self {
         let root = Arc::new(TmpNode::new_directory(
@@ -95,7 +95,7 @@ impl TmpFSv2 {
     }
 }
 
-impl FileSystemOperations for TmpFSv2 {
+impl FileSystemOperations for TmpFS {
     fn lookup(
         &self,
         parent_node: Arc<dyn VfsNode>,
@@ -286,7 +286,7 @@ pub struct TmpNode {
     children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     
     /// Reference to filesystem
-    filesystem: Weak<TmpFSv2>,
+    filesystem: Weak<TmpFS>,
 }
 
 impl TmpNode {
