@@ -15,13 +15,12 @@ use spin::RwLock;
 
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileType, 
-    DeviceFileInfo, DirectoryEntryInternal
+    DeviceFileInfo
 };
 use crate::object::KernelObject;
 
 use super::{
-    core::{VfsEntry, VfsNode, FileSystemOperations, FileSystemRef},
-    path_walk::PathWalkContext,
+    core::{VfsEntry, FileSystemOperations, DirectoryEntryInternal},
     mount_tree_v2::{MountTree, MountOptionsV2},
 };
 
@@ -37,9 +36,6 @@ fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
 pub struct VfsManager {
     /// Mount tree for hierarchical mount point management
     mount_tree: MountTree,
-    
-    /// Path walking context for VfsEntry navigation
-    path_walker: PathWalkContext,
     
     /// Registered filesystems by name
     filesystems: RwLock<BTreeMap<String, Arc<dyn FileSystemOperations>>>,
@@ -59,11 +55,9 @@ impl VfsManager {
         let dummy_root = VfsEntry::new(None, "/".to_string(), root_node);
         
         let mount_tree = MountTree::new(dummy_root.clone());
-        let path_walker = PathWalkContext::new(dummy_root);
         
         Self {
             mount_tree,
-            path_walker,
             filesystems: RwLock::new(BTreeMap::new()),
             cwd: RwLock::new(None),
         }
@@ -84,12 +78,20 @@ impl VfsManager {
         
         // Create a root VfsEntry for the filesystem
         // Note: This is a simplified approach - in reality, you'd need to get the actual root from the filesystem
+        // Note: Use the root node directly from filesystem (which already has fs reference)
         let root_node = filesystem.root_node();
-        let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
+        // Verify that root_node has filesystem reference
+        debug_assert!(root_node.filesystem().is_some(), "VfsManager::mount - root_node.filesystem() is None");
+        
+        let root_entry = VfsEntry::new(None, "/".to_string(), root_node.clone());
+        
+        // Verify VfsEntry's node also has filesystem reference  
+        debug_assert!(root_entry.node().filesystem().is_some(), "VfsManager::mount - root_entry.node().filesystem() is None");
+        debug_assert!(root_entry.node().filesystem().unwrap().upgrade().is_some(), "VfsManager::mount - root_entry.node().filesystem().upgrade() failed");
         
         // Use MountTreeV2 for mounting
         self.mount_tree.mount(mount_point, root_entry)?;
-        
+
         // Register filesystem
         let fs_name = format!("{}:{}", filesystem.name(), mount_point);
         self.filesystems.write().insert(fs_name, filesystem);
@@ -114,16 +116,13 @@ impl VfsManager {
     
     /// Open a file at the specified path
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
-        // Use MountTreeV2 for path resolution with mount point handling
+        // Use MountTreeV2 to resolve filesystem and relative path, then open
         let entry = self.mount_tree.resolve_path(path)?;
-        
-        // Get VfsNode from entry
         let node = entry.node();
-        
-        // Get filesystem and open the file
-        let filesystem = node.filesystem();
+        let filesystem = node.filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
         let file_obj = filesystem.open(node, flags)?;
-        
         Ok(KernelObject::File(file_obj))
     }
     
@@ -135,9 +134,13 @@ impl VfsManager {
         // Resolve parent directory using MountTreeV2
         let parent_entry = self.mount_tree.resolve_path(&parent_path)?;
         let parent_node = parent_entry.node();
+        debug_assert!(parent_node.filesystem().is_some(), "VfsManager::create_file - parent_node.filesystem() is None for path '{}'", parent_path);
+        // crate::println!("Creating file '{}' in parent '{}'", filename, parent_path);
         
         // Create file using filesystem
-        let filesystem = parent_node.filesystem();
+        let filesystem = parent_node.filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
         let new_node = filesystem.create(
             parent_node,
             &filename,
@@ -174,7 +177,9 @@ impl VfsManager {
         let parent_node = parent_entry.node();
         
         // Remove from filesystem
-        let filesystem = parent_node.filesystem();
+        let filesystem = parent_node.filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
         filesystem.remove(parent_node, &filename)?;
         
         // Remove from parent cache
@@ -186,10 +191,10 @@ impl VfsManager {
     /// Get metadata for a file at the specified path
     pub fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         // Resolve path to VfsEntry
-        let entry = self.path_walker.path_walk(path, self.get_cwd())?;
+        let entry = self.mount_tree.resolve_path(path)?;
         
         // Get VfsNode and return metadata
-        let node =entry.node();
+        let node = entry.node();
         
         node.metadata()
     }
@@ -197,7 +202,7 @@ impl VfsManager {
     /// Read directory entries at the specified path
     pub fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         // Resolve path to VfsEntry
-        let entry = self.path_walker.path_walk(path, self.get_cwd())?;
+        let entry = self.mount_tree.resolve_path(path)?;
         
         // Get VfsNode
         let node = entry.node();
@@ -210,14 +215,26 @@ impl VfsManager {
             ));
         }
         
-        // TODO: Implement directory reading using new architecture
-        // For now, return empty list
-        Ok(Vec::new())
+        // Get filesystem from node
+        let fs_ref = node.filesystem()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Node has no filesystem reference"
+            ))?;
+            
+        let filesystem = fs_ref.upgrade()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem reference is dead"
+            ))?;
+        
+        // Call filesystem's readdir
+        filesystem.readdir(node)
     }
     
     /// Set current working directory
     pub fn set_cwd(&self, path: &str) -> Result<(), FileSystemError> {
-        let entry = self.path_walker.path_walk(path, self.get_cwd())?;
+        let entry = self.mount_tree.resolve_path(path)?;
         
         // Verify it's a directory
         let node = entry.node();
@@ -260,7 +277,12 @@ impl VfsManager {
     
     /// Split a path into parent directory and filename
     fn split_parent_child(&self, path: &str) -> Result<(String, String), FileSystemError> {
-        let normalized = PathWalkContext::normalize_path(path)?;
+        // Simple path normalization: remove trailing slash except for root
+        let normalized = if path != "/" && path.ends_with('/') {
+            path.trim_end_matches('/').to_string()
+        } else {
+            path.to_string()
+        };
         
         if normalized == "/" {
             return Err(FileSystemError::new(

@@ -11,6 +11,7 @@ use alloc::{
 };
 use spin::RwLock;
 use core::any::Any;
+use alloc::sync::Weak;
 
 use crate::fs::vfs_v2::core::{
     VfsNode, FileSystemOperations, FileSystemRef
@@ -85,14 +86,9 @@ impl CpioNode {
 }
 
 impl VfsNode for CpioNode {
-    fn filesystem(&self) -> FileSystemRef {
+    fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
         let fs_guard = self.filesystem.read();
-        if let Some(fs) = fs_guard.as_ref() {
-            Arc::clone(fs) as FileSystemRef
-        } else {
-            // This should not happen in normal operation
-            panic!("CpioNode has no filesystem reference");
-        }
+        fs_guard.as_ref().map(|fs| Arc::downgrade(fs) as Weak<dyn FileSystemOperations>)
     }
     
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
@@ -232,6 +228,13 @@ impl FileSystemOperations for CpioFS {
     
     fn is_read_only(&self) -> bool {
         true
+    }
+    
+    fn readdir(
+        &self,
+        node: Arc<dyn VfsNode>,
+    ) -> Result<Vec<super::DirectoryEntryInternal>, FileSystemError> {
+        todo!()
     }
 }
 

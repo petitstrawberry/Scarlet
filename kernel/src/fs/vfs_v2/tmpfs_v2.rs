@@ -17,12 +17,12 @@ use crate::fs::{
 use crate::object::capability::{StreamOps, StreamError};
 use crate::device::manager::BorrowedDeviceGuard;
 
-use super::core::{VfsNode, FileSystemOperations, FileSystemRef};
+use super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
 
 /// TmpFS v2 - New memory-based filesystem implementation
 pub struct TmpFS {
     /// Root directory node
-    root: Arc<TmpNode>,
+    root: RwLock<Arc<TmpNode>>,
     
     /// Memory limit (0 = unlimited)
     memory_limit: usize,
@@ -38,20 +38,20 @@ pub struct TmpFS {
 }
 
 impl TmpFS {
-    /// Create a new TmpFS instance
-    pub fn new(memory_limit: usize) -> Self {
-        let root = Arc::new(TmpNode::new_directory(
-            "/".to_string(),
-            1, // Root directory always has ID 1
-        ));
-        
-        Self {
-            root,
+    /// Create a new TmpFS instance (2段階初期化)
+    pub fn new(memory_limit: usize) -> Arc<Self> {
+        let root = Arc::new(TmpNode::new_directory("/".to_string(), 1));
+        let fs = Arc::new(Self {
+            root: RwLock::new(Arc::clone(&root)),
             memory_limit,
             current_memory: Mutex::new(0),
             next_file_id: Mutex::new(2), // Start from 2, root is 1
             name: "tmpfs_v2".to_string(),
-        }
+        });
+        let fs_weak = Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>));
+        root.set_filesystem(fs_weak);
+        debug_assert!(root.filesystem().is_some(), "TmpFS root node's filesystem() is None after set_filesystem");
+        fs
     }
     
     /// Generate next unique file ID
@@ -117,6 +117,32 @@ impl FileSystemOperations for TmpFS {
             ));
         }
         
+        // Handle special directory entries
+        match name.as_str() {
+            "." => {
+                // Current directory - return self
+                return Ok(Arc::clone(&parent_node));
+            }
+            ".." => {
+                // Parent directory - try to handle within filesystem
+                if let Some(parent_weak) = &tmp_node.parent {
+                    if let Some(parent) = parent_weak.upgrade() {
+                        // Return parent node within this filesystem
+                        return Ok(parent as Arc<dyn VfsNode>);
+                    }
+                }
+                // No parent or parent is dropped - this might be filesystem root
+                // Return special error to indicate VFS layer should handle mount boundary
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Parent directory crosses filesystem boundary"
+                ));
+            }
+            _ => {
+                // Regular lookup
+            }
+        }
+        
         // Look up child in directory
         let children = tmp_node.children.read();
         if let Some(child_node) = children.get(name) {
@@ -142,12 +168,11 @@ impl FileSystemOperations for TmpFS {
         ))
     }
     
-    fn create(
-        &self,
+    fn create(&self,
         parent_node: Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        _mode: u32,
+        mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let tmp_parent = parent_node.as_any()
             .downcast_ref::<TmpNode>()
@@ -163,7 +188,6 @@ impl FileSystemOperations for TmpFS {
                 "Parent is not a directory"
             ));
         }
-        
         // Check if file already exists
         {
             let children = tmp_parent.children.read();
@@ -174,11 +198,8 @@ impl FileSystemOperations for TmpFS {
                 ));
             }
         }
-        
         // Generate file ID
         let file_id = self.generate_file_id();
-        
-        // Create new node
         let new_node = match file_type {
             FileType::RegularFile => {
                 Arc::new(TmpNode::new_file(name.clone().to_string(), file_id))
@@ -196,14 +217,28 @@ impl FileSystemOperations for TmpFS {
                 ));
             }
         };
-        
+        // 生成後にfs参照をセット（upgrade可能か必ず確認）
+        let fs_ref = parent_node.filesystem()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Parent node does not have a filesystem reference"
+            ))?;
+        if fs_ref.upgrade().is_none() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Parent node's filesystem reference is dead (cannot upgrade)"
+            ));
+        }
+        if let Some(tmp_node) = new_node.as_any().downcast_ref::<TmpNode>() {
+            tmp_node.set_filesystem(fs_ref);
+        }
         // Add to parent directory
         {
             let mut children = tmp_parent.children.write();
             children.insert(name.clone(), Arc::clone(&new_node) as Arc<dyn VfsNode>);
         }
-        
-        Ok(new_node as Arc<dyn VfsNode>)
+
+        Ok(new_node)
     }
     
     fn remove(
@@ -259,8 +294,44 @@ impl FileSystemOperations for TmpFS {
         Ok(())
     }
     
+    fn readdir(
+        &self,
+        node: Arc<dyn VfsNode>,
+    ) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
+        let tmp_node = node.as_any()
+            .downcast_ref::<TmpNode>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid node type for TmpFS"
+            ))?;
+            
+        // Check if it's a directory
+        if tmp_node.file_type != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Not a directory"
+            ));
+        }
+        
+        let mut entries = Vec::new();
+        let children = tmp_node.children.read();
+        
+        for (name, child_node) in children.iter() {
+            if let Some(child_tmp_node) = child_node.as_any().downcast_ref::<TmpNode>() {
+                let metadata = child_tmp_node.metadata.read();
+                entries.push(DirectoryEntryInternal {
+                    name: name.clone(),
+                    file_type: child_tmp_node.file_type,
+                    file_id: metadata.file_id,
+                });
+            }
+        }
+        
+        Ok(entries)
+    }
+    
     fn root_node(&self) -> Arc<dyn VfsNode> {
-        Arc::clone(&self.root) as Arc<dyn VfsNode>
+        Arc::clone(&*self.root.read()) as Arc<dyn VfsNode>
     }
     
     fn name(&self) -> &str {
@@ -285,8 +356,11 @@ pub struct TmpNode {
     /// Child nodes (for directories)
     children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     
-    /// Reference to filesystem
-    filesystem: Weak<TmpFS>,
+    /// Parent node (weak reference to avoid cycles)
+    parent: Option<Weak<TmpNode>>,
+    
+    /// Reference to filesystem (Weak<dyn FileSystemOperations>)
+    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 
 impl TmpNode {
@@ -311,7 +385,8 @@ impl TmpNode {
             }),
             content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
-            filesystem: Weak::new(),
+            parent: None, // No parent initially
+            filesystem: RwLock::new(None),
         }
     }
     
@@ -336,7 +411,8 @@ impl TmpNode {
             }),
             content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
-            filesystem: Weak::new(),
+            parent: None,
+            filesystem: RwLock::new(None),
         }
     }
     
@@ -361,8 +437,14 @@ impl TmpNode {
             }),
             content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
-            filesystem: Weak::new(),
+            parent: None,
+            filesystem: RwLock::new(None),
         }
+    }
+    
+    /// Set the filesystem reference for this node
+    pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
+        *self.filesystem.write() = Some(fs);
     }
     
     /// Update file size in metadata
@@ -371,13 +453,26 @@ impl TmpNode {
         metadata.size = new_size as usize;
         metadata.modified_time = 0; // TODO: actual timestamp
     }
+    
+    /// Set parent reference for this node
+    pub fn set_parent(&mut self, parent: Weak<TmpNode>) {
+        self.parent = Some(parent);
+    }
+    
+    /// Get parent node
+    pub fn get_parent(&self) -> Option<Arc<TmpNode>> {
+        self.parent.as_ref().and_then(|weak| weak.upgrade())
+    }
+    
+    /// Check if this node is the root of the filesystem
+    pub fn is_filesystem_root(&self) -> bool {
+        self.parent.is_none()
+    }
 }
 
 impl VfsNode for TmpNode {
-    fn filesystem(&self) -> FileSystemRef {
-        // TODO: Return proper filesystem reference
-        // For now, this is a placeholder
-        unimplemented!("TmpNode::filesystem() needs filesystem reference")
+    fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
+        self.filesystem.read().clone()
     }
     
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
@@ -526,7 +621,16 @@ impl FileObject for TmpFileObject {
         let file_size = content.len() as u64;
         
         let new_pos = match pos {
-            SeekFrom::Start(offset) => offset,
+            SeekFrom::Start(offset) => {
+                if offset <= file_size {
+                    offset
+                } else {
+                    return Err(StreamError::from(FileSystemError::new(
+                        FileSystemErrorKind::NotSupported,
+                        "Seek offset beyond EOF"
+                    )));
+                }
+            }
             SeekFrom::End(offset) => {
                 if offset >= 0 {
                     file_size + offset as u64
@@ -577,3 +681,56 @@ impl FileObject for TmpFileObject {
         Ok(())
     }
 }
+
+// === 解決策1: Factory パターン ===
+// 
+// FileSystemの実装例：
+// impl FileSystemOperations for TmpFS {
+//     fn create(&self, ...) -> Result<Arc<dyn VfsNode>, ...> {
+//         // Arc<Self> から Weak<Self> への変換が必要
+//         // しかし &self からは Arc<Self> を取得できない...
+//         let fs_weak = ???; // この部分が問題
+//         let node = TmpNode::new_file(name, id, fs_weak);
+//         Ok(Arc::new(node))
+//     }
+// }
+
+// === 解決策2: Arc<Self> ベースの設計 ===
+//
+// VfsNode trait の filesystem() メソッドを変更：
+// trait VfsNode {
+//     fn filesystem(&self) -> FileSystemRef; // 現在
+//     // ↓
+//     fn filesystem_weak(&self) -> Weak<dyn FileSystemOperations>; // 変更案
+// }
+//
+// FileSystemOperations trait を変更：
+// trait FileSystemOperations {
+//     fn create(self: Arc<Self>, ...) -> Result<Arc<dyn VfsNode>, ...>;
+//     // self: Arc<Self> を使うことで、Arc::downgrade() が可能
+// }
+
+// === 解決策3: 遅延参照設定 ===
+//
+// 1. VfsNodeを空のfilesystem参照で作成
+// 2. FileSystemがArc::downgrade(self) を何らかの方法で取得
+// 3. VfsNode.set_filesystem(weak_ref) で後から設定
+//
+// 問題: &self から Arc<Self> を取得する方法が標準的でない
+
+// === 解決策4: 実用的アプローチ（推奨） ===
+//
+// Option 4a: filesystem() で新しいインスタンスを返す（現在の実装）
+// - メリット: シンプル、循環参照なし
+// - デメリット: パフォーマンス、状態の不整合
+//
+// Option 4b: filesystem() の代わりに必要な情報だけ提供
+// trait VfsNode {
+//     fn filesystem_name(&self) -> &str;
+//     fn filesystem_type(&self) -> &str; 
+//     // filesystem() は削除
+// }
+//
+// Option 4c: VfsNode に filesystem() 不要の設計
+// - VfsManager や MountTree が FS 情報を管理
+// - VfsNode は純粋にファイル/ディレクトリの情報のみ

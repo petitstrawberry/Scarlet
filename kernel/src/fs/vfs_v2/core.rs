@@ -9,12 +9,21 @@ use alloc::{
     collections::BTreeMap,
     sync::{Arc, Weak},
     string::String,
+    vec::Vec,
 };
 use spin::RwLock;
 use core::any::Any;
 use core::fmt;
 
 use crate::fs::{FileSystemError, FileMetadata, FileObject, FileType};
+
+/// DirectoryEntry structure used by readdir
+#[derive(Debug, Clone)]
+pub struct DirectoryEntryInternal {
+    pub name: String,
+    pub file_type: FileType,
+    pub file_id: u64,
+}
 
 /// Reference to a filesystem instance
 pub type FileSystemRef = Arc<dyn FileSystemOperations>;
@@ -52,6 +61,10 @@ impl VfsEntry {
         name: String,
         node: Arc<dyn VfsNode>,
     ) -> Arc<Self> {
+        // Verify that node has filesystem reference when creating VfsEntry
+        debug_assert!(node.filesystem().is_some(), "VfsEntry::new - node.filesystem() is None for name '{}'", name);
+        debug_assert!(node.filesystem().unwrap().upgrade().is_some(), "VfsEntry::new - node.filesystem().upgrade() failed for name '{}'", name);
+        
         Arc::new(Self {
             parent: parent.unwrap_or_else(|| Weak::new()),
             name,
@@ -154,15 +167,14 @@ impl fmt::Debug for VfsEntry {
 }
 
 /// VfsNode trait represents the "entity" interface for files and directories
-/// 
-/// This trait abstracts the actual file/directory entity, providing a contract
-/// between VFS and individual filesystem drivers. It's similar to Linux inode
-/// or BSD vnode.
+///
+/// This trait provides only basic APIs for file/directory attributes, type checks, fs reference, and downcasting.
+/// All operation APIs (lookup, create, remove, open, etc.) are consolidated in FileSystemOperations for clear separation of concerns.
 pub trait VfsNode: Send + Sync {
-    /// Get the filesystem this VfsNode belongs to
-    fn filesystem(&self) -> FileSystemRef;
+    /// Returns a (Weak) reference to the filesystem this node belongs to
+    fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>>;
 
-    /// Get metadata for this VfsNode
+    /// Get metadata for this node
     fn metadata(&self) -> Result<FileMetadata, FileSystemError>;
 
     /// Get the file type of this node
@@ -170,20 +182,20 @@ pub trait VfsNode: Send + Sync {
         Ok(self.metadata()?.file_type)
     }
 
-    /// Helper method for downcasting
+    /// Helper for downcasting
     fn as_any(&self) -> &dyn Any;
 
-    /// Check if this node represents a directory
+    /// Returns true if this node is a directory
     fn is_directory(&self) -> Result<bool, FileSystemError> {
         Ok(self.file_type()? == FileType::Directory)
     }
 
-    /// Check if this node represents a symbolic link
+    /// Returns true if this node is a symbolic link
     fn is_symlink(&self) -> Result<bool, FileSystemError> {
         Ok(self.file_type()? == FileType::SymbolicLink)
     }
 
-    /// Read symbolic link target (only valid for symlinks)
+    /// Read the target of a symbolic link (returns error if not a symlink)
     fn read_link(&self) -> Result<String, FileSystemError> {
         Err(FileSystemError::new(
             crate::fs::FileSystemErrorKind::NotSupported,
@@ -233,6 +245,12 @@ pub trait FileSystemOperations: Send + Sync {
         parent_node: Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<(), FileSystemError>;
+
+    /// Read directory entries from a directory node
+    fn readdir(
+        &self,
+        node: Arc<dyn VfsNode>,
+    ) -> Result<Vec<DirectoryEntryInternal>, FileSystemError>;
 
     /// Get the root VfsNode for this filesystem
     fn root_node(&self) -> Arc<dyn VfsNode>;

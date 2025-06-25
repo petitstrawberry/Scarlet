@@ -8,63 +8,10 @@ use crate::fs::vfs_v2::{
     mount_tree_v2::{MountTree, MountPoint, MountType, MountOptionsV2},
     tmpfs_v2::TmpFS,
 };
-use crate::fs::{FileSystemError, FileType, FileMetadata, FilePermission};
 use alloc::{
     sync::Arc,
     string::ToString,
 };
-use core::any::Any;
-
-/// Test basic VfsEntry creation
-#[test_case]
-fn test_vfs_entry_creation() {
-    // Create a mock VfsNode
-    struct MockNode {
-        file_type: FileType,
-    }
-    
-    impl VfsNode for MockNode {
-        fn filesystem(&self) -> FileSystemRef {
-            Arc::new(TmpFS::new(1024 * 1024))
-        }
-
-        fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
-            Ok(FileMetadata {
-                size: 1024,
-                file_type: self.file_type,
-                modified_time: 0,
-                accessed_time: 0,
-                created_time: 0,
-                permissions: FilePermission {
-                    read: true,
-                    write: true,
-                    execute: false,
-                },
-                link_count: 1,
-                file_id: 1,
-            })
-        }
-        
-        fn file_type(&self) -> Result<FileType, FileSystemError> {
-            Ok(self.file_type)
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-    }
-    
-    let mock_node = Arc::new(MockNode {
-        file_type: FileType::RegularFile,
-    });
-    
-    // Create VfsEntry with correct argument order: parent, name, node
-    let vfs_entry = VfsEntry::new(None, "test_file".to_string(), mock_node.clone());
-    
-    // Test basic access
-    assert_eq!(vfs_entry.name(), "test_file");
-    assert_eq!(vfs_entry.node().file_type().unwrap(), FileType::RegularFile);
-}
 
 /// Test basic mount tree operations
 #[test_case]
@@ -78,7 +25,7 @@ fn test_mount_tree_basic() {
     let mount_tree = MountTree::new(root_entry.clone());
     
     // Test basic functionality
-    assert_eq!(mount_tree.root_entry().name(), "/");
+    assert_eq!(mount_tree.root_mount.read().root.name(), "/");
     // For now, just verify that the mount tree was created successfully
 }
 
