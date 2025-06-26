@@ -6,7 +6,7 @@ use crate::fs::vfs_v2::{
     core::*,
     manager::VfsManager,
     mount_tree::{MountTree, MountPoint, MountType, MountOptionsV2},
-    tmpfs_v2::TmpFS,
+    tmpfs::TmpFS,
 };
 use alloc::{
     sync::Arc,

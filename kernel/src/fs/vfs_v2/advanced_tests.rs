@@ -3,7 +3,7 @@
 /// This module contains placeholder tests for advanced VFS v2 functionality.
 
 use crate::fs::vfs_v2::{
-    tmpfs_v2::TmpFS,
+    tmpfs::TmpFS,
 };
 
 /// Test nested mount points (simplified)

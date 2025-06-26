@@ -11,7 +11,7 @@ use alloc::{
 use alloc::string::ToString;
 use crate::fs::{
     vfs_v2::{
-        tmpfs_v2::TmpFS,
+        tmpfs::TmpFS,
         manager::VfsManager,
     },
     FileType,

@@ -12,7 +12,7 @@
 //! - Cleaner interface for complex filesystems like ext4
 
 pub mod core;
-pub mod tmpfs_v2;
+pub mod tmpfs;
 pub mod cpiofs;
 pub mod manager;
 pub mod mount_tree;
@@ -26,4 +26,4 @@ pub mod advanced_tests;
 pub mod performance_tests;
 
 pub use core::*;
-pub use tmpfs_v2::*;
+pub use tmpfs::*;

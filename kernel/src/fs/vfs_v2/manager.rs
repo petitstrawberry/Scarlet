@@ -49,7 +49,7 @@ impl VfsManager {
     pub fn new() -> Self {
         // Create a dummy root entry for initialization
         // In practice, this should be replaced with the actual root filesystem
-        use super::tmpfs_v2::TmpFS;
+        use super::tmpfs::TmpFS;
         let tmpfs = TmpFS::new(0); // 0 = unlimited memory
         let root_node = tmpfs.root_node();
         let dummy_root = VfsEntry::new(None, "/".to_string(), root_node);
