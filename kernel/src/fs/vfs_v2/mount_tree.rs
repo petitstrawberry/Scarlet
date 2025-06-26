@@ -74,6 +74,8 @@ pub struct MountPoint {
     pub root: VfsEntryRef,
     /// Parent mount (weak reference to avoid cycles)
     pub parent: Option<Weak<MountPoint>>,
+    /// Parent entry
+    pub parent_entry: Option<VfsEntryRef>,
     /// Child mounts
     pub children: RwLock<BTreeMap<String, Arc<MountPoint>>>,
     /// For bind mounts: the original entry being bound
@@ -91,6 +93,7 @@ impl MountPoint {
             path,
             root,
             parent: None,
+            parent_entry: None,
             children: RwLock::new(BTreeMap::new()),
             bind_source: None,
             overlay_layers: Vec::new(),
@@ -105,6 +108,7 @@ impl MountPoint {
             path,
             root: source.clone(),
             parent: None,
+            parent_entry: None,
             children: RwLock::new(BTreeMap::new()),
             bind_source: Some(source),
             overlay_layers: Vec::new(),
@@ -126,6 +130,7 @@ impl MountPoint {
             path,
             root,
             parent: None,
+            parent_entry: None,
             children: RwLock::new(BTreeMap::new()),
             bind_source: None,
             overlay_layers: layers,
@@ -150,9 +155,7 @@ impl MountPoint {
     /// Add a child mount
     pub fn add_child(self: &Arc<Self>, child: Arc<MountPoint>) -> VfsResult<()> {
         // Set parent reference in child
-        // --- 修正版: 強制的にparentをセット ---
         let mut_child: *const MountPoint = Arc::as_ptr(&child);
-        // Safety: 呼び出し直後で他参照がなければOK、または設計上ここで必ずセットする
         unsafe {
             let mut_child = mut_child as *mut MountPoint;
             (*mut_child).parent = Some(Arc::downgrade(self));
