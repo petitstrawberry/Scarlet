@@ -245,3 +245,57 @@ fn test_mount_tree_performance() {
     let root_entries = manager.readdir("/").unwrap();
     assert!(root_entries.len() >= 3); // Should contain at least mnt, tmp, var
 }
+
+#[test_case]
+fn test_mount() {
+    let manager = VfsManager::new();
+    
+    // Create root tmpfs
+    let root_fs: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(1024 * 1024);
+    manager.mount(root_fs, "/", 0).unwrap();
+
+    // Create /mnt
+    manager.create_dir("/mnt").unwrap();
+    // Create /mnt/fs1
+    manager.create_dir("/mnt/fs1").unwrap();
+    // Mount another tmpfs at /mnt/fs1
+    let fs1: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(512 * 1024);
+    manager.mount(fs1, "/mnt/fs1", 0).unwrap();
+    // Create a file in /mnt/fs1
+    manager.create_file("/mnt/fs1/test_file.txt", FileType::RegularFile).unwrap();
+
+    // Check cross mount resolution
+    let metadata = manager.metadata("/mnt/fs1/../fs1/test_file.txt").unwrap();
+    assert_eq!(metadata.file_type, FileType::RegularFile);
+}
+
+#[test_case]
+fn test_nested_mounts() {
+    let manager = VfsManager::new();
+    
+    // Create root tmpfs
+    let root_fs: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(1024 * 1024);
+    manager.mount(root_fs, "/", 0).unwrap();
+
+    // Create /mnt
+    manager.create_dir("/mnt").unwrap();
+    // Create /mnt/fs1
+    manager.create_dir("/mnt/fs1").unwrap();
+    // Mount another tmpfs at /mnt/fs1
+    let fs1: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(512 * 1024);
+    manager.mount(fs1, "/mnt/fs1", 0).unwrap();
+    
+    // Create /mnt/fs1/fs2
+    manager.create_dir("/mnt/fs1/fs2").unwrap();
+    // Create a file in /mnt/fs1/fs2
+    manager.create_file("/mnt/fs1/test_file1.txt", FileType::RegularFile).unwrap();
+    
+    // Create a file in /mnt/fs1/fs2
+    manager.create_file("/mnt/fs1/fs2/test_file2.txt", FileType::RegularFile).unwrap();
+
+    // Verify the files exists
+    let metadata = manager.metadata("/mnt/fs1/test_file1.txt").unwrap();
+    assert_eq!(metadata.file_type, FileType::RegularFile);
+    let metadata = manager.metadata("/mnt/fs1/fs2/test_file2.txt").unwrap();
+    assert_eq!(metadata.file_type, FileType::RegularFile);
+}

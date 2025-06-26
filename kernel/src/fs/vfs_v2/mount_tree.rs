@@ -19,6 +19,8 @@ use crate::fs::{FileSystemError, FileSystemErrorKind};
 
 pub type VfsResult<T> = Result<T, FileSystemError>;
 pub type VfsEntryRef = Arc<VfsEntry>;
+pub type VfsEntryWeakRef = Weak<VfsEntry>;
+
 
 // Helper function to create FileSystemError
 fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
@@ -74,8 +76,8 @@ pub struct MountPoint {
     pub root: VfsEntryRef,
     /// Parent mount (weak reference to avoid cycles)
     pub parent: Option<Weak<MountPoint>>,
-    /// Parent entry
-    pub parent_entry: Option<VfsEntryRef>,
+    /// Parent entry (weak reference to the VFS entry at the mount point)
+    pub parent_entry: Option<VfsEntryWeakRef>,
     /// Child mounts
     pub children: RwLock<BTreeMap<String, Arc<MountPoint>>>,
     /// For bind mounts: the original entry being bound
@@ -218,6 +220,18 @@ impl MountTree {
             mounts.insert(mount_id, Arc::downgrade(&new_root_mount));
             
             return Ok(mount_id);
+        }
+        
+        // Check if the path is valid
+        match self.resolve_path(path) {
+            Ok(_) => {}, // Path exists, proceed
+            Err(e) => {
+                if e.kind == FileSystemErrorKind::NotFound {
+                    return Err(vfs_error(FileSystemErrorKind::NotFound, "Mount path does not exist"));
+                } else {
+                    return Err(e); // Other errors propagate
+                }
+            }
         }
         
         let mount_point = self.find_mount_point_for_path(path)?;
@@ -531,13 +545,6 @@ impl MountTree {
             return Ok(entry);
         }
         
-        // For "..", this should have been handled at the caller level
-        // If we reach here with "..", it's a programming error
-        if component == ".." {
-            return Err(vfs_error(FileSystemErrorKind::InvalidPath, 
-                ".. should be handled by mount boundary logic"));
-        }
-
         // Check cache first (fast path)
         let component_string = component.to_string();
         if let Some(cached_child) = entry.get_child(&component_string) {
