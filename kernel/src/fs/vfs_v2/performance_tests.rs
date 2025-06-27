@@ -269,6 +269,10 @@ fn test_mount() {
     assert_eq!(metadata.file_type, FileType::RegularFile);
 
     // Check cross mount resolution
+    let metadata = manager.metadata("/mnt/fs1/test_file.txt").unwrap();
+    assert_eq!(metadata.file_type, FileType::RegularFile);
+
+    // Check cross mount resolution
     let metadata = manager.metadata("/mnt/fs1/../fs1/test_file.txt").unwrap();
     assert_eq!(metadata.file_type, FileType::RegularFile);
 }
@@ -304,6 +308,8 @@ fn test_nested_mounts() {
 
     // Verify the files exists
     let metadata = manager.metadata("/mnt/fs1/test_file1.txt").unwrap();
+    assert_eq!(metadata.file_type, FileType::RegularFile);
+    let metadata = manager.metadata("/mnt/fs1/dir/../test_file1.txt").unwrap();
     assert_eq!(metadata.file_type, FileType::RegularFile);
     let metadata = manager.metadata("/mnt/fs1/dir/fs2/test_file2.txt").unwrap();
     assert_eq!(metadata.file_type, FileType::RegularFile);
