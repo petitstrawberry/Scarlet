@@ -86,6 +86,10 @@ impl CpioNode {
 }
 
 impl VfsNode for CpioNode {
+    fn id(&self) -> u64 {
+        0
+    }
+
     fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
         let fs_guard = self.filesystem.read();
         fs_guard.as_ref().map(|fs| Arc::downgrade(fs) as Weak<dyn FileSystemOperations>)

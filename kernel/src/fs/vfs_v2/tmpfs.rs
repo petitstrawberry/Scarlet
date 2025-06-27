@@ -471,6 +471,10 @@ impl TmpNode {
 }
 
 impl VfsNode for TmpNode {
+    fn id(&self) -> u64 {
+        self.metadata.read().file_id
+    }
+    
     fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
         self.filesystem.read().clone()
     }

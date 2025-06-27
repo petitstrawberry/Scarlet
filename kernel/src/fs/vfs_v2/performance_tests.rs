@@ -265,6 +265,10 @@ fn test_mount() {
     manager.create_file("/mnt/fs1/test_file.txt", FileType::RegularFile).unwrap();
 
     // Check cross mount resolution
+    let metadata = manager.metadata("/mnt/fs1/test_file.txt").unwrap();
+    assert_eq!(metadata.file_type, FileType::RegularFile);
+
+    // Check cross mount resolution
     let metadata = manager.metadata("/mnt/fs1/../fs1/test_file.txt").unwrap();
     assert_eq!(metadata.file_type, FileType::RegularFile);
 }
@@ -285,17 +289,22 @@ fn test_nested_mounts() {
     let fs1: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(512 * 1024);
     manager.mount(fs1, "/mnt/fs1", 0).unwrap();
     
-    // Create /mnt/fs1/fs2
-    manager.create_dir("/mnt/fs1/fs2").unwrap();
-    // Create a file in /mnt/fs1/fs2
+    // Create /mnt/fs1/die
+    manager.create_dir("/mnt/fs1/dir").unwrap();
+    // Create a file in /mnt/fs1/dir
     manager.create_file("/mnt/fs1/test_file1.txt", FileType::RegularFile).unwrap();
     
-    // Create a file in /mnt/fs1/fs2
-    manager.create_file("/mnt/fs1/fs2/test_file2.txt", FileType::RegularFile).unwrap();
+    // Create a directory in /mnt/dir/fs2
+    manager.create_dir("/mnt/fs1/dir/fs2").unwrap();
+    // Mount another tmpfs at /mnt/fs1/dir/fs2
+    let fs2: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(256 * 1024);
+    manager.mount(fs2, "/mnt/fs1/dir/fs2", 0).unwrap();
+    // Create a file in /mnt/fs1/dir/fs2
+    manager.create_file("/mnt/fs1/dir/fs2/test_file2.txt", FileType::RegularFile).unwrap();
 
     // Verify the files exists
     let metadata = manager.metadata("/mnt/fs1/test_file1.txt").unwrap();
     assert_eq!(metadata.file_type, FileType::RegularFile);
-    let metadata = manager.metadata("/mnt/fs1/fs2/test_file2.txt").unwrap();
+    let metadata = manager.metadata("/mnt/fs1/dir/fs2/test_file2.txt").unwrap();
     assert_eq!(metadata.file_type, FileType::RegularFile);
 }

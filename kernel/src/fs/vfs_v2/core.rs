@@ -150,6 +150,9 @@ impl fmt::Debug for VfsEntry {
 /// This trait provides only basic APIs for file/directory attributes, type checks, fs reference, and downcasting.
 /// All operation APIs (lookup, create, remove, open, etc.) are consolidated in FileSystemOperations for clear separation of concerns.
 pub trait VfsNode: Send + Sync {
+    /// Returns the unique identifier in the filesystem
+    fn id(&self) -> u64;
+
     /// Returns a (Weak) reference to the filesystem this node belongs to
     fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>>;
 

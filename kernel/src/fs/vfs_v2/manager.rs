@@ -103,8 +103,8 @@ impl VfsManager {
     pub fn unmount(&self, mount_point: &str) -> Result<(), FileSystemError> {
         // Find the mount ID for the given path
         let mount_id = match self.mount_tree.resolve_path(mount_point) {
-            Ok(entry) => {
-                self.mount_tree.get_mount_info(entry)
+            Ok(res) => {
+                self.mount_tree.get_mount_info(res.0)
             },
             Err(_) => {
                 return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Mount point not found"));
@@ -125,7 +125,7 @@ impl VfsManager {
     /// Open a file at the specified path
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
         // Use MountTreeV2 to resolve filesystem and relative path, then open
-        let entry = self.mount_tree.resolve_path(path)?;
+        let entry = self.mount_tree.resolve_path(path)?.0;
         let node = entry.node();
         let filesystem = node.filesystem()
             .and_then(|w| w.upgrade())
@@ -140,7 +140,7 @@ impl VfsManager {
         let (parent_path, filename) = self.split_parent_child(path)?;
         
         // Resolve parent directory using MountTreeV2
-        let parent_entry = self.mount_tree.resolve_path(&parent_path)?;
+        let parent_entry = self.mount_tree.resolve_path(&parent_path)?.0;
         let parent_node = parent_entry.node();
         debug_assert!(parent_node.filesystem().is_some(), "VfsManager::create_file - parent_node.filesystem() is None for path '{}'", parent_path);
         // crate::println!("Creating file '{}' in parent '{}'", filename, parent_path);
@@ -181,7 +181,7 @@ impl VfsManager {
         let (parent_path, filename) = self.split_parent_child(path)?;
         
         // Resolve parent directory using MountTreeV2
-        let parent_entry = self.mount_tree.resolve_path(&parent_path)?;
+        let parent_entry = self.mount_tree.resolve_path(&parent_path)?.0;
         let parent_node = parent_entry.node();
         
         // Remove from filesystem
@@ -199,7 +199,7 @@ impl VfsManager {
     /// Get metadata for a file at the specified path
     pub fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         // Resolve path to VfsEntry
-        let entry = self.mount_tree.resolve_path(path)?;
+        let entry = self.mount_tree.resolve_path(path)?.0;
         
         // Get VfsNode and return metadata
         let node = entry.node();
@@ -210,7 +210,7 @@ impl VfsManager {
     /// Read directory entries at the specified path
     pub fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         // Resolve path to VfsEntry
-        let entry = self.mount_tree.resolve_path(path)?;
+        let entry = self.mount_tree.resolve_path(path)?.0;
         
         // Get VfsNode
         let node = entry.node();
@@ -242,7 +242,7 @@ impl VfsManager {
     
     /// Set current working directory
     pub fn set_cwd(&self, path: &str) -> Result<(), FileSystemError> {
-        let entry = self.mount_tree.resolve_path(path)?;
+        let entry = self.mount_tree.resolve_path(path)?.0;
         
         // Verify it's a directory
         let node = entry.node();
