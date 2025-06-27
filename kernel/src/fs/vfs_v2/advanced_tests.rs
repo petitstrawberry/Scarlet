@@ -154,3 +154,33 @@ fn test_recursive_bind_mount_fails() {
     // This should fail to prevent filesystem loops.
     assert!(result.is_err());
 }
+
+#[test_case]
+fn test_bind_mount_path_traversal() {
+    // 1. Setup
+    let vfs = VfsManager::new();
+    let tmpfs1 = TmpFS::new(0);
+    let tmpfs2 = TmpFS::new(0);
+
+    // Create a secret file in the root fs
+    vfs.create_file("/root_secret.txt", FileType::RegularFile).unwrap();
+
+    vfs.create_dir("/fs1").unwrap();
+    vfs.create_dir("/fs2").unwrap();
+    vfs.mount(tmpfs1, "/fs1", 0).unwrap();
+    vfs.mount(tmpfs2, "/fs2", 0).unwrap();
+
+    vfs.create_dir("/fs1/dir_a").unwrap();
+    vfs.create_dir("/fs2/mount_point").unwrap();
+
+    // 2. Bind mount /fs1/dir_a onto /fs2/mount_point
+    vfs.bind_mount("/fs1/dir_a", "/fs2/mount_point").unwrap();
+
+    // 3. Attempt to traverse out of the bind mount
+    // This path should resolve to /fs2/root_secret.txt, which does not exist.
+    // It must not resolve to /root_secret.txt
+    let result = vfs.open("/fs2/mount_point/../../root_secret.txt", 0);
+
+    // 4. Verification
+    assert!(result.is_err(), "Path traversal vulnerability detected!");
+}
