@@ -117,8 +117,6 @@ impl FileSystemOperations for TmpFS {
             ));
         }
 
-        crate::println!("TmpFS lookup: parent={}, name={}", tmp_node.name(), name);
-        
         // Handle special directory entries
         match name.as_str() {
             "." => {
@@ -162,12 +160,14 @@ impl FileSystemOperations for TmpFS {
         node: Arc<dyn VfsNode>,
         _flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
-        // TODO: Proper implementation with correct Arc<TmpNode> handling
-        // For now, return an error to make compilation pass
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "TmpFS open not yet properly implemented in VFS v2"
-        ))
+        let tmp_node = Arc::downcast::<TmpNode>(node)
+            .map_err(|_| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid node type for TmpFS"
+            ))?;
+
+        let file_object = TmpFileObject::new_regular(tmp_node);
+        Ok(Arc::new(file_object))
     }
     
     fn create(&self,

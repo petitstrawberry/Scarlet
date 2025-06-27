@@ -14,7 +14,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::RwLock;
 
-use super::core::VfsEntry;
+use super::core::{VfsEntry, FileSystemOperations};
 use crate::fs::{FileSystemError, FileSystemErrorKind};
 use crate::println;
 
@@ -159,8 +159,6 @@ impl MountPoint {
     /// Add a child mount by VfsEntry
     pub fn add_child(self: &Arc<Self>, entry: &VfsEntryRef, child: Arc<MountPoint>) -> VfsResult<()> {
         // Set parent reference in child
-        crate::println!("Adding child mount at entry: {:?} -> child: {:?}", entry, child.path);
-        crate::println!("Entry parent: {:?}", entry.clone());
         let mut_child: *const MountPoint = Arc::as_ptr(&child);
         unsafe {
             let mut_child = mut_child as *mut MountPoint;
@@ -208,53 +206,101 @@ impl MountTree {
         }
     }
 
-    /// Mount a filesystem at the specified path
-    pub fn mount(&self, path: &str, root: VfsEntryRef) -> VfsResult<MountId> {
-        // Special case: mounting at root ("/") replaces the root mount
-        if path == "/" {
-            // Create new root mount
-            let new_root_mount = MountPoint::new_regular("/".to_string(), root.clone());
-            let mount_id = new_root_mount.id;
-            
-            // Replace root_mount (unsafe operation for self-modification)
-            *self.root_mount.write() = new_root_mount.clone();
-            
-            // Update global mount table
-            let old_root_id = self.root_mount.read().id;
-            let mut mounts = self.mounts.write();
-            mounts.remove(&old_root_id);
-            mounts.insert(mount_id, Arc::downgrade(&new_root_mount));
-            
-            return Ok(mount_id);
-        }
-        
-        // Check if the path is valid
-        let target_point = match self.resolve_path(path) {
-            Ok(point) => {
-                point
-            },
-            Err(e) => return Err(e),
-        };
+    /// Create a bind mount.
+    ///
+    /// # Arguments
+    /// * `source_entry` - The VFS entry to be mounted.
+    /// * `target_entry` - The VFS entry where the source will be mounted.
+    /// * `target_mount_point` - The mount point containing the target entry.
+    pub fn bind_mount(
+        &self,
+        source_entry: VfsEntryRef,
+        target_entry: VfsEntryRef,
+        target_mount_point: Arc<MountPoint>,
+    ) -> VfsResult<MountId> {
+        // Create a new bind mount point. The name of the mount point is the name of the target entry.
+        let bind_mount = MountPoint::new_bind(target_entry.name().clone(), source_entry);
+        let mount_id = bind_mount.id;
 
-        let entry = target_point.0;
-        let mount_point = target_point.1;
+        // Add the new mount as a child of the target's containing mount point, attached to the target entry.
+        target_mount_point.add_child(&target_entry, bind_mount.clone())?;
 
-        let name = entry.name();
+        // Register the new mount in the global mount table.
+        self.mounts.write().insert(mount_id, Arc::downgrade(&bind_mount));
 
-        crate::println!("Mounting at path: '{}', entry: {:?} -> fs_root: {:?}", path, entry, root);
-        
-        // Create new mount
-        let new_mount = MountPoint::new_regular(name.clone(), root.clone());
+        Ok(mount_id)
+    }
+
+    /// Mount a filesystem at a specific entry in the mount tree.
+    pub fn mount(
+        &self,
+        target_entry: VfsEntryRef,
+        target_mount_point: Arc<MountPoint>,
+        filesystem: Arc<dyn FileSystemOperations>,
+    ) -> VfsResult<MountId> {
+        // The root of the new filesystem.
+        let new_fs_root_node = filesystem.root_node();
+
+        // Create a VfsEntry for the root of the new filesystem.
+        let new_fs_root_entry = VfsEntry::new(None, "/".to_string(), new_fs_root_node);
+
+        // Create a new mount point for the filesystem.
+        let new_mount = MountPoint::new_regular(target_entry.name().clone(), new_fs_root_entry);
         let mount_id = new_mount.id;
 
-        // Add to parent's children
-        debug_assert!(new_mount.parent.is_none(), "new_mount.parent should be None before add_child");
-        mount_point.add_child(&entry, new_mount.clone())?;
-       
-        // Register in global mount table
+        // Add the new mount as a child to the target's mount point.
+        target_mount_point.add_child(&target_entry, new_mount.clone())?;
+
+        // Register the new mount in the global mount table.
         self.mounts.write().insert(mount_id, Arc::downgrade(&new_mount));
 
         Ok(mount_id)
+    }
+
+    /// Replaces the root mount point.
+    pub fn replace_root(&self, new_root: Arc<MountPoint>) {
+        let old_root_id = self.root_mount.read().id;
+        *self.root_mount.write() = new_root.clone();
+        let mut mounts = self.mounts.write();
+        mounts.remove(&old_root_id);
+        mounts.insert(new_root.id, Arc::downgrade(&new_root));
+    }
+
+    /// Check if an entry is a mount point or a source for a bind mount.
+    pub fn is_entry_mounted(&self, entry_to_check: &VfsEntryRef) -> bool {
+        let node_to_check = entry_to_check.node();
+        let node_id = node_to_check.id();
+        
+        // We need to compare filesystem pointers to correctly identify the source filesystem.
+        let fs_ptr_to_check = match node_to_check.filesystem().and_then(|w| w.upgrade()) {
+            Some(fs) => Arc::as_ptr(&fs) as *const (),
+            None => return false, // If no fs, cannot be mounted.
+        };
+
+        for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
+            // Check if the entry is a mount point itself.
+            if let Some(parent_entry) = &mount.parent_entry {
+                if parent_entry.node().id() == node_id {
+                    let parent_fs_ptr = parent_entry.node().filesystem().and_then(|w| w.upgrade())
+                        .map(|fs| Arc::as_ptr(&fs) as *const ());
+                    if parent_fs_ptr == Some(fs_ptr_to_check) {
+                        return true;
+                    }
+                }
+            }
+
+            // Check if the entry is a source for a bind mount.
+            if let Some(bind_source) = &mount.bind_source {
+                if bind_source.node().id() == node_id {
+                    let source_fs_ptr = bind_source.node().filesystem().and_then(|w| w.upgrade())
+                        .map(|fs| Arc::as_ptr(&fs) as *const ());
+                    if source_fs_ptr == Some(fs_ptr_to_check) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     // /// Create a bind mount
@@ -339,7 +385,6 @@ impl MountTree {
 
     /// Resolve a path to a VFS entry, handling mount boundaries
     pub fn resolve_path(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        // crate::println!("Resolving path: '{}'", path);
         if path.is_empty() || path == "/" {
             return Ok((self.root_mount.read().root.clone(), self.root_mount.read().clone()));
         }
@@ -348,17 +393,13 @@ impl MountTree {
         let mut current_mount = self.root_mount.read().clone();
         let mut current_entry = current_mount.root.clone();
         
-        let mut resolved_path = String::new();
         for component in components {
             if component == ".." {
                 // Check if we're at a mount point root before deciding how to handle ".."
                 if Arc::ptr_eq(&current_entry, &current_mount.root) {
-                    crate::println!("Resolving '..' at mount root: {}", current_mount.path);
                     // At mount root move to parent mount
                     match current_mount.get_parent() {
                         Some(parent_mount) => {
-                            crate::println!("Found parent mount: {}", parent_mount.path);
-                            crate::println!("Current entry before '..': {:?}", current_entry);
                             current_entry = match current_mount.parent_entry.clone() {
                                 Some(parent_entry) => {
                                     parent_entry
@@ -369,9 +410,6 @@ impl MountTree {
                             };
                             current_mount = parent_mount.clone();
                             current_entry = self.resolve_component(current_entry, &"..")?;
-
-                            crate::println!("Moved to parent mount: {}", current_mount.path);
-                            crate::println!("Current entry after '..': {:?}", current_entry);
                         },
                         None => {
                             // No parent mount - stay at current mount root (this is the VFS root)
@@ -384,7 +422,6 @@ impl MountTree {
                 }
             } else {
                 // Regular path traversal within current mount
-                crate::println!("Current entry: {:?}, resolving component: '{}'", current_entry, component);
                 current_entry = self.resolve_component(current_entry, &component)?;
 
                 // Check if we need to cross mount boundaries
@@ -394,13 +431,7 @@ impl MountTree {
                     current_entry = current_mount.root.clone();
                 }
             }
-            // Update resolved path
-            resolved_path.push('/');
-            resolved_path.push_str(&component);
-            crate::println!("Resolved path so far: '{}'", resolved_path);
         }
-
-        // crate::println!("Resolved path '{}' to entry: {:?}", path, current_entry);
 
         Ok((current_entry, current_mount))
     }

@@ -21,7 +21,7 @@ use crate::object::KernelObject;
 
 use super::{
     core::{VfsEntry, FileSystemOperations, DirectoryEntryInternal},
-    mount_tree::{MountTree, MountOptionsV2},
+    mount_tree::{MountTree, MountOptionsV2, MountPoint},
 };
 
 // Helper function to create FileSystemError
@@ -47,18 +47,20 @@ pub struct VfsManager {
 impl VfsManager {
     /// Create a new VFS manager instance with a dummy root
     pub fn new() -> Self {
-        // Create a dummy root entry for initialization
-        // In practice, this should be replaced with the actual root filesystem
+        // Create a dummy root filesystem for initialization
         use super::tmpfs::TmpFS;
-        let tmpfs = TmpFS::new(0); // 0 = unlimited memory
-        let root_node = tmpfs.root_node();
-        let dummy_root = VfsEntry::new(None, "/".to_string(), root_node);
+        let root_fs: Arc<dyn FileSystemOperations> = TmpFS::new(0); // 0 = unlimited memory
+        let root_node = root_fs.root_node();
+        let dummy_root_entry = VfsEntry::new(None, "/".to_string(), root_node);
         
-        let mount_tree = MountTree::new(dummy_root.clone());
+        let mount_tree = MountTree::new(dummy_root_entry.clone());
         
+        let mut filesystems = BTreeMap::new();
+        filesystems.insert("/".to_string(), root_fs);
+
         Self {
             mount_tree,
-            filesystems: RwLock::new(BTreeMap::new()),
+            filesystems: RwLock::new(filesystems),
             cwd: RwLock::new(None),
         }
     }
@@ -67,58 +69,73 @@ impl VfsManager {
     pub fn mount(
         &self,
         filesystem: Arc<dyn FileSystemOperations>,
-        mount_point: &str,
+        mount_point_str: &str,
         flags: u32,
     ) -> Result<(), FileSystemError> {
+        if mount_point_str == "/" {
+            // Special case: replacing the root filesystem
+            let new_root_node = filesystem.root_node();
+            let new_root_entry = VfsEntry::new(None, "/".to_string(), new_root_node);
+            let new_root_mount = MountPoint::new_regular("/".to_string(), new_root_entry);
+            self.mount_tree.replace_root(new_root_mount);
+            let mut fs_map = self.filesystems.write();
+            fs_map.clear();
+            fs_map.insert("/".to_string(), filesystem);
+            return Ok(());
+        }
+
         // Convert flags to mount options (for future use)
         let _mount_options = MountOptionsV2 {
             readonly: (flags & 0x01) != 0,
             flags,
         };
         
-        // Create a root VfsEntry for the filesystem
-        // Note: This is a simplified approach - in reality, you'd need to get the actual root from the filesystem
-        // Note: Use the root node directly from filesystem (which already has fs reference)
-        let root_node = filesystem.root_node();
-        // Verify that root_node has filesystem reference
-        debug_assert!(root_node.filesystem().is_some(), "VfsManager::mount - root_node.filesystem() is None");
-        
-        let root_entry = VfsEntry::new(None, "/".to_string(), root_node.clone());
-        
-        // Verify VfsEntry's node also has filesystem reference  
-        debug_assert!(root_entry.node().filesystem().is_some(), "VfsManager::mount - root_entry.node().filesystem() is None");
-        debug_assert!(root_entry.node().filesystem().unwrap().upgrade().is_some(), "VfsManager::mount - root_entry.node().filesystem().upgrade() failed");
-        
+        let (target_entry, target_mount_point) = self.mount_tree.resolve_path(mount_point_str)?;
+
         // Use MountTreeV2 for mounting
-        self.mount_tree.mount(mount_point, root_entry)?;
+        self.mount_tree.mount(target_entry, target_mount_point, filesystem.clone())?;
 
         // Register filesystem
-        let fs_name = format!("{}:{}", filesystem.name(), mount_point);
-        self.filesystems.write().insert(fs_name, filesystem);
+        self.filesystems.write().insert(mount_point_str.to_string(), filesystem);
         
         Ok(())
     }
     
     /// Unmount a filesystem from the specified path
-    pub fn unmount(&self, mount_point: &str) -> Result<(), FileSystemError> {
-        // Find the mount ID for the given path
-        let mount_id = match self.mount_tree.resolve_path(mount_point) {
-            Ok(res) => {
-                self.mount_tree.get_mount_info(res.0)
-            },
-            Err(_) => {
-                return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Mount point not found"));
-            }
-        }.map_err(|_| {
-            vfs_error(FileSystemErrorKind::InvalidPath, "Mount point not found")
-        })?;
-            
-        // Use MountTreeV2 for unmounting
-        self.mount_tree.unmount(mount_id)?;
+    pub fn unmount(&self, mount_point_str: &str) -> Result<(), FileSystemError> {
+        // Resolve the entry and mount point for the given path.
+        let (entry, mount_point) = self.mount_tree.resolve_path(mount_point_str)?;
+
+        // Check if the resolved entry is actually a mount point.
+        if !self.mount_tree.is_mount_point(entry)? {
+            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path is not a mount point"));
+        }
+
+        // Unmount using the MountTree.
+        self.mount_tree.unmount(mount_point.id)?;
         
-        // Remove from filesystem registry
-        self.filesystems.write().retain(|k, _| !k.ends_with(&format!(":{}", mount_point)));
+        // Remove from the filesystem registry.
+        self.filesystems.write().remove(mount_point_str);
         
+        Ok(())
+    }
+
+    /// Create a bind mount from source_path to target_path
+    pub fn bind_mount(&self, source_path: &str, target_path: &str) -> Result<(), FileSystemError> {
+        // Prevent recursive mounting (e.g., mounting a directory inside itself)
+        if target_path.starts_with(source_path) && target_path != source_path {
+            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
+        }
+
+        // Resolve the source entry to be mounted
+        let (source_entry, _) = self.mount_tree.resolve_path(source_path)?;
+
+        // Resolve the target entry where the source will be mounted
+        let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
+
+        // Perform the bind mount operation in the MountTree
+        self.mount_tree.bind_mount(source_entry, target_entry, target_mount_point)?;
+
         Ok(())
     }
     
@@ -177,6 +194,14 @@ impl VfsManager {
     
     /// Remove a file at the specified path
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
+        // Resolve the entry to be removed
+        let (entry_to_remove, _) = self.mount_tree.resolve_path(path)?;
+
+        // Check if the entry is involved in any mount, which would make it busy
+        if self.mount_tree.is_entry_mounted(&entry_to_remove) {
+            return Err(vfs_error(FileSystemErrorKind::NotSupported, "Resource is busy"));
+        }
+
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
         
