@@ -7,7 +7,7 @@
 use alloc::{
     collections::BTreeMap, format, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
 };
-use spin::{Mutex, RwLock};
+use spin::{rwlock::RwLock, Mutex};
 use core::any::Any;
 
 use crate::fs::{
@@ -110,12 +110,14 @@ impl FileSystemOperations for TmpFS {
             ))?;
             
         // Check if parent is a directory
-        if tmp_node.file_type != FileType::Directory {
+        if tmp_node.file_type() != FileType::Directory {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotADirectory,
                 "Parent is not a directory"
             ));
         }
+
+        crate::println!("TmpFS lookup: parent={}, name={}", tmp_node.name(), name);
         
         // Handle special directory entries
         match name.as_str() {
@@ -125,18 +127,18 @@ impl FileSystemOperations for TmpFS {
             }
             ".." => {
                 // Parent directory - try to handle within filesystem
-                if let Some(parent_weak) = &tmp_node.parent {
+                if let Some(parent_weak) = &tmp_node.parent() {
                     if let Some(parent) = parent_weak.upgrade() {
                         // Return parent node within this filesystem
                         return Ok(parent as Arc<dyn VfsNode>);
                     }
                 }
-                // No parent or parent is dropped - this might be filesystem root
-                // Return special error to indicate VFS layer should handle mount boundary
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::NotSupported,
-                    "Parent directory crosses filesystem boundary"
-                ));
+                // // No parent or parent is dropped - this might be filesystem root
+                // // Return special error to indicate VFS layer should handle mount boundary
+                // return Err(FileSystemError::new(
+                //     FileSystemErrorKind::NotSupported,
+                //     "Parent directory crosses filesystem boundary"
+                // ));
             }
             _ => {
                 // Regular lookup
@@ -174,15 +176,14 @@ impl FileSystemOperations for TmpFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        let tmp_parent = parent_node.as_any()
-            .downcast_ref::<TmpNode>()
-            .ok_or_else(|| FileSystemError::new(
+        let tmp_parent = Arc::downcast::<TmpNode>(parent_node.clone())
+            .map_err(|_| FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Invalid node type for TmpFS"
             ))?;
             
         // Check if parent is a directory
-        if tmp_parent.file_type != FileType::Directory {
+        if tmp_parent.file_type() != FileType::Directory {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotADirectory,
                 "Parent is not a directory"
@@ -235,6 +236,7 @@ impl FileSystemOperations for TmpFS {
         // Add to parent directory
         {
             let mut children = tmp_parent.children.write();
+            new_node.set_parent(Arc::downgrade(&tmp_parent));
             children.insert(name.clone(), Arc::clone(&new_node) as Arc<dyn VfsNode>);
         }
 
@@ -254,7 +256,7 @@ impl FileSystemOperations for TmpFS {
             ))?;
             
         // Check if parent is a directory
-        if tmp_parent.file_type != FileType::Directory {
+        if tmp_parent.file_type() != FileType::Directory {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotADirectory,
                 "Parent is not a directory"
@@ -266,7 +268,7 @@ impl FileSystemOperations for TmpFS {
         if let Some(removed_node) = children.get(name) {
             // If it's a directory, check if it's empty first
             if let Some(tmp_node) = removed_node.as_any().downcast_ref::<TmpNode>() {
-                if tmp_node.file_type == FileType::Directory {
+                if tmp_node.file_type() == FileType::Directory {
                     let child_children = tmp_node.children.read();
                     if !child_children.is_empty() {
                         return Err(FileSystemError::new(
@@ -277,7 +279,7 @@ impl FileSystemOperations for TmpFS {
                 }
                 
                 // Update memory usage for regular files
-                if tmp_node.file_type == FileType::RegularFile {
+                if tmp_node.file_type() == FileType::RegularFile {
                     let content = tmp_node.content.read();
                     self.subtract_memory_usage(content.len());
                 }
@@ -306,7 +308,7 @@ impl FileSystemOperations for TmpFS {
             ))?;
             
         // Check if it's a directory
-        if tmp_node.file_type != FileType::Directory {
+        if tmp_node.file_type() != FileType::Directory {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotADirectory,
                 "Not a directory"
@@ -321,7 +323,7 @@ impl FileSystemOperations for TmpFS {
                 let metadata = child_tmp_node.metadata.read();
                 entries.push(DirectoryEntryInternal {
                     name: name.clone(),
-                    file_type: child_tmp_node.file_type,
+                    file_type: child_tmp_node.file_type.read().clone(),
                     file_id: metadata.file_id,
                 });
             }
@@ -342,10 +344,10 @@ impl FileSystemOperations for TmpFS {
 /// TmpNode represents a file or directory in TmpFS
 pub struct TmpNode {
     /// File name
-    name: String,
+    name: RwLock<String>,
     
     /// File type
-    file_type: FileType,
+    file_type: RwLock<FileType>,
     
     /// File metadata
     metadata: RwLock<FileMetadata>,
@@ -357,7 +359,7 @@ pub struct TmpNode {
     children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     
     /// Parent node (weak reference to avoid cycles)
-    parent: Option<Weak<TmpNode>>,
+    parent: RwLock<Option<Weak<TmpNode>>>,
     
     /// Reference to filesystem (Weak<dyn FileSystemOperations>)
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
@@ -367,8 +369,8 @@ impl TmpNode {
     /// Create a new regular file node
     pub fn new_file(name: String, file_id: u64) -> Self {
         Self {
-            name,
-            file_type: FileType::RegularFile,
+            name: RwLock::new(name),
+            file_type: RwLock::new(FileType::RegularFile),
             metadata: RwLock::new(FileMetadata {
                 file_type: FileType::RegularFile,
                 size: 0,
@@ -385,7 +387,7 @@ impl TmpNode {
             }),
             content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
-            parent: None, // No parent initially
+            parent: RwLock::new(None), // No parent initially
             filesystem: RwLock::new(None),
         }
     }
@@ -393,8 +395,8 @@ impl TmpNode {
     /// Create a new directory node
     pub fn new_directory(name: String, file_id: u64) -> Self {
         Self {
-            name,
-            file_type: FileType::Directory,
+            name: RwLock::new(name),
+            file_type: RwLock::new(FileType::Directory),
             metadata: RwLock::new(FileMetadata {
                 file_type: FileType::Directory,
                 size: 0,
@@ -411,7 +413,7 @@ impl TmpNode {
             }),
             content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
-            parent: None,
+            parent: RwLock::new(None), // No parent initially
             filesystem: RwLock::new(None),
         }
     }
@@ -419,8 +421,8 @@ impl TmpNode {
     /// Create a new device file node
     pub fn new_device(name: String, file_type: FileType, file_id: u64) -> Self {
         Self {
-            name,
-            file_type: file_type.clone(),
+            name: RwLock::new(name),
+            file_type: RwLock::new(file_type),
             metadata: RwLock::new(FileMetadata {
                 file_type,
                 size: 0,
@@ -437,7 +439,7 @@ impl TmpNode {
             }),
             content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
-            parent: None,
+            parent: RwLock::new(None), // No parent initially
             filesystem: RwLock::new(None),
         }
     }
@@ -455,18 +457,33 @@ impl TmpNode {
     }
     
     /// Set parent reference for this node
-    pub fn set_parent(&mut self, parent: Weak<TmpNode>) {
-        self.parent = Some(parent);
-    }
-    
-    /// Get parent node
-    pub fn get_parent(&self) -> Option<Arc<TmpNode>> {
-        self.parent.as_ref().and_then(|weak| weak.upgrade())
+    pub fn set_parent(&self, parent: Weak<TmpNode>) {
+        self.parent.write().replace(parent);
     }
     
     /// Check if this node is the root of the filesystem
     pub fn is_filesystem_root(&self) -> bool {
-        self.parent.is_none()
+        self.parent.read().is_none()
+    }
+
+    /// Get the file name
+    pub fn name(&self) -> String {
+        self.name.read().clone()
+    }
+
+    /// Get the file type
+    pub fn file_type(&self) -> FileType {
+        self.file_type.read().clone()
+    }
+
+    /// Get the filesystem reference
+    pub fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
+        self.filesystem.read().clone()
+    }
+
+    /// Get the parent node
+    pub fn parent(&self) -> Option<Weak<TmpNode>> {
+        self.parent.read().clone()
     }
 }
 
@@ -538,7 +555,7 @@ impl TmpFileObject {
 
 impl StreamOps for TmpFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        match &self.node.file_type {
+        match self.node.file_type() {
             FileType::RegularFile => {
                 let mut position = self.position.write();
                 let content = self.node.content.read();
@@ -576,7 +593,7 @@ impl StreamOps for TmpFileObject {
     }
     
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        match &self.node.file_type {
+        match self.node.file_type() {
             FileType::RegularFile => {
                 let mut position = self.position.write();
                 let mut content = self.node.content.write();
@@ -660,7 +677,7 @@ impl FileObject for TmpFileObject {
     }
     
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
-        if self.node.file_type != FileType::RegularFile {
+        if self.node.file_type() != FileType::RegularFile {
             return Err(StreamError::from(FileSystemError::new(
                 FileSystemErrorKind::IsADirectory,
                 "Cannot truncate non-regular file"
@@ -685,56 +702,3 @@ impl FileObject for TmpFileObject {
         Ok(())
     }
 }
-
-// === 解決策1: Factory パターン ===
-// 
-// FileSystemの実装例：
-// impl FileSystemOperations for TmpFS {
-//     fn create(&self, ...) -> Result<Arc<dyn VfsNode>, ...> {
-//         // Arc<Self> から Weak<Self> への変換が必要
-//         // しかし &self からは Arc<Self> を取得できない...
-//         let fs_weak = ???; // この部分が問題
-//         let node = TmpNode::new_file(name, id, fs_weak);
-//         Ok(Arc::new(node))
-//     }
-// }
-
-// === 解決策2: Arc<Self> ベースの設計 ===
-//
-// VfsNode trait の filesystem() メソッドを変更：
-// trait VfsNode {
-//     fn filesystem(&self) -> FileSystemRef; // 現在
-//     // ↓
-//     fn filesystem_weak(&self) -> Weak<dyn FileSystemOperations>; // 変更案
-// }
-//
-// FileSystemOperations trait を変更：
-// trait FileSystemOperations {
-//     fn create(self: Arc<Self>, ...) -> Result<Arc<dyn VfsNode>, ...>;
-//     // self: Arc<Self> を使うことで、Arc::downgrade() が可能
-// }
-
-// === 解決策3: 遅延参照設定 ===
-//
-// 1. VfsNodeを空のfilesystem参照で作成
-// 2. FileSystemがArc::downgrade(self) を何らかの方法で取得
-// 3. VfsNode.set_filesystem(weak_ref) で後から設定
-//
-// 問題: &self から Arc<Self> を取得する方法が標準的でない
-
-// === 解決策4: 実用的アプローチ（推奨） ===
-//
-// Option 4a: filesystem() で新しいインスタンスを返す（現在の実装）
-// - メリット: シンプル、循環参照なし
-// - デメリット: パフォーマンス、状態の不整合
-//
-// Option 4b: filesystem() の代わりに必要な情報だけ提供
-// trait VfsNode {
-//     fn filesystem_name(&self) -> &str;
-//     fn filesystem_type(&self) -> &str; 
-//     // filesystem() は削除
-// }
-//
-// Option 4c: VfsNode に filesystem() 不要の設計
-// - VfsManager や MountTree が FS 情報を管理
-// - VfsNode は純粋にファイル/ディレクトリの情報のみ

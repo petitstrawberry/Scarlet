@@ -368,7 +368,7 @@ impl MountTree {
                                 }
                             };
                             current_mount = parent_mount.clone();
-                            current_entry = current_entry.parent().unwrap();
+                            current_entry = self.resolve_component(current_entry, &"..")?;
 
                             crate::println!("Moved to parent mount: {}", current_mount.path);
                             crate::println!("Current entry after '..': {:?}", current_entry);
