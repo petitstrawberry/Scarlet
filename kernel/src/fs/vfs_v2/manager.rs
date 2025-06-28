@@ -46,8 +46,8 @@ pub struct VfsManager {
     /// Current working directory
     cwd: RwLock<Option<Arc<VfsEntry>>>,
     
-    /// Cross-VFS references for bind mounting from other VfsManagers
-    cross_vfs_refs: RwLock<BTreeMap<VfsManagerId, alloc::sync::Weak<VfsManager>>>,
+    // /// Cross-VFS references for bind mounting from other VfsManagers
+    // cross_vfs_refs: RwLock<BTreeMap<VfsManagerId, alloc::sync::Weak<VfsManager>>>,
 }
 
 impl VfsManager {
@@ -69,7 +69,7 @@ impl VfsManager {
             mount_tree,
             filesystems: RwLock::new(filesystems),
             cwd: RwLock::new(None),
-            cross_vfs_refs: RwLock::new(BTreeMap::new()),
+            // cross_vfs_refs: RwLock::new(BTreeMap::new()),
         }
     }
     
@@ -147,15 +147,15 @@ impl VfsManager {
         Ok(())
     }
     
-    /// Register another VfsManager for cross-VFS operations
-    pub fn register_cross_vfs(&self, other: &Arc<VfsManager>) {
-        self.cross_vfs_refs.write().insert(other.id, Arc::downgrade(other));
-    }
+    // /// Register another VfsManager for cross-VFS operations
+    // pub fn register_cross_vfs(&self, other: &Arc<VfsManager>) {
+    //     self.cross_vfs_refs.write().insert(other.id, Arc::downgrade(other));
+    // }
 
-    /// Remove stale cross-VFS references
-    pub fn cleanup_cross_vfs_refs(&self) {
-        self.cross_vfs_refs.write().retain(|_, weak_ref| weak_ref.strong_count() > 0);
-    }
+    // /// Remove stale cross-VFS references
+    // pub fn cleanup_cross_vfs_refs(&self) {
+    //     self.cross_vfs_refs.write().retain(|_, weak_ref| weak_ref.strong_count() > 0);
+    // }
 
     // /// Create a cross-VFS bind mount from another VfsManager
     // pub fn bind_mount_from(
@@ -381,10 +381,10 @@ impl VfsManager {
         self.id
     }
 
-    /// Get the number of cross-VFS references
-    pub fn get_cross_vfs_ref_count(&self) -> usize {
-        self.cross_vfs_refs.read().len()
-    }
+    // /// Get the number of cross-VFS references
+    // pub fn get_cross_vfs_ref_count(&self) -> usize {
+    //     self.cross_vfs_refs.read().len()
+    // }
 
     /// List all mounts in this VFS
     pub fn list_mounts(&self) -> Vec<(String, MountType)> {
@@ -393,11 +393,11 @@ impl VfsManager {
             .collect()
     }
 
-    /// Register cross-VFS reference
-    pub fn register_cross_vfs_ref(&self, other: Arc<VfsManager>) -> Result<(), FileSystemError> {
-        self.cross_vfs_refs.write().insert(other.id, Arc::downgrade(&other));
-        Ok(())
-    }
+    // /// Register cross-VFS reference
+    // pub fn register_cross_vfs_ref(&self, other: Arc<VfsManager>) -> Result<(), FileSystemError> {
+    //     self.cross_vfs_refs.write().insert(other.id, Arc::downgrade(&other));
+    //     Ok(())
+    // }
 
     // /// Create a cross-VFS bind mount
     // pub fn cross_vfs_bind_mount(
