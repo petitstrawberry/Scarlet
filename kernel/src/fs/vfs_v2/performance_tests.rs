@@ -313,4 +313,6 @@ fn test_nested_mounts() {
     assert_eq!(metadata.file_type, FileType::RegularFile);
     let metadata = manager.metadata("/mnt/fs1/dir/fs2/test_file2.txt").unwrap();
     assert_eq!(metadata.file_type, FileType::RegularFile);
+    let metadata = manager.metadata("/mnt/fs1/dir/fs2/../../test_file1.txt").unwrap();
+    assert_eq!(metadata.file_type, FileType::RegularFile);
 }

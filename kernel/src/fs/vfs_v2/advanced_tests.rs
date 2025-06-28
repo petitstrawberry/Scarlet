@@ -162,8 +162,8 @@ fn test_bind_mount_path_traversal() {
     let tmpfs1 = TmpFS::new(0);
     let tmpfs2 = TmpFS::new(0);
 
-    // Create a secret file in the root fs
-    vfs.create_file("/root_secret.txt", FileType::RegularFile).unwrap();
+    // Create a root directory with a visible file
+    vfs.create_file("/root_content.txt", FileType::RegularFile).unwrap();
 
     vfs.create_dir("/fs1").unwrap();
     vfs.create_dir("/fs2").unwrap();
@@ -171,16 +171,44 @@ fn test_bind_mount_path_traversal() {
     vfs.mount(tmpfs2, "/fs2", 0).unwrap();
 
     vfs.create_dir("/fs1/dir_a").unwrap();
-    vfs.create_dir("/fs2/mount_point").unwrap();
+    vfs.create_dir("/fs1/dir_a/dir_b").unwrap();
+    vfs.create_file("/fs1/dir_a/dir_b/file_b", FileType::RegularFile).unwrap();
+    // Create a secret file in the bind mount source
+    // This file should not be accessible through the bind mount
+    // to prevent path traversal attacks.
+    vfs.create_file("/fs1/dir_a/secret.txt", FileType::RegularFile).unwrap();
 
-    // 2. Bind mount /fs1/dir_a onto /fs2/mount_point
-    vfs.bind_mount("/fs1/dir_a", "/fs2/mount_point").unwrap();
+    vfs.create_dir("/fs2/mount_point").unwrap();
+    vfs.create_file("/fs2/file2", FileType::RegularFile).unwrap();
+
+    // 2. Bind mount /fs1/dir_a/dir_b onto /fs2/mount_point
+    vfs.bind_mount("/fs1/dir_a/dir_b", "/fs2/mount_point").unwrap();
 
     // 3. Attempt to traverse out of the bind mount
-    // This path should resolve to /fs2/root_secret.txt, which does not exist.
-    // It must not resolve to /root_secret.txt
-    let result = vfs.open("/fs2/mount_point/../../root_secret.txt", 0);
+    // /fs2/mount_point/../file2 --> /fs2/file2
+    let result = vfs.metadata("/fs2/mount_point/../file2");
+    match &result {
+        Ok(metadata) => {
+            crate::println!("Accessed file2: {:?}", metadata);
+        },
+        Err(_) => (), // Expected error
+    }
+    assert!(result.is_ok(), "Path traversal should allow access to /fs2/file2!");
 
-    // 4. Verification
-    assert!(result.is_err(), "Path traversal vulnerability detected!");
+    // 4. Attempt to access the secret file
+    let result = vfs.metadata("/fs2/mount_point/../secret.txt");
+    assert!(result.is_err(), "Path traversal should not allow access to /fs1/dir_a/secret.txt!");
+
+    
+    let result = vfs.metadata("/fs2/mount_point/../../root_content.txt");
+    match &result {
+        Ok(metadata) => {
+            crate::println!("Accessed root secret file: {:?}", metadata);
+        },
+        Err(e) => {
+            crate::println!("Failed to access root_content.txt: {:?}", e);
+        },
+    }
+    assert!(result.is_ok(), "Cannot access root_content.txt from bind mount!");
+
 }
