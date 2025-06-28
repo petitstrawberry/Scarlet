@@ -21,7 +21,7 @@ use crate::object::KernelObject;
 
 use super::{
     core::{VfsEntry, FileSystemOperations, DirectoryEntryInternal},
-    mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId, MountType},
+    mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId, MountId, MountType},
 };
 
 // Helper function to create FileSystemError
@@ -45,9 +45,6 @@ pub struct VfsManager {
     
     /// Current working directory
     cwd: RwLock<Option<Arc<VfsEntry>>>,
-    
-    // /// Cross-VFS references for bind mounting from other VfsManagers
-    // cross_vfs_refs: RwLock<BTreeMap<VfsManagerId, alloc::sync::Weak<VfsManager>>>,
 }
 
 impl VfsManager {
@@ -112,15 +109,15 @@ impl VfsManager {
     /// Unmount a filesystem from the specified path
     pub fn unmount(&self, mount_point_str: &str) -> Result<(), FileSystemError> {
         // Resolve to the mount point entry (not the mounted content)
-        let (entry, _) = self.mount_tree.resolve_mount_point(mount_point_str)?;
+        let (entry, mount_point) = self.mount_tree.resolve_mount_point(mount_point_str)?;
 
         // Check if the resolved entry is actually a mount point.
-        if !self.mount_tree.is_mount_point(&entry) {
+        if !self.mount_tree.is_mount_point(&entry, &mount_point) {
             return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path is not a mount point"));
         }
 
         // Unmount using the MountTree.
-        self.mount_tree.unmount(&entry)?;
+        self.mount_tree.unmount(&entry, &mount_point)?;
         
         // Remove from the filesystem registry.
         self.filesystems.write().remove(mount_point_str);
@@ -128,75 +125,59 @@ impl VfsManager {
         Ok(())
     }
 
-    /// Create a bind mount from source_path to target_path
-    pub fn bind_mount(&self, source_path: &str, target_path: &str) -> Result<(), FileSystemError> {
-        // Prevent recursive mounting (e.g., mounting a directory inside itself)
-        if target_path.starts_with(source_path) && target_path != source_path {
-            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
-        }
-
-        // Resolve the source entry to be mounted
-        let (source_entry, _) = self.mount_tree.resolve_path(source_path)?;
-
-        // Resolve the target entry where the source will be mounted
+    pub fn bind_mount(
+        &self,
+        source_path: &str,
+        target_path: &str
+    ) -> Result<(), FileSystemError> {
+        // Resolve the target mount point
         let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
+        // Resolve the source entry
+        let (source_entry, source_mount_point) = self.mount_tree.resolve_path(source_path)?;
+        // Check if source is a valid entry
+        if !source_entry.node().is_directory()? {
+            return Err(vfs_error(FileSystemErrorKind::NotADirectory, "Source path must be a directory"));
+        }
+        // Check if target is not already a mount point
+        if self.mount_tree.is_mount_point(&target_entry, &target_mount_point) {
+            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Target path is already a mount point"));
+        }
+        // Check if source is a directory (bind mounts only support directories)
+        if !source_entry.node().is_directory()? {
+            return Err(vfs_error(FileSystemErrorKind::NotADirectory, "Source path must be a directory"));
+        }
+        // Create the bind mount entry
+        self.bind_mount_entry(
+            source_entry,
+            source_mount_point,
+            target_entry,
+            target_mount_point
+        )
+    }
 
-        // Perform the bind mount operation in the MountTree
-        self.mount_tree.bind_mount(source_entry, target_entry, target_mount_point)?;
-
+    /// Create a bind mount from source_entry to target_entry
+    pub fn bind_mount_entry(
+        &self,
+        source_entry: Arc<VfsEntry>,
+        source_mount_point: Arc<MountPoint>,
+        target_entry: Arc<VfsEntry>,
+        target_mount_point: Arc<MountPoint>,
+    ) -> Result<(), FileSystemError> {
+        crate::println!("Creating bind mount from '{}' to '{}'", source_entry.name(), target_entry.name());
+        // Create a new MountPoint for the bind mount
+        let bind_mount = MountPoint::new_bind(target_entry.name().clone(), source_entry);
+        // Set parent/parent_entry
+        unsafe {
+            let mut_ptr = Arc::as_ptr(&bind_mount) as *mut MountPoint;
+            (*mut_ptr).parent = Some(Arc::downgrade(&target_mount_point));
+            (*mut_ptr).parent_entry = Some(target_entry.clone());
+        }
+        // Connect the bind mount to the source mount point
+        *(bind_mount.children.write()) = source_mount_point.children.read().clone();
+        // Add as child to target_mount_point
+        target_mount_point.children.write().insert(target_entry.node().id(), bind_mount);
         Ok(())
     }
-    
-    // /// Register another VfsManager for cross-VFS operations
-    // pub fn register_cross_vfs(&self, other: &Arc<VfsManager>) {
-    //     self.cross_vfs_refs.write().insert(other.id, Arc::downgrade(other));
-    // }
-
-    // /// Remove stale cross-VFS references
-    // pub fn cleanup_cross_vfs_refs(&self) {
-    //     self.cross_vfs_refs.write().retain(|_, weak_ref| weak_ref.strong_count() > 0);
-    // }
-
-    // /// Create a cross-VFS bind mount from another VfsManager
-    // pub fn bind_mount_from(
-    //     &self,
-    //     source_vfs: &Arc<VfsManager>,
-    //     source_path: &str,
-    //     target_path: &str,
-    //     cache_timeout: Option<u64>,
-    // ) -> Result<(), FileSystemError> {
-    //     // Prevent recursive mounting (e.g., mounting a directory inside itself)
-    //     if target_path.starts_with(source_path) && target_path != source_path {
-    //         return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
-    //     }
-
-    //     // Register the source VFS for future reference
-    //     self.register_cross_vfs(source_vfs);
-
-    //     // Resolve the target entry where the source will be mounted
-    //     let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
-
-    //     // Verify the source path exists in the source VFS
-    //     let _ = source_vfs.mount_tree.resolve_path(source_path)
-    //         .map_err(|_| vfs_error(FileSystemErrorKind::NotFound, "Source path not found in source VFS"))?;
-
-    //     // Create a cross-VFS bind mount
-    //     let cross_vfs_mount = MountPoint::new_cross_vfs_bind(
-    //         target_entry.name().clone(),
-    //         Arc::downgrade(source_vfs),
-    //         source_path.to_string(),
-    //         target_entry.clone(), // Use target_entry as placeholder for now
-    //         cache_timeout.unwrap_or(5), // Default 5 seconds cache
-    //     );
-
-    //     // Add the new mount as a child of the target's containing mount point
-    //     target_mount_point.add_child(&target_entry, cross_vfs_mount.clone())?;
-
-    //     // Register the new mount in the global mount table
-    //     self.mount_tree.register_mount(cross_vfs_mount);
-
-    //     Ok(())
-    // }
     
     /// Open a file at the specified path
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
@@ -254,10 +235,10 @@ impl VfsManager {
     /// Remove a file at the specified path
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         // Resolve the entry to be removed
-        let (entry_to_remove, _) = self.mount_tree.resolve_path(path)?;
+        let (entry_to_remove, mount_point) = self.mount_tree.resolve_path(path)?;
 
         // Check if the entry is involved in any mount, which would make it busy
-        if self.mount_tree.is_entry_used_in_mount(&entry_to_remove) {
+        if self.mount_tree.is_entry_used_in_mount(&entry_to_remove, &mount_point) {
             return Err(vfs_error(FileSystemErrorKind::NotSupported, "Resource is busy"));
         }
 
@@ -385,13 +366,6 @@ impl VfsManager {
     // pub fn get_cross_vfs_ref_count(&self) -> usize {
     //     self.cross_vfs_refs.read().len()
     // }
-
-    /// List all mounts in this VFS
-    pub fn list_mounts(&self) -> Vec<(String, MountType)> {
-        self.mount_tree.list_mounts().into_iter()
-            .map(|(_, path, mount_type)| (path, mount_type))
-            .collect()
-    }
 
     // /// Register cross-VFS reference
     // pub fn register_cross_vfs_ref(&self, other: Arc<VfsManager>) -> Result<(), FileSystemError> {

@@ -56,10 +56,7 @@ pub enum MountType {
     /// Regular mount
     Regular,
     /// Bind mount (mount existing directory at another location)
-    Bind {
-        /// Type and details of the bind mount
-        bind_type: BindType,
-    },
+    Bind,
     /// Overlay mount (overlay multiple directories)
     Overlay {
         /// The list of overlay layers (top to bottom priority)
@@ -72,30 +69,6 @@ pub enum MountType {
 pub struct MountOptionsV2 {
     pub readonly: bool,
     pub flags: u32,
-}
-
-/// Bind mount type
-#[derive(Debug, Clone)]
-pub enum BindType {
-    /// Regular bind mount within same VFS
-    Regular {
-        /// The original entry being bound
-        source: VfsEntryRef,
-    },
-    /// Cross-VFS bind mount to another VfsManager
-    CrossVfs {
-        /// Weak reference to source VfsManager (avoid cycles)
-        source_vfs: Weak<VfsManager>,
-        /// Source path in the source VfsManager
-        source_path: String,
-        /// Cache timeout in seconds
-        cache_timeout: u64,
-    },
-    /// Recursive bind mount (for future use)
-    Recursive {
-        /// The original entry being bound
-        source: VfsEntryRef,
-    },
 }
 
 /// Mount point information
@@ -135,11 +108,7 @@ impl MountPoint {
     pub fn new_bind(path: String, source: VfsEntryRef) -> Arc<Self> {
         Arc::new(Self {
             id: MountId::new(),
-            mount_type: MountType::Bind {
-                bind_type: BindType::Regular {
-                    source: source.clone(),
-                },
-            },
+            mount_type: MountType::Bind,
             path,
             root: source,
             parent: None,
@@ -196,6 +165,7 @@ impl MountPoint {
             (*mut_child).parent_entry = Some(entry.clone());
         }
         let key = entry.node().id();
+        crate::println!("Adding child mount: {} -> {}", self.path, child.path);
         self.children.write().insert(key, child);
         Ok(())
     }
@@ -219,13 +189,7 @@ impl MountPoint {
     /// Get the bind source entry (for regular bind mounts only)
     pub fn get_bind_source(&self) -> Option<VfsEntryRef> {
         match &self.mount_type {
-            MountType::Bind { bind_type } => {
-                match bind_type {
-                    BindType::Regular { source } => Some(source.clone()),
-                    BindType::Recursive { source } => Some(source.clone()),
-                    BindType::CrossVfs { .. } => None, // Cross-VFS sources are resolved dynamically
-                }
-            }
+            MountType::Bind { .. } => Some(self.root.clone()),
             _ => None,
         }
     }
@@ -233,8 +197,8 @@ impl MountPoint {
     /// Get cross-VFS bind information
     pub fn get_cross_vfs_info(&self) -> Option<(Weak<VfsManager>, &str, u64)> {
         match &self.mount_type {
-            MountType::Bind { bind_type: BindType::CrossVfs { source_vfs, source_path, cache_timeout } } => {
-                Some((source_vfs.clone(), source_path.as_str(), *cache_timeout))
+            MountType::Bind { .. } => {
+                None
             }
             _ => None,
         }
@@ -246,8 +210,6 @@ impl MountPoint {
 pub struct MountTree {
     /// Root mount point (can be updated when mounting at "/")
     pub root_mount: RwLock<Arc<MountPoint>>,
-    /// All mounts indexed by ID for quick lookup
-    mounts: RwLock<BTreeMap<MountId, Weak<MountPoint>>>,
 }
 
 impl MountTree {
@@ -261,7 +223,6 @@ impl MountTree {
 
         Self {
             root_mount: RwLock::new(root_mount.clone()),
-            mounts: RwLock::new(mounts),
         }
     }
 
@@ -283,9 +244,6 @@ impl MountTree {
 
         // Add the new mount as a child of the target's containing mount point, attached to the target entry.
         target_mount_point.add_child(&target_entry, bind_mount.clone())?;
-
-        // Register the new mount in the global mount table.
-        self.mounts.write().insert(mount_id, Arc::downgrade(&bind_mount));
 
         Ok(mount_id)
     }
@@ -310,44 +268,46 @@ impl MountTree {
         // Add the new mount as a child to the target's mount point.
         target_mount_point.add_child(&target_entry, new_mount.clone())?;
 
-        // Register the new mount in the global mount table.
-        self.mounts.write().insert(mount_id, Arc::downgrade(&new_mount));
-
         Ok(mount_id)
     }
 
     /// Replaces the root mount point.
     pub fn replace_root(&self, new_root: Arc<MountPoint>) {
-        let old_root_id = self.root_mount.read().id;
         *self.root_mount.write() = new_root.clone();
-        let mut mounts = self.mounts.write();
-        mounts.remove(&old_root_id);
-        mounts.insert(new_root.id, Arc::downgrade(&new_root));
     }
 
     /// Check if a path is a mount point
-    pub fn is_mount_point(&self, entry_to_check: &VfsEntryRef) -> bool {
+    /// 
+    /// # Arguments
+    /// * `entry_to_check` - The VFS entry to check if it is a mount point.
+    /// * `mount_point_to_check` - The mount point to check against.
+    /// 
+    /// # Notes
+    /// `entry_to_check` and `mount_point_to_check` should be in the same mount point.
+    pub fn is_mount_point(&self, entry_to_check: &VfsEntryRef, mount_point_to_check: &Arc<MountPoint>) -> bool {
         crate::println!("Checking if entry is a mount point: {}", entry_to_check.name());
-        let node_to_check = entry_to_check.node();
-        let node_id = node_to_check.id();
+        // let node_to_check = entry_to_check.node();
+        // let node_id = node_to_check.id();
         
-        let fs_ptr_to_check = match node_to_check.filesystem().and_then(|w| w.upgrade()) {
-            Some(fs) => Arc::as_ptr(&fs) as *const (),
-            None => return false,
-        };
+        // let fs_ptr_to_check = match node_to_check.filesystem().and_then(|w| w.upgrade()) {
+        //     Some(fs) => Arc::as_ptr(&fs) as *const (),
+        //     None => return false,
+        // };
 
-        for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
-            if let Some(parent_entry) = &mount.parent_entry {
-                if parent_entry.node().id() == node_id {
-                    let parent_fs_ptr = parent_entry.node().filesystem().and_then(|w| w.upgrade())
-                        .map(|fs| Arc::as_ptr(&fs) as *const ());
-                    if parent_fs_ptr == Some(fs_ptr_to_check) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        // for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
+        //     if let Some(parent_entry) = &mount.parent_entry {
+        //         if parent_entry.node().id() == node_id {
+        //             let parent_fs_ptr = parent_entry.node().filesystem().and_then(|w| w.upgrade())
+        //                 .map(|fs| Arc::as_ptr(&fs) as *const ());
+        //             if parent_fs_ptr == Some(fs_ptr_to_check) {
+        //                 return true;
+        //             }
+        //         }
+        //     }
+        // 
+
+        let children = mount_point_to_check.children.read();
+        children.contains_key(&entry_to_check.node().id())      
     }
 
     /// Check if an entry is a source for a bind mount
@@ -360,62 +320,20 @@ impl MountTree {
             None => return false,
         };
 
-        for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
-            if let MountType::Bind { bind_type } = &mount.mount_type {
-                let source = match bind_type {
-                    BindType::Regular { source } => source,
-                    BindType::Recursive { source } => source,
-                    BindType::CrossVfs { .. } => continue, // Cross-VFS bind doesn't use same filesystem
-                };
-                
-                if source.node().id() == node_id {
-                    let source_fs_ptr = source.node().filesystem().and_then(|w| w.upgrade())
-                        .map(|fs| Arc::as_ptr(&fs) as *const ());
-                    if source_fs_ptr == Some(fs_ptr_to_check) {
-                        return true;
-                    }
-                }
-            }
-        }
         false
     }
 
     /// Check if an entry is used in a mount (either as a mount point or a bind source)
-    pub fn is_entry_used_in_mount(&self, entry_to_check: &VfsEntryRef) -> bool {
-        self.is_mount_point(entry_to_check) || self.is_bind_source(entry_to_check)
+    pub fn is_entry_used_in_mount(&self, entry_to_check: &VfsEntryRef, mount_point_to_check: &Arc<MountPoint>) -> bool {
+        // self.is_mount_point(entry_to_check, mount_point_to_check) || self.is_bind_source(entry_to_check)
+        self.is_mount_point(entry_to_check, mount_point_to_check)
     }
 
     /// Unmount a filesystem
-    pub fn unmount(&self, entry: &VfsEntryRef) -> VfsResult<()> {
-        // Find the mount point
-        let mount = {
-            let mounts = self.mounts.read();
-            mounts.values()
-                .filter_map(|w| w.upgrade())
-                .find(|m| m.root.node().id() == entry.node().id())
-                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Mount point not found"))?
-        };
+    pub fn unmount(&self, entry: &VfsEntryRef, parent_mount_point: &Arc<MountPoint>) -> VfsResult<()> {
+        crate::println!("Children of mount point {}: {:?}", parent_mount_point.path, parent_mount_point.children.read());
 
-        // Cannot unmount root
-        if mount.is_root_mount() {
-            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Cannot unmount root filesystem"));
-        }
-
-        crate::println!("Children of mount point {}: {:?}", mount.path, mount.list_children());
-
-        // Check if mount has children (busy)
-        if !mount.children.read().is_empty() {
-            return Err(vfs_error(FileSystemErrorKind::NotSupported, "Mount point has child mounts"));
-        }
-
-        // Remove from parent
-        if let Some(parent) = mount.get_parent() {
-            parent.remove_child(&mount.root);
-        }
-
-        // Remove from global mount table
-        self.mounts.write().remove(&mount.id);
-
+        parent_mount_point.remove_child(&entry);
         Ok(())
     }
 
@@ -511,51 +429,6 @@ impl MountTree {
         }
 
         Ok((current_entry, current_mount))
-    }
-
-    /// Get mount information for a path
-    pub fn get_mount_info(&self, entry: VfsEntryRef) -> VfsResult<MountId> {
-        // Check if the entry is a mount point
-        if self.is_mount_point(&entry) {
-            // Find the mount point for this entry
-            for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
-                if let Some(parent_entry) = &mount.parent_entry {
-                    if Arc::ptr_eq(&entry, parent_entry) {
-                        return Ok(mount.id);
-                    }
-                }
-            }
-            Err(vfs_error(FileSystemErrorKind::NotFound, "Mount not found"))
-        } else {
-            Err(vfs_error(FileSystemErrorKind::NotFound, "Entry is not a mount point"))
-        }
-    }
-
-    /// List all mounts
-    pub fn list_mounts(&self) -> Vec<(MountId, String, MountType)> {
-        let mut result = Vec::new();
-        let mounts = self.mounts.read();
-        
-        for (id, weak_mount) in mounts.iter() {
-            if let Some(mount) = weak_mount.upgrade() {
-                let full_path = self.get_mount_path(&mount);
-                result.push((*id, full_path, mount.mount_type.clone()));
-            }
-        }
-        
-        result
-    }
-
-    /// Register a mount in the global mount table
-    pub fn register_mount(&self, mount: Arc<MountPoint>) -> MountId {
-        let mount_id = mount.id;
-        self.mounts.write().insert(mount_id, Arc::downgrade(&mount));
-        mount_id
-    }
-
-    /// Unregister a mount from the global mount table
-    pub fn unregister_mount(&self, mount_id: MountId) -> bool {
-        self.mounts.write().remove(&mount_id).is_some()
     }
 
     // Helper methods
