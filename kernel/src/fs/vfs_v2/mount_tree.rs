@@ -39,14 +39,20 @@ impl MountId {
 }
 
 /// Type of mount operation
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum MountType {
     /// Regular mount
     Regular,
     /// Bind mount (mount existing directory at another location)
-    Bind,
+    Bind {
+        /// The original entry being bound
+        source: VfsEntryRef,
+    },
     /// Overlay mount (overlay multiple directories)
-    Overlay,
+    Overlay {
+        /// The list of overlay layers (top to bottom priority)
+        layers: Vec<VfsEntryRef>,
+    },
 }
 
 /// Mount options (for compatibility with manager_v2.rs)
@@ -80,10 +86,6 @@ pub struct MountPoint {
     pub parent_entry: Option<VfsEntryRef>,
     /// Child mounts: map of VfsEntry ID to MountPoint
     pub children: RwLock<BTreeMap<u64, Arc<MountPoint>>>,
-    /// For bind mounts: the original entry being bound
-    pub bind_source: Option<VfsEntryRef>,
-    /// For overlay mounts: the list of overlay layers
-    pub overlay_layers: Vec<VfsEntryRef>,
 }
 
 impl MountPoint {
@@ -97,8 +99,6 @@ impl MountPoint {
             parent: None,
             parent_entry: None,
             children: RwLock::new(BTreeMap::new()),
-            bind_source: None,
-            overlay_layers: Vec::new(),
         })
     }
 
@@ -106,14 +106,14 @@ impl MountPoint {
     pub fn new_bind(path: String, source: VfsEntryRef) -> Arc<Self> {
         Arc::new(Self {
             id: MountId::new(),
-            mount_type: MountType::Bind,
+            mount_type: MountType::Bind {
+                source: source.clone(),
+            },
             path,
-            root: source.clone(),
+            root: source,
             parent: None,
             parent_entry: None,
             children: RwLock::new(BTreeMap::new()),
-            bind_source: Some(source),
-            overlay_layers: Vec::new(),
         })
     }
 
@@ -128,14 +128,14 @@ impl MountPoint {
 
         Ok(Arc::new(Self {
             id: MountId::new(),
-            mount_type: MountType::Overlay,
+            mount_type: MountType::Overlay {
+                layers: layers.clone(),
+            },
             path,
             root,
             parent: None,
             parent_entry: None,
             children: RwLock::new(BTreeMap::new()),
-            bind_source: None,
-            overlay_layers: layers,
         }))
     }
 
@@ -301,9 +301,9 @@ impl MountTree {
         };
 
         for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
-            if let Some(bind_source) = &mount.bind_source {
-                if bind_source.node().id() == node_id {
-                    let source_fs_ptr = bind_source.node().filesystem().and_then(|w| w.upgrade())
+            if let MountType::Bind { source, .. } = &mount.mount_type {
+                if source.node().id() == node_id {
+                    let source_fs_ptr = source.node().filesystem().and_then(|w| w.upgrade())
                         .map(|fs| Arc::as_ptr(&fs) as *const ());
                     if source_fs_ptr == Some(fs_ptr_to_check) {
                         return true;
