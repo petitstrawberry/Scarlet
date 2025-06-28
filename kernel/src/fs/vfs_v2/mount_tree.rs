@@ -395,20 +395,6 @@ impl MountTree {
                     // Not at mount root - use normal filesystem navigation
                     // crate::println!("Not at mount root - resolving within filesystem");
                     current_entry = self.resolve_component(current_entry, &component)?;
-                    
-                    // After resolving ".." within a filesystem, check if we've moved to a mount boundary
-                    // In particular, if we're now at the root of the current mount but this mount has a parent,
-                    // we may need to cross the mount boundary
-                    let is_now_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
-                    if is_now_at_mount_root {
-                        if let Some((parent_mount, parent_entry)) = current_mount.get_parent().zip(current_mount.parent_entry.clone()) {
-                            // Check if the current mount's root is actually a mount point in the parent
-                            // If so, we should move to the parent mount and set current_entry to the parent of the mount point
-                            // crate::println!("At mount root after .. - checking if should cross to parent mount");
-                            current_mount = parent_mount;
-                            current_entry = self.resolve_component(parent_entry, &"..")?;
-                        }
-                    }
                 }
             } else {
                 // Regular path traversal within current mount
