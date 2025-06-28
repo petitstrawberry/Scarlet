@@ -170,31 +170,31 @@ impl MountPoint {
         }))
     }
 
-    /// Create a new cross-VFS bind mount point
-    /// Note: For cross-VFS bind mounts, the root will be resolved dynamically during path resolution
-    pub fn new_cross_vfs_bind(
-        path: String, 
-        source_vfs: Weak<VfsManager>, 
-        source_path: String, 
-        placeholder_root: VfsEntryRef,  // Temporary placeholder until first resolution
-        cache_timeout: u64
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            id: MountId::new(),
-            mount_type: MountType::Bind {
-                bind_type: BindType::CrossVfs {
-                    source_vfs,
-                    source_path,
-                    cache_timeout,
-                },
-            },
-            path,
-            root: placeholder_root,  // This will be replaced during first access
-            parent: None,
-            parent_entry: None,
-            children: RwLock::new(BTreeMap::new()),
-        })
-    }
+    // /// Create a new cross-VFS bind mount point
+    // /// Note: For cross-VFS bind mounts, the root will be resolved dynamically during path resolution
+    // pub fn new_cross_vfs_bind(
+    //     path: String, 
+    //     source_vfs: Weak<VfsManager>, 
+    //     source_path: String, 
+    //     placeholder_root: VfsEntryRef,  // Temporary placeholder until first resolution
+    //     cache_timeout: u64
+    // ) -> Arc<Self> {
+    //     Arc::new(Self {
+    //         id: MountId::new(),
+    //         mount_type: MountType::Bind {
+    //             bind_type: BindType::CrossVfs {
+    //                 source_vfs,
+    //                 source_path,
+    //                 cache_timeout,
+    //             },
+    //         },
+    //         path,
+    //         root: placeholder_root,  // This will be replaced during first access
+    //         parent: None,
+    //         parent_entry: None,
+    //         children: RwLock::new(BTreeMap::new()),
+    //     })
+    // }
 
     /// Get the parent mount point
     pub fn get_parent(&self) -> Option<Arc<MountPoint>> {
@@ -242,10 +242,10 @@ impl MountPoint {
         matches!(self.mount_type, MountType::Bind { .. })
     }
 
-    /// Check if this mount point is a cross-VFS bind mount
-    pub fn is_cross_vfs_bind(&self) -> bool {
-        matches!(self.mount_type, MountType::Bind { bind_type: BindType::CrossVfs { .. } })
-    }
+    // /// Check if this mount point is a cross-VFS bind mount
+    // pub fn is_cross_vfs_bind(&self) -> bool {
+    //     matches!(self.mount_type, MountType::Bind { bind_type: BindType::CrossVfs { .. } })
+    // }
 
     /// Get the bind source entry (for regular bind mounts only)
     pub fn get_bind_source(&self) -> Option<VfsEntryRef> {
@@ -508,27 +508,30 @@ impl MountTree {
                 // If so, return the mount point entry itself, not the mounted content
                 if resolve_mount && i == components.len() - 1 {
                     // This is a mount point - return the mount point entry and the parent mount
-                    if let Some(child_mount) = current_mount.get_child(&current_entry) {
-                        // For cross-VFS bind mounts on final component, still delegate to source VFS
-                        if child_mount.is_cross_vfs_bind() {
-                            return self.resolve_cross_vfs_path(&child_mount, "");
-                        } else {
-                            return Ok((current_entry, current_mount));
-                        }
+                    if let Some(_child_mount) = current_mount.get_child(&current_entry) {
+                        // // For cross-VFS bind mounts on final component, still delegate to source VFS
+                        // if child_mount.is_cross_vfs_bind() {
+                        //     return self.resolve_cross_vfs_path(&child_mount, "");
+                        // } else {
+                        //     return Ok((current_entry, current_mount));
+                        // }
+                        return Ok((current_entry, current_mount));
                     }
                 } else {
                     // Not the final component - cross mount boundaries normally
                     if let Some(child_mount) = current_mount.get_child(&current_entry) {
-                        // Check if this is a cross-VFS bind mount
-                        if child_mount.is_cross_vfs_bind() {
-                            // For cross-VFS bind mounts, delegate remaining path resolution to source VFS
-                            let remaining_path = components[i + 1..].join("/");
-                            return self.resolve_cross_vfs_path(&child_mount, &remaining_path);
-                        } else {
-                            // Regular mount - switch to child mount
-                            current_mount = child_mount;
-                            current_entry = current_mount.root.clone();
-                        }
+                        // // Check if this is a cross-VFS bind mount
+                        // if child_mount.is_cross_vfs_bind() {
+                        //     // For cross-VFS bind mounts, delegate remaining path resolution to source VFS
+                        //     let remaining_path = components[i + 1..].join("/");
+                        //     return self.resolve_cross_vfs_path(&child_mount, &remaining_path);
+                        // } else {
+                        //     // Regular mount - switch to child mount
+                        //     current_mount = child_mount;
+                        //     current_entry = current_mount.root.clone();
+                        // }
+                        current_mount = child_mount;
+                        current_entry = current_mount.root.clone();
                     }
                 }
             }
@@ -675,26 +678,26 @@ impl MountTree {
         Ok(child_entry)
     }
 
-    /// Resolve cross-VFS path for bind mounts
-    fn resolve_cross_vfs_path(
-        &self, 
-        mount_point: &MountPoint, 
-        relative_path: &str
-    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        if let Some((source_vfs, source_path, _cache_timeout)) = mount_point.get_cross_vfs_info() {
-            let source_vfs = source_vfs.upgrade()
-                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS no longer available"))?;
+    // /// Resolve cross-VFS path for bind mounts
+    // fn resolve_cross_vfs_path(
+    //     &self, 
+    //     mount_point: &MountPoint, 
+    //     relative_path: &str
+    // ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+    //     if let Some((source_vfs, source_path, _cache_timeout)) = mount_point.get_cross_vfs_info() {
+    //         let source_vfs = source_vfs.upgrade()
+    //             .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS no longer available"))?;
 
-            let full_source_path = if relative_path.is_empty() || relative_path == "/" {
-                source_path.to_string()
-            } else {
-                format!("{}/{}", source_path.trim_end_matches('/'), relative_path.trim_start_matches('/'))
-            };
+    //         let full_source_path = if relative_path.is_empty() || relative_path == "/" {
+    //             source_path.to_string()
+    //         } else {
+    //             format!("{}/{}", source_path.trim_end_matches('/'), relative_path.trim_start_matches('/'))
+    //         };
 
-            // Delegate to source VFS for complete resolution (including child mounts)
-            source_vfs.resolve_path_cross_vfs(&full_source_path)
-        } else {
-            Err(vfs_error(FileSystemErrorKind::NotSupported, "Not a cross-VFS mount"))
-        }
-    }
+    //         // Delegate to source VFS for complete resolution (including child mounts)
+    //         source_vfs.resolve_path_cross_vfs(&full_source_path)
+    //     } else {
+    //         Err(vfs_error(FileSystemErrorKind::NotSupported, "Not a cross-VFS mount"))
+    //     }
+    // }
 }
