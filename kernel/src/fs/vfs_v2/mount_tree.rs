@@ -355,6 +355,16 @@ impl MountTree {
 
     /// Resolve a path to a VFS entry, handling mount boundaries
     pub fn resolve_path(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_path_internal(path, false)
+    }
+
+    /// Resolve a path to the mount point entry (not the mounted content)
+    /// This is used for unmount operations where we need the actual mount point
+    pub fn resolve_mount_point(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_path_internal(path, true)
+    }
+
+    fn resolve_path_internal(&self, path: &str, resolve_mount: bool) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
         if path.is_empty() || path == "/" {
             return Ok((self.root_mount.read().root.clone(), self.root_mount.read().clone()));
         }
@@ -364,10 +374,7 @@ impl MountTree {
         let mut current_entry = current_mount.root.clone();
         
         let mut resolved_path = String::new();
-        for component in components {
-            // crate::println!("Resolving component: {}", component);
-            // crate::println!("Current mount: {:?}", current_mount.path);
-            // crate::println!("Current entry: {:?}", current_entry.name());
+        for (i, component) in components.iter().enumerate() {
             if component == ".." {
                 // crate::println!("Processing '..' - current_mount: {:?}, current_entry: {:?}", current_mount.path, current_entry.name());
                 
@@ -400,59 +407,9 @@ impl MountTree {
                 // Regular path traversal within current mount
                 current_entry = self.resolve_component(current_entry, &component)?;
 
-                // Check if we need to cross mount boundaries
-                if let Some(child_mount) = current_mount.get_child(&current_entry) {
-                    // We have crossed into a child mount
-                    current_mount = child_mount;
-                    current_entry = current_mount.root.clone();
-                }
-            }
-
-            resolved_path.push('/');
-            resolved_path.push_str(&component);
-            crate::println!("Resolved path: {}", resolved_path);
-        }
-
-        Ok((current_entry, current_mount))
-    }
-
-    /// Resolve a path to the mount point entry (not the mounted content)
-    /// This is used for unmount operations where we need the actual mount point
-    pub fn resolve_mount_point(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        if path.is_empty() || path == "/" {
-            return Ok((self.root_mount.read().root.clone(), self.root_mount.read().clone()));
-        }
-
-        let components = self.parse_path(path);
-        let mut current_mount = self.root_mount.read().clone();
-        let mut current_entry = current_mount.root.clone();
-        
-        for (i, component) in components.iter().enumerate() {
-            if component == ".." {
-                // Handle parent directory traversal
-                let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
-                
-                if is_at_mount_root {
-                    let parent_info = current_mount.get_parent().zip(current_mount.parent_entry.clone());
-                    match parent_info {
-                        Some((parent_mount, parent_entry)) => {
-                            current_mount = parent_mount;
-                            current_entry = self.resolve_component(parent_entry, &"..")?;
-                        },
-                        None => {
-                            // Stay at root
-                        }
-                    }
-                } else {
-                    current_entry = self.resolve_component(current_entry, &component)?;
-                }
-            } else {
-                // Regular path traversal within current mount
-                current_entry = self.resolve_component(current_entry, &component)?;
-
                 // Check if we've reached a mount point but this is the final component
                 // If so, return the mount point entry itself, not the mounted content
-                if i == components.len() - 1 {
+                if resolve_mount && i == components.len() - 1 {
                     // This is a mount point - return the mount point entry and the parent mount
                     if let Some(_child_mount) = current_mount.get_child(&current_entry) {
                         return Ok((current_entry, current_mount));
@@ -465,6 +422,10 @@ impl MountTree {
                     }
                 }
             }
+
+            resolved_path.push('/');
+            resolved_path.push_str(&component);
+            crate::println!("Resolved path: {}", resolved_path);
         }
 
         Ok((current_entry, current_mount))
