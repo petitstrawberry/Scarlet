@@ -38,7 +38,7 @@ pub struct TmpFS {
 }
 
 impl TmpFS {
-    /// Create a new TmpFS instance (2段階初期化)
+    /// Create a new TmpFS instance (two-phase initialization)
     pub fn new(memory_limit: usize) -> Arc<Self> {
         let root = Arc::new(TmpNode::new_directory("/".to_string(), 1));
         let fs = Arc::new(Self {
@@ -216,7 +216,7 @@ impl FileSystemOperations for TmpFS {
                 ));
             }
         };
-        // 生成後にfs参照をセット（upgrade可能か必ず確認）
+        // After creation, set the filesystem reference (always check if upgrade is possible)
         let fs_ref = parent_node.filesystem()
             .ok_or_else(|| FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
