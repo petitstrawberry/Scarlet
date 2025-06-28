@@ -68,6 +68,8 @@ fn test_nested_bind_mount() {
     vfs.mount(tmpfs1, "/fs1", 0).unwrap();
     vfs.mount(tmpfs2, "/fs2", 0).unwrap();
 
+    vfs.create_file("/fs2/file2.txt", FileType::RegularFile).unwrap();
+
     vfs.create_dir("/fs1/dir_a").unwrap();
     vfs.create_dir("/fs1/dir_b").unwrap();
     vfs.create_dir("/fs2/mount_a").unwrap();
@@ -81,6 +83,10 @@ fn test_nested_bind_mount() {
 
     // 3. Verification
     let file_obj = vfs.open("/fs2/mount_a/nested_mount/file_b", 0).unwrap();
+    let file = file_obj.as_file().unwrap();
+    assert!(file.metadata().is_ok());
+
+    let file_obj = vfs.open("/fs2/mount_a/nested_mount/../../file2.txt", 0).unwrap();
     let file = file_obj.as_file().unwrap();
     assert!(file.metadata().is_ok());
 }
