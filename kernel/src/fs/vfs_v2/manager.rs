@@ -107,7 +107,7 @@ impl VfsManager {
         let (entry, mount_point) = self.mount_tree.resolve_path(mount_point_str)?;
 
         // Check if the resolved entry is actually a mount point.
-        if !self.mount_tree.is_mount_point(entry)? {
+        if !self.mount_tree.is_mount_point(&entry) {
             return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path is not a mount point"));
         }
 
@@ -198,7 +198,7 @@ impl VfsManager {
         let (entry_to_remove, _) = self.mount_tree.resolve_path(path)?;
 
         // Check if the entry is involved in any mount, which would make it busy
-        if self.mount_tree.is_entry_mounted(&entry_to_remove) {
+        if self.mount_tree.is_entry_used_in_mount(&entry_to_remove) {
             return Err(vfs_error(FileSystemErrorKind::NotSupported, "Resource is busy"));
         }
 

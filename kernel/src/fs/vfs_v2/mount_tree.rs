@@ -265,19 +265,18 @@ impl MountTree {
         mounts.insert(new_root.id, Arc::downgrade(&new_root));
     }
 
-    /// Check if an entry is a mount point or a source for a bind mount.
-    pub fn is_entry_mounted(&self, entry_to_check: &VfsEntryRef) -> bool {
+    /// Check if a path is a mount point
+    pub fn is_mount_point(&self, entry_to_check: &VfsEntryRef) -> bool {
+        crate::println!("Checking if entry is a mount point: {}", entry_to_check.name());
         let node_to_check = entry_to_check.node();
         let node_id = node_to_check.id();
         
-        // We need to compare filesystem pointers to correctly identify the source filesystem.
         let fs_ptr_to_check = match node_to_check.filesystem().and_then(|w| w.upgrade()) {
             Some(fs) => Arc::as_ptr(&fs) as *const (),
-            None => return false, // If no fs, cannot be mounted.
+            None => return false,
         };
 
         for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
-            // Check if the entry is a mount point itself.
             if let Some(parent_entry) = &mount.parent_entry {
                 if parent_entry.node().id() == node_id {
                     let parent_fs_ptr = parent_entry.node().filesystem().and_then(|w| w.upgrade())
@@ -287,8 +286,21 @@ impl MountTree {
                     }
                 }
             }
+        }
+        false
+    }
 
-            // Check if the entry is a source for a bind mount.
+    /// Check if an entry is a source for a bind mount
+    pub fn is_bind_source(&self, entry_to_check: &VfsEntryRef) -> bool {
+        let node_to_check = entry_to_check.node();
+        let node_id = node_to_check.id();
+        
+        let fs_ptr_to_check = match node_to_check.filesystem().and_then(|w| w.upgrade()) {
+            Some(fs) => Arc::as_ptr(&fs) as *const (),
+            None => return false,
+        };
+
+        for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
             if let Some(bind_source) = &mount.bind_source {
                 if bind_source.node().id() == node_id {
                     let source_fs_ptr = bind_source.node().filesystem().and_then(|w| w.upgrade())
@@ -300,6 +312,11 @@ impl MountTree {
             }
         }
         false
+    }
+
+    /// エントリが何らかのマウント関係で使用中かチェック（削除前の安全性確認用）
+    pub fn is_entry_used_in_mount(&self, entry_to_check: &VfsEntryRef) -> bool {
+        self.is_mount_point(entry_to_check) || self.is_bind_source(entry_to_check)
     }
 
     /// Unmount a filesystem
@@ -411,29 +428,10 @@ impl MountTree {
         Ok((current_entry, current_mount))
     }
 
-    /// Check if a path is a mount point
-    pub fn is_mount_point(&self, entry: VfsEntryRef) -> VfsResult<bool> {
-        // Check if the entry is a mount point by looking up its parent
-        if entry.parent().is_some() {
-            // For simplicity, check if any mount has this entry as its parent_entry
-            for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
-                if let Some(parent_entry) = &mount.parent_entry {
-                    if Arc::ptr_eq(&entry, parent_entry) {
-                        return Ok(true);
-                    }
-                }
-            }
-            Ok(false)
-        } else {
-            // If no parent, it cannot be a mount point
-            Ok(false)
-        }
-    }
-
     /// Get mount information for a path
     pub fn get_mount_info(&self, entry: VfsEntryRef) -> VfsResult<MountId> {
         // Check if the entry is a mount point
-        if self.is_mount_point(entry.clone())? {
+        if self.is_mount_point(&entry) {
             // Find the mount point for this entry
             for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
                 if let Some(parent_entry) = &mount.parent_entry {
