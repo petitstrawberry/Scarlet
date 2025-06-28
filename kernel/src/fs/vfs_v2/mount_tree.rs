@@ -113,8 +113,8 @@ pub struct MountPoint {
     pub parent: Option<Weak<MountPoint>>,
     /// Parent entry (strong reference to the VFS entry at the mount point to ensure it stays alive)
     pub parent_entry: Option<VfsEntryRef>,
-    /// Child mounts: map of VfsEntry ID to MountPoint
-    pub children: RwLock<BTreeMap<u64, Arc<MountPoint>>>,
+    /// Child mounts: shared map of VfsEntry ID to MountPoint
+    pub children: Arc<RwLock<BTreeMap<u64, Arc<MountPoint>>>>,
 }
 
 impl MountPoint {
@@ -127,7 +127,7 @@ impl MountPoint {
             root,
             parent: None,
             parent_entry: None,
-            children: RwLock::new(BTreeMap::new()),
+            children: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -144,7 +144,7 @@ impl MountPoint {
             root: source,
             parent: None,
             parent_entry: None,
-            children: RwLock::new(BTreeMap::new()),
+            children: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -166,7 +166,7 @@ impl MountPoint {
             root,
             parent: None,
             parent_entry: None,
-            children: RwLock::new(BTreeMap::new()),
+            children: Arc::new(RwLock::new(BTreeMap::new())),
         }))
     }
 
