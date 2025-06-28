@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::RwLock;
 
 use super::core::{VfsEntry, FileSystemOperations};
+use super::manager::VfsManager;
 use crate::fs::{FileSystemError, FileSystemErrorKind};
 
 pub type VfsResult<T> = Result<T, FileSystemError>;
@@ -38,6 +39,17 @@ impl MountId {
     }
 }
 
+/// Unique identifier for VfsManager instances
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VfsManagerId(u64);
+
+impl VfsManagerId {
+    pub fn new() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// Type of mount operation
 #[derive(Debug, Clone)]
 pub enum MountType {
@@ -45,8 +57,8 @@ pub enum MountType {
     Regular,
     /// Bind mount (mount existing directory at another location)
     Bind {
-        /// The original entry being bound
-        source: VfsEntryRef,
+        /// Type and details of the bind mount
+        bind_type: BindType,
     },
     /// Overlay mount (overlay multiple directories)
     Overlay {
@@ -62,11 +74,28 @@ pub struct MountOptionsV2 {
     pub flags: u32,
 }
 
-/// Bind mount type (for compatibility with manager_v2.rs)  
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Bind mount type
+#[derive(Debug, Clone)]
 pub enum BindType {
-    Regular,
-    Recursive,
+    /// Regular bind mount within same VFS
+    Regular {
+        /// The original entry being bound
+        source: VfsEntryRef,
+    },
+    /// Cross-VFS bind mount to another VfsManager
+    CrossVfs {
+        /// Weak reference to source VfsManager (avoid cycles)
+        source_vfs: Weak<VfsManager>,
+        /// Source path in the source VfsManager
+        source_path: String,
+        /// Cache timeout in seconds
+        cache_timeout: u64,
+    },
+    /// Recursive bind mount (for future use)
+    Recursive {
+        /// The original entry being bound
+        source: VfsEntryRef,
+    },
 }
 
 /// Mount point information
@@ -107,7 +136,9 @@ impl MountPoint {
         Arc::new(Self {
             id: MountId::new(),
             mount_type: MountType::Bind {
-                source: source.clone(),
+                bind_type: BindType::Regular {
+                    source: source.clone(),
+                },
             },
             path,
             root: source,
@@ -137,6 +168,32 @@ impl MountPoint {
             parent_entry: None,
             children: RwLock::new(BTreeMap::new()),
         }))
+    }
+
+    /// Create a new cross-VFS bind mount point
+    /// Note: For cross-VFS bind mounts, the root will be resolved dynamically during path resolution
+    pub fn new_cross_vfs_bind(
+        path: String, 
+        source_vfs: Weak<VfsManager>, 
+        source_path: String, 
+        placeholder_root: VfsEntryRef,  // Temporary placeholder until first resolution
+        cache_timeout: u64
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            id: MountId::new(),
+            mount_type: MountType::Bind {
+                bind_type: BindType::CrossVfs {
+                    source_vfs,
+                    source_path,
+                    cache_timeout,
+                },
+            },
+            path,
+            root: placeholder_root,  // This will be replaced during first access
+            parent: None,
+            parent_entry: None,
+            children: RwLock::new(BTreeMap::new()),
+        })
     }
 
     /// Get the parent mount point
@@ -178,6 +235,40 @@ impl MountPoint {
     /// List all child mount IDs
     pub fn list_children(&self) -> Vec<u64> {
         self.children.read().keys().cloned().collect()
+    }
+
+    /// Check if this mount point is a bind mount
+    pub fn is_bind_mount(&self) -> bool {
+        matches!(self.mount_type, MountType::Bind { .. })
+    }
+
+    /// Check if this mount point is a cross-VFS bind mount
+    pub fn is_cross_vfs_bind(&self) -> bool {
+        matches!(self.mount_type, MountType::Bind { bind_type: BindType::CrossVfs { .. } })
+    }
+
+    /// Get the bind source entry (for regular bind mounts only)
+    pub fn get_bind_source(&self) -> Option<VfsEntryRef> {
+        match &self.mount_type {
+            MountType::Bind { bind_type } => {
+                match bind_type {
+                    BindType::Regular { source } => Some(source.clone()),
+                    BindType::Recursive { source } => Some(source.clone()),
+                    BindType::CrossVfs { .. } => None, // Cross-VFS sources are resolved dynamically
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get cross-VFS bind information
+    pub fn get_cross_vfs_info(&self) -> Option<(Weak<VfsManager>, &str, u64)> {
+        match &self.mount_type {
+            MountType::Bind { bind_type: BindType::CrossVfs { source_vfs, source_path, cache_timeout } } => {
+                Some((source_vfs.clone(), source_path.as_str(), *cache_timeout))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -301,7 +392,13 @@ impl MountTree {
         };
 
         for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
-            if let MountType::Bind { source, .. } = &mount.mount_type {
+            if let MountType::Bind { bind_type } = &mount.mount_type {
+                let source = match bind_type {
+                    BindType::Regular { source } => source,
+                    BindType::Recursive { source } => source,
+                    BindType::CrossVfs { .. } => continue, // Cross-VFS bind doesn't use same filesystem
+                };
+                
                 if source.node().id() == node_id {
                     let source_fs_ptr = source.node().filesystem().and_then(|w| w.upgrade())
                         .map(|fs| Arc::as_ptr(&fs) as *const ());
@@ -411,14 +508,27 @@ impl MountTree {
                 // If so, return the mount point entry itself, not the mounted content
                 if resolve_mount && i == components.len() - 1 {
                     // This is a mount point - return the mount point entry and the parent mount
-                    if let Some(_child_mount) = current_mount.get_child(&current_entry) {
-                        return Ok((current_entry, current_mount));
+                    if let Some(child_mount) = current_mount.get_child(&current_entry) {
+                        // For cross-VFS bind mounts on final component, still delegate to source VFS
+                        if child_mount.is_cross_vfs_bind() {
+                            return self.resolve_cross_vfs_path(&child_mount, "");
+                        } else {
+                            return Ok((current_entry, current_mount));
+                        }
                     }
                 } else {
                     // Not the final component - cross mount boundaries normally
                     if let Some(child_mount) = current_mount.get_child(&current_entry) {
-                        current_mount = child_mount;
-                        current_entry = current_mount.root.clone();
+                        // Check if this is a cross-VFS bind mount
+                        if child_mount.is_cross_vfs_bind() {
+                            // For cross-VFS bind mounts, delegate remaining path resolution to source VFS
+                            let remaining_path = components[i + 1..].join("/");
+                            return self.resolve_cross_vfs_path(&child_mount, &remaining_path);
+                        } else {
+                            // Regular mount - switch to child mount
+                            current_mount = child_mount;
+                            current_entry = current_mount.root.clone();
+                        }
                     }
                 }
             }
@@ -462,6 +572,18 @@ impl MountTree {
         }
         
         result
+    }
+
+    /// Register a mount in the global mount table
+    pub fn register_mount(&self, mount: Arc<MountPoint>) -> MountId {
+        let mount_id = mount.id;
+        self.mounts.write().insert(mount_id, Arc::downgrade(&mount));
+        mount_id
+    }
+
+    /// Unregister a mount from the global mount table
+    pub fn unregister_mount(&self, mount_id: MountId) -> bool {
+        self.mounts.write().remove(&mount_id).is_some()
     }
 
     // Helper methods
@@ -551,5 +673,28 @@ impl MountTree {
         entry.add_child(component_string, child_entry.clone());
 
         Ok(child_entry)
+    }
+
+    /// Resolve cross-VFS path for bind mounts
+    fn resolve_cross_vfs_path(
+        &self, 
+        mount_point: &MountPoint, 
+        relative_path: &str
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        if let Some((source_vfs, source_path, _cache_timeout)) = mount_point.get_cross_vfs_info() {
+            let source_vfs = source_vfs.upgrade()
+                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS no longer available"))?;
+
+            let full_source_path = if relative_path.is_empty() || relative_path == "/" {
+                source_path.to_string()
+            } else {
+                format!("{}/{}", source_path.trim_end_matches('/'), relative_path.trim_start_matches('/'))
+            };
+
+            // Delegate to source VFS for complete resolution (including child mounts)
+            source_vfs.resolve_path_cross_vfs(&full_source_path)
+        } else {
+            Err(vfs_error(FileSystemErrorKind::NotSupported, "Not a cross-VFS mount"))
+        }
     }
 }

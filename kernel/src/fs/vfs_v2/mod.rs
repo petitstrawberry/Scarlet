@@ -24,6 +24,9 @@ pub mod tests;
 pub mod advanced_tests;
 #[cfg(test)]
 pub mod performance_tests;
+#[cfg(test)]
+pub mod cross_vfs_tests;
+
 
 pub use core::*;
 pub use tmpfs::*;
