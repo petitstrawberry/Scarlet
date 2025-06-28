@@ -170,32 +170,6 @@ impl MountPoint {
         }))
     }
 
-    // /// Create a new cross-VFS bind mount point
-    // /// Note: For cross-VFS bind mounts, the root will be resolved dynamically during path resolution
-    // pub fn new_cross_vfs_bind(
-    //     path: String, 
-    //     source_vfs: Weak<VfsManager>, 
-    //     source_path: String, 
-    //     placeholder_root: VfsEntryRef,  // Temporary placeholder until first resolution
-    //     cache_timeout: u64
-    // ) -> Arc<Self> {
-    //     Arc::new(Self {
-    //         id: MountId::new(),
-    //         mount_type: MountType::Bind {
-    //             bind_type: BindType::CrossVfs {
-    //                 source_vfs,
-    //                 source_path,
-    //                 cache_timeout,
-    //             },
-    //         },
-    //         path,
-    //         root: placeholder_root,  // This will be replaced during first access
-    //         parent: None,
-    //         parent_entry: None,
-    //         children: RwLock::new(BTreeMap::new()),
-    //     })
-    // }
-
     /// Get the parent mount point
     pub fn get_parent(&self) -> Option<Arc<MountPoint>> {
         self.parent.as_ref().and_then(|weak| weak.upgrade())
@@ -241,11 +215,6 @@ impl MountPoint {
     pub fn is_bind_mount(&self) -> bool {
         matches!(self.mount_type, MountType::Bind { .. })
     }
-
-    // /// Check if this mount point is a cross-VFS bind mount
-    // pub fn is_cross_vfs_bind(&self) -> bool {
-    //     matches!(self.mount_type, MountType::Bind { bind_type: BindType::CrossVfs { .. } })
-    // }
 
     /// Get the bind source entry (for regular bind mounts only)
     pub fn get_bind_source(&self) -> Option<VfsEntryRef> {
