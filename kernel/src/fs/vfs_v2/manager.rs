@@ -163,7 +163,6 @@ impl VfsManager {
         target_entry: Arc<VfsEntry>,
         target_mount_point: Arc<MountPoint>,
     ) -> Result<(), FileSystemError> {
-        crate::println!("Creating bind mount from '{}' to '{}'", source_entry.name(), target_entry.name());
         // Create a new MountPoint for the bind mount
         let bind_mount = MountPoint::new_bind(target_entry.name().clone(), source_entry);
         // Set parent/parent_entry
