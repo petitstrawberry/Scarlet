@@ -509,6 +509,12 @@ impl VfsManager {
         
         self.create_file(path, file_type)
     }
+
+    pub fn resolve_path(&self, path: &str) -> Result<Arc<VfsEntry>, FileSystemError> {
+        // Use MountTreeV2 to resolve the path
+        let (entry, _mount_point) = self.mount_tree.resolve_path(path)?;
+        Ok(entry)
+    }
     
     // Helper methods
     

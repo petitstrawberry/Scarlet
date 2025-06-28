@@ -165,7 +165,6 @@ impl MountPoint {
             (*mut_child).parent_entry = Some(entry.clone());
         }
         let key = entry.node().id();
-        crate::println!("Adding child mount: {} -> {}", self.path, child.path);
         self.children.write().insert(key, child);
         Ok(())
     }
@@ -285,7 +284,6 @@ impl MountTree {
     /// # Notes
     /// `entry_to_check` and `mount_point_to_check` should be in the same mount point.
     pub fn is_mount_point(&self, entry_to_check: &VfsEntryRef, mount_point_to_check: &Arc<MountPoint>) -> bool {
-        crate::println!("Checking if entry is a mount point: {}", entry_to_check.name());
         // let node_to_check = entry_to_check.node();
         // let node_id = node_to_check.id();
         
@@ -331,8 +329,6 @@ impl MountTree {
 
     /// Unmount a filesystem
     pub fn unmount(&self, entry: &VfsEntryRef, parent_mount_point: &Arc<MountPoint>) -> VfsResult<()> {
-        crate::println!("Children of mount point {}: {:?}", parent_mount_point.path, parent_mount_point.children.read());
-
         parent_mount_point.remove_child(&entry);
         Ok(())
     }
@@ -425,7 +421,7 @@ impl MountTree {
 
             resolved_path.push('/');
             resolved_path.push_str(&component);
-            crate::println!("Resolved path: {}", resolved_path);
+            // crate::println!("Resolved path: {}", resolved_path);
         }
 
         Ok((current_entry, current_mount))

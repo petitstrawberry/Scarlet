@@ -193,12 +193,6 @@ fn test_bind_mount_path_traversal() {
     // 3. Attempt to traverse out of the bind mount
     // /fs2/mount_point/../file2 --> /fs2/file2
     let result = vfs.metadata("/fs2/mount_point/../file2");
-    match &result {
-        Ok(metadata) => {
-            crate::println!("Accessed file2: {:?}", metadata);
-        },
-        Err(_) => (), // Expected error
-    }
     assert!(result.is_ok(), "Path traversal should allow access to /fs2/file2!");
 
     // 4. Attempt to access the secret file
@@ -207,14 +201,6 @@ fn test_bind_mount_path_traversal() {
 
     
     let result = vfs.metadata("/fs2/mount_point/../../root_content.txt");
-    match &result {
-        Ok(metadata) => {
-            crate::println!("Accessed root secret file: {:?}", metadata);
-        },
-        Err(e) => {
-            crate::println!("Failed to access root_content.txt: {:?}", e);
-        },
-    }
     assert!(result.is_ok(), "Cannot access root_content.txt from bind mount!");
 
 }
