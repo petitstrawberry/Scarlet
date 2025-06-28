@@ -157,46 +157,46 @@ impl VfsManager {
         self.cross_vfs_refs.write().retain(|_, weak_ref| weak_ref.strong_count() > 0);
     }
 
-    /// Create a cross-VFS bind mount from another VfsManager
-    pub fn bind_mount_from(
-        &self,
-        source_vfs: &Arc<VfsManager>,
-        source_path: &str,
-        target_path: &str,
-        cache_timeout: Option<u64>,
-    ) -> Result<(), FileSystemError> {
-        // Prevent recursive mounting (e.g., mounting a directory inside itself)
-        if target_path.starts_with(source_path) && target_path != source_path {
-            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
-        }
+    // /// Create a cross-VFS bind mount from another VfsManager
+    // pub fn bind_mount_from(
+    //     &self,
+    //     source_vfs: &Arc<VfsManager>,
+    //     source_path: &str,
+    //     target_path: &str,
+    //     cache_timeout: Option<u64>,
+    // ) -> Result<(), FileSystemError> {
+    //     // Prevent recursive mounting (e.g., mounting a directory inside itself)
+    //     if target_path.starts_with(source_path) && target_path != source_path {
+    //         return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
+    //     }
 
-        // Register the source VFS for future reference
-        self.register_cross_vfs(source_vfs);
+    //     // Register the source VFS for future reference
+    //     self.register_cross_vfs(source_vfs);
 
-        // Resolve the target entry where the source will be mounted
-        let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
+    //     // Resolve the target entry where the source will be mounted
+    //     let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
 
-        // Verify the source path exists in the source VFS
-        let _ = source_vfs.mount_tree.resolve_path(source_path)
-            .map_err(|_| vfs_error(FileSystemErrorKind::NotFound, "Source path not found in source VFS"))?;
+    //     // Verify the source path exists in the source VFS
+    //     let _ = source_vfs.mount_tree.resolve_path(source_path)
+    //         .map_err(|_| vfs_error(FileSystemErrorKind::NotFound, "Source path not found in source VFS"))?;
 
-        // Create a cross-VFS bind mount
-        let cross_vfs_mount = MountPoint::new_cross_vfs_bind(
-            target_entry.name().clone(),
-            Arc::downgrade(source_vfs),
-            source_path.to_string(),
-            target_entry.clone(), // Use target_entry as placeholder for now
-            cache_timeout.unwrap_or(5), // Default 5 seconds cache
-        );
+    //     // Create a cross-VFS bind mount
+    //     let cross_vfs_mount = MountPoint::new_cross_vfs_bind(
+    //         target_entry.name().clone(),
+    //         Arc::downgrade(source_vfs),
+    //         source_path.to_string(),
+    //         target_entry.clone(), // Use target_entry as placeholder for now
+    //         cache_timeout.unwrap_or(5), // Default 5 seconds cache
+    //     );
 
-        // Add the new mount as a child of the target's containing mount point
-        target_mount_point.add_child(&target_entry, cross_vfs_mount.clone())?;
+    //     // Add the new mount as a child of the target's containing mount point
+    //     target_mount_point.add_child(&target_entry, cross_vfs_mount.clone())?;
 
-        // Register the new mount in the global mount table
-        self.mount_tree.register_mount(cross_vfs_mount);
+    //     // Register the new mount in the global mount table
+    //     self.mount_tree.register_mount(cross_vfs_mount);
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
     
     /// Open a file at the specified path
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
@@ -399,50 +399,50 @@ impl VfsManager {
         Ok(())
     }
 
-    /// Create a cross-VFS bind mount
-    pub fn cross_vfs_bind_mount(
-        &self,
-        source_vfs_id: VfsManagerId,
-        source_path: &str,
-        target_path: &str,
-        _recursive: bool,
-    ) -> Result<(), FileSystemError> {
-        // Check if we're trying to bind to ourselves (recursive bind)
-        if source_vfs_id == self.id {
-            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
-        }
+    // /// Create a cross-VFS bind mount
+    // pub fn cross_vfs_bind_mount(
+    //     &self,
+    //     source_vfs_id: VfsManagerId,
+    //     source_path: &str,
+    //     target_path: &str,
+    //     _recursive: bool,
+    // ) -> Result<(), FileSystemError> {
+    //     // Check if we're trying to bind to ourselves (recursive bind)
+    //     if source_vfs_id == self.id {
+    //         return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
+    //     }
 
-        // Get the source VFS reference
-        let source_vfs = {
-            let refs = self.cross_vfs_refs.read();
-            refs.get(&source_vfs_id)
-                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS not registered"))?
-                .upgrade()
-                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS no longer available"))?
-        };
+    //     // Get the source VFS reference
+    //     let source_vfs = {
+    //         let refs = self.cross_vfs_refs.read();
+    //         refs.get(&source_vfs_id)
+    //             .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS not registered"))?
+    //             .upgrade()
+    //             .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS no longer available"))?
+    //     };
 
-        // Verify the source path exists
-        let _ = source_vfs.mount_tree.resolve_path(source_path)
-            .map_err(|_| vfs_error(FileSystemErrorKind::NotFound, "Source path not found"))?;
+    //     // Verify the source path exists
+    //     let _ = source_vfs.mount_tree.resolve_path(source_path)
+    //         .map_err(|_| vfs_error(FileSystemErrorKind::NotFound, "Source path not found"))?;
 
-        // Verify the target path exists
-        let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
+    //     // Verify the target path exists
+    //     let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
 
-        // Create cross-VFS bind mount
-        let cross_vfs_mount = MountPoint::new_cross_vfs_bind(
-            target_entry.name().clone(),
-            Arc::downgrade(&source_vfs),
-            source_path.to_string(),
-            target_entry.clone(),
-            5, // Default 5 seconds cache
-        );
+    //     // Create cross-VFS bind mount
+    //     let cross_vfs_mount = MountPoint::new_cross_vfs_bind(
+    //         target_entry.name().clone(),
+    //         Arc::downgrade(&source_vfs),
+    //         source_path.to_string(),
+    //         target_entry.clone(),
+    //         5, // Default 5 seconds cache
+    //     );
 
-        // Add the mount
-        target_mount_point.add_child(&target_entry, cross_vfs_mount.clone())?;
-        self.mount_tree.register_mount(cross_vfs_mount);
+    //     // Add the mount
+    //     target_mount_point.add_child(&target_entry, cross_vfs_mount.clone())?;
+    //     self.mount_tree.register_mount(cross_vfs_mount);
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
     
     // Helper methods
     
