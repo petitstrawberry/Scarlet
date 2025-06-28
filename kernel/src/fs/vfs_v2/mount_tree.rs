@@ -16,7 +16,6 @@ use spin::RwLock;
 
 use super::core::{VfsEntry, FileSystemOperations};
 use crate::fs::{FileSystemError, FileSystemErrorKind};
-use crate::println;
 
 pub type VfsResult<T> = Result<T, FileSystemError>;
 pub type VfsEntryRef = Arc<VfsEntry>;
@@ -393,32 +392,52 @@ impl MountTree {
         let mut current_mount = self.root_mount.read().clone();
         let mut current_entry = current_mount.root.clone();
         
+        let mut resolved_path = String::new();
         for component in components {
+            // crate::println!("Resolving component: {}", component);
+            // crate::println!("Current mount: {:?}", current_mount.path);
+            // crate::println!("Current entry: {:?}", current_entry.name());
             if component == ".." {
-                // Check if we're at a mount point root before deciding how to handle ".."
-                if Arc::ptr_eq(&current_entry, &current_mount.root) {
-                    // At mount root move to parent mount
-                    match current_mount.get_parent() {
-                        Some(parent_mount) => {
-                            current_entry = match current_mount.parent_entry.clone() {
-                                Some(parent_entry) => {
-                                    parent_entry
-                                },
-                                None => {
-                                    return Err(vfs_error(FileSystemErrorKind::NotFound, "Parent entry not set for mount root but parent mount exists"));
-                                }
-                            };
-                            current_mount = parent_mount.clone();
-                            current_entry = self.resolve_component(current_entry, &"..")?;
+                // crate::println!("Processing '..' - current_mount: {:?}, current_entry: {:?}", current_mount.path, current_entry.name());
+                
+                // Check if current entry points to the root node of current mount
+                let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
+                // crate::println!("Is at mount root? {}", is_at_mount_root);
+                
+                // Handle parent directory traversal
+                if is_at_mount_root {
+                    // We're at the root of current mount - go to parent mount regardless of mount type
+                    let parent_info = current_mount.get_parent().zip(current_mount.parent_entry.clone());
+                    match parent_info {
+                        Some((parent_mount, parent_entry)) => {
+                            // crate::println!("Moving to parent mount: {:?}", parent_mount.path);
+                            current_mount = parent_mount;
+                            // Resolve ".." from the mount point in the parent mount
+                            current_entry = self.resolve_component(parent_entry, &"..")?;
                         },
                         None => {
                             // No parent mount - stay at current mount root (this is the VFS root)
-                            current_entry = current_mount.root.clone();
+                            // crate::println!("No parent mount - staying at root");
                         }
                     }
                 } else {
-                    // Not at mount root - delegate to filesystem via regular path resolution
+                    // Not at mount root - use normal filesystem navigation
+                    // crate::println!("Not at mount root - resolving within filesystem");
                     current_entry = self.resolve_component(current_entry, &component)?;
+                    
+                    // After resolving ".." within a filesystem, check if we've moved to a mount boundary
+                    // In particular, if we're now at the root of the current mount but this mount has a parent,
+                    // we may need to cross the mount boundary
+                    let is_now_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
+                    if is_now_at_mount_root {
+                        if let Some((parent_mount, parent_entry)) = current_mount.get_parent().zip(current_mount.parent_entry.clone()) {
+                            // Check if the current mount's root is actually a mount point in the parent
+                            // If so, we should move to the parent mount and set current_entry to the parent of the mount point
+                            // crate::println!("At mount root after .. - checking if should cross to parent mount");
+                            current_mount = parent_mount;
+                            current_entry = self.resolve_component(parent_entry, &"..")?;
+                        }
+                    }
                 }
             } else {
                 // Regular path traversal within current mount
@@ -431,55 +450,28 @@ impl MountTree {
                     current_entry = current_mount.root.clone();
                 }
             }
+
+            resolved_path.push('/');
+            resolved_path.push_str(&component);
+            crate::println!("Resolved path: {}", resolved_path);
         }
 
         Ok((current_entry, current_mount))
     }
 
-    /// Resolve parent directory with mount boundary crossing support
-    /// This function is called when current_entry is already confirmed to be at mount root
-    fn resolve_parent_with_mount_crossing(
-        &self,
-        current_mount: Arc<MountPoint>,
-        _current_entry: VfsEntryRef, // We know this is current_mount.root
-    ) -> VfsResult<VfsEntryRef> {
-        // At mount root - need to cross to parent mount
-        if let Some(parent_mount_weak) = &current_mount.parent {
-            if let Some(parent_mount) = parent_mount_weak.upgrade() {
-                // Find the mount point entry in parent mount
-                return self.find_mount_point_entry(&parent_mount, &current_mount.path);
-            }
-        }
-        // No parent mount - stay at current mount root (this is the VFS root)
-        Ok(current_mount.root.clone())
-    }
-
-    /// Find mount point entry in parent mount
-    fn find_mount_point_entry(
-        &self,
-        parent_mount: &Arc<MountPoint>,
-        _mount_path: &str,
-    ) -> VfsResult<VfsEntryRef> {
-        // This is a simplified implementation
-        // In practice, we'd need to resolve the mount path in the parent mount
-        // For now, return the parent mount root
-        Ok(parent_mount.root.clone())
-    }
-
-    /// Find which mount contains the given entry
-    fn find_mount_for_entry(&self, _entry: &VfsEntryRef) -> VfsResult<Arc<MountPoint>> {
-        // This is a simplified implementation
-        // In practice, we'd need to traverse up the entry hierarchy to find the mount root
-        // For now, return root mount
-        Ok(self.root_mount.read().clone())
-    }
-
     /// Check if a path is a mount point
     pub fn is_mount_point(&self, entry: VfsEntryRef) -> VfsResult<bool> {
         // Check if the entry is a mount point by looking up its parent
-        if let Some(parent) = entry.parent() {
-            let parent_mount = self.find_mount_for_entry(&parent)?;
-            Ok(parent_mount.get_child(&entry).is_some())
+        if entry.parent().is_some() {
+            // For simplicity, check if any mount has this entry as its parent_entry
+            for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
+                if let Some(parent_entry) = &mount.parent_entry {
+                    if Arc::ptr_eq(&entry, parent_entry) {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
         } else {
             // If no parent, it cannot be a mount point
             Ok(false)
@@ -491,8 +483,14 @@ impl MountTree {
         // Check if the entry is a mount point
         if self.is_mount_point(entry.clone())? {
             // Find the mount point for this entry
-            let mount = self.find_mount_for_entry(&entry)?;
-            Ok(mount.id)
+            for mount in self.mounts.read().values().filter_map(|w| w.upgrade()) {
+                if let Some(parent_entry) = &mount.parent_entry {
+                    if Arc::ptr_eq(&entry, parent_entry) {
+                        return Ok(mount.id);
+                    }
+                }
+            }
+            Err(vfs_error(FileSystemErrorKind::NotFound, "Mount not found"))
         } else {
             Err(vfs_error(FileSystemErrorKind::NotFound, "Entry is not a mount point"))
         }
@@ -556,22 +554,6 @@ impl MountTree {
     //     Ok(current_mount)
     // }
 
-    /// Get the relative path within a mount point
-    fn get_relative_path(&self, mount: &Arc<MountPoint>, full_path: &str) -> VfsResult<String> {
-        let mount_path = self.get_mount_path(mount);
-        
-        if full_path == mount_path {
-            return Ok(".".to_string());
-        }
-
-        if !full_path.starts_with(&mount_path) {
-            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path not within mount"));
-        }
-
-        let relative = &full_path[mount_path.len()..];
-        Ok(relative.trim_start_matches('/').to_string())
-    }
-
     /// Get the full path of a mount point
     fn get_mount_path(&self, mount: &Arc<MountPoint>) -> String {
         if mount.is_root_mount() {
@@ -608,6 +590,7 @@ impl MountTree {
         // Check cache first (fast path)
         let component_string = component.to_string();
         if let Some(cached_child) = entry.get_child(&component_string) {
+            // crate::println!("Cache hit for component '{}'", component_string);
             return Ok(cached_child);
         }
 
@@ -629,7 +612,7 @@ impl MountTree {
         );
 
         // Add to parent's cache
-        entry.add_child(component_string, Arc::clone(&child_entry));
+        entry.add_child(component_string, child_entry.clone());
 
         Ok(child_entry)
     }

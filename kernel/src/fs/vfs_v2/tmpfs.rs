@@ -8,7 +8,7 @@ use alloc::{
     collections::BTreeMap, format, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
-use core::any::Any;
+use core::{any::Any, fmt::Debug};
 
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FilePermission, 
@@ -127,16 +127,11 @@ impl FileSystemOperations for TmpFS {
                 // Parent directory - try to handle within filesystem
                 if let Some(parent_weak) = &tmp_node.parent() {
                     if let Some(parent) = parent_weak.upgrade() {
+                        // crate::println!("TmpFS lookup: found parent node {:?}", parent);
                         // Return parent node within this filesystem
                         return Ok(parent as Arc<dyn VfsNode>);
                     }
                 }
-                // // No parent or parent is dropped - this might be filesystem root
-                // // Return special error to indicate VFS layer should handle mount boundary
-                // return Err(FileSystemError::new(
-                //     FileSystemErrorKind::NotSupported,
-                //     "Parent directory crosses filesystem boundary"
-                // ));
             }
             _ => {
                 // Regular lookup
@@ -145,6 +140,9 @@ impl FileSystemOperations for TmpFS {
         
         // Look up child in directory
         let children = tmp_node.children.read();
+        for (_child_name, _child_node) in children.iter() {
+            // crate::println!("TmpFS lookup: checking child '{}'", child_name);
+        }
         if let Some(child_node) = children.get(name) {
             Ok(Arc::clone(child_node) as Arc<dyn VfsNode>)
         } else {
@@ -363,6 +361,17 @@ pub struct TmpNode {
     
     /// Reference to filesystem (Weak<dyn FileSystemOperations>)
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+}
+
+impl Debug for TmpNode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TmpNode")
+            .field("name", &self.name.read())
+            .field("file_type", &self.file_type.read())
+            .field("metadata", &self.metadata.read())
+            .field("parent", &self.parent.read().as_ref().map(|p| p.strong_count()))
+            .finish()
+    }
 }
 
 impl TmpNode {

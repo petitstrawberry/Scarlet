@@ -39,7 +39,7 @@ pub type FileSystemRef = Arc<dyn FileSystemOperations>;
 /// VfsEntry is designed to be thread-safe and can be shared across threads.
 pub struct VfsEntry {
     /// Weak reference to parent VfsEntry (prevents circular references)
-    parent: Weak<VfsEntry>,
+    parent: RwLock<Weak<VfsEntry>>,
 
     /// Name of this VfsEntry (e.g., "user", "file.txt")
     name: String,
@@ -63,7 +63,7 @@ impl VfsEntry {
         debug_assert!(node.filesystem().unwrap().upgrade().is_some(), "VfsEntry::new - node.filesystem().upgrade() failed for name '{}'", name);
         
         Arc::new(Self {
-            parent: parent.unwrap_or_else(|| Weak::new()),
+            parent: RwLock::new(parent.unwrap_or_else(|| Weak::new())),
             name,
             node,
             children: RwLock::new(BTreeMap::new()),
@@ -82,11 +82,16 @@ impl VfsEntry {
 
     /// Get parent VfsEntry if it exists
     pub fn parent(&self) -> Option<Arc<VfsEntry>> {
-        self.parent.upgrade()
+        self.parent.read().upgrade()
+    }
+
+    pub fn set_parent(&self, parent: Weak<VfsEntry>) {
+        *self.parent.write() = parent;
     }
 
     /// Add a child to the cache
-    pub fn add_child(&self, name: String, child: Arc<VfsEntry>) {
+    pub fn add_child(self: &Arc<Self>, name: String, child: Arc<VfsEntry>) {
+        child.set_parent(Arc::downgrade(self));
         let mut children = self.children.write();
         children.insert(name, Arc::downgrade(&child));
     }
@@ -128,7 +133,7 @@ impl VfsEntry {
 impl Clone for VfsEntry {
     fn clone(&self) -> Self {
          Self {
-            parent: self.parent.clone(),
+            parent: RwLock::new(self.parent.read().clone()),
             name: self.name.clone(),
             node: Arc::clone(&self.node),
             children: RwLock::new(self.children.read().clone()),
