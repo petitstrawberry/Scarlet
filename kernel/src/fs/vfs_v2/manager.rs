@@ -71,6 +71,17 @@ impl VfsManager {
     }
     
     /// Mount a filesystem at the specified path
+    /// 
+    /// This will register the filesystem and create a mount point in the VFS.
+    /// 
+    /// # Arguments
+    /// * `filesystem` - The filesystem to mount.
+    /// * `mount_point_str` - The path where the filesystem should be mounted.
+    /// * `flags` - Mount options (e.g., read-only, etc.).
+    /// 
+    /// # Errors
+    /// Returns an error if the mount point already exists or is invalid.
+    /// 
     pub fn mount(
         &self,
         filesystem: Arc<dyn FileSystemOperations>,
@@ -107,6 +118,15 @@ impl VfsManager {
     }
     
     /// Unmount a filesystem from the specified path
+    /// 
+    /// This will remove the mount point and unregister the filesystem.
+    /// 
+    /// # Arguments
+    /// * `mount_point_str` - The path of the mount point to unmount.
+    /// 
+    /// # Errors
+    /// Returns an error if the mount point does not exist or is not a mount point.
+    /// 
     pub fn unmount(&self, mount_point_str: &str) -> Result<(), FileSystemError> {
         // Resolve to the mount point entry (not the mounted content)
         let (entry, mount_point) = self.mount_tree.resolve_mount_point(mount_point_str)?;
@@ -125,6 +145,19 @@ impl VfsManager {
         Ok(())
     }
 
+    /// Bind mount a directory from source_path to target_path
+    /// 
+    /// This will create a bind mount where the source directory is mounted
+    /// at the target path.
+    /// 
+    /// # Arguments
+    /// * `source_path` - The path of the source directory to bind mount.
+    /// * `target_path` - The path where the source directory should be mounted.
+    /// 
+    /// # Errors
+    /// Returns an error if the source is not a directory, the target is already a mount point,
+    /// or if the source is not a valid directory.
+    /// 
     pub fn bind_mount(
         &self,
         source_path: &str,
@@ -155,8 +188,42 @@ impl VfsManager {
         )
     }
 
+    /// Bind mount a directory from another VFS instance
+    /// 
+    /// This will create a bind mount where the source directory from another VFS
+    /// is mounted at the target path in this VFS.
+    /// 
+    /// # Arguments
+    /// * `source_vfs` - The source VFS instance containing the directory to bind
+    /// * `source_path` - The path of the source directory in the source VFS.
+    /// * `target_path` - The path where the source directory should be mounted in this
+    /// VFS.
+    /// 
+    /// # Errors
+    /// Returns an error if the source path does not exist, the target is already a mount point,
+    /// or if the source is not a valid directory.
+    /// 
+    pub fn bind_mount_from(
+        &self,
+        source_vfs: Arc<VfsManager>,
+        source_path: &str,
+        target_path: &str,
+    ) -> Result<(), FileSystemError> {
+        // Resolve the source and target paths
+        let (source_entry, source_mount_point) = source_vfs.mount_tree.resolve_path(source_path)?;
+        let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
+
+        // Create the bind mount entry
+        self.bind_mount_entry(
+            source_entry,
+            source_mount_point,
+            target_entry,
+            target_mount_point
+        )
+    }
+
     /// Create a bind mount from source_entry to target_entry
-    pub fn bind_mount_entry(
+    fn bind_mount_entry(
         &self,
         source_entry: Arc<VfsEntry>,
         source_mount_point: Arc<MountPoint>,
@@ -179,6 +246,19 @@ impl VfsManager {
     }
     
     /// Open a file at the specified path
+    /// 
+    /// This will resolve the path using the MountTreeV2 and open the file
+    /// using the filesystem associated with the resolved VfsEntry.
+    /// 
+    /// # Arguments
+    /// * `path` - The path of the file to open.
+    /// * `flags` - Flags for opening the file (e.g., read, write
+    /// * `O_CREAT`, etc.).
+    /// 
+    /// # Errors
+    /// Returns an error if the path does not exist, is not a file, or if
+    /// the filesystem cannot be resolved.
+    /// 
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
         // Use MountTreeV2 to resolve filesystem and relative path, then open
         let entry = self.mount_tree.resolve_path(path)?.0;
@@ -191,6 +271,18 @@ impl VfsManager {
     }
     
     /// Create a file at the specified path
+    /// 
+    /// This will create a new file in the filesystem at the given path.
+    ///
+    /// # Arguments
+    /// * `path` - The path where the file should be created.
+    /// * `file_type` - The type of file to create (e.g., regular
+    /// file, directory, etc.).
+    /// 
+    /// # Errors
+    /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
+    /// or if the file cannot be created.
+    /// 
     pub fn create_file(&self, path: &str, file_type: FileType) -> Result<(), FileSystemError> {
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
@@ -227,11 +319,31 @@ impl VfsManager {
     }
     
     /// Create a directory at the specified path
+    /// 
+    /// This will create a new directory in the filesystem at the given path.
+    /// 
+    /// # Arguments
+    /// * `path` - The path where the directory should be created.
+    /// 
+    /// # Errors
+    /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
+    /// or if the directory cannot be created.
+    /// 
     pub fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::Directory)
     }
     
     /// Remove a file at the specified path
+    /// 
+    /// This will remove the file from the filesystem and update the mount tree.
+    /// 
+    /// # Arguments
+    /// * `path` - The path of the file to remove.
+    /// 
+    /// # Errors
+    /// Returns an error if the path does not exist, is not a file, or if
+    /// the filesystem cannot be resolved.
+    /// 
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
         // Resolve the entry to be removed
         let (entry_to_remove, mount_point) = self.mount_tree.resolve_path(path)?;
@@ -261,6 +373,17 @@ impl VfsManager {
     }
     
     /// Get metadata for a file at the specified path
+    /// 
+    /// This will resolve the path using the MountTreeV2 and return the metadata
+    /// for the file represented by the resolved VfsEntry.
+    /// 
+    /// # Arguments
+    /// * `path` - The path of the file to get metadata for.
+    /// 
+    /// # Errors
+    /// Returns an error if the path does not exist, is not a file, or if
+    /// the filesystem cannot be resolved.
+    /// 
     pub fn metadata(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         // Resolve path to VfsEntry
         let entry = self.mount_tree.resolve_path(path)?.0;
@@ -272,6 +395,17 @@ impl VfsManager {
     }
     
     /// Read directory entries at the specified path
+    /// 
+    /// This will resolve the path using the MountTreeV2 and return a list of
+    /// directory entries for the directory represented by the resolved VfsEntry.
+    /// 
+    /// # Arguments
+    /// * `path` - The path of the directory to read.
+    /// 
+    /// # Errors
+    /// Returns an error if the path does not exist, is not a directory, or if
+    /// the filesystem cannot be resolved.
+    /// 
     pub fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         // Resolve path to VfsEntry
         let entry = self.mount_tree.resolve_path(path)?.0;
@@ -305,6 +439,16 @@ impl VfsManager {
     }
     
     /// Set current working directory
+    /// 
+    /// This will change the current working directory to the specified path.
+    /// 
+    /// # Arguments
+    /// * `path` - The path to set as the current working directory.
+    /// 
+    /// # Errors
+    /// Returns an error if the path does not exist, is not a directory, or if
+    /// the filesystem cannot be resolved.
+    /// 
     pub fn set_cwd(&self, path: &str) -> Result<(), FileSystemError> {
         let entry = self.mount_tree.resolve_path(path)?.0;
         
@@ -323,11 +467,32 @@ impl VfsManager {
     }
     
     /// Get current working directory
+    /// 
+    /// This returns the current working directory as an `Arc<VfsEntry>`.
+    /// 
+    /// If the current working directory is not set, it returns `None`.
+    ///
+    /// # Returns
+    /// An `Option<Arc<VfsEntry>>` containing the current working directory entry,
+    /// or `None` if the current working directory is not set.
+    /// 
     pub fn get_cwd(&self) -> Option<Arc<VfsEntry>> {
         self.cwd.read().clone()
     }
     
     /// Create a device file
+    /// 
+    /// This will create a new device file in the filesystem at the given path.
+    /// 
+    /// # Arguments
+    /// * `path` - The path where the device file should be created.
+    /// * `device_info` - Information about the device file to create (e.g.,
+    /// device type, major/minor numbers, etc.).
+    /// 
+    /// # Errors
+    /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
+    /// or if the device file cannot be created.
+    /// 
     pub fn create_device_file(
         &self,
         path: &str,
@@ -344,78 +509,6 @@ impl VfsManager {
         
         self.create_file(path, file_type)
     }
-    
-    /// Resolve a path in this VFS (public interface for cross-VFS access)
-    pub fn resolve_path_cross_vfs(&self, path: &str) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
-        self.mount_tree.resolve_path(path)
-    }
-    
-    /// Resolve a path to a VfsEntry (public interface)
-    pub fn resolve_path(&self, path: &str) -> Result<Arc<VfsEntry>, FileSystemError> {
-        let (entry, _) = self.mount_tree.resolve_path(path)?;
-        Ok(entry)
-    }
-
-    /// Get the unique ID of this VfsManager
-    pub fn id(&self) -> VfsManagerId {
-        self.id
-    }
-
-    // /// Get the number of cross-VFS references
-    // pub fn get_cross_vfs_ref_count(&self) -> usize {
-    //     self.cross_vfs_refs.read().len()
-    // }
-
-    // /// Register cross-VFS reference
-    // pub fn register_cross_vfs_ref(&self, other: Arc<VfsManager>) -> Result<(), FileSystemError> {
-    //     self.cross_vfs_refs.write().insert(other.id, Arc::downgrade(&other));
-    //     Ok(())
-    // }
-
-    // /// Create a cross-VFS bind mount
-    // pub fn cross_vfs_bind_mount(
-    //     &self,
-    //     source_vfs_id: VfsManagerId,
-    //     source_path: &str,
-    //     target_path: &str,
-    //     _recursive: bool,
-    // ) -> Result<(), FileSystemError> {
-    //     // Check if we're trying to bind to ourselves (recursive bind)
-    //     if source_vfs_id == self.id {
-    //         return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Recursive bind mount is not allowed"));
-    //     }
-
-    //     // Get the source VFS reference
-    //     let source_vfs = {
-    //         let refs = self.cross_vfs_refs.read();
-    //         refs.get(&source_vfs_id)
-    //             .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS not registered"))?
-    //             .upgrade()
-    //             .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Source VFS no longer available"))?
-    //     };
-
-    //     // Verify the source path exists
-    //     let _ = source_vfs.mount_tree.resolve_path(source_path)
-    //         .map_err(|_| vfs_error(FileSystemErrorKind::NotFound, "Source path not found"))?;
-
-    //     // Verify the target path exists
-    //     let (target_entry, target_mount_point) = self.mount_tree.resolve_path(target_path)?;
-
-    //     // Create cross-VFS bind mount
-    //     let cross_vfs_mount = MountPoint::new_cross_vfs_bind(
-    //         target_entry.name().clone(),
-    //         Arc::downgrade(&source_vfs),
-    //         source_path.to_string(),
-    //         target_entry.clone(),
-    //         5, // Default 5 seconds cache
-    //     );
-
-    //     // Add the mount
-    //     target_mount_point.add_child(&target_entry, cross_vfs_mount.clone())?;
-    //     self.mount_tree.register_mount(cross_vfs_mount);
-
-    //     Ok(())
-    // }
     
     // Helper methods
     
