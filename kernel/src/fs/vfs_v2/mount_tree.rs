@@ -314,26 +314,28 @@ impl MountTree {
         false
     }
 
-    /// エントリが何らかのマウント関係で使用中かチェック（削除前の安全性確認用）
+    /// Check if an entry is used in a mount (either as a mount point or a bind source)
     pub fn is_entry_used_in_mount(&self, entry_to_check: &VfsEntryRef) -> bool {
         self.is_mount_point(entry_to_check) || self.is_bind_source(entry_to_check)
     }
 
     /// Unmount a filesystem
-    pub fn unmount(&self, mount_id: MountId) -> VfsResult<()> {
+    pub fn unmount(&self, entry: &VfsEntryRef) -> VfsResult<()> {
         // Find the mount point
         let mount = {
             let mounts = self.mounts.read();
-            let weak_mount = mounts.get(&mount_id)
-                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Mount not found"))?;
-            weak_mount.upgrade()
-                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Mount no longer exists"))?
+            mounts.values()
+                .filter_map(|w| w.upgrade())
+                .find(|m| m.root.node().id() == entry.node().id())
+                .ok_or_else(|| vfs_error(FileSystemErrorKind::NotFound, "Mount point not found"))?
         };
 
         // Cannot unmount root
         if mount.is_root_mount() {
             return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Cannot unmount root filesystem"));
         }
+
+        crate::println!("Children of mount point {}: {:?}", mount.path, mount.list_children());
 
         // Check if mount has children (busy)
         if !mount.children.read().is_empty() {
@@ -346,7 +348,7 @@ impl MountTree {
         }
 
         // Remove from global mount table
-        self.mounts.write().remove(&mount_id);
+        self.mounts.write().remove(&mount.id);
 
         Ok(())
     }
@@ -428,6 +430,60 @@ impl MountTree {
         Ok((current_entry, current_mount))
     }
 
+    /// Resolve a path to the mount point entry (not the mounted content)
+    /// This is used for unmount operations where we need the actual mount point
+    pub fn resolve_mount_point(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        if path.is_empty() || path == "/" {
+            return Ok((self.root_mount.read().root.clone(), self.root_mount.read().clone()));
+        }
+
+        let components = self.parse_path(path);
+        let mut current_mount = self.root_mount.read().clone();
+        let mut current_entry = current_mount.root.clone();
+        
+        for (i, component) in components.iter().enumerate() {
+            if component == ".." {
+                // Handle parent directory traversal
+                let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
+                
+                if is_at_mount_root {
+                    let parent_info = current_mount.get_parent().zip(current_mount.parent_entry.clone());
+                    match parent_info {
+                        Some((parent_mount, parent_entry)) => {
+                            current_mount = parent_mount;
+                            current_entry = self.resolve_component(parent_entry, &"..")?;
+                        },
+                        None => {
+                            // Stay at root
+                        }
+                    }
+                } else {
+                    current_entry = self.resolve_component(current_entry, &component)?;
+                }
+            } else {
+                // Regular path traversal within current mount
+                current_entry = self.resolve_component(current_entry, &component)?;
+
+                // Check if we've reached a mount point but this is the final component
+                // If so, return the mount point entry itself, not the mounted content
+                if i == components.len() - 1 {
+                    // This is a mount point - return the mount point entry and the parent mount
+                    if let Some(_child_mount) = current_mount.get_child(&current_entry) {
+                        return Ok((current_entry, current_mount));
+                    }
+                } else {
+                    // Not the final component - cross mount boundaries normally
+                    if let Some(child_mount) = current_mount.get_child(&current_entry) {
+                        current_mount = child_mount;
+                        current_entry = current_mount.root.clone();
+                    }
+                }
+            }
+        }
+
+        Ok((current_entry, current_mount))
+    }
+
     /// Get mount information for a path
     pub fn get_mount_info(&self, entry: VfsEntryRef) -> VfsResult<MountId> {
         // Check if the entry is a mount point
@@ -460,23 +516,6 @@ impl MountTree {
         
         result
     }
-
-    // /// Find mount ID for a given path
-    // pub fn find_mount_id_by_path(&self, path: &str) -> Option<MountId> {
-    //     let components = self.parse_path(path);
-    //     let mut current_mount = self.root_mount.read().clone();
-
-    //     for component in components {
-    //         if let Some(child_mount) = current_mount.get_child(&component) {
-    //             current_mount = child_mount;
-    //         } else {
-    //             // Path doesn't correspond to a mount point
-    //             return None;
-    //         }
-    //     }
-
-    //     Some(current_mount.id)
-    // }
 
     // Helper methods
 

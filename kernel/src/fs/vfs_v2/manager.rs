@@ -103,8 +103,8 @@ impl VfsManager {
     
     /// Unmount a filesystem from the specified path
     pub fn unmount(&self, mount_point_str: &str) -> Result<(), FileSystemError> {
-        // Resolve the entry and mount point for the given path.
-        let (entry, mount_point) = self.mount_tree.resolve_path(mount_point_str)?;
+        // Resolve to the mount point entry (not the mounted content)
+        let (entry, _) = self.mount_tree.resolve_mount_point(mount_point_str)?;
 
         // Check if the resolved entry is actually a mount point.
         if !self.mount_tree.is_mount_point(&entry) {
@@ -112,7 +112,7 @@ impl VfsManager {
         }
 
         // Unmount using the MountTree.
-        self.mount_tree.unmount(mount_point.id)?;
+        self.mount_tree.unmount(&entry)?;
         
         // Remove from the filesystem registry.
         self.filesystems.write().remove(mount_point_str);
