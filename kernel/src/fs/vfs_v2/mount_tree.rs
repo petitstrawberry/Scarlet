@@ -302,54 +302,6 @@ impl MountTree {
         false
     }
 
-    // /// Create a bind mount
-    // pub fn bind_mount(&self, source_path: &str, target_path: &str) -> VfsResult<MountId> {
-    //     // Find the source entry
-    //     let source_entry = self.resolve_path(source_path)?;
-        
-    //     // Find target mount point
-    //     let target_mount = self.find_mount_point_for_path(target_path)?;
-    //     let relative_path = self.get_relative_path(&target_mount, target_path)?;
-
-    //     // Create bind mount
-    //     let bind_mount = MountPoint::new_bind(relative_path.clone(), source_entry.clone());
-    //     let mount_id = bind_mount.id;
-
-    //     // Add to parent's children
-    //     target_mount.add_child(&source_entry, bind_mount.clone())?;
-
-    //     // Register in global mount table
-    //     self.mounts.write().insert(mount_id, Arc::downgrade(&bind_mount));
-
-    //     Ok(mount_id)
-    // }
-
-    // /// Create an overlay mount
-    // pub fn overlay_mount(&self, layers: Vec<&str>, target_path: &str) -> VfsResult<MountId> {
-    //     // Resolve all layer paths
-    //     let mut layer_entries = Vec::new();
-    //     for layer_path in layers {
-    //         let entry = self.resolve_path(layer_path)?;
-    //         layer_entries.push(entry);
-    //     }
-
-    //     // Find target mount point
-    //     let target_mount = self.find_mount_point_for_path(target_path)?;
-    //     let relative_path = self.get_relative_path(&target_mount, target_path)?;
-
-    //     // Create overlay mount
-    //     let overlay_mount = MountPoint::new_overlay(relative_path.clone(), layer_entries.clear())?;
-    //     let mount_id = overlay_mount.id;
-
-    //     // Add to parent's children
-    //     target_mount.add_child(&layer_entries[0], overlay_mount.clone())?;
-
-    //     // Register in global mount table
-    //     self.mounts.write().insert(mount_id, Arc::downgrade(&overlay_mount));
-
-    //     Ok(mount_id)
-    // }
-
     /// Unmount a filesystem
     pub fn unmount(&self, mount_id: MountId) -> VfsResult<()> {
         // Find the mount point
