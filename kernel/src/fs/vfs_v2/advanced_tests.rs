@@ -80,7 +80,7 @@ fn test_nested_bind_mount() {
     vfs.bind_mount("/fs1/dir_b", "/fs2/mount_a/nested_mount").unwrap();
 
     // 3. Verification
-    let mut file_obj = vfs.open("/fs2/mount_a/nested_mount/file_b", 0).unwrap();
+    let file_obj = vfs.open("/fs2/mount_a/nested_mount/file_b", 0).unwrap();
     let file = file_obj.as_file().unwrap();
     assert!(file.metadata().is_ok());
 }
