@@ -14,7 +14,7 @@ use core::any::Any;
 use alloc::sync::Weak;
 
 use crate::fs::vfs_v2::core::{
-    VfsNode, FileSystemOperations, FileSystemRef
+    VfsNode, FileSystemOperations
 };
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, FilePermission
@@ -49,6 +49,9 @@ pub struct CpioNode {
     
     /// File ID
     file_id: usize,
+
+    /// Parent node (weak reference)
+    parent: RwLock<Option<Weak<CpioNode>>>,
 }
 
 impl CpioNode {
@@ -61,6 +64,7 @@ impl CpioNode {
             children: RwLock::new(BTreeMap::new()),
             filesystem: RwLock::new(None),
             file_id,
+            parent: RwLock::new(None),
         })
     }
     
@@ -72,7 +76,8 @@ impl CpioNode {
                 "Cannot add child to non-directory node"
             ));
         }
-        
+        // Set parent pointer
+        *child.parent.write() = Some(Arc::downgrade(&child));
         let mut children = self.children.write();
         children.insert(name, child);
         Ok(())
@@ -82,6 +87,10 @@ impl CpioNode {
     pub fn get_child(&self, name: &str) -> Option<Arc<CpioNode>> {
         let children = self.children.read();
         children.get(name).cloned()
+    }
+
+    pub fn parent_file_id(&self) -> Option<u64> {
+        self.parent.read().as_ref()?.upgrade().map(|p| p.file_id as u64)
     }
 }
 
@@ -293,7 +302,41 @@ impl FileSystemOperations for CpioFS {
         &self,
         node: Arc<dyn VfsNode>,
     ) -> Result<Vec<super::DirectoryEntryInternal>, FileSystemError> {
-        todo!()
+        let cpio_node = node.as_any()
+            .downcast_ref::<CpioNode>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid node type for CpioFS"
+            ))?;
+        if cpio_node.file_type != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Not a directory"
+            ));
+        }
+        let mut entries = Vec::new();
+        // Add "." and ".." entries
+        entries.push(super::DirectoryEntryInternal {
+            name: ".".to_string(),
+            file_type: FileType::Directory,
+            file_id: cpio_node.file_id as u64,
+        });
+        // .. entry should have the parent directory's file_id
+        let parent_file_id = cpio_node.parent_file_id().unwrap_or(0);
+        entries.push(super::DirectoryEntryInternal {
+            name: "..".to_string(),
+            file_type: FileType::Directory,
+            file_id: parent_file_id,
+        });
+        // Add children
+        for child in cpio_node.children.read().values() {
+            entries.push(super::DirectoryEntryInternal {
+                name: child.name.clone(),
+                file_type: child.file_type,
+                file_id: child.file_id as u64,
+            });
+        }
+        Ok(entries)
     }
 }
 
