@@ -121,30 +121,85 @@ impl CpioFS {
     /// Create a new CpioFS from CPIO archive data
     pub fn new(name: String, cpio_data: &[u8]) -> Result<Arc<Self>, FileSystemError> {
         let root_node = CpioNode::new("/".to_string(), FileType::Directory, Vec::new(), 1);
-        
         let filesystem = Arc::new(Self {
             root_node: Arc::clone(&root_node),
             name,
         });
-        
-        // Set filesystem reference in root node
         {
             let mut fs_guard = root_node.filesystem.write();
             *fs_guard = Some(Arc::clone(&filesystem));
         }
-        
         // Parse CPIO data and build directory tree
-        // For now, simplified implementation - just create root
-        // In a real implementation, you would parse the CPIO format here
-        
+        filesystem.parse_cpio_archive(cpio_data)?;
         Ok(filesystem)
     }
     
-    /// Parse CPIO archive and build directory tree (simplified)
-    fn parse_cpio_archive(&self, _data: &[u8]) -> Result<(), FileSystemError> {
-        // TODO: Implement actual CPIO parsing
-        // This would extract files and directories from the CPIO archive
-        // and build the directory tree by calling add_child on nodes
+    /// Parse CPIO archive and build directory tree
+    fn parse_cpio_archive(&self, data: &[u8]) -> Result<(), FileSystemError> {
+        // CPIO new ASCII format: magic "070701"
+        let mut offset = 0;
+        let mut file_id = 2;
+        while offset + 110 <= data.len() {
+            // Parse header
+            let magic = &data[offset..offset+6];
+            if magic != b"070701" {
+                break;
+            }
+            let inode = u32::from_str_radix(core::str::from_utf8(&data[offset+6..offset+14]).unwrap_or("0"), 16).unwrap_or(0);
+            let mode = u32::from_str_radix(core::str::from_utf8(&data[offset+14..offset+22]).unwrap_or("0"), 16).unwrap_or(0);
+            let namesize = usize::from_str_radix(core::str::from_utf8(&data[offset+94..offset+102]).unwrap_or("0"), 16).unwrap_or(0);
+            let filesize = usize::from_str_radix(core::str::from_utf8(&data[offset+54..offset+62]).unwrap_or("0"), 16).unwrap_or(0);
+            let name_start = offset + 110;
+            let name_end = name_start + namesize;
+            if name_end > data.len() { break; }
+            let name = &data[name_start..name_end-1]; // remove trailing NUL
+            let name_str = core::str::from_utf8(name).unwrap_or("").to_string();
+            let file_start = (name_end + 3) & !3; // 4-byte align
+            let file_end = file_start + filesize;
+            if file_end > data.len() { break; }
+            if name_str == "TRAILER!!!" { break; }
+            // Determine file type
+            let file_type = match mode & 0o170000 {
+                0o040000 => FileType::Directory,
+                0o100000 => FileType::RegularFile,
+                _ => FileType::RegularFile,
+            };
+            let content = if file_type == FileType::RegularFile {
+                data[file_start..file_end].to_vec()
+            } else {
+                Vec::new()
+            };
+            // Build node and insert into tree
+            let node = CpioNode::new(name_str.clone(), file_type, content, file_id);
+            file_id += 1;
+            // Insert into parent
+            let parent_path = if let Some(pos) = name_str.rfind('/') {
+                &name_str[..pos]
+            } else {
+                ""
+            };
+            let parent = if parent_path.is_empty() {
+                Arc::clone(&self.root_node)
+            } else {
+                // Traverse from root to find parent
+                let mut cur = Arc::clone(&self.root_node);
+                for part in parent_path.split('/') {
+                    if part.is_empty() { continue; }
+                    if let Some(child) = cur.get_child(part) {
+                        cur = child;
+                    } else {
+                        // Create intermediate directory if missing
+                        let dir = CpioNode::new(part.to_string(), FileType::Directory, Vec::new(), file_id);
+                        file_id += 1;
+                        cur.add_child(part.to_string(), Arc::clone(&dir)).ok();
+                        cur = dir;
+                    }
+                }
+                cur
+            };
+            parent.add_child(node.name.clone(), Arc::clone(&node)).ok();
+            offset = (file_end + 3) & !3;
+        }
         Ok(())
     }
 }
