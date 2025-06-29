@@ -69,6 +69,21 @@ impl VfsManager {
             // cross_vfs_refs: RwLock::new(BTreeMap::new()),
         }
     }
+
+    /// Create a new VFS manager instance with a specified root filesystem
+    pub fn new_with_root(root_fs: Arc<dyn FileSystemOperations>) -> Self {
+        let root_node = root_fs.root_node();
+        let dummy_root_entry = VfsEntry::new(None, "/".to_string(), root_node);
+        let mount_tree = MountTree::new(dummy_root_entry.clone());
+        let mut filesystems = BTreeMap::new();
+        filesystems.insert("/".to_string(), root_fs);
+        Self {
+            id: VfsManagerId::new(),
+            mount_tree,
+            filesystems: RwLock::new(filesystems),
+            cwd: RwLock::new(None),
+        }
+    }
     
     /// Mount a filesystem at the specified path
     /// 
