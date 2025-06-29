@@ -10,7 +10,7 @@ use alloc::{
 use spin::{rwlock::RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
 
-use crate::{driver_initcall, fs::{
+use crate::{device::DeviceType, driver_initcall, fs::{
     get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
 }};
 use crate::object::capability::{StreamOps, StreamError};
@@ -19,19 +19,20 @@ use crate::device::manager::BorrowedDeviceGuard;
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
 
 /// TmpFS v2 - New memory-based filesystem implementation
+///
+/// This struct implements an in-memory filesystem for VFS v2.
+/// It supports regular files, directories, and device nodes, with optional memory usage limits.
+/// The internal structure is based on `TmpNode` and uses locking for thread safety.
+///
 pub struct TmpFS {
     /// Root directory node
     root: RwLock<Arc<TmpNode>>,
-    
     /// Memory limit (0 = unlimited)
     memory_limit: usize,
-    
     /// Current memory usage
     current_memory: Mutex<usize>,
-    
     /// Next file ID generator
     next_file_id: Mutex<u64>,
-    
     /// Filesystem name
     name: String,
 }
@@ -355,26 +356,23 @@ impl FileSystemOperations for TmpFS {
     }
 }
 
-/// TmpNode represents a file or directory in TmpFS
+/// TmpNode represents a file, directory, or device node in TmpFS.
+///
+/// Each node contains metadata, content (for files), children (for directories),
+/// and references to its parent and filesystem. All fields are protected by locks for thread safety.
 pub struct TmpNode {
     /// File name
     name: RwLock<String>,
-    
     /// File type
     file_type: RwLock<FileType>,
-    
     /// File metadata
     metadata: RwLock<FileMetadata>,
-    
     /// File content (for regular files)
     content: RwLock<Vec<u8>>,
-    
     /// Child nodes (for directories)
     children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
-    
     /// Parent node (weak reference to avoid cycles)
     parent: RwLock<Option<Weak<TmpNode>>>,
-    
     /// Reference to filesystem (Weak<dyn FileSystemOperations>)
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
 }
@@ -538,6 +536,10 @@ impl VfsNode for TmpNode {
 }
 
 /// File object for TmpFS operations
+///
+/// TmpFileObject represents an open file or directory in TmpFS.
+///
+/// It maintains the current file position and, for device files, an optional device guard.
 pub struct TmpFileObject {
     /// Reference to the TmpNode
     node: Arc<TmpNode>,
@@ -576,28 +578,206 @@ impl TmpFileObject {
             device_guard: Some(device_guard),
         }
     }
+
+    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.device();
+            let mut device_read = device_guard_ref.write();
+            
+            match device_read.device_type() {
+                DeviceType::Char => {
+                    if let Some(char_device) = device_read.as_char_device() {
+                        let mut bytes_read = 0;
+                        for byte in buffer.iter_mut() {
+                            match char_device.read_byte() {
+                                Some(b) => {
+                                    *byte = b;
+                                    bytes_read += 1;
+                                },
+                                None => break,
+                            }
+                        }
+                        return Ok(bytes_read);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a character device".to_string(),
+                        });
+                    }
+                },
+                DeviceType::Block => {
+                    if let Some(block_device) = device_read.as_block_device() {
+                        // For block devices, we can read a single sector
+                        let request = Box::new(crate::device::block::request::BlockIORequest {
+                            request_type: crate::device::block::request::BlockIORequestType::Read,
+                            sector: 0,
+                            sector_count: 1,
+                            head: 0,
+                            cylinder: 0,
+                            buffer: buffer.to_vec(),
+                        });
+                        
+                        block_device.enqueue_request(request);
+                        let results = block_device.process_requests();
+                        
+                        if let Some(result) = results.first() {
+                            match &result.result {
+                                Ok(_) => return Ok(buffer.len()),
+                                Err(e) => {
+                                    return Err(FileSystemError {
+                                        kind: FileSystemErrorKind::IoError,
+                                        message: format!("Block device read failed: {}", e),
+                                    });
+                                }
+                            }
+                        }
+                        return Ok(0);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a block device".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(FileSystemError {
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Unsupported device type".to_string(),
+                    });
+                }
+            }
+        }
+
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "No device guard available".to_string(),
+        })
+    }
+
+    fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
+        let mut position = self.position.write();
+        
+        // Use the direct node reference instead of finding it by path
+        
+        let content_guard = self.node.content.write();
+        // self.node.update_access_time();
+
+        if *position as usize >= content_guard.len() {
+            return Ok(0); // EOF
+        }
+        
+        let available = content_guard.len() - *position as usize;
+        let to_read = buffer.len().min(available);
+        
+        buffer[..to_read].copy_from_slice(&content_guard[*position as usize..*position as usize + to_read]);
+        *position += to_read as u64;
+        
+        Ok(to_read)
+    }
+
+    fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.device();
+            let mut device_write = device_guard_ref.write();
+            
+            match device_write.device_type() {
+                DeviceType::Char => {
+                    if let Some(char_device) = device_write.as_char_device() {
+                        let mut bytes_written = 0;
+                        for &byte in buffer {
+                            match char_device.write_byte(byte) {
+                                Ok(_) => bytes_written += 1,
+                                Err(_) => break,
+                            }
+                        }
+                        return Ok(bytes_written);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a character device".to_string(),
+                        });
+                    }
+                },
+                DeviceType::Block => {
+                    if let Some(block_device) = device_write.as_block_device() {
+                        let request = Box::new(crate::device::block::request::BlockIORequest {
+                            request_type: crate::device::block::request::BlockIORequestType::Write,
+                            sector: 0,
+                            sector_count: 1,
+                            head: 0,
+                            cylinder: 0,
+                            buffer: buffer.to_vec(),
+                        });
+                        
+                        block_device.enqueue_request(request);
+                        let results = block_device.process_requests();
+                        
+                        if let Some(result) = results.first() {
+                            match &result.result {
+                                Ok(_) => return Ok(buffer.len()),
+                                Err(e) => {
+                                    return Err(FileSystemError {
+                                        kind: FileSystemErrorKind::IoError,
+                                        message: format!("Block device write failed: {}", e),
+                                    });
+                                }
+                            }
+                        }
+                        return Ok(0);
+                    } else {
+                        return Err(FileSystemError {
+                            kind: FileSystemErrorKind::NotSupported,
+                            message: "Device is not a block device".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(FileSystemError {
+                        kind: FileSystemErrorKind::NotSupported,
+                        message: "Unsupported device type".to_string(),
+                    });
+                }
+            }
+        } else {
+            Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "No device guard available".to_string(),
+            })
+        }
+    }
+
+    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
+        let mut position = self.position.write();
+        
+        // Use the direct node reference instead of finding it by path
+        let mut content_guard = self.node.content.write();
+        let old_size = content_guard.len();
+        let new_position = *position as usize + buffer.len();
+        
+        // Expand file if necessary
+        if new_position > content_guard.len() {
+            content_guard.resize(new_position, 0);
+        }
+        
+        // Write data
+        content_guard[*position as usize..new_position].copy_from_slice(buffer);
+        let new_size = content_guard.len();
+        
+        // Update metadata
+        self.node.update_size(new_size as u64);
+        
+        // let size_increase = new_size.saturating_sub(old_size);
+        *position += buffer.len() as u64;
+        Ok(buffer.len())
+    }
 }
 
 impl StreamOps for TmpFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         match self.node.file_type() {
             FileType::RegularFile => {
-                let mut position = self.position.write();
-                let content = self.node.content.read();
-                
-                if *position as usize >= content.len() {
-                    return Ok(0); // EOF
-                }
-                
-                let available = content.len() - *position as usize;
-                let to_read = buffer.len().min(available);
-                
-                buffer[..to_read].copy_from_slice(
-                    &content[*position as usize..*position as usize + to_read]
-                );
-                *position += to_read as u64;
-                
-                Ok(to_read)
+                self.read_regular_file(buffer)
+                    .map_err(StreamError::from)
             }
             FileType::Directory => {
                 // TODO: Implement directory reading
@@ -605,13 +785,8 @@ impl StreamOps for TmpFileObject {
                 Ok(0)
             }
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
-                // Delegate to device
-                if let Some(ref device_guard) = self.device_guard {
-                    // TODO: Implement device reading
-                    Ok(0)
-                } else {
-                    Err(StreamError::NotSupported)
-                }
+                self.read_device(buffer)
+                    .map_err(StreamError::from)
             }
             _ => Err(StreamError::NotSupported)
         }
@@ -620,23 +795,7 @@ impl StreamOps for TmpFileObject {
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         match self.node.file_type() {
             FileType::RegularFile => {
-                let mut position = self.position.write();
-                let mut content = self.node.content.write();
-                
-                // Expand file if necessary
-                if *position as usize + buffer.len() > content.len() {
-                    content.resize(*position as usize + buffer.len(), 0);
-                }
-                
-                // Write data
-                content[*position as usize..*position as usize + buffer.len()]
-                    .copy_from_slice(buffer);
-                *position += buffer.len() as u64;
-                
-                // Update metadata
-                self.node.update_size(content.len() as u64);
-                
-                Ok(buffer.len())
+                self.write_regular_file(buffer).map_err(StreamError::from)
             }
             FileType::Directory => {
                 Err(StreamError::from(FileSystemError::new(
@@ -645,13 +804,7 @@ impl StreamOps for TmpFileObject {
                 )))
             }
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
-                // Delegate to device
-                if let Some(ref device_guard) = self.device_guard {
-                    // TODO: Implement device writing
-                    Ok(buffer.len())
-                } else {
-                    Err(StreamError::NotSupported)
-                }
+                self.write_device(buffer).map_err(StreamError::from)
             }
             _ => Err(StreamError::NotSupported)
         }
