@@ -4,6 +4,7 @@ use super::OverlayFS;
 use super::tmpfs::TmpFS;
 use crate::fs::vfs_v2::FileSystemOperations;
 use crate::fs::FileType;
+use crate::fs::SeekFrom;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use alloc::vec;
@@ -90,7 +91,15 @@ fn test_overlayfs_copy_up() {
     let upper_file_obj = upper.open(&upper_file, 0).unwrap(); // Read mode
     let mut buffer = [0u8; 32];
     let bytes_read = upper_file_obj.read(&mut buffer).unwrap();
-    assert_eq!(&buffer[..bytes_read], b"upper content"); 
+    assert_eq!(&buffer[..bytes_read], b"upper content");
+
+    // Verify lower layer still has original content
+    let mut lower_buffer = [0u8; 32];
+    let lower_file_obj = lower.open(&lower_file, 1).unwrap(); // Write mode
+    lower_file_obj.write(b"lower content").unwrap();
+    lower_file_obj.seek(SeekFrom::Start(0)).unwrap();
+    let lower_bytes_read = lower_file_obj.read(&mut lower_buffer).unwrap();
+    assert_eq!(&lower_buffer[..lower_bytes_read], b"lower content");    
 }
 
 #[test_case]
