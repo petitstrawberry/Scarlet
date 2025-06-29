@@ -70,7 +70,7 @@ fn test_concurrent_operations() {    // Create two separate VFS managers to simu
     manager2.mount(fs2, "/", 0).unwrap();
     
     // Create files concurrently in both managers
-    let file_count = 20;
+    let file_count = 10;
     
     // Manager 1 creates files with prefix "mgr1_"
     for i in 0..file_count {

@@ -94,14 +94,12 @@ impl CpioNode {
         self.parent.read().as_ref()?.upgrade().map(|p| p.file_id as u64)
     }
 
-    /// Arc<dyn VfsNode>からArc<CpioNode>へ安全に変換するヘルパー
+    /// Helper to convert from Arc<dyn VfsNode> to Arc<CpioNode>
     pub fn from_vfsnode_arc(node: &Arc<dyn VfsNode>) -> Option<Arc<CpioNode>> {
-        // Arc内部のポインタ比較で同一性を判定し、cloneでArc<CpioNode>を返す
-        node.as_any().downcast_ref::<CpioNode>().map(|raw| {
-            // Safety: Arcの参照カウントは維持されているのでcloneでOK
-            let ptr = raw as *const CpioNode;
-            unsafe { Arc::from_raw(ptr) }.clone()
-        })
+        match Arc::downcast::<CpioNode>(node.clone()) {
+            Ok(cpio_node) => Some(cpio_node),
+            Err(_) => None,
+        }
     }
 }
 

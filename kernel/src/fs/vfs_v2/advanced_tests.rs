@@ -8,8 +8,8 @@ use crate::fs::vfs_v2::{ manager::VfsManager, tmpfs::TmpFS, }; use crate::fs::Fi
 fn test_basic_bind_mount() {
     // 1. Setup: two filesystems (tmpfs) mounted at /fs1 and /fs2
     let vfs_manager = VfsManager::new();
-    let tmpfs1: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(1024 * 1024);
-    let tmpfs2: Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations> = TmpFS::new(1024 * 1024);
+    let tmpfs1 = TmpFS::new(1024 * 1024);
+    let tmpfs2 = TmpFS::new(1024 * 1024);
 
     vfs_manager.create_dir("/fs1").expect("Failed to create /fs1");
     vfs_manager.create_dir("/fs2").expect("Failed to create /fs2");

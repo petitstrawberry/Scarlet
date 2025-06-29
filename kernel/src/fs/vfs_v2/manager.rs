@@ -5,11 +5,10 @@
 //! VfsEntry-based caching, and better isolation support.
 
 use alloc::{
-    collections::BTreeMap,
     string::{String, ToString},
     sync::Arc,
+    vec,
     vec::Vec,
-    format,
 };
 use spin::{RwLock, Once};
 
@@ -21,7 +20,7 @@ use crate::object::KernelObject;
 
 use super::{
     core::{VfsEntry, FileSystemOperations, DirectoryEntryInternal},
-    mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId, MountId, MountType},
+    mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId},
 };
 
 /// Filesystem ID type (v1互換)
@@ -39,12 +38,12 @@ fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
 pub struct VfsManager {
     /// Unique identifier for this VfsManager instance
     pub id: VfsManagerId,
-    
     /// Mount tree for hierarchical mount point management
     pub mount_tree: MountTree,
-    
     /// Current working directory
     cwd: RwLock<Option<Arc<VfsEntry>>>,
+    /// Strong references to all currently mounted filesystems
+    mounted_filesystems: RwLock<Vec<Arc<dyn FileSystemOperations>>>,
 }
 
 static GLOBAL_VFS_MANAGER: Once<Arc<VfsManager>> = Once::new();
@@ -64,6 +63,7 @@ impl VfsManager {
             id: VfsManagerId::new(),
             mount_tree,
             cwd: RwLock::new(None),
+            mounted_filesystems: RwLock::new(vec![root_fs.clone()]),
         }
     }
 
@@ -76,6 +76,7 @@ impl VfsManager {
             id: VfsManagerId::new(),
             mount_tree,
             cwd: RwLock::new(None),
+            mounted_filesystems: RwLock::new(vec![root_fs.clone()]),
         }
     }
     
@@ -100,10 +101,20 @@ impl VfsManager {
         flags: u32,
     ) -> Result<(), FileSystemError> {
         if mount_point_str == "/" {
+            // Remove the existing root FS from the list
+            let old_root_fs = self.mount_tree.root_mount.read().root.node().filesystem()
+                .and_then(|w| w.upgrade());
+            if let Some(old_fs) = old_root_fs {
+                let old_ptr = Arc::as_ptr(&old_fs) as *const () as usize;
+                self.mounted_filesystems.write().retain(|fs| Arc::as_ptr(fs) as *const () as usize != old_ptr);
+            }
+            // Set the new root
             let new_root_node = filesystem.root_node();
             let new_root_entry = VfsEntry::new(None, "/".to_string(), new_root_node);
             let new_root_mount = MountPoint::new_regular("/".to_string(), new_root_entry);
             self.mount_tree.replace_root(new_root_mount);
+            // Push the new FS
+            self.mounted_filesystems.write().push(filesystem.clone());
             return Ok(());
         }
         let _mount_options = MountOptionsV2 {
@@ -111,7 +122,8 @@ impl VfsManager {
             flags,
         };
         let (target_entry, target_mount_point) = self.mount_tree.resolve_path(mount_point_str)?;
-        self.mount_tree.mount(target_entry, target_mount_point, filesystem)?;
+        self.mount_tree.mount(target_entry, target_mount_point, filesystem.clone())?;
+        self.mounted_filesystems.write().push(filesystem);
         Ok(())
     }
 
@@ -132,6 +144,9 @@ impl VfsManager {
             return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path is not a mount point"));
         }
         self.mount_tree.unmount(&entry, &mount_point)?;
+        // Identify the unmounted fs and remove it from the holding list
+        let fs_ptr = Arc::as_ptr(&mount_point.root.node().filesystem().unwrap().upgrade().unwrap()) as *const () as usize;
+        self.mounted_filesystems.write().retain(|fs| Arc::as_ptr(fs) as *const () as usize != fs_ptr);
         Ok(())
     }
 
@@ -281,7 +296,6 @@ impl VfsManager {
         let parent_entry = self.mount_tree.resolve_path(&parent_path)?.0;
         let parent_node = parent_entry.node();
         debug_assert!(parent_node.filesystem().is_some(), "VfsManager::create_file - parent_node.filesystem() is None for path '{}'", parent_path);
-        // crate::println!("Creating file '{}' in parent '{}'", filename, parent_path);
         
         // Create file using filesystem
         let filesystem = parent_node.filesystem()
@@ -506,12 +520,12 @@ impl VfsManager {
         Ok(entry)
     }
     
-    /// Overlay mount (v2, cross-vfs非対応)
-    /// upperdir: 上書き層, lowerdirs: 下層(複数可), target: マウント先, flags: オプション
+    /// Overlay mount (v2, cross-vfs not supported)
+    /// upperdir: upper layer, lowerdirs: lower layers (multiple allowed), target: mount point, flags: options
     pub fn overlay_mount(&self, upperdir: &str, lowerdirs: &[&str], target: &str, flags: u32) -> Result<(), FileSystemError> {
-        // TODO: 実装例（ダミー）
-        // 実際にはoverlayfsドライバを生成し、mount_treeに追加する
-        // cross-vfsはサポートしない
+        // TODO: Example implementation (dummy)
+        // In practice, generate an overlayfs driver and add it to the mount_tree
+        // Cross-vfs is not supported
         Err(FileSystemError::new(
             FileSystemErrorKind::NotSupported,
             "overlay_mount: not yet implemented (v2, no cross-vfs)",
