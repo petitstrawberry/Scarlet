@@ -69,7 +69,7 @@ impl CpioNode {
     }
     
     /// Add a child to this directory node
-    pub fn add_child(&self, name: String, child: Arc<CpioNode>) -> Result<(), FileSystemError> {
+    pub fn add_child(self: &Arc<Self>, name: String, child: Arc<CpioNode>) -> Result<(), FileSystemError> {
         if self.file_type != FileType::Directory {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotADirectory,
@@ -77,7 +77,7 @@ impl CpioNode {
             ));
         }
         // Set parent pointer
-        *child.parent.write() = Some(Arc::downgrade(&child));
+        *child.parent.write() = Some(Arc::downgrade(self));
         let mut children = self.children.write();
         children.insert(name, child);
         Ok(())
