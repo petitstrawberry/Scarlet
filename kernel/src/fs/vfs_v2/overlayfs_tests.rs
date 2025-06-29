@@ -28,6 +28,21 @@ fn make_mount_and_entry(fs: Arc<dyn FileSystemOperations>) -> (Arc<MountPoint>, 
 
 #[test_case]
 fn test_overlayfs_basic() {
+    /*
+    Directory structure:
+
+    lower:/
+    ├── foo (file)
+    ├── bar (file)
+    upper:/
+    ├── foo (file, overrides lower)
+    ├── baz (file)
+
+    OverlayFS root:
+    ├── foo  (from upper)
+    ├── bar  (from lower)
+    ├── baz  (from upper)
+    */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
     
@@ -60,6 +75,21 @@ fn test_overlayfs_basic() {
 
 #[test_case]
 fn test_overlayfs_readdir() {
+    /*
+    Directory structure:
+
+    lower:/
+    ├── a (file)
+    ├── b (file)
+    upper:/
+    ├── b (file, overrides lower)
+    ├── c (file)
+
+    OverlayFS root:
+    ├── a
+    ├── b (from upper)
+    ├── c
+    */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
     
@@ -90,6 +120,21 @@ fn test_overlayfs_readdir() {
 
 #[test_case]
 fn test_overlayfs_copy_up() {
+    /*
+    Directory structure:
+
+    lower:/
+    ├── testfile (file, "lower content")
+    upper:/
+    (empty)
+
+    After copy-up:
+    upper:/
+    ├── testfile (file, "upper content")
+
+    OverlayFS root:
+    ├── testfile (from upper after write)
+    */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
     
@@ -136,6 +181,21 @@ fn test_overlayfs_copy_up() {
 
 #[test_case]
 fn test_overlayfs_whiteout() {
+    /*
+    Directory structure:
+
+    lower:/
+    ├── hideme (file)
+    upper:/
+    (empty)
+
+    After remove:
+    upper:/
+    ├── .wh.hideme (whiteout)
+
+    OverlayFS root:
+    (no hideme)
+    */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
     
@@ -165,6 +225,18 @@ fn test_overlayfs_whiteout() {
 
 #[test_case]
 fn test_overlayfs_read_only() {
+    /*
+    Directory structure:
+
+    lower:/
+    ├── readonly (file)
+    upper:/
+    (empty)
+
+    OverlayFS is read-only (no upper layer)
+    OverlayFS root:
+    ├── readonly (readable, not writable)
+    */
     let lower = TmpFS::new(0);
     
     // Create file in lower
@@ -198,6 +270,21 @@ fn test_overlayfs_read_only() {
 
 #[test_case]
 fn test_overlayfs_upper_dir_remove_whiteout() {
+    /*
+    Directory structure:
+
+    lower:/
+    ├── dir1/
+    upper:/
+    ├── dir1/
+
+    After remove:
+    upper:/
+    ├── .wh.dir1 (whiteout)
+
+    OverlayFS root:
+    (no dir1)
+    */
     let lower = TmpFS::new(0);
     let upper = TmpFS::new(0);
 
@@ -229,6 +316,22 @@ fn test_overlayfs_upper_dir_remove_whiteout() {
 
 #[test_case]
 fn test_overlayfs_lower_mount_visibility_and_whiteout() {
+    /*
+    Directory/mount structure:
+
+    lower:/
+    └── dir1/
+        └── mnt/ (mount point)
+    mount_fs:/
+    └── file_in_mount (file)
+
+    bind mount:
+    mount_fs:/  →  lower:/dir1/mnt
+
+    OverlayFS lower: /dir1/mnt
+    OverlayFS root:
+    └── file_in_mount
+    */
     use crate::fs::vfs_v2::manager::VfsManager;
     use alloc::sync::Arc;
 
@@ -277,6 +380,33 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
 
 #[test_case]
 fn test_overlayfs_nested_mnt_bind_mounts() {
+    /*
+    Directory/mount structure:
+
+    lower:/
+    └── mnt/ (mount point)
+    mount1:/
+    └── file1 (file)
+    mount2:/
+    └── file2 (file)
+
+    bind mount:
+    mount1:/      → lower:/mnt
+    mount2:/      → lower:/mnt/child
+
+    Resulting structure:
+    /mnt
+    ├── file1      (from mount1)
+    └── child/     (mount point)
+        └── file2  (from mount2)
+
+    OverlayFS lower: /mnt
+    OverlayFS root:
+    ├── file1
+    └── child/
+    OverlayFS /mnt/child:
+    └── file2
+    */
     use crate::fs::vfs_v2::manager::VfsManager;
     use alloc::sync::Arc;
 
