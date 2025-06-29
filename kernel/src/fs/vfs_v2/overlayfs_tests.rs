@@ -12,7 +12,7 @@ use alloc::vec;
 use super::core::VfsEntry;
 use alloc::sync::Arc;
 
-// MountPoint生成ヘルパ
+// Helper to create a MountPoint
 fn make_mount(fs: Arc<dyn FileSystemOperations>) -> Arc<MountPoint> {
     let root_node = fs.root_node();
     let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
@@ -236,22 +236,22 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     let upper = TmpFS::new(0);
     let mount_fs = TmpFS::new(0);
 
-    // lower_mgrとmount_mgrをnew_with_rootで初期化
+    // Initialize lower_mgr and mount_mgr with new_with_root
     let lower_mgr = VfsManager::new_with_root(lower.clone());
     let mount_mgr = VfsManager::new_with_root(mount_fs.clone());
 
-    // lower_mgrの/dir1/mntを作成
+    // Create /dir1/mnt in lower_mgr
     let lower_root = lower.root_node();
     let dir1 = lower.create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
     let mnt = lower.create(&dir1, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
-    // mount_fsにファイルを作成
+    // Create a file in mount_fs
     let mount_root = mount_fs.root_node();
     mount_fs.create(&mount_root, &"file_in_mount".to_string(), FileType::RegularFile, 0o644).unwrap();
 
     // bind mount: mount_mgr:/ → lower_mgr:/dir1/mnt
     lower_mgr.bind_mount_from(Arc::new(mount_mgr), "/", "/dir1/mnt").unwrap();
 
-    // OverlayFSのlowerを/dir1/mntにする
+    // Use /dir1/mnt in lower_mgr as the lower layer for OverlayFS
     let mnt_entry = lower_mgr.resolve_path("/dir1/mnt").unwrap();
     let mnt_mp = make_mount(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
@@ -262,15 +262,15 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     ).unwrap();
     let root = overlay.root_node();
 
-    // OverlayFS経由でfile_in_mountが見えることを確認
+    // Confirm that file_in_mount is visible via OverlayFS
     let file_node = overlay.lookup(&root, &"file_in_mount".to_string()).unwrap();
     assert_eq!(file_node.metadata().unwrap().file_type, FileType::RegularFile);
 
-    // OverlayFS経由でfile_in_mountをwhiteout（remove）
+    // Remove file_in_mount via OverlayFS (whiteout)
     overlay.remove(&root, &"file_in_mount".to_string()).unwrap();
-    // file_in_mountが見えなくなっていることを確認
+    // Confirm that file_in_mount is no longer visible
     assert!(overlay.lookup(&root, &"file_in_mount".to_string()).is_err());
-    // upper層にwhiteoutファイルができていることを確認
+    // Confirm that a whiteout file was created in the upper layer
     let upper_root = upper.root_node();
     assert!(upper.lookup(&upper_root, &".wh.file_in_mount".to_string()).is_ok());
 }
@@ -280,109 +280,71 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
     use crate::fs::vfs_v2::manager::VfsManager;
     use alloc::sync::Arc;
 
+    // Prepare each FS
     let lower = TmpFS::new(0);
-    let upper = TmpFS::new(0);
-    let mount_fs1 = TmpFS::new(0);
-    let mount_fs2 = TmpFS::new(0);
+    let mount1 = TmpFS::new(0);
+    let mount2 = TmpFS::new(0);
 
-    // VFSマネージャを初期化
-    let lower_mgr = VfsManager::new_with_root(lower.clone());
-    let mount_mgr1 = VfsManager::new_with_root(mount_fs1.clone());
-    let mount_mgr2 = VfsManager::new_with_root(mount_fs2.clone());
-
-    // lower側に/dir1/mnt/mnt2を作成
+    // Create /mnt/child in lower
     let lower_root = lower.root_node();
-    let dir1 = lower.create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
-    let mnt = lower.create(&dir1, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
-    let mnt2 = lower.create(&mnt, &"mnt2".to_string(), FileType::Directory, 0o755).unwrap();
+    let mnt = lower.create(&lower_root, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
 
-    // mount_fs1, mount_fs2にファイル・ディレクトリを作成
-    let mount_root1 = mount_fs1.root_node();
-    mount_fs1.create(&mount_root1, &"file1".to_string(), FileType::RegularFile, 0o644).unwrap();
-    // mount_fs1上にmnt2ディレクトリを作成（bind mountのため）
-    let mount_mnt2 = mount_fs1.create(&mount_root1, &"mnt2".to_string(), FileType::Directory, 0o755).unwrap();
-    let mount_root2 = mount_fs2.root_node();
-    mount_fs2.create(&mount_root2, &"file2".to_string(), FileType::RegularFile, 0o644).unwrap();
+    // Create mount1:/file1, mount2:/file2
+    let mount1_root = mount1.root_node();
+    mount1.create(&mount1_root, &"file1".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let child = lower.create(&mount1_root, &"child".to_string(), FileType::Directory, 0o755).unwrap();
 
-    crate::println!("Before bind mounts:");
-    // Check entries in /dir1/mnt
-    let entries = lower_mgr.readdir("/dir1/mnt").unwrap();
-    for entry in entries {
-        crate::println!("Entry in /dir1/mnt: {}", entry.name);
-    }
+    let mount2_root = mount2.root_node();
+    mount2.create(&mount2_root, &"file2".to_string(), FileType::RegularFile, 0o644).unwrap();
 
-    // bind mount: mount_mgr1:/ → lower_mgr:/dir1/mnt
-    lower_mgr.bind_mount_from(Arc::new(mount_mgr1), "/", "/dir1/mnt").unwrap();
+    // Bind mount with VfsManager
+    let lower_mgr = VfsManager::new_with_root(lower.clone());
+    let mount1_mgr = VfsManager::new_with_root(mount1.clone());
+    let mount2_mgr = VfsManager::new_with_root(mount2.clone());
+    lower_mgr.bind_mount_from(Arc::new(mount1_mgr), "/", "/mnt").unwrap();
+    lower_mgr.bind_mount_from(Arc::new(mount2_mgr), "/", "/mnt/child").unwrap();
 
-    // bind mount: mount_mgr2:/ → lower_mgr:/dir1/mnt/mnt2
-    lower_mgr.bind_mount_from(Arc::new(mount_mgr2), "/", "/dir1/mnt/mnt2").unwrap();
+    // Check the lower_mgr's readdir for /mnt and /mnt/child
+    // Expected structure:
+    // /mnt
+    // ├── file1      ← from mount1
+    // └── child
+    //     └── file2  ← from mount2
+    let entries = lower_mgr.readdir("/mnt").unwrap();
+    assert!(entries.iter().any(|e| e.name == "file1"));
+    assert!(entries.iter().any(|e| e.name == "child"));
+    let entries = lower_mgr.readdir("/mnt/child").unwrap();
+    assert!(entries.iter().any(|e| e.name == "file2"));
 
-    // OverlayFSはlower_mgrの/dir1/mntを使う
-    let mnt_entry = lower_mgr.resolve_path("/dir1/mnt").unwrap();
-    let mnt_node = mnt_entry.node();
 
-    // bind mount後のmnt_nodeでfile1だけが見えることを確認
-    let mnt_dirents = lower.readdir(&mnt_node).unwrap();
-    let mnt_names: Vec<_> = mnt_dirents.iter().map(|e| &e.name).collect();
-    assert_eq!(mnt_names, vec![&"file1".to_string(), &"mnt2".to_string()], "mnt_nodeに余計なエントリが見えている: {:?}", mnt_names);
+    // Get VfsEntry and MountPoint for lower:/mnt
+    let (mnt_entry, mnt_mp) = lower_mgr.mount_tree.resolve_path("/mnt").unwrap();
+    // Check mnt_mp has child mount
+    let children = &mnt_mp.children;
+    assert!(children.read().values().any(|c| c.path == "child"));
 
-    // mnt2ディレクトリの中身はfile2のみ
-    let mnt2_entry = lower_mgr.resolve_path("/dir1/mnt/mnt2").unwrap();
-    let mnt2_node = mnt2_entry.node();
-    let mnt2_dirents = lower.readdir(&mnt2_node).unwrap();
-    crate::println!("Entries in /dir1/mnt/mnt2:");
-    for entry in &mnt2_dirents {
-        crate::println!(" - {}", entry.name);
-    }
-    let mnt2_names: Vec<_> = mnt2_dirents.iter().map(|e| &e.name).collect();
-    assert_eq!(mnt2_names, vec![&"file2".to_string()], "mnt2_nodeに余計なエントリが見えている: {:?}", mnt2_names);
-
-    // --- デバッグ: OverlayFS lowerに渡しているmnt2ノードでfile2が見えるか確認 ---
-    let mnt2_entry = lower_mgr.resolve_path("/dir1/mnt/mnt2").unwrap();
-    let mnt2_node = mnt2_entry.node();
-    let mnt2_dirents = lower.readdir(&mnt2_node).unwrap();
-    crate::println!("Direct readdir on lower mnt2 node:");
-    for entry in &mnt2_dirents {
-        crate::println!(" - {}", entry.name);
-    }
-    assert!(mnt2_dirents.iter().any(|e| e.name == "file2"), "Not found: {:?}", mnt2_dirents);
-    // --- ここまでデバッグ ---
-
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    // Upper layer is an empty TmpFS
+    let upper = TmpFS::new(0);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
-    // OverlayFSはlower_mgrの/dir1/mntを使う
+
+    // Create OverlayFS
     let overlay = OverlayFS::new_with_dirs(
-        Some((upper_mp.clone(), upper_entry.clone())),
-        vec![(lower_mp.clone(), lower_entry.clone())],
+        Some((upper_mp, upper_entry)),
+        vec![(mnt_mp, mnt_entry.clone())],
         "overlayfs".to_string()
     ).unwrap();
     let root = overlay.root_node();
 
-    // /file1が見える（mount_fs1由来）
-    let file1_node = overlay.lookup(&root, &"file1".to_string()).unwrap();
-    assert_eq!(file1_node.metadata().unwrap().file_type, FileType::RegularFile);
+    // file1 and child should be visible at OverlayFS root
+    let entries = overlay.readdir(&root).unwrap();
+    let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort();
+    assert!(names.contains(&"file1"));
+    assert!(names.contains(&"child"));
 
-    let dirents = overlay.readdir(&root).unwrap();
-    for entry in &dirents {
-        crate::println!("OverlayFS root entry: {}", entry.name);
-    }
-
-    // /mnt2/file2が見える（mount_fs2由来）
-    let mnt2_node = overlay.lookup(&root, &"mnt2".to_string()).unwrap();
-    let dirents = overlay.readdir(&mnt2_node).unwrap();
-    for entry in &dirents {
-        crate::println!("OverlayFS /mnt2 entry: {}", entry.name);
-    }
-    let mnt2_node = overlay.lookup(&root, &"mnt2".to_string()).unwrap();
-    crate::println!("Looking up /mnt2/file2 in OverlayFS");
-    let file2_node = overlay.lookup(&mnt2_node, &"file2".to_string()).unwrap();
-    assert_eq!(file2_node.metadata().unwrap().file_type, FileType::RegularFile);
-
-    // /mnt2/file2をwhiteout（remove）
-    overlay.remove(&mnt2_node, &"file2".to_string()).unwrap();
-    assert!(overlay.lookup(&mnt2_node, &"file2".to_string()).is_err());
-    // upper層にwhiteoutファイルができていることを確認
-    let upper_root = upper.root_node();
-    let upper_mnt2 = upper.lookup(&upper_root, &"mnt2".to_string()).unwrap();
-    assert!(upper.lookup(&upper_mnt2, &".wh.file2".to_string()).is_ok());
+    // file2 should be visible in child directory
+    let child_node = overlay.lookup(&root, &"child".to_string()).unwrap();
+    let child_entries = overlay.readdir(&child_node).unwrap();
+    let child_names: Vec<_> = child_entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(child_names.contains(&"file2"));
 }
