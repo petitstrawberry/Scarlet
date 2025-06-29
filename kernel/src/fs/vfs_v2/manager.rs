@@ -38,7 +38,7 @@ pub struct VfsManager {
     pub id: VfsManagerId,
     
     /// Mount tree for hierarchical mount point management
-    mount_tree: MountTree,
+    pub mount_tree: MountTree,
     
     /// Registered filesystems by name
     filesystems: RwLock<BTreeMap<String, Arc<dyn FileSystemOperations>>>,
