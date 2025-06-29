@@ -125,13 +125,32 @@ impl OverlayFS {
 
     /// Resolve a path in a specific layer, starting from the given node
     fn resolve_in_layer(&self, mount: &Arc<MountPoint>, entry: &Arc<VfsEntry>, path: &str) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        let fs = Self::fs_from_mount(mount);
-        let mut current = entry.node();
+        let mut current_mount = mount.clone();
+        let mut current_node = entry.node();
+
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
-        for part in parts {
-            current = fs.lookup(&current, &part.to_string())?;
+        if parts.is_empty() {
+            return Ok(current_node);
         }
-        Ok(current)
+
+        for part in parts {
+            let current_fs = current_node.filesystem()
+                .and_then(|w| w.upgrade())
+                .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "Node has no filesystem"))?;
+            
+            let next_node = current_fs.lookup(&current_node, &part.to_string())?;
+
+            let child_mount_opt = current_mount.children.read().get(&next_node.id()).cloned();
+
+            if let Some(child_mount) = child_mount_opt {
+                current_mount = child_mount.clone();
+                current_node = child_mount.root.node();
+            } else {
+                current_node = next_node;
+            }
+        }
+
+        Ok(current_node)
     }
 
     /// Check if a file is hidden by a whiteout file
@@ -496,7 +515,7 @@ impl FileSystemOperations for OverlayFS {
         // Read from upper layer first
         if let Some((ref upper_mount, ref upper_node)) = self.upper {
             if let Ok(upper_node) = self.resolve_in_layer(upper_mount, upper_node, &overlay_node.path) {
-                let fs = Self::fs_from_mount(upper_mount);
+                let fs = upper_node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "Node has no filesystem"))?;
                 if let Ok(upper_entries) = fs.readdir(&upper_node) {
                     for entry in upper_entries {
                         // Skip whiteout files themselves and . .. entries
@@ -515,7 +534,7 @@ impl FileSystemOperations for OverlayFS {
         // Read from lower layers (skip entries already seen in upper layers)
         for (lower_mount, lower_node) in &self.lower_layers {
             if let Ok(lower_node) = self.resolve_in_layer(lower_mount, lower_node, &overlay_node.path) {
-                let fs = Self::fs_from_mount(lower_mount);
+                let fs = lower_node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "Node has no filesystem"))?;
                 if let Ok(lower_entries) = fs.readdir(&lower_node) {
                     for entry in lower_entries {
                         // Skip . .. entries
