@@ -3,15 +3,18 @@
 //! This provides a union/overlay view of multiple filesystems (upper/lower).
 //! Only supports same-VfsManager overlays (no cross-vfs).
 
+use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::{sync::Arc, string::String, vec::Vec, collections::BTreeSet, format};
 use spin::RwLock;
 use core::any::Any;
 
+use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal, VfsEntry};
-use crate::fs::{FileSystemError, FileSystemErrorKind, FileType, FileMetadata, FileObject, FilePermission, SeekFrom};
+use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom};
 use crate::object::capability::{StreamOps, StreamError};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
+use crate::vm::vmem::MemoryArea;
 
 /// OverlayFS implementation for VFS v2
 pub struct OverlayFS {
@@ -309,15 +312,15 @@ impl OverlayFS {
         false
     }
 
-    /// VFS v2ドライバ登録用API: オプション文字列から生成
-    /// 例: option = Some("upper=tmpfs,lower=cpiofs")
+    /// Create an OverlayFS from an option string
+    /// example: option = Some("upper=tmpfs,lower=cpiofs")
     pub fn create_from_option_string(
         option: Option<&str>,
         upper: Option<(Arc<MountPoint>, Arc<VfsEntry>)>,
         lower_layers: Vec<(Arc<MountPoint>, Arc<VfsEntry>)>,
     ) -> Arc<dyn FileSystemOperations> {
-        // nameは固定またはoptionから取得
-        let name = "overlayfs_v2".to_string();
+        // Parse options if provided
+        let name = "overlayfs".to_string();
         OverlayFS::new_with_dirs(upper, lower_layers, name).expect("Failed to create OverlayFS") as Arc<dyn FileSystemOperations>
     }
 }
@@ -570,3 +573,33 @@ impl FileSystemOperations for OverlayFS {
         Ok(entries)
     }
 }
+
+pub struct OverlayFSDriver;
+
+impl FileSystemDriver for OverlayFSDriver {
+    fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        Ok(OverlayFS::create_from_option_string(None, None, Vec::new()))
+    }
+
+    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        Ok(OverlayFS::create_from_option_string(None, None, Vec::new()))
+    }
+    
+    fn name(&self) -> &'static str {
+        "overlayfs"
+    }
+    
+    fn filesystem_type(&self) -> crate::fs::FileSystemType {
+        crate::fs::FileSystemType::Virtual
+    }
+}
+
+fn register_driver() {
+    let fs_driver_manager = get_fs_driver_manager();
+    fs_driver_manager.register_driver(Box::new(OverlayFSDriver));
+}
+
+driver_initcall!(register_driver);
+
+#[cfg(test)]
+mod tests;

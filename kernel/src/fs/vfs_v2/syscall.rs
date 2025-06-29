@@ -342,23 +342,23 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
                 Err(_) => usize::MAX,
             }
         },
-        "overlay" => {
-            // Handle overlay mount - this is a special case handled by VFS
-            if let Some(data) = data_str {
-                match parse_overlay_options(&data) {
-                    Ok((upperdir, lowerdirs)) => {
-                        let lowerdir_refs: Vec<&str> = lowerdirs.iter().map(|s| s.as_str()).collect();
-                        match vfs.overlay_mount(upperdir.as_deref().unwrap_or(""), &lowerdir_refs, &target_str, flags) {
-                            Ok(_) => 0,
-                            Err(_) => usize::MAX,
-                        }
-                    },
-                    Err(_) => usize::MAX,
-                }
-            } else {
-                usize::MAX // Overlay requires options
-            }
-        },
+        // "overlay" => {
+        //     // Handle overlay mount - this is a special case handled by VFS
+        //     if let Some(data) = data_str {
+        //         match parse_overlay_options(&data) {
+        //             Ok((upperdir, lowerdirs)) => {
+        //                 let lowerdir_refs: Vec<&str> = lowerdirs.iter().map(|s| s.as_str()).collect();
+        //                 match vfs.overlay_mount(upperdir.as_deref().unwrap_or(""), &lowerdir_refs, &target_str, flags) {
+        //                     Ok(_) => 0,
+        //                     Err(_) => usize::MAX,
+        //                 }
+        //             },
+        //             Err(_) => usize::MAX,
+        //         }
+        //     } else {
+        //         usize::MAX // Overlay requires options
+        //     }
+        // },
         _ => {
             // Handle filesystem creation using drivers
             let options = data_str.unwrap_or_default();

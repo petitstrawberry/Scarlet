@@ -4,7 +4,7 @@
 #[test_case]
 fn test_cross_vfs_bind_mount_basic() {
     use crate::fs::FileType;
-    use super::manager::VfsManager;
+    use crate::fs::manager::VfsManager;
     use alloc::sync::Arc;
 
     // Create the source VFS and prepare a directory and file
@@ -36,7 +36,7 @@ fn test_cross_vfs_bind_mount_basic() {
 #[test_case]
 fn test_cross_vfs_bind_mount_file_create_delete() {
     use crate::fs::FileType;
-    use super::manager::VfsManager;
+    use crate::fs::manager::VfsManager;
     use alloc::sync::Arc;
 
     let source_vfs = Arc::new(VfsManager::new());
@@ -60,7 +60,7 @@ fn test_cross_vfs_bind_mount_file_create_delete() {
 #[test_case]
 fn test_cross_vfs_bind_mount_recursive() {
     use crate::fs::FileType;
-    use super::manager::VfsManager;
+    use crate::fs::manager::VfsManager;
     use alloc::sync::Arc;
 
     let source_vfs = Arc::new(VfsManager::new());
@@ -79,7 +79,7 @@ fn test_cross_vfs_bind_mount_recursive() {
 #[test_case]
 fn test_cross_vfs_bind_mount_multiple() {
     use crate::fs::FileType;
-    use super::manager::VfsManager;
+    use crate::fs::manager::VfsManager;
     use alloc::sync::Arc;
 
     let source1 = Arc::new(VfsManager::new());
@@ -102,7 +102,7 @@ fn test_cross_vfs_bind_mount_multiple() {
 #[test_case]
 fn test_cross_vfs_bind_mount_parent_traversal() {
     use crate::fs::FileType;
-    use super::manager::VfsManager;
+    use crate::fs::manager::VfsManager;
     use alloc::sync::Arc;
 
     let source = Arc::new(VfsManager::new());

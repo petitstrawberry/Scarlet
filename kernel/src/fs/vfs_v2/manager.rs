@@ -52,7 +52,7 @@ impl VfsManager {
     /// Create a new VFS manager instance with a dummy root
     pub fn new() -> Self {
         // Create a dummy root filesystem for initialization
-        use super::tmpfs::TmpFS;
+        use super::drivers::tmpfs::TmpFS;
         let root_fs: Arc<dyn FileSystemOperations> = TmpFS::new(0); // 0 = unlimited memory
         let root_node = root_fs.root_node();
         let dummy_root_entry = VfsEntry::new(None, "/".to_string(), root_node);
@@ -520,18 +520,6 @@ impl VfsManager {
         Ok(entry)
     }
     
-    /// Overlay mount (v2, cross-vfs not supported)
-    /// upperdir: upper layer, lowerdirs: lower layers (multiple allowed), target: mount point, flags: options
-    pub fn overlay_mount(&self, upperdir: &str, lowerdirs: &[&str], target: &str, flags: u32) -> Result<(), FileSystemError> {
-        // TODO: Example implementation (dummy)
-        // In practice, generate an overlayfs driver and add it to the mount_tree
-        // Cross-vfs is not supported
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "overlay_mount: not yet implemented (v2, no cross-vfs)",
-        ))
-    }
-
     // Helper methods
     
     /// Split a path into parent directory and filename

@@ -5,19 +5,18 @@
 //! structure representation.
 
 use alloc::{
-    collections::BTreeMap, format, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
+    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
 
-use crate::fs::{
-    FileSystemError, FileSystemErrorKind, FileMetadata, FilePermission, 
-    FileType, FileObject
-};
+use crate::{driver_initcall, fs::{
+    get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
+}};
 use crate::object::capability::{StreamOps, StreamError};
 use crate::device::manager::BorrowedDeviceGuard;
 
-use super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
+use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
 
 /// TmpFS v2 - New memory-based filesystem implementation
 pub struct TmpFS {
@@ -728,3 +727,31 @@ impl FileObject for TmpFileObject {
         Ok(())
     }
 }
+
+pub struct TmpFSDriver;
+
+impl FileSystemDriver for TmpFSDriver {
+    
+    fn filesystem_type(&self) -> crate::fs::FileSystemType {
+        crate::fs::FileSystemType::Virtual
+    }
+    
+    fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        Ok(TmpFS::new(0) as Arc<dyn FileSystemOperations>)
+    }
+    
+    fn create_from_params(&self, _params: &dyn crate::fs::params::FileSystemParams) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        Ok(TmpFS::create_from_option_string(None))
+    }
+    
+    fn name(&self) -> &'static str {
+        "tmpfs"
+    }
+}
+
+fn register_driver() {
+    let fs_driver_manager = get_fs_driver_manager();
+    fs_driver_manager.register_driver(Box::new(TmpFSDriver));
+}
+
+driver_initcall!(register_driver);

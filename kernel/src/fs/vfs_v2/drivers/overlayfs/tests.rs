@@ -1,15 +1,15 @@
 //! OverlayFS v2 tests (same VFS only)
 
 use super::OverlayFS;
-use super::tmpfs::TmpFS;
-use super::mount_tree::MountPoint;
-use crate::fs::vfs_v2::FileSystemOperations;
+use super::super::tmpfs::TmpFS;
+use crate::fs::mount_tree::MountPoint;
+use crate::fs::FileSystemOperations;
 use crate::fs::FileType;
 use crate::fs::SeekFrom;
+use crate::fs::VfsEntry;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use alloc::vec;
-use super::core::VfsEntry;
 use alloc::sync::Arc;
 
 // Helper to create a MountPoint

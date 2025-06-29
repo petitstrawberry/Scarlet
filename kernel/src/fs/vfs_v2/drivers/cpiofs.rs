@@ -4,19 +4,15 @@
 //! used as initramfs. It implements the VFS v2 architecture.
 
 use alloc::{
-    collections::BTreeMap,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-    format,
+    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec
 };
 use spin::RwLock;
 use core::any::Any;
 use alloc::sync::Weak;
 
-use crate::fs::vfs_v2::core::{
-    VfsNode, FileSystemOperations
-};
+use crate::{driver_initcall, fs::{core::DirectoryEntryInternal, get_fs_driver_manager, vfs_v2::core::{
+    FileSystemOperations, VfsNode
+}, FileSystemDriver, FileSystemType}, vm::vmem::MemoryArea};
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, FilePermission
 };
@@ -327,7 +323,7 @@ impl FileSystemOperations for CpioFS {
     fn readdir(
         &self,
         node: &Arc<dyn VfsNode>,
-    ) -> Result<Vec<super::DirectoryEntryInternal>, FileSystemError> {
+    ) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         let cpio_node = node.as_any()
             .downcast_ref::<CpioNode>()
             .ok_or_else(|| FileSystemError::new(
@@ -342,21 +338,21 @@ impl FileSystemOperations for CpioFS {
         }
         let mut entries = Vec::new();
         // Add "." and ".." entries
-        entries.push(super::DirectoryEntryInternal {
+        entries.push(DirectoryEntryInternal {
             name: ".".to_string(),
             file_type: FileType::Directory,
             file_id: cpio_node.file_id as u64,
         });
         // .. entry should have the parent directory's file_id
         let parent_file_id = cpio_node.parent_file_id().unwrap_or(0);
-        entries.push(super::DirectoryEntryInternal {
+        entries.push(DirectoryEntryInternal {
             name: "..".to_string(),
             file_type: FileType::Directory,
             file_id: parent_file_id,
         });
         // Add children
         for child in cpio_node.children.read().values() {
-            entries.push(super::DirectoryEntryInternal {
+            entries.push(DirectoryEntryInternal {
                 name: child.name.clone(),
                 file_type: child.file_type,
                 file_id: child.file_id as u64,
@@ -493,3 +489,76 @@ impl FileObject for CpioDirectoryObject {
         )))
     }
 }
+
+
+/// Driver for CPIO-format filesystems (initramfs)
+/// 
+/// This driver creates filesystems from memory areas only.
+pub struct CpiofsDriver;
+
+impl FileSystemDriver for CpiofsDriver {
+    fn name(&self) -> &'static str {
+        "cpiofs"
+    }
+    
+    /// This filesystem only supports creation from memory
+    fn filesystem_type(&self) -> FileSystemType {
+        FileSystemType::Memory
+    }
+    
+    /// Create a file system from memory area
+    /// 
+    /// # Arguments
+    /// 
+    /// * `memory_area` - A reference to the memory area containing the CPIO filesystem data
+    /// 
+    /// # Returns
+    /// 
+    /// A result containing a boxed CPIO filesystem or an error
+    /// 
+    fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        let data = unsafe { memory_area.as_slice() };
+        // Create the Cpiofs from the memory data
+        match CpioFS::new("cpiofs".to_string(), data) {
+            Ok(cpio_fs) => Ok(cpio_fs),
+            Err(err) => Err(FileSystemError {
+                kind: FileSystemErrorKind::InvalidData,
+                message: format!("Failed to create CPIO filesystem from memory: {}", err.message),
+            })
+        }
+    }
+
+    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+        use crate::fs::params::*;
+        
+        // Try to downcast to CpioFSParams
+        if let Some(_cpio_params) = params.as_any().downcast_ref::<CpioFSParams>() {
+            // CPIO filesystem requires memory area for creation, so we cannot create from parameters alone
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
+            });
+        }
+        
+        // Try to downcast to BasicFSParams for compatibility
+        if let Some(_basic_params) = params.as_any().downcast_ref::<BasicFSParams>() {
+            return Err(FileSystemError {
+                kind: FileSystemErrorKind::NotSupported,
+                message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
+            });
+        }
+        
+        // If all downcasts fail, return error
+        Err(FileSystemError {
+            kind: FileSystemErrorKind::NotSupported,
+            message: "CPIO filesystem requires CpioFSParams and memory area for creation".to_string(),
+        })
+    }
+}
+
+fn register_driver() {
+    let fs_driver_manager = get_fs_driver_manager();
+    fs_driver_manager.register_driver(Box::new(CpiofsDriver));
+}
+
+driver_initcall!(register_driver);

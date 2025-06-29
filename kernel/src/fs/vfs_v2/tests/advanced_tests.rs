@@ -1,7 +1,6 @@
 /// Advanced VFS v2 tests for complex scenarios
 
-use alloc::sync::Arc;
-use crate::fs::vfs_v2::{ manager::VfsManager, tmpfs::TmpFS, }; use crate::fs::FileType;
+use crate::fs::vfs_v2::{ manager::VfsManager, drivers::tmpfs::TmpFS, }; use crate::fs::FileType;
 
 
 #[test_case]

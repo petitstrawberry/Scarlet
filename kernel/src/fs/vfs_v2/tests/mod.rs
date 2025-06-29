@@ -2,11 +2,15 @@
 /// 
 /// These are basic tests to verify that VFS v2 components compile and work correctly.
 
+pub mod advanced_tests;
+pub mod performance_tests;
+pub mod cross_vfs_tests;
+
 use crate::fs::vfs_v2::{
     core::*,
     manager::VfsManager,
     mount_tree::{MountTree, MountPoint, MountType, MountOptionsV2},
-    tmpfs::TmpFS,
+    drivers::tmpfs::TmpFS,
 };
 use alloc::{
     sync::Arc,

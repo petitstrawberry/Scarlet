@@ -8,15 +8,14 @@ use alloc::{
     vec::Vec,
     format,
 };
-use alloc::string::ToString;
+
 use crate::fs::{
     vfs_v2::{
-        tmpfs::TmpFS,
+        drivers::tmpfs::TmpFS,
         manager::VfsManager,
     },
     FileType,
 };
-use crate::println;
 
 /// Test basic performance - multiple file creation and lookup
 #[test_case]

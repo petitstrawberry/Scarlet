@@ -206,7 +206,7 @@ use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_E
 use timer::get_kernel_timer;
 use core::panic::PanicInfo;
 use crate::fs::vfs_v2::manager::init_global_vfs_manager;
-use crate::fs::vfs_v2::initramfs::{init_initramfs, relocate_initramfs};
+use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
 
 
 /// A panic handler is required in Rust, this is probably the most basic one possible

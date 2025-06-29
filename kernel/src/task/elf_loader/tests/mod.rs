@@ -2,7 +2,7 @@
 //!
 //! Tests for ELF binary loading and execution, including integration with VFS manager for filesystem-based executable loading in isolated namespaces.
 
-use crate::fs::{VfsManager, TmpFS, TmpFSParams, FileType, SeekFrom};
+use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, TmpFSParams, FileType, SeekFrom};
 use crate::task::new_user_task;
 
 use super::*;
