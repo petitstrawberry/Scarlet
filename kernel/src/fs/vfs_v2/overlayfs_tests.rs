@@ -152,3 +152,28 @@ fn test_overlayfs_read_only() {
     let root = overlay.root_node();
     assert!(overlay.create(&root, &"newfile".to_string(), FileType::RegularFile, 0o644).is_err());
 }
+
+#[test_case]
+fn test_overlayfs_upper_dir_remove_whiteout() {
+    let lower = TmpFS::new(0);
+    let upper = TmpFS::new(0);
+
+    // Create a directory named "dir1" in both lower and upper layers
+    let lower_root = lower.root_node();
+    lower.create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
+    let upper_root = upper.root_node();
+    upper.create(&upper_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
+
+    let overlay = OverlayFS::new(Some(upper.clone()), vec![lower.clone()], "overlayfs".to_string()).unwrap();
+    let root = overlay.root_node();
+
+    // Remove dir1 via OverlayFS
+    overlay.remove(&root, &"dir1".to_string()).unwrap();
+
+    // Confirm that dir1 is no longer visible from OverlayFS
+    assert!(overlay.lookup(&root, &"dir1".to_string()).is_err());
+
+    // Confirm that a whiteout file was created in the upper layer
+    let upper_dir1_whiteout = upper.lookup(&upper_root, &".wh.dir1".to_string());
+    assert!(upper_dir1_whiteout.is_ok());
+}
