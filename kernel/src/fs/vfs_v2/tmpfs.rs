@@ -98,7 +98,7 @@ impl TmpFS {
 impl FileSystemOperations for TmpFS {
     fn lookup(
         &self,
-        parent_node: Arc<dyn VfsNode>,
+        parent_node: &Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         // Downcast to TmpNode
@@ -155,10 +155,10 @@ impl FileSystemOperations for TmpFS {
     
     fn open(
         &self,
-        node: Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
         _flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
-        let tmp_node = Arc::downcast::<TmpNode>(node)
+        let tmp_node = Arc::downcast::<TmpNode>(node.clone())
             .map_err(|_| FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Invalid node type for TmpFS"
@@ -169,10 +169,10 @@ impl FileSystemOperations for TmpFS {
     }
     
     fn create(&self,
-        parent_node: Arc<dyn VfsNode>,
+        parent_node: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        mode: u32,
+        _mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let tmp_parent = Arc::downcast::<TmpNode>(parent_node.clone())
             .map_err(|_| FileSystemError::new(
@@ -243,7 +243,7 @@ impl FileSystemOperations for TmpFS {
     
     fn remove(
         &self,
-        parent_node: Arc<dyn VfsNode>,
+        parent_node: &Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<(), FileSystemError> {
         let tmp_parent = parent_node.as_any()
@@ -296,7 +296,7 @@ impl FileSystemOperations for TmpFS {
     
     fn readdir(
         &self,
-        node: Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
     ) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
         let tmp_node = node.as_any()
             .downcast_ref::<TmpNode>()

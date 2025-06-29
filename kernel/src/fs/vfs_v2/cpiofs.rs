@@ -216,7 +216,7 @@ impl CpioFS {
 impl FileSystemOperations for CpioFS {
     fn lookup(
         &self,
-        parent_node: Arc<dyn VfsNode>,
+        parent_node: &Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         // Downcast to CpioNode
@@ -238,7 +238,7 @@ impl FileSystemOperations for CpioFS {
     
     fn open(
         &self,
-        node: Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
         _flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
         let cpio_node = node.as_any()
@@ -250,10 +250,10 @@ impl FileSystemOperations for CpioFS {
         
         match cpio_node.file_type {
             FileType::RegularFile => {
-                Ok(Arc::new(CpioFileObject::new(node)))
+                Ok(Arc::new(CpioFileObject::new(Arc::clone(node))))
             },
             FileType::Directory => {
-                Ok(Arc::new(CpioDirectoryObject::new(node)))
+                Ok(Arc::new(CpioDirectoryObject::new(Arc::clone(node))))
             },
             _ => Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -264,7 +264,7 @@ impl FileSystemOperations for CpioFS {
     
     fn create(
         &self,
-        _parent_node: Arc<dyn VfsNode>,
+        _parent_node: &Arc<dyn VfsNode>,
         _name: &String,
         _file_type: FileType,
         _mode: u32,
@@ -277,7 +277,7 @@ impl FileSystemOperations for CpioFS {
     
     fn remove(
         &self,
-        _parent_node: Arc<dyn VfsNode>,
+        _parent_node: &Arc<dyn VfsNode>,
         _name: &String,
     ) -> Result<(), FileSystemError> {
         Err(FileSystemError::new(
@@ -300,7 +300,7 @@ impl FileSystemOperations for CpioFS {
     
     fn readdir(
         &self,
-        node: Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
     ) -> Result<Vec<super::DirectoryEntryInternal>, FileSystemError> {
         let cpio_node = node.as_any()
             .downcast_ref::<CpioNode>()

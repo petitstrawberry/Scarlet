@@ -500,7 +500,7 @@ impl MountTree {
             .and_then(|w| w.upgrade())
             .ok_or_else(|| vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
         // Ask filesystem to lookup the component
-        let child_node = filesystem.lookup(parent_node, &component_string)
+        let child_node = filesystem.lookup(&parent_node, &component_string)
             .map_err(|e| vfs_error(e.kind, &e.message))?;
 
         // Create new VfsEntry for the child

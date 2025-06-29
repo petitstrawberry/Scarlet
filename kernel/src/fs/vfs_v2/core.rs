@@ -203,7 +203,7 @@ pub trait FileSystemOperations: Send + Sync {
     /// VfsNode and a name, returning the child's VfsNode.
     fn lookup(
         &self,
-        parent_node: Arc<dyn VfsNode>,
+        parent_node: &Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError>;
 
@@ -213,14 +213,14 @@ pub trait FileSystemOperations: Send + Sync {
     /// a stateful FileObject for read/write operations.
     fn open(
         &self,
-        node: Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
         flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError>;
 
     /// Create a new file in the specified directory
     fn create(
         &self,
-        parent_node: Arc<dyn VfsNode>,
+        parent_node: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
         mode: u32,
@@ -229,14 +229,14 @@ pub trait FileSystemOperations: Send + Sync {
     /// Remove a file from the specified directory
     fn remove(
         &self,
-        parent_node: Arc<dyn VfsNode>,
+        parent_node: &Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<(), FileSystemError>;
 
     /// Read directory entries from a directory node
     fn readdir(
         &self,
-        node: Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
     ) -> Result<Vec<DirectoryEntryInternal>, FileSystemError>;
 
     /// Get the root VfsNode for this filesystem

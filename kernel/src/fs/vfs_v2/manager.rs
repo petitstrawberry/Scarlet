@@ -266,7 +266,7 @@ impl VfsManager {
         let filesystem = node.filesystem()
             .and_then(|w| w.upgrade())
             .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
-        let file_obj = filesystem.open(node, flags)?;
+        let file_obj = filesystem.open(&node, flags)?;
         Ok(KernelObject::File(file_obj))
     }
     
@@ -298,7 +298,7 @@ impl VfsManager {
             .and_then(|w| w.upgrade())
             .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
         let new_node = filesystem.create(
-            parent_node,
+            &parent_node,
             &filename,
             file_type,
             0o644, // Default permissions
@@ -364,7 +364,7 @@ impl VfsManager {
         let filesystem = parent_node.filesystem()
             .and_then(|w| w.upgrade())
             .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
-        filesystem.remove(parent_node, &filename)?;
+        filesystem.remove(&parent_node, &filename)?;
         
         // Remove from parent cache
         let _ = parent_entry.remove_child(&filename);
@@ -435,7 +435,7 @@ impl VfsManager {
             ))?;
         
         // Call filesystem's readdir
-        filesystem.readdir(node)
+        filesystem.readdir(&node)
     }
     
     /// Set current working directory
