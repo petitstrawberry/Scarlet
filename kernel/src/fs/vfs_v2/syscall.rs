@@ -194,7 +194,7 @@ pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
-    // v2: openしてtruncate
+
     let file_obj = match vfs.open(&path_str, 0) {
         Ok(obj) => obj,
         Err(_) => return usize::MAX,
@@ -406,7 +406,7 @@ fn create_filesystem_and_mount(
 ) -> Result<(), crate::fs::FileSystemError> {
     use crate::fs::get_fs_driver_manager;
     let driver_manager = get_fs_driver_manager();
-    // v2: 直接ArcでFSを生成し、そのままmount
+    // v2: directly create FS as Arc and mount it
     let filesystem = driver_manager.create_from_option_string(fstype, options)?;
     vfs.mount(filesystem, target, 0)?;
     Ok(())

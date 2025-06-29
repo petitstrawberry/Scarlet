@@ -1,9 +1,8 @@
 //! VFS v2 Driver Manager
 //!
-//! v2用のファイルシステムドライバ管理・生成の仕組み。
-//! - ドライバはID(enum)で登録・生成
-//! - 柔軟な生成API（option string, params, memory, block device等）
-//! - v1の設計を参考にしたtraitベース
+//! File system driver management and instantiation for VFS v2.
+//! - Drivers are registered/created by ID (enum)
+//! - Flexible creation API (option string, params, memory, block device, etc.)
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -12,25 +11,25 @@ use spin::RwLock;
 use super::core::FileSystemOperations;
 use crate::fs::params::FileSystemParams;
 
-/// v2用ファイルシステムID
+/// v2 file system ID
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FileSystemId {
     TmpFS,
     CpioFS,
     OverlayFS,
-    // 必要に応じて追加
+    // Add more as needed
 }
 
-/// v2用ファイルシステムドライバtrait
+/// v2 file system driver trait
 pub trait FileSystemDriverV2: Send + Sync {
     fn id(&self) -> FileSystemId;
     fn name(&self) -> &'static str;
     fn create_from_option_string(&self, option: Option<&str>) -> Arc<dyn FileSystemOperations>;
     fn create_from_params(&self, params: &dyn FileSystemParams) -> Arc<dyn FileSystemOperations>;
-    // 必要に応じて他の生成APIも追加可能
+    // Add other creation APIs as needed
 }
 
-/// v2用ドライバマネージャ
+/// v2 driver manager
 pub struct FileSystemDriverManagerV2 {
     drivers: RwLock<BTreeMap<FileSystemId, Arc<dyn FileSystemDriverV2>>>,
 }
@@ -53,7 +52,7 @@ impl FileSystemDriverManagerV2 {
     }
 }
 
-// グローバルなv2ドライバマネージャ（unsafeでstatic化も可）
+// Global v2 driver manager (can also be static with unsafe)
 use core::sync::atomic::{AtomicPtr, Ordering};
 static mut V2_DRIVER_MANAGER: Option<FileSystemDriverManagerV2> = None;
 

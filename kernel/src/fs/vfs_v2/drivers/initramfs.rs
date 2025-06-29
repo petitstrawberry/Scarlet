@@ -44,7 +44,7 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
 fn mount_initramfs(manager: &Arc<VfsManager>, initramfs: MemoryArea) -> Result<(), FileSystemError> {
     early_println!("[InitRamFS] Initializing initramfs");
     early_println!("[InitRamFS] Using initramfs at address: {:#x}, size: {} bytes", initramfs.start, initramfs.size());
-    // CPIOイメージからファイルシステムを生成
+    // Generate file system from CPIO image
     let cpio_data = unsafe {
         core::slice::from_raw_parts(initramfs.start as *const u8, initramfs.size())
     };

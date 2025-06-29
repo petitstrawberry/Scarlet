@@ -23,7 +23,7 @@ use super::{
     mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId},
 };
 
-/// Filesystem ID type (v1互換)
+/// Filesystem ID type
 pub type FSId = u64;
 
 // Helper function to create FileSystemError
@@ -555,12 +555,12 @@ impl VfsManager {
     }
 }
 
-/// グローバルVFSマネージャ（Arc）を初期化し、以後取得できるようにする
+/// Initialize the global VFS manager (Arc) so it can be retrieved later
 pub fn init_global_vfs_manager() -> Arc<VfsManager> {
     GLOBAL_VFS_MANAGER.call_once(|| Arc::new(VfsManager::new())).clone()
 }
 
-/// グローバルVFSマネージャ（Arc）を取得
+/// Retrieve the global VFS manager (Arc)
 pub fn get_global_vfs_manager() -> Arc<VfsManager> {
     GLOBAL_VFS_MANAGER.get().expect("global VFS manager not initialized").clone()
 }

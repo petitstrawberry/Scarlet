@@ -97,7 +97,7 @@ impl OverlayFS {
         Ok(overlay)
     }
 
-    /// MountPointからFileSystemOperationsを取得
+    /// Get FileSystemOperations from MountPoint
     fn fs_from_mount(mount: &Arc<MountPoint>) -> Arc<dyn FileSystemOperations> {
         mount.root.node().filesystem().unwrap().upgrade().unwrap()
     }
@@ -388,7 +388,7 @@ impl FileSystemOperations for OverlayFS {
     }
 
     fn open(&self, overlay_node: &Arc<dyn VfsNode>, flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError> {
-        // OverlayNodeにダウンキャスト
+        // Downcast to OverlayNode
         let overlay_node = overlay_node.as_any()
             .downcast_ref::<OverlayNode>()
             .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "Invalid node type for OverlayFS"))?;

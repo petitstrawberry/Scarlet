@@ -148,12 +148,12 @@ impl CpioFS {
         Ok(filesystem)
     }
 
-    /// VFS v2ドライバ登録用API: オプション文字列から生成
-    /// 例: option = Some("initramfs_addr=0x80000000,size=65536")
+    /// VFS v2 driver registration API: create from option string
+    /// Example: option = Some("initramfs_addr=0x80000000,size=65536")
     pub fn create_from_option_string(option: Option<&str>, cpio_data: &[u8]) -> Arc<dyn FileSystemOperations> {
-        // nameは固定、cpio_dataは外部から渡す前提
-        let name = "cpiofs_v2".to_string();
-        // オプション解析は必要に応じて拡張
+        // Name is fixed, cpio_data is assumed to be provided externally
+        let name = "cpiofs".to_string();
+        // Extend option parsing as needed
         CpioFS::new(name, cpio_data).expect("Failed to create CpioFS") as Arc<dyn FileSystemOperations>
     }
     
