@@ -780,10 +780,90 @@ impl StreamOps for TmpFileObject {
                     .map_err(StreamError::from)
             }
             FileType::Directory => {
-                // TODO: Implement directory reading
-                // For now, return empty
-                Ok(0)
-            }
+                // For directories, return entries in struct format
+                let node = self.node.clone();
+                // We need to reconstruct the path from the node structure
+                // Since we don't have path stored, use the readdir logic directly
+                
+                // Create a vector to store all entries including "." and ".."
+                let mut all_entries = Vec::new();
+                
+                // Add "." entry (current directory)
+                let current_metadata = node.metadata.read();
+                all_entries.push(crate::fs::DirectoryEntryInternal {
+                    name: ".".to_string(),
+                    file_type: FileType::Directory,
+                    size: current_metadata.size,
+                    file_id: current_metadata.file_id,
+                    metadata: Some(current_metadata.clone()),
+                });
+                
+                // Add ".." entry (parent directory) - simplified to point to self for now
+                all_entries.push(crate::fs::DirectoryEntryInternal {
+                    name: "..".to_string(),
+                    file_type: FileType::Directory,
+                    size: current_metadata.size,
+                    file_id: current_metadata.file_id,
+                    metadata: Some(current_metadata.clone()),
+                });
+                
+                // Add regular directory entries and sort by file_id
+                let children = node.children.read();
+                let mut regular_entries = Vec::new();
+                for (name, child) in children.iter() {
+                    let metadata = child.metadata().unwrap();
+                    regular_entries.push(crate::fs::DirectoryEntryInternal {
+                        name: name.clone(),
+                        file_type: child.file_type().unwrap().clone(),
+                        size: metadata.size,
+                        file_id: metadata.file_id,
+                        metadata: Some(metadata.clone()),
+                    });
+                }
+                
+                // Sort regular entries by file_id (ascending order)
+                regular_entries.sort_by_key(|entry| entry.file_id);
+                
+                // Append sorted regular entries to the result
+                all_entries.extend(regular_entries);
+                
+                // position is the entry index
+                let position = *self.position.read() as usize;
+                
+                if position >= all_entries.len() {
+                    return Ok(0); // EOF
+                }
+                
+                // Get current entry (already sorted)
+                let internal_entry = &all_entries[position];
+                
+                // Convert to binary format
+                let dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
+                
+                // Calculate actual entry size
+                let entry_size = dir_entry.entry_size();
+                
+                // Check buffer size
+                if buffer.len() < entry_size {
+                    return Err(StreamError::InvalidArgument); // Buffer too small
+                }
+                
+                // Treat struct as byte array
+                let entry_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &dir_entry as *const _ as *const u8,
+                        entry_size
+                    )
+                };
+                
+                // Copy to buffer
+                buffer[..entry_size].copy_from_slice(entry_bytes);
+                
+                // Move to next entry
+                *self.position.write() += 1;
+                
+                Ok(entry_size)
+            },
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 self.read_device(buffer)
                     .map_err(StreamError::from)

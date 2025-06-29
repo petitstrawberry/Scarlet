@@ -10,7 +10,6 @@
 //! - Standard OS compatibility
 //! - Improved symbolic link resolution
 //! - Cleaner interface for complex filesystems like ext4
-
 pub mod core;
 pub mod drivers;
 pub mod manager;

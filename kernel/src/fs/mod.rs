@@ -243,6 +243,87 @@ pub struct DirectoryEntryInternal {
     pub metadata: Option<FileMetadata>,
 }
 
+/// Binary representation of directory entry for system call interface
+/// This structure has a fixed layout for efficient copying between kernel and user space
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DirectoryEntry {
+    /// Unique file identifier
+    pub file_id: u64,
+    /// File size in bytes
+    pub size: u64,
+    /// File type as a byte value
+    pub file_type: u8,
+    /// Length of the file name
+    pub name_len: u8,
+    /// Reserved bytes for alignment
+    pub _reserved: [u8; 6],
+    /// File name (null-terminated, max 255 characters)
+    pub name: [u8; 256],
+}
+
+impl DirectoryEntry {
+    /// Create a DirectoryEntry from internal representation
+    pub fn from_internal(internal: &DirectoryEntryInternal) -> Self {
+        let file_type_byte = match internal.file_type {
+            FileType::RegularFile => 0u8,
+            FileType::Directory => 1u8,
+            FileType::SymbolicLink => 2u8,
+            FileType::CharDevice(_) => 3u8,
+            FileType::BlockDevice(_) => 4u8,
+            FileType::Pipe => 5u8,
+            FileType::Socket => 6u8,
+            FileType::Unknown => 7u8,
+        };
+
+        let name_bytes = internal.name.as_bytes();
+        let mut name_array = [0u8; 256];
+        let copy_len = ::core::cmp::min(name_bytes.len(), 255); // Reserve 1 byte for null terminator
+        name_array[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        name_array[copy_len] = 0; // Null terminator
+
+        Self {
+            file_id: internal.file_id,
+            size: internal.size as u64,
+            file_type: file_type_byte,
+            name_len: copy_len as u8,
+            _reserved: [0; 6],
+            name: name_array,
+        }
+    }
+
+    /// Get the name as a string
+    pub fn name_str(&self) -> Result<&str, ::core::str::Utf8Error> {
+        let name_bytes = &self.name[..self.name_len as usize];
+        ::core::str::from_utf8(name_bytes)
+    }
+
+    /// Get the actual size of this entry
+    pub fn entry_size(&self) -> usize {
+        // Fixed size of the entry structure
+        ::core::mem::size_of::<Self>()  as usize
+    }
+
+    /// Parse a DirectoryEntry from raw bytes
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < ::core::mem::size_of::<Self>() {
+            return None;
+        }
+
+        // Safety: We've checked the size above
+        let entry = unsafe {
+            ::core::ptr::read(data.as_ptr() as *const Self)
+        };
+
+        // Basic validation
+        if entry.name_len as usize > 255 {
+            return None;
+        }
+
+        Some(entry)
+    }
+}
+
 /// Structure representing a directory
 pub struct Directory {
     pub path: String,
