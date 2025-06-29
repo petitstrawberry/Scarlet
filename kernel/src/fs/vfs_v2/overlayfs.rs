@@ -15,9 +15,9 @@ use crate::object::capability::{StreamOps, StreamError};
 /// OverlayFS implementation for VFS v2
 pub struct OverlayFS {
     /// Upper layer for write operations (may be None for read-only overlay)
-    upper: Option<Arc<dyn FileSystemOperations>>,
+    upper: Option<(Arc<dyn FileSystemOperations>, Arc<dyn VfsNode>)>,
     /// Lower layers (in priority order, highest priority first)
-    lower_layers: Vec<Arc<dyn FileSystemOperations>>,
+    lower_layers: Vec<(Arc<dyn FileSystemOperations>, Arc<dyn VfsNode>)>,
     /// Filesystem name
     name: String,
     /// Root node (composite of all layers)
@@ -77,9 +77,9 @@ impl VfsNode for OverlayNode {
 }
 
 impl OverlayFS {
-    pub fn new(
-        upper: Option<Arc<dyn FileSystemOperations>>,
-        lower_layers: Vec<Arc<dyn FileSystemOperations>>,
+    pub fn new_with_dirs(
+        upper: Option<(Arc<dyn FileSystemOperations>, Arc<dyn VfsNode>)>,
+        lower_layers: Vec<(Arc<dyn FileSystemOperations>, Arc<dyn VfsNode>)>,
         name: String
     ) -> Result<Arc<Self>, FileSystemError> {
         let root_node = OverlayNode::new("/".to_string(), "/".to_string(), FileType::Directory, 1);
@@ -103,15 +103,15 @@ impl OverlayFS {
         }
 
         // Check upper layer first
-        if let Some(ref upper) = self.upper {
-            if let Ok(node) = self.resolve_in_layer(upper, path) {
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if let Ok(node) = self.resolve_in_layer(upper_fs, upper_node, path) {
                 return node.metadata();
             }
         }
 
         // Check lower layers
-        for lower in &self.lower_layers {
-            if let Ok(node) = self.resolve_in_layer(lower, path) {
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if let Ok(node) = self.resolve_in_layer(lower_fs, lower_node, path) {
                 return node.metadata();
             }
         }
@@ -119,21 +119,19 @@ impl OverlayFS {
         Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File not found in any layer"))
     }
 
-    /// Resolve a path in a specific layer
-    fn resolve_in_layer(&self, fs: &Arc<dyn FileSystemOperations>, path: &str) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        let mut current = fs.root_node();
+    /// Resolve a path in a specific layer, starting from the given node
+    fn resolve_in_layer(&self, fs: &Arc<dyn FileSystemOperations>, node: &Arc<dyn VfsNode>, path: &str) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        let mut current = Arc::clone(node);
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
-        
         for part in parts {
             current = fs.lookup(&current, &part.to_string())?;
         }
-        
         Ok(current)
     }
 
     /// Check if a file is hidden by a whiteout file
     fn is_whiteout(&self, path: &str) -> bool {
-        if let Some(ref upper) = self.upper {
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
             let whiteout_name = format!(".wh.{}", 
                 path.split('/').last().unwrap_or(path));
             let parent_path = if let Some(pos) = path.rfind('/') {
@@ -147,7 +145,7 @@ impl OverlayFS {
                 format!("{}/{}", parent_path, whiteout_name)
             };
             
-            self.resolve_in_layer(upper, &whiteout_path).is_ok()
+            self.resolve_in_layer(upper_fs, upper_node, &whiteout_path).is_ok()
         } else {
             false
         }
@@ -156,7 +154,6 @@ impl OverlayFS {
     /// Create a whiteout file to hide a file from lower layers
     fn create_whiteout(&self, path: &str) -> Result<(), FileSystemError> {
         let upper = self.get_upper_layer()?;
-        
         let whiteout_name = format!(".wh.{}", 
             path.split('/').last().unwrap_or(path));
         let parent_path = if let Some(pos) = path.rfind('/') {
@@ -169,53 +166,44 @@ impl OverlayFS {
         } else {
             format!("{}/{}", parent_path, whiteout_name)
         };
-        
         // Create parent directories if needed
         self.ensure_parent_dirs(&whiteout_path)?;
-        
-        let parent_node = self.resolve_in_layer(upper, parent_path)?;
-        upper.create(&parent_node, &whiteout_name, FileType::RegularFile, 0o644)
+        let parent_node = self.resolve_in_layer(&upper.0, &upper.1, parent_path)?;
+        upper.0.create(&parent_node, &whiteout_name, FileType::RegularFile, 0o644)
             .map(|_| ())
     }
 
     /// Perform copy-up operation: copy a file from lower layer to upper layer
     fn copy_up(&self, path: &str) -> Result<(), FileSystemError> {
         let upper = self.get_upper_layer()?;
-        
         // Check if file already exists in upper layer
-        if self.resolve_in_layer(upper, path).is_ok() {
+        if self.resolve_in_layer(&upper.0, &upper.1, path).is_ok() {
             return Ok(());
         }
-
         // Find the file in lower layers
-        for lower in &self.lower_layers {
-            if let Ok(lower_node) = self.resolve_in_layer(lower, path) {
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if let Ok(lower_node) = self.resolve_in_layer(lower_fs, lower_node, path) {
                 let metadata = lower_node.metadata()?;
-                
                 // Ensure parent directories exist in upper layer
                 self.ensure_parent_dirs(path)?;
-                
                 let parent_path = if let Some(pos) = path.rfind('/') {
                     &path[..pos]
                 } else {
                     "/"
                 };
                 let filename = path.split('/').last().unwrap_or(path);
-                let parent_node = self.resolve_in_layer(upper, parent_path)?;
-                
+                let parent_node = self.resolve_in_layer(&upper.0, &upper.1, parent_path)?;
                 match metadata.file_type {
                     FileType::Directory => {
-                        upper.create(&parent_node, &filename.to_string(), FileType::Directory, 0o755)?;
+                        upper.0.create(&parent_node, &filename.to_string(), FileType::Directory, 0o755)?;
                     }
                     FileType::RegularFile => {
                         // Create file and copy content
-                        let new_node = upper.create(&parent_node, &filename.to_string(), FileType::RegularFile, 0o644)?;
-                        
+                        let new_node = upper.0.create(&parent_node, &filename.to_string(), FileType::RegularFile, 0o644)?;
                         // Copy file content
-                        if let Ok(source_file) = lower.open(&lower_node, 0) { // Read-only
-                            if let Ok(dest_file) = upper.open(&new_node, 1) { // Write-only
+                        if let Ok(source_file) = lower_fs.open(&lower_node, 0) { // Read-only
+                            if let Ok(dest_file) = upper.0.open(&new_node, 1) { // Write-only
                                 let _ = dest_file.seek(SeekFrom::Start(0));
-                                
                                 let mut buffer = [0u8; 4096];
                                 loop {
                                     match source_file.read(&mut buffer) {
@@ -232,52 +220,44 @@ impl OverlayFS {
                     }
                     _ => {
                         // For other file types, create a placeholder
-                        upper.create(&parent_node, &filename.to_string(), metadata.file_type, 0o644)?;
+                        upper.0.create(&parent_node, &filename.to_string(), metadata.file_type, 0o644)?;
                     }
                 }
-                
                 return Ok(());
             }
         }
-
         Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File not found for copy-up"))
     }
 
     /// Ensure parent directories exist in upper layer
     fn ensure_parent_dirs(&self, path: &str) -> Result<(), FileSystemError> {
         let upper = self.get_upper_layer()?;
-        
         let parent_path = if let Some(pos) = path.rfind('/') {
             &path[..pos]
         } else {
             return Ok(());
         };
-        
         if parent_path.is_empty() || parent_path == "/" {
             return Ok(());
         }
-        
         // Try to resolve parent - if it fails, create it
-        if self.resolve_in_layer(upper, parent_path).is_err() {
+        if self.resolve_in_layer(&upper.0, &upper.1, parent_path).is_err() {
             self.ensure_parent_dirs(parent_path)?;
-            
             let grandparent_path = if let Some(pos) = parent_path.rfind('/') {
                 &parent_path[..pos]
             } else {
                 "/"
             };
             let dirname = parent_path.split('/').last().unwrap_or(parent_path);
-            let grandparent_node = self.resolve_in_layer(upper, if grandparent_path.is_empty() { "/" } else { grandparent_path })?;
-            
-            upper.create(&grandparent_node, &dirname.to_string(), FileType::Directory, 0o755)?;
+            let grandparent_node = self.resolve_in_layer(&upper.0, &upper.1, if grandparent_path.is_empty() { "/" } else { grandparent_path })?;
+            upper.0.create(&grandparent_node, &dirname.to_string(), FileType::Directory, 0o755)?;
         }
-        
         Ok(())
     }
 
     /// Get upper layer, error if not available
-    fn get_upper_layer(&self) -> Result<&Arc<dyn FileSystemOperations>, FileSystemError> {
-        self.upper.as_ref().ok_or_else(|| 
+    fn get_upper_layer(&self) -> Result<(Arc<dyn FileSystemOperations>, Arc<dyn VfsNode>), FileSystemError> {
+        self.upper.as_ref().map(|fs| fs.clone()).ok_or_else(|| 
             FileSystemError::new(FileSystemErrorKind::PermissionDenied, "Overlay is read-only (no upper layer)")
         )
     }
@@ -285,15 +265,15 @@ impl OverlayFS {
     /// Check if file exists only in lower layers (not in upper)
     fn file_exists_in_lower_only(&self, path: &str) -> bool {
         // Check if exists in upper
-        if let Some(ref upper) = self.upper {
-            if self.resolve_in_layer(upper, path).is_ok() {
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if self.resolve_in_layer(upper_fs, upper_node, path).is_ok() {
                 return false;
             }
         }
         
         // Check if exists in any lower layer
-        for lower in &self.lower_layers {
-            if self.resolve_in_layer(lower, path).is_ok() {
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if self.resolve_in_layer(lower_fs, lower_node, path).is_ok() {
                 return true;
             }
         }
@@ -338,8 +318,8 @@ impl FileSystemOperations for OverlayFS {
         }
 
         // Try upper layer first
-        if let Some(ref upper) = self.upper {
-            if let Ok(_) = self.resolve_in_layer(upper, &child_path) {
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if let Ok(_) = self.resolve_in_layer(upper_fs, upper_node, &child_path) {
                 let metadata = self.get_metadata_for_path(&child_path)?;
                 let node = OverlayNode::new(name.clone(), child_path.clone(), metadata.file_type, metadata.file_id);
                 if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
@@ -350,8 +330,8 @@ impl FileSystemOperations for OverlayFS {
         }
 
         // Try lower layers
-        for lower in &self.lower_layers {
-            if let Ok(_) = self.resolve_in_layer(lower, &child_path) {
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if let Ok(_) = self.resolve_in_layer(lower_fs, lower_node, &child_path) {
                 let metadata = self.get_metadata_for_path(&child_path)?;
                 let node = OverlayNode::new(name.clone(), child_path.clone(), metadata.file_type, metadata.file_id);
                 if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
@@ -364,42 +344,37 @@ impl FileSystemOperations for OverlayFS {
         Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File not found"))
     }
 
-    fn open(&self, node: &Arc<dyn VfsNode>, flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError> {
-        let overlay_node = node.as_any()
+    fn open(&self, overlay_node: &Arc<dyn VfsNode>, flags: u32) -> Result<Arc<dyn FileObject>, FileSystemError> {
+        // OverlayNodeにダウンキャスト
+        let overlay_node = overlay_node.as_any()
             .downcast_ref::<OverlayNode>()
             .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "Invalid node type for OverlayFS"))?;
-
         // Check if this is a write operation
         let is_write_operation = (flags & 0x3) != 0; // O_WRONLY=1, O_RDWR=2
-
         // If writing to a file that exists only in lower layer, copy it up first
         if is_write_operation && self.file_exists_in_lower_only(&overlay_node.path) {
             self.copy_up(&overlay_node.path)?;
         }
-
         // Try upper layer first
-        if let Some(ref upper) = self.upper {
-            if let Ok(upper_node) = self.resolve_in_layer(upper, &overlay_node.path) {
-                if let Ok(file) = upper.open(&upper_node, flags) {
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if let Ok(upper_node) = self.resolve_in_layer(upper_fs, upper_node, &overlay_node.path) {
+                if let Ok(file) = upper_fs.open(&upper_node, flags) {
                     return Ok(file);
                 }
             }
         }
-
         // For write operations, we need an upper layer
         if is_write_operation {
             return Err(FileSystemError::new(FileSystemErrorKind::PermissionDenied, "Cannot write to read-only overlay"));
         }
-
         // Try lower layers for read operations
-        for lower in &self.lower_layers {
-            if let Ok(lower_node) = self.resolve_in_layer(lower, &overlay_node.path) {
-                if let Ok(file) = lower.open(&lower_node, flags) {
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if let Ok(lower_node) = self.resolve_in_layer(lower_fs, lower_node, &overlay_node.path) {
+                if let Ok(file) = lower_fs.open(&lower_node, flags) {
                     return Ok(file);
                 }
             }
         }
-
         Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File not found"))
     }
 
@@ -408,26 +383,21 @@ impl FileSystemOperations for OverlayFS {
         let overlay_parent = parent_node.as_any()
             .downcast_ref::<OverlayNode>()
             .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "Invalid node type for OverlayFS"))?;
-
         let child_path = if overlay_parent.path == "/" {
             format!("/{}", name)
         } else {
             format!("{}/{}", overlay_parent.path, name)
         };
-
         // Ensure parent exists in upper layer (copy-up if needed)
         if self.file_exists_in_lower_only(&overlay_parent.path) {
             self.copy_up(&overlay_parent.path)?;
         }
-
         // Remove any existing whiteout
         if self.is_whiteout(&child_path) {
             // Remove whiteout file by creating the actual file
         }
-
-        let upper_parent = self.resolve_in_layer(upper, &overlay_parent.path)?;
-        let new_node = upper.create(&upper_parent, name, file_type, mode)?;
-        
+        let upper_parent = self.resolve_in_layer(&upper.0, &upper.1, &overlay_parent.path)?;
+        let new_node = upper.0.create(&upper_parent, name, file_type, mode)?;
         // Return overlay node
         let metadata = new_node.metadata()?;
         let overlay_node = OverlayNode::new(name.clone(), child_path, metadata.file_type, metadata.file_id);
@@ -449,12 +419,12 @@ impl FileSystemOperations for OverlayFS {
         };
 
         // If file exists in upper layer, remove it
-        if let Some(ref upper) = self.upper {
-            if let Ok(upper_parent) = self.resolve_in_layer(upper, &overlay_parent.path) {
-                if upper.remove(&upper_parent, name).is_ok() {
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if let Ok(upper_parent) = self.resolve_in_layer(upper_fs, upper_node, &overlay_parent.path) {
+                if upper_fs.remove(&upper_parent, name).is_ok() {
                     // If file also exists in lower layers, create whiteout
-                    for lower in &self.lower_layers {
-                        if self.resolve_in_layer(lower, &child_path).is_ok() {
+                    for (lower_fs, lower_node) in &self.lower_layers {
+                        if self.resolve_in_layer(lower_fs, lower_node, &child_path).is_ok() {
                             self.create_whiteout(&child_path)?;
                             break;
                         }
@@ -465,8 +435,8 @@ impl FileSystemOperations for OverlayFS {
         }
 
         // If file exists only in lower layers, create whiteout
-        for lower in &self.lower_layers {
-            if self.resolve_in_layer(lower, &child_path).is_ok() {
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if self.resolve_in_layer(lower_fs, lower_node, &child_path).is_ok() {
                 self.create_whiteout(&child_path)?;
                 return Ok(());
             }
@@ -510,9 +480,9 @@ impl FileSystemOperations for OverlayFS {
         seen_names.insert("..".to_string());
 
         // Read from upper layer first
-        if let Some(ref upper) = self.upper {
-            if let Ok(upper_node) = self.resolve_in_layer(upper, &overlay_node.path) {
-                if let Ok(upper_entries) = upper.readdir(&upper_node) {
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if let Ok(upper_node) = self.resolve_in_layer(upper_fs, upper_node, &overlay_node.path) {
+                if let Ok(upper_entries) = upper_fs.readdir(&upper_node) {
                     for entry in upper_entries {
                         // Skip whiteout files themselves and . .. entries
                         if entry.name.starts_with(".wh.") || entry.name == "." || entry.name == ".." {
@@ -528,9 +498,9 @@ impl FileSystemOperations for OverlayFS {
         }
 
         // Read from lower layers (skip entries already seen in upper layers)
-        for lower in &self.lower_layers {
-            if let Ok(lower_node) = self.resolve_in_layer(lower, &overlay_node.path) {
-                if let Ok(lower_entries) = lower.readdir(&lower_node) {
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if let Ok(lower_node) = self.resolve_in_layer(lower_fs, lower_node, &overlay_node.path) {
+                if let Ok(lower_entries) = lower_fs.readdir(&lower_node) {
                     for entry in lower_entries {
                         // Skip . .. entries
                         if entry.name == "." || entry.name == ".." {
