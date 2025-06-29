@@ -14,6 +14,7 @@
 pub mod core;
 pub mod tmpfs;
 pub mod cpiofs;
+pub mod overlayfs;
 pub mod manager;
 pub mod mount_tree;
 
@@ -27,6 +28,11 @@ pub mod performance_tests;
 #[cfg(test)]
 pub mod cross_vfs_tests;
 
+#[cfg(test)]
+pub mod overlayfs_tests;
+
 
 pub use core::*;
 pub use tmpfs::*;
+pub use cpiofs::*;
+pub use overlayfs::*;
