@@ -459,11 +459,62 @@ impl CpioDirectoryObject {
 }
 
 impl StreamOps for CpioDirectoryObject {
-    fn read(&self, _buf: &mut [u8]) -> Result<usize, StreamError> {
-        // Directory reading not implemented for simplified version
-        Err(StreamError::NotSupported)
+    fn read(&self, buf: &mut [u8]) -> Result<usize, StreamError> {
+        let cpio_node = self.node.as_any()
+            .downcast_ref::<CpioNode>()
+            .ok_or(StreamError::NotSupported)?;
+        if cpio_node.file_type != FileType::Directory {
+            return Err(StreamError::NotSupported);
+        }
+        let mut all_entries = Vec::new();
+        // . entry
+        all_entries.push(crate::fs::DirectoryEntryInternal {
+            name: ".".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            file_id: cpio_node.file_id as u64,
+            metadata: None,
+        });
+        // .. entry
+        let parent_file_id = cpio_node.parent_file_id().unwrap_or(0);
+        all_entries.push(crate::fs::DirectoryEntryInternal {
+            name: "..".to_string(),
+            file_type: FileType::Directory,
+            size: 0,
+            file_id: parent_file_id,
+            metadata: None,
+        });
+        // children entries
+        for child in cpio_node.children.read().values() {
+            all_entries.push(crate::fs::DirectoryEntryInternal {
+                name: child.name.clone(),
+                file_type: child.file_type,
+                size: child.content.len(),
+                file_id: child.file_id as u64,
+                metadata: None,
+            });
+        }
+        
+        let position = *self.position.read() as usize;
+        if position >= all_entries.len() {
+            return Ok(0); // EOF
+        }
+        let internal_entry = &all_entries[position];
+        let dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
+        let entry_size = dir_entry.entry_size();
+        if buf.len() < entry_size {
+            return Err(StreamError::InvalidArgument); 
+        }
+        let entry_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &dir_entry as *const _ as *const u8,
+                entry_size
+            )
+        };
+        buf[..entry_size].copy_from_slice(entry_bytes);
+        *self.position.write() += 1;
+        Ok(entry_size)
     }
-    
     fn write(&self, _buf: &[u8]) -> Result<usize, StreamError> {
         Err(StreamError::FileSystemError(FileSystemError::new(
             FileSystemErrorKind::ReadOnly,
