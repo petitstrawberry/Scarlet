@@ -57,7 +57,6 @@ impl TmpFS {
     /// VFS v2 driver registration API: create from option string
     /// Example option: "mem=1048576" etc.
     pub fn create_from_option_string(option: Option<&str>) -> Arc<dyn FileSystemOperations> {
-        // オプション例: "mem=1048576" など
         let mut memory_limit = 0;
         if let Some(opt) = option {
             for part in opt.split(',') {
