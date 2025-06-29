@@ -24,9 +24,8 @@ fn test_vfs_inheritance_basic() {
     
     // Create unified VFS with basic directories
     let vfs = VfsManager::new();
-    let fs = Box::new(crate::fs::drivers::tmpfs::TmpFS::new(1024 * 1024)); // 1MB limit
-    let fs_id = vfs.register_fs(fs);
-    vfs.mount(fs_id, "/").unwrap();
+    let fs = Arc::new(crate::fs::vfs_v2::tmpfs::TmpFS::create_from_params(&crate::fs::vfs_v2::tmpfs::TmpFSParams::with_memory_limit(1024 * 1024)).unwrap()); // 1MB limit
+    vfs.mount(fs, "/").unwrap();
     
     // Create directories in VFS
     vfs.create_dir("/home").unwrap();
@@ -82,9 +81,8 @@ fn test_vfs_inheritance_abi_switch() {
     
     // Create unified VFS with directories
     let vfs = VfsManager::new();
-    let fs = Box::new(crate::fs::drivers::tmpfs::TmpFS::new(1024 * 1024)); // 1MB limit
-    let fs_id = vfs.register_fs(fs);
-    vfs.mount(fs_id, "/").unwrap();
+    let fs = Arc::new(crate::fs::vfs_v2::tmpfs::TmpFS::create_from_params(&crate::fs::vfs_v2::tmpfs::TmpFSParams::with_memory_limit(1024 * 1024)).unwrap()); // 1MB limit
+    vfs.mount(fs, "/").unwrap();
     
     // Create standard directories
     vfs.create_dir("/home").unwrap();
@@ -155,9 +153,8 @@ fn test_executor_vfs_inheritance() {
     
     // Create unified VFS with some directories
     let vfs = VfsManager::new();
-    let fs = Box::new(crate::fs::drivers::tmpfs::TmpFS::new(1024 * 1024)); // 1MB limit
-    let fs_id = vfs.register_fs(fs);
-    vfs.mount(fs_id, "/").unwrap();
+    let fs = Arc::new(crate::fs::vfs_v2::tmpfs::TmpFS::create_from_params(&crate::fs::vfs_v2::tmpfs::TmpFSParams::with_memory_limit(1024 * 1024)).unwrap()); // 1MB limit
+    vfs.mount(fs, "/").unwrap();
     
     // Create directories and files in VFS
     vfs.create_dir("/home").unwrap();

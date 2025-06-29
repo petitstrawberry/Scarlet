@@ -308,6 +308,18 @@ impl OverlayFS {
         
         false
     }
+
+    /// VFS v2ドライバ登録用API: オプション文字列から生成
+    /// 例: option = Some("upper=tmpfs,lower=cpiofs")
+    pub fn create_from_option_string(
+        option: Option<&str>,
+        upper: Option<(Arc<MountPoint>, Arc<VfsEntry>)>,
+        lower_layers: Vec<(Arc<MountPoint>, Arc<VfsEntry>)>,
+    ) -> Arc<dyn FileSystemOperations> {
+        // nameは固定またはoptionから取得
+        let name = "overlayfs_v2".to_string();
+        OverlayFS::new_with_dirs(upper, lower_layers, name).expect("Failed to create OverlayFS") as Arc<dyn FileSystemOperations>
+    }
 }
 
 impl FileSystemOperations for OverlayFS {

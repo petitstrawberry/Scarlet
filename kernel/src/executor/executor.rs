@@ -4,7 +4,7 @@
 //! It does NOT contain ABI-specific knowledge - each ABI module handles
 //! its own binary format and conversion logic.
 
-use crate::task::Task;
+use crate::{fs::manager::get_global_vfs_manager, task::Task};
 use crate::arch::Trapframe;
 use crate::vm::vmem::VirtualMemoryMap;
 use crate::task::ManagedPage;
@@ -265,7 +265,7 @@ impl TransparentExecutor {
         task.vfs = Some(clean_vfs);
         
         // Get base VFS (global VFS) for overlay and shared resources
-        let base_vfs = crate::fs::get_global_vfs();
+        let base_vfs = get_global_vfs_manager();
         
         // Prepare ABI-specific directories in base VFS
         let abi_name = abi.get_name();

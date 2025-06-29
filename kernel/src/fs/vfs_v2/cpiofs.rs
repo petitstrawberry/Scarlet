@@ -8,6 +8,7 @@ use alloc::{
     string::{String, ToString},
     sync::Arc,
     vec::Vec,
+    format,
 };
 use spin::RwLock;
 use core::any::Any;
@@ -92,6 +93,16 @@ impl CpioNode {
     pub fn parent_file_id(&self) -> Option<u64> {
         self.parent.read().as_ref()?.upgrade().map(|p| p.file_id as u64)
     }
+
+    /// Arc<dyn VfsNode>からArc<CpioNode>へ安全に変換するヘルパー
+    pub fn from_vfsnode_arc(node: &Arc<dyn VfsNode>) -> Option<Arc<CpioNode>> {
+        // Arc内部のポインタ比較で同一性を判定し、cloneでArc<CpioNode>を返す
+        node.as_any().downcast_ref::<CpioNode>().map(|raw| {
+            // Safety: Arcの参照カウントは維持されているのでcloneでOK
+            let ptr = raw as *const CpioNode;
+            unsafe { Arc::from_raw(ptr) }.clone()
+        })
+    }
 }
 
 impl VfsNode for CpioNode {
@@ -142,9 +153,18 @@ impl CpioFS {
         filesystem.parse_cpio_archive(cpio_data)?;
         Ok(filesystem)
     }
+
+    /// VFS v2ドライバ登録用API: オプション文字列から生成
+    /// 例: option = Some("initramfs_addr=0x80000000,size=65536")
+    pub fn create_from_option_string(option: Option<&str>, cpio_data: &[u8]) -> Arc<dyn FileSystemOperations> {
+        // nameは固定、cpio_dataは外部から渡す前提
+        let name = "cpiofs_v2".to_string();
+        // オプション解析は必要に応じて拡張
+        CpioFS::new(name, cpio_data).expect("Failed to create CpioFS") as Arc<dyn FileSystemOperations>
+    }
     
     /// Parse CPIO archive and build directory tree
-    fn parse_cpio_archive(&self, data: &[u8]) -> Result<(), FileSystemError> {
+    fn parse_cpio_archive(self: &Arc<Self>, data: &[u8]) -> Result<(), FileSystemError> {
         // CPIO new ASCII format: magic "070701"
         let mut offset = 0;
         let mut file_id = 2;
@@ -180,13 +200,13 @@ impl CpioFS {
             };
             // Build node and insert into tree
             let node = CpioNode::new(name_str.clone(), file_type, content, file_id);
+            {
+                let mut fs_guard = node.filesystem.write();
+                *fs_guard = Some(Arc::clone(self));
+            }
             file_id += 1;
             // Insert into parent
-            let parent_path = if let Some(pos) = name_str.rfind('/') {
-                &name_str[..pos]
-            } else {
-                ""
-            };
+            let parent_path = if let Some(pos) = name_str.rfind('/') { &name_str[..pos] } else { "" };
             let parent = if parent_path.is_empty() {
                 Arc::clone(&self.root_node)
             } else {
@@ -199,6 +219,10 @@ impl CpioFS {
                     } else {
                         // Create intermediate directory if missing
                         let dir = CpioNode::new(part.to_string(), FileType::Directory, Vec::new(), file_id);
+                        {
+                            let mut fs_guard = dir.filesystem.write();
+                            *fs_guard = Some(Arc::clone(self));
+                        }
                         file_id += 1;
                         cur.add_child(part.to_string(), Arc::clone(&dir)).ok();
                         cur = dir;
@@ -206,7 +230,12 @@ impl CpioFS {
                 }
                 cur
             };
-            parent.add_child(node.name.clone(), Arc::clone(&node)).ok();
+            let base_name = if let Some(pos) = name_str.rfind('/') {
+                &name_str[pos+1..]
+            } else {
+                &name_str[..]
+            };
+            parent.add_child(base_name.to_string(), Arc::clone(&node)).ok();
             offset = (file_end + 3) & !3;
         }
         Ok(())
@@ -226,13 +255,12 @@ impl FileSystemOperations for CpioFS {
                 FileSystemErrorKind::NotSupported,
                 "Invalid node type for CpioFS"
             ))?;
-        
         // Look up child
         cpio_parent.get_child(name)
-            .map(|child| child as Arc<dyn VfsNode>)
+            .map(|n| n as Arc<dyn VfsNode>)
             .ok_or_else(|| FileSystemError::new(
                 FileSystemErrorKind::NotFound,
-                "File not found"
+                format!("File not found: {} in {}", name, cpio_parent.name)
             ))
     }
     

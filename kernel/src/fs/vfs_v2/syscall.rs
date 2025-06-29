@@ -1,34 +1,8 @@
 use alloc::{string::String, vec::Vec, string::ToString, sync::Arc};
-use alloc::boxed::Box;
 
 use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_string, task::mytask};
 
-use super::{SeekFrom, MAX_PATH_LENGTH};
-use super::vfs_v2::manager::VfsManager;
-use super::vfs_v2::core::FileSystemOperations;
-
-fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
-    if path.starts_with('/') {
-        Ok(path.to_string())
-    } else {
-        let cwd = task.cwd.clone().ok_or(())?;
-        let mut absolute_path = cwd;
-        if !absolute_path.ends_with('/') {
-            absolute_path.push('/');
-        }
-        absolute_path.push_str(path);
-        // 簡易正規化（"//"や"."などの除去）
-        let mut components = Vec::new();
-        for comp in absolute_path.split('/') {
-            match comp {
-                "" | "." => {},
-                ".." => { components.pop(); },
-                _ => components.push(comp),
-            }
-        }
-        Ok("/".to_string() + &components.join("/"))
-    }
-}
+use crate::fs::{SeekFrom, VfsManager, MAX_PATH_LENGTH};
 
 pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
@@ -59,7 +33,10 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
 
     // Convert path bytes to string
     let path_str = match str::from_utf8(&path_bytes) {
-        Ok(s) => s.to_string(),
+        Ok(s) => match to_absolute_path_v2(&task, s) {
+            Ok(abs) => abs,
+            Err(_) => return usize::MAX,
+        },
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
@@ -205,7 +182,7 @@ pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     // Convert path bytes to string
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+    let path_str: String = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
         Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
@@ -217,8 +194,16 @@ pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
         Some(vfs) => vfs,
         None => return usize::MAX, // VFS not initialized
     };
-    
-    match vfs.truncate(&path_str, length) {
+    // v2: openしてtruncate
+    let file_obj = match vfs.open(&path_str, 0) {
+        Ok(obj) => obj,
+        Err(_) => return usize::MAX,
+    };
+    let file = match file_obj.as_file() {
+        Some(f) => f,
+        None => return usize::MAX,
+    };
+    match file.truncate(length) {
         Ok(_) => 0,
         Err(_) => usize::MAX, // -1
     }
@@ -352,7 +337,7 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
         "bind" => {
             // Handle bind mount - this is a special case handled by VFS
             let read_only = (flags & 1) != 0; // MS_RDONLY
-            match vfs.bind_mount(&source_str, &target_str, read_only) {
+            match vfs.bind_mount(&source_str, &target_str) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
             }
@@ -363,7 +348,7 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
                 match parse_overlay_options(&data) {
                     Ok((upperdir, lowerdirs)) => {
                         let lowerdir_refs: Vec<&str> = lowerdirs.iter().map(|s| s.as_str()).collect();
-                        match vfs.overlay_mount(upperdir.as_deref(), lowerdir_refs, &target_str) {
+                        match vfs.overlay_mount(upperdir.as_deref().unwrap_or(""), &lowerdir_refs, &target_str, flags) {
                             Ok(_) => 0,
                             Err(_) => usize::MAX,
                         }
@@ -414,14 +399,15 @@ fn parse_overlay_options(data: &str) -> Result<(Option<String>, Vec<String>), ()
 /// is delegated to the filesystem driver, and registration is handled
 /// by sys_mount.
 fn create_filesystem_and_mount(
-    vfs: &VfsManager,
+    vfs: &crate::fs::VfsManager,
     fstype: &str,
     target: &str,
     options: &str,
 ) -> Result<(), crate::fs::FileSystemError> {
     use crate::fs::get_fs_driver_manager;
     let driver_manager = get_fs_driver_manager();
-    let filesystem: alloc::sync::Arc<dyn FileSystemOperations> = driver_manager.create_from_option_string(fstype, options)?;
+    // v2: 直接ArcでFSを生成し、そのままmount
+    let filesystem = driver_manager.create_from_option_string(fstype, options)?;
     vfs.mount(filesystem, target, 0)?;
     Ok(())
 }
@@ -434,7 +420,7 @@ pub fn sys_umount(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(task);
 
     // Convert target path to string
-    let target_str = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
+    let target_str: String = match cstring_to_string(target_ptr, MAX_PATH_LENGTH) {
         Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
@@ -463,7 +449,7 @@ pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
 
     // Convert new_root path to string
-    let new_root_str = match cstring_to_string(new_root_ptr, MAX_PATH_LENGTH) {
+    let new_root_str: String = match cstring_to_string(new_root_ptr, MAX_PATH_LENGTH) {
         Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
@@ -472,7 +458,7 @@ pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
     };
 
     // Convert old_root path to string
-    let old_root_str = match cstring_to_string(old_root_ptr, MAX_PATH_LENGTH) {
+    let old_root_str: String = match cstring_to_string(old_root_ptr, MAX_PATH_LENGTH) {
         Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX,
@@ -507,10 +493,51 @@ fn pivot_root_in_place(
     vfs: &Arc<VfsManager>, 
     new_root_path: &str, 
     old_root_path: &str
-) -> Result<(), super::FileSystemError> {
-    // TODO: v2用のpivot_root実装が必要
-    Err(super::FileSystemError {
-        kind: super::FileSystemErrorKind::NotSupported,
-        message: "pivot_root_in_place is not yet implemented for VFS v2".to_string(),
-    })
+) -> Result<(), crate::fs::FileSystemError> {
+    // Use bind mount to mount the new root as "/" in the new mount tree
+    let temp_vfs = VfsManager::new();
+    temp_vfs.bind_mount_from(vfs.clone(), new_root_path, "/")?;
+    let old_root_path = if old_root_path == new_root_path {
+        return Err(crate::fs::FileSystemError {
+            kind: crate::fs::FileSystemErrorKind::InvalidPath,
+            message: "Old root path cannot be the same as new root path".to_string(),
+        });
+    } else if old_root_path.starts_with(new_root_path) {
+        &old_root_path[new_root_path.len()..]
+    } else {
+        old_root_path
+    };
+    temp_vfs.create_dir(old_root_path)?;
+    temp_vfs.bind_mount_from(vfs.clone(), "/", old_root_path)?;
+    // MountTreeのロックはroot_mount.write()で取得
+    {
+        let mut original_guard = temp_vfs.mount_tree.root_mount.write();
+        let mut temp_guard = vfs.mount_tree.root_mount.write();
+        core::mem::swap(&mut *original_guard, &mut *temp_guard);
+    }
+    Ok(())
+}
+
+// Use a local path normalization function
+fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
+    if path.starts_with('/') {
+        Ok(path.to_string())
+    } else {
+        let cwd = task.cwd.clone().ok_or(())?;
+        let mut absolute_path = cwd;
+        if !absolute_path.ends_with('/') {
+            absolute_path.push('/');
+        }
+        absolute_path.push_str(path);
+        // Simple normalization (removes "//", ".", etc.)
+        let mut components = Vec::new();
+        for comp in absolute_path.split('/') {
+            match comp {
+                "" | "." => {},
+                ".." => { components.pop(); },
+                _ => components.push(comp),
+            }
+        }
+        Ok("/".to_string() + &components.join("/"))
+    }
 }

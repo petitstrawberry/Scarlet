@@ -53,6 +53,23 @@ impl TmpFS {
         debug_assert!(root.filesystem().is_some(), "TmpFS root node's filesystem() is None after set_filesystem");
         fs
     }
+
+    /// VFS v2ドライバ登録用API: オプション文字列から生成
+    pub fn create_from_option_string(option: Option<&str>) -> Arc<dyn FileSystemOperations> {
+        // オプション例: "mem=1048576" など
+        let mut memory_limit = 0;
+        if let Some(opt) = option {
+            for part in opt.split(',') {
+                let part = part.trim();
+                if let Some(mem_str) = part.strip_prefix("mem=") {
+                    if let Ok(val) = mem_str.parse::<usize>() {
+                        memory_limit = val;
+                    }
+                }
+            }
+        }
+        TmpFS::new(memory_limit) as Arc<dyn FileSystemOperations>
+    }
     
     /// Generate next unique file ID
     fn generate_file_id(&self) -> u64 {

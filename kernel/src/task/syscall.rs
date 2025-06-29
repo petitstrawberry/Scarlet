@@ -118,10 +118,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
-        Ok(path) => match VfsManager::to_absolute_path(&task, &path) {
-            Ok(abs_path) => abs_path,
-            Err(_) => return usize::MAX, // Path error
-        },
+        Ok(path) => path,
         Err(_) => return usize::MAX, // Path parsing error
     };
     
@@ -170,10 +167,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
-        Ok(path) => match VfsManager::to_absolute_path(&task, &path) {
-            Ok(abs_path) => abs_path,
-            Err(_) => return usize::MAX, // Path error
-        },
+        Ok(path) => path,
         Err(_) => return usize::MAX, // Path parsing error
     };
     

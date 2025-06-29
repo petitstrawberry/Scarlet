@@ -192,14 +192,11 @@ pub mod executor;
 pub mod test;
 
 extern crate alloc;
-use alloc::{string::ToString, sync::Arc};
+use alloc::string::ToString;
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use environment::PAGE_SIZE;
-use fs::{drivers::initramfs::{init_initramfs, relocate_initramfs}, VfsManager};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
-
-use core::panic::{self, PanicInfo};
 
 use arch::{get_cpu, init_arch};
 use task::{elf_loader::load_elf_into_task, new_user_task};
@@ -207,8 +204,9 @@ use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
-
-use crate::fs::{get_global_vfs, init_global_vfs};
+use core::panic::PanicInfo;
+use crate::fs::vfs_v2::manager::init_global_vfs_manager;
+use crate::fs::vfs_v2::initramfs::{init_initramfs, relocate_initramfs};
 
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
@@ -284,18 +282,16 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let scheduler = get_scheduler();
     /* Initialize global VFS */
     println!("[Scarlet Kernel] Initializing global VFS...");
-    init_global_vfs().expect("Failed to initialize global VFS");
+    let manager = init_global_vfs_manager();
     /* Initialize initramfs */
     println!("[Scarlet Kernel] Initializing initramfs...");
-    let manager = get_global_vfs();
-    init_initramfs(manager);
+    init_initramfs(&manager);
     /* Make init task */
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
-    let manager_arc = manager.clone();
-    task.vfs = Some(manager_arc);
+    task.vfs = Some(manager.clone());
     task.cwd = Some("/".to_string());
     let file_obj = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
         Ok(kernel_obj) => kernel_obj,

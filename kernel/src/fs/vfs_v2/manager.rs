@@ -11,7 +11,7 @@ use alloc::{
     vec::Vec,
     format,
 };
-use spin::RwLock;
+use spin::{RwLock, Once};
 
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileType, 
@@ -23,6 +23,9 @@ use super::{
     core::{VfsEntry, FileSystemOperations, DirectoryEntryInternal},
     mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId, MountId, MountType},
 };
+
+/// Filesystem ID type (v1互換)
+pub type FSId = u64;
 
 // Helper function to create FileSystemError
 fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
@@ -40,12 +43,11 @@ pub struct VfsManager {
     /// Mount tree for hierarchical mount point management
     pub mount_tree: MountTree,
     
-    /// Registered filesystems by name
-    filesystems: RwLock<BTreeMap<String, Arc<dyn FileSystemOperations>>>,
-    
     /// Current working directory
     cwd: RwLock<Option<Arc<VfsEntry>>>,
 }
+
+static GLOBAL_VFS_MANAGER: Once<Arc<VfsManager>> = Once::new();
 
 impl VfsManager {
     /// Create a new VFS manager instance with a dummy root
@@ -58,15 +60,10 @@ impl VfsManager {
         
         let mount_tree = MountTree::new(dummy_root_entry.clone());
         
-        let mut filesystems = BTreeMap::new();
-        filesystems.insert("/".to_string(), root_fs);
-
         Self {
             id: VfsManagerId::new(),
             mount_tree,
-            filesystems: RwLock::new(filesystems),
             cwd: RwLock::new(None),
-            // cross_vfs_refs: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -75,27 +72,26 @@ impl VfsManager {
         let root_node = root_fs.root_node();
         let dummy_root_entry = VfsEntry::new(None, "/".to_string(), root_node);
         let mount_tree = MountTree::new(dummy_root_entry.clone());
-        let mut filesystems = BTreeMap::new();
-        filesystems.insert("/".to_string(), root_fs);
         Self {
             id: VfsManagerId::new(),
             mount_tree,
-            filesystems: RwLock::new(filesystems),
             cwd: RwLock::new(None),
         }
     }
     
     /// Mount a filesystem at the specified path
     /// 
-    /// This will register the filesystem and create a mount point in the VFS.
+    /// This will mount the given filesystem at the specified mount point.
+    /// If the mount point is "/", it will replace the root filesystem.
     /// 
     /// # Arguments
     /// * `filesystem` - The filesystem to mount.
     /// * `mount_point_str` - The path where the filesystem should be mounted.
-    /// * `flags` - Mount options (e.g., read-only, etc.).
+    /// * `flags` - Flags for the mount operation (e.g., read-only).
     /// 
     /// # Errors
-    /// Returns an error if the mount point already exists or is invalid.
+    /// Returns an error if the mount point is invalid, the filesystem cannot be mounted,
+    /// or if the mount operation fails.
     /// 
     pub fn mount(
         &self,
@@ -104,59 +100,38 @@ impl VfsManager {
         flags: u32,
     ) -> Result<(), FileSystemError> {
         if mount_point_str == "/" {
-            // Special case: replacing the root filesystem
             let new_root_node = filesystem.root_node();
             let new_root_entry = VfsEntry::new(None, "/".to_string(), new_root_node);
             let new_root_mount = MountPoint::new_regular("/".to_string(), new_root_entry);
             self.mount_tree.replace_root(new_root_mount);
-            let mut fs_map = self.filesystems.write();
-            fs_map.clear();
-            fs_map.insert("/".to_string(), filesystem);
             return Ok(());
         }
-
-        // Convert flags to mount options (for future use)
         let _mount_options = MountOptionsV2 {
             readonly: (flags & 0x01) != 0,
             flags,
         };
-        
         let (target_entry, target_mount_point) = self.mount_tree.resolve_path(mount_point_str)?;
-
-        // Use MountTreeV2 for mounting
-        self.mount_tree.mount(target_entry, target_mount_point, filesystem.clone())?;
-
-        // Register filesystem
-        self.filesystems.write().insert(mount_point_str.to_string(), filesystem);
-        
+        self.mount_tree.mount(target_entry, target_mount_point, filesystem)?;
         Ok(())
     }
-    
-    /// Unmount a filesystem from the specified path
+
+    /// Unmount a mount point at the specified path
     /// 
-    /// This will remove the mount point and unregister the filesystem.
+    /// This will remove the mount point from the mount tree and clean up any
+    /// associated resources.
     /// 
     /// # Arguments
     /// * `mount_point_str` - The path of the mount point to unmount.
     /// 
     /// # Errors
-    /// Returns an error if the mount point does not exist or is not a mount point.
+    /// Returns an error if the mount point is not valid or if the unmount operation fails.
     /// 
     pub fn unmount(&self, mount_point_str: &str) -> Result<(), FileSystemError> {
-        // Resolve to the mount point entry (not the mounted content)
         let (entry, mount_point) = self.mount_tree.resolve_mount_point(mount_point_str)?;
-
-        // Check if the resolved entry is actually a mount point.
         if !self.mount_tree.is_mount_point(&entry, &mount_point) {
             return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path is not a mount point"));
         }
-
-        // Unmount using the MountTree.
         self.mount_tree.unmount(&entry, &mount_point)?;
-        
-        // Remove from the filesystem registry.
-        self.filesystems.write().remove(mount_point_str);
-        
         Ok(())
     }
 
@@ -531,6 +506,18 @@ impl VfsManager {
         Ok(entry)
     }
     
+    /// Overlay mount (v2, cross-vfs非対応)
+    /// upperdir: 上書き層, lowerdirs: 下層(複数可), target: マウント先, flags: オプション
+    pub fn overlay_mount(&self, upperdir: &str, lowerdirs: &[&str], target: &str, flags: u32) -> Result<(), FileSystemError> {
+        // TODO: 実装例（ダミー）
+        // 実際にはoverlayfsドライバを生成し、mount_treeに追加する
+        // cross-vfsはサポートしない
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "overlay_mount: not yet implemented (v2, no cross-vfs)",
+        ))
+    }
+
     // Helper methods
     
     /// Split a path into parent directory and filename
@@ -564,5 +551,15 @@ impl VfsManager {
             ))
         }
     }
+}
+
+/// グローバルVFSマネージャ（Arc）を初期化し、以後取得できるようにする
+pub fn init_global_vfs_manager() -> Arc<VfsManager> {
+    GLOBAL_VFS_MANAGER.call_once(|| Arc::new(VfsManager::new())).clone()
+}
+
+/// グローバルVFSマネージャ（Arc）を取得
+pub fn get_global_vfs_manager() -> Arc<VfsManager> {
+    GLOBAL_VFS_MANAGER.get().expect("global VFS manager not initialized").clone()
 }
 

@@ -392,27 +392,11 @@ impl MountTree {
                 if resolve_mount && i == components.len() - 1 {
                     // This is a mount point - return the mount point entry and the parent mount
                     if let Some(_child_mount) = current_mount.get_child(&current_entry) {
-                        // // For cross-VFS bind mounts on final component, still delegate to source VFS
-                        // if child_mount.is_cross_vfs_bind() {
-                        //     return self.resolve_cross_vfs_path(&child_mount, "");
-                        // } else {
-                        //     return Ok((current_entry, current_mount));
-                        // }
                         return Ok((current_entry, current_mount));
                     }
                 } else {
                     // Not the final component - cross mount boundaries normally
                     if let Some(child_mount) = current_mount.get_child(&current_entry) {
-                        // // Check if this is a cross-VFS bind mount
-                        // if child_mount.is_cross_vfs_bind() {
-                        //     // For cross-VFS bind mounts, delegate remaining path resolution to source VFS
-                        //     let remaining_path = components[i + 1..].join("/");
-                        //     return self.resolve_cross_vfs_path(&child_mount, &remaining_path);
-                        // } else {
-                        //     // Regular mount - switch to child mount
-                        //     current_mount = child_mount;
-                        //     current_entry = current_mount.root.clone();
-                        // }
                         current_mount = child_mount;
                         current_entry = current_mount.root.clone();
                     }
@@ -436,22 +420,6 @@ impl MountTree {
             .map(|s| s.to_string())
             .collect()
     }
-
-    // /// Find the mount point that should contain the given path
-    // fn find_mount_point_for_path(&self, path: &str) -> VfsResult<Arc<MountPoint>> {
-    //     let components = self.parse_path(path);
-    //     let mut current_mount = self.root_mount.read().clone();
-
-    //     for component in components {
-    //         if let Some(child_mount) = current_mount.get_child(&component) {
-    //             current_mount = child_mount;
-    //         } else {
-    //             break;
-    //         }
-    //     }
-
-    //     Ok(current_mount)
-    // }
 
     /// Get the full path of a mount point
     fn get_mount_path(&self, mount: &Arc<MountPoint>) -> String {

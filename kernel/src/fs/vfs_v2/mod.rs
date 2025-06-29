@@ -17,6 +17,8 @@ pub mod cpiofs;
 pub mod overlayfs;
 pub mod manager;
 pub mod mount_tree;
+pub mod initramfs;
+pub mod syscall;
 
 // VFS v2 test modules
 #[cfg(test)]

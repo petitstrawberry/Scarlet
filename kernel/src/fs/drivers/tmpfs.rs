@@ -768,17 +768,15 @@ impl StreamOps for TmpFileObject {
                     // Since we don't have path stored, use the readdir logic directly
                     
                     // Create a vector to store all entries including "." and ".."
-                    let mut all_entries = Vec::new();
-                    
                     // Add "." entry (current directory)
                     let current_metadata = node.metadata.read();
-                    all_entries.push(crate::fs::DirectoryEntryInternal {
+                    let mut all_entries = vec![crate::fs::DirectoryEntryInternal {
                         name: ".".to_string(),
                         file_type: FileType::Directory,
                         size: current_metadata.size,
                         file_id: current_metadata.file_id,
                         metadata: Some(current_metadata.clone()),
-                    });
+                    }];
                     
                     // Add ".." entry (parent directory) - simplified to point to self for now
                     all_entries.push(crate::fs::DirectoryEntryInternal {
@@ -1687,13 +1685,9 @@ mod tests {
     /// Test basic hardlink creation and verification
     #[test_case]
     fn test_hardlink_creation() {
-        // Create TmpFS instance directly (not wrapped in Arc<RwLock>)
-        let tmpfs = TmpFS::new(1024 * 1024); // 1MB limit
+        let tmpfs = Arc::new(TmpFS::new(1024 * 1024)); // 1MB limit
         let manager = VfsManager::new();
-        
-        // Register and mount filesystem
-        let fs_id = manager.register_fs(Box::new(tmpfs));
-        manager.mount(fs_id, "/tmp").expect("Failed to mount tmpfs");
+        manager.mount(tmpfs.clone(), "/tmp").expect("Failed to mount tmpfs");
         
         // Create original file
         manager.create_regular_file("/tmp/original.txt").expect("Failed to create original file");
@@ -1737,11 +1731,9 @@ mod tests {
     /// Test hardlink removal behavior
     #[test_case]
     fn test_hardlink_removal() {
-        let tmpfs = TmpFS::new(1024 * 1024);
+        let tmpfs = Arc::new(TmpFS::new(1024 * 1024));
         let manager = VfsManager::new();
-        
-        let fs_id = manager.register_fs(Box::new(tmpfs));
-        manager.mount(fs_id, "/tmp").expect("Failed to mount tmpfs");
+        manager.mount(tmpfs.clone(), "/tmp").expect("Failed to mount tmpfs");
         
         // Create file and hardlink
         manager.create_regular_file("/tmp/file.txt").expect("Failed to create file");
@@ -1793,11 +1785,9 @@ mod tests {
     /// Test that hardlink to directory fails
     #[test_case]
     fn test_hardlink_directory_fails() {
-        let tmpfs = TmpFS::new(1024 * 1024);
+        let tmpfs = Arc::new(TmpFS::new(1024 * 1024));
         let manager = VfsManager::new();
-        
-        let fs_id = manager.register_fs(Box::new(tmpfs));
-        manager.mount(fs_id, "/tmp").expect("Failed to mount tmpfs");
+        manager.mount(tmpfs.clone(), "/tmp").expect("Failed to mount tmpfs");
         
         // Create directory
         manager.create_dir("/tmp/testdir").expect("Failed to create directory");
@@ -1814,15 +1804,11 @@ mod tests {
     /// Test cross-filesystem hardlink fails
     #[test_case]
     fn test_cross_filesystem_hardlink_fails() {
-        let tmpfs1 = TmpFS::new(1024 * 1024);
-        let tmpfs2 = TmpFS::new(1024 * 1024);
+        let tmpfs1 = Arc::new(TmpFS::new(1024 * 1024));
+        let tmpfs2 = Arc::new(TmpFS::new(1024 * 1024));
         let manager = VfsManager::new();
-        
-        // Mount two different filesystems
-        let fs1_id = manager.register_fs(Box::new(tmpfs1));
-        let fs2_id = manager.register_fs(Box::new(tmpfs2));
-        manager.mount(fs1_id, "/tmp1").expect("Failed to mount tmpfs1");
-        manager.mount(fs2_id, "/tmp2").expect("Failed to mount tmpfs2");
+        manager.mount(tmpfs1.clone(), "/tmp1").expect("Failed to mount tmpfs1");
+        manager.mount(tmpfs2.clone(), "/tmp2").expect("Failed to mount tmpfs2");
         
         // Create file in first filesystem
         manager.create_regular_file("/tmp1/file.txt").expect("Failed to create file");
