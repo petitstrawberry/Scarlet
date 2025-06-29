@@ -251,24 +251,22 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     // bind mount: mount_mgr:/ → lower_mgr:/dir1/mnt
     lower_mgr.bind_mount_from(Arc::new(mount_mgr), "/", "/dir1/mnt").unwrap();
 
-    // OverlayFSはlower_mgrの/dir1/mntを使う
+    // OverlayFSのlowerを/dir1/mntにする
     let mnt_entry = lower_mgr.resolve_path("/dir1/mnt").unwrap();
-    let mnt_node = mnt_entry.node();
-
-    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let mnt_mp = make_mount(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new_with_dirs(
         Some((upper_mp.clone(), upper_entry.clone())),
-        vec![(lower_mp.clone(), lower_entry.clone())],
+        vec![(mnt_mp.clone(), mnt_entry.clone())],
         "overlayfs".to_string()
     ).unwrap();
     let root = overlay.root_node();
 
-    // OverlayFS経由で/dir1/mnt/file_in_mountが見えることを確認
+    // OverlayFS経由でfile_in_mountが見えることを確認
     let file_node = overlay.lookup(&root, &"file_in_mount".to_string()).unwrap();
     assert_eq!(file_node.metadata().unwrap().file_type, FileType::RegularFile);
 
-    // OverlayFS経由でmntをwhiteout（remove）
+    // OverlayFS経由でfile_in_mountをwhiteout（remove）
     overlay.remove(&root, &"file_in_mount".to_string()).unwrap();
     // file_in_mountが見えなくなっていることを確認
     assert!(overlay.lookup(&root, &"file_in_mount".to_string()).is_err());
