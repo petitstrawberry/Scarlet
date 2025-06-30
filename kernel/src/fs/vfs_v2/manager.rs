@@ -143,10 +143,13 @@ impl VfsManager {
         if !self.mount_tree.is_mount_point(&entry, &mount_point) {
             return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path is not a mount point"));
         }
+        
         self.mount_tree.unmount(&entry, &mount_point)?;
         // Identify the unmounted fs and remove it from the holding list
-        let fs_ptr = Arc::as_ptr(&mount_point.root.node().filesystem().unwrap().upgrade().unwrap()) as *const () as usize;
-        self.mounted_filesystems.write().retain(|fs| Arc::as_ptr(fs) as *const () as usize != fs_ptr);
+        if let Some(fs) = mount_point.root.node().filesystem().unwrap().upgrade() {
+            let fs_ptr = Arc::as_ptr(&fs) as *const () as usize;
+            self.mounted_filesystems.write().retain(|fs| Arc::as_ptr(fs) as *const () as usize != fs_ptr);
+        }
         Ok(())
     }
 
