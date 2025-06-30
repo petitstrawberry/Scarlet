@@ -328,9 +328,12 @@ impl MountTree {
     }
 
     /// Unmount a filesystem
-    pub fn unmount(&self, entry: &VfsEntryRef, parent_mount_point: &Arc<MountPoint>) -> VfsResult<()> {
-        parent_mount_point.remove_child(&entry);
-        Ok(())
+    pub fn unmount(&self, entry: &VfsEntryRef, parent_mount_point: &Arc<MountPoint>) -> VfsResult<Arc<MountPoint>> {
+        let removed_mount = parent_mount_point.remove_child(&entry);
+        match removed_mount {
+            Some(mount) => Ok(mount),
+            None => Err(vfs_error(FileSystemErrorKind::NotFound, "Mount point not found for unmount")),
+        }
     }
 
     /// Resolve a path to a VFS entry, handling mount boundaries
