@@ -6,13 +6,10 @@
 //! - FileSystemOperations: Driver API for filesystem operations
 
 use alloc::{
-    collections::BTreeMap,
-    sync::{Arc, Weak},
-    string::String,
-    vec::Vec,
+    collections::BTreeMap, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
 };
 use spin::RwLock;
-use core::any::Any;
+use core::{any::Any, fmt::Debug};
 use core::fmt;
 
 use crate::fs::{FileSystemError, FileMetadata, FileObject, FileType};
@@ -145,6 +142,7 @@ impl fmt::Debug for VfsEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VfsEntry")
             .field("name", &self.name)
+            .field("node", &self.node)
             .field("children_count", &self.children.read().len())
             .finish()
     }
@@ -188,6 +186,16 @@ pub trait VfsNode: Send + Sync + Any {
             crate::fs::FileSystemErrorKind::NotSupported,
             "Not a symbolic link"
         ))
+    }
+}
+
+// Impl debug for VfsNode
+impl fmt::Debug for dyn VfsNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VfsNode")
+            .field("id", &self.id())
+            .field("file_type", &self.file_type().unwrap_or(FileType::Unknown))
+            .finish()
     }
 }
 

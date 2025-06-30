@@ -101,7 +101,7 @@ impl CpioNode {
 
 impl VfsNode for CpioNode {
     fn id(&self) -> u64 {
-        0
+        self.file_id as u64
     }
 
     fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
