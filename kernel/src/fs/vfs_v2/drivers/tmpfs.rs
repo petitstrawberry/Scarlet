@@ -157,9 +157,6 @@ impl FileSystemOperations for TmpFS {
         
         // Look up child in directory
         let children = tmp_node.children.read();
-        for (_child_name, _child_node) in children.iter() {
-            // crate::println!("TmpFS lookup: checking child '{}'", child_name);
-        }
         if let Some(child_node) = children.get(name) {
             Ok(Arc::clone(child_node) as Arc<dyn VfsNode>)
         } else {
