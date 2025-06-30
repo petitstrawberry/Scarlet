@@ -195,6 +195,8 @@ impl fmt::Debug for dyn VfsNode {
         f.debug_struct("VfsNode")
             .field("id", &self.id())
             .field("file_type", &self.file_type().unwrap_or(FileType::Unknown))
+            .field("metadata", &self.metadata())
+            .field("filesystem", &self.filesystem().and_then(|fs| fs.upgrade().map(|fs| fs.name().to_string())))
             .finish()
     }
 }
@@ -256,5 +258,14 @@ pub trait FileSystemOperations: Send + Sync {
     /// Check if filesystem is read-only
     fn is_read_only(&self) -> bool {
         false
+    }
+}
+
+impl fmt::Debug for dyn FileSystemOperations {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileSystemOperations")
+            .field("name", &self.name())
+            .field("root", &self.root_node())
+            .finish()
     }
 }
