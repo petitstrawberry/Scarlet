@@ -41,9 +41,9 @@ pub struct VfsManager {
     /// Mount tree for hierarchical mount point management
     pub mount_tree: MountTree,
     /// Current working directory
-    cwd: RwLock<Option<Arc<VfsEntry>>>,
+    pub cwd: RwLock<Option<Arc<VfsEntry>>>,
     /// Strong references to all currently mounted filesystems
-    mounted_filesystems: RwLock<Vec<Arc<dyn FileSystemOperations>>>,
+    pub mounted_filesystems: RwLock<Vec<Arc<dyn FileSystemOperations>>>,
 }
 
 static GLOBAL_VFS_MANAGER: Once<Arc<VfsManager>> = Once::new();
@@ -143,12 +143,14 @@ impl VfsManager {
         if !self.mount_tree.is_mount_point(&entry, &mount_point) {
             return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Path is not a mount point"));
         }
-        
-        self.mount_tree.unmount(&entry, &mount_point)?;
+        let unmounted_mount = self.mount_tree.unmount(&entry, &mount_point)?;
         // Identify the unmounted fs and remove it from the holding list
-        if let Some(fs) = mount_point.root.node().filesystem().unwrap().upgrade() {
-            let fs_ptr = Arc::as_ptr(&fs) as *const () as usize;
-            self.mounted_filesystems.write().retain(|fs| Arc::as_ptr(fs) as *const () as usize != fs_ptr);
+        // If mount_point is a bind mount, we do not remove the filesystem
+        if !unmounted_mount.is_bind_mount() {
+            if let Some(fs) = unmounted_mount.root.node().filesystem().unwrap().upgrade() {
+                let fs_ptr = Arc::as_ptr(&fs) as *const () as usize;
+                self.mounted_filesystems.write().retain(|fs| Arc::as_ptr(fs) as *const () as usize != fs_ptr);
+            }
         }
         Ok(())
     }
