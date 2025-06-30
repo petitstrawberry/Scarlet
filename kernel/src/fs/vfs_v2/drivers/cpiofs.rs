@@ -193,7 +193,12 @@ impl CpioFS {
                 Vec::new()
             };
             // Build node and insert into tree
-            let node = CpioNode::new(name_str.clone(), file_type, content, file_id);
+            let base_name = if let Some(pos) = name_str.rfind('/') {
+                &name_str[pos+1..]
+            } else {
+                &name_str[..]
+            };
+            let node = CpioNode::new(base_name.to_string(), file_type, content, file_id);
             {
                 let mut fs_guard = node.filesystem.write();
                 *fs_guard = Some(Arc::clone(self));
@@ -224,11 +229,6 @@ impl CpioFS {
                 }
                 cur
             };
-            let base_name = if let Some(pos) = name_str.rfind('/') {
-                &name_str[pos+1..]
-            } else {
-                &name_str[..]
-            };
             parent.add_child(base_name.to_string(), Arc::clone(&node)).ok();
             offset = (file_end + 3) & !3;
         }
@@ -249,6 +249,7 @@ impl FileSystemOperations for CpioFS {
                 FileSystemErrorKind::NotSupported,
                 "Invalid node type for CpioFS"
             ))?;
+        
         // Look up child
         cpio_parent.get_child(name)
             .map(|n| n as Arc<dyn VfsNode>)
