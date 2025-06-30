@@ -507,14 +507,55 @@ fn pivot_root_in_place(
     } else {
         old_root_path
     };
+
+    let temp_root_entry = vfs.mount_tree.resolve_path(new_root_path)?.0;
+    let temp_root = temp_root_entry.node();
+    let fs = match temp_root.filesystem() {
+        Some(fs) => {
+            match fs.upgrade() {
+                Some(fs) => fs,
+                None => return Err(crate::fs::FileSystemError {
+                    kind: crate::fs::FileSystemErrorKind::InvalidPath,
+                    message: "New root path does not have a valid filesystem".to_string(),
+                }),
+            }
+        }
+        None => return Err(crate::fs::FileSystemError {
+            kind: crate::fs::FileSystemErrorKind::InvalidPath,
+            message: "New root path does not have a filesystem".to_string(),
+        }),
+    };
+    // Mount the new root filesystem at "/"
+    match temp_vfs.mount(fs, "/", 0) {
+        Ok(_) => {},
+        Err(e) => {
+            crate::println!("Failed to mount new root filesystem: {}", e.message);
+            return Err(e);
+        }
+    }
+
     temp_vfs.create_dir(old_root_path)?;
-    temp_vfs.bind_mount_from(vfs.clone(), "/", old_root_path)?;
-    // MountTreeのロックはroot_mount.write()で取得
+
+    match temp_vfs.bind_mount_from(vfs.clone(), "/", old_root_path) {
+        Ok(_) => {},
+        Err(e) => {
+            crate::println!("Failed to bind mount old root path: {}", e.message);
+            return Err(e);
+        }
+    }
+
     {
         let mut original_guard = temp_vfs.mount_tree.root_mount.write();
         let mut temp_guard = vfs.mount_tree.root_mount.write();
         core::mem::swap(&mut *original_guard, &mut *temp_guard);
     }
+
+    {
+        let mut vfs_fs = vfs.mounted_filesystems.write();
+        let temp_fs = temp_vfs.mounted_filesystems.read();
+        *vfs_fs = temp_fs.clone();
+    }
+
     Ok(())
 }
 
