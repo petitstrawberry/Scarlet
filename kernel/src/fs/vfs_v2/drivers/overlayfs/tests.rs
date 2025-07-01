@@ -727,3 +727,41 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     let bytes_read = top_read_obj.read(&mut buffer).unwrap();
     assert_eq!(&buffer[..bytes_read], b"VFS3 top content");
 }
+
+#[test_case]
+fn test_overlayfs_simple_readdir() {
+    /*
+    Simple test to verify basic overlay readdir functionality
+    */
+    let lower = TmpFS::new(0);
+    let upper = TmpFS::new(0);
+    
+    // Create one file in each layer
+    let lower_root = lower.root_node();
+    lower.create(&lower_root, &"lower_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    
+    let upper_root = upper.root_node();
+    upper.create(&upper_root, &"upper_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    
+    // Create overlay
+    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    let overlay = OverlayFS::new(
+        Some((upper_mp, upper_entry)),
+        vec![(lower_mp, lower_entry)],
+        "simple_test".to_string()
+    ).unwrap();
+    
+    // Test readdir
+    let root = overlay.root_node();
+    let entries = overlay.readdir(&root).unwrap();
+    let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort();
+    
+    // Should contain both files
+    assert!(names.contains(&"lower_file"));
+    assert!(names.contains(&"upper_file"));
+    assert!(names.contains(&"."));
+    assert!(names.contains(&".."));
+    assert_eq!(names.len(), 4); // ., .., lower_file, upper_file
+}
