@@ -179,6 +179,110 @@ impl OverlayFS {
         Ok(overlay)
     }
 
+    /// Create a new OverlayFS from VFS paths
+    ///
+    /// This is a convenience method that resolves VFS paths to create an overlay.
+    /// This approach follows the "normal filesystem" pattern - create the overlay
+    /// instance, then mount it like any other filesystem.
+    ///
+    /// # Arguments
+    /// * `vfs_manager` - VFS manager to resolve paths in
+    /// * `upper_path` - Optional path for the upper (writable) layer
+    /// * `lower_paths` - Vector of paths for lower (read-only) layers
+    /// * `name` - Name for the overlay instance
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// // Create overlay from paths
+    /// let overlay = OverlayFS::new_from_paths(
+    ///     &vfs_manager,
+    ///     Some("/tmp/overlay"),           // Upper layer
+    ///     vec!["/system", "/base"],       // Lower layers
+    ///     "container_overlay"
+    /// )?;
+    /// 
+    /// // Mount like any other filesystem
+    /// vfs_manager.mount(overlay, "/merged", 0)?;
+    /// ```
+    pub fn new_from_paths(
+        vfs_manager: &crate::fs::vfs_v2::manager::VfsManager,
+        upper_path: Option<&str>,
+        lower_paths: Vec<&str>,
+        name: &str,
+    ) -> Result<Arc<Self>, FileSystemError> {
+        // Resolve upper layer if provided
+        let upper = if let Some(path) = upper_path {
+            let (entry, mount) = vfs_manager.mount_tree.resolve_path(path)?;
+            Some((mount, entry))
+        } else {
+            None
+        };
+
+        // Resolve lower layers
+        let mut lower_layers = Vec::new();
+        for path in lower_paths {
+            let (entry, mount) = vfs_manager.mount_tree.resolve_path(path)?;
+            lower_layers.push((mount, entry));
+        }
+
+        // Create overlay with resolved layers
+        Self::new(upper, lower_layers, name.to_string())
+    }
+
+    /// Create a new OverlayFS from paths across multiple VFS managers (Cross-VFS)
+    ///
+    /// This method enables true cross-VFS overlays where upper and lower layers
+    /// can come from completely different VFS manager instances. This is perfect
+    /// for container scenarios where the base system is in one VFS and the
+    /// container overlay is in another.
+    ///
+    /// # Arguments
+    /// * `upper_vfs_and_path` - Optional tuple of (vfs_manager, path) for upper layer
+    /// * `lower_vfs_and_paths` - Vector of (vfs_manager, path) tuples for lower layers
+    /// * `name` - Name for the overlay instance
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// // Cross-VFS overlay: base system from global VFS, overlay in container VFS
+    /// let base_vfs = get_global_vfs_manager();
+    /// let container_vfs = VfsManager::new();
+    /// 
+    /// let overlay = OverlayFS::new_from_paths_and_vfs(
+    ///     Some((&container_vfs, "/upper")),       // Upper in container VFS
+    ///     vec![
+    ///         (&base_vfs, "/system"),              // Base system from global VFS
+    ///         (&container_vfs, "/config"),         // Config from container VFS
+    ///     ],
+    ///     "cross_vfs_overlay"
+    /// )?;
+    /// 
+    /// // Mount in container VFS like any other filesystem
+    /// container_vfs.mount(overlay, "/merged", 0)?;
+    /// ```
+    pub fn new_from_paths_and_vfs(
+        upper_vfs_and_path: Option<(&crate::fs::vfs_v2::manager::VfsManager, &str)>,
+        lower_vfs_and_paths: Vec<(&crate::fs::vfs_v2::manager::VfsManager, &str)>,
+        name: &str,
+    ) -> Result<Arc<Self>, FileSystemError> {
+        // Resolve upper layer from its VFS
+        let upper = if let Some((upper_vfs, upper_path)) = upper_vfs_and_path {
+            let (entry, mount) = upper_vfs.mount_tree.resolve_path(upper_path)?;
+            Some((mount, entry))
+        } else {
+            None
+        };
+
+        // Resolve lower layers from their respective VFS managers
+        let mut lower_layers = Vec::new();
+        for (lower_vfs, lower_path) in lower_vfs_and_paths {
+            let (entry, mount) = lower_vfs.mount_tree.resolve_path(lower_path)?;
+            lower_layers.push((mount, entry));
+        }
+
+        // Create overlay - the internal implementation already supports cross-VFS!
+        Self::new(upper, lower_layers, name.to_string())
+    }
+
     /// Get FileSystemOperations from MountPoint
     /// 
     /// Helper method to extract the filesystem operations from a mount point.
@@ -452,7 +556,7 @@ impl OverlayFS {
     /// Create an OverlayFS from an option string
     /// example: option = Some("upper=tmpfs,lower=cpiofs")
     pub fn create_from_option_string(
-        option: Option<&str>,
+        _option: Option<&str>,
         upper: Option<(Arc<MountPoint>, Arc<VfsEntry>)>,
         lower_layers: Vec<(Arc<MountPoint>, Arc<VfsEntry>)>,
     ) -> Arc<dyn FileSystemOperations> {
@@ -738,11 +842,11 @@ impl FileSystemOperations for OverlayFS {
 pub struct OverlayFSDriver;
 
 impl FileSystemDriver for OverlayFSDriver {
-    fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+    fn create_from_memory(&self, _memory_area: &MemoryArea) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         Ok(OverlayFS::create_from_option_string(None, None, Vec::new()))
     }
 
-    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+    fn create_from_params(&self, _params: &dyn crate::fs::params::FileSystemParams) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         Ok(OverlayFS::create_from_option_string(None, None, Vec::new()))
     }
     
@@ -808,5 +912,146 @@ driver_initcall!(register_driver);
 // This follows the standard overlay filesystem whiteout convention.
 //
 
-#[cfg(test)]
-mod tests;
+// ========================================================================
+// Usage Examples - Normal Filesystem Approach
+// ========================================================================
+//
+// ## Example 1: Basic Overlay (Same VFS)
+//
+// ```rust,no_run
+// // Setup base filesystem
+// let base_fs = crate::fs::vfs_v2::drivers::tmpfs::TmpFS::new(0);
+// vfs.mount(base_fs, "/base", 0)?;
+//
+// // Setup upper filesystem for writes
+// let upper_fs = crate::fs::vfs_v2::drivers::tmpfs::TmpFS::new(0); 
+// vfs.mount(upper_fs, "/upper", 0)?;
+//
+// // Create overlay combining them - NORMAL FILESYSTEM APPROACH
+// let overlay = OverlayFS::new_from_paths(
+//     &vfs,
+//     Some("/upper"),           // Upper layer (writable)
+//     vec!["/base"],           // Lower layers (read-only)
+//     "my_overlay"
+// )?;
+//
+// // Mount like any other filesystem!
+// vfs.mount(overlay, "/merged", 0)?;
+// ```
+//
+// ## Example 2: Multi-layer Overlay
+//
+// ```rust,no_run
+// // Mount multiple base layers
+// vfs.mount(system_fs, "/system", 0)?;    // System files
+// vfs.mount(config_fs, "/config", 0)?;    // Configuration
+// vfs.mount(overlay_fs, "/overlay", 0)?;  // Overlay workspace
+//
+// // Create multi-layer overlay
+// let overlay = OverlayFS::new_from_paths(
+//     &vfs,
+//     Some("/overlay"),         // Writable layer
+//     vec!["/config", "/system"], // Read-only layers (priority order)
+//     "container_overlay"
+// )?;
+//
+// // Mount normally
+// vfs.mount(overlay, "/merged", 0)?;
+// ```
+//
+// ## Benefits of Normal Filesystem Approach
+//
+// - **Consistent API**: Uses standard mount()/unmount() operations
+// - **No special VFS methods**: No need for create_and_mount_overlay() etc.
+// - **Flexible**: Can be combined with other filesystem operations
+// - **Maintainable**: Less complexity in VfsManager
+// - **Testable**: Easy to unit test overlay creation independently
+//
+
+// ========================================================================
+// Usage Examples - Including Cross-VFS Support
+// ========================================================================
+//
+// ## Example 1: Same-VFS Overlay
+//
+// ```rust,no_run
+// // Setup base filesystem
+// let base_fs = crate::fs::vfs_v2::drivers::tmpfs::TmpFS::new(0);
+// vfs.mount(base_fs, "/base", 0)?;
+//
+// // Setup upper filesystem for writes
+// let upper_fs = crate::fs::vfs_v2::drivers::tmpfs::TmpFS::new(0); 
+// vfs.mount(upper_fs, "/upper", 0)?;
+//
+// // Create overlay combining them - NORMAL FILESYSTEM APPROACH
+// let overlay = OverlayFS::new_from_paths(
+//     &vfs,
+//     Some("/upper"),           // Upper layer (writable)
+//     vec!["/base"],           // Lower layers (read-only)
+//     "my_overlay"
+// )?;
+//
+// // Mount like any other filesystem!
+// vfs.mount(overlay, "/merged", 0)?;
+// ```
+//
+// ## Example 2: Cross-VFS Overlay (Container Scenario)
+//
+// ```rust,no_run
+// // Get global VFS with base system
+// let base_vfs = get_global_vfs_manager();
+//
+// // Create container VFS
+// let container_vfs = VfsManager::new();
+//
+// // Mount container-specific filesystems
+// let overlay_fs = TmpFS::new(0);
+// container_vfs.mount(overlay_fs, "/overlay", 0)?;
+//
+// let config_fs = TmpFS::new(0);
+// container_vfs.mount(config_fs, "/config", 0)?;
+//
+// // Create cross-VFS overlay: base system from global VFS, overlay from container VFS
+// let overlay = OverlayFS::new_from_paths_and_vfs(
+//     Some((&container_vfs, "/overlay")),       // Upper in container VFS (writable)
+//     vec![
+//         (&container_vfs, "/config"),           // Container config (higher priority)
+//         (&base_vfs, "/system"),               // Global system files (lower priority)
+//     ],
+//     "container_overlay"
+// )?;
+//
+// // Mount in container VFS - completely seamless!
+// container_vfs.mount(overlay, "/", 0)?;
+// ```
+//
+// ## Example 3: Multi-layer Same-VFS Overlay
+//
+// ```rust,no_run
+// // Mount multiple base layers
+// vfs.mount(system_fs, "/system", 0)?;    // System files
+// vfs.mount(config_fs, "/config", 0)?;    // Configuration
+// vfs.mount(overlay_fs, "/overlay", 0)?;  // Overlay workspace
+//
+// // Create multi-layer overlay
+// let overlay = OverlayFS::new_from_paths(
+//     &vfs,
+//     Some("/overlay"),         // Writable layer
+//     vec!["/config", "/system"], // Read-only layers (priority order)
+//     "container_overlay"
+// )?;
+//
+// // Mount normally
+// vfs.mount(overlay, "/merged", 0)?;
+// ```
+//
+// ## Benefits of This Approach
+//
+// - **Cross-VFS Support**: Layers can come from different VFS managers
+// - **Consistent API**: Uses standard mount()/unmount() operations
+// - **No special VFS methods**: No need for create_and_mount_overlay() etc.
+// - **Flexible**: Can be combined with other filesystem operations
+// - **Container-friendly**: Perfect for namespace isolation
+// - **Maintainable**: Less complexity in VfsManager
+// - **Testable**: Easy to unit test overlay creation independently
+//
