@@ -296,6 +296,7 @@ impl AbiModule for Xv6Riscv64Abi {
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
+        crate::println!("Setting up XV6 overlay environment with system path: {} and config path: {}", system_path, config_path);
         // XV6 ABI uses overlay mount with system XV6 tools and config persistence
         let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         let upper_vfs = base_vfs;
@@ -321,16 +322,55 @@ impl AbiModule for Xv6Riscv64Abi {
         target_vfs: &Arc<VfsManager>,
         base_vfs: &Arc<VfsManager>,
     ) -> Result<(), &'static str> {
+        crate::println!("Setting up XV6 shared resources with base VFS");
         // XV6 shared resource setup: bind mount common directories and Scarlet gateway
-        target_vfs.bind_mount_from(base_vfs, "/home", "/home")
-            .map_err(|_| "Failed to bind mount /home for XV6")?;
+        match target_vfs.create_dir("/home") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /home directory for XV6: {}", e.message);
+                return Err("Failed to create /home directory for XV6");
+            }
+        }
 
-        target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared")
-            .map_err(|_| "Failed to bind mount /data/shared for XV6")?;
-        
+        match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /home for XV6: {}", e.message);
+                // return Err("Failed to bind mount /home for XV6");
+            }
+        }
+
+        match target_vfs.create_dir("/data") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /data directory for XV6: {}", e.message);
+                return Err("Failed to create /data directory for XV6");
+            }
+        }
+
+        match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /data/shared for XV6: {}", e.message);
+                // return Err("Failed to bind mount /data/shared for XV6");
+            }
+        }
+
         // Setup gateway to native Scarlet environment (read-only for security)
-        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet")
-            .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet for XV6")
+        match target_vfs.create_dir("/scarlet") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /scarlet directory for XV6: {}", e.message);
+                return Err("Failed to create /scarlet directory for XV6");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                crate::println!("Failed to bind mount native Scarlet root to /scarlet for XV6: {}", e.message);
+                return Err("Failed to bind mount native Scarlet root to /scarlet for XV6");
+            }
+        }
     }
 }
 
