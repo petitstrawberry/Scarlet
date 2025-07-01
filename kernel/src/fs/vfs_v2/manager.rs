@@ -215,7 +215,7 @@ impl VfsManager {
     /// 
     pub fn bind_mount_from(
         &self,
-        source_vfs: Arc<VfsManager>,
+        source_vfs: &Arc<VfsManager>,
         source_path: &str,
         target_path: &str,
     ) -> Result<(), FileSystemError> {
