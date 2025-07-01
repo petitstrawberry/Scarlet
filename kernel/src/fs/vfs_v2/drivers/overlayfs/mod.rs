@@ -1,7 +1,36 @@
 //! OverlayFS v2 - Overlay filesystem implementation for VFS v2
 //!
-//! This provides a union/overlay view of multiple filesystems (upper/lower).
-//! Only supports same-VfsManager overlays (no cross-vfs).
+//! This module provides a union/overlay view of multiple filesystems, allowing
+//! files and directories from multiple source filesystems to appear as a single
+//! unified filesystem hierarchy.
+//!
+//! ## Features
+//!
+//! - **Multi-layer support**: Combines an optional upper layer (read-write) with
+//!   multiple lower layers (read-only) in priority order
+//! - **Copy-up semantics**: Modifications to lower layer files are copied to the
+//!   upper layer before modification
+//! - **Whiteout support**: Files can be hidden or deleted from view using special
+//!   whiteout entries
+//! - **Mount point aware**: Handles crossing mount boundaries correctly when
+//!   resolving paths across layers
+//!
+//! ## Usage
+//!
+//! ```rust,no_run
+//! // Create overlay with upper and lower layers
+//! let overlay = OverlayFS::new_with_dirs(
+//!     Some((upper_mount, upper_entry)),  // Upper layer for writes
+//!     vec![(lower_mount, lower_entry)],  // Lower layers (read-only)
+//!     "my_overlay".to_string()
+//! )?;
+//! ```
+//!
+//! ## Limitations
+//!
+//! - Only supports same-VfsManager overlays (no cross-VFS operations)
+//! - Upper layer is required for write operations
+//! - Whiteout files follow the `.wh.filename` convention
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -17,6 +46,24 @@ use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::vm::vmem::MemoryArea;
 
 /// OverlayFS implementation for VFS v2
+/// 
+/// This filesystem provides a unified view of multiple underlying filesystems
+/// by layering them on top of each other. Files and directories from all layers
+/// are merged, with the upper layer taking precedence for writes and the lower
+/// layers providing fallback content.
+///
+/// ## Layer Resolution
+/// 
+/// When resolving files or directories:
+/// 1. Check upper layer first (if present and not whiteout)
+/// 2. Check lower layers in priority order 
+/// 3. Return first match found
+///
+/// ## Write Operations
+///
+/// All write operations are performed on the upper layer. If a file exists
+/// only in lower layers, it is first copied to the upper layer (copy-up)
+/// before modification.
 pub struct OverlayFS {
     /// Upper layer for write operations (may be None for read-only overlay)
     upper: Option<(Arc<MountPoint>, Arc<VfsEntry>)>,
@@ -29,6 +76,17 @@ pub struct OverlayFS {
 }
 
 /// A composite node that represents a file/directory across overlay layers
+///
+/// OverlayNode serves as a virtual representation of a file or directory that
+/// may exist in one or more layers of the overlay filesystem. It handles the
+/// resolution of operations across these layers according to overlay semantics.
+///
+/// ## Design
+///
+/// Each OverlayNode represents a specific path in the overlay and delegates
+/// operations to the appropriate underlying filesystem layers. The node itself
+/// doesn't store file content but rather coordinates access to the real nodes
+/// in the upper and lower layers.
 pub struct OverlayNode {
     /// Node name
     name: String,
@@ -81,6 +139,30 @@ impl VfsNode for OverlayNode {
 }
 
 impl OverlayFS {
+    /// Create a new OverlayFS instance with specified layers
+    ///
+    /// # Arguments
+    ///
+    /// * `upper` - Optional upper layer for write operations (mount point and entry)
+    /// * `lower_layers` - Vector of lower layers in priority order (highest priority first)
+    /// * `name` - Name identifier for this overlay filesystem
+    ///
+    /// # Returns
+    ///
+    /// Returns an Arc<OverlayFS> on success, or FileSystemError on failure
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// let overlay = OverlayFS::new_with_dirs(
+    ///     Some((upper_mount, upper_entry)),  // Read-write upper layer
+    ///     vec![
+    ///         (layer1_mount, layer1_entry),   // Higher priority lower layer
+    ///         (layer2_mount, layer2_entry),   // Lower priority layer
+    ///     ],
+    ///     "system_overlay".to_string()
+    /// )?;
+    /// ```
     pub fn new_with_dirs(
         upper: Option<(Arc<MountPoint>, Arc<VfsEntry>)>,
         lower_layers: Vec<(Arc<MountPoint>, Arc<VfsEntry>)>,
@@ -98,11 +180,29 @@ impl OverlayFS {
     }
 
     /// Get FileSystemOperations from MountPoint
+    /// 
+    /// Helper method to extract the filesystem operations from a mount point.
+    /// This is used internally to access the underlying filesystem operations
+    /// for each layer.
     fn fs_from_mount(mount: &Arc<MountPoint>) -> Arc<dyn FileSystemOperations> {
         mount.root.node().filesystem().unwrap().upgrade().unwrap()
     }
 
     /// Get metadata for a path by checking layers in priority order
+    ///
+    /// This method implements the core overlay resolution logic:
+    /// 1. Check if the path is hidden by a whiteout file
+    /// 2. Check the upper layer first (if present)
+    /// 3. Fall back to lower layers in priority order
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to resolve within the overlay
+    ///
+    /// # Returns
+    ///
+    /// Returns FileMetadata for the first matching file found, or NotFound error
+    /// if the file doesn't exist in any layer or is hidden by whiteout.
     fn get_metadata_for_path(&self, path: &str) -> Result<FileMetadata, FileSystemError> {
         // Check for whiteout first
         if self.is_whiteout(path) {
@@ -127,6 +227,21 @@ impl OverlayFS {
     }
 
     /// Resolve a path in a specific layer, starting from the given node
+    ///
+    /// This method performs path resolution within a single overlay layer,
+    /// handling mount boundary crossings correctly. It walks down the path
+    /// components, following mount points as needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `mount` - The mount point to start resolution from
+    /// * `entry` - The VFS entry to start resolution from  
+    /// * `path` - The path to resolve (relative to the entry)
+    ///
+    /// # Returns
+    ///
+    /// Returns the resolved VfsNode, or an error if the path cannot be resolved
+    /// in this layer.
     fn resolve_in_layer(&self, mount: &Arc<MountPoint>, entry: &Arc<VfsEntry>, path: &str) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let mut current_mount = mount.clone();
         let mut current_node = entry.node();
@@ -157,6 +272,19 @@ impl OverlayFS {
     }
 
     /// Check if a file is hidden by a whiteout file
+    ///
+    /// Whiteout files are special files in the upper layer that indicate
+    /// a file from a lower layer should be hidden. They follow the naming
+    /// convention `.wh.filename` where `filename` is the name of the file
+    /// to be hidden.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to check for whiteout
+    ///
+    /// # Returns
+    ///
+    /// Returns true if the file is hidden by a whiteout, false otherwise.
     fn is_whiteout(&self, path: &str) -> bool {
         if let Some((ref upper_fs, ref upper_node)) = self.upper {
             let whiteout_name = format!(".wh.{}", 
@@ -179,6 +307,15 @@ impl OverlayFS {
     }
 
     /// Get upper layer, error if not available
+    ///
+    /// Returns the upper layer mount point and entry, or an error if the
+    /// overlay filesystem is read-only (no upper layer configured).
+    /// This is used by write operations that require an upper layer.
+    ///
+    /// # Returns
+    ///
+    /// Returns (MountPoint, VfsEntry) tuple for upper layer, or PermissionDenied
+    /// error if no upper layer is available.
     fn get_upper_layer(&self) -> Result<(Arc<MountPoint>, Arc<VfsEntry>), FileSystemError> {
         self.upper.as_ref().map(|fs| fs.clone()).ok_or_else(|| 
             FileSystemError::new(FileSystemErrorKind::PermissionDenied, "Overlay is read-only (no upper layer)")
@@ -591,6 +728,13 @@ impl FileSystemOperations for OverlayFS {
     }
 }
 
+/// Driver for creating OverlayFS instances
+///
+/// This driver implements the FileSystemDriver trait to allow OverlayFS
+/// to be created through the standard filesystem driver infrastructure.
+/// Currently, OverlayFS instances are typically created programmatically
+/// rather than through driver parameters due to the complexity of specifying
+/// multiple layer mount points.
 pub struct OverlayFSDriver;
 
 impl FileSystemDriver for OverlayFSDriver {
@@ -611,12 +755,58 @@ impl FileSystemDriver for OverlayFSDriver {
     }
 }
 
+/// Register the OverlayFS driver with the filesystem driver manager
+///
+/// This function is called during kernel initialization to make the OverlayFS
+/// driver available for use. It's automatically invoked by the driver_initcall
+/// mechanism.
 fn register_driver() {
     let fs_driver_manager = get_fs_driver_manager();
     fs_driver_manager.register_driver(Box::new(OverlayFSDriver));
 }
 
 driver_initcall!(register_driver);
+
+// ========================================================================
+// Implementation Notes and Usage Examples
+// ========================================================================
+//
+// ## Creating an Overlay
+//
+// ```rust,no_run
+// // Mount base filesystem
+// let base_fs = create_base_filesystem()?;
+// vfs.mount(base_fs, "/base", 0)?;
+//
+// // Mount overlay filesystem  
+// let overlay_fs = create_overlay_filesystem()?;
+// vfs.mount(overlay_fs, "/overlay", 0)?;
+//
+// // Create overlay combining them
+// let (base_mount, base_entry) = vfs.resolve_path("/base")?;
+// let (overlay_mount, overlay_entry) = vfs.resolve_path("/overlay")?;
+//
+// let overlay = OverlayFS::new_with_dirs(
+//     Some((overlay_mount, overlay_entry)),  // Upper (writable)
+//     vec![(base_mount, base_entry)],        // Lower (read-only)
+//     "system_overlay".to_string()
+// )?;
+//
+// vfs.mount(overlay, "/merged", 0)?;
+// ```
+//
+// ## Key Behaviors
+//
+// - **Read operations**: Check upper first, then lower layers in order
+// - **Write operations**: Always go to upper layer (copy-up if needed)
+// - **Delete operations**: Create whiteout files in upper layer
+// - **Directory listing**: Merge all layers, respecting whiteouts
+//
+// ## Whiteout Files
+//
+// To hide `/merged/file.txt`, create `/overlay/.wh.file.txt` in upper layer.
+// This follows the standard overlay filesystem whiteout convention.
+//
 
 #[cfg(test)]
 mod tests;
