@@ -26,9 +26,15 @@
 //! )?;
 //! ```
 //!
+//! ## Cross-VFS Support
+//!
+//! - **Cross-VFS overlays supported**: Upper and lower layers can come from
+//!   different VFS managers, enabling flexible overlay configurations
+//! - **Seamless integration**: Mount points from different VFS managers are
+//!   unified transparently through the overlay interface
+//!
 //! ## Limitations
 //!
-//! - Only supports same-VfsManager overlays (no cross-VFS operations)
 //! - Upper layer is required for write operations
 //! - Whiteout files follow the `.wh.filename` convention
 
@@ -1055,3 +1061,6 @@ driver_initcall!(register_driver);
 // - **Maintainable**: Less complexity in VfsManager
 // - **Testable**: Easy to unit test overlay creation independently
 //
+
+#[cfg(test)]
+mod tests;
