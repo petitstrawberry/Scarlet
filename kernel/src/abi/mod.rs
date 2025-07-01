@@ -160,17 +160,18 @@ pub trait AbiModule: 'static {
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
-        // Create cross-VFS overlay mount with provided paths
-        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
-        target_vfs.overlay_mount_from(
-            Some(base_vfs),             // upper_vfs (base VFS)
-            config_path,                // upperdir (read-write persistent layer)
-            lower_vfs_list,             // lowerdir (read-only base system)
-            "/"                         // target mount point in task VFS
-        ).map_err(|e| {
-            crate::println!("Failed to create cross-VFS overlay for ABI: {}", e.message);
-            "Failed to create overlay environment"
-        })
+        // cross-vfs overlay_mount_fromはv2では未サポートのため一旦コメントアウト
+        // let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
+        // target_vfs.overlay_mount_from(
+        //     Some(base_vfs),             // upper_vfs (base VFS)
+        //     config_path,                // upperdir (read-write persistent layer)
+        //     lower_vfs_list,             // lowerdir (read-only base system)
+        //     "/"                         // target mount point in task VFS
+        // ).map_err(|e| {
+        //     crate::println!("Failed to create cross-VFS overlay for ABI: {}", e.message);
+        //     "Failed to create overlay environment"
+        // })
+        Err("overlay_mount_from (cross-vfs) is not supported in v2")
     }
     
     /// Setup shared resources accessible across all ABIs
@@ -187,14 +188,11 @@ pub trait AbiModule: 'static {
         base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
     ) -> Result<(), &'static str> {
         // Bind mount shared directories from base VFS
-        target_vfs.bind_mount_from(base_vfs, "/home", "/home", false)
+        target_vfs.bind_mount_from(base_vfs.clone(), "/home", "/home")
             .map_err(|_| "Failed to bind mount /home")?;
-        
-        target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared", false)
+        target_vfs.bind_mount_from(base_vfs.clone(), "/data/shared", "/data/shared")
             .map_err(|_| "Failed to bind mount /data/shared")?;
-        
-        // Setup official gateway to native Scarlet environment
-        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet", true) // Read-only for security
+        target_vfs.bind_mount_from(base_vfs.clone(), "/", "/scarlet") // Read-onlyは未サポート
             .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
     }
 }

@@ -57,62 +57,75 @@
 //! - **Trait-based Abstractions**: Common interfaces for device drivers and subsystems enabling modularity:
 //!   - The `BlockDevice` trait defines operations for block-based storage
 //!   - The `SerialDevice` trait provides a common interface for UART and console devices
-//!   - The `FileSystem` and `FileOperations` traits allow different filesystem implementations
+//!   - The `FileSystem` trait provides unified filesystem operations for VFS v2 integration
 //!
-//! ## Virtual File System
+//! ## Virtual File System v2
 //!
-//! Scarlet implements a highly flexible Virtual File System (VFS) layer designed for
-//! containerization and process isolation with advanced bind mount capabilities:
+//! Scarlet implements an advanced Virtual File System (VFS v2) layer providing high-performance
+//! unified file operations with container support and POSIX compatibility:
 //!
 //! ### Core Architecture
 //!
-//! - **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance:
-//!   - Tasks store `Option<Arc<VfsManager>>` allowing independent filesystem namespaces
-//!   - Support for complete filesystem isolation or selective resource sharing
-//!   - Thread-safe operations via RwLock protection throughout the VFS layer
+//! - **Type-Safe File System Interface**: Modern API design with compile-time safety:
+//!   - `FileSystem` trait providing standardized operations across all filesystem types
+//!   - Type-safe metadata operations with `Metadata` structure for file attributes
+//!   - Generic `Result<T, VfsError>` error handling with detailed error classification
+//!   - Zero-copy operations where possible reducing memory allocation overhead
 //!
-//! - **Filesystem Driver Framework**: Modular driver system with type-safe parameter handling:
-//!   - Global `FileSystemDriverManager` singleton for driver registration and management
-//!   - Support for block device, memory-based, and virtual filesystem creation
-//!   - Structured parameter system replacing old string-based configuration
-//!   - Dynamic dispatch enabling future runtime filesystem module loading
+//! - **Unified VFS Manager**: Single global filesystem namespace with isolation capabilities:
+//!   - Global `VfsManager` providing unified access to all mounted filesystems
+//!   - Per-process mount namespace support for container isolation
+//!   - Thread-safe concurrent operations via fine-grained RwLock protection
+//!   - O(1) path cache lookup improving repeated access performance
 //!
-//! - **Enhanced Mount Tree**: Hierarchical mount point management with bind mount support:
-//!   - O(log k) path resolution performance where k is path depth
-//!   - Independent mount point namespaces per VfsManager instance
-//!   - Security-enhanced path normalization preventing directory traversal attacks
-//!   - Efficient Trie-based mount point storage reducing memory usage
+//! - **Hierarchical Mount Tree**: Advanced mount management with B-tree optimization:
+//!   - `MountTree` implementing efficient O(log n) mount point resolution
+//!   - Support for nested mounts and complex mount hierarchies
+//!   - Automatic mount point validation preventing invalid mount operations
+//!   - Dynamic mount/unmount operations with consistency guarantees
 //!
-//! ### Bind Mount Functionality
+//! ### FileSystem Driver Architecture
 //!
-//! Advanced bind mount capabilities for flexible directory mapping and container orchestration:
+//! Modular driver system supporting diverse storage backends and virtual filesystems:
 //!
-//! - **Basic Bind Mounts**: Mount directories from one location to another within the same VfsManager
-//! - **Cross-VFS Bind Mounts**: Share directories between isolated VfsManager instances for container resource sharing
-//! - **Read-Only Bind Mounts**: Security-enhanced mounting with write protection
-//! - **Shared Bind Mounts**: Mount propagation sharing for complex namespace scenarios
-//! - **Thread-Safe Operations**: Bind mount operations callable from system call context
+//! - **Driver Registration System**: Dynamic filesystem driver management:
+//!   - `DriverManager` singleton for runtime driver registration and discovery
+//!   - Type-safe driver parameters replacing legacy string-based configuration
+//!   - Support for both static (compile-time) and dynamic (runtime) driver loading
+//!   - Driver versioning and compatibility checking
 //!
-//! ### Path Resolution & Security
+//! - **Built-in Filesystem Drivers**:
+//!   - **TmpFS**: High-performance in-memory filesystem with optional persistence
+//!   - **CpioFS**: Read-only filesystem for boot archives and embedded data
+//!   - **InitramFS**: Boot-time filesystem initialization with automatic extraction
+//!   - **OverlayFS**: Copy-on-write layered filesystem for container images
 //!
-//! - **Normalized Path Handling**: Automatic resolution of relative paths (`.` and `..`)
-//! - **Security Protection**: Prevention of directory traversal attacks through path validation
-//! - **Transparent Resolution**: Seamless handling of bind mounts and nested mount points
-//! - **Performance Optimization**: Efficient path lookup with O(log k) complexity
+//! ### Advanced Features
 //!
-//! ### File Operations & Resource Management
+//! - **Path Resolution & Security**: Robust path handling with security emphasis:
+//!   - Automatic path normalization preventing directory traversal attacks
+//!   - Symlink resolution with loop detection and depth limits
+//!   - Permission checking at each path component for security compliance
+//!   - Case-sensitive and case-insensitive filesystem support
 //!
-//! - **RAII Resource Safety**: Files automatically close when dropped, preventing resource leaks
-//! - **Thread-Safe File Access**: Concurrent file operations with proper locking
-//! - **Handle Management**: Arc-based file object sharing with automatic cleanup
-//! - **Directory Operations**: Complete directory manipulation with metadata support
+//! - **File Handle Management**: Resource-safe file operations:
+//!   - RAII-based automatic resource cleanup preventing file descriptor leaks
+//!   - Reference-counted file objects (`Arc<dyn FileObject>`) for safe sharing
+//!   - Lazy file loading reducing memory footprint for large directories
+//!   - Efficient buffering strategies for optimal I/O performance
 //!
-//! ### Storage Integration
+//! - **System Call Integration**: Full POSIX-compatible system call support:
+//!   - Direct mapping from POSIX system calls to VFS operations
+//!   - Efficient `openat()`, `readdir()`, `stat()` family implementations
+//!   - Advanced features like `splice()`, `sendfile()` for zero-copy operations
+//!   - Support for file locks, memory mapping, and extended attributes
 //!
-//! - **Block Device Interface**: Abstraction layer for storage device interaction
-//! - **Memory-Based Filesystems**: Support for RAM-based filesystems like tmpfs
-//! - **Hybrid Filesystem Support**: Filesystems operating on both block devices and memory
-//! - **Device File Support**: Integration with character and block device management
+//! ### Container & Namespace Support
+//!
+//! - **Mount Namespaces**: Complete filesystem isolation for containers
+//! - **Bind Mounts**: Flexible directory sharing between namespaces
+//! - **Read-Only Mounts**: Security-enhanced mounting with write protection
+//! - **Private/Shared Mount Propagation**: Advanced mount event propagation control
 //!
 //! ## Boot Process
 //!
@@ -192,14 +205,11 @@ pub mod executor;
 pub mod test;
 
 extern crate alloc;
-use alloc::{string::ToString, sync::Arc};
+use alloc::string::ToString;
 use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
 use environment::PAGE_SIZE;
-use fs::{drivers::initramfs::{init_initramfs, relocate_initramfs}, VfsManager};
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
-
-use core::panic::{self, PanicInfo};
 
 use arch::{get_cpu, init_arch};
 use task::{elf_loader::load_elf_into_task, new_user_task};
@@ -207,8 +217,9 @@ use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
-
-use crate::fs::{get_global_vfs, init_global_vfs};
+use core::panic::PanicInfo;
+use crate::fs::vfs_v2::manager::init_global_vfs_manager;
+use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
 
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
@@ -284,18 +295,16 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let scheduler = get_scheduler();
     /* Initialize global VFS */
     println!("[Scarlet Kernel] Initializing global VFS...");
-    init_global_vfs().expect("Failed to initialize global VFS");
+    let manager = init_global_vfs_manager();
     /* Initialize initramfs */
     println!("[Scarlet Kernel] Initializing initramfs...");
-    let manager = get_global_vfs();
-    init_initramfs(manager);
+    init_initramfs(&manager);
     /* Make init task */
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
-    let manager_arc = manager.clone();
-    task.vfs = Some(manager_arc);
+    task.vfs = Some(manager.clone());
     task.cwd = Some("/".to_string());
     let file_obj = match task.vfs.as_ref().unwrap().open("/bin/init", 0) {
         Ok(kernel_obj) => kernel_obj,
