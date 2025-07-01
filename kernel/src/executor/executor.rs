@@ -293,8 +293,16 @@ impl TransparentExecutor {
                 .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
             
             // Step 2: Shared resources setup with base VFS
-            abi.setup_shared_resources(vfs_arc, &base_vfs)
-                .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+            match abi.setup_shared_resources(vfs_arc, &base_vfs) {
+                Ok(()) => {}
+                Err(e) => {
+                    // Log error but do not fail execution - shared resources are optional
+                    crate::println!("Warning: Failed to setup shared resources for ABI {}: {}", abi_name, e);
+                    Err(ExecutorError::ExecutionFailed(
+                        alloc::format!("Failed to setup shared resources for ABI {}: {}", abi_name, e)
+                    ))?;
+                }
+            }
         }
         
         // Set default working directory for the ABI
