@@ -5,7 +5,7 @@
 //! structure representation.
 
 use alloc::{
-    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
+    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::{Arc, Weak}, vec, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
@@ -253,6 +253,77 @@ impl FileSystemOperations for TmpFS {
         }
 
         Ok(new_node)
+    }
+
+    /// Create a hard link to an existing file
+    ///
+    /// This function creates a new directory entry (hard link) for an existing file.
+    /// Both the link and the target must be in the same filesystem.
+    /// The link count of the target file is incremented.
+    /// Returns the target node (the same inode as the original file).
+    fn create_hardlink(
+        &self,
+        link_parent: &Arc<dyn VfsNode>,
+        link_name: &String,
+        target_node: &Arc<dyn VfsNode>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        // Check that both parent and target are TmpNodes
+        let tmp_parent = link_parent.as_any()
+            .downcast_ref::<TmpNode>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid parent node type for TmpFS"
+            ))?;
+            
+        let tmp_target = target_node.as_any()
+            .downcast_ref::<TmpNode>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid target node type for TmpFS"
+            ))?;
+        
+        // Check that parent is a directory
+        if tmp_parent.file_type() != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Parent is not a directory"
+            ));
+        }
+        
+        // Check that target is a regular file (no directory hard links)
+        if tmp_target.file_type() != FileType::RegularFile {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidOperation,
+                "Cannot create hard link to non-regular file"
+            ));
+        }
+        
+        // Check if link name already exists
+        {
+            let children = tmp_parent.children.read();
+            if children.contains_key(link_name) {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::FileExists,
+                    "Link name already exists"
+                ));
+            }
+        }
+        
+        // For TmpFS, hard links are just additional references to the same TmpNode
+        // Update the link count in metadata
+        {
+            let mut metadata = tmp_target.metadata.write();
+            metadata.link_count += 1;
+        }
+        
+        // Add the target node to the parent directory under the new name
+        {
+            let mut children = tmp_parent.children.write();
+            children.insert(link_name.clone(), Arc::clone(target_node));
+        }
+        
+        // Return the same target node (hard link shares the same inode)
+        Ok(Arc::clone(target_node))
     }
     
     fn remove(
@@ -783,17 +854,15 @@ impl StreamOps for TmpFileObject {
                 // Since we don't have path stored, use the readdir logic directly
                 
                 // Create a vector to store all entries including "." and ".."
-                let mut all_entries = Vec::new();
-                
                 // Add "." entry (current directory)
                 let current_metadata = node.metadata.read();
-                all_entries.push(crate::fs::DirectoryEntryInternal {
+                let mut all_entries = vec![crate::fs::DirectoryEntryInternal {
                     name: ".".to_string(),
                     file_type: FileType::Directory,
                     size: current_metadata.size,
                     file_id: current_metadata.file_id,
                     metadata: Some(current_metadata.clone()),
-                });
+                }];
                 
                 // Add ".." entry (parent directory) - simplified to point to self for now
                 all_entries.push(crate::fs::DirectoryEntryInternal {
@@ -1022,3 +1091,6 @@ fn register_driver() {
 }
 
 driver_initcall!(register_driver);
+
+#[cfg(test)]
+mod tests;
