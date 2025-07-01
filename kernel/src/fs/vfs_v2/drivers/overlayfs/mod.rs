@@ -881,6 +881,7 @@ impl FileSystemOperations for OverlayFS {
                 }
             }
         }
+        entries.sort_by(|a, b| a.file_id.cmp(&b.file_id)); // Sort entries by file_id
         Ok(entries)
     }
 }
@@ -1014,6 +1015,9 @@ impl OverlayDirectoryObject {
                 }
             }
         }
+
+        // Sort entries by file_id to maintain consistent order
+        all_entries.sort_by(|a, b| a.file_id.cmp(&b.file_id));
         
         Ok(all_entries)
     }
