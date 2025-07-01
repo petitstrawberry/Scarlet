@@ -812,6 +812,18 @@ impl FileSystemOperations for OverlayFS {
         let mut entries = Vec::new();
         let mut seen_names = BTreeSet::new();
 
+        // Get parent directory file_id for ".."
+        let parent_file_id = if overlay_node.path == "/" {
+            // Root directory's parent is itself
+            overlay_node.file_id
+        } else {
+            // Get parent by looking up ".." from current directory
+            match self.lookup(node, &"..".to_string()) {
+                Ok(parent_node) => parent_node.id(),
+                Err(_) => overlay_node.file_id, // Fallback to current if parent can't be resolved
+            }
+        };
+
         // Add "." and ".." entries
         entries.push(DirectoryEntryInternal {
             name: ".".to_string(),
@@ -821,7 +833,7 @@ impl FileSystemOperations for OverlayFS {
         entries.push(DirectoryEntryInternal {
             name: "..".to_string(),
             file_type: FileType::Directory,
-            file_id: 0,
+            file_id: parent_file_id,
         });
         seen_names.insert(".".to_string());
         seen_names.insert("..".to_string());
@@ -897,18 +909,44 @@ impl OverlayDirectoryObject {
         let mut all_entries = Vec::new();
         let mut seen_names = BTreeSet::new();
         
+        // Get current directory node by resolving path components
+        let current_dir_node = {
+            let mut current = self.overlay_fs.root_node();
+            if self.path != "/" {
+                for component in self.path.trim_start_matches('/').split('/') {
+                    if !component.is_empty() {
+                        current = self.overlay_fs.lookup(&current, &component.to_string())?;
+                    }
+                }
+            }
+            current
+        };
+        let current_file_id = current_dir_node.id();
+        
+        // Get parent directory file_id for ".."
+        let parent_file_id = if self.path == "/" {
+            // Root directory's parent is itself
+            current_file_id
+        } else {
+            // Get parent by looking up ".." from current directory
+            match self.overlay_fs.lookup(&current_dir_node, &"..".to_string()) {
+                Ok(parent_node) => parent_node.id(),
+                Err(_) => current_file_id, // Fallback to current if parent can't be resolved
+            }
+        };
+        
         // Add "." and ".." entries first
         all_entries.push(crate::fs::DirectoryEntryInternal {
             name: ".".to_string(),
             file_type: FileType::Directory,
-            file_id: 1,
+            file_id: current_file_id,
             size: 0,
             metadata: None,
         });
         all_entries.push(crate::fs::DirectoryEntryInternal {
             name: "..".to_string(),
             file_type: FileType::Directory,
-            file_id: 1,
+            file_id: parent_file_id,
             size: 0,
             metadata: None,
         });
