@@ -168,10 +168,22 @@ impl CpioFS {
             if magic != b"070701" {
                 break;
             }
-            let inode = u32::from_str_radix(core::str::from_utf8(&data[offset+6..offset+14]).unwrap_or("0"), 16).unwrap_or(0);
-            let mode = u32::from_str_radix(core::str::from_utf8(&data[offset+14..offset+22]).unwrap_or("0"), 16).unwrap_or(0);
-            let namesize = usize::from_str_radix(core::str::from_utf8(&data[offset+94..offset+102]).unwrap_or("0"), 16).unwrap_or(0);
-            let filesize = usize::from_str_radix(core::str::from_utf8(&data[offset+54..offset+62]).unwrap_or("0"), 16).unwrap_or(0);
+            let inode = match core::str::from_utf8(&data[offset+6..offset+14]) {
+                Ok(s) => u32::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid inode value"))?,
+                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in inode field")),
+            };
+            let mode = match core::str::from_utf8(&data[offset+14..offset+22]) {
+                Ok(s) => u32::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid mode value"))?,
+                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in mode field")),
+            };
+            let namesize = match core::str::from_utf8(&data[offset+94..offset+102]) {
+                Ok(s) => usize::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid namesize value"))?,
+                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in namesize field")),
+            };
+            let filesize = match core::str::from_utf8(&data[offset+54..offset+62]) {
+                Ok(s) => usize::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid filesize value"))?,
+                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in filesize field")),
+            };
             let name_start = offset + 110;
             let name_end = name_start + namesize;
             if name_end > data.len() { break; }
