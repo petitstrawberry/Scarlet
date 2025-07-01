@@ -210,6 +210,13 @@ impl CpioFS {
             } else {
                 &name_str[..]
             };
+            
+            // Skip "." and ".." entries as they are handled automatically by the VFS
+            if base_name == "." || base_name == ".." {
+                offset = (file_end + 3) & !3;
+                continue;
+            }
+            
             let node = CpioNode::new(base_name.to_string(), file_type, content, file_id);
             {
                 let mut fs_guard = node.filesystem.write();
