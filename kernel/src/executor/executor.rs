@@ -287,16 +287,14 @@ impl TransparentExecutor {
         }
         
         // Setup ABI-specific environment with the clean VFS
-        if let Some(ref mut vfs_arc) = task.vfs {
-            if let Some(mut_vfs) = Arc::get_mut(vfs_arc) {
-                // Step 1: Overlay environment setup with prepared paths
-                abi.setup_overlay_environment(mut_vfs, &base_vfs, &system_path, &config_path)
-                    .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
-                
-                // Step 2: Shared resources setup with base VFS
-                abi.setup_shared_resources(mut_vfs, &base_vfs)
-                    .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
-            }
+        if let Some(ref vfs_arc) = task.vfs {
+            // Step 1: Overlay environment setup with prepared paths
+            abi.setup_overlay_environment(vfs_arc, &base_vfs, &system_path, &config_path)
+                .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+            
+            // Step 2: Shared resources setup with base VFS
+            abi.setup_shared_resources(vfs_arc, &base_vfs)
+                .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
         }
         
         // Set default working directory for the ABI

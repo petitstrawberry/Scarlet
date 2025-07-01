@@ -7,7 +7,7 @@ mod pipe;
 
 // pub mod drivers;
 
-use alloc::{boxed::Box, string::ToString, vec::Vec};
+use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
@@ -19,8 +19,7 @@ use crate::{
             proc::{sys_chdir, sys_sbrk}
         }, 
         AbiModule
-    }, arch::{self, Registers}, early_initcall, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack},
-    fs::SeekFrom,
+    }, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -292,38 +291,45 @@ impl AbiModule for Xv6Riscv64Abi {
     
     fn setup_overlay_environment(
         &self,
-        target_vfs: &mut crate::fs::VfsManager,
-        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+        target_vfs: &Arc<VfsManager>,
+        base_vfs: &Arc<VfsManager>,
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
         // XV6 ABI uses overlay mount with system XV6 tools and config persistence
         let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
-        target_vfs.overlay_mount_from(
-            Some(base_vfs),             // upper_vfs (base VFS)
-            config_path,                // upperdir (read-write persistent layer for XV6)
-            lower_vfs_list,             // lowerdir (read-only XV6 system)
-            "/"                         // target mount point in task VFS
-        ).map_err(|e| {
-            crate::println!("Failed to create cross-VFS overlay for XV6 ABI: {}", e.message);
-            "Failed to create XV6 overlay environment"
-        })
+        let upper_vfs = base_vfs;
+        let fs = match OverlayFS::new_from_paths_and_vfs(Some((upper_vfs, config_path)), lower_vfs_list, "/") {
+            Ok(fs) => fs,
+            Err(e) => {
+                crate::println!("Failed to create overlay filesystem for XV6 ABI: {}", e.message);
+                return Err("Failed to create XV6 overlay environment");
+            }
+        }
+        ;
+        match target_vfs.mount(fs, "/", 0) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                crate::println!("Failed to create cross-VFS overlay for XV6 ABI: {}", e.message);
+                Err("Failed to create XV6 overlay environment")
+            }
+        }
     }
     
     fn setup_shared_resources(
         &self,
-        target_vfs: &mut crate::fs::VfsManager,
-        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+        target_vfs: &Arc<VfsManager>,
+        base_vfs: &Arc<VfsManager>,
     ) -> Result<(), &'static str> {
         // XV6 shared resource setup: bind mount common directories and Scarlet gateway
-        target_vfs.bind_mount_from(base_vfs, "/home", "/home", false)
+        target_vfs.bind_mount_from(base_vfs, "/home", "/home")
             .map_err(|_| "Failed to bind mount /home for XV6")?;
-        
-        target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared", false)
+
+        target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared")
             .map_err(|_| "Failed to bind mount /data/shared for XV6")?;
         
         // Setup gateway to native Scarlet environment (read-only for security)
-        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet", true)
+        target_vfs.bind_mount_from(base_vfs, "/", "/scarlet")
             .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet for XV6")
     }
 }

@@ -6,8 +6,8 @@
 //! interfaces.
 //! 
 
-use crate::{arch::Trapframe, task::mytask};
-use alloc::{boxed::Box, string::{String, ToString}};
+use crate::{arch::Trapframe, fs::{drivers::overlayfs::OverlayFS, VfsManager}, task::mytask};
+use alloc::{boxed::Box, string::{String, ToString}, sync::Arc};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -156,8 +156,8 @@ pub trait AbiModule: 'static {
     /// * `config_path` - Path to writable persistence layer (e.g., "/data/config/scarlet")
     fn setup_overlay_environment(
         &self,
-        target_vfs: &mut crate::fs::VfsManager,
-        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+        target_vfs: &Arc<VfsManager>,
+        base_vfs: &Arc<VfsManager>,
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
@@ -185,16 +185,19 @@ pub trait AbiModule: 'static {
     /// * `base_vfs` - Base VFS containing shared directories
     fn setup_shared_resources(
         &self,
-        target_vfs: &mut crate::fs::VfsManager,
-        base_vfs: &alloc::sync::Arc<crate::fs::VfsManager>,
+        _target_vfs: &Arc<VfsManager>,
+        _base_vfs: &Arc<VfsManager>,
     ) -> Result<(), &'static str> {
+        // TODO: VFS v2 migration - update bind_mount_from API usage
+        // Current limitation: function signature uses VFS v1 types
         // Bind mount shared directories from base VFS
-        target_vfs.bind_mount_from(base_vfs.clone(), "/home", "/home")
-            .map_err(|_| "Failed to bind mount /home")?;
-        target_vfs.bind_mount_from(base_vfs.clone(), "/data/shared", "/data/shared")
-            .map_err(|_| "Failed to bind mount /data/shared")?;
-        target_vfs.bind_mount_from(base_vfs.clone(), "/", "/scarlet") // Read-onlyは未サポート
-            .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
+        // target_vfs.bind_mount_from(&base_vfs, "/home", "/home")
+        //     .map_err(|_| "Failed to bind mount /home")?;
+        // target_vfs.bind_mount_from(&base_vfs, "/data/shared", "/data/shared")
+        //     .map_err(|_| "Failed to bind mount /data/shared")?;
+        // target_vfs.bind_mount_from(&base_vfs, "/", "/scarlet") // Read-onlyは未サポート
+        //     .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
+        Ok(())
     }
 }
 

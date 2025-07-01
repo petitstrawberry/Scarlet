@@ -526,10 +526,10 @@ fn test_overlayfs_cross_vfs() {
     let lib_content = b"Base library file";
     let config_content = b"Base config file";
     
-    let mut lib_obj = base_fs.open(&lib_file, 0o2).unwrap(); // Write mode
+    let lib_obj = base_fs.open(&lib_file, 0o2).unwrap(); // Write mode
     lib_obj.write(lib_content).unwrap();
     
-    let mut config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode 
+    let config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode 
     config_obj.write(config_content).unwrap();
     
     // Setup container VFS: create /overlay directory with files
@@ -544,16 +544,16 @@ fn test_overlayfs_cross_vfs() {
     let override_config_content = b"Container config file";
     let app_content = b"Container app file";
     
-    let mut override_obj = container_fs.open(&override_config, 0o2).unwrap(); // Write mode
+    let override_obj = container_fs.open(&override_config, 0o2).unwrap(); // Write mode
     override_obj.write(override_config_content).unwrap();
     
-    let mut app_obj = container_fs.open(&app_file, 0o2).unwrap(); // Write mode
+    let app_obj = container_fs.open(&app_file, 0o2).unwrap(); // Write mode
     app_obj.write(app_content).unwrap();
     
     // Create cross-VFS overlay using the new API
     let overlay = OverlayFS::new_from_paths_and_vfs(
-        Some((&*container_vfs, "/overlay")),  // Upper layer from container VFS
-        vec![(&*base_vfs, "/system")],        // Lower layer from base VFS
+        Some((&container_vfs, "/overlay")),  // Upper layer from container VFS
+        vec![(&base_vfs, "/system")],        // Lower layer from base VFS
         "cross_vfs_test",
     ).unwrap();
     
@@ -579,7 +579,7 @@ fn test_overlayfs_cross_vfs() {
     
     // Test 3: Verify lib.txt comes from lower layer (base VFS)
     let lib_node = overlay.lookup(&overlay_root, &"lib.txt".to_string()).unwrap();
-    let mut lib_read_obj = overlay.open(&lib_node, 0).unwrap(); // Read mode
+    let lib_read_obj = overlay.open(&lib_node, 0).unwrap(); // Read mode
     let mut lib_buffer = vec![0u8; 128];
     let lib_bytes_read = lib_read_obj.read(&mut lib_buffer).unwrap();
     let lib_data = &lib_buffer[..lib_bytes_read];
@@ -587,7 +587,7 @@ fn test_overlayfs_cross_vfs() {
     
     // Test 4: Verify app.txt comes from upper layer (container VFS)
     let app_node = overlay.lookup(&overlay_root, &"app.txt".to_string()).unwrap();
-    let mut app_read_obj = overlay.open(&app_node, 0).unwrap(); // Read mode
+    let app_read_obj = overlay.open(&app_node, 0).unwrap(); // Read mode
     let mut app_buffer = vec![0u8; 128];
     let app_bytes_read = app_read_obj.read(&mut app_buffer).unwrap();
     let app_data = &app_buffer[..app_bytes_read];
@@ -595,7 +595,7 @@ fn test_overlayfs_cross_vfs() {
     
     // Test 5: Verify write operations go to upper layer (container VFS)
     let new_file = overlay.create(&overlay_root, &"new.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let mut new_obj = overlay.open(&new_file, 0o2).unwrap(); // Write mode
+    let new_obj = overlay.open(&new_file, 0o2).unwrap(); // Write mode
     let new_content = b"New file content";
     new_obj.write(new_content).unwrap();
     
@@ -606,7 +606,7 @@ fn test_overlayfs_cross_vfs() {
     
     // Verify we can read back what we wrote
     let read_new_node = overlay.lookup(&overlay_root, &"new.txt".to_string()).unwrap();
-    let mut read_new_obj = overlay.open(&read_new_node, 0).unwrap(); // Read mode
+    let read_new_obj = overlay.open(&read_new_node, 0).unwrap(); // Read mode
     let mut read_buffer = vec![0u8; 128];
     let read_bytes = read_new_obj.read(&mut read_buffer).unwrap();
     let read_data = &read_buffer[..read_bytes];
@@ -668,9 +668,9 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     let override_base = fs2.create(&middle_dir, &"base.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
     let middle_file = fs2.create(&middle_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
 
-    let mut override_obj = fs2.open(&override_base, 0o2).unwrap();
+    let override_obj = fs2.open(&override_base, 0o2).unwrap();
     override_obj.write(b"VFS2 base override").unwrap();
-    let mut middle_obj = fs2.open(&middle_file, 0o2).unwrap();
+    let middle_obj = fs2.open(&middle_file, 0o2).unwrap();
     middle_obj.write(b"VFS2 middle content").unwrap();
     
     // Setup VFS3 (top layer)
@@ -679,17 +679,17 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     let override_middle = fs3.create(&top_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
     let top_file = fs3.create(&top_dir, &"top.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
 
-    let mut override_middle_obj = fs3.open(&override_middle, 0o2).unwrap();
+    let override_middle_obj = fs3.open(&override_middle, 0o2).unwrap();
     override_middle_obj.write(b"VFS3 middle override").unwrap();
-    let mut top_obj = fs3.open(&top_file, 0o2).unwrap();
+    let top_obj = fs3.open(&top_file, 0o2).unwrap();
     top_obj.write(b"VFS3 top content").unwrap();
     
     // Create multi-layer cross-VFS overlay
     let overlay = OverlayFS::new_from_paths_and_vfs(
-        Some((&*vfs3, "/top")),              // Upper from VFS3
+        Some((&vfs3, "/top")),              // Upper from VFS3
         vec![
-            (&*vfs2, "/middle"),             // Middle from VFS2  
-            (&*vfs1, "/base"),               // Base from VFS1
+            (&vfs2, "/middle"),             // Middle from VFS2  
+            (&vfs1, "/base"),               // Base from VFS1
         ],
         "multi_cross_vfs_test",
     ).unwrap();
