@@ -161,48 +161,63 @@ Scarlet leverages Rust's ownership and borrowing system to provide memory safety
 
 Examples of this can be seen in device management, filesystem access, and task scheduling, where resources are borrowed rather than copied, and ownership is clearly defined.
 
-## Virtual File System
+## Virtual File System v2
 
-Scarlet implements a highly flexible Virtual File System (VFS) layer designed for containerization, process isolation, and advanced bind mount capabilities:
+Scarlet implements a modern Virtual File System (VFS v2) designed with clean architecture principles, supporting containerization, process isolation, and advanced filesystem operations:
 
-### Core Architecture
+### VFS v2 Architecture
 
-- **Per-Task VFS Management**: Each task can have its own isolated `VfsManager` instance for containerization and namespace isolation, supporting both complete filesystem isolation and selective resource sharing through Arc-based filesystem object sharing
-- **Filesystem Driver Framework**: Modular driver system with global `FileSystemDriverManager` singleton, supporting block device, memory-based, and virtual filesystem creation with type-safe structured parameter handling
-- **Enhanced Mount Tree**: Hierarchical mount point management with O(log k) path resolution performance, independent mount point namespaces per VfsManager, and security-enhanced path normalization preventing directory traversal attacks
+The new architecture provides three core components inspired by modern operating systems:
 
-### Advanced Bind Mount System
+- **VfsEntry**: Path hierarchy cache (similar to Linux dentry) providing fast path resolution with weak reference-based cleanup and parent-child relationship management
+- **VfsNode**: File entity interface (similar to Linux inode/BSD vnode) offering abstract file representation with metadata access and clean downcasting support  
+- **FileSystemOperations**: Unified driver API consolidating all filesystem operations (lookup, create, remove, etc.) with clean separation between VFS core and filesystem drivers
 
-- **Basic Bind Mounts**: Mount directories from one location to another within the same VfsManager for flexible filesystem layout management
-- **Cross-VFS Bind Mounts**: Share directories between isolated VfsManager instances, enabling controlled resource sharing between containers while maintaining namespace isolation
-- **Security-Enhanced Mounting**: Read-only bind mount support with write protection and proper permission inheritance
-- **Shared Bind Mounts**: Mount propagation sharing for complex namespace scenarios and container orchestration
-- **Thread-Safe Operations**: All bind mount operations are callable from system call context with proper locking
+### Advanced Mount System
 
-### Path Resolution & Security
+- **Hierarchical Mount Tree**: Efficient mount point management with proper parent-child relationships and mount boundary crossing
+- **Bind Mount Operations**: Mount directories from one location to another, including cross-VFS bind mounting for container resource sharing
+- **Overlay Filesystem**: Union filesystem support combining multiple layers (upper writable, lower read-only) with whiteout file support
+- **Mount Namespace Isolation**: Per-task VFS namespaces enabling complete filesystem isolation or selective resource sharing
 
-- **Normalized Path Handling**: Automatic resolution of relative paths (`.` and `..`) with security validation
-- **Directory Traversal Protection**: Comprehensive path validation preventing escape attacks through malicious path components
-- **Transparent Resolution**: Seamless handling of bind mounts and nested mount points with proper filesystem delegation
-- **Performance Optimization**: Efficient Trie-based mount point storage with O(log k) lookup complexity
+### Available Filesystems
 
-### File Operations & Resource Management
+- **TmpFS**: Memory-based temporary filesystem with configurable size limits
+- **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs with efficient directory structure parsing  
+- **OverlayFS**: Advanced union filesystem combining multiple layers with copy-up semantics and whiteout support
+- **InitramFS**: Special boot-time filesystem for early kernel initialization and user program loading
 
-- **RAII Resource Safety**: Files automatically close when dropped, filesystem handles are properly released, and memory is freed automatically
-- **Thread-Safe File Access**: Concurrent file operations with RwLock protection and proper handle sharing through Arc
-- **Standard Operations**: Complete support for open, read, write, seek, close operations with resource safety guarantees
-- **Directory Operations**: Full directory manipulation including creation, deletion, listing with metadata support
-- **Handle Management**: Arc-based file object sharing with automatic cleanup and reference counting
+### Container and Isolation Support
 
-### Storage & Device Integration
+```rust
+// Create isolated VFS namespace for container
+let container_vfs = VfsManager::new();
+container_vfs.mount(container_fs, "/", 0)?;
 
-- **Block Device Interface**: Abstraction layer for interacting with storage devices including disk drives and other block-oriented storage
-- **Memory-Based Filesystems**: Support for RAM-based filesystems like tmpfs with configurable size limits and persistence options
+// Selectively share host resources via bind mounts
+let host_vfs = get_global_vfs();
+container_vfs.bind_mount_from(&host_vfs, "/host/shared", "/shared")?;
+
+// Assign to task for complete namespace isolation
+task.vfs = Some(Arc::new(container_vfs));
+```
+
+### Performance Characteristics
+
+- **Path Resolution Caching**: VfsEntry provides fast lookup of recently accessed paths with automatic weak reference cleanup
+- **Mount Boundary Optimization**: Efficient crossing of mount points during path resolution with O(log k) mount point lookup
+- **Fine-Grained Locking**: Minimal lock contention with component-specific synchronization
+- **Memory Efficiency**: Weak reference-based caching prevents memory leaks while maintaining performance
+### System Call Interface
+
+VFS v2 provides system calls operating within each task's namespace:
+
+- **File Operations**: `open()`, `read()`, `write()`, `close()`, `lseek()`, `truncate()`
+- **Directory Operations**: `mkdir()`, directory listing with proper metadata support
+- **Mount Operations**: `mount()`, `umount()`, `pivot_root()` for dynamic filesystem management
 - **Device File Support**: Integration with character and block device management for /dev filesystem functionality
-- **Hybrid Filesystem Support**: Filesystems that can operate on both block devices and memory regions for maximum flexibility
-- **Driver Framework**: Extensible system for adding new filesystem implementations with proper type safety and error handling
 
-The VFS implementation enables flexible deployment scenarios from simple shared filesystems to complete filesystem isolation with selective resource sharing, making it ideal for containerized applications, modular system architectures, and security-conscious environments.
+The VFS v2 implementation enables flexible deployment scenarios from simple shared filesystems to complete filesystem isolation with selective resource sharing, making it ideal for containerized applications, modular system architectures, and security-conscious environments.
 
 ## Contributing
 

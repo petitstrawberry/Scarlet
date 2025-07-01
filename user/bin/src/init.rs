@@ -53,7 +53,7 @@ fn perform_pivot_root() -> bool {
     println!("init: New root is now active, old root accessible at /old_root");
     
     // Optional: Clean up the old root (in a real system, you might want to keep it for a while)
-    umount("/old_root", 0);
+    // umount("/old_root", 0);
     
     true
 }
