@@ -46,7 +46,7 @@ use core::any::Any;
 
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal, VfsEntry};
-use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom};
+use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager};
 use crate::object::capability::{StreamOps, StreamError};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::vm::vmem::MemoryArea;
@@ -286,8 +286,8 @@ impl OverlayFS {
     /// container_vfs.mount(overlay, "/merged", 0)?;
     /// ```
     pub fn new_from_paths_and_vfs(
-        upper_vfs_and_path: Option<(&crate::fs::vfs_v2::manager::VfsManager, &str)>,
-        lower_vfs_and_paths: Vec<(&crate::fs::vfs_v2::manager::VfsManager, &str)>,
+        upper_vfs_and_path: Option<(&Arc<VfsManager>, &str)>,
+        lower_vfs_and_paths: Vec<(&Arc<VfsManager>, &str)>,
         name: &str,
     ) -> Result<Arc<Self>, FileSystemError> {
         // Resolve upper layer from its VFS

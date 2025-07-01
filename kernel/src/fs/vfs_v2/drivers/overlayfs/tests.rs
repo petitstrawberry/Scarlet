@@ -552,8 +552,8 @@ fn test_overlayfs_cross_vfs() {
     
     // Create cross-VFS overlay using the new API
     let overlay = OverlayFS::new_from_paths_and_vfs(
-        Some((&*container_vfs, "/overlay")),  // Upper layer from container VFS
-        vec![(&*base_vfs, "/system")],        // Lower layer from base VFS
+        Some((&container_vfs, "/overlay")),  // Upper layer from container VFS
+        vec![(&base_vfs, "/system")],        // Lower layer from base VFS
         "cross_vfs_test",
     ).unwrap();
     
@@ -686,10 +686,10 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     
     // Create multi-layer cross-VFS overlay
     let overlay = OverlayFS::new_from_paths_and_vfs(
-        Some((&*vfs3, "/top")),              // Upper from VFS3
+        Some((&vfs3, "/top")),              // Upper from VFS3
         vec![
-            (&*vfs2, "/middle"),             // Middle from VFS2  
-            (&*vfs1, "/base"),               // Base from VFS1
+            (&vfs2, "/middle"),             // Middle from VFS2  
+            (&vfs1, "/base"),               // Base from VFS1
         ],
         "multi_cross_vfs_test",
     ).unwrap();
