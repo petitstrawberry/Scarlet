@@ -1,100 +1,168 @@
-//! Virtual File System (VFS) module.
+//! Virtual File System (VFS) Module - Version 2 Architecture
 //!
-//! This module provides a flexible Virtual File System implementation that supports
-//! per-task isolated filesystems, containerization, and bind mount functionality.
+//! This module provides a modern Virtual File System implementation based on VFS v2
+//! architecture, supporting per-task isolated filesystems, containerization, and 
+//! advanced mount operations including bind mounts and overlay filesystems.
 //!
-//! # Architecture Overview
+//! # VFS v2 Architecture Overview
 //!
-//! The VFS architecture has evolved to support containerization, process isolation,
-//! and advanced mount operations including bind mounts:
+//! The VFS v2 architecture provides a clean separation of concerns with three main
+//! components inspired by modern operating systems:
 //!
-//! ## VfsManager Distribution
+//! ## Core Components
+//!
+//! - **VfsEntry**: Path hierarchy cache (similar to Linux dentry)
+//!   - Represents "names" and "links" in the filesystem hierarchy
+//!   - Provides fast path resolution with weak reference-based caching
+//!   - Manages parent-child relationships in the VFS tree
+//!
+//! - **VfsNode**: File entity interface (similar to Linux inode/BSD vnode)
+//!   - Abstract representation of files, directories, and special files
+//!   - Provides metadata access and type information
+//!   - Enables clean downcasting for filesystem-specific operations
+//!
+//! - **FileSystemOperations**: Unified driver API for filesystem implementations
+//!   - Consolidated interface for all filesystem operations (lookup, create, etc.)
+//!   - Clean separation between VFS core and filesystem drivers
+//!   - Supports both simple and complex filesystem types
+//!
+//! ## Key Infrastructure
+//!
+//! - **VfsManager**: Main VFS management structure supporting isolation and sharing
+//! - **MountTree**: Hierarchical mount tree with support for bind mounts and overlays
+//! - **FileSystemDriverManager**: Global singleton for driver registration (VFS v1 compatibility)
+//! - **MountPoint**: Associates filesystem instances with mount paths and manages mount relationships
+//!
+//! ## VfsManager Distribution and Isolation
 //!
 //! - **Per-Task VfsManager**: Each task can have its own isolated `VfsManager` instance
 //!   stored as `Option<Arc<VfsManager>>` in the task structure
 //! - **Shared Filesystems**: Multiple VfsManager instances can share underlying filesystem
 //!   objects while maintaining independent mount points
-//! - **Bind Mounts**: Support for mounting directories from one location to another,
-//!   including cross-VFS bind mounting for container orchestration
+//! - **Global Fallback**: Tasks without their own VFS use the global VfsManager instance
 //!
-//! ## Key Components
+//! ## Advanced Mount Operations
 //!
-//! - `VfsManager`: Main VFS management structure supporting both isolation and sharing
-//! - `FileSystemDriverManager`: Global singleton for filesystem driver registration
-//! - `VirtualFileSystem`: Trait combining filesystem and file operation interfaces
-//! - `MountPoint`: Associates filesystem instances with mount paths
-//! - `MountTree`: Hierarchical mount tree structure supporting bind mounts
+//! VFS v2 provides comprehensive mount functionality for flexible filesystem composition:
 //!
-//! ## Bind Mount Functionality
-//!
-//! The VFS provides comprehensive bind mount support for flexible directory mapping:
-//!
-//! ### Basic Bind Mounts
+//! ### Basic Filesystem Mounting
 //! ```rust
-//! let mut vfs = VfsManager::new();
-//! // Mount a directory at another location
-//! vfs.bind_mount("/source/dir", "/target/dir", false)?;
+//! let vfs = VfsManager::new();
+//! 
+//! // Create and mount a tmpfs
+//! let tmpfs = TmpFS::new(1024 * 1024); // 1MB limit
+//! vfs.mount(tmpfs, "/tmp", 0)?;
+//! 
+//! // Mount with specific options
+//! vfs.mount_with_options(filesystem, "/mnt/data", &mount_options)?;
 //! ```
 //!
-//! ### Read-Only Bind Mounts
+//! ### Bind Mount Operations
 //! ```rust
-//! // Create read-only bind mount for security
-//! vfs.bind_mount("/source/dir", "/readonly/dir", true)?;
+//! // Basic bind mount - mount a directory at another location
+//! vfs.bind_mount("/source/dir", "/target/dir")?;
+//! 
+//! // Cross-VFS bind mount for container isolation
+//! let host_vfs = Arc::new(host_vfs_manager);
+//! container_vfs.bind_mount_from(host_vfs, "/host/data", "/container/data")?;
 //! ```
 //!
-//! ### Cross-VFS Bind Mounts
+//! ### Overlay Filesystem Support
 //! ```rust
-//! // Share directories between isolated VFS instances
-//! let host_vfs = Arc::new(vfs_manager);
-//! container_vfs.bind_mount_from(&host_vfs, "/host/data", "/container/data", false)?;
+//! // Create overlay combining multiple layers
+//! let overlay = OverlayFS::new_with_dirs(
+//!     Some((upper_mount, upper_entry)),  // Upper layer (writable)
+//!     vec![(lower_mount, lower_entry)],  // Lower layers (read-only)
+//!     "system_overlay".to_string()
+//! )?;
+//! vfs.mount(overlay, "/merged", 0)?;
 //! ```
 //!
-
-//! ### Thread-Safe Access
-//! Bind mount operations are thread-safe and can be called from system call context:
-//! ```rust
-//! // Use shared reference method for system calls
-//! vfs_arc.bind_mount_shared_ref("/source", "/target", false)?;
-//! ```
+//! ## Available Filesystem Types
+//!
+//! VFS v2 includes several built-in filesystem drivers:
+//!
+//! - **TmpFS**: Memory-based temporary filesystem with optional size limits
+//! - **CpioFS**: Read-only CPIO archive filesystem for initramfs
+//! - **OverlayFS**: Union/overlay filesystem combining multiple layers
+//! - **InitramFS**: Special handling for initial ramdisk mounting
 //!
 //! ## Usage Patterns
 //!
-//! ### Container Isolation with Bind Mounts
+//! ### Container Isolation with Namespaces
 //! ```rust
 //! // Create isolated VfsManager for container
-//! let mut container_vfs = VfsManager::new();
-//! container_vfs.mount(fs_id, "/");
+//! let container_vfs = VfsManager::new();
 //! 
-//! // Bind mount host resources into container
-//! let host_vfs = Arc::new(host_vfs_manager);
-//! container_vfs.bind_mount_from(&host_vfs, "/host/shared", "/shared", true)?;
+//! // Mount container root filesystem
+//! let container_fs = TmpFS::new(512 * 1024 * 1024); // 512MB
+//! container_vfs.mount(container_fs, "/", 0)?;
 //! 
-//! // Assign to task
+//! // Bind mount host resources selectively
+//! let host_vfs = get_global_vfs();
+//! container_vfs.bind_mount_from(&host_vfs, "/host/shared", "/shared")?;
+//! 
+//! // Assign isolated namespace to task
 //! task.vfs = Some(Arc::new(container_vfs));
 //! ```
 //!
-//! ### Shared Filesystem Access
+//! ### Shared VFS Access Patterns
 //!
-//! The VFS supports two distinct patterns for sharing filesystem resources:
+//! VFS v2 supports multiple sharing patterns for different use cases:
 //!
-//! #### VFS Sharing via Arc
+//! #### Full VFS Sharing via Arc
 //! ```rust
 //! // Share entire VfsManager instance including mount points
-//! let shared_vfs = Arc::new(original_vfs);
+//! let shared_vfs = Arc::new(vfs_manager);
 //! let task_vfs = Arc::clone(&shared_vfs);
 //! 
 //! // All mount operations affect the shared mount tree
-//! shared_vfs.mount(tmpfs_id, "/tmp")?;  // Visible to all references
+//! shared_vfs.mount(tmpfs, "/tmp", 0)?;  // Visible to all references
 //! 
 //! // Useful for:
-//! // - Fork-like behavior where child inherits parent's full filesystem view
+//! // - Fork-like behavior where child inherits parent's filesystem view
 //! // - Thread-like sharing where all threads see the same mount points
 //! // - System-wide mount operations
 //! ```
 //!
-//! The design enables flexible deployment scenarios from simple shared filesystems
+//! #### Selective Resource Sharing via Bind Mounts
+//! ```rust
+//! // Each container has isolated filesystem but shares specific directories
+//! let container1_vfs = VfsManager::new();
+//! let container2_vfs = VfsManager::new();
+//! 
+//! // Both containers share a common data directory
+//! let host_vfs = get_global_vfs();
+//! container1_vfs.bind_mount_from(&host_vfs, "/host/shared", "/data")?;
+//! container2_vfs.bind_mount_from(&host_vfs, "/host/shared", "/data")?;
+//! ```
+//!
+//! ## System Call Interface
+//!
+//! VFS v2 provides POSIX-compatible system calls that operate within each task's
+//! VFS namespace:
+//!
+//! - File operations: `open()`, `read()`, `write()`, `close()`, `lseek()`
+//! - Directory operations: `mkdir()`, `readdir()`
+//! - Mount operations: `mount()`, `umount()`, `pivot_root()`
+//!
+//! ## Performance Characteristics
+//!
+//! VFS v2 is designed for performance with:
+//!
+//! - **Path Resolution Caching**: VfsEntry provides fast lookup of recently accessed paths
+//! - **Weak Reference Cleanup**: Automatic cleanup of expired cache entries
+//! - **Mount Boundary Optimization**: Efficient crossing of mount points during path resolution
+//! - **Lock Granularity**: Fine-grained locking to minimize contention
+//!
+//! ## Migration from VFS v1
+//!
+//! VFS v2 maintains compatibility with existing code while providing improved APIs.
+//! The old interfaces are deprecated but still functional for transition purposes.
+//!
+//! This architecture enables flexible deployment scenarios from simple shared filesystems
 //! to complete filesystem isolation with selective resource sharing for containerized
-//! applications through bind mounts.
+//! applications, all while maintaining high performance and POSIX compatibility.
 
 pub mod vfs_v2;
 pub use vfs_v2::*;
