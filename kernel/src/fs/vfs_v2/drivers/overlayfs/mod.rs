@@ -440,7 +440,24 @@ impl FileSystemOperations for OverlayFS {
         }
         // Remove any existing whiteout
         if self.is_whiteout(&child_path) {
-            // Remove whiteout file by creating the actual file
+            // Remove whiteout file
+            let whiteout_name = format!(".wh.{}", name);
+            let parent_path = if let Some(pos) = overlay_parent.path.rfind('/') {
+                &overlay_parent.path[..pos]
+            } else {
+                "/"
+            };
+            let whiteout_path = if parent_path == "/" {
+                format!("/{}", whiteout_name)
+            } else {
+                format!("{}/{}", parent_path, whiteout_name)
+            };
+            if let Ok(whiteout_parent) = self.resolve_in_layer(&upper.0, &upper.1, &whiteout_path) {
+                if upper_fs.remove(&whiteout_parent, &whiteout_name).is_err() {
+                    return Err(FileSystemError::new(FileSystemErrorKind::NotFound, "Whiteout file not found"));
+                }
+                // Successfully removed whiteout file
+            }
         }
         let upper_parent = self.resolve_in_layer(&upper.0, &upper.1, &overlay_parent.path)?;
         let fs = Self::fs_from_mount(&upper.0);
