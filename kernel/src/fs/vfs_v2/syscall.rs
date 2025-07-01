@@ -1,3 +1,40 @@
+//! VFS v2 System Call Interface
+//!
+//! This module implements system call handlers for VFS v2, providing the user-space
+//! interface to filesystem operations. All system calls follow POSIX-like semantics
+//! and work with the task's VFS namespace.
+//!
+//! ## Supported System Calls
+//!
+//! ### File Operations
+//! - `sys_open()`: Open files and directories
+//! - `sys_close()`: Close file descriptors
+//! - `sys_read()`: Read data from files
+//! - `sys_write()`: Write data to files
+//! - `sys_lseek()`: Seek within files
+//! - `sys_truncate()`: Truncate files by path
+//! - `sys_ftruncate()`: Truncate files by descriptor
+//!
+//! ### Directory Operations
+//! - `sys_mkdir()`: Create directories
+//! - `sys_mkfile()`: Create regular files
+//!
+//! ### Mount Operations
+//! - `sys_mount()`: Mount filesystems
+//! - `sys_umount()`: Unmount filesystems
+//! - `sys_pivot_root()`: Change root filesystem
+//!
+//! ## VFS Namespace Isolation
+//!
+//! Each task can have its own VFS namespace (Option<Arc<VfsManager>>).
+//! System calls operate within the task's namespace, enabling containerization
+//! and process isolation.
+//!
+//! ## Error Handling
+//!
+//! System calls return usize::MAX (-1) on error and appropriate values on success,
+//! following POSIX conventions for error reporting.
+
 use alloc::{string::String, vec::Vec, string::ToString, sync::Arc};
 
 use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_string, task::mytask};
@@ -237,7 +274,7 @@ pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
 pub fn sys_mkfile(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let mode = trapframe.get_arg(1) as i32;
+    let _mode = trapframe.get_arg(1) as i32;
 
     trapframe.increment_pc_next(task);
 
@@ -336,7 +373,7 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
     match fstype_str.as_str() {
         "bind" => {
             // Handle bind mount - this is a special case handled by VFS
-            let read_only = (flags & 1) != 0; // MS_RDONLY
+            let _read_only = (flags & 1) != 0; // MS_RDONLY
             match vfs.bind_mount(&source_str, &target_str) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
@@ -371,6 +408,7 @@ pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
 }
 
 // Helper function to parse overlay mount options
+#[allow(dead_code)]
 fn parse_overlay_options(data: &str) -> Result<(Option<String>, Vec<String>), ()> {
     let mut upperdir = None;
     let mut lowerdirs = Vec::new();
