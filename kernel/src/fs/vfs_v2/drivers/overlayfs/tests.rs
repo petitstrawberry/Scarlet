@@ -1,4 +1,4 @@
-//! OverlayFS v2 tests (same VFS only)
+//! OverlayFS v2 tests including cross-VFS support
 
 use super::OverlayFS;
 use super::super::tmpfs::TmpFS;
@@ -256,7 +256,7 @@ fn test_overlayfs_read_only() {
     // Should be able to read
     let root = overlay.root_node();
     let file_node = overlay.lookup(&root.clone(), &"readonly".to_string()).unwrap();
-    let file_obj = overlay.open(&file_node, 0).unwrap(); // Read mode
+    let _file_obj = overlay.open(&file_node, 0).unwrap(); // Read mode
     
     // Should not be able to write
     let root = overlay.root_node();
@@ -346,7 +346,7 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     // Create /dir1/mnt in lower_mgr
     let lower_root = lower.root_node();
     let dir1 = lower.create(&lower_root, &"dir1".to_string(), FileType::Directory, 0o755).unwrap();
-    let mnt = lower.create(&dir1, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
+    let _mnt = lower.create(&dir1, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
     // Create a file in mount_fs
     let mount_root = mount_fs.root_node();
     mount_fs.create(&mount_root, &"file_in_mount".to_string(), FileType::RegularFile, 0o644).unwrap();
@@ -417,12 +417,12 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
 
     // Create /mnt/child in lower
     let lower_root = lower.root_node();
-    let mnt = lower.create(&lower_root, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
+    let _mnt = lower.create(&lower_root, &"mnt".to_string(), FileType::Directory, 0o755).unwrap();
 
     // Create mount1:/file1, mount2:/file2
     let mount1_root = mount1.root_node();
     mount1.create(&mount1_root, &"file1".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let child = lower.create(&mount1_root, &"child".to_string(), FileType::Directory, 0o755).unwrap();
+    let _child = lower.create(&mount1_root, &"child".to_string(), FileType::Directory, 0o755).unwrap();
 
     let mount2_root = mount2.root_node();
     mount2.create(&mount2_root, &"file2".to_string(), FileType::RegularFile, 0o644).unwrap();
@@ -477,4 +477,253 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
     let child_entries = overlay.readdir(&child_node).unwrap();
     let child_names: Vec<_> = child_entries.iter().map(|e| e.name.as_str()).collect();
     assert!(child_names.contains(&"file2"));
+}
+
+#[test_case]
+fn test_overlayfs_cross_vfs() {
+    /*
+    Cross-VFS overlay test:
+    
+    VFS1 (base_vfs) with lower layer:
+    └── system/
+        ├── lib.txt (file)
+        └── config.txt (file)
+    
+    VFS2 (container_vfs) with upper layer:
+    └── overlay/
+        ├── config.txt (file, overrides lower)
+        └── app.txt (file, new)
+    
+    Expected result in overlay:
+    ├── lib.txt (from VFS1/system)
+    ├── config.txt (from VFS2/overlay, overrides VFS1)
+    └── app.txt (from VFS2/overlay)
+    */
+    
+    // Create two separate VfsManager instances to simulate cross-VFS scenario
+    use crate::fs::vfs_v2::manager::VfsManager;
+    
+    let base_vfs = Arc::new(VfsManager::new());
+    let container_vfs = Arc::new(VfsManager::new());
+    
+    // Create filesystems for each VFS
+    let base_fs = TmpFS::new(0);
+    let container_fs = TmpFS::new(0);
+    
+    // Mount filesystems in their respective VFS managers
+    base_vfs.mount(base_fs.clone(), "/", 0).unwrap();
+    container_vfs.mount(container_fs.clone(), "/", 0).unwrap();
+    
+    // Setup base VFS: create /system directory with files
+    let base_root = base_fs.root_node();
+    let system_dir = base_fs.create(&base_root, &"system".to_string(), FileType::Directory, 0o755).unwrap();
+    
+    // Create files in base system
+    let lib_file = base_fs.create(&system_dir, &"lib.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let config_file = base_fs.create(&system_dir, &"config.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+
+    // Write content to base files
+    let lib_content = b"Base library file";
+    let config_content = b"Base config file";
+    
+    let mut lib_obj = base_fs.open(&lib_file, 0o2).unwrap(); // Write mode
+    lib_obj.write(lib_content).unwrap();
+    
+    let mut config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode 
+    config_obj.write(config_content).unwrap();
+    
+    // Setup container VFS: create /overlay directory with files
+    let container_root = container_fs.root_node();
+    let overlay_dir = container_fs.create(&container_root, &"overlay".to_string(), FileType::Directory, 0o755).unwrap();
+    
+    // Create files in container overlay (one overrides, one is new)
+    let override_config = container_fs.create(&overlay_dir, &"config.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let app_file = container_fs.create(&overlay_dir, &"app.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+
+    // Write content to container files
+    let override_config_content = b"Container config file";
+    let app_content = b"Container app file";
+    
+    let mut override_obj = container_fs.open(&override_config, 0o2).unwrap(); // Write mode
+    override_obj.write(override_config_content).unwrap();
+    
+    let mut app_obj = container_fs.open(&app_file, 0o2).unwrap(); // Write mode
+    app_obj.write(app_content).unwrap();
+    
+    // Create cross-VFS overlay using the new API
+    let overlay = OverlayFS::new_from_paths_and_vfs(
+        Some((&*container_vfs, "/overlay")),  // Upper layer from container VFS
+        vec![(&*base_vfs, "/system")],        // Lower layer from base VFS
+        "cross_vfs_test",
+    ).unwrap();
+    
+    let overlay_root = overlay.root_node();
+    
+    // Test 1: Verify all expected files are visible
+    let entries = overlay.readdir(&overlay_root).unwrap();
+    let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort();
+    
+    assert!(names.contains(&"lib.txt"));     // From base VFS
+    assert!(names.contains(&"config.txt"));  // From container VFS (overrides base)
+    assert!(names.contains(&"app.txt"));     // From container VFS (new)
+    assert_eq!(names.len(), 5); // Should have . .. lib.txt config.txt app.txt
+    
+    // Test 2: Verify config.txt comes from upper layer (container VFS)
+    let config_node = overlay.lookup(&overlay_root, &"config.txt".to_string()).unwrap();
+    let config_read_obj = overlay.open(&config_node, 0).unwrap(); // Read mode
+    let mut config_buffer = vec![0u8; 128];
+    let config_bytes_read = config_read_obj.read(&mut config_buffer).unwrap();
+    let config_data = &config_buffer[..config_bytes_read];
+    assert_eq!(config_data, override_config_content); // Should be container version
+    
+    // Test 3: Verify lib.txt comes from lower layer (base VFS)
+    let lib_node = overlay.lookup(&overlay_root, &"lib.txt".to_string()).unwrap();
+    let mut lib_read_obj = overlay.open(&lib_node, 0).unwrap(); // Read mode
+    let mut lib_buffer = vec![0u8; 128];
+    let lib_bytes_read = lib_read_obj.read(&mut lib_buffer).unwrap();
+    let lib_data = &lib_buffer[..lib_bytes_read];
+    assert_eq!(lib_data, lib_content); // Should be base version
+    
+    // Test 4: Verify app.txt comes from upper layer (container VFS)
+    let app_node = overlay.lookup(&overlay_root, &"app.txt".to_string()).unwrap();
+    let mut app_read_obj = overlay.open(&app_node, 0).unwrap(); // Read mode
+    let mut app_buffer = vec![0u8; 128];
+    let app_bytes_read = app_read_obj.read(&mut app_buffer).unwrap();
+    let app_data = &app_buffer[..app_bytes_read];
+    assert_eq!(app_data, app_content); // Should be container version
+    
+    // Test 5: Verify write operations go to upper layer (container VFS)
+    let new_file = overlay.create(&overlay_root, &"new.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let mut new_obj = overlay.open(&new_file, 0o2).unwrap(); // Write mode
+    let new_content = b"New file content";
+    new_obj.write(new_content).unwrap();
+    
+    // Verify the file appears in the overlay
+    let updated_entries = overlay.readdir(&overlay_root).unwrap();
+    let updated_names: Vec<_> = updated_entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(updated_names.contains(&"new.txt"));
+    
+    // Verify we can read back what we wrote
+    let read_new_node = overlay.lookup(&overlay_root, &"new.txt".to_string()).unwrap();
+    let mut read_new_obj = overlay.open(&read_new_node, 0).unwrap(); // Read mode
+    let mut read_buffer = vec![0u8; 128];
+    let read_bytes = read_new_obj.read(&mut read_buffer).unwrap();
+    let read_data = &read_buffer[..read_bytes];
+    assert_eq!(read_data, new_content);
+}
+
+#[test_case]
+fn test_overlayfs_cross_vfs_multi_layer() {
+    /*
+    Multi-layer cross-VFS overlay test:
+    
+    VFS1 with layer1:
+    └── base/
+        └── base.txt
+    
+    VFS2 with layer2:
+    └── middle/
+        ├── base.txt (overrides VFS1)
+        └── middle.txt
+    
+    VFS3 with upper layer:
+    └── top/
+        ├── middle.txt (overrides VFS2)
+        └── top.txt
+    
+    Expected overlay result:
+    ├── base.txt (from VFS2/middle, overrides VFS1)
+    ├── middle.txt (from VFS3/top, overrides VFS2)
+    └── top.txt (from VFS3/top)
+    */
+    
+    use crate::fs::vfs_v2::manager::VfsManager;
+    
+    // Create three VFS managers
+    let vfs1 = Arc::new(VfsManager::new());
+    let vfs2 = Arc::new(VfsManager::new());  
+    let vfs3 = Arc::new(VfsManager::new());
+    
+    // Create filesystems
+    let fs1 = TmpFS::new(0);
+    let fs2 = TmpFS::new(0);
+    let fs3 = TmpFS::new(0);
+
+    // Mount filesystems
+    vfs1.mount(fs1.clone(), "/", 0).unwrap();
+    vfs2.mount(fs2.clone(), "/", 0).unwrap();
+    vfs3.mount(fs3.clone(), "/", 0).unwrap();
+    
+    // Setup VFS1 (bottom layer)
+    let root1 = fs1.root_node();
+    let base_dir = fs1.create(&root1, &"base".to_string(), FileType::Directory, 0o755).unwrap();
+    let base_file = fs1.create(&base_dir, &"base.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let base_obj = fs1.open(&base_file, 0o2).unwrap();
+    base_obj.write(b"VFS1 base content").unwrap();
+    
+    // Setup VFS2 (middle layer)
+    let root2 = fs2.root_node();
+    let middle_dir = fs2.create(&root2, &"middle".to_string(), FileType::Directory, 0o755).unwrap();
+    let override_base = fs2.create(&middle_dir, &"base.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let middle_file = fs2.create(&middle_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+
+    let mut override_obj = fs2.open(&override_base, 0o2).unwrap();
+    override_obj.write(b"VFS2 base override").unwrap();
+    let mut middle_obj = fs2.open(&middle_file, 0o2).unwrap();
+    middle_obj.write(b"VFS2 middle content").unwrap();
+    
+    // Setup VFS3 (top layer)
+    let root3 = fs3.root_node();
+    let top_dir = fs3.create(&root3, &"top".to_string(), FileType::Directory, 0o755).unwrap();
+    let override_middle = fs3.create(&top_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let top_file = fs3.create(&top_dir, &"top.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
+
+    let mut override_middle_obj = fs3.open(&override_middle, 0o2).unwrap();
+    override_middle_obj.write(b"VFS3 middle override").unwrap();
+    let mut top_obj = fs3.open(&top_file, 0o2).unwrap();
+    top_obj.write(b"VFS3 top content").unwrap();
+    
+    // Create multi-layer cross-VFS overlay
+    let overlay = OverlayFS::new_from_paths_and_vfs(
+        Some((&*vfs3, "/top")),              // Upper from VFS3
+        vec![
+            (&*vfs2, "/middle"),             // Middle from VFS2  
+            (&*vfs1, "/base"),               // Base from VFS1
+        ],
+        "multi_cross_vfs_test",
+    ).unwrap();
+    
+    let overlay_root = overlay.root_node();
+    
+    // Verify all files are visible
+    let entries = overlay.readdir(&overlay_root).unwrap();
+    let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort();
+    
+    assert!(names.contains(&"base.txt"));
+    assert!(names.contains(&"middle.txt"));
+    assert!(names.contains(&"top.txt"));
+    assert_eq!(names.len(), 5); // Should have . .. base.txt middle.txt top.txt
+
+    // Verify base.txt comes from VFS2 (overrides VFS1)
+    let base_node = overlay.lookup(&overlay_root, &"base.txt".to_string()).unwrap();
+    let base_read_obj = overlay.open(&base_node, 0).unwrap();
+    let mut buffer = vec![0u8; 128];
+    let bytes_read = base_read_obj.read(&mut buffer).unwrap();
+    assert_eq!(&buffer[..bytes_read], b"VFS2 base override");
+    
+    // Verify middle.txt comes from VFS3 (overrides VFS2)
+    let middle_node = overlay.lookup(&overlay_root, &"middle.txt".to_string()).unwrap();
+    let middle_read_obj = overlay.open(&middle_node, 0).unwrap();
+    let mut buffer = vec![0u8; 128];
+    let bytes_read = middle_read_obj.read(&mut buffer).unwrap();
+    assert_eq!(&buffer[..bytes_read], b"VFS3 middle override");
+    
+    // Verify top.txt comes from VFS3
+    let top_node = overlay.lookup(&overlay_root, &"top.txt".to_string()).unwrap();
+    let top_read_obj = overlay.open(&top_node, 0).unwrap();
+    let mut buffer = vec![0u8; 128];
+    let bytes_read = top_read_obj.read(&mut buffer).unwrap();
+    assert_eq!(&buffer[..bytes_read], b"VFS3 top content");
 }
