@@ -19,7 +19,7 @@ fn test_cross_vfs_bind_mount_basic() {
 
     // Perform cross-vfs bind mount
     target_vfs.bind_mount_from(
-        source_vfs.clone(),
+        &source_vfs,
         "/srcdir",
         "/mnt",
     ).expect("cross-vfs bind mount failed");
@@ -43,7 +43,7 @@ fn test_cross_vfs_bind_mount_file_create_delete() {
     source_vfs.create_dir("/srcdir").unwrap();
     let target_vfs = Arc::new(VfsManager::new());
     target_vfs.create_dir("/mnt").unwrap();
-    target_vfs.bind_mount_from(source_vfs.clone(), "/srcdir", "/mnt").unwrap();
+    target_vfs.bind_mount_from(&source_vfs, "/srcdir", "/mnt").unwrap();
 
     // Create file from target side
     target_vfs.create_file("/mnt/newfile.txt", FileType::RegularFile).unwrap();
@@ -69,7 +69,7 @@ fn test_cross_vfs_bind_mount_recursive() {
     source_vfs.create_file("/a/b/file.txt", FileType::RegularFile).unwrap();
     let target_vfs = Arc::new(VfsManager::new());
     target_vfs.create_dir("/mnt").unwrap();
-    target_vfs.bind_mount_from(source_vfs.clone(), "/a", "/mnt").unwrap();
+    target_vfs.bind_mount_from(&source_vfs, "/a", "/mnt").unwrap();
 
     // Recursively access file
     let entry = target_vfs.resolve_path("/mnt/b/file.txt").expect("recursive bind mount failed");
@@ -91,8 +91,8 @@ fn test_cross_vfs_bind_mount_multiple() {
     let target = Arc::new(VfsManager::new());
     target.create_dir("/mnt1").unwrap();
     target.create_dir("/mnt2").unwrap();
-    target.bind_mount_from(source1.clone(), "/d1", "/mnt1").unwrap();
-    target.bind_mount_from(source2.clone(), "/d2", "/mnt2").unwrap();
+    target.bind_mount_from(&source1, "/d1", "/mnt1").unwrap();
+    target.bind_mount_from(&source2, "/d2", "/mnt2").unwrap();
     let e1 = target.resolve_path("/mnt1/f1").expect("mnt1 failed");
     let e2 = target.resolve_path("/mnt2/f2").expect("mnt2 failed");
     assert_eq!(e1.name(), "f1");
@@ -111,7 +111,7 @@ fn test_cross_vfs_bind_mount_parent_traversal() {
     let target = Arc::new(VfsManager::new());
     target.create_dir("/mnt").unwrap();
     target.create_file("/outside", FileType::RegularFile).unwrap();
-    target.bind_mount_from(source.clone(), "/d", "/mnt").unwrap();
+    target.bind_mount_from(&source, "/d", "/mnt").unwrap();
     // .. from inside bind mount should not escape to source VFS
     let e = target.resolve_path("/mnt/../outside").expect("parent traversal failed");
     assert_eq!(e.name(), "outside");

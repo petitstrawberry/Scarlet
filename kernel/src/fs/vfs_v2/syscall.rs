@@ -534,7 +534,7 @@ fn pivot_root_in_place(
 ) -> Result<(), crate::fs::FileSystemError> {
     // Use bind mount to mount the new root as "/" in the new mount tree
     let temp_vfs = VfsManager::new();
-    temp_vfs.bind_mount_from(vfs.clone(), new_root_path, "/")?;
+    temp_vfs.bind_mount_from(&vfs, new_root_path, "/")?;
     let old_root_path = if old_root_path == new_root_path {
         return Err(crate::fs::FileSystemError {
             kind: crate::fs::FileSystemErrorKind::InvalidPath,
@@ -574,7 +574,7 @@ fn pivot_root_in_place(
 
     temp_vfs.create_dir(old_root_path)?;
 
-    match temp_vfs.bind_mount_from(vfs.clone(), "/", old_root_path) {
+    match temp_vfs.bind_mount_from(&vfs, "/", old_root_path) {
         Ok(_) => {},
         Err(e) => {
             crate::println!("Failed to bind mount old root path: {}", e.message);

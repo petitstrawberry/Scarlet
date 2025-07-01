@@ -352,7 +352,7 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     mount_fs.create(&mount_root, &"file_in_mount".to_string(), FileType::RegularFile, 0o644).unwrap();
 
     // bind mount: mount_mgr:/ → lower_mgr:/dir1/mnt
-    lower_mgr.bind_mount_from(Arc::new(mount_mgr), "/", "/dir1/mnt").unwrap();
+    lower_mgr.bind_mount_from(&Arc::new(mount_mgr), "/", "/dir1/mnt").unwrap();
 
     // Use /dir1/mnt in lower_mgr as the lower layer for OverlayFS
     let mnt_entry = lower_mgr.resolve_path("/dir1/mnt").unwrap();
@@ -431,8 +431,8 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
     let lower_mgr = VfsManager::new_with_root(lower.clone());
     let mount1_mgr = VfsManager::new_with_root(mount1.clone());
     let mount2_mgr = VfsManager::new_with_root(mount2.clone());
-    lower_mgr.bind_mount_from(Arc::new(mount1_mgr), "/", "/mnt").unwrap();
-    lower_mgr.bind_mount_from(Arc::new(mount2_mgr), "/", "/mnt/child").unwrap();
+    lower_mgr.bind_mount_from(&Arc::new(mount1_mgr), "/", "/mnt").unwrap();
+    lower_mgr.bind_mount_from(&Arc::new(mount2_mgr), "/", "/mnt/child").unwrap();
 
     // Check the lower_mgr's readdir for /mnt and /mnt/child
     // Expected structure:
