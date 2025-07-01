@@ -13,7 +13,6 @@
 //! - All filesystem operations are thread-safe and handle concurrent access properly
 
 use alloc::format;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::abi::MAX_ABI_LENGTH;

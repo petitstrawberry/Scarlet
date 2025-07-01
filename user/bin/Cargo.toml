@@ -19,5 +19,9 @@ path = "src/hello.rs"
 name = "test"
 path = "src/test.rs"
 
+[[bin]]
+name = "xv6"
+path = "src/xv6.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib" }
