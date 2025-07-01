@@ -19,7 +19,7 @@
 //!
 //! ```rust,no_run
 //! // Create overlay with upper and lower layers
-//! let overlay = OverlayFS::new_with_dirs(
+//! let overlay = OverlayFS::new(
 //!     Some((upper_mount, upper_entry)),  // Upper layer for writes
 //!     vec![(lower_mount, lower_entry)],  // Lower layers (read-only)
 //!     "my_overlay".to_string()
@@ -154,7 +154,7 @@ impl OverlayFS {
     /// # Example
     ///
     /// ```rust,no_run
-    /// let overlay = OverlayFS::new_with_dirs(
+    /// let overlay = OverlayFS::new(
     ///     Some((upper_mount, upper_entry)),  // Read-write upper layer
     ///     vec![
     ///         (layer1_mount, layer1_entry),   // Higher priority lower layer
@@ -163,7 +163,7 @@ impl OverlayFS {
     ///     "system_overlay".to_string()
     /// )?;
     /// ```
-    pub fn new_with_dirs(
+    pub fn new(
         upper: Option<(Arc<MountPoint>, Arc<VfsEntry>)>,
         lower_layers: Vec<(Arc<MountPoint>, Arc<VfsEntry>)>,
         name: String
@@ -458,7 +458,7 @@ impl OverlayFS {
     ) -> Arc<dyn FileSystemOperations> {
         // Parse options if provided
         let name = "overlayfs".to_string();
-        OverlayFS::new_with_dirs(upper, lower_layers, name).expect("Failed to create OverlayFS") as Arc<dyn FileSystemOperations>
+        OverlayFS::new(upper, lower_layers, name).expect("Failed to create OverlayFS") as Arc<dyn FileSystemOperations>
     }
 }
 
@@ -786,7 +786,7 @@ driver_initcall!(register_driver);
 // let (base_mount, base_entry) = vfs.resolve_path("/base")?;
 // let (overlay_mount, overlay_entry) = vfs.resolve_path("/overlay")?;
 //
-// let overlay = OverlayFS::new_with_dirs(
+// let overlay = OverlayFS::new(
 //     Some((overlay_mount, overlay_entry)),  // Upper (writable)
 //     vec![(base_mount, base_entry)],        // Lower (read-only)
 //     "system_overlay".to_string()

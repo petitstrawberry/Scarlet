@@ -58,7 +58,7 @@ fn test_overlayfs_basic() {
     
     let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
         "overlayfs".to_string()
@@ -103,7 +103,7 @@ fn test_overlayfs_readdir() {
     
     let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
         "overlayfs".to_string()
@@ -148,7 +148,7 @@ fn test_overlayfs_copy_up() {
     
     let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
         "overlayfs".to_string()
@@ -205,7 +205,7 @@ fn test_overlayfs_whiteout() {
     
     let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
         "overlayfs".to_string()
@@ -245,7 +245,7 @@ fn test_overlayfs_read_only() {
     
     let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
     // Create read-only overlay (no upper layer)
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         None,
         vec![(lower_mp, lower_entry)],
         "overlayfs".to_string()
@@ -296,7 +296,7 @@ fn test_overlayfs_upper_dir_remove_whiteout() {
 
     let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(lower_mp.clone(), lower_entry.clone())],
         "overlayfs".to_string()
@@ -358,7 +358,7 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     let mnt_entry = lower_mgr.resolve_path("/dir1/mnt").unwrap();
     let mnt_mp = make_mount(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         Some((upper_mp.clone(), upper_entry.clone())),
         vec![(mnt_mp.clone(), mnt_entry.clone())],
         "overlayfs".to_string()
@@ -458,7 +458,7 @@ fn test_overlayfs_nested_mnt_bind_mounts() {
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
 
     // Create OverlayFS
-    let overlay = OverlayFS::new_with_dirs(
+    let overlay = OverlayFS::new(
         Some((upper_mp, upper_entry)),
         vec![(mnt_mp, mnt_entry.clone())],
         "overlayfs".to_string()
