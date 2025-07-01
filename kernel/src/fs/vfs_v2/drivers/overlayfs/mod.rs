@@ -46,7 +46,7 @@ use core::any::Any;
 
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal, VfsEntry};
-use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager};
+use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager};
 use crate::object::capability::{StreamOps, StreamError};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::vm::vmem::MemoryArea;
