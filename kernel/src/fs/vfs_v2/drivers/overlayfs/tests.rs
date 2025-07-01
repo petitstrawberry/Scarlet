@@ -526,10 +526,10 @@ fn test_overlayfs_cross_vfs() {
     let lib_content = b"Base library file";
     let config_content = b"Base config file";
     
-    let mut lib_obj = base_fs.open(&lib_file, 0o2).unwrap(); // Write mode
+    let lib_obj = base_fs.open(&lib_file, 0o2).unwrap(); // Write mode
     lib_obj.write(lib_content).unwrap();
     
-    let mut config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode 
+    let config_obj = base_fs.open(&config_file, 0o2).unwrap(); // Write mode 
     config_obj.write(config_content).unwrap();
     
     // Setup container VFS: create /overlay directory with files
@@ -539,15 +539,15 @@ fn test_overlayfs_cross_vfs() {
     // Create files in container overlay (one overrides, one is new)
     let override_config = container_fs.create(&overlay_dir, &"config.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
     let app_file = container_fs.create(&overlay_dir, &"app.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-
+    
     // Write content to container files
-    let override_config_content = b"Container config file";
+    let override_content = b"Container config override";
     let app_content = b"Container app file";
     
-    let mut override_obj = container_fs.open(&override_config, 0o2).unwrap(); // Write mode
-    override_obj.write(override_config_content).unwrap();
+    let override_obj = container_fs.open(&override_config, 0o2).unwrap(); // Write mode
+    override_obj.write(override_content).unwrap();
     
-    let mut app_obj = container_fs.open(&app_file, 0o2).unwrap(); // Write mode
+    let app_obj = container_fs.open(&app_file, 0o2).unwrap(); // Write mode
     app_obj.write(app_content).unwrap();
     
     // Create cross-VFS overlay using the new API
@@ -575,11 +575,11 @@ fn test_overlayfs_cross_vfs() {
     let mut config_buffer = vec![0u8; 128];
     let config_bytes_read = config_read_obj.read(&mut config_buffer).unwrap();
     let config_data = &config_buffer[..config_bytes_read];
-    assert_eq!(config_data, override_config_content); // Should be container version
+    assert_eq!(config_data, override_content); // Should be container version
     
     // Test 3: Verify lib.txt comes from lower layer (base VFS)
     let lib_node = overlay.lookup(&overlay_root, &"lib.txt".to_string()).unwrap();
-    let mut lib_read_obj = overlay.open(&lib_node, 0).unwrap(); // Read mode
+    let lib_read_obj = overlay.open(&lib_node, 0).unwrap(); // Read mode
     let mut lib_buffer = vec![0u8; 128];
     let lib_bytes_read = lib_read_obj.read(&mut lib_buffer).unwrap();
     let lib_data = &lib_buffer[..lib_bytes_read];
@@ -587,7 +587,7 @@ fn test_overlayfs_cross_vfs() {
     
     // Test 4: Verify app.txt comes from upper layer (container VFS)
     let app_node = overlay.lookup(&overlay_root, &"app.txt".to_string()).unwrap();
-    let mut app_read_obj = overlay.open(&app_node, 0).unwrap(); // Read mode
+    let app_read_obj = overlay.open(&app_node, 0).unwrap(); // Read mode
     let mut app_buffer = vec![0u8; 128];
     let app_bytes_read = app_read_obj.read(&mut app_buffer).unwrap();
     let app_data = &app_buffer[..app_bytes_read];
@@ -595,7 +595,7 @@ fn test_overlayfs_cross_vfs() {
     
     // Test 5: Verify write operations go to upper layer (container VFS)
     let new_file = overlay.create(&overlay_root, &"new.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
-    let mut new_obj = overlay.open(&new_file, 0o2).unwrap(); // Write mode
+    let new_obj = overlay.open(&new_file, 0o2).unwrap(); // Write mode
     let new_content = b"New file content";
     new_obj.write(new_content).unwrap();
     
@@ -606,7 +606,7 @@ fn test_overlayfs_cross_vfs() {
     
     // Verify we can read back what we wrote
     let read_new_node = overlay.lookup(&overlay_root, &"new.txt".to_string()).unwrap();
-    let mut read_new_obj = overlay.open(&read_new_node, 0).unwrap(); // Read mode
+    let read_new_obj = overlay.open(&read_new_node, 0).unwrap(); // Read mode
     let mut read_buffer = vec![0u8; 128];
     let read_bytes = read_new_obj.read(&mut read_buffer).unwrap();
     let read_data = &read_buffer[..read_bytes];
@@ -668,9 +668,9 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     let override_base = fs2.create(&middle_dir, &"base.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
     let middle_file = fs2.create(&middle_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
 
-    let mut override_obj = fs2.open(&override_base, 0o2).unwrap();
+    let override_obj = fs2.open(&override_base, 0o2).unwrap();
     override_obj.write(b"VFS2 base override").unwrap();
-    let mut middle_obj = fs2.open(&middle_file, 0o2).unwrap();
+    let middle_obj = fs2.open(&middle_file, 0o2).unwrap();
     middle_obj.write(b"VFS2 middle content").unwrap();
     
     // Setup VFS3 (top layer)
@@ -679,9 +679,9 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     let override_middle = fs3.create(&top_dir, &"middle.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
     let top_file = fs3.create(&top_dir, &"top.txt".to_string(), FileType::RegularFile, 0o644).unwrap();
 
-    let mut override_middle_obj = fs3.open(&override_middle, 0o2).unwrap();
+    let override_middle_obj = fs3.open(&override_middle, 0o2).unwrap();
     override_middle_obj.write(b"VFS3 middle override").unwrap();
-    let mut top_obj = fs3.open(&top_file, 0o2).unwrap();
+    let top_obj = fs3.open(&top_file, 0o2).unwrap();
     top_obj.write(b"VFS3 top content").unwrap();
     
     // Create multi-layer cross-VFS overlay
@@ -726,4 +726,218 @@ fn test_overlayfs_cross_vfs_multi_layer() {
     let mut buffer = vec![0u8; 128];
     let bytes_read = top_read_obj.read(&mut buffer).unwrap();
     assert_eq!(&buffer[..bytes_read], b"VFS3 top content");
+}
+
+#[test_case]
+fn test_overlayfs_simple_readdir() {
+    /*
+    Simple test to verify basic overlay readdir functionality
+    */
+    let lower = TmpFS::new(0);
+    let upper = TmpFS::new(0);
+    
+    // Create one file in each layer
+    let lower_root = lower.root_node();
+    lower.create(&lower_root, &"lower_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    
+    let upper_root = upper.root_node();
+    upper.create(&upper_root, &"upper_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    
+    // Create overlay
+    let (lower_mp, lower_entry) = make_mount_and_entry(lower.clone() as Arc<dyn FileSystemOperations>);
+    let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
+    let overlay = OverlayFS::new(
+        Some((upper_mp, upper_entry)),
+        vec![(lower_mp, lower_entry)],
+        "simple_test".to_string()
+    ).unwrap();
+    
+    // Test readdir
+    let root = overlay.root_node();
+    let entries = overlay.readdir(&root).unwrap();
+    let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort();
+    
+    // Should contain both files
+    assert!(names.contains(&"lower_file"));
+    assert!(names.contains(&"upper_file"));
+    assert!(names.contains(&"."));
+    assert!(names.contains(&".."));
+    assert_eq!(names.len(), 4); // ., .., lower_file, upper_file
+}
+
+#[test_case]
+fn test_overlayfs_directory_read() {
+    use crate::fs::DirectoryEntry;
+    
+    /*
+    Test directory read operations (not readdir, but reading directory via StreamOps::read)
+    This tests the OverlayDirectoryObject implementation
+    
+    Directory structure:
+    lower:/
+    ├── lower_file (file)
+    ├── shared_dir/ (directory)
+    upper:/
+    ├── upper_file (file)
+    ├── shared_dir/ (directory, merged with lower)
+    
+    Expected read result should merge both layers
+    */
+    
+    let lower: Arc<dyn FileSystemOperations> = TmpFS::new(0);
+    let upper: Arc<dyn FileSystemOperations> = TmpFS::new(0);
+    
+    // Create files and directories in lower layer
+    let lower_root = lower.root_node();
+    let _lower_file = lower.create(&lower_root, &"lower_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let _lower_shared_dir = lower.create(&lower_root, &"shared_dir".to_string(), FileType::Directory, 0o755).unwrap();
+    
+    // Create files and directories in upper layer  
+    let upper_root = upper.root_node();
+    let _upper_file = upper.create(&upper_root, &"upper_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let _upper_shared_dir = upper.create(&upper_root, &"shared_dir".to_string(), FileType::Directory, 0o755).unwrap();
+    
+    // Create overlay filesystem
+    let (upper_mount, upper_entry) = make_mount_and_entry(upper.clone());
+    let (lower_mount, lower_entry) = make_mount_and_entry(lower.clone());
+    
+    let overlay = OverlayFS::new(
+        Some((upper_mount, upper_entry)),
+        vec![(lower_mount, lower_entry)],
+        "test_overlay".to_string()
+    ).unwrap();
+    
+    // Keep TmpFS instances alive
+    let _keep_upper_alive = upper;
+    let _keep_lower_alive = lower;
+    
+    // Get overlay root node
+    let overlay_root = overlay.root_node();
+    
+    // Open the root directory for reading
+    let dir_file = overlay.open(&overlay_root, 0).unwrap(); // O_RDONLY
+    
+    // Read directory entries one by one using StreamOps::read
+    let mut found_entries = Vec::new();
+    
+    loop {
+        let mut buffer = vec![0u8; 512]; // Buffer for one directory entry
+        let bytes_read = dir_file.read(&mut buffer).unwrap();
+        if bytes_read == 0 {
+            break; // EOF
+        }
+        
+        // Parse the directory entry from the buffer
+        let dir_entry = unsafe {
+            &*(buffer.as_ptr() as *const DirectoryEntry)
+        };
+        
+        // Extract the name from the directory entry
+        let name_bytes = unsafe {
+            core::slice::from_raw_parts(
+                dir_entry.name.as_ptr(),
+                dir_entry.name_len as usize
+            )
+        };
+        let name = core::str::from_utf8(name_bytes).unwrap().to_string();
+        found_entries.push(name);
+    }
+    
+    // Verify that we found entries from both layers
+    assert!(found_entries.contains(&"lower_file".to_string()));
+    assert!(found_entries.contains(&"upper_file".to_string()));
+    assert!(found_entries.contains(&"shared_dir".to_string()));
+    assert!(found_entries.contains(&".".to_string()));
+    assert!(found_entries.contains(&"..".to_string()));
+    
+    // Should have exactly 5 entries: ., .., lower_file, upper_file, shared_dir
+    assert_eq!(found_entries.len(), 5);
+}
+
+#[test_case]
+fn test_overlayfs_directory_read_whiteout() {
+    use crate::fs::DirectoryEntry;
+    
+    /*
+    Test directory read with whiteout files - whiteout files should hide lower layer entries
+    
+    Directory structure:
+    lower:/
+    ├── hidden_file (file)
+    ├── visible_file (file)
+    upper:/
+    ├── .wh.hidden_file (whiteout for hidden_file)
+    ├── upper_file (file)
+    
+    Expected: hidden_file should not appear in read results
+    */
+    
+    let lower: Arc<dyn FileSystemOperations> = TmpFS::new(0);
+    let upper: Arc<dyn FileSystemOperations> = TmpFS::new(0);
+    
+    // Create files in lower layer
+    let lower_root = lower.root_node();
+    let _hidden_file = lower.create(&lower_root, &"hidden_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let _visible_file = lower.create(&lower_root, &"visible_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    
+    // Create whiteout and file in upper layer
+    let upper_root = upper.root_node();
+    let _whiteout = upper.create(&upper_root, &".wh.hidden_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    let _upper_file = upper.create(&upper_root, &"upper_file".to_string(), FileType::RegularFile, 0o644).unwrap();
+    
+    // Create overlay filesystem
+    let (upper_mount, upper_entry) = make_mount_and_entry(upper.clone());
+    let (lower_mount, lower_entry) = make_mount_and_entry(lower.clone());
+    
+    let overlay = OverlayFS::new(
+        Some((upper_mount, upper_entry)),
+        vec![(lower_mount, lower_entry)],
+        "test_overlay".to_string()
+    ).unwrap();
+    
+    // Keep filesystem instances alive for the test
+    let _keep_upper_alive = upper;
+    let _keep_lower_alive = lower;
+    
+    // Get overlay root node
+    let overlay_root = overlay.root_node();
+    
+    // Open the root directory for reading
+    let dir_file = overlay.open(&overlay_root, 0).unwrap(); // O_RDONLY
+    
+    // Read directory entries
+    let mut found_entries = Vec::new();
+    
+    loop {
+        let mut buffer = vec![0u8; 512]; // Buffer for one directory entry
+        let bytes_read = dir_file.read(&mut buffer).unwrap();
+        if bytes_read == 0 {
+            break; // EOF
+        }
+        
+        let dir_entry = unsafe {
+            &*(buffer.as_ptr() as *const DirectoryEntry)
+        };
+        
+        let name_bytes = unsafe {
+            core::slice::from_raw_parts(
+                dir_entry.name.as_ptr(),
+                dir_entry.name_len as usize
+            )
+        };
+        let name = core::str::from_utf8(name_bytes).unwrap().to_string();
+        found_entries.push(name);
+    }
+    
+    // Verify whiteout behavior
+    assert!(!found_entries.contains(&"hidden_file".to_string())); // Should be hidden by whiteout
+    assert!(!found_entries.contains(&".wh.hidden_file".to_string())); // Whiteout itself should not appear
+    assert!(found_entries.contains(&"visible_file".to_string())); // Should be visible
+    assert!(found_entries.contains(&"upper_file".to_string())); // Should be visible
+    assert!(found_entries.contains(&".".to_string()));
+    assert!(found_entries.contains(&"..".to_string()));
+    
+    // Should have exactly 4 entries: ., .., visible_file, upper_file
+    assert_eq!(found_entries.len(), 4);
 }
