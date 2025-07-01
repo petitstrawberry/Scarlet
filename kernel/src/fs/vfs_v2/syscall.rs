@@ -32,8 +32,8 @@
 //!
 //! ## Error Handling
 //!
-//! System calls return usize::MAX (-1) on error and appropriate values on success,
-//! following POSIX conventions for error reporting.
+//! System calls return usize::MAX (-1) on error and appropriate values on success.
+//! 
 
 use alloc::{string::String, vec::Vec, string::ToString, sync::Arc};
 

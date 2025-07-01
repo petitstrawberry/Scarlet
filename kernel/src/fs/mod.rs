@@ -139,7 +139,7 @@
 //!
 //! ## System Call Interface
 //!
-//! VFS v2 provides POSIX-compatible system calls that operate within each task's
+//! VFS v2 provides system calls that operate within each task's
 //! VFS namespace:
 //!
 //! - File operations: `open()`, `read()`, `write()`, `close()`, `lseek()`
@@ -513,7 +513,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>, FileSystemError>` - The created file system
+    /// * `Result<Arc<dyn FileSystemOperations>, FileSystemError>` - The created file system
     /// 
     fn create_from_memory(&self, _memory_area: &crate::vm::vmem::MemoryArea) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
         if self.filesystem_type() == FileSystemType::Block {
@@ -550,7 +550,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>, FileSystemError>` - The created file system
+    /// * `Result<Arc<dyn FileSystemOperations>, FileSystemError>` - The created file system
     /// 
     /// # Note
     /// 
@@ -575,7 +575,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// 
     /// # Returns
     /// 
-    /// * `Result<Box<dyn VirtualFileSystem>, FileSystemError>` - The created file system
+    /// * `Result<Arc<dyn FileSystemOperations>, FileSystemError>` - The created file system
     /// 
     /// # Note
     /// 
@@ -747,7 +747,7 @@ impl FileSystemDriverManager {
     /// 
     /// # Returns
     /// 
-    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Ok(Arc<dyn FileSystemOperations>)` - Successfully created filesystem instance
     /// * `Err(FileSystemError)` - If driver not found, doesn't support block devices, or creation fails
     /// 
     /// # Errors
@@ -797,7 +797,7 @@ impl FileSystemDriverManager {
     /// 
     /// # Returns
     /// 
-    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Ok(Arc<dyn FileSystemOperations>)` - Successfully created filesystem instance
     /// * `Err(FileSystemError)` - If driver not found, doesn't support memory-based creation, or creation fails
     /// 
     /// # Errors
@@ -850,7 +850,7 @@ impl FileSystemDriverManager {
     /// 
     /// # Returns
     /// 
-    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Ok(Arc<dyn FileSystemOperations>)` - Successfully created filesystem instance
     /// * `Err(FileSystemError)` - If driver not found, parameters invalid, or creation fails
     /// 
     /// # Errors
@@ -899,7 +899,7 @@ impl FileSystemDriverManager {
     /// 
     /// # Returns
     /// 
-    /// * `Ok(Box<dyn VirtualFileSystem>)` - Successfully created filesystem instance
+    /// * `Ok(Arc<dyn FileSystemOperations>)` - Successfully created filesystem instance
     /// * `Err(FileSystemError)` - If driver not found or creation fails
     /// 
     /// # Errors
