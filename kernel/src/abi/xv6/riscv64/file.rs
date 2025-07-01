@@ -1,5 +1,24 @@
-use alloc::{boxed::Box, string::ToString, vec, vec::Vec};
-use crate::{abi::xv6::riscv64::fs::xv6fs::{Dirent, Stat}, arch::{self, Registers, Trapframe}, device::manager::DeviceManager, executor::TransparentExecutor, fs::{helper::get_path_str, DeviceFileInfo, FileType, SeekFrom, VfsManager, DirectoryEntry}, library::std::string::{cstring_to_string, parse_c_string_from_userspace, parse_string_array_from_userspace, StringConversionError}, object::capability::StreamError, sched::scheduler::get_scheduler, task::{elf_loader::load_elf_into_task, mytask}, vm};
+use alloc::{boxed::Box, string::{String, ToString}, vec, vec::Vec};
+use crate::{
+    abi::xv6::riscv64::fs::xv6fs::{Dirent, Stat}, 
+    arch::Trapframe, 
+    device::manager::DeviceManager, 
+    executor::TransparentExecutor, 
+    fs::{
+        FileType, 
+        SeekFrom,
+        DirectoryEntry, // Legacy support for conversion
+        DeviceFileInfo,
+    }, 
+    library::std::string::{
+        cstring_to_string, 
+        parse_c_string_from_userspace, 
+        parse_string_array_from_userspace, 
+    }, 
+    object::capability::StreamError, 
+    sched::scheduler::get_scheduler, 
+    task::mytask, 
+};
 
 /// Convert Scarlet DirectoryEntry to xv6 Dirent and write to buffer
 fn read_directory_as_xv6_dirent(buf_ptr: *mut u8, count: usize, buffer_data: &[u8]) -> usize {
@@ -48,7 +67,7 @@ pub fn sys_exec(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
-        Ok(path) => match VfsManager::to_absolute_path(&task, &path) {
+        Ok(path) => match to_absolute_path_v2(&task, &path) {
             Ok(abs_path) => abs_path,
             Err(_) => return usize::MAX, // Path error
         },
@@ -99,15 +118,18 @@ pub fn sys_open(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
 
     // Convert path bytes to string
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => VfsManager::to_absolute_path(&task, &path).unwrap(),
+        Ok((path, _)) => match to_absolute_path_v2(&task, &path) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
+    // Use task's VFS manager
+    let vfs = task.vfs.as_ref().unwrap();
+
     // Try to open the file
-    let file = match task.vfs.as_ref() {
-        Some(vfs) => vfs.open(&path_str, 0),
-        None => return usize::MAX, // VFS not initialized
-    };
+    let file = vfs.open(&path_str, 0);
 
     match file {
         Ok(kernel_obj) => {
@@ -126,7 +148,6 @@ pub fn sys_open(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
         Err(_) =>{
             // If the file does not exist and we are trying to create it
             if mode & OpenMode::Create as i32 != 0 {
-                let vfs = task.vfs.as_ref().unwrap();
                 let res = vfs.create_file(&path_str, FileType::RegularFile);
                 if res.is_err() {
                     return usize::MAX; // File creation error
@@ -368,8 +389,8 @@ pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     let name_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let name = get_path_str(name_ptr).unwrap();
-    let path = VfsManager::to_absolute_path(&task, &name).unwrap();
+    let name = get_path_str_v2(name_ptr).unwrap();
+    let path = to_absolute_path_v2(&task, &name).unwrap();
 
     let major = trapframe.get_arg(1) as u32;
     let minor = trapframe.get_arg(2) as u32;
@@ -453,8 +474,8 @@ pub fn sys_mkdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     trapframe.increment_pc_next(task);
     
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let path = match get_path_str(path_ptr) {
-        Ok(p) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+    let path = match get_path_str_v2(path_ptr) {
+        Ok(p) => to_absolute_path_v2(&task, &p).unwrap(),
         Err(_) => return usize::MAX, // Invalid path
     };
 
@@ -472,7 +493,7 @@ pub fn sys_unlink(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe:
     
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((p, _)) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
         Err(_) => return usize::MAX, // Invalid path
     };
 
@@ -492,18 +513,79 @@ pub fn sys_link(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     let dst_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
 
     let src_path = match cstring_to_string(src_path_ptr, MAX_PATH_LENGTH) {
-        Ok((p, _)) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
         Err(_) => return usize::MAX, // Invalid path
     };
 
     let dst_path = match cstring_to_string(dst_path_ptr, MAX_PATH_LENGTH) {
-        Ok((p, _)) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+        Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
         Err(_) => return usize::MAX, // Invalid path
     };
 
-    let vfs = task.vfs.as_mut().unwrap();
+    let vfs = task.vfs.as_ref().unwrap();
     match vfs.create_hardlink(&src_path, &dst_path) {
         Ok(_) => 0, // Success
-        Err(_) => usize::MAX, // Error
+        Err(err) => {
+            use crate::fs::FileSystemErrorKind;
+            
+            // Map VFS errors to appropriate errno values for xv6
+            match err.kind {
+                FileSystemErrorKind::NotFound => {
+                    // Source file doesn't exist
+                    2 // ENOENT
+                },
+                FileSystemErrorKind::FileExists => {
+                    // Destination already exists
+                    17 // EEXIST
+                },
+                FileSystemErrorKind::CrossDevice => {
+                    // Hard links across devices not supported
+                    18 // EXDEV
+                },
+                FileSystemErrorKind::InvalidOperation => {
+                    // Operation not supported (e.g., directory hardlink)
+                    1 // EPERM
+                },
+                FileSystemErrorKind::PermissionDenied => {
+                    13 // EACCES
+                },
+                _ => {
+                    // Other errors
+                    5 // EIO
+                }
+            }
+        }
     }
+}
+
+/// VFS v2 helper function for path absolutization
+/// TODO: Move this to a shared helper module when VFS v2 provides public API
+fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
+    if path.starts_with('/') {
+        Ok(path.to_string())
+    } else {
+        let cwd = task.cwd.clone().ok_or(())?;
+        let mut absolute_path = cwd;
+        if !absolute_path.ends_with('/') {
+            absolute_path.push('/');
+        }
+        absolute_path.push_str(path);
+        // Simple normalization (removes "//", ".", etc.)
+        let mut components = Vec::new();
+        for comp in absolute_path.split('/') {
+            match comp {
+                "" | "." => {},
+                ".." => { components.pop(); },
+                _ => components.push(comp),
+            }
+        }
+        Ok("/".to_string() + &components.join("/"))
+    }
+}
+
+/// Helper function to replace the missing get_path_str function
+/// TODO: This should be moved to a shared helper when VFS v2 provides public API
+fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
+    const MAX_PATH_LENGTH: usize = 128;
+    cstring_to_string(ptr, MAX_PATH_LENGTH).map(|(s, _)| s).map_err(|_| ())
 }

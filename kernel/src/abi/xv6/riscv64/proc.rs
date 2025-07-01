@@ -1,4 +1,43 @@
-use crate::{arch::{get_cpu, Trapframe}, fs::{helper::get_path_str, FileType, VfsManager}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags, WaitError}};
+use alloc::string::{String, ToString};
+use crate::{
+    arch::{get_cpu, Trapframe}, 
+    fs::FileType, 
+    library::std::string::cstring_to_string,
+    sched::scheduler::get_scheduler, 
+    task::{mytask, CloneFlags, WaitError}
+};
+
+/// VFS v2 helper function for path absolutization
+/// TODO: Move this to a shared helper module when VFS v2 provides public API
+fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
+    if path.starts_with('/') {
+        Ok(path.to_string())
+    } else {
+        let cwd = task.cwd.clone().ok_or(())?;
+        let mut absolute_path = cwd;
+        if !absolute_path.ends_with('/') {
+            absolute_path.push('/');
+        }
+        absolute_path.push_str(path);
+        // Simple normalization (removes "//", ".", etc.)
+        let mut components = alloc::vec::Vec::new();
+        for comp in absolute_path.split('/') {
+            match comp {
+                "" | "." => {},
+                ".." => { components.pop(); },
+                _ => components.push(comp),
+            }
+        }
+        Ok("/".to_string() + &components.join("/"))
+    }
+}
+
+/// Helper function to replace the missing get_path_str function
+/// TODO: This should be moved to a shared helper when VFS v2 provides public API
+fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
+    const MAX_PATH_LENGTH: usize = 128;
+    cstring_to_string(ptr, MAX_PATH_LENGTH).map(|(s, _)| s).map_err(|_| ())
+}
 
 pub fn sys_fork(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let parent_task = mytask().unwrap();
@@ -62,7 +101,7 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     return trapframe.get_return_value();
 }
 
-pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut Trapframe) -> usize {
     // Implement the kill syscall
     // This is a placeholder implementation
     0
@@ -84,8 +123,11 @@ pub fn sys_chdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     trapframe.increment_pc_next(task);
     
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0) as usize).unwrap() as *const u8;
-    let path = match get_path_str(path_ptr) {
-        Ok(p) => VfsManager::to_absolute_path(&task, &p).unwrap(),
+    let path = match get_path_str_v2(path_ptr) {
+        Ok(p) => match to_absolute_path_v2(&task, &p) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
         Err(_) => return usize::MAX, /* -1 */
     };
 
