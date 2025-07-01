@@ -199,6 +199,9 @@ pub enum FileSystemErrorKind {
     BrokenFileSystem,
     Busy,
     DirectoryNotEmpty,
+    InvalidOperation,
+    CrossDevice,
+    FileExists,
 }
 
 #[derive(Clone)]

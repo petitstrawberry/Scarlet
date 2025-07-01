@@ -525,6 +525,90 @@ impl VfsManager {
         Ok(entry)
     }
     
+    /// Create a hard link
+    /// 
+    /// This will create a hard link where the source file is linked to the target path.
+    /// Both paths will refer to the same underlying file data.
+    /// 
+    /// # Arguments
+    /// * `source_path` - Path of the existing file to link to
+    /// * `target_path` - Path where the hard link should be created
+    /// 
+    /// # Errors
+    /// Returns an error if the source doesn't exist, target already exists, 
+    /// filesystems don't match, or hard links aren't supported.
+    /// 
+    pub fn create_hardlink(
+        &self,
+        source_path: &str,
+        target_path: &str,
+    ) -> Result<(), FileSystemError> {
+        // Resolve source file
+        let (source_entry, _source_mount) = self.mount_tree.resolve_path(source_path)?;
+        let source_node = source_entry.node();
+        
+        // Check that source is a regular file (most filesystems don't support directory hard links)
+        if source_node.is_directory()? {
+            return Err(vfs_error(
+                FileSystemErrorKind::InvalidOperation, 
+                "Cannot create hard link to directory"
+            ));
+        }
+        
+        // Split target path into parent and filename
+        let (target_parent_path, target_filename) = self.split_parent_child(target_path)?;
+        
+        // Resolve target parent directory
+        let (target_parent_entry, _target_mount) = self.mount_tree.resolve_path(&target_parent_path)?;
+        let target_parent_node = target_parent_entry.node();
+        
+        // Check that target parent is a directory
+        if !target_parent_node.is_directory()? {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotADirectory,
+                "Target parent is not a directory"
+            ));
+        }
+        
+        // Get filesystems for both source and target
+        let source_fs = source_node.filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference for source"))?;
+        
+        let target_fs = target_parent_node.filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference for target"))?;
+        
+        // Check that both files are on the same filesystem (hard links can't cross filesystem boundaries)
+        if !Arc::ptr_eq(&source_fs, &target_fs) {
+            return Err(vfs_error(
+                FileSystemErrorKind::CrossDevice,
+                "Hard links cannot cross filesystem boundaries"
+            ));
+        }
+        
+        // Check if target already exists
+        if target_parent_entry.get_child(&target_filename).is_some() {
+            return Err(vfs_error(
+                FileSystemErrorKind::FileExists,
+                "Target file already exists"
+            ));
+        }
+        
+        // Create the hard link
+        let link_node = source_fs.create_hardlink(&target_parent_node, &target_filename, &source_node)?;
+        
+        // Create VfsEntry and add to parent cache
+        let link_entry = VfsEntry::new(
+            Some(Arc::downgrade(&target_parent_entry)),
+            target_filename.clone(),
+            link_node,
+        );
+        target_parent_entry.add_child(target_filename, link_entry);
+        
+        Ok(())
+    }
+
     // Helper methods
     
     /// Split a path into parent directory and filename
