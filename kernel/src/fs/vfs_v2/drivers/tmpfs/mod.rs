@@ -11,10 +11,11 @@ use spin::{rwlock::RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
 
 use crate::{device::DeviceType, driver_initcall, fs::{
-    get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
+    get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
 }};
 use crate::object::capability::{StreamOps, StreamError};
 use crate::device::manager::BorrowedDeviceGuard;
+use crate::device::manager::DeviceManager;
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
 
@@ -178,7 +179,20 @@ impl FileSystemOperations for TmpFS {
                 "Invalid node type for TmpFS"
             ))?;
 
-        let file_object = TmpFileObject::new_regular(tmp_node);
+        let file_object = match tmp_node.file_type() {
+            FileType::RegularFile => TmpFileObject::new_regular(tmp_node),
+            FileType::Directory => TmpFileObject::new_directory(tmp_node),
+            FileType::CharDevice(info) | FileType::BlockDevice(info) => {
+                TmpFileObject::new_device(tmp_node, info)
+            }
+            _ => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Unsupported file type for open"
+                ));
+            }
+        };
+
         Ok(Arc::new(file_object))
     }
     
@@ -639,14 +653,23 @@ impl TmpFileObject {
     }
     
     /// Create a new file object for device files
-    pub fn new_device(node: Arc<TmpNode>, device_guard: BorrowedDeviceGuard) -> Self {
-        Self {
-            node,
-            position: RwLock::new(0),
-            device_guard: Some(device_guard),
+    pub fn new_device(node: Arc<TmpNode>, info: DeviceFileInfo) -> Self {
+        // Try to borrow the device from DeviceManager
+        match DeviceManager::get_manager().borrow_device(info.device_id) {
+            Ok(device_guard) => {
+                Self {
+                    node,
+                    position: RwLock::new(0),
+                    device_guard: Some(device_guard),
+                }
+            },
+            Err(e) => {
+                // If borrowing fails, return an error
+                panic!("Failed to borrow device {}: {}", info.device_id, e);
+            }
         }
     }
-
+                        
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.device();
