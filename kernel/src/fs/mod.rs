@@ -70,7 +70,7 @@
 //! ### Overlay Filesystem Support
 //! ```rust
 //! // Create overlay combining multiple layers
-//! let overlay = OverlayFS::new_with_dirs(
+//! let overlay = OverlayFS::new(
 //!     Some((upper_mount, upper_entry)),  // Upper layer (writable)
 //!     vec![(lower_mount, lower_entry)],  // Lower layers (read-only)
 //!     "system_overlay".to_string()
@@ -199,6 +199,9 @@ pub enum FileSystemErrorKind {
     BrokenFileSystem,
     Busy,
     DirectoryNotEmpty,
+    InvalidOperation,
+    CrossDevice,
+    FileExists,
 }
 
 #[derive(Clone)]

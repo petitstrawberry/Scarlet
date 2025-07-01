@@ -12,7 +12,7 @@ use spin::RwLock;
 use core::{any::Any, fmt::Debug};
 use core::fmt;
 
-use crate::fs::{FileSystemError, FileMetadata, FileObject, FileType};
+use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType};
 
 /// DirectoryEntry structure used by readdir
 #[derive(Debug, Clone)]
@@ -258,6 +258,39 @@ pub trait FileSystemOperations: Send + Sync {
     /// Check if filesystem is read-only
     fn is_read_only(&self) -> bool {
         false
+    }
+
+    /// Create a hard link to an existing file
+    /// 
+    /// This method creates a hard link from `link_name` in `link_parent` to the existing
+    /// file represented by `target_node`. Both the link and target will refer to the
+    /// same underlying file data.
+    /// 
+    /// # Arguments
+    /// * `link_parent` - Parent directory where the link will be created
+    /// * `link_name` - Name for the new hard link
+    /// * `target_node` - Existing file to link to
+    /// 
+    /// # Returns
+    /// Returns the VfsNode representing the new hard link on success
+    /// 
+    /// # Errors
+    /// * `NotSupported` - Filesystem doesn't support hard links
+    /// * `InvalidOperation` - Target is a directory (most filesystems don't support directory hard links)
+    /// * `CrossDevice` - Target and link are on different filesystems
+    /// * `FileExists` - Link name already exists in parent directory
+    fn create_hardlink(
+        &self,
+        link_parent: &Arc<dyn VfsNode>,
+        link_name: &String,
+        target_node: &Arc<dyn VfsNode>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        // Default implementation: not supported
+        let _ = (link_parent, link_name, target_node);
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Hard links not supported by this filesystem"
+        ))
     }
 }
 
