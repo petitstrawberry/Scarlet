@@ -5,7 +5,6 @@ skip_core_tasks = true
 [env]
 OSABI_VALUE = "83"
 DIST_DIR = "dist"
-BINARIES = "init sh hello test"
 
 [tasks.build]
 description = "Build all user programs with OSABI=83"
@@ -21,28 +20,50 @@ description = "Set OSABI to 83 for all user program binaries"
 dependencies = ["build-only"]
 script = '''
 echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
-for binary in ${BINARIES}; do
-    if [ -f "${DIST_DIR}/${binary}" ]; then
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+# Find all executable files in the dist directory
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
         echo "Setting OSABI for ${binary}"
-        python3 ./set_osabi.py "${DIST_DIR}/${binary}" ${OSABI_VALUE}
-    else
-        echo "Warning: ${binary} not found in ${DIST_DIR}"
+        python3 ./set_osabi.py "${binary_path}" ${OSABI_VALUE}
     fi
 done
+
+# Check if any binaries were processed
+binary_count=$(find "${DIST_DIR}" -type f -executable | wc -l)
+if [ "$binary_count" -eq 0 ]; then
+    echo "Warning: No executable binaries found in ${DIST_DIR}"
+fi
 '''
 
 [tasks.verify-osabi]
 description = "Verify OSABI settings for all binaries"
 script = '''
 echo "Verifying OSABI settings..."
-for binary in ${BINARIES}; do
-    if [ -f "${DIST_DIR}/${binary}" ]; then
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
+
+# Find all executable files in the dist directory
+found_binaries=false
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
         echo -n "${binary}: "
-        od -t u1 -N 1 -j 7 "${DIST_DIR}/${binary}" | awk 'NR==1 {print $2}'
-    else
-        echo "${binary}: not found in ${DIST_DIR}"
+        od -t u1 -N 1 -j 7 "${binary_path}" | awk 'NR==1 {print $2}'
+        found_binaries=true
     fi
 done
+
+if [ "$found_binaries" = false ]; then
+    echo "No executable binaries found in ${DIST_DIR}"
+fi
 '''
 
 [tasks.clean]
