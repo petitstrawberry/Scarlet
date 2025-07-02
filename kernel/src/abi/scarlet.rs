@@ -54,9 +54,24 @@ impl AbiModule for ScarletAbi {
         
         let mut confidence = magic_score;
         
-        // Stage 2: Entry point validation (placeholder - could check ELF header)
-        // TODO: Add ELF header parsing to validate entry point
-        confidence += 15;
+        // Stage 2: ELF header checks
+        if let Some(file_obj) = file_object.as_file() {
+            // Check ELF header for Scarlet-specific OSABI (83)
+            let mut osabi_buffer = [0u8; 1];
+            file_obj.seek(SeekFrom::Start(7)).ok(); // OSABI is at
+            match file_obj.read(&mut osabi_buffer) {
+                Ok(bytes_read) if bytes_read == 1 => {
+                    if osabi_buffer[0] == 83 { // Scarlet OSABI
+                        confidence += 70; // Strong indicator for Scarlet ABI
+                    } else {
+                        return None; // Not a Scarlet binary
+                    }
+                }
+                _ => return None // Read failed, cannot determine
+            }
+        } else {
+            return None; // Not a file object
+        }
         
         // Stage 3: File path hints
         if file_path.ends_with(".elf") || file_path.contains("scarlet") {
