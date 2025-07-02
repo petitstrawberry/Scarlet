@@ -145,7 +145,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let force_abi_rebuild = (flags & EXECVE_FORCE_ABI_REBUILD) != 0;
     
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary_with_flags(&path_str, &argv_refs, &envp_refs, task, trapframe, force_abi_rebuild) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe, force_abi_rebuild) {
         Ok(_) => {
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
@@ -204,7 +204,7 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let force_abi_rebuild = (flags & EXECVE_FORCE_ABI_REBUILD) != 0;
 
     // Use TransparentExecutor for ABI-aware execution
-    match TransparentExecutor::execute_with_abi_and_flags(
+    match TransparentExecutor::execute_with_abi(
         &path_str,
         &argv_refs,
         &envp_refs,
