@@ -1,0 +1,73 @@
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[env]
+OSABI_VALUE = "83"
+DIST_DIR = "dist"
+BINARIES = "init sh hello test"
+
+[tasks.build]
+description = "Build all user programs with OSABI=83"
+dependencies = ["build-only", "set-osabi"]
+
+[tasks.build-only]
+description = "Build user programs without OSABI setting (internal)"
+command = "cargo"
+args = ["build", "--out-dir", "dist"]
+
+[tasks.set-osabi]
+description = "Set OSABI to 83 for all user program binaries"
+dependencies = ["build-only"]
+script = '''
+echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
+for binary in ${BINARIES}; do
+    if [ -f "${DIST_DIR}/${binary}" ]; then
+        echo "Setting OSABI for ${binary}"
+        python3 ./set_osabi.py "${DIST_DIR}/${binary}" ${OSABI_VALUE}
+    else
+        echo "Warning: ${binary} not found in ${DIST_DIR}"
+    fi
+done
+'''
+
+[tasks.verify-osabi]
+description = "Verify OSABI settings for all binaries"
+script = '''
+echo "Verifying OSABI settings..."
+for binary in ${BINARIES}; do
+    if [ -f "${DIST_DIR}/${binary}" ]; then
+        echo -n "${binary}: "
+        od -t u1 -N 1 -j 7 "${DIST_DIR}/${binary}" | awk 'NR==1 {print $2}'
+    else
+        echo "${binary}: not found in ${DIST_DIR}"
+    fi
+done
+'''
+
+[tasks.clean]
+description = "Clean build artifacts"
+command = "cargo"
+args = ["clean"]
+
+[tasks.test-osabi]
+description = "Test OSABI setting with a single binary"
+script = '''
+if [ "$#" -eq 0 ]; then
+    echo "Usage: cargo make test-osabi -- <binary_name>"
+    exit 1
+fi
+BINARY_NAME="$1"
+BINARY_PATH="${DIST_DIR}/${BINARY_NAME}"
+
+if [ -f "${BINARY_PATH}" ]; then
+    echo "Current OSABI for ${BINARY_NAME}:"
+    od -t u1 -N 1 -j 7 "${BINARY_PATH}" | awk 'NR==1 {print $2}'
+    python3 ./set_osabi.py "${BINARY_PATH}" ${OSABI_VALUE}
+    echo "New OSABI for ${BINARY_NAME}:"
+    od -t u1 -N 1 -j 7 "${BINARY_PATH}" | awk 'NR==1 {print $2}'
+else
+    echo "Binary ${BINARY_NAME} not found in ${DIST_DIR}"
+    exit 1
+fi
+'''
