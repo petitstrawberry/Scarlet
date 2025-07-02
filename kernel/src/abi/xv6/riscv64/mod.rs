@@ -296,7 +296,7 @@ impl AbiModule for Xv6Riscv64Abi {
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
-        crate::println!("Setting up XV6 overlay environment with system path: {} and config path: {}", system_path, config_path);
+        // crate::println!("Setting up XV6 overlay environment with system path: {} and config path: {}", system_path, config_path);
         // XV6 ABI uses overlay mount with system XV6 tools and config persistence
         let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         let upper_vfs = base_vfs;
@@ -322,7 +322,7 @@ impl AbiModule for Xv6Riscv64Abi {
         target_vfs: &Arc<VfsManager>,
         base_vfs: &Arc<VfsManager>,
     ) -> Result<(), &'static str> {
-        crate::println!("Setting up XV6 shared resources with base VFS");
+        // crate::println!("Setting up XV6 shared resources with base VFS");
         // XV6 shared resource setup: bind mount common directories and Scarlet gateway
         match create_dir_if_not_exists(target_vfs, "/home") {
             Ok(()) => {}
