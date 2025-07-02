@@ -174,11 +174,11 @@ pub extern "C" fn main() {
     match std::task::fork() {
         0 => {
             // Child process: Execute the shell program
-            if execve("/bin/sh", &[], &[]) != 0 {
-                println!("Failed to execve /bin/sh");
+            if execve("/system/scarlet/bin/sh", &[], &[]) != 0 {
+                println!("Failed to execve /system/scarlet/bin/sh");
                 // Try to execute from old root if pivot_root was successful
-                if execve("/old_root/bin/sh", &[], &[]) != 0 {
-                    println!("Failed to execve /old_root/bin/sh");
+                if execve("/old_root/system/scarlet/bin/sh", &[], &[]) != 0 {
+                    println!("Failed to execve /old_root/system/scarlet/bin/sh");
                 }
             }
             exit(-1);
