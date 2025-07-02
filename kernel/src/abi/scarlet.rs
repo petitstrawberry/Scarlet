@@ -151,7 +151,7 @@ impl AbiModule for ScarletAbi {
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
-        crate::println!("Setting up Scarlet overlay environment with system path: {} and config path: {}", system_path, config_path);
+        // crate::println!("Setting up Scarlet overlay environment with system path: {} and config path: {}", system_path, config_path);
         // Scarlet ABI uses overlay mount with system Scarlet tools and config persistence
         let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         let upper_vfs = base_vfs;
@@ -177,7 +177,7 @@ impl AbiModule for ScarletAbi {
         target_vfs: &Arc<VfsManager>,
         base_vfs: &Arc<VfsManager>,
     ) -> Result<(), &'static str> {
-        crate::println!("Setting up Scarlet shared resources with base VFS");
+        // crate::println!("Setting up Scarlet shared resources with base VFS");
         // Scarlet shared resource setup: bind mount common directories and Scarlet gateway
         match create_dir_if_not_exists(target_vfs, "/home") {
             Ok(()) => {}
@@ -190,7 +190,7 @@ impl AbiModule for ScarletAbi {
         match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to bind mount /home for Scarlet: {}", e.message);
+                // crate::println!("Failed to bind mount /home for Scarlet: {}", e.message);
             }
         }
 
@@ -205,7 +205,7 @@ impl AbiModule for ScarletAbi {
         match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to bind mount /data/shared for Scarlet: {}", e.message);
+                // crate::println!("Failed to bind mount /data/shared for Scarlet: {}", e.message);
             }
         }
 

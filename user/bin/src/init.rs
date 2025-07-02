@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, fs::{self, close, mkdir, mkfile, mount, open, pivot_root, readdir, umount}, println, task::{execve, exit, waitpid}, vec::Vec};
+use std::{format, fs::{self, close, mkdir, mkfile, mount, open, pivot_root, readdir, umount}, println, task::{execve, execve_with_flags, exit, waitpid, EXECVE_FORCE_ABI_REBUILD}, vec::Vec};
 
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
@@ -175,10 +175,10 @@ pub extern "C" fn main() {
     match std::task::fork() {
         0 => {
             // Child process: Execute the shell program
-            if execve("/system/scarlet/bin/sh", &[], &[]) != 0 {
+            if execve_with_flags("/system/scarlet/bin/sh", &[], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
                 println!("Failed to execve /system/scarlet/bin/sh");
                 // Try to execute from old root if pivot_root was successful
-                if execve("/old_root/system/scarlet/bin/sh", &[], &[]) != 0 {
+                if execve_with_flags("/old_root/system/scarlet/bin/sh", &[], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
                     println!("Failed to execve /old_root/system/scarlet/bin/sh");
                 }
             }
