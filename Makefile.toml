@@ -27,7 +27,7 @@ args = ["build"]
 description = "Build user programs"
 cwd = "user/bin"
 command = "cargo"
-args = ["build", "--out-dir", "dist"]
+args = ["make", "build"]
 dependencies = ["build-userlib"]
 
 [tasks.clean]
