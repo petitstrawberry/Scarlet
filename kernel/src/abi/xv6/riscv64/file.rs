@@ -84,7 +84,7 @@ pub fn sys_exec(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe) {
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe, false) {
         Ok(_) => {
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
