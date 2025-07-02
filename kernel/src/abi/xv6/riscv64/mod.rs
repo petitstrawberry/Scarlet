@@ -19,7 +19,7 @@ use crate::{
             proc::{sys_chdir, sys_sbrk}
         }, 
         AbiModule
-    }, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    }, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -324,7 +324,7 @@ impl AbiModule for Xv6Riscv64Abi {
     ) -> Result<(), &'static str> {
         crate::println!("Setting up XV6 shared resources with base VFS");
         // XV6 shared resource setup: bind mount common directories and Scarlet gateway
-        match target_vfs.create_dir("/home") {
+        match create_dir_if_not_exists(target_vfs, "/home") {
             Ok(()) => {}
             Err(e) => {
                 crate::println!("Failed to create /home directory for XV6: {}", e.message);
@@ -340,7 +340,7 @@ impl AbiModule for Xv6Riscv64Abi {
             }
         }
 
-        match target_vfs.create_dir("/data") {
+        match create_dir_if_not_exists(target_vfs, "/data") {
             Ok(()) => {}
             Err(e) => {
                 crate::println!("Failed to create /data directory for XV6: {}", e.message);
@@ -357,7 +357,7 @@ impl AbiModule for Xv6Riscv64Abi {
         }
 
         // Setup gateway to native Scarlet environment (read-only for security)
-        match target_vfs.create_dir("/scarlet") {
+        match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
             Err(e) => {
                 crate::println!("Failed to create /scarlet directory for XV6: {}", e.message);
@@ -399,6 +399,19 @@ syscall_table! {
     Link = 19 => sys_link,
     Mkdir = 20 => sys_mkdir,
     Close = 21 => sys_close,
+}
+
+fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
+    match vfs.create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if e.kind == FileSystemErrorKind::AlreadyExists {
+                Ok(()) // Directory already exists, nothing to do
+            } else {
+                Err(e) // Some other error occurred
+            }
+        }
+    }
 }
 
 fn register_xv6_abi() {
