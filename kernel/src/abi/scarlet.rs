@@ -5,9 +5,9 @@
 //! and interacting with the Scarlet kernel.
 //! 
 
-use alloc::{boxed::Box, string::ToString};
+use alloc::{boxed::Box, string::ToString, sync::Arc};
 
-use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::SeekFrom, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
+use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -63,8 +63,6 @@ impl AbiModule for ScarletAbi {
                 Ok(bytes_read) if bytes_read == 1 => {
                     if osabi_buffer[0] == 83 { // Scarlet OSABI
                         confidence += 70; // Strong indicator for Scarlet ABI
-                    } else {
-                        return None; // Not a Scarlet binary
                     }
                 }
                 _ => return None // Read failed, cannot determine
@@ -143,6 +141,101 @@ impl AbiModule for ScarletAbi {
                 }
             },
             None => Err("Invalid file object type for binary execution"),
+        }
+    }
+
+    fn setup_overlay_environment(
+        &self,
+        target_vfs: &Arc<VfsManager>,
+        base_vfs: &Arc<VfsManager>,
+        system_path: &str,
+        config_path: &str,
+    ) -> Result<(), &'static str> {
+        crate::println!("Setting up Scarlet overlay environment with system path: {} and config path: {}", system_path, config_path);
+        // Scarlet ABI uses overlay mount with system Scarlet tools and config persistence
+        let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
+        let upper_vfs = base_vfs;
+        let fs = match OverlayFS::new_from_paths_and_vfs(Some((upper_vfs, config_path)), lower_vfs_list, "/") {
+            Ok(fs) => fs,
+            Err(e) => {
+                crate::println!("Failed to create overlay filesystem for Scarlet ABI: {}", e.message);
+                return Err("Failed to create Scarlet overlay environment");
+            }
+        };
+
+        match target_vfs.mount(fs, "/", 0) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                crate::println!("Failed to create cross-VFS overlay for Scarlet ABI: {}", e.message);
+                Err("Failed to create Scarlet overlay environment")
+            }
+        }
+    }
+    
+    fn setup_shared_resources(
+        &self,
+        target_vfs: &Arc<VfsManager>,
+        base_vfs: &Arc<VfsManager>,
+    ) -> Result<(), &'static str> {
+        crate::println!("Setting up Scarlet shared resources with base VFS");
+        // Scarlet shared resource setup: bind mount common directories and Scarlet gateway
+        match create_dir_if_not_exists(target_vfs, "/home") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /home directory for Scarlet: {}", e.message);
+                return Err("Failed to create /home directory for Scarlet");
+            }
+        }
+
+        match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /home for Scarlet: {}", e.message);
+            }
+        }
+
+        match create_dir_if_not_exists(target_vfs, "/data") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /data directory for Scarlet: {}", e.message);
+                return Err("Failed to create /data directory for Scarlet");
+            }
+        }
+
+        match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /data/shared for Scarlet: {}", e.message);
+            }
+        }
+
+        // Setup gateway to native Scarlet environment (read-only for security)
+        match create_dir_if_not_exists(target_vfs, "/scarlet") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /scarlet directory for Scarlet: {}", e.message);
+                return Err("Failed to create /scarlet directory for Scarlet");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                crate::println!("Failed to bind mount native Scarlet root to /scarlet for Scarlet: {}", e.message);
+                return Err("Failed to bind mount native Scarlet root to /scarlet for Scarlet");
+            }
+        }
+    }
+}
+
+fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
+    match vfs.create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if e.kind == FileSystemErrorKind::AlreadyExists {
+                Ok(()) // Directory already exists, nothing to do
+            } else {
+                Err(e) // Some other error occurred
+            }
         }
     }
 }

@@ -4,7 +4,7 @@
 cd "$(dirname "$0")" || exit 1
 
 mkdir -p initramfs/bin
-cp ../user/bin/dist/* initramfs/bin/
+cp ../user/bin/dist/* initramfs/system/scarlet/bin/
 
 mkdir -p dist
 cd initramfs || exit 1
