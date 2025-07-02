@@ -34,6 +34,7 @@ fn test_exec_backup_restore() {
         &["ENV=test"],
         &mut task,
         &mut trapframe,
+        true
     );
     
     // Verify the exec failed as expected

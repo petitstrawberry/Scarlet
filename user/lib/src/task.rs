@@ -1,8 +1,9 @@
-use core::clone;
-
-use crate::syscall::{syscall0, syscall1, syscall3, syscall4, Syscall};
+use crate::syscall::{syscall0, syscall1, syscall3, syscall4, syscall5, Syscall};
 use crate::vec::Vec;
 use crate::boxed::Box;
+
+// Flags for execve system calls
+pub const EXECVE_FORCE_ABI_REBUILD: usize = 0x1; // Force ABI environment reconstruction
 
 #[repr(u64)]
 pub enum CloneFlagsDef {
@@ -110,7 +111,7 @@ pub fn getppid() -> u32 {
 /// # Return Value
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
-pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
+pub fn execve(path: &str, _argv: &[&str], _envp: &[&str]) -> i32 {
     let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
     let path_boxed_slice_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
@@ -127,7 +128,7 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     res as i32
 }
 
-pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
+pub fn execve_abi(path: &str, _argv: &[&str], _envp: &[&str], abi: &str) -> i32 {
     let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
     let path_boxed_slice_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
@@ -156,6 +157,72 @@ fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
     v.extend_from_slice(s.as_bytes());
     v.push(0); // Null terminator
     Ok(v)
+}
+
+/// Execute a program with flags support
+/// 
+/// This function extends execve() to support additional flags,
+/// particularly for forcing ABI environment reconstruction.
+/// 
+/// # Arguments
+/// * `path` - Path to the executable
+/// * `argv` - Command line arguments (currently not used)
+/// * `envp` - Environment variables (currently not used)
+/// * `flags` - Execution flags (e.g., EXECVE_FORCE_ABI_REBUILD)
+/// 
+/// # Return Value
+/// - Returns only if an error occurred
+/// - On error: -1 (usize::MAX)
+pub fn execve_with_flags(path: &str, _argv: &[&str], _envp: &[&str], flags: usize) -> i32 {
+    let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
+    let path_boxed_slice_len = path_boxed_slice.len();
+    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
+
+    let argv_ptr = 0; // argv is not used in this implementation
+    let envp_ptr = 0; // envp is not used in this implementation
+    let res = syscall4(Syscall::Execve, path_ptr, argv_ptr, envp_ptr, flags);
+    
+    // If the syscall fails, we need to free the allocated memory
+    // (On success, the context is switched, so this code is not reached)
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) };
+
+    // Return the result of the syscall
+    res as i32
+}
+
+/// Execute a program with explicit ABI specification and flags support
+/// 
+/// This function extends execve_abi() to support additional flags,
+/// particularly for forcing ABI environment reconstruction.
+/// 
+/// # Arguments
+/// * `path` - Path to the executable
+/// * `argv` - Command line arguments (currently not used)
+/// * `envp` - Environment variables (currently not used)
+/// * `abi` - Target ABI name
+/// * `flags` - Execution flags (e.g., EXECVE_FORCE_ABI_REBUILD)
+/// 
+/// # Return Value
+/// - Returns only if an error occurred
+/// - On error: -1 (usize::MAX)
+pub fn execve_abi_with_flags(path: &str, _argv: &[&str], _envp: &[&str], abi: &str, flags: usize) -> i32 {
+    let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
+    let path_boxed_slice_len = path_boxed_slice.len();
+    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
+
+    let argv_ptr = 0; // argv is not used in this implementation
+    let envp_ptr = 0; // envp is not used in this implementation
+   
+    let abi_boxed_slice = str_to_cstr_bytes(abi).unwrap().into_boxed_slice();
+    let abi_boxed_slice_len = abi_boxed_slice.len();
+    let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
+    
+    let res = syscall5(Syscall::ExecveABI, path_ptr, argv_ptr, envp_ptr, abi_ptr, flags);
+
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) }; // Free the path
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(abi_ptr as *mut u8, abi_boxed_slice_len)) }; // Free the abi
+
+    res as i32
 }
 
 /// Waits for a child process to exit.
