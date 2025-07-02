@@ -136,7 +136,7 @@ impl TransparentExecutor {
         task: &mut Task,
         trapframe: &mut Trapframe,
     ) -> ExecutorResult<()> {
-        Self::execute_with_optional_abi(path, argv, envp, None, task, trapframe)
+        Self::execute_with_optional_abi(path, argv, envp, None, task, trapframe, false)
     }
 
     /// Execute binary with explicit ABI specification
@@ -152,10 +152,41 @@ impl TransparentExecutor {
         task: &mut Task,
         trapframe: &mut Trapframe,
     ) -> ExecutorResult<()> {
-        Self::execute_with_optional_abi(path, argv, envp, Some(abi_name), task, trapframe)
+        Self::execute_with_optional_abi(path, argv, envp, Some(abi_name), task, trapframe, false)
     }
 
-    /// Unified execution implementation with optional ABI specification
+    /// Execute a binary with flags (including force ABI rebuild)
+    /// 
+    /// This method extends execute_binary() to support additional flags,
+    /// particularly for forcing ABI environment reconstruction.
+    pub fn execute_binary_with_flags(
+        path: &str,
+        argv: &[&str],
+        envp: &[&str],
+        task: &mut Task,
+        trapframe: &mut Trapframe,
+        force_abi_rebuild: bool,
+    ) -> ExecutorResult<()> {
+        Self::execute_with_optional_abi(path, argv, envp, None, task, trapframe, force_abi_rebuild)
+    }
+
+    /// Execute binary with explicit ABI specification and flags
+    /// 
+    /// This method extends execute_with_abi() to support additional flags,
+    /// particularly for forcing ABI environment reconstruction.
+    pub fn execute_with_abi_and_flags(
+        path: &str,
+        argv: &[&str],
+        envp: &[&str],
+        abi_name: &str,
+        task: &mut Task,
+        trapframe: &mut Trapframe,
+        force_abi_rebuild: bool,
+    ) -> ExecutorResult<()> {
+        Self::execute_with_optional_abi(path, argv, envp, Some(abi_name), task, trapframe, force_abi_rebuild)
+    }
+
+    /// Unified execution implementation with optional ABI specification and flags
     /// 
     /// This method handles both automatic ABI detection and explicit ABI specification
     /// with unified backup/restore logic and error handling.
@@ -166,12 +197,13 @@ impl TransparentExecutor {
         explicit_abi: Option<&str>,
         task: &mut Task,
         trapframe: &mut Trapframe,
+        force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
         // Step 1: Create backup of current task state
         let backup = TaskStateBackup::create_backup(task, trapframe);
         
         // Execute with unified error handling and restoration
-        let result = Self::execute_implementation(path, argv, envp, explicit_abi, task, trapframe);
+        let result = Self::execute_implementation_with_flags(path, argv, envp, explicit_abi, task, trapframe, force_abi_rebuild);
         
         // If execution failed, restore original state
         if result.is_err() {
@@ -184,16 +216,18 @@ impl TransparentExecutor {
         result
     }
 
-    /// Core execution implementation
+    /// Core execution implementation with flags support
     /// 
     /// This method contains the actual execution logic without backup/restore handling.
-    fn execute_implementation(
+    /// It supports additional flags such as forcing ABI environment reconstruction.
+    fn execute_implementation_with_flags(
         path: &str,
         argv: &[&str],
         envp: &[&str],
         explicit_abi: Option<&str>,
         task: &mut Task,
         trapframe: &mut Trapframe,
+        force_abi_rebuild: bool,
     ) -> ExecutorResult<()> {
         // Step 1: Open binary file and determine ABI
         let file_object = Self::open_file(path, task)?;
@@ -206,10 +240,12 @@ impl TransparentExecutor {
         let abi = crate::abi::AbiRegistry::instantiate(&abi_name)
             .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
 
-        // Step 3: Check if ABI switch is required
-        let abi_switch_required = abi_name != task.abi.as_ref().unwrap().get_name();
+        // Step 3: Check if ABI switch or forced rebuild is required
+        let current_abi_name = task.abi.as_ref().map(|abi| abi.get_name());
+        let abi_switch_required = abi_name != current_abi_name.unwrap_or_default();
+        let rebuild_required = abi_switch_required || force_abi_rebuild;
         
-        if abi_switch_required {
+        if rebuild_required {
             // Step 4: Setup complete task environment for new ABI (includes VFS, CWD, and handle conversion)
             Self::setup_task_environment(task, &abi)?;
         }
