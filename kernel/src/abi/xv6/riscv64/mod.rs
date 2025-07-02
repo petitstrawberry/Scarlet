@@ -327,7 +327,7 @@ impl AbiModule for Xv6Riscv64Abi {
         match create_dir_if_not_exists(target_vfs, "/home") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to create /home directory for XV6: {}", e.message);
+                // crate::println!("Failed to create /home directory for XV6: {}", e.message);
                 return Err("Failed to create /home directory for XV6");
             }
         }
@@ -335,8 +335,7 @@ impl AbiModule for Xv6Riscv64Abi {
         match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to bind mount /home for XV6: {}", e.message);
-                // return Err("Failed to bind mount /home for XV6");
+                // crate::println!("Failed to bind mount /home for XV6: {}", e.message);
             }
         }
 
@@ -351,8 +350,7 @@ impl AbiModule for Xv6Riscv64Abi {
         match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to bind mount /data/shared for XV6: {}", e.message);
-                // return Err("Failed to bind mount /data/shared for XV6");
+                // crate::println!("Failed to bind mount /data/shared for XV6: {}", e.message);
             }
         }
 
