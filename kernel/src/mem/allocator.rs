@@ -34,6 +34,10 @@ unsafe impl GlobalAlloc for Allocator {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
         if let Some(ref inner) = self.inner {
             unsafe { inner.dealloc(ptr, layout) }
+            // early_println!("Deallocated {} bytes at {:?}", layout.size(), ptr);
+            self.allocated_count.fetch_sub(1, Ordering::SeqCst);
+            self.allocated_bytes.fetch_sub(layout.size(), Ordering::SeqCst);
+            // early_println!("Total allocations: {}, Total bytes allocated: {}", self.allocated_count.load(Ordering::SeqCst), self.allocated_bytes.load(Ordering::SeqCst));
         } else {
             panic!("Allocator not initialized, cannot deallocate memory.");
         }
