@@ -130,7 +130,12 @@ unsafe impl GlobalAlloc for FreeListAllocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let size = layout.size().max(core::mem::size_of::<FreeBlock>());
-        let block = ptr as *mut FreeBlock;
+        let align = layout.align();
+        let min_align = core::cmp::max(align, core::mem::align_of::<FreeBlock>());
+        let addr = ptr as usize;
+        // Reverse alignment adjustment to find the original block start address
+        let block_start_addr = addr & !(min_align - 1);
+        let block = block_start_addr as *mut FreeBlock;
         unsafe {
             (*block).size = size;
             // Return to the head of the free list
