@@ -12,6 +12,10 @@ name = "sh"
 path = "src/sh.rs"
 
 [[bin]]
+name = "ls"
+path = "src/ls.rs"
+
+[[bin]]
 name = "hello"
 path = "src/hello.rs"
 
