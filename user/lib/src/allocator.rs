@@ -1,106 +1,141 @@
 use crate::syscall;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
-use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-// Global allocator instance
+/// Free-list memory allocator
 #[global_allocator]
-pub static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+pub static ALLOCATOR: FreeListAllocator = FreeListAllocator::new();
 
-/// Simple bump allocator
-/// Allocates memory using brk and sbrk system calls
-pub struct BumpAllocator {
-    heap_start: AtomicUsize,
-    heap_end: AtomicUsize,
-    next: UnsafeCell<usize>,
-    allocations: AtomicUsize,
+#[repr(C)]
+struct FreeBlock {
+    size: usize,
+    next: *mut FreeBlock,
 }
 
-unsafe impl Sync for BumpAllocator {}
+pub struct FreeListAllocator {
+    head: UnsafeCell<*mut FreeBlock>,
+    heap_start: AtomicUsize,
+    heap_end: AtomicUsize,
+}
 
-impl BumpAllocator {
+unsafe impl Sync for FreeListAllocator {}
+
+impl FreeListAllocator {
     pub const fn new() -> Self {
-        BumpAllocator {
+        FreeListAllocator {
+            head: UnsafeCell::new(core::ptr::null_mut()),
             heap_start: AtomicUsize::new(0),
             heap_end: AtomicUsize::new(0),
-            next: UnsafeCell::new(0),
-            allocations: AtomicUsize::new(0),
         }
     }
 
-    /// Initialization process
-    /// 
-    /// # Safety
-    /// This method must be called only once.
-    pub unsafe fn init(&self) {
-        // Allocate initial heap area (starting with 4KB)
+    unsafe fn init(&self) {
         let initial_size = 4096;
         let start = sbrk(initial_size);
         if start == usize::MAX {
             panic!("Failed to initialize heap");
         }
-
         self.heap_start.store(start, Ordering::SeqCst);
         self.heap_end.store(start + initial_size, Ordering::SeqCst);
-        unsafe { *self.next.get() = start };
+        unsafe { *self.head.get() = core::ptr::null_mut(); }
     }
 
-    /// Extend the heap
-    fn extend_heap(&self, additional: usize) -> bool {
-        let aligned_size = (additional + 15) & !15; // 16-byte alignment
-        let prev_end = self.heap_end.load(Ordering::SeqCst);
-        
-        // Extend the heap using sbrk
-        let new_end = sbrk(aligned_size);
-        if new_end == usize::MAX {
-            return false;
+    fn extend_heap(&self, size: usize) -> *mut u8 {
+        let aligned_size = (size + 15) & !15;
+        let new_block_addr = sbrk(aligned_size);
+        if new_block_addr == usize::MAX {
+            return core::ptr::null_mut();
         }
+        self.heap_end.fetch_add(aligned_size, Ordering::SeqCst);
+        // Add as a new free block to the list
+        unsafe {
+            let block = new_block_addr as *mut FreeBlock;
+            (*block).size = aligned_size;
+            (*block).next = *self.head.get();
+            *self.head.get() = block;
+            block as *mut u8
+        }
+    }
 
-        self.heap_end.store(prev_end + aligned_size, Ordering::SeqCst);
-        true
+    unsafe fn find_fit(&self, size: usize, align: usize) -> (*mut FreeBlock, *mut FreeBlock) {
+        let mut prev: *mut FreeBlock = core::ptr::null_mut();
+        let mut curr = unsafe { *self.head.get() };
+        while !curr.is_null() {
+            let addr = curr as usize;
+            let aligned_addr = (addr + core::cmp::max(align, core::mem::align_of::<FreeBlock>()) - 1) & !(core::cmp::max(align, core::mem::align_of::<FreeBlock>()) - 1);
+            let offset = aligned_addr - addr;
+            if unsafe { (*curr).size } >= size + offset {
+                return (prev, curr);
+            }
+            prev = curr;
+            curr = unsafe { (*curr).next };
+        }
+        (core::ptr::null_mut(), core::ptr::null_mut())
     }
 }
 
-unsafe impl GlobalAlloc for BumpAllocator {
+unsafe impl GlobalAlloc for FreeListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size();
+        let size = layout.size().max(core::mem::size_of::<FreeBlock>());
         let align = layout.align();
-
-        // Initialize if not already initialized
         if self.heap_start.load(Ordering::SeqCst) == 0 {
-            unsafe { self.init() };
+            unsafe { self.init(); }
         }
-
-        // Get the current position
-        let current = unsafe { *self.next.get() };
-        
-        // Adjust alignment
-        let aligned = (current + align - 1) & !(align - 1);
-        
-        // If there is not enough memory, extend the heap
-        if aligned + size > self.heap_end.load(Ordering::SeqCst) {
-            let needed = aligned + size - self.heap_end.load(Ordering::SeqCst);
-            if !self.extend_heap(needed) {
-                return ptr::null_mut();
+        // Find a fitting free block
+        let (mut prev, mut curr) = unsafe { self.find_fit(size, align) };
+        if curr.is_null() {
+            // Extend and try again
+            self.extend_heap(size.max(4096));
+            let (p, c) = unsafe { self.find_fit(size, align) };
+            prev = p;
+            curr = c;
+            if curr.is_null() {
+                return core::ptr::null_mut();
             }
         }
-
-        // Update the next pointer
-        unsafe { *self.next.get() = aligned + size };
-        
-        // Increment the allocation count
-        self.allocations.fetch_add(1, Ordering::SeqCst);
-        
-        aligned as *mut u8
+        // Alignment adjustment
+        let min_align = core::cmp::max(align, core::mem::align_of::<FreeBlock>());
+        let addr = curr as usize;
+        let aligned_addr = (addr + min_align - 1) & !(min_align - 1);
+        let offset = aligned_addr - addr;
+        let total_size = size + offset;
+        // Split block if possible
+        if unsafe { (*curr).size } > total_size + core::mem::size_of::<FreeBlock>() {
+            let next_block_addr = aligned_addr + size;
+            // Align next_block_addr as well
+            let next_block_addr = (next_block_addr + min_align - 1) & !(min_align - 1);
+            let next_block = next_block_addr as *mut FreeBlock;
+            unsafe {
+                (*next_block).size = (*curr).size - (next_block_addr - addr);
+                (*next_block).next = (*curr).next;
+                if prev.is_null() {
+                    *self.head.get() = next_block;
+                } else {
+                    (*prev).next = next_block;
+                }
+            }
+        } else {
+            // Exact fit or too small to split
+            unsafe {
+                if prev.is_null() {
+                    *self.head.get() = (*curr).next;
+                } else {
+                    (*prev).next = (*curr).next;
+                }
+            }
+        }
+        aligned_addr as *mut u8
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // This simple allocator does not free memory
-        // Only decrement the allocation count
-        if self.allocations.fetch_sub(1, Ordering::SeqCst) == 1 {
-            // If all allocations are freed, reset the heap to the initial position
-            unsafe { self.init(); }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let size = layout.size().max(core::mem::size_of::<FreeBlock>());
+        let block = ptr as *mut FreeBlock;
+        unsafe {
+            (*block).size = size;
+            // Return to the head of the free list
+            (*block).next = *self.head.get();
+            *self.head.get() = block;
         }
     }
 }
