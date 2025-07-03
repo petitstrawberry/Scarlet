@@ -4,7 +4,7 @@ echo Starting qemu...
 
 qemu-system-riscv64 \
     -machine virt \
-    -m 512M \
+    -m 1G \
     -bios default \
     -nographic \
     -serial mon:stdio \
