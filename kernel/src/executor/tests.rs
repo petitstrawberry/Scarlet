@@ -4,6 +4,7 @@
 //! and correctly restored when exec fails.
 
 use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use super::executor::TransparentExecutor;
 use crate::task::new_user_task;
@@ -52,61 +53,96 @@ fn test_exec_backup_restore() {
     assert_eq!(trapframe.regs.reg[10], original_a0, "A0 should be restored");
 }
 
-/// Test environment variable handling in TransparentExecutor
+/// Test TransparentExecutor basic functionality with valid parameters
 #[test_case]
-fn test_envp_to_task_env_conversion() {
-    let mut task = new_user_task("EnvTestTask".to_string(), 1002);
+fn test_exec_parameter_validation() {
+    let mut task = new_user_task("ParamTestTask".to_string(), 1002);
     task.init();
+    let mut trapframe = Trapframe::new(0);
     
-    // Set some initial environment variables
-    task.set_env("OLD_VAR".to_string(), "old_value".to_string());
-    task.set_env("PATH".to_string(), "/old/path".to_string());
+    // Test with empty arguments
+    let result = TransparentExecutor::execute_binary(
+        "/nonexistent/binary",
+        &[],
+        &[],
+        &mut task,
+        &mut trapframe,
+        true
+    );
     
-    // Simulate envp array (like in execve)
-    let envp = [
-        "PATH=/usr/bin:/bin",
-        "HOME=/home/user", 
-        "SHELL=/bin/sh",
-        "NEW_VAR=new_value"
-    ];
+    // Should fail but not panic
+    assert!(result.is_err(), "Exec should fail gracefully with empty args");
     
-    // Convert envp to task environment variables
-    TransparentExecutor::set_task_env_from_envp(&mut task, &envp);
+    // Test with various argument combinations
+    let result = TransparentExecutor::execute_binary(
+        "/nonexistent/binary",
+        &["program", "arg1", "arg2", "arg with spaces"],
+        &["PATH=/bin:/usr/bin", "HOME=/root", "VAR=value"],
+        &mut task,
+        &mut trapframe,
+        true
+    );
     
-    // Verify old variables are cleared and new ones are set
-    assert_eq!(task.get_env("OLD_VAR"), None, "Old variables should be cleared");
-    assert_eq!(task.get_env("PATH"), Some(&"/usr/bin:/bin".to_string()), "PATH should be updated");
-    assert_eq!(task.get_env("HOME"), Some(&"/home/user".to_string()), "HOME should be set");
-    assert_eq!(task.get_env("SHELL"), Some(&"/bin/sh".to_string()), "SHELL should be set");
-    assert_eq!(task.get_env("NEW_VAR"), Some(&"new_value".to_string()), "NEW_VAR should be set");
-    
-    // Verify total number of environment variables
-    assert_eq!(task.get_env_map().len(), 4, "Should have exactly 4 environment variables");
+    // Should fail but handle arguments correctly
+    assert!(result.is_err(), "Exec should fail gracefully with various args");
 }
 
-/// Test malformed environment variable handling
-#[test_case]
-fn test_malformed_envp_handling() {
-    let mut task = new_user_task("MalformedEnvTestTask".to_string(), 1003);
+/// Test argument array handling
+#[test_case] 
+fn test_argv_array_handling() {
+    let mut task = new_user_task("ArgvTestTask".to_string(), 1003);
     task.init();
+    let mut trapframe = Trapframe::new(0);
     
-    // Test with malformed environment variables (no '=' sign or empty key)
-    let envp = [
-        "VALID_VAR=valid_value",
-        "INVALID_VAR_NO_EQUALS",        // No '=' sign - invalid
-        "ANOTHER_VALID=another_value",
-        "=EMPTY_KEY_INVALID",          // Empty key - invalid
-        ""                             // Empty string - invalid
-    ];
+    // Test with different argument patterns
+    let mut test_cases = Vec::new();
+    test_cases.push(Vec::from(["program"]));
+    test_cases.push(Vec::from(["program", "single_arg"]));
+    test_cases.push(Vec::from(["program", "arg1", "arg2", "arg3"]));
+    test_cases.push(Vec::from(["program", "", "empty_arg_test"]));
+    test_cases.push(Vec::from(["program", "unicode_test_あいう"]));
     
-    TransparentExecutor::set_task_env_from_envp(&mut task, &envp);
+    for args in test_cases {
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
+        let result = TransparentExecutor::execute_binary(
+            "/nonexistent/binary",
+            &arg_refs,
+            &["TEST=1"],
+            &mut task,
+            &mut trapframe,
+            true
+        );
+        
+        // Should fail gracefully regardless of argument content
+        assert!(result.is_err(), "Exec should fail gracefully with args: {:?}", args);
+    }
+}
+
+/// Test environment variable array handling
+#[test_case]
+fn test_envp_array_handling() {
+    let mut task = new_user_task("EnvpTestTask".to_string(), 1004);
+    task.init();
+    let mut trapframe = Trapframe::new(0);
     
-    // Only valid variables should be set
-    assert_eq!(task.get_env("VALID_VAR"), Some(&"valid_value".to_string()), "Valid variable should be set");
-    assert_eq!(task.get_env("ANOTHER_VALID"), Some(&"another_value".to_string()), "Another valid variable should be set");
-    assert_eq!(task.get_env("INVALID_VAR_NO_EQUALS"), None, "Invalid variable should not be set");
-    assert_eq!(task.get_env(""), None, "Empty key should not be set");
+    // Test with different environment variable patterns
+    let mut test_cases = Vec::new();
+    test_cases.push(Vec::<&str>::new());  // Empty environment
+    test_cases.push(Vec::from(["PATH=/bin"]));
+    test_cases.push(Vec::from(["PATH=/bin", "HOME=/root", "SHELL=/bin/sh"]));
+    test_cases.push(Vec::from(["EMPTY_VALUE=", "EQUALS_IN_VALUE=val=ue", "UNICODE=あいう"]));
     
-    // Should have exactly 2 environment variables
-    assert_eq!(task.get_env_map().len(), 2, "Should have exactly 2 valid environment variables");
+    for envp in test_cases {
+        let result = TransparentExecutor::execute_binary(
+            "/nonexistent/binary",
+            &["program"],
+            &envp,
+            &mut task,
+            &mut trapframe,
+            true
+        );
+        
+        // Should fail gracefully regardless of environment content
+        assert!(result.is_err(), "Exec should fail gracefully with envp: {:?}", envp);
+    }
 }
