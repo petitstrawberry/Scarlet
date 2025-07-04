@@ -329,9 +329,48 @@ impl TransparentExecutor {
         // Set default working directory for the ABI
         task.cwd = Some(abi.get_default_cwd().to_string());
         
+        // Environment variable conversion when switching ABIs
+        // Convert: Current ABI → Scarlet → New ABI
+        Self::convert_environment_variables(task, abi)?;
+        
         // Let ABI module handle conversion from previous ABI (handles, etc.)
         abi.initialize_from_existing_handles(task)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+
+        
+        Ok(())
+    }
+    
+    /// Convert environment variables when switching ABIs
+    /// 
+    /// This method handles the three-step conversion:
+    /// 1. Current ABI → Scarlet canonical format (normalize)
+    /// 2. Scarlet canonical format → New ABI format (denormalize)
+    /// 
+    /// # Arguments
+    /// * `task` - Task whose environment variables need conversion
+    /// * `new_abi` - Target ABI to convert to
+    fn convert_environment_variables(
+        task: &mut Task,
+        new_abi: &Box<dyn crate::abi::AbiModule>
+    ) -> ExecutorResult<()> {
+        // Step 1: Get current environment variables
+        let current_env = task.get_env_map().clone();
+        
+        // Step 2: Normalize from current ABI to Scarlet format
+        let scarlet_env = if let Some(ref current_abi) = task.abi {
+            // If task has a current ABI, use it to normalize
+            current_abi.normalize_env_to_scarlet(&current_env)
+        } else {
+            // No current ABI - assume already in Scarlet format
+            current_env
+        };
+        
+        // Step 3: Denormalize from Scarlet format to new ABI format
+        let new_env = new_abi.denormalize_env_from_scarlet(&scarlet_env);
+        
+        // Step 4: Update task's environment variables
+        *task.get_env_map_mut() = new_env;
         
         Ok(())
     }
