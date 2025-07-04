@@ -5,72 +5,128 @@ extern crate scarlet_std as std;
 
 use std::{println, task::{execve, fork, waitpid, getpid}};
 
-// Function to safely convert a C string to Rust str
-unsafe fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
-    if ptr.is_null() {
-        return None;
+const TEST_ENV_KEY: &str = "SCARLET_TEST";
+const TEST_ENV_VALUE: &str = "test_value_123";
+const CHILD_MARKER: &str = "--child";
+
+fn run_child_test() -> i32 {
+    println!("=== CHILD PROCESS TEST ===");
+    println!("This is the child process from execve()");
+    println!("PID: {}", getpid());
+    
+    let args = std::env::args_vec();
+    println!("Child argc: {}", args.len());
+    
+    // Display all arguments received by child
+    for (i, arg) in args.iter().enumerate() {
+        println!("Child argv[{}]: {}", i, arg);
     }
     
-    let mut len = 0;
-    unsafe {
-        while *ptr.add(len) != 0 {
-            len += 1;
-            if len > 1024 { // Safety limit
-                return None;
+    // Check if test environment variable was passed correctly
+    match std::env::var(TEST_ENV_KEY) {
+        Some(value) => {
+            if value == TEST_ENV_VALUE {
+                println!("✓ Environment variable passed correctly: {}={}", TEST_ENV_KEY, value);
+            } else {
+                println!("✗ Environment variable value mismatch: expected '{}', got '{}'", 
+                         TEST_ENV_VALUE, value);
+                return 1;
             }
         }
-        
-        let slice = core::slice::from_raw_parts(ptr, len);
-        core::str::from_utf8(slice).ok()
-    }
-}
-
-// Function to safely convert argv array to Vec of strings
-unsafe fn parse_argv(argc: usize, argv: *const *const u8) -> std::vec::Vec<std::string::String> {
-    let mut args = std::vec::Vec::new();
-    
-    for i in 0..argc {
-        if let Some(arg_str) = unsafe { cstr_to_str(*argv.add(i)) } {
-            args.push(std::string::String::from(arg_str));
+        None => {
+            println!("✗ Test environment variable '{}' not found", TEST_ENV_KEY);
+            return 1;
         }
     }
     
-    args
+    // Display all environment variables
+    println!("Child environment variables:");
+    for (k, v) in std::env::vars() {
+        println!("  {}={}", k, v);
+    }
+    
+    println!("✓ Child process test completed successfully");
+    0
 }
 
-// Function to safely get environment variables (placeholder implementation)
-// TODO: Replace with actual environment variable access once startup routine supports envp
-// In the future, this would either:
-// 1. Read from envp passed to main() if startup routine is updated
-// 2. Use getenv() syscall if implemented
-// 3. Access environment through global variable set by startup routine
-fn get_env_var(key: &str) -> Option<std::string::String> {
-    // Placeholder implementation - simulates some environment variables
-    // In real implementation, environment variables would be set by execve
-    // and accessible through the startup routine or syscalls
-    match key {
-        "TEST_VAR" => Some(std::string::String::from("placeholder_value")),
-        "PATH" => Some(std::string::String::from("/bin:/usr/bin")),
-        _ => None,
+fn run_parent_test() -> i32 {
+    println!("=== PARENT PROCESS TEST ===");
+    println!("This is the parent process, about to exec child");
+    println!("PID: {}", getpid());
+    
+    let args = std::env::args_vec();
+    println!("Parent argc: {}", args.len());
+    
+    // Display parent arguments
+    for (i, arg) in args.iter().enumerate() {
+        println!("Parent argv[{}]: {}", i, arg);
+    }
+    
+    // Display parent environment
+    println!("Parent environment variables:");
+    for (k, v) in std::env::vars() {
+        println!("  {}={}", k, v);
+    }
+    
+    // Prepare arguments for child process
+    let mut child_args = std::vec::Vec::new();
+    child_args.push(args[0].as_str());  // Program name
+    child_args.push(CHILD_MARKER);      // Marker to indicate child mode
+    child_args.push("test_arg1");       // Test argument 1
+    child_args.push("test arg with spaces"); // Test argument with spaces
+    
+    // Prepare environment for child process
+    let test_env_var = std::format!("{}={}", TEST_ENV_KEY, TEST_ENV_VALUE);
+    let mut child_env = std::vec::Vec::new();
+    child_env.push("PATH=/bin:/usr/bin");
+    child_env.push("HOME=/root");
+    child_env.push(test_env_var.as_str()); // Our test variable
+    child_env.push("SHELL=/bin/sh");
+    
+    println!("Forking and executing child process...");
+    
+    match fork() {
+        0 => {
+            // Child process - exec the same program with different args/env
+            println!("Child: About to execve with args: {:?}", child_args);
+            if execve(&args[0], &child_args, &child_env) != 0 {
+                println!("execve failed");
+                std::task::exit(1);
+            }
+            // This should never be reached
+            std::task::exit(1);
+        }
+        -1 => {
+            println!("Fork failed");
+            return 1;
+        }
+        child_pid => {
+            println!("Parent: Child process created with PID {}", child_pid);
+            let (waited_pid, exit_status) = waitpid(child_pid, 0);
+            println!("Parent: Child process {} exited with status {}", waited_pid, exit_status);
+            
+            if exit_status == 0 {
+                println!("execve test completed successfully");
+                return 0;
+            } else {
+                println!("Child process failed with exit status {}", exit_status);
+                return 1;
+            }
+        }
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main() -> i32 {
+fn main() -> i32 {
     let args = std::env::args_vec();
     
     println!("=== Environment and Argument Test ===");
     println!("This test verifies execve() argument and environment variable passing");
-    println!("PID: {}", getpid());
-    println!("argc: {}", args.len());
     
-    // Display all arguments
-    for (i, arg) in args.iter().enumerate() {
-        println!("argv[{}]: {}", i, arg);
+    // Check if this is a child process (spawned by execve)
+    if args.len() > 1 && args[1] == CHILD_MARKER {
+        return run_child_test();
+    } else {
+        return run_parent_test();
     }
-    // Display all environment variables
-    for (k, v) in std::env::vars() {
-        println!("env: {}={}", k, v);
-    }
-    0
 }
