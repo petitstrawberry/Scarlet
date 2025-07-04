@@ -1,4 +1,4 @@
-This is the repository for the Scarlet project, 
+This is the repository for the Scarlet project. 
 which implements a transparent ABI conversion layer for executing binaries across different operating systems and architectures.
 
 ## Code Standards
