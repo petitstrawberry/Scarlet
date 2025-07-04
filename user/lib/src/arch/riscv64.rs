@@ -18,14 +18,29 @@ pub extern "C" fn _entry() {
 }
 
 unsafe extern "Rust" {
-    fn main() -> i32;
+    fn main(argc: usize, argv: *const *const u8) -> i32;
 }
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_start")]
-pub fn _start() {
-    let ret = unsafe { main() };
-    exit(ret as i32);
+pub fn _start(a0: usize, a1: usize) -> ! {
+    // Get argc and argv from RISC-V calling convention registers
+    // a0 = argc, a1 = argv (set by kernel's ScarletAbi)
+    let argc = a0;
+    let argv = a1 as *const *const u8;
+
+    unsafe {
+        // asm!(
+        //     "mv {}, a0",
+        //     "mv {}, a1",
+        //     out(reg) argc,
+        //     out(reg) argv,
+        //     options(nostack)
+        // );
+        
+        let ret = main(argc, argv);
+        exit(ret as i32);
+    }
 }
 
 pub fn arch_syscall0(syscall: Syscall) -> usize{

@@ -89,8 +89,7 @@ impl AbiModule for ScarletAbi {
     fn execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
-        argv: &[&str], 
-        envp: &[&str], // Processed by TransparentExecutor before calling this method
+        argv: &[&str],
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str> {
@@ -123,7 +122,13 @@ impl AbiModule for ScarletAbi {
                         task.vcpu.set_sp(stack_pointer);
 
                         // Setup argv/envp on stack following Unix and RISC-V conventions
-                        let (adjusted_sp, argv_ptr) = self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
+                        // Use task.env instead of envp parameter for consistency
+                        let env_vec: Vec<String> = task.get_env_map().iter()
+                            .map(|(k, v)| format!("{}={}", k, v))
+                            .collect();
+                        let env_refs: Vec<&str> = env_vec.iter().map(|s| s.as_str()).collect();
+                        
+                        let (adjusted_sp, argv_ptr) = self.setup_arguments_on_stack(task, argv, &env_refs, stack_pointer)?;
                         task.vcpu.set_sp(adjusted_sp);
                         
                         // Set RISC-V calling convention registers
@@ -131,6 +136,12 @@ impl AbiModule for ScarletAbi {
                         // a1 (reg[11]) = argv pointer
                         task.vcpu.regs.reg[10] = argv.len(); // argc
                         task.vcpu.regs.reg[11] = argv_ptr; // argv array pointer
+
+                        crate::println!("Executing binary: {} with entry point: {:#x}", task.name, entry_point);
+                        crate::println!("Arguments: {:?}", argv);
+                        crate::println!("Environment: {:?}", task.get_env_map());
+                        crate::println!("argv pointer set to: {:#x}", argv_ptr);
+                        // crate::println!("Environment pointer set to: {:#x}", env_ptr);
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);

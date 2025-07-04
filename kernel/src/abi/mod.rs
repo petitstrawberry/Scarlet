@@ -142,16 +142,19 @@ pub trait AbiModule: 'static {
     /// by can_execute_binary. Use file_object.as_file() to access FileObject,
     /// and call ABI-specific loaders (ELF, PE, etc.) to load and execute the binary.
     /// 
+    /// Environment variables should be accessed from task.env, which has already
+    /// been processed by TransparentExecutor and converted to this ABI's format.
+    /// 
     /// # Arguments
     /// * `file_object` - Binary file to execute (already opened, in KernelObject format)
     /// * `argv` - Command line arguments
-    /// * `envp` - Environment variables
-    /// * `task` - Target task (modified by this method)
+    /// * `task` - Target task (modified by this method, contains converted env vars in task.env)
     /// * `trapframe` - Execution context (modified by this method)
     /// 
     /// # Implementation Notes
     /// - Use file_object.as_file() to get FileObject
     /// - Use ABI-specific loaders (e.g., task::elf_loader)
+    /// - Access environment variables from task.env (already ABI-converted)
     /// - Set task's memory space, registers, and entry point
     /// - Update trapframe registers (PC, SP) for the new process
     /// - Recommended to restore original state on execution failure
@@ -166,8 +169,7 @@ pub trait AbiModule: 'static {
     fn execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
-        argv: &[&str], 
-        envp: &[&str],
+        argv: &[&str],
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str>;

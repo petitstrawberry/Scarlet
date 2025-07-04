@@ -238,8 +238,8 @@ impl TransparentExecutor {
             Self::setup_task_environment(task, &abi)?;
         }
         
-        // Step 6: Execute binary through ABI module
-        abi.execute_binary(&file_object, argv, envp, task, trapframe)
+        // Step 6: Execute binary through ABI module (envp not needed - uses task.env)
+        abi.execute_binary(&file_object, argv, task, trapframe)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
         
         // Step 7: Update task's ABI if switch occurred
