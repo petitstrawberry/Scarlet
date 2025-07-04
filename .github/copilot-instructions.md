@@ -4,16 +4,16 @@ which implements a transparent ABI conversion layer for executing binaries acros
 ## Code Standards
 
 ### Required Before Each Commit
-- Run `cargo make test` at the root of the repository to ensure all tests pass.
+- Ensure all tests pass before committing changes.
 
 ### Development Flow
 Executing commands in the root directory of the repository:
-- Build: `cargo make build` 
-- Test: `cargo make test`
+- Build: `cargo make build`
 
 #### Testing
-Use `cargo make test` to run all tests.
+Use `cargo make test` to run all tests at the root of the repository.
 You cannot run a specific test directly; instead, you can run the entire test suite.
+Ensure all tests pass before committing changes to maintain code integrity.
 
 ## Key guidelines
 - Use `cargo make` for all commands to ensure consistency.
