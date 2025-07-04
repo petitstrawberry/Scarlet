@@ -144,48 +144,50 @@ impl AbiModule for ScarletAbi {
         }
     }
 
-    fn normalize_env_to_scarlet(&self, env_map: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-        // Scarlet ABI is already in canonical format, so just return as-is
-        // But ensure all paths are absolute Scarlet namespace paths
-        let mut normalized = BTreeMap::new();
+    fn normalize_env_to_scarlet(&self, env_map: &mut BTreeMap<String, String>) {
+        // Scarlet ABI is already in canonical format, but ensure all paths are absolute
+        // Modify in-place to avoid allocations
         
-        for (key, value) in env_map.iter() {
-            let normalized_value = match key.as_str() {
-                "PATH" | "LD_LIBRARY_PATH" => {
-                    // Ensure all paths are in absolute Scarlet namespace format
-                    self.normalize_path_to_absolute_scarlet(value)
-                }
-                "HOME" => {
-                    // Ensure home directory is absolute
-                    if value.starts_with('/') {
-                        value.clone()
-                    } else {
-                        format!("/home/{}", value)
+        let keys_to_update: Vec<String> = env_map.keys().cloned().collect();
+        
+        for key in keys_to_update {
+            if let Some(value) = env_map.get(&key).cloned() {
+                let normalized_value = match key.as_str() {
+                    "PATH" | "LD_LIBRARY_PATH" => {
+                        // Ensure all paths are in absolute Scarlet namespace format
+                        self.normalize_path_to_absolute_scarlet(&value)
                     }
+                    "HOME" => {
+                        // Ensure home directory is absolute
+                        if value.starts_with('/') {
+                            value
+                        } else {
+                            format!("/home/{}", value)
+                        }
+                    }
+                    _ => value, // Most variables pass through unchanged
+                };
+                
+                // Update in-place if value changed
+                if normalized_value != env_map[&key] {
+                    env_map.insert(key, normalized_value);
                 }
-                _ => value.clone(), // Most variables pass through unchanged
-            };
-            normalized.insert(key.clone(), normalized_value);
+            }
         }
-        
-        normalized
     }
     
-    fn denormalize_env_from_scarlet(&self, scarlet_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    fn denormalize_env_from_scarlet(&self, env_map: &mut BTreeMap<String, String>) {
         // For Scarlet ABI, canonical format is the native format
-        // But we may want to ensure proper Scarlet-specific defaults
-        let mut result = scarlet_env.clone();
+        // But ensure proper Scarlet-specific defaults exist
         
-        // Ensure Scarlet-specific defaults exist
-        if !result.contains_key("PATH") {
-            result.insert("PATH".to_string(), "/system/scarlet/bin:/bin:/usr/bin".to_string());
+        // Add defaults if they don't exist
+        if !env_map.contains_key("PATH") {
+            env_map.insert("PATH".to_string(), "/system/scarlet/bin:/bin:/usr/bin".to_string());
         }
         
-        if !result.contains_key("SHELL") {
-            result.insert("SHELL".to_string(), "/system/scarlet/bin/sh".to_string());
+        if !env_map.contains_key("SHELL") {
+            env_map.insert("SHELL".to_string(), "/system/scarlet/bin/sh".to_string());
         }
-        
-        result
     }
 
     fn setup_overlay_environment(

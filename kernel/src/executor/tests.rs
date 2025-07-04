@@ -6,7 +6,7 @@
 use alloc::string::ToString;
 
 use super::executor::TransparentExecutor;
-use crate::task::{Task, new_user_task};
+use crate::task::new_user_task;
 use crate::arch::Trapframe;
 
 /// Test that TransparentExecutor can backup and restore task state on exec failure

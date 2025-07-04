@@ -99,42 +99,41 @@ pub trait AbiModule: 'static {
         Ok(()) // Default: no conversion needed
     }
     
-    /// Convert environment variables from this ABI to Scarlet canonical format
+    /// Convert environment variables from this ABI to Scarlet canonical format (in-place)
     /// 
     /// This method is called when switching from this ABI to another ABI.
     /// It should convert ABI-specific environment variables to a canonical
     /// Scarlet format that can then be converted to the target ABI.
     /// 
-    /// # Arguments
-    /// * `env_map` - Current environment variables in this ABI's format
+    /// Uses in-place modification to avoid expensive allocations.
     /// 
-    /// # Returns
-    /// * Environment variables in Scarlet canonical format
+    /// # Arguments
+    /// * `env_map` - Mutable reference to environment variables in this ABI's format,
+    ///               will be modified to contain Scarlet canonical format
     /// 
     /// # Implementation Guidelines
     /// - Convert paths to absolute Scarlet namespace paths
     /// - Normalize variable names to Scarlet conventions
     /// - Remove ABI-specific variables that don't translate
     /// - Ensure all paths are absolute and start with /
-    fn normalize_env_to_scarlet(&self, env_map: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-        // Default: pass through unchanged (assuming already in Scarlet format)
-        env_map.clone()
+    /// - Modify the map in-place for efficiency
+    fn normalize_env_to_scarlet(&self, _env_map: &mut BTreeMap<String, String>) {
+        // Default: no conversion needed (assuming already in Scarlet format)
     }
     
-    /// Convert environment variables from Scarlet canonical format to this ABI's format
+    /// Convert environment variables from Scarlet canonical format to this ABI's format (in-place)
     /// 
     /// This method is called when switching to this ABI from another ABI.
     /// It should convert canonical Scarlet environment variables to this ABI's
     /// specific format and namespace.
     /// 
-    /// # Arguments
-    /// * `scarlet_env` - Environment variables in Scarlet canonical format
+    /// Uses in-place modification to avoid expensive allocations.
     /// 
-    /// # Returns
-    /// * Environment variables converted to this ABI's format
-    fn denormalize_env_from_scarlet(&self, scarlet_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-        // Default: pass through unchanged (assuming target is Scarlet format)
-        scarlet_env.clone()
+    /// # Arguments
+    /// * `env_map` - Mutable reference to environment variables in Scarlet canonical format,
+    ///               will be modified to contain this ABI's format
+    fn denormalize_env_from_scarlet(&self, _env_map: &mut BTreeMap<String, String>) {
+        // Default: no conversion needed (assuming target is Scarlet format)
     }
     
     /// Binary execution (each ABI supports its own binary format)

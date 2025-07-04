@@ -346,9 +346,11 @@ impl TransparentExecutor {
     
     /// Convert environment variables when switching ABIs
     /// 
-    /// This method handles the three-step conversion:
-    /// 1. Current ABI → Scarlet canonical format (normalize)
-    /// 2. Scarlet canonical format → New ABI format (denormalize)
+    /// This method handles the two-step in-place conversion:
+    /// 1. Current ABI → Scarlet canonical format (normalize in-place)
+    /// 2. Scarlet canonical format → New ABI format (denormalize in-place)
+    /// 
+    /// Uses `core::mem::take` and in-place operations to avoid expensive cloning.
     /// 
     /// # Arguments
     /// * `task` - Task whose environment variables need conversion
@@ -357,23 +359,21 @@ impl TransparentExecutor {
         task: &mut Task,
         new_abi: &Box<dyn crate::abi::AbiModule>
     ) -> ExecutorResult<()> {
-        // Step 1: Get current environment variables
-        let current_env = task.get_env_map().clone();
+        // Step 1: Take current environment variables (moves ownership, avoids clone)
+        let mut env_map = core::mem::take(task.get_env_map_mut());
         
-        // Step 2: Normalize from current ABI to Scarlet format
-        let scarlet_env = if let Some(ref current_abi) = task.abi {
-            // If task has a current ABI, use it to normalize
-            current_abi.normalize_env_to_scarlet(&current_env)
-        } else {
-            // No current ABI - assume already in Scarlet format
-            current_env
-        };
+        // Step 2: Normalize from current ABI to Scarlet format (in-place)
+        if let Some(ref current_abi) = task.abi {
+            // If task has a current ABI, use it to normalize in-place
+            current_abi.normalize_env_to_scarlet(&mut env_map);
+        }
+        // If no current ABI, assume already in Scarlet format (no-op)
         
-        // Step 3: Denormalize from Scarlet format to new ABI format
-        let new_env = new_abi.denormalize_env_from_scarlet(&scarlet_env);
+        // Step 3: Denormalize from Scarlet format to new ABI format (in-place)
+        new_abi.denormalize_env_from_scarlet(&mut env_map);
         
-        // Step 4: Update task's environment variables
-        *task.get_env_map_mut() = new_env;
+        // Step 4: Put the converted environment back (reuses allocation)
+        *task.get_env_map_mut() = env_map;
         
         Ok(())
     }
