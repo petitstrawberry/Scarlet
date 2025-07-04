@@ -51,3 +51,62 @@ fn test_exec_backup_restore() {
     assert_eq!(trapframe.regs.reg[2], original_sp, "SP should be restored");
     assert_eq!(trapframe.regs.reg[10], original_a0, "A0 should be restored");
 }
+
+/// Test environment variable handling in TransparentExecutor
+#[test_case]
+fn test_envp_to_task_env_conversion() {
+    let mut task = new_user_task("EnvTestTask".to_string(), 1002);
+    task.init();
+    
+    // Set some initial environment variables
+    task.set_env("OLD_VAR".to_string(), "old_value".to_string());
+    task.set_env("PATH".to_string(), "/old/path".to_string());
+    
+    // Simulate envp array (like in execve)
+    let envp = [
+        "PATH=/usr/bin:/bin",
+        "HOME=/home/user", 
+        "SHELL=/bin/sh",
+        "NEW_VAR=new_value"
+    ];
+    
+    // Convert envp to task environment variables
+    TransparentExecutor::set_task_env_from_envp(&mut task, &envp);
+    
+    // Verify old variables are cleared and new ones are set
+    assert_eq!(task.get_env("OLD_VAR"), None, "Old variables should be cleared");
+    assert_eq!(task.get_env("PATH"), Some(&"/usr/bin:/bin".to_string()), "PATH should be updated");
+    assert_eq!(task.get_env("HOME"), Some(&"/home/user".to_string()), "HOME should be set");
+    assert_eq!(task.get_env("SHELL"), Some(&"/bin/sh".to_string()), "SHELL should be set");
+    assert_eq!(task.get_env("NEW_VAR"), Some(&"new_value".to_string()), "NEW_VAR should be set");
+    
+    // Verify total number of environment variables
+    assert_eq!(task.get_env_map().len(), 4, "Should have exactly 4 environment variables");
+}
+
+/// Test malformed environment variable handling
+#[test_case]
+fn test_malformed_envp_handling() {
+    let mut task = new_user_task("MalformedEnvTestTask".to_string(), 1003);
+    task.init();
+    
+    // Test with malformed environment variables (no '=' sign or empty key)
+    let envp = [
+        "VALID_VAR=valid_value",
+        "INVALID_VAR_NO_EQUALS",        // No '=' sign - invalid
+        "ANOTHER_VALID=another_value",
+        "=EMPTY_KEY_INVALID",          // Empty key - invalid
+        ""                             // Empty string - invalid
+    ];
+    
+    TransparentExecutor::set_task_env_from_envp(&mut task, &envp);
+    
+    // Only valid variables should be set
+    assert_eq!(task.get_env("VALID_VAR"), Some(&"valid_value".to_string()), "Valid variable should be set");
+    assert_eq!(task.get_env("ANOTHER_VALID"), Some(&"another_value".to_string()), "Another valid variable should be set");
+    assert_eq!(task.get_env("INVALID_VAR_NO_EQUALS"), None, "Invalid variable should not be set");
+    assert_eq!(task.get_env(""), None, "Empty key should not be set");
+    
+    // Should have exactly 2 environment variables
+    assert_eq!(task.get_env_map().len(), 2, "Should have exactly 2 valid environment variables");
+}

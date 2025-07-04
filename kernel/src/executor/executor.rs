@@ -225,21 +225,24 @@ impl TransparentExecutor {
         let abi = crate::abi::AbiRegistry::instantiate(&abi_name)
             .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
 
-        // Step 3: Check if ABI switch or forced rebuild is required
+        // Step 3: Set environment variables from envp (standard execve behavior)
+        Self::set_task_env_from_envp(task, envp);
+
+        // Step 4: Check if ABI switch or forced rebuild is required
         let current_abi_name = task.abi.as_ref().map(|abi| abi.get_name());
         let abi_switch_required = abi_name != current_abi_name.unwrap_or_default();
         let rebuild_required = abi_switch_required || force_abi_rebuild;
         
         if rebuild_required {
-            // Step 4: Setup complete task environment for new ABI (includes VFS, CWD, and handle conversion)
+            // Step 5: Setup complete task environment for new ABI (includes VFS, CWD, and env conversion)
             Self::setup_task_environment(task, &abi)?;
         }
         
-        // Step 5: Execute binary through ABI module
+        // Step 6: Execute binary through ABI module
         abi.execute_binary(&file_object, argv, envp, task, trapframe)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
         
-        // Step 6: Update task's ABI if switch occurred
+        // Step 7: Update task's ABI if switch occurred
         if abi_switch_required {
             task.abi = Some(abi);
         }
@@ -382,5 +385,33 @@ impl TransparentExecutor {
     fn create_clean_vfs() -> Result<Arc<crate::fs::VfsManager>, &'static str> {
         let vfs = crate::fs::VfsManager::new();
         Ok(Arc::new(vfs))
+    }
+
+    /// Set task environment variables from envp array (standard execve behavior)
+    /// 
+    /// This method replaces the current task environment with the provided envp array.
+    /// This follows standard Unix execve() semantics where the new process gets
+    /// exactly the environment variables specified in envp.
+    /// 
+    /// # Arguments
+    /// * `task` - Task whose environment variables will be replaced
+    /// * `envp` - Array of environment variable strings in "KEY=VALUE" format
+    pub fn set_task_env_from_envp(task: &mut Task, envp: &[&str]) {
+        // Clear existing environment variables (execve replaces the environment)
+        task.clear_env();
+        
+        // Set new environment variables from envp
+        for env_var in envp {
+            if let Some(eq_pos) = env_var.find('=') {
+                let key = &env_var[..eq_pos];
+                let value = &env_var[eq_pos + 1..];
+                
+                // Only set environment variables with non-empty keys
+                if !key.is_empty() {
+                    task.set_env(key.to_string(), value.to_string());
+                }
+            }
+            // Ignore malformed environment variables (no '=' found or empty key)
+        }
     }
 }
