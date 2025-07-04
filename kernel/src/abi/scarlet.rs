@@ -171,7 +171,7 @@ impl AbiModule for ScarletAbi {
         normalized
     }
     
-    fn denormalize_env_from_scarlet(&self, scarlet_env: &alloc::collections::BTreeMap<String, String>) -> alloc::collections::BTreeMap<String, String> {
+    fn denormalize_env_from_scarlet(&self, scarlet_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
         // For Scarlet ABI, canonical format is the native format
         // But we may want to ensure proper Scarlet-specific defaults
         let mut result = scarlet_env.clone();
