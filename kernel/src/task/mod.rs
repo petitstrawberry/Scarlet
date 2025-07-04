@@ -7,7 +7,7 @@ pub mod elf_loader;
 
 extern crate alloc;
 
-use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::{Handle, HandleTable, KernelObject}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
@@ -83,6 +83,28 @@ pub struct Task {
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
     /// All internal operations use RwLock for concurrent access protection.
     pub vfs: Option<Arc<VfsManager>>,
+
+    /// Environment variables
+    /// 
+    /// Each task can have its own environment variables that are managed
+    /// by the ABI module during execution and process creation.
+    /// 
+    /// # Usage Patterns
+    /// 
+    /// - Environment variables are set during exec() operations by ABI modules
+    /// - Each ABI can convert and filter environment variables appropriately
+    /// - Common variables like PATH are converted to match the ABI's namespace
+    /// - Variables are inherited from parent process during fork() if desired
+    /// 
+    /// # ABI Compatibility
+    /// 
+    /// Different ABIs may have different environment variable formats:
+    /// - Path separators (/ vs \)
+    /// - Directory structures
+    /// - Special variables (PATH, LD_LIBRARY_PATH, etc.)
+    /// 
+    /// ABI modules are responsible for converting these appropriately.
+    pub env: BTreeMap<String, String>,
 
     // KernelObject table
     pub handle_table: HandleTable,
@@ -169,6 +191,7 @@ impl Task {
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             cwd: None,
             vfs: None,
+            env: BTreeMap::new(), // Empty environment variables
             handle_table: HandleTable::new(),
         };
 
@@ -800,6 +823,9 @@ impl Task {
             }
         }
 
+        // Copy environment variables (inherited by default unless overridden by exec)
+        child.env = self.env.clone();
+
         // Set the state to Ready
         child.state = self.state;
 
@@ -872,6 +898,64 @@ impl Task {
     /// Get a reference to the VFS
     pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
         self.vfs.as_ref()
+    }
+
+    /// Set an environment variable
+    /// 
+    /// # Arguments
+    /// * `key` - The environment variable name
+    /// * `value` - The environment variable value
+    pub fn set_env(&mut self, key: String, value: String) {
+        self.env.insert(key, value);
+    }
+    
+    /// Get an environment variable
+    /// 
+    /// # Arguments
+    /// * `key` - The environment variable name
+    /// 
+    /// # Returns
+    /// The environment variable value, if it exists
+    pub fn get_env(&self, key: &str) -> Option<&String> {
+        self.env.get(key)
+    }
+    
+    /// Remove an environment variable
+    /// 
+    /// # Arguments
+    /// * `key` - The environment variable name
+    /// 
+    /// # Returns
+    /// The removed environment variable value, if it existed
+    pub fn remove_env(&mut self, key: &str) -> Option<String> {
+        self.env.remove(key)
+    }
+    
+    /// Clear all environment variables
+    pub fn clear_env(&mut self) {
+        self.env.clear();
+    }
+    
+    /// Set multiple environment variables from a slice of "KEY=VALUE" strings
+    /// 
+    /// # Arguments
+    /// * `envp` - Array of environment variable strings in "KEY=VALUE" format
+    pub fn set_env_from_slice(&mut self, envp: &[&str]) {
+        for env_var in envp {
+            if let Some((key, value)) = env_var.split_once('=') {
+                self.env.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    
+    /// Get all environment variables as a reference to the BTreeMap
+    pub fn get_env_map(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+    
+    /// Get a mutable reference to environment variables (for ABI modules)
+    pub fn get_env_map_mut(&mut self) -> &mut BTreeMap<String, String> {
+        &mut self.env
     }
 }
 

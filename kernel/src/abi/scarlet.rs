@@ -5,7 +5,7 @@
 //! and interacting with the Scarlet kernel.
 //! 
 
-use alloc::{boxed::Box, string::ToString, sync::Arc};
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 
 use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
 
@@ -90,7 +90,7 @@ impl AbiModule for ScarletAbi {
         &self,
         file_object: &crate::object::KernelObject,
         argv: &[&str], 
-        _envp: &[&str], // Not implemented yet
+        _envp: &[&str], // Processed by TransparentExecutor before calling this method
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str> {
@@ -100,7 +100,7 @@ impl AbiModule for ScarletAbi {
                 task.text_size = 0;
                 task.data_size = 0;
                 task.stack_size = 0;
-                
+
                 // Load the ELF file and replace the current process
                 match load_elf_into_task(file_obj, task) {
                     Ok(entry_point) => {
@@ -141,6 +141,52 @@ impl AbiModule for ScarletAbi {
                 }
             },
             None => Err("Invalid file object type for binary execution"),
+        }
+    }
+
+    fn normalize_env_to_scarlet(&self, env_map: &mut BTreeMap<String, String>) {
+        // Scarlet ABI is already in canonical format, but ensure all paths are absolute
+        // Modify in-place to avoid allocations
+        
+        let keys_to_update: Vec<String> = env_map.keys().cloned().collect();
+        
+        for key in keys_to_update {
+            if let Some(value) = env_map.get(&key).cloned() {
+                let normalized_value = match key.as_str() {
+                    "PATH" | "LD_LIBRARY_PATH" => {
+                        // Ensure all paths are in absolute Scarlet namespace format
+                        self.normalize_path_to_absolute_scarlet(&value)
+                    }
+                    "HOME" => {
+                        // Ensure home directory is absolute
+                        if value.starts_with('/') {
+                            value
+                        } else {
+                            format!("/home/{}", value)
+                        }
+                    }
+                    _ => value, // Most variables pass through unchanged
+                };
+                
+                // Update in-place if value changed
+                if normalized_value != env_map[&key] {
+                    env_map.insert(key, normalized_value);
+                }
+            }
+        }
+    }
+    
+    fn denormalize_env_from_scarlet(&self, env_map: &mut BTreeMap<String, String>) {
+        // For Scarlet ABI, canonical format is the native format
+        // But ensure proper Scarlet-specific defaults exist
+        
+        // Add defaults if they don't exist
+        if !env_map.contains_key("PATH") {
+            env_map.insert("PATH".to_string(), "/system/scarlet/bin:/bin:/usr/bin".to_string());
+        }
+        
+        if !env_map.contains_key("SHELL") {
+            env_map.insert("SHELL".to_string(), "/system/scarlet/bin/sh".to_string());
         }
     }
 
@@ -224,6 +270,46 @@ impl AbiModule for ScarletAbi {
                 return Err("Failed to bind mount native Scarlet root to /scarlet for Scarlet");
             }
         }
+    }
+}
+
+impl ScarletAbi {
+    /// Normalize path string to absolute Scarlet namespace format
+    /// 
+    /// This ensures all paths in PATH-like variables are absolute and
+    /// in the proper Scarlet namespace format.
+    fn normalize_path_to_absolute_scarlet(&self, path_value: &str) -> String {
+        let paths: Vec<&str> = path_value.split(':').collect();
+        let mut normalized_paths = Vec::new();
+        
+        for path in paths {
+            if path.starts_with('/') {
+                // Already absolute - ensure it's in proper Scarlet namespace
+                if path.starts_with("/system/scarlet/") || path.starts_with("/scarlet/") {
+                    normalized_paths.push(path.to_string());
+                } else {
+                    // Map standard paths to Scarlet namespace
+                    let mapped_path = match path {
+                        "/bin" => "/system/scarlet/bin",
+                        "/usr/bin" => "/system/scarlet/usr/bin",
+                        "/usr/local/bin" => "/system/scarlet/usr/local/bin",
+                        "/sbin" => "/system/scarlet/sbin",
+                        "/usr/sbin" => "/system/scarlet/usr/sbin",
+                        "/lib" => "/system/scarlet/lib",
+                        "/usr/lib" => "/system/scarlet/usr/lib",
+                        "/usr/local/lib" => "/system/scarlet/usr/local/lib",
+                        _ => path, // Keep other absolute paths as-is
+                    };
+                    normalized_paths.push(mapped_path.to_string());
+                }
+            } else if !path.is_empty() {
+                // Relative paths - prefix with current working directory or make absolute
+                normalized_paths.push(format!("/{}", path));
+            }
+            // Skip empty paths
+        }
+        
+        normalized_paths.join(":")
     }
 }
 
