@@ -61,7 +61,6 @@ pub extern "C" fn main() -> i32 {
     
     println!("=== Environment and Argument Test ===");
     println!("This test verifies execve() argument and environment variable passing");
-    println!("NOTE: Environment variable access requires startup routine updates");
     println!("PID: {}", getpid());
     println!("argc: {}", args.len());
     
