@@ -150,7 +150,7 @@ fn copy_file(src: &str, dest: &str) -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main() {
+fn main() -> i32 {
     println!("init: I'm the init process: PID={}", std::task::getpid());
     println!("init: Starting root filesystem transition...");
     

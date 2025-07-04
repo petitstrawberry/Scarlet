@@ -84,6 +84,8 @@ pub struct Task {
     /// All internal operations use RwLock for concurrent access protection.
     pub vfs: Option<Arc<VfsManager>>,
 
+
+
     // KernelObject table
     pub handle_table: HandleTable,
 }
@@ -880,6 +882,7 @@ impl Task {
     pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
         self.vfs.as_ref()
     }
+
 }
 
 pub enum WaitError {
