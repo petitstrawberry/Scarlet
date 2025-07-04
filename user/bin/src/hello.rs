@@ -27,7 +27,7 @@ unsafe fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 
 // Main function that receives argc and argv from _start
 #[unsafe(no_mangle)]
-pub extern "C" fn main() -> i32 {
+fn main() -> i32 {
     println!("Hello, world!");
     println!("PID  = {}", std::task::getpid());
     println!("PPID = {}", std::task::getppid());

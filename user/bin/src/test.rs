@@ -28,7 +28,7 @@ pub fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[allow(static_mut_refs)]
 #[unsafe(link_section = ".text")]
 #[unsafe(export_name = "main")]
-pub extern "C" fn main() {
+fn main() {
     let a = HELLO;
     let b = DUMMY;
     let c = unsafe { &mut DUMMY_BSS };

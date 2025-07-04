@@ -137,7 +137,7 @@ fn interactive_shell() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main() -> i32 {
+fn main() -> i32 {
     let args = std::env::args_vec();
     
     // Check command line arguments
