@@ -1,6 +1,6 @@
 use core::arch::{asm, naked_asm};
 
-use crate::{syscall::Syscall, task::exit};
+use crate::{syscall::Syscall, task::exit, env};
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
@@ -18,7 +18,7 @@ pub extern "C" fn _entry() {
 }
 
 unsafe extern "Rust" {
-    fn main(argc: usize, argv: *const *const u8) -> i32;
+    fn main() -> i32;
 }
 
 #[unsafe(link_section = ".init")]
@@ -30,15 +30,21 @@ pub fn _start(a0: usize, a1: usize) -> ! {
     let argv = a1 as *const *const u8;
 
     unsafe {
-        // asm!(
-        //     "mv {}, a0",
-        //     "mv {}, a1",
-        //     out(reg) argc,
-        //     out(reg) argv,
-        //     options(nostack)
-        // );
+        // Calculate envp from stack layout:
+        // Stack layout: argc | argv[] | envp[] | argv_strings | envp_strings
+        // envp starts right after argv[] (which has argc+1 entries including NULL)
         
-        let ret = main(argc, argv);
+        // Handle NULL argv case - if argv is NULL, envp calculation is not safe
+        let envp = if !argv.is_null() && argc > 0 {
+            argv.add(argc + 1) as *const *const u8
+        } else {
+            core::ptr::null()
+        };
+        
+        // Initialize environment before calling main
+        env::init_env(argc, argv, envp);
+        
+        let ret = main();
         exit(ret as i32);
     }
 }

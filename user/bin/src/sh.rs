@@ -7,7 +7,7 @@ use std::{print, println, string::String, task::{execve, exit, fork, waitpid}};
 
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main(_argc: usize, _argv: *const *const u8) -> i32 {
+pub extern "C" fn main() -> i32 {
     let mut inputs = String::new();
 
     println!("Scarlet Shell");

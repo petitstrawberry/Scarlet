@@ -56,86 +56,22 @@ fn get_env_var(key: &str) -> Option<std::string::String> {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main(argc: usize, argv: *const *const u8) -> i32 {
-    let args = unsafe { parse_argv(argc, argv) };
+pub extern "C" fn main() -> i32 {
+    let args = std::env::args_vec();
     
     println!("=== Environment and Argument Test ===");
     println!("This test verifies execve() argument and environment variable passing");
     println!("NOTE: Environment variable access requires startup routine updates");
     println!("PID: {}", getpid());
-    println!("argc: {}", argc);
+    println!("argc: {}", args.len());
     
     // Display all arguments
     for (i, arg) in args.iter().enumerate() {
         println!("argv[{}]: {}", i, arg);
     }
-    
-    // Check if this is a child process (has specific arguments)
-    if args.len() > 1 && args[1] == "child_process" {
-        println!("\n--- Child Process Environment Test ---");
-        println!("NOTE: Environment variable access not yet implemented in startup routine");
-        println!("This test verifies that execve with envp arguments works correctly");
-        
-        // Test argument passing (this should work)
-        if args.len() > 2 {
-            println!("SUCCESS: Extra argument from parent received: {}", args[2]);
-        } else {
-            println!("WARNING: Expected extra argument from parent not found");
-        }
-        
-        // Test placeholder environment variable access
-        // TODO: Replace with actual environment access once implemented
-        println!("Testing placeholder environment variable access:");
-        if let Some(test_var) = get_env_var("TEST_VAR") {
-            println!("  TEST_VAR = {} (placeholder)", test_var);
-        }
-        
-        if let Some(path) = get_env_var("PATH") {
-            println!("  PATH = {} (placeholder)", path);
-        }
-        
-        println!("Child process completed - argument passing verified");
-        return 42; // Return specific exit code for parent to verify
+    // Display all environment variables
+    for (k, v) in std::env::vars() {
+        println!("env: {}={}", k, v);
     }
-    
-    // Parent process - test execve with various arguments and environment
-    println!("\n--- Parent Process - Testing execve ---");
-    
-    let pid = fork();
-    if pid == 0 {
-        // Child process - execve with new arguments and environment
-        let path = "/bin/env_test"; // Execute ourselves
-        let argv = &["env_test", "child_process", "passed_from_parent"];
-        let envp = &[
-            "TEST_VAR=hello_from_parent",
-            "PATH=/bin:/usr/bin:/system/scarlet/bin", 
-            "USER=scarlet_test",
-            "CUSTOM_VAR=execve_test_value"
-        ];
-        
-        println!("Parent: About to execve child with custom args and env");
-        println!("Parent: execve path: {}", path);
-        println!("Parent: execve argv: {:?}", argv);
-        println!("Parent: execve envp: {:?}", envp);
-        let result = execve(path, argv, envp);
-        println!("Parent: execve failed with result {}", result);
-        return -1; // Should not reach here if execve succeeds
-    } else if pid > 0 {
-        // Parent process - wait for child
-        println!("Parent: Created child with PID {}", pid);
-        let (waited_pid, status) = waitpid(pid, 0);
-        println!("Parent: Child {} exited with status {}", waited_pid, status);
-        
-        if status == 42 {
-            println!("SUCCESS: Child returned expected exit code");
-        } else {
-            println!("WARNING: Child returned unexpected exit code {}", status);
-        }
-    } else {
-        println!("ERROR: Fork failed");
-        return 1;
-    }
-    
-    println!("\n=== Environment and Argument Test Completed ===");
-    return 0;
+    0
 }

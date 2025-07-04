@@ -75,6 +75,7 @@ pub mod io;
 pub mod task;
 pub mod fs;
 pub mod utils;
+pub mod env;
 
 pub use core_exports::*;
 pub use alloc_exports::*;
