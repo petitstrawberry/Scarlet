@@ -90,6 +90,7 @@ impl AbiModule for ScarletAbi {
         &self,
         file_object: &crate::object::KernelObject,
         argv: &[&str],
+        envp: &[&str],
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str> {
@@ -122,13 +123,7 @@ impl AbiModule for ScarletAbi {
                         task.vcpu.set_sp(stack_pointer);
 
                         // Setup argv/envp on stack following Unix and RISC-V conventions
-                        // Use task.env instead of envp parameter for consistency
-                        let env_vec: Vec<String> = task.get_env_map().iter()
-                            .map(|(k, v)| format!("{}={}", k, v))
-                            .collect();
-                        let env_refs: Vec<&str> = env_vec.iter().map(|s| s.as_str()).collect();
-                        
-                        let (adjusted_sp, argv_ptr) = self.setup_arguments_on_stack(task, argv, &env_refs, stack_pointer)?;
+                        let (adjusted_sp, argv_ptr) = self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.set_sp(adjusted_sp);
                         
                         // Set RISC-V calling convention registers
@@ -137,10 +132,10 @@ impl AbiModule for ScarletAbi {
                         task.vcpu.regs.reg[10] = argv.len(); // argc
                         task.vcpu.regs.reg[11] = argv_ptr; // argv array pointer
 
-                        crate::println!("Executing binary: {} with entry point: {:#x}", task.name, entry_point);
-                        crate::println!("Arguments: {:?}", argv);
-                        crate::println!("Environment: {:?}", task.get_env_map());
-                        crate::println!("argv pointer set to: {:#x}", argv_ptr);
+                        // crate::println!("Executing binary: {} with entry point: {:#x}", task.name, entry_point);
+                        // crate::println!("Arguments: {:?}", argv);
+                        // crate::println!("Environment: {:?}", envp);
+                        // crate::println!("argv pointer set to: {:#x}", argv_ptr);
                         // crate::println!("Environment pointer set to: {:#x}", env_ptr);
 
                         // Switch to the new task
@@ -158,41 +153,53 @@ impl AbiModule for ScarletAbi {
         }
     }
 
-    fn normalize_env_to_scarlet(&self, env_map: &mut BTreeMap<String, String>) {
+    fn normalize_env_to_scarlet(&self, envp: &mut Vec<String>) {
         // Scarlet ABI is already in canonical format, but ensure all paths are absolute
         // Modify in-place to avoid allocations
         
-        let keys_to_update: Vec<String> = env_map.keys().cloned().collect();
-        
-        for key in keys_to_update {
-            if let Some(value) = env_map.get(&key).cloned() {
-                let normalized_value = match key.as_str() {
+        for env_var in envp.iter_mut() {
+            if let Some(eq_pos) = env_var.find('=') {
+                let key = &env_var[..eq_pos];
+                let value = &env_var[eq_pos + 1..];
+                
+                let normalized_value = match key {
                     "PATH" | "LD_LIBRARY_PATH" => {
                         // Ensure all paths are in absolute Scarlet namespace format
-                        self.normalize_path_to_absolute_scarlet(&value)
+                        self.normalize_path_to_absolute_scarlet(value)
                     }
                     "HOME" => {
                         // Ensure home directory is absolute
                         if value.starts_with('/') {
-                            value
+                            value.to_string()
                         } else {
                             format!("/home/{}", value)
                         }
                     }
-                    _ => value, // Most variables pass through unchanged
+                    _ => value.to_string(), // Most variables pass through unchanged
                 };
                 
                 // Update in-place if value changed
-                if normalized_value != env_map[&key] {
-                    env_map.insert(key, normalized_value);
+                let new_env_var = format!("{}={}", key, normalized_value);
+                if new_env_var != *env_var {
+                    *env_var = new_env_var;
                 }
             }
         }
     }
     
-    fn denormalize_env_from_scarlet(&self, env_map: &mut BTreeMap<String, String>) {
+    fn denormalize_env_from_scarlet(&self, envp: &mut Vec<String>) {
         // For Scarlet ABI, canonical format is the native format
         // But ensure proper Scarlet-specific defaults exist
+        
+        // Convert to temporary map for easier processing
+        let mut env_map = BTreeMap::new();
+        for env_var in envp.iter() {
+            if let Some(eq_pos) = env_var.find('=') {
+                let key = env_var[..eq_pos].to_string();
+                let value = env_var[eq_pos + 1..].to_string();
+                env_map.insert(key, value);
+            }
+        }
         
         // Add defaults if they don't exist
         if !env_map.contains_key("PATH") {
@@ -201,6 +208,12 @@ impl AbiModule for ScarletAbi {
         
         if !env_map.contains_key("SHELL") {
             env_map.insert("SHELL".to_string(), "/system/scarlet/bin/sh".to_string());
+        }
+        
+        // Convert back to Vec<String> format
+        envp.clear();
+        for (key, value) in env_map.iter() {
+            envp.push(format!("{}={}", key, value));
         }
     }
 
@@ -249,7 +262,7 @@ impl AbiModule for ScarletAbi {
 
         match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
             Ok(()) => {}
-            Err(e) => {
+            Err(_e) => {
                 // crate::println!("Failed to bind mount /home for Scarlet: {}", e.message);
             }
         }
@@ -264,7 +277,7 @@ impl AbiModule for ScarletAbi {
 
         match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
             Ok(()) => {}
-            Err(e) => {
+            Err(_e) => {
                 // crate::println!("Failed to bind mount /data/shared for Scarlet: {}", e.message);
             }
         }
