@@ -7,7 +7,10 @@ which implements a transparent ABI conversion layer for executing binaries acros
 - Ensure all tests pass before committing changes.
 
 ### Development Flow
-Executing commands in the root directory of the repository:
+Use the docker container of ` scarlet-dev` for development to ensure a consistent environment.
+If the image is not available, you can build it using the provided Dockerfile in the repository.
+
+Executing commands in the Docker container at the root of the repository:
 - Build: `cargo make build`
 
 #### Testing
