@@ -111,39 +111,78 @@ pub fn getppid() -> u32 {
 /// # Return Value
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
-pub fn execve(path: &str, _argv: &[&str], _envp: &[&str]) -> i32 {
+pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> i32 {
     let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
     let path_boxed_slice_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
 
-    let argv_ptr = 0; // argv is not used in this implementation
-    let envp_ptr = 0; // envp is not used in this implementation
-    let res = syscall3(Syscall::Execve, path_ptr, argv_ptr, envp_ptr);
+    // Convert argv to C-style array
+    let (argv_data, argv_ptrs) = if argv.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(argv).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (argv_ptr_array, argv_len) = create_ptr_array_box(argv_ptrs);
+
+    // Convert envp to C-style array
+    let (envp_data, envp_ptrs) = if envp.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(envp).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
+
+    let res = syscall3(Syscall::Execve, path_ptr, argv_ptr_array as usize, envp_ptr_array as usize);
     
     // If the syscall fails, we need to free the allocated memory
     // (On success, the context is switched, so this code is not reached)
     let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) };
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(argv_ptr_array as *mut usize, argv_len)) };
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(envp_ptr_array as *mut usize, envp_len)) };
+    
+    // Keep argv_data and envp_data alive until syscall completes
+    drop(argv_data);
+    drop(envp_data);
 
     // Return the result of the syscall
     res as i32
 }
 
-pub fn execve_abi(path: &str, _argv: &[&str], _envp: &[&str], abi: &str) -> i32 {
+pub fn execve_abi(path: &str, argv: &[&str], envp: &[&str], abi: &str) -> i32 {
     let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
     let path_boxed_slice_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
 
-    let argv_ptr = 0; // argv is not used in this implementation
-    let envp_ptr = 0; // envp is not used in this implementation
+    // Convert argv to C-style array
+    let (argv_data, argv_ptrs) = if argv.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(argv).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (argv_ptr_array, argv_len) = create_ptr_array_box(argv_ptrs);
+
+    // Convert envp to C-style array
+    let (envp_data, envp_ptrs) = if envp.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(envp).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
    
     let abi_boxed_slice = str_to_cstr_bytes(abi).unwrap().into_boxed_slice();
     let abi_boxed_slice_len = abi_boxed_slice.len();
     let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
     
-    let res = syscall4(Syscall::ExecveABI, path_ptr, argv_ptr, envp_ptr, abi_ptr);
+    let res = syscall4(Syscall::ExecveABI, path_ptr, argv_ptr_array as usize, envp_ptr_array as usize, abi_ptr);
 
     let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) }; // Free the path
     let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(abi_ptr as *mut u8, abi_boxed_slice_len)) }; // Free the abi
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(argv_ptr_array as *mut usize, argv_len)) };
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(envp_ptr_array as *mut usize, envp_len)) };
+    
+    // Keep argv_data and envp_data alive until syscall completes
+    drop(argv_data);
+    drop(envp_data);
 
     res as i32
 } 
@@ -159,6 +198,36 @@ fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
     Ok(v)
 }
 
+// Converts a slice of strings to a null-terminated array of C string pointers
+fn strarr_to_cstr_ptrs(arr: &[&str]) -> Result<(Vec<Vec<u8>>, Vec<usize>), ()> {
+    let mut string_data = Vec::with_capacity(arr.len());
+    let mut ptrs = Vec::with_capacity(arr.len() + 1);
+    
+    for s in arr {
+        let cstr_bytes = str_to_cstr_bytes(s)?;
+        ptrs.push(cstr_bytes.as_ptr() as usize);
+        string_data.push(cstr_bytes);
+    }
+    ptrs.push(0); // Null terminator for the array
+    
+    Ok((string_data, ptrs))
+}
+
+// Creates an empty pointer array with just null terminator
+fn create_empty_ptr_array() -> Vec<usize> {
+    let mut v = Vec::with_capacity(1);
+    v.push(0);
+    v
+}
+
+// Creates a boxed slice from pointer array for passing to syscalls
+fn create_ptr_array_box(ptrs: Vec<usize>) -> (*const usize, usize) {
+    let len = ptrs.len();
+    let boxed_slice = ptrs.into_boxed_slice();
+    let ptr = Box::into_raw(boxed_slice) as *const usize;
+    (ptr, len)
+}
+
 /// Execute a program with flags support
 /// 
 /// This function extends execve() to support additional flags,
@@ -166,25 +235,45 @@ fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
 /// 
 /// # Arguments
 /// * `path` - Path to the executable
-/// * `argv` - Command line arguments (currently not used)
-/// * `envp` - Environment variables (currently not used)
+/// * `argv` - Command line arguments
+/// * `envp` - Environment variables
 /// * `flags` - Execution flags (e.g., EXECVE_FORCE_ABI_REBUILD)
 /// 
 /// # Return Value
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
-pub fn execve_with_flags(path: &str, _argv: &[&str], _envp: &[&str], flags: usize) -> i32 {
+pub fn execve_with_flags(path: &str, argv: &[&str], envp: &[&str], flags: usize) -> i32 {
     let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
     let path_boxed_slice_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
 
-    let argv_ptr = 0; // argv is not used in this implementation
-    let envp_ptr = 0; // envp is not used in this implementation
-    let res = syscall4(Syscall::Execve, path_ptr, argv_ptr, envp_ptr, flags);
+    // Convert argv to C-style array
+    let (argv_data, argv_ptrs) = if argv.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(argv).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (argv_ptr_array, argv_len) = create_ptr_array_box(argv_ptrs);
+
+    // Convert envp to C-style array
+    let (envp_data, envp_ptrs) = if envp.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(envp).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
+
+    let res = syscall4(Syscall::Execve, path_ptr, argv_ptr_array as usize, envp_ptr_array as usize, flags);
     
     // If the syscall fails, we need to free the allocated memory
     // (On success, the context is switched, so this code is not reached)
     let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) };
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(argv_ptr_array as *mut usize, argv_len)) };
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(envp_ptr_array as *mut usize, envp_len)) };
+    
+    // Keep argv_data and envp_data alive until syscall completes
+    drop(argv_data);
+    drop(envp_data);
 
     // Return the result of the syscall
     res as i32
@@ -197,30 +286,49 @@ pub fn execve_with_flags(path: &str, _argv: &[&str], _envp: &[&str], flags: usiz
 /// 
 /// # Arguments
 /// * `path` - Path to the executable
-/// * `argv` - Command line arguments (currently not used)
-/// * `envp` - Environment variables (currently not used)
+/// * `argv` - Command line arguments
+/// * `envp` - Environment variables
 /// * `abi` - Target ABI name
 /// * `flags` - Execution flags (e.g., EXECVE_FORCE_ABI_REBUILD)
 /// 
 /// # Return Value
 /// - Returns only if an error occurred
 /// - On error: -1 (usize::MAX)
-pub fn execve_abi_with_flags(path: &str, _argv: &[&str], _envp: &[&str], abi: &str, flags: usize) -> i32 {
+pub fn execve_abi_with_flags(path: &str, argv: &[&str], envp: &[&str], abi: &str, flags: usize) -> i32 {
     let path_boxed_slice = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
     let path_boxed_slice_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
 
-    let argv_ptr = 0; // argv is not used in this implementation
-    let envp_ptr = 0; // envp is not used in this implementation
+    // Convert argv to C-style array
+    let (argv_data, argv_ptrs) = if argv.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(argv).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (argv_ptr_array, argv_len) = create_ptr_array_box(argv_ptrs);
+
+    // Convert envp to C-style array
+    let (envp_data, envp_ptrs) = if envp.is_empty() {
+        (Vec::new(), create_empty_ptr_array())
+    } else {
+        strarr_to_cstr_ptrs(envp).unwrap_or_else(|_| (Vec::new(), create_empty_ptr_array()))
+    };
+    let (envp_ptr_array, envp_len) = create_ptr_array_box(envp_ptrs);
    
     let abi_boxed_slice = str_to_cstr_bytes(abi).unwrap().into_boxed_slice();
     let abi_boxed_slice_len = abi_boxed_slice.len();
     let abi_ptr = Box::into_raw(abi_boxed_slice) as *const u8 as usize;
     
-    let res = syscall5(Syscall::ExecveABI, path_ptr, argv_ptr, envp_ptr, abi_ptr, flags);
+    let res = syscall5(Syscall::ExecveABI, path_ptr, argv_ptr_array as usize, envp_ptr_array as usize, abi_ptr, flags);
 
     let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_boxed_slice_len)) }; // Free the path
     let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(abi_ptr as *mut u8, abi_boxed_slice_len)) }; // Free the abi
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(argv_ptr_array as *mut usize, argv_len)) };
+    let _ = unsafe { Box::from_raw(core::slice::from_raw_parts_mut(envp_ptr_array as *mut usize, envp_len)) };
+    
+    // Keep argv_data and envp_data alive until syscall completes
+    drop(argv_data);
+    drop(envp_data);
 
     res as i32
 }

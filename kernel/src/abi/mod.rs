@@ -7,7 +7,7 @@
 //! 
 
 use crate::{arch::Trapframe, fs::{drivers::overlayfs::OverlayFS, VfsManager}, task::mytask};
-use alloc::{boxed::Box, collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
+use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -108,16 +108,16 @@ pub trait AbiModule: 'static {
     /// Uses in-place modification to avoid expensive allocations.
     /// 
     /// # Arguments
-    /// * `env_map` - Mutable reference to environment variables in this ABI's format,
-    ///               will be modified to contain Scarlet canonical format
+    /// * `envp` - Mutable reference to environment variables in "KEY=VALUE" format,
+    ///            will be modified to contain Scarlet canonical format
     /// 
     /// # Implementation Guidelines
     /// - Convert paths to absolute Scarlet namespace paths
     /// - Normalize variable names to Scarlet conventions
     /// - Remove ABI-specific variables that don't translate
     /// - Ensure all paths are absolute and start with /
-    /// - Modify the map in-place for efficiency
-    fn normalize_env_to_scarlet(&self, _env_map: &mut BTreeMap<String, String>) {
+    /// - Modify the vector in-place for efficiency
+    fn normalize_env_to_scarlet(&self, _envp: &mut Vec<String>) {
         // Default: no conversion needed (assuming already in Scarlet format)
     }
     
@@ -130,9 +130,9 @@ pub trait AbiModule: 'static {
     /// Uses in-place modification to avoid expensive allocations.
     /// 
     /// # Arguments
-    /// * `env_map` - Mutable reference to environment variables in Scarlet canonical format,
-    ///               will be modified to contain this ABI's format
-    fn denormalize_env_from_scarlet(&self, _env_map: &mut BTreeMap<String, String>) {
+    /// * `envp` - Mutable reference to environment variables in Scarlet canonical format,
+    ///            will be modified to contain this ABI's format
+    fn denormalize_env_from_scarlet(&self, _envp: &mut Vec<String>) {
         // Default: no conversion needed (assuming target is Scarlet format)
     }
     
@@ -142,16 +142,19 @@ pub trait AbiModule: 'static {
     /// by can_execute_binary. Use file_object.as_file() to access FileObject,
     /// and call ABI-specific loaders (ELF, PE, etc.) to load and execute the binary.
     /// 
+    /// Environment variables are passed directly as envp array, not stored in task.
+    /// 
     /// # Arguments
     /// * `file_object` - Binary file to execute (already opened, in KernelObject format)
     /// * `argv` - Command line arguments
-    /// * `envp` - Environment variables
+    /// * `envp` - Environment variables in "KEY=VALUE" format
     /// * `task` - Target task (modified by this method)
     /// * `trapframe` - Execution context (modified by this method)
     /// 
     /// # Implementation Notes
     /// - Use file_object.as_file() to get FileObject
     /// - Use ABI-specific loaders (e.g., task::elf_loader)
+    /// - Environment variables are passed directly as envp parameter
     /// - Set task's memory space, registers, and entry point
     /// - Update trapframe registers (PC, SP) for the new process
     /// - Recommended to restore original state on execution failure
@@ -166,7 +169,7 @@ pub trait AbiModule: 'static {
     fn execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
-        argv: &[&str], 
+        argv: &[&str],
         envp: &[&str],
         task: &mut crate::task::Task,
         trapframe: &mut Trapframe
