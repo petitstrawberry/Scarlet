@@ -132,11 +132,77 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
 }
 
 /// Execute a script file
+/// Execute a shell script file
 fn execute_script(script_path: &str) -> i32 {
     println!("Executing script: {}", script_path);
-    // TODO: Implement script file reading and execution
-    // For now, just try to execute it as a binary using PATH resolution
-    return execute_command(script_path, &[String::from(script_path)]);
+    
+    // Try to read the script file
+    let script_content = match read_file(script_path) {
+        Ok(content) => content,
+        Err(_) => {
+            // If we can't read as a script, try to execute as a binary
+            println!("Cannot read as script, trying as binary...");
+            return execute_command(script_path, &[String::from(script_path)]);
+        }
+    };
+    
+    execute_script_content(&script_content)
+}
+
+/// Read a file and return its content as a string
+fn read_file(file_path: &str) -> Result<String, i32> {
+    let fd = std::fs::open(file_path, 0);
+    if fd < 0 {
+        return Err(fd);
+    }
+    
+    let mut content = String::new();
+    let mut buffer = [0u8; 1024];
+    
+    loop {
+        let bytes_read = std::fs::read(fd, &mut buffer);
+        if bytes_read <= 0 {
+            break;
+        }
+        
+        // Convert bytes to string (assuming UTF-8)
+        if let Ok(text) = std::str::from_utf8(&buffer[..bytes_read as usize]) {
+            content.push_str(text);
+        } else {
+            std::fs::close(fd);
+            return Err(-1); // Invalid UTF-8
+        }
+    }
+    
+    std::fs::close(fd);
+    Ok(content)
+}
+
+/// Execute script content line by line
+fn execute_script_content(content: &str) -> i32 {
+    let mut last_exit_code = 0;
+    
+    for line in content.lines() {
+        let trimmed_line = line.trim();
+        
+        // Skip empty lines and comments
+        if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
+            continue;
+        }
+        
+        let (program, args) = parse_command(trimmed_line);
+        
+        if program.is_empty() {
+            continue;
+        }
+        
+        last_exit_code = execute_command(&program, &args);
+        
+        // If a command fails, we could choose to continue or stop
+        // For now, we continue executing the rest of the script
+    }
+    
+    last_exit_code
 }
 
 /// Interactive shell mode
@@ -144,6 +210,10 @@ fn interactive_shell() -> i32 {
     let mut inputs = String::new();
 
     println!("Scarlet Shell (Interactive Mode)");
+    
+    // Try to execute .shrc on startup
+    execute_shrc();
+    
     println!("Enter 'exit' to quit");
 
     loop {
@@ -379,8 +449,58 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 }
             }
         }
+        "source" | "." => {
+            // Source a script file in the current shell context
+            if args.len() < 2 {
+                println!("source: usage: source FILENAME");
+                return Some(1);
+            }
+            
+            let script_path = &args[1];
+            match read_file(script_path) {
+                Ok(content) => {
+                    let exit_code = execute_script_content(&content);
+                    Some(exit_code)
+                }
+                Err(_) => {
+                    println!("source: {}: file not found or cannot read", script_path);
+                    Some(1)
+                }
+            }
+        }
         _ => None, // Not a built-in command
     }
+}
+
+/// Execute .shrc file if it exists
+fn execute_shrc() {
+    let mut shrc_paths = Vec::new();
+    
+    // Add HOME/.shrc if HOME is set
+    if let Some(home) = std::env::var("HOME") {
+        shrc_paths.push(format!("{}/.shrc", home));
+    }
+    
+    // Add standard paths
+    shrc_paths.push(String::from("/.shrc"));
+    shrc_paths.push(String::from("/etc/shrc"));
+    shrc_paths.push(String::from("./.shrc"));
+    
+    for shrc_path in &shrc_paths {
+        // Check if file exists by trying to open it
+        let fd = std::fs::open(shrc_path, 0);
+        if fd >= 0 {
+            std::fs::close(fd);
+            println!("Loading {}", shrc_path);
+            let exit_code = execute_script(shrc_path);
+            if exit_code != 0 {
+                println!("Warning: {} exited with code {}", shrc_path, exit_code);
+            }
+            return; // Only execute the first found .shrc
+        }
+    }
+    
+    // No .shrc file found, which is normal
 }
 
 #[unsafe(no_mangle)]
