@@ -100,6 +100,7 @@ impl AbiModule for ScarletAbi {
                 task.text_size = 0;
                 task.data_size = 0;
                 task.stack_size = 0;
+                task.brk = None;
 
                 // Load the ELF file and replace the current process
                 match load_elf_into_task(file_obj, task) {
