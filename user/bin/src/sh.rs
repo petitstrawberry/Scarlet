@@ -449,6 +449,62 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 }
             }
         }
+        "echo" => {
+            // Echo command - print arguments separated by spaces
+            // Supports -n (no newline) and -e (interpret escapes)
+            let mut no_newline = false;
+            let mut interpret_escapes = false;
+            let mut start_index = 1;
+            
+            // Parse options
+            while start_index < args.len() {
+                let arg = &args[start_index];
+                if arg == "-n" {
+                    no_newline = true;
+                    start_index += 1;
+                } else if arg == "-e" {
+                    interpret_escapes = true;
+                    start_index += 1;
+                } else if arg == "-ne" || arg == "-en" {
+                    no_newline = true;
+                    interpret_escapes = true;
+                    start_index += 1;
+                } else if arg.starts_with('-') {
+                    // Unknown option, stop parsing
+                    break;
+                } else {
+                    // Not an option, stop parsing
+                    break;
+                }
+            }
+            
+            if start_index < args.len() {
+                let mut output = String::new();
+                for (i, arg) in args[start_index..].iter().enumerate() {
+                    if i > 0 {
+                        output.push(' ');
+                    }
+                    
+                    if interpret_escapes {
+                        output.push_str(&process_escape_sequences(arg));
+                    } else {
+                        output.push_str(arg);
+                    }
+                }
+                
+                if no_newline {
+                    print!("{}", output);
+                } else {
+                    println!("{}", output);
+                }
+            } else {
+                // No arguments to print
+                if !no_newline {
+                    println!();
+                }
+            }
+            Some(0)
+        }
         "source" | "." => {
             // Source a script file in the current shell context
             if args.len() < 2 {
@@ -531,4 +587,41 @@ fn main() -> i32 {
         // Interactive mode
         return interactive_shell();
     }
+}
+
+/// Process escape sequences in a string (for echo -e)
+fn process_escape_sequences(input: &str) -> String {
+    let mut result = String::new();
+    let mut chars = input.chars();
+    
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next_char) = chars.next() {
+                match next_char {
+                    'n' => result.push('\n'),
+                    't' => result.push('\t'),
+                    'r' => result.push('\r'),
+                    '\\' => result.push('\\'),
+                    '0' => result.push('\0'),
+                    'a' => result.push('\x07'), // Bell
+                    'b' => result.push('\x08'), // Backspace
+                    'f' => result.push('\x0C'), // Form feed
+                    'v' => result.push('\x0B'), // Vertical tab
+                    'e' => result.push('\x1B'), // Escape
+                    _ => {
+                        // Unknown escape sequence, treat as literal
+                        result.push('\\');
+                        result.push(next_char);
+                    }
+                }
+            } else {
+                // Backslash at end of string
+                result.push('\\');
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    
+    result
 }
