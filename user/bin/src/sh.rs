@@ -3,14 +3,17 @@
 
 extern crate scarlet_std as std;
 
-use std::{print, println, string::String, vec::Vec, task::{execve, exit, fork, waitpid}};
+use std::{format, print, println, string::String, vec::Vec, task::{execve, exit, fork, waitpid}};
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
+    // First expand environment variables
+    let expanded_input = expand_variables(input);
+    
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = input.chars();
+    let mut chars = expanded_input.chars();
     
     while let Some(c) = chars.next() {
         match c {
@@ -45,27 +48,95 @@ fn parse_command(input: &str) -> (String, Vec<String>) {
     (program, args)
 }
 
-/// Execute a script file
-fn execute_script(script_path: &str) -> i32 {
-    println!("Executing script: {}", script_path);
-    // TODO: Implement script file reading and execution
-    // For now, just try to execute it as a binary
+/// Find executable in PATH environment variable
+fn find_executable_in_path(program: &str) -> Option<String> {
+    // If program contains '/', treat it as an absolute or relative path
+    if program.contains('/') {
+        return Some(String::from(program));
+    }
+    
+    // Get PATH environment variable
+    match std::env::var("PATH") {
+        Some(path_var) => {
+            // Split PATH by ':' and search in each directory
+            for path_dir in path_var.split(':') {
+                if path_dir.is_empty() {
+                    continue;
+                }
+
+                crate::println!("Checking directory: {}", path_dir);
+                
+                let full_path = if path_dir.ends_with('/') {
+                    format!("{}{}", path_dir, program)
+                } else {
+                    format!("{}/{}", path_dir, program)
+                };
+                
+                // Check if file exists by trying to open it
+                let fd = std::fs::open(&full_path, 0);
+                if fd >= 0 {
+                    std::fs::close(fd); // Close the file descriptor we just opened
+                    return Some(full_path);
+                }
+            }
+            None
+        }
+        None => {
+            // No PATH set, try current directory
+            let current_path = format!("./{}", program);
+            let fd = std::fs::open(&current_path, 0);
+            if fd >= 0 {
+                std::fs::close(fd);
+                Some(current_path)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Execute a command with PATH resolution
+fn execute_command(program: &str, args: &[String]) -> i32 {
+    // First check if it's a built-in command
+    if let Some(exit_code) = handle_builtin_command(program, args) {
+        return exit_code;
+    }
+    
+    let executable_path = match find_executable_in_path(program) {
+        Some(path) => path,
+        None => {
+            println!("sh: {}: command not found", program);
+            return 127; // Standard exit code for "command not found"
+        }
+    };
+    
     match fork() {
         0 => {
-            if execve(script_path, &[script_path], &[]) != 0 {
-                println!("Failed to execute script: {}", script_path);
+            // Convert args to &[&str] for execve
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            
+            if execve(&executable_path, &arg_refs, &[]) != 0 {
+                println!("sh: {}: execution failed", executable_path);
             }
-            exit(-1);
+            exit(126); // Standard exit code for "command not executable"
         }
         -1 => {
-            println!("Failed to fork for script execution");
-            return -1;
+            println!("sh: fork failed");
+            return 1;
         }
         pid => {
             let (_, status) = waitpid(pid, 0);
             return status;
         }
     }
+}
+
+/// Execute a script file
+fn execute_script(script_path: &str) -> i32 {
+    println!("Executing script: {}", script_path);
+    // TODO: Implement script file reading and execution
+    // For now, just try to execute it as a binary using PATH resolution
+    return execute_command(script_path, &[String::from(script_path)]);
 }
 
 /// Interactive shell mode
@@ -101,10 +172,6 @@ fn interactive_shell() -> i32 {
             }
         }
         
-        if inputs.trim() == "exit" {
-            break;
-        }
-
         if inputs.trim().is_empty() {
             continue;
         }
@@ -115,25 +182,205 @@ fn interactive_shell() -> i32 {
             continue;
         }
 
-        match fork() {
-            0 => {
-                // Convert args to &[&str] for execve
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                
-                if execve(&program, &arg_refs, &[]) != 0 {
-                    println!("Failed to execute: {}", program);
-                }
-                exit(-1);
-            }
-            -1 => {
-                println!("Failed to fork");
-            }
-            pid => {
-                let (_, _) = waitpid(pid, 0);
-            }
+        let status = execute_command(&program, &args);
+        if status != 0 {
+            // Command failed, but continue shell
         }
     }
+    // This line is unreachable because 'exit' command terminates the process
+    // But we keep it for compiler satisfaction
+    #[allow(unreachable_code)]
     0
+}
+
+/// Expand environment variables in a string
+/// Supports $VAR, ${VAR}, and special variables like $?, $$, $0
+fn expand_variables(input: &str) -> String {
+    let mut result = String::new();
+    let mut chars = input.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '$' {
+            // Check if this is a variable expansion
+            if let Some(&next_char) = chars.peek() {
+                if next_char == '{' {
+                    // Handle ${VAR} syntax
+                    chars.next(); // consume '{'
+                    let mut var_name = String::new();
+                    let mut found_close = false;
+                    
+                    while let Some(var_char) = chars.next() {
+                        if var_char == '}' {
+                            found_close = true;
+                            break;
+                        }
+                        var_name.push(var_char);
+                    }
+                    
+                    if found_close && !var_name.is_empty() {
+                        // Expand the variable
+                        if let Some(value) = get_variable_value(&var_name) {
+                            result.push_str(&value);
+                        }
+                        // If variable doesn't exist, just ignore it (common shell behavior)
+                    } else {
+                        // Malformed ${...}, treat as literal
+                        result.push('$');
+                        result.push('{');
+                        result.push_str(&var_name);
+                        if !found_close {
+                            // Put back the chars we consumed if no closing brace
+                            // This is a simplified approach
+                        }
+                    }
+                } else if next_char.is_alphabetic() || next_char == '_' || next_char == '?' || next_char == '$' || next_char == '0' {
+                    // Handle $VAR syntax and special variables
+                    let mut var_name = String::new();
+                    
+                    if next_char == '?' || next_char == '$' || next_char == '0' {
+                        // Special single-character variables
+                        var_name.push(chars.next().unwrap());
+                    } else {
+                        // Regular variable name
+                        while let Some(&var_char) = chars.peek() {
+                            if var_char.is_alphanumeric() || var_char == '_' {
+                                var_name.push(chars.next().unwrap());
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if !var_name.is_empty() {
+                        // Expand the variable
+                        if let Some(value) = get_variable_value(&var_name) {
+                            result.push_str(&value);
+                        }
+                        // If variable doesn't exist, just ignore it
+                    } else {
+                        result.push('$');
+                    }
+                } else {
+                    // Not a variable, just a literal $
+                    result.push('$');
+                }
+            } else {
+                // $ at end of string
+                result.push('$');
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    
+    result
+}
+
+/// Get the value of a variable (environment variable or special variable)
+fn get_variable_value(var_name: &str) -> Option<String> {
+    match var_name {
+        "?" => {
+            // Exit status of last command (simplified, always return 0 for now)
+            Some(String::from("0"))
+        }
+        "$" => {
+            // Process ID (simplified, return a placeholder)
+            Some(String::from("1000"))
+        }
+        "0" => {
+            // Name of the shell or script
+            Some(String::from("sh"))
+        }
+        _ => {
+            // Regular environment variable
+            std::env::var(var_name)
+        }
+    }
+}
+
+/// Handle built-in shell commands
+fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
+    match program {
+        "exit" => {
+            let exit_code = if args.len() > 1 {
+                args[1].parse::<i32>().unwrap_or(0)
+            } else {
+                0
+            };
+            exit(exit_code);
+        }
+        "env" => {
+            // Display all environment variables
+            let env_vars = std::env::vars();
+            for (key, value) in env_vars {
+                println!("{}={}", key, value);
+            }
+            Some(0)
+        }
+        "export" => {
+            if args.len() < 2 {
+                println!("export: usage: export NAME=VALUE");
+                return Some(1);
+            }
+            
+            let assignment = &args[1];
+            if let Some(eq_pos) = assignment.find('=') {
+                let name = &assignment[..eq_pos];
+                let value = &assignment[eq_pos+1..];
+                
+                // Validate variable name (basic check)
+                if name.is_empty() {
+                    println!("export: invalid variable name");
+                    return Some(1);
+                }
+                
+                // Set the environment variable
+                std::env::set_var(name, value);
+                println!("export: {}={}", name, value);
+                Some(0)
+            } else {
+                // If no '=' is provided, show the variable if it exists
+                let var_name = assignment;
+                match std::env::var(var_name) {
+                    Some(value) => {
+                        println!("export {}={}", var_name, value);
+                        Some(0)
+                    }
+                    None => {
+                        println!("export: {}: variable not set", var_name);
+                        Some(1)
+                    }
+                }
+            }
+        }
+        "cd" => {
+            // Change directory (not implemented yet)
+            println!("cd: not implemented yet");
+            Some(1)
+        }
+        "unset" => {
+            if args.len() < 2 {
+                println!("unset: usage: unset NAME");
+                return Some(1);
+            }
+            
+            let var_name = &args[1];
+            
+            // Check if variable exists before unsetting
+            match std::env::var(var_name) {
+                Some(_) => {
+                    std::env::remove_var(var_name);
+                    println!("unset: removed {}", var_name);
+                    Some(0)
+                }
+                None => {
+                    println!("unset: {}: variable not set", var_name);
+                    Some(1)
+                }
+            }
+        }
+        _ => None, // Not a built-in command
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -155,23 +402,7 @@ fn main() -> i32 {
                 return 1;
             }
             
-            match fork() {
-                0 => {
-                    let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-                    if execve(&program, &arg_refs, &[]) != 0 {
-                        println!("Failed to execute: {}", program);
-                    }
-                    exit(-1);
-                }
-                -1 => {
-                    println!("Failed to fork");
-                    return -1;
-                }
-                pid => {
-                    let (_, status) = waitpid(pid, 0);
-                    return status;
-                }
-            }
+            return execute_command(&program, &cmd_args);
         } else {
             // Execute script file
             return execute_script(script_or_command);

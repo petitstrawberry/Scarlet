@@ -199,6 +199,49 @@ pub fn vars() -> VarsIterator {
     }
 }
 
+/// Sets the environment variable `key` to the value `value` for the current process
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet_std::env;
+/// 
+/// env::set_var("MY_VAR", "my_value");
+/// assert_eq!(env::var("MY_VAR"), Some("my_value".to_string()));
+/// ```
+pub fn set_var<K: AsRef<str>, V: AsRef<str>>(key: K, value: V) {
+    if !INITIALIZED.load(Ordering::Acquire) {
+        panic!("Environment not initialized");
+    }
+    
+    unsafe {
+        let env_map = &mut *ENV_MAP_PTR;
+        env_map.insert(key.as_ref().to_string(), value.as_ref().to_string());
+    }
+}
+
+/// Removes an environment variable from the current process
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet_std::env;
+/// 
+/// env::set_var("MY_VAR", "my_value");
+/// env::remove_var("MY_VAR");
+/// assert_eq!(env::var("MY_VAR"), None);
+/// ```
+pub fn remove_var<K: AsRef<str>>(key: K) {
+    if !INITIALIZED.load(Ordering::Acquire) {
+        panic!("Environment not initialized");
+    }
+    
+    unsafe {
+        let env_map = &mut *ENV_MAP_PTR;
+        env_map.remove(key.as_ref());
+    }
+}
+
 /// Iterator over command line arguments
 pub struct ArgsIterator {
     args: Vec<String>,
