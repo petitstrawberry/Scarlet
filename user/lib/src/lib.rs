@@ -82,6 +82,7 @@ pub use alloc_exports::*;
 
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {
+    crate::println!("Panic occurred: {:?}", _info);
     loop {}
 }
 
