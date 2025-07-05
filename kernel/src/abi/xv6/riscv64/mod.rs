@@ -213,6 +213,7 @@ impl AbiModule for Xv6Riscv64Abi {
                 task.text_size = 0;
                 task.data_size = 0;
                 task.stack_size = 0;
+                task.brk = None;
                 
                 // Load ELF using XV6-compatible method
                 match load_elf_into_task(file_obj, task) {
