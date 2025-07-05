@@ -7,7 +7,7 @@ use std::{println, task::execve_abi};
 
 
 #[unsafe(no_mangle)]
-pub extern "C" fn main() -> i32 {
+fn main() -> i32 {
     println!("xv6 container");
     println!("Preparing to execute xv6 init...");
 
