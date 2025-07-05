@@ -75,12 +75,14 @@ pub mod io;
 pub mod task;
 pub mod fs;
 pub mod ffi;
+pub mod env;
 
 pub use core_exports::*;
 pub use alloc_exports::*;
 
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {
+    crate::println!("Panic occurred: {:?}", _info);
     loop {}
 }
 

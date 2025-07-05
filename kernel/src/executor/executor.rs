@@ -231,11 +231,11 @@ impl TransparentExecutor {
         let rebuild_required = abi_switch_required || force_abi_rebuild;
         
         if rebuild_required {
-            // Step 4: Setup complete task environment for new ABI (includes VFS, CWD, and handle conversion)
+            // Step 4: Setup complete task environment for new ABI (includes VFS, CWD)
             Self::setup_task_environment(task, &abi)?;
         }
         
-        // Step 5: Execute binary through ABI module
+        // Step 5: Execute binary through ABI module (pass envp directly)
         abi.execute_binary(&file_object, argv, envp, task, trapframe)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
         
@@ -332,6 +332,7 @@ impl TransparentExecutor {
         // Let ABI module handle conversion from previous ABI (handles, etc.)
         abi.initialize_from_existing_handles(task)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
+
         
         Ok(())
     }
@@ -344,4 +345,5 @@ impl TransparentExecutor {
         let vfs = crate::fs::VfsManager::new();
         Ok(Arc::new(vfs))
     }
+
 }

@@ -1,6 +1,6 @@
 use core::arch::{asm, naked_asm};
 
-use crate::{syscall::Syscall, task::exit};
+use crate::{syscall::Syscall, task::exit, env};
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_entry")]
@@ -23,9 +23,30 @@ unsafe extern "Rust" {
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_start")]
-pub fn _start() {
-    let ret = unsafe { main() };
-    exit(ret as i32);
+pub fn _start(a0: usize, a1: usize) -> ! {
+    // Get argc and argv from RISC-V calling convention registers
+    // a0 = argc, a1 = argv (set by kernel's ScarletAbi)
+    let argc = a0;
+    let argv = a1 as *const *const u8;
+
+    unsafe {
+        // Calculate envp from stack layout:
+        // Stack layout: argc | argv[] | envp[] | argv_strings | envp_strings
+        // envp starts right after argv[] (which has argc+1 entries including NULL)
+        
+        // Handle NULL argv case - if argv is NULL, envp calculation is not safe
+        let envp = if !argv.is_null() && argc > 0 {
+            argv.add(argc + 1) as *const *const u8
+        } else {
+            core::ptr::null()
+        };
+        
+        // Initialize environment before calling main
+        env::init_env(argc, argv, envp);
+        
+        let ret = main();
+        exit(ret as i32);
+    }
 }
 
 pub fn arch_syscall0(syscall: Syscall) -> usize{
