@@ -64,8 +64,6 @@ fn find_executable_in_path(program: &str) -> Option<String> {
                     continue;
                 }
 
-                crate::println!("Checking directory: {}", path_dir);
-                
                 let full_path = if path_dir.ends_with('/') {
                     format!("{}{}", path_dir, program)
                 } else {
@@ -134,8 +132,6 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
 /// Execute a script file
 /// Execute a shell script file
 fn execute_script(script_path: &str) -> i32 {
-    println!("Executing script: {}", script_path);
-    
     // Try to read the script file
     let script_content = match read_file(script_path) {
         Ok(content) => content,
@@ -406,7 +402,6 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 
                 // Set the environment variable
                 std::env::set_var(name, value);
-                println!("export: {}={}", name, value);
                 Some(0)
             } else {
                 // If no '=' is provided, show the variable if it exists
