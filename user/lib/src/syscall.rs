@@ -31,6 +31,8 @@ pub enum Syscall {
     Mount = 32,
     Umount = 33,
     PivotRoot = 34,
+    // Change directory
+    Chdir = 35,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

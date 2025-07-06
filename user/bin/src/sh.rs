@@ -419,9 +419,31 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
             }
         }
         "cd" => {
-            // Change directory (not implemented yet)
-            println!("cd: not implemented yet");
-            Some(1)
+            // Change directory
+            let target_dir = if args.len() >= 2 {
+                &args[1]
+            } else {
+                // If no argument provided, go to home directory
+                &match std::env::var("HOME") {
+                    Some(home) => home,
+                    None => {
+                        println!("cd: HOME not set");
+                        return Some(1);
+                    }
+                }
+            };
+            
+            match std::fs::chdir(target_dir) {
+                0 => {
+                    // Success - update PWD environment variable
+                    std::env::set_var("PWD", target_dir);
+                    Some(0)
+                }
+                _ => {
+                    println!("cd: {}: No such file or directory", target_dir);
+                    Some(1)
+                }
+            }
         }
         "unset" => {
             if args.len() < 2 {
