@@ -190,7 +190,16 @@ fn main() -> i32 {
         }
         pid => {
             println!("init: Shell process created, child PID: {}", pid);
-            let res = waitpid(pid, 0);
+            
+            let res = loop {
+                let res = waitpid(pid, 0);
+                if res.0 < 0 {
+                    // Any child process exits
+                    continue;
+                }
+                break res; // Exit loop on success
+            };
+
             println!("init: Child process (PID={}) exited with status: {}", res.0, res.1);
             if res.1 != 0 {
                 println!("init: Child process exited with error");
