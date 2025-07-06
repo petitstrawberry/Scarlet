@@ -7,13 +7,26 @@ OSABI_VALUE = "83"
 DIST_DIR = "dist"
 
 [tasks.build]
-description = "Build all user programs with OSABI=83"
-dependencies = ["build-only", "set-osabi"]
+description = "Build all user programs with OSABI=83 (debug mode)"
+dependencies = ["build-only-debug", "set-osabi"]
+
+[tasks.build-release]
+description = "Build all user programs with OSABI=83 (release mode)"
+dependencies = ["build-only-release", "set-osabi"]
 
 [tasks.build-only]
-description = "Build user programs without OSABI setting (internal)"
+description = "Build user programs without OSABI setting (debug, internal)"
+dependencies = ["build-only-debug"]
+
+[tasks.build-only-debug]
+description = "Build user programs in debug mode without OSABI setting (internal)"
 command = "cargo"
 args = ["build", "--out-dir", "dist"]
+
+[tasks.build-only-release]
+description = "Build user programs in release mode without OSABI setting (internal)"
+command = "cargo"
+args = ["build", "--release", "--out-dir", "dist"]
 
 [tasks.set-osabi]
 description = "Set OSABI to 83 for all user program binaries"
