@@ -3,7 +3,6 @@
 
 # Set environment variables
 export PATH=/bin
-export HOME=/home/user
 
 echo "Welcome to Scarlet Shell!"
 echo "PATH is set to: $PATH"

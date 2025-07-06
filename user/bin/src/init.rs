@@ -174,12 +174,12 @@ fn main() -> i32 {
 
     match std::task::fork() {
         0 => {
-            // Child process: Execute the shell program
-            if execve_with_flags("/system/scarlet/bin/sh", &[], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
-                println!("Failed to execve /system/scarlet/bin/sh");
+            // Child process: Execute the login program
+            if execve_with_flags("/system/scarlet/bin/login", &["/bin/login"], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
+                println!("Failed to execve /system/scarlet/bin/login");
                 // Try to execute from old root if pivot_root was successful
-                if execve_with_flags("/old_root/system/scarlet/bin/sh", &[], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
-                    println!("Failed to execve /old_root/system/scarlet/bin/sh");
+                if execve_with_flags("/old_root/system/scarlet/bin/login", &["/bin/login"], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
+                    println!("Failed to execve /old_root/system/scarlet/bin/login");
                 }
             }
             exit(-1);
