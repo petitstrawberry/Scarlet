@@ -8,11 +8,11 @@ DIST_DIR = "dist"
 
 [tasks.build]
 description = "Build all user programs with OSABI=83 (debug mode)"
-dependencies = ["build-only-debug", "set-osabi"]
+dependencies = ["build-only-debug", "set-osabi-debug"]
 
 [tasks.build-release]
 description = "Build all user programs with OSABI=83 (release mode)"
-dependencies = ["build-only-release", "set-osabi"]
+dependencies = ["build-only-release", "set-osabi-release"]
 
 [tasks.build-only]
 description = "Build user programs without OSABI setting (debug, internal)"
@@ -28,9 +28,9 @@ description = "Build user programs in release mode without OSABI setting (intern
 command = "cargo"
 args = ["build", "--release", "--out-dir", "dist"]
 
-[tasks.set-osabi]
-description = "Set OSABI to 83 for all user program binaries"
-dependencies = ["build-only"]
+[tasks.set-osabi-debug]
+description = "Set OSABI to 83 for all user program binaries (debug mode)"
+dependencies = ["build-only-debug"]
 script = '''
 echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
 if [ ! -d "${DIST_DIR}" ]; then
@@ -38,6 +38,31 @@ if [ ! -d "${DIST_DIR}" ]; then
     exit 1
 fi
 
+# Find all executable files in the dist directory
+for binary_path in "${DIST_DIR}"/*; do
+    if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
+        binary=$(basename "${binary_path}")
+        echo "Setting OSABI for ${binary}"
+        python3 ./set_osabi.py "${binary_path}" ${OSABI_VALUE}
+    fi
+done
+
+# Check if any binaries were processed
+binary_count=$(find "${DIST_DIR}" -type f -executable | wc -l)
+if [ "$binary_count" -eq 0 ]; then
+    echo "Warning: No executable binaries found in ${DIST_DIR}"
+fi
+'''
+
+[tasks.set-osabi-release]
+description = "Set OSABI to 83 for all user program binaries (release mode)"
+dependencies = ["build-only-release"]
+script = '''
+echo "Setting OSABI to ${OSABI_VALUE} for user programs..."
+if [ ! -d "${DIST_DIR}" ]; then
+    echo "Error: ${DIST_DIR} directory not found"
+    exit 1
+fi
 # Find all executable files in the dist directory
 for binary_path in "${DIST_DIR}"/*; do
     if [ -f "${binary_path}" ] && [ -x "${binary_path}" ]; then
