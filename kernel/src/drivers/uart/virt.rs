@@ -5,7 +5,23 @@ use core::fmt::Write;
 use alloc::{boxed::Box, collections::VecDeque};
 use spin::Mutex;
 
-use crate::{device::{char::CharDevice, Device, DeviceType}, driver_initcall, early_initcall, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial};
+use crate::{
+    device::{
+        char::CharDevice, 
+        Device, 
+        DeviceInfo,
+        DeviceType, 
+        platform::{
+            PlatformDeviceDriver, 
+            PlatformDeviceInfo,
+            resource::PlatformDeviceResourceType
+        },
+        manager::{DeviceManager, DriverPriority}
+    }, 
+    driver_initcall, 
+    interrupt::{InterruptId, InterruptManager}, 
+    traits::serial::Serial
+};
 
 #[derive(Clone)]
 pub struct Uart {
@@ -219,10 +235,15 @@ impl Write for Uart {
 /// UART interrupt handler
 fn uart_interrupt_handler(handle: &mut crate::interrupt::InterruptHandle) -> crate::interrupt::InterruptResult<()> {
     // Get UART device from device manager
-    let device_manager = crate::device::manager::DeviceManager::get_mut_manager();
-    if let Some(serial) = device_manager.basic.borrow_mut_serial(0) {
+    let device_manager = crate::device::manager::DeviceManager::get_manager();
+    
+    // Find a character device (UART)
+    if let Some(borrowed_device) = device_manager.borrow_first_device_by_type(crate::device::DeviceType::Char) {
+        let device = borrowed_device.device();
+        let mut device_guard = device.write();
+        
         // Cast to Uart to access interrupt-specific methods
-        if let Some(uart) = serial.as_any_mut().downcast_mut::<Uart>() {
+        if let Some(uart) = device_guard.as_any_mut().downcast_mut::<Uart>() {
             // Check interrupt identification register
             let iir = uart.reg_read(IIR_OFFSET);
             
@@ -254,29 +275,75 @@ fn uart_interrupt_handler(handle: &mut crate::interrupt::InterruptHandle) -> cra
 }
 
 fn register_uart() {
-    let mut uart = Uart::new(0x1000_0000);
+    use alloc::vec;
     
-    // TODO: get id from fdt
-    let uart_interrupt_id = 10;
+    // Create UART platform device driver
+    let driver = Box::new(PlatformDeviceDriver::new(
+        "virt-uart-driver",
+        uart_probe,
+        uart_remove,
+        vec!["ns16550a", "ns16550", "uart16550", "serial"]
+    ));
     
-    // Enable UART interrupts
-    if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {
-        crate::early_println!("Failed to enable UART interrupts: {}", e);
-        // If enabling interrupts fails, we can still use UART in polling mode
-    } else {
-        crate::early_println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
+    // Register with Core priority since UART is essential for early console output
+    DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Core);
+}
+
+/// Probe function for UART devices
+fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    crate::early_println!("Probing UART device: {}", device_info.name());
+    
+    // Get memory resource (base address)
+    let memory_resource = device_info.get_resources()
+        .iter()
+        .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
+        .ok_or("No memory resource found for UART")?;
+    
+    let base_addr = memory_resource.start;
+    crate::early_println!("UART base address: 0x{:x}", base_addr);
+    
+    // Create UART instance
+    let mut uart = Uart::new(base_addr);
+    
+    // Get interrupt resource if available
+    if let Some(irq_resource) = device_info.get_resources()
+        .iter()
+        .find(|r| r.res_type == PlatformDeviceResourceType::IRQ) {
         
-        // Register interrupt handler
-        if let Err(e) = InterruptManager::with_manager(|mgr| {
-            mgr.register_external_handler(uart_interrupt_id, uart_interrupt_handler)
-        }) {
-            crate::early_println!("Failed to register UART interrupt handler: {}", e);
+        let uart_interrupt_id = irq_resource.start as u32;
+        crate::early_println!("UART interrupt ID: {}", uart_interrupt_id);
+        
+        // Enable UART interrupts
+        if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {
+            crate::early_println!("Failed to enable UART interrupts: {}", e);
+            // Continue without interrupts - polling mode will work
         } else {
-            crate::early_println!("UART interrupt handler registered");
+            crate::early_println!("UART interrupts enabled (ID: {})", uart_interrupt_id);
+            
+            // Register interrupt handler
+            if let Err(e) = InterruptManager::with_manager(|mgr| {
+                mgr.register_external_handler(uart_interrupt_id, uart_interrupt_handler)
+            }) {
+                crate::early_println!("Failed to register UART interrupt handler: {}", e);
+            } else {
+                crate::early_println!("UART interrupt handler registered");
+            }
         }
+    } else {
+        crate::early_println!("No interrupt resource found for UART, using polling mode");
     }
     
-    crate::device::manager::register_serial(Box::new(uart));
+    // Register the UART device with the device manager
+    let device_id = DeviceManager::get_mut_manager().register_device(Box::new(uart));
+    crate::early_println!("UART device registered with ID: {}", device_id);
+    
+    Ok(())
+}
+
+/// Remove function for UART devices  
+fn uart_remove(_device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
+    // TODO: Implement device removal logic
+    Ok(())
 }
 
 driver_initcall!(register_uart);

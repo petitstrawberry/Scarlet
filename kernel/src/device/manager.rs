@@ -5,22 +5,21 @@
 //! ## Overview
 //!
 //! The device manager is responsible for:
-//! - Registering and managing serial devices
-//! - Tracking available device drivers
-//! - Device discovery and initialization
-//! - Managing device information
+//! - Tracking available device drivers with priority-based initialization
+//! - Device discovery and initialization through FDT
+//! - Managing device information and lifecycle
 //!
 //! ## Key Components
 //!
-//! - `BasicDeviceManager`: Manages fundamental I/O devices like serial ports
 //! - `DeviceManager`: The main device management system that handles all devices and drivers
+//! - `DriverPriority`: Priority levels for controlling driver initialization order
 //!
 //! ## Device Discovery
 //!
 //! Devices are discovered through the Flattened Device Tree (FDT). The manager:
 //! 1. Parses the device tree
-//! 2. Matches compatible devices with registered drivers
-//! 3. Probes devices with appropriate drivers
+//! 2. Matches compatible devices with registered drivers based on priority
+//! 3. Probes devices with appropriate drivers in priority order
 //!
 //! ## Usage
 //!
@@ -28,16 +27,16 @@
 //! - `DeviceManager::get_manager()` - Immutable access
 //! - `DeviceManager::get_mut_manager()` - Mutable access
 //!
-//! ### Example: Registering a serial device
+//! ### Example: Registering a device driver
 //!
 //! ```
-//! use crate::device::manager::register_serial;
+//! use crate::device::manager::{DeviceManager, DriverPriority};
 //! 
-//! // Create a new serial device
-//! let my_serial = Box::new(MySerialImplementation::new());
+//! // Create a new device driver
+//! let my_driver = Box::new(MyDeviceDriver::new());
 //! 
-//! // Register with the device manager
-//! register_serial(my_serial);
+//! // Register with the device manager at Core priority
+//! DeviceManager::get_mut_manager().register_driver(my_driver, DriverPriority::Core);
 //! ```
 
 extern crate alloc;
@@ -54,58 +53,10 @@ use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::PlatformDeviceInfo;
 use crate::println;
 
-use crate::traits::serial::Serial;
-
 use super::fdt::FdtManager;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
-use super::DeviceType;
-
-/// BasicDeviceManager
-///
-/// This struct manages basic I/O devices, such as serial ports.
-/// It provides methods to register, borrow, and manage serial devices.
-/// It is a part of the DeviceManager, which handles all devices and drivers.
-///
-/// # Fields
-/// - `serials`: A vector of serial devices managed by this manager.
-/// 
-pub struct BasicDeviceManager {
-    /* Basic I/O */
-    serials: Vec<Box<dyn Serial>>,
-}
-
-impl BasicDeviceManager {
-    pub fn register_serial(&mut self, serial: Box<dyn Serial>) {
-        self.serials.push(serial);
-        println!("Registered serial device");
-    }
-
-    pub fn register_serials(&mut self, serias: Vec<Box<dyn Serial>>) {
-        let len = serias.len();
-        for serial in serias {
-            self.serials.push(serial);
-        }
-        println!("Registered serial devices: {}", len);
-    }
-
-    pub fn borrow_serial(&self, idx: usize) -> Option<&Box<dyn Serial>> {
-        self.serials.get(idx)
-    }
-
-    pub fn borrow_mut_serial(&mut self, idx: usize) -> Option<&mut Box<dyn Serial>> {
-        self.serials.get_mut(idx)
-    }
-
-    pub fn borrow_serials(&self) -> &Vec<Box<dyn Serial>> {
-        &self.serials
-    }
-
-    pub fn borrow_mut_serials(&mut self) -> &mut Vec<Box<dyn Serial>> {
-        &mut self.serials
-    }
-}
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum DeviceState {
@@ -240,17 +191,12 @@ static mut MANAGER: DeviceManager = DeviceManager::new();
 /// DeviceManager
 /// 
 /// This struct is the main device management system.
-/// It handles all devices and drivers, including basic I/O devices.
-/// It provides methods to register devices, populate devices from the FDT,
-/// and manage device drivers with priority-based initialization.
+/// It handles all devices and drivers with priority-based initialization.
 /// 
 /// # Fields
-/// - `basic`: An instance of `BasicDeviceManager` for managing basic I/O devices.
 /// - `devices`: A mutex-protected vector of all registered devices.
 /// - `drivers`: A mutex-protected map of device drivers organized by priority.
 pub struct DeviceManager {
-    /* Manager for basic devices */
-    pub basic: BasicDeviceManager,
     /* Other devices */
     devices: Mutex<Vec<Arc<DeviceHandle>>>,
     /* Device drivers organized by priority */
@@ -260,9 +206,6 @@ pub struct DeviceManager {
 impl DeviceManager {
     const fn new() -> Self {
         DeviceManager {
-            basic: BasicDeviceManager {
-                serials: Vec::new(),
-            },
             devices: Mutex::new(Vec::new()),
             drivers: Mutex::new(BTreeMap::new()),
         }
@@ -496,27 +439,41 @@ impl DeviceManager {
     /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
     pub fn register_driver_default(&mut self, driver: Box<dyn DeviceDriver>) {
         self.register_driver(driver, DriverPriority::Standard);
+    }    
+    /// Find and borrow the first available device of a specific type
+    pub fn borrow_first_device_by_type(&self, device_type: super::DeviceType) -> Option<BorrowedDeviceGuard> {
+        let devices = self.devices.lock();
+        for device_handle in devices.iter() {
+            if *device_handle.state.read() == DeviceState::Available {
+                let device = device_handle.device.read();
+                if device.device_type() == device_type {
+                    drop(device); // Release the read lock
+                    return self.borrow_device_by_handle(device_handle.clone()).ok();
+                }
+            }
+        }
+        None
+    }
+
+    /// Helper method to borrow a device by handle
+    fn borrow_device_by_handle(&self, handle: Arc<DeviceHandle>) -> Result<BorrowedDeviceGuard, &'static str> {
+        let state = *handle.state.read();
+        if state == DeviceState::InUseExclusive {
+            return Err("Device is in exclusive use");
+        }
+        
+        let mut borrow_count = handle.borrow_count.write();
+        *borrow_count += 1;
+        
+        let mut state_write = handle.state.write();
+        *state_write = DeviceState::InUse;
+        
+        Ok(BorrowedDeviceGuard {
+            handle: handle.clone(),
+        })
     }
 }
-/// Registers a serial device with the device manager.
-/// 
-/// This function takes a boxed serial device and adds it to the list of registered serial devices.
-/// It is used to register serial devices that can be used for I/O operations.
-/// 
-/// # Arguments
-/// 
-/// * `serial` - A boxed serial device that implements the `Serial` trait.
-/// 
-/// # Example
-/// 
-/// ```rust
-/// let serial = Box::new(MySerialDevice::new());
-/// register_serial(serial);
-/// ```
-pub fn register_serial(serial: Box<dyn Serial>) {
-    let manager = DeviceManager::get_mut_manager();
-    manager.basic.register_serial(serial);
-}
+
 
 #[cfg(test)]
 mod tests {

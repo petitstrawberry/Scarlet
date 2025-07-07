@@ -286,20 +286,22 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_initcall_call();
     fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
-    /* Serial console also works */
 
     #[cfg(test)]
     test_main();
 
-    println!("[Scarlet Kernel] Initializing Virtual Memory...");
+    early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
     /* Initialize (populate) devices */
-    println!("[Scarlet Kernel] Initializing devices...");
+    early_println!("[Scarlet Kernel] Initializing devices...");
     DeviceManager::get_mut_manager().populate_devices();
+    /* After this point, we can use the device manager */
+    /* Serial console also works */
+    
     /* Initcalls */
     call_initcalls();
 
