@@ -4,7 +4,7 @@
 //! It supports both local interrupts (via CLINT) and external interrupts (via PLIC) on RISC-V architecture.
 
 use core::fmt;
-use crate::arch;
+use crate::arch::{self, interrupt::enable_external_interrupts};
 
 pub mod controllers;
 
@@ -211,6 +211,11 @@ impl InterruptManager {
                 crate::early_println!("Failed to initialize external controller: {}", e);
             }
         }
+
+        
+        enable_external_interrupts(); // Enable external interrupts
+        // Timer interrupts are disabled by default, enable them if needed by scheduler or other components
+        enable_interrupts(); // Enable interrupts globally
     }
 
     /// Handle an external interrupt

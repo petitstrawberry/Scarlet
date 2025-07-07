@@ -48,3 +48,113 @@ where
     }
     result
 }
+
+/// Enable timer interrupts
+/// 
+/// Enables the timer interrupt by setting the STIE (Supervisor Timer Interrupt Enable) bit in the sie register.
+pub fn enable_timer_interrupts() {
+    unsafe {
+        core::arch::asm!(
+            "csrs sie, {0}",
+            in(reg) 1 << 5, // Set STIE bit
+            options(nostack)
+        );
+    }
+}
+
+/// Disable timer interrupts
+/// 
+/// Disables the timer interrupt by clearing the STIE (Supervisor Timer Interrupt Enable) bit in the sie register.
+pub fn disable_timer_interrupts() {
+    unsafe {
+        core::arch::asm!(
+            "csrc sie, {0}",
+            in(reg) 1 << 5, // Clear STIE bit
+            options(nostack)
+        );
+    }
+}
+
+/// Check if timer interrupts are enabled
+/// 
+/// Returns true if the STIE (Supervisor Timer Interrupt Enable) bit is set in the sie register.
+pub fn are_timer_interrupts_enabled() -> bool {
+    let sie: usize;
+    unsafe {
+        core::arch::asm!("csrr {}, sie", out(reg) sie);
+    }
+    (sie & (1 << 5)) != 0
+}
+
+/// Enable software interrupts
+/// 
+/// Enables the software interrupt by setting the SSIE (Supervisor Software Interrupt Enable) bit in the sie register.
+pub fn enable_software_interrupts() {
+    unsafe {
+        core::arch::asm!(
+            "csrs sie, {0}",
+            in(reg) 1 << 1, // Set SSIE bit
+            options(nostack)
+        );
+    }
+}
+/// Disable software interrupts
+///
+/// Disables the software interrupt by clearing the SSIE (Supervisor Software Interrupt Enable) bit in the sie register.
+pub fn disable_software_interrupts() {
+    unsafe {
+        core::arch::asm!(
+            "csrc sie, {0}",
+            in(reg) 1 << 1, // Clear SSIE bit
+            options(nostack)
+        );
+    }
+}
+
+/// Check if software interrupts are enabled
+/// 
+/// Returns true if the SSIE (Supervisor Software Interrupt Enable) bit is set in the sie register.
+pub fn are_software_interrupts_enabled() -> bool {
+    let sie: usize;
+    unsafe {
+        core::arch::asm!("csrr {}, sie", out(reg) sie);
+    }
+    (sie & (1 << 1)) != 0
+}
+
+/// Enable external interrupts
+/// 
+/// Enables the external interrupt by setting the SEIE (Supervisor External Interrupt Enable) bit in the sie register.
+pub fn enable_external_interrupts() {
+    unsafe {
+        core::arch::asm!(
+            "csrs sie, {0}",
+            in(reg) 1 << 9, // Set SEIE bit
+            options(nostack)
+        );
+    }
+}
+
+/// Disable external interrupts
+///
+/// Disables the external interrupt by clearing the SEIE (Supervisor External Interrupt Enable) bit in the sie register.
+pub fn disable_external_interrupts() {
+    unsafe {
+        core::arch::asm!(
+            "csrc sie, {0}",
+            in(reg) 1 << 9, // Clear SEIE bit
+            options(nostack)
+        );
+    }
+}
+
+/// Check if external interrupts are enabled
+/// 
+/// Returns true if the SEIE (Supervisor External Interrupt Enable) bit is set in the sie register.
+pub fn are_external_interrupts_enabled() -> bool {
+    let sie: usize;
+    unsafe {
+        core::arch::asm!("csrr {}, sie", out(reg) sie);
+    }
+    (sie & (1 << 9)) != 0
+}
