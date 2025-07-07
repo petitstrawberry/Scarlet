@@ -907,7 +907,9 @@ impl OverlayDirectoryObject {
 
     /// Collect all directory entries from all layers, handling whiteouts and merging
     fn collect_directory_entries(&self) -> Result<Vec<crate::fs::DirectoryEntryInternal>, FileSystemError> {
+        let mut special_entries = Vec::new();
         let mut all_entries = Vec::new();
+
         let mut seen_names = BTreeSet::new();
         
         // Get current directory node by resolving path components
@@ -937,14 +939,14 @@ impl OverlayDirectoryObject {
         };
         
         // Add "." and ".." entries first
-        all_entries.push(crate::fs::DirectoryEntryInternal {
+        special_entries.push(crate::fs::DirectoryEntryInternal {
             name: ".".to_string(),
             file_type: FileType::Directory,
             file_id: current_file_id,
             size: 0,
             metadata: None,
         });
-        all_entries.push(crate::fs::DirectoryEntryInternal {
+        special_entries.push(crate::fs::DirectoryEntryInternal {
             name: "..".to_string(),
             file_type: FileType::Directory,
             file_id: parent_file_id,
@@ -1018,8 +1020,8 @@ impl OverlayDirectoryObject {
 
         // Sort entries by file_id to maintain consistent order
         all_entries.sort_by(|a, b| a.file_id.cmp(&b.file_id));
-        
-        Ok(all_entries)
+        special_entries.extend(all_entries);
+        Ok(special_entries)
     }
 
     /// Safe version of fs_from_mount that returns Result instead of panicking

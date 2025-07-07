@@ -883,6 +883,15 @@ impl Task {
         self.vfs.as_ref()
     }
 
+    /// Set the current working directory
+    pub fn set_cwd(&mut self, cwd: String) {
+        self.cwd = Some(cwd);
+    }
+
+    /// Get the current working directory
+    pub fn get_cwd(&self) -> Option<&String> {
+        self.cwd.as_ref()
+    }
 }
 
 pub enum WaitError {
@@ -935,6 +944,22 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
 pub fn mytask() -> Option<&'static mut Task> {
     let cpu = get_cpu();
     get_scheduler().get_current_task(cpu.get_cpuid())
+}
+
+/// Set the current working directory for the current task
+/// 
+/// # Arguments
+/// * `cwd` - New current working directory path
+/// 
+/// # Returns
+/// * `true` if successful, `false` if no current task
+pub fn set_current_task_cwd(cwd: String) -> bool {
+    if let Some(task) = mytask() {
+        task.set_cwd(cwd);
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
