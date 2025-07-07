@@ -256,7 +256,7 @@ fn uart_interrupt_handler(handle: &mut crate::interrupt::InterruptHandle) -> cra
 fn register_uart() {
     let mut uart = Uart::new(0x1000_0000);
     
-    // QEMU virt でのUART割り込みIDは通常10番
+    // TODO: get id from fdt
     let uart_interrupt_id = 10;
     
     // 割り込みを有効化
