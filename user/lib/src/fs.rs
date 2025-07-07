@@ -1,6 +1,6 @@
-use crate::utils::str_to_cstr_bytes;
+use crate::ffi::str_to_cstr_bytes;
 use crate::boxed::Box;
-use crate::syscall::{syscall2, syscall3, syscall5, Syscall};
+use crate::syscall::{syscall1, syscall2, syscall3, syscall5, Syscall};
 use crate::string::String;
 
 // Mount flags (similar to Linux mount flags)
@@ -137,6 +137,29 @@ pub fn mkdir(path: &str, mode: u32) -> i32 {
     let path_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
     let res = syscall2(Syscall::Mkdir, path_ptr, mode as usize);
+    // Free the allocated memory
+    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
+    // Return the result of the syscall
+    res as i32
+}
+
+/// Change current working directory.
+/// 
+/// # Arguments
+/// * `path` - Path to the new working directory
+/// 
+/// # Return Value
+/// * `0` on success, `-1` on error
+/// 
+pub fn chdir(path: &str) -> i32 {
+    let path_bytes = match str_to_cstr_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return -1, // Return -1 on failure to match POSIX semantics
+    };
+    let path_boxed_slice = path_bytes.into_boxed_slice();
+    let path_len = path_boxed_slice.len();
+    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
+    let res = syscall1(Syscall::Chdir, path_ptr);
     // Free the allocated memory
     let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
     // Return the result of the syscall

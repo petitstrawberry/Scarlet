@@ -25,3 +25,19 @@ pub fn str_to_cstr_bytes(s: &str) -> Result<Vec<u8>, ()> {
     v.push(0); // Null terminator
     Ok(v)
 }
+
+pub unsafe fn cstr_ptr_to_str(ptr: *const u8) -> Option<&'static str> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len = 0;
+    while {
+        // ループ条件全体をunsafeブロックで囲む
+        unsafe { *ptr.add(len) != 0 }
+    } {
+        len += 1;
+    }
+    unsafe {
+        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).ok()
+    }
+}

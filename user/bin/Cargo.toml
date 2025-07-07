@@ -8,8 +8,16 @@ name = "init"
 path = "src/init.rs"
 
 [[bin]]
+name = "login"
+path = "src/login.rs"
+
+[[bin]]
 name = "sh"
 path = "src/sh.rs"
+
+[[bin]]
+name = "ls"
+path = "src/ls.rs"
 
 [[bin]]
 name = "hello"

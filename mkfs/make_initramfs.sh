@@ -3,7 +3,7 @@
 # cd to the script directory
 cd "$(dirname "$0")" || exit 1
 
-mkdir -p initramfs/bin
+mkdir -p initramfs/system/scarlet/bin
 cp ../user/bin/dist/* initramfs/system/scarlet/bin/
 
 mkdir -p dist

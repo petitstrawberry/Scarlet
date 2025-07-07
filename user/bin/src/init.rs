@@ -174,12 +174,12 @@ fn main() -> i32 {
 
     match std::task::fork() {
         0 => {
-            // Child process: Execute the shell program
-            if execve_with_flags("/system/scarlet/bin/sh", &[], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
-                println!("Failed to execve /system/scarlet/bin/sh");
+            // Child process: Execute the login program
+            if execve_with_flags("/system/scarlet/bin/login", &["/bin/login"], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
+                println!("Failed to execve /system/scarlet/bin/login");
                 // Try to execute from old root if pivot_root was successful
-                if execve_with_flags("/old_root/system/scarlet/bin/sh", &[], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
-                    println!("Failed to execve /old_root/system/scarlet/bin/sh");
+                if execve_with_flags("/old_root/system/scarlet/bin/login", &["/bin/login"], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
+                    println!("Failed to execve /old_root/system/scarlet/bin/login");
                 }
             }
             exit(-1);
@@ -190,7 +190,16 @@ fn main() -> i32 {
         }
         pid => {
             println!("init: Shell process created, child PID: {}", pid);
-            let res = waitpid(pid, 0);
+            
+            let res = loop {
+                let res = waitpid(pid, 0);
+                if res.0 < 0 {
+                    // Any child process exits
+                    continue;
+                }
+                break res; // Exit loop on success
+            };
+
             println!("init: Child process (PID={}) exited with status: {}", res.0, res.1);
             if res.1 != 0 {
                 println!("init: Child process exited with error");

@@ -74,7 +74,7 @@ pub mod syscall;
 pub mod io;
 pub mod task;
 pub mod fs;
-pub mod utils;
+pub mod ffi;
 pub mod env;
 
 pub use core_exports::*;

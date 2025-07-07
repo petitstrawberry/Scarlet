@@ -580,6 +580,46 @@ fn pivot_root_in_place(
     Ok(())
 }
 
+pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    
+    // Increment PC to avoid infinite loop if chdir fails
+    trapframe.increment_pc_next(task);
+    
+    // Convert path pointer to string
+    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok(p) => p.0,
+        Err(_) => return usize::MAX,
+    };
+    
+    // Get the VFS manager (either task-specific or global)
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    // Resolve absolute path
+    let absolute_path = match to_absolute_path_v2(&task, &path) {
+        Ok(path) => path,
+        Err(_) => return usize::MAX,
+    };
+    
+    // Check if the path exists and is a directory
+    match vfs.resolve_path(&absolute_path) {
+        Ok(entry) => {
+            if entry.node().file_type().unwrap() == FileType::Directory {
+                // Update the task's current working directory
+                task.set_cwd(absolute_path);
+                0 // Success
+            } else {
+                usize::MAX // Not a directory
+            }
+        }
+        Err(_) => return usize::MAX, // Path resolution error
+    }
+}
+
 // Use a local path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {
