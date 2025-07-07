@@ -259,7 +259,7 @@ fn register_uart() {
     // TODO: get id from fdt
     let uart_interrupt_id = 10;
     
-    // 割り込みを有効化
+    // Enable UART interrupts
     if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {
         crate::early_println!("Failed to enable UART interrupts: {}", e);
         // If enabling interrupts fails, we can still use UART in polling mode
