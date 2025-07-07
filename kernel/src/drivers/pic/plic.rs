@@ -3,7 +3,7 @@
 //! The PLIC is responsible for managing external interrupts from devices and
 //! routing them to different CPUs with priority support.
 
-use crate::{device::{manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}}, driver_initcall, early_initcall, interrupt::{
+use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}}, driver_initcall, early_initcall, interrupt::{
     controllers::{ExternalInterruptController, LocalInterruptType}, CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority
 }};
 use alloc::{boxed::Box, vec};
@@ -302,7 +302,7 @@ fn register_driver() {
         vec!["sifive,plic-1.0.0", "riscv,plic0"],
     );
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver))
+    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Critical)
 }
 
 // driver_initcall!(register_driver);

@@ -195,6 +195,24 @@ impl InterruptManager {
         f(&mut Self::global().lock())
     }
 
+    pub fn init(&mut self) {
+        // Initialize local controllers (e.g., CLINT)
+        match self.controllers.init_local_controllers() {
+            Ok(()) => {}
+            Err(e) => {
+                crate::early_println!("Failed to initialize local controllers: {}", e);
+            }
+        }
+
+        // Initialize external controller (e.g., PLIC)
+        match self.controllers.init_external_controller() {
+            Ok(()) => {}
+            Err(e) => {
+                crate::early_println!("Failed to initialize external controller: {}", e);
+            }
+        }
+    }
+
     /// Handle an external interrupt
     pub fn handle_external_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
         let handler = {

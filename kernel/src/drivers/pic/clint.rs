@@ -3,7 +3,7 @@
 //! The CLINT manages CPU-local interrupts such as timer interrupts and
 //! software interrupts in RISC-V systems.
 
-use crate::{device::{manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}}, driver_initcall, interrupt::{
+use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}}, driver_initcall, interrupt::{
     controllers::{LocalInterruptController, LocalInterruptType}, CpuId, InterruptError, InterruptManager, InterruptResult
 }};
 use alloc::{boxed::Box, vec};
@@ -266,7 +266,7 @@ fn register_driver() {
         vec!["sifive,clint0", "riscv,clint0"],
     );
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver))
+    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Critical);
 }
 
 driver_initcall!(register_driver);

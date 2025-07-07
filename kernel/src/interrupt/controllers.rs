@@ -2,6 +2,8 @@
 //! 
 //! This module defines the basic traits for local and external interrupt controllers.
 
+use crate::interrupt::InterruptError;
+
 use super::{InterruptId, CpuId, Priority, InterruptResult};
 use alloc::boxed::Box;
 
@@ -161,6 +163,28 @@ impl InterruptControllers {
     /// Get a mutable reference to the external interrupt controller
     pub fn external_controller_mut(&mut self) -> Option<&mut Box<dyn ExternalInterruptController>> {
         self.external_controller.as_mut()
+    }
+
+    /// Initialize all local controllers for their respective CPUs
+    pub fn init_local_controllers(&mut self) -> InterruptResult<()> {
+        for (cpu_id, &controller_index) in &self.cpu_to_local_controller {
+            if let Some(controller) = self.local_controllers.get_mut(controller_index) {
+                controller.init(*cpu_id)?;
+            } else {
+                return Err(InterruptError::ControllerNotFound);
+            }
+        }
+        Ok(())
+    }
+
+    /// Initialize the external controller
+    pub fn init_external_controller(&mut self) -> InterruptResult<()> {
+        if let Some(controller) = self.external_controller.as_mut() {
+            controller.init()?;
+            Ok(())
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
     }
 
     /// Check if local controller is available for a specific CPU

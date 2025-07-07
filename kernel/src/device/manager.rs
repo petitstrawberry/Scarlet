@@ -200,6 +200,41 @@ impl Drop for BorrowedDeviceGuard {
     }
 }
 
+/// Driver priority levels for initialization order
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DriverPriority {
+    /// Critical infrastructure drivers (interrupt controllers, memory controllers)
+    Critical = 0,
+    /// Core system drivers (timers, basic I/O)
+    Core = 1,
+    /// Standard device drivers (network, storage)
+    Standard = 2,
+    /// Late initialization drivers (filesystems, user interface)
+    Late = 3,
+}
+
+impl DriverPriority {
+    /// Get all priority levels in order
+    pub fn all() -> &'static [DriverPriority] {
+        &[
+            DriverPriority::Critical,
+            DriverPriority::Core,
+            DriverPriority::Standard,
+            DriverPriority::Late,
+        ]
+    }
+
+    /// Get a human-readable description of the priority level
+    pub fn description(&self) -> &'static str {
+        match self {
+            DriverPriority::Critical => "Critical Infrastructure",
+            DriverPriority::Core => "Core System",
+            DriverPriority::Standard => "Standard Devices",
+            DriverPriority::Late => "Late Initialization",
+        }
+    }
+}
+
 static mut MANAGER: DeviceManager = DeviceManager::new();
 
 /// DeviceManager
@@ -207,19 +242,19 @@ static mut MANAGER: DeviceManager = DeviceManager::new();
 /// This struct is the main device management system.
 /// It handles all devices and drivers, including basic I/O devices.
 /// It provides methods to register devices, populate devices from the FDT,
-/// and manage device drivers.
+/// and manage device drivers with priority-based initialization.
 /// 
 /// # Fields
 /// - `basic`: An instance of `BasicDeviceManager` for managing basic I/O devices.
 /// - `devices`: A mutex-protected vector of all registered devices.
-/// - `drivers`: A mutex-protected vector of all registered device drivers.
+/// - `drivers`: A mutex-protected map of device drivers organized by priority.
 pub struct DeviceManager {
     /* Manager for basic devices */
     pub basic: BasicDeviceManager,
     /* Other devices */
     devices: Mutex<Vec<Arc<DeviceHandle>>>,
-    /* Device drivers */
-    drivers: Mutex<Vec<Box<dyn DeviceDriver>>>,
+    /* Device drivers organized by priority */
+    drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
 }
 
 impl DeviceManager {
@@ -229,7 +264,7 @@ impl DeviceManager {
                 serials: Vec::new(),
             },
             devices: Mutex::new(Vec::new()),
-            drivers: Mutex::new(Vec::new()),
+            drivers: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -331,7 +366,7 @@ impl DeviceManager {
         devices.len()
     }
 
-    pub fn borrow_drivers(&self) -> &Mutex<Vec<Box<dyn DeviceDriver>>> {
+    pub fn borrow_drivers(&self) -> &Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>> {
         &self.drivers
     }
 
@@ -342,6 +377,16 @@ impl DeviceManager {
     /// If a matching driver is found, it probes the device using the driver's `probe` method.
     /// If the probe is successful, the device is registered with the driver.
     pub fn populate_devices(&mut self) {
+        // Use all priority levels in order
+        self.populate_devices_by_priority(None);
+    }
+
+    /// Populate devices using drivers of specific priority levels
+    /// 
+    /// # Arguments
+    /// 
+    /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
+    pub fn populate_devices_by_priority(&mut self, priorities: Option<&[DriverPriority]>) {
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
@@ -349,61 +394,72 @@ impl DeviceManager {
             return;
         }
         let fdt = fdt.unwrap();
-        println!("Populating devices from FDT...");
-
-        let soc = fdt.find_node("/soc");
-        if soc.is_none() {
-            println!("No /soc node found");
-            return;
-        }
-
-        let soc = soc.unwrap();
-        let mut idx = 0;
-        for child in soc.children() {
-            let compatible = child.compatible();
-            if compatible.is_none() {
+        
+        let priority_list = priorities.unwrap_or(DriverPriority::all());
+        
+        for &priority in priority_list {
+            println!("Populating devices with {} drivers from FDT...", priority.description());
+            
+            let soc = fdt.find_node("/soc");
+            if soc.is_none() {
+                println!("No /soc node found");
                 continue;
             }
-            let compatible = compatible.unwrap().all().collect::<Vec<_>>();
-            
-            for driver in self.drivers.lock().iter() {
-                if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
-                    let mut resources = Vec::new();
-                    
-                    // Memory regions
-                    if let Some(regions) = child.reg() {
-                        for region in regions {
-                            let res = PlatformDeviceResource {
-                                res_type: PlatformDeviceResourceType::MEM,
-                                start: region.starting_address as usize,
-                                end: region.starting_address as usize + region.size.unwrap() - 1,
-                            };
-                            resources.push(res);
-                        }
-                    }
 
-                    // IRQs
-                    if let Some(irqs) = child.interrupts() {
-                        for irq in irqs {
-                            let res = PlatformDeviceResource {
-                                res_type: PlatformDeviceResourceType::IRQ,
-                                start: irq,
-                                end: irq,
-                            };
-                            resources.push(res);
-                        }
-                    }
+            let soc = soc.unwrap();
+            let mut idx = 0;
+            for child in soc.children() {
+                let compatible = child.compatible();
+                if compatible.is_none() {
+                    continue;
+                }
+                let compatible = compatible.unwrap().all().collect::<Vec<_>>();
+                
+                // Get drivers for this priority level
+                let drivers = self.drivers.lock();
+                if let Some(driver_list) = drivers.get(&priority) {
+                    for driver in driver_list.iter() {
+                        if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
+                            let mut resources = Vec::new();
+                            
+                            // Memory regions
+                            if let Some(regions) = child.reg() {
+                                for region in regions {
+                                    let res = PlatformDeviceResource {
+                                        res_type: PlatformDeviceResourceType::MEM,
+                                        start: region.starting_address as usize,
+                                        end: region.starting_address as usize + region.size.unwrap() - 1,
+                                    };
+                                    resources.push(res);
+                                }
+                            }
 
-                    let device: Box<dyn DeviceInfo> = Box::new(PlatformDeviceInfo::new(
-                        child.name,
-                        idx,
-                        compatible.clone(),
-                        resources,
-                    ));
-                    if let Err(e) = driver.probe(&*device) {
-                        println!("Failed to probe device {}: {}", device.name(), e);
-                    } else {
-                        idx += 1;
+                            // IRQs
+                            if let Some(irqs) = child.interrupts() {
+                                for irq in irqs {
+                                    let res = PlatformDeviceResource {
+                                        res_type: PlatformDeviceResourceType::IRQ,
+                                        start: irq,
+                                        end: irq,
+                                    };
+                                    resources.push(res);
+                                }
+                            }
+
+                            let device: Box<dyn DeviceInfo> = Box::new(PlatformDeviceInfo::new(
+                                child.name,
+                                idx,
+                                compatible.clone(),
+                                resources,
+                            ));
+                            if let Err(e) = driver.probe(&*device) {
+                                println!("Failed to probe {} device {}: {}", priority.description(), device.name(), e);
+                            } else {
+                                println!("Successfully probed {} device: {}", priority.description(), device.name());
+                                idx += 1;
+                            }
+                            break; // Found matching driver, move to next device
+                        }
                     }
                 }
             }
@@ -412,24 +468,36 @@ impl DeviceManager {
 
     /// Registers a device driver with the device manager.
     /// 
-    /// This function takes a boxed device driver and adds it to the list of registered drivers.
-    /// It is used to register drivers that can be used to probe and manage devices.
+    /// This function takes a boxed device driver and adds it to the list of registered drivers
+    /// at the specified priority level.
     /// 
     /// # Arguments
     /// 
     /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
+    /// * `priority` - The priority level for this driver.
     /// 
     /// # Example
     /// 
     /// ```rust
     /// let driver = Box::new(MyDeviceDriver::new());
-    /// DeviceManager::get_mut_manager().register_driver(driver);
+    /// DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Standard);
     /// ```
-    pub fn register_driver(&mut self, driver: Box<dyn DeviceDriver>) {
-        self.drivers.lock().push(driver);
+    pub fn register_driver(&mut self, driver: Box<dyn DeviceDriver>, priority: DriverPriority) {
+        let mut drivers = self.drivers.lock();
+        drivers.entry(priority).or_insert_with(Vec::new).push(driver);
+    }
+
+    /// Registers a device driver with default Standard priority.
+    /// 
+    /// This is a convenience method for backward compatibility.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
+    pub fn register_driver_default(&mut self, driver: Box<dyn DeviceDriver>) {
+        self.register_driver(driver, DriverPriority::Standard);
     }
 }
-
 /// Registers a serial device with the device manager.
 /// 
 /// This function takes a boxed serial device and adds it to the list of registered serial devices.
@@ -472,7 +540,7 @@ mod tests {
             |_device| Ok(()),
             vec!["sifive,test0"]
         ));
-        DeviceManager::get_mut_manager().register_driver(driver);
+        DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Standard);
 
         DeviceManager::get_mut_manager().populate_devices();
         let result = unsafe { TEST_RESULT };

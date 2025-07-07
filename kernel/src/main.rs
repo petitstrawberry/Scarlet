@@ -219,7 +219,7 @@ use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
-use crate::fs::vfs_v2::manager::init_global_vfs_manager;
+use crate::{fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
 use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
 
 
@@ -302,22 +302,16 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     DeviceManager::get_mut_manager().populate_devices();
     /* Initcalls */
     call_initcalls();
+
+    /* Initialize interrupt management system */
+    println!("[Scarlet Kernel] Initializing interrupt system...");
+    InterruptManager::get_manager().init();
+
     /* Initialize timer */
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
-    
-    /* Initialize interrupt management system */
-    println!("[Scarlet Kernel] Initializing interrupt system...");
-    // if let Err(e) = init_interrupt_system() {
-    //     early_println!("[Scarlet Kernel] Failed to initialize interrupt system: {}", e);
-    // } else {
-    //     if let Err(e) = init_standard_handlers() {
-    //         early_println!("[Scarlet Kernel] Failed to initialize standard handlers: {}", e);
-    //     } else {
-    //         println!("[Scarlet Kernel] Interrupt system initialized successfully");
-    //     }
-    // }
-    
+
+    /* Initialize scheduler */
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
     /* Initialize global VFS */
