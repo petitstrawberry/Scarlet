@@ -295,16 +295,15 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     
     /* Initialize interrupt management system */
     println!("[Scarlet Kernel] Initializing interrupt system...");
-    use crate::interrupt::init::{init_interrupt_system, init_standard_handlers};
-    if let Err(e) = init_interrupt_system() {
-        early_println!("[Scarlet Kernel] Failed to initialize interrupt system: {}", e);
-    } else {
-        if let Err(e) = init_standard_handlers() {
-            early_println!("[Scarlet Kernel] Failed to initialize standard handlers: {}", e);
-        } else {
-            println!("[Scarlet Kernel] Interrupt system initialized successfully");
-        }
-    }
+    // if let Err(e) = init_interrupt_system() {
+    //     early_println!("[Scarlet Kernel] Failed to initialize interrupt system: {}", e);
+    // } else {
+    //     if let Err(e) = init_standard_handlers() {
+    //         early_println!("[Scarlet Kernel] Failed to initialize standard handlers: {}", e);
+    //     } else {
+    //         println!("[Scarlet Kernel] Interrupt system initialized successfully");
+    //     }
+    // }
     
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
