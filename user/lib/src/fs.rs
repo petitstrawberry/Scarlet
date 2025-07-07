@@ -152,7 +152,10 @@ pub fn mkdir(path: &str, mode: u32) -> i32 {
 /// * `0` on success, `-1` on error
 /// 
 pub fn chdir(path: &str) -> i32 {
-    let path_bytes = str_to_cstr_bytes(path).unwrap();
+    let path_bytes = match str_to_cstr_bytes(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return -1, // Return -1 on failure to match POSIX semantics
+    };
     let path_boxed_slice = path_bytes.into_boxed_slice();
     let path_len = path_boxed_slice.len();
     let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
