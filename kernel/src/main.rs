@@ -218,7 +218,7 @@ use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
-use core::panic::PanicInfo;
+use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
 use crate::fs::vfs_v2::manager::init_global_vfs_manager;
 use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
 
@@ -229,7 +229,7 @@ use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
 fn panic(info: &PanicInfo) -> ! {
     use arch::instruction::idle;
 
-    println!("[Scarlet Kernel] panic: {}", info);
+    crate::early_println!("[Scarlet Kernel] panic: {}", info);
     loop {
         idle();
     }
@@ -270,8 +270,21 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let heap_size = ((usable_area.end - heap_start + 1) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
     let heap_end = heap_start + heap_size - 1;
     init_heap(MemoryArea::new(heap_start, heap_end));
+
+    fence(Ordering::SeqCst);
+    early_println!("[Scarlet Kernel] Heap initialized at {:#x} - {:#x}", heap_start, heap_end);
+    
+    {
+        let test_vec = alloc::vec::Vec::<u8>::with_capacity(1024);
+        drop(test_vec);
+        early_println!("[Scarlet Kernel] Heap allocation test passed");
+    }
+    
+    fence(Ordering::Release);
+
     /* After this point, we can use the heap */
     early_initcall_call();
+    fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
     /* Serial console also works */
 
