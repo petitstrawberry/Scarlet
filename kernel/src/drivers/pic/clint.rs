@@ -231,8 +231,6 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     
     let base_addr = mem_res.start as usize;
 
-    crate::println!("CLINT device_info: {:x?}", device);
-
     // Create CLINT controller
     let mut controller = Box::new(Clint::new(base_addr, 4)); // Example: 4 CPUs for QEMU virt
     
