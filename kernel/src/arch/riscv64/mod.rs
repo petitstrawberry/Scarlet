@@ -17,6 +17,7 @@ use crate::task::Task;
 
 pub mod boot;
 pub mod instruction;
+pub mod interrupt;
 pub mod kernel;
 pub mod trap;
 pub mod earlycon;

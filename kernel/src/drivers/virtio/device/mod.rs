@@ -5,7 +5,7 @@ use core::result::Result;
 
 use alloc::{boxed::Box, vec};
 
-use crate::{device::{manager::DeviceManager, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
+use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
 use super::queue::VirtQueue;
 
 /// Register enum for Virtio devices
@@ -670,7 +670,7 @@ fn register_driver() {
         vec!["virtio,mmio"],
     );
     // Register the driver with the kernel
-    DeviceManager::get_mut_manager().register_driver(Box::new(driver))
+    DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Standard)
 }
 
 driver_initcall!(register_driver);

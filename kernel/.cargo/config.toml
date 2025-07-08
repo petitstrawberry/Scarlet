@@ -1,9 +1,6 @@
 [profile.dev]
 opt-level = 0
 
-[profile.release]
-opt-level = "s"
-
 [target.riscv64gc-unknown-none-elf]
 runner = "tools/run.sh"
 

@@ -66,15 +66,21 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 }
 
 pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
-    let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0).unwrap();
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     
-    if let Some(byte) = serial.get() {
-        byte as usize
-    } else {
-        0 // Return 0 if no data available
+    // Find a character device (UART) 
+    let manager = DeviceManager::get_manager();
+    if let Some(borrowed_device) = manager.borrow_first_device_by_type(crate::device::DeviceType::Char) {
+        let device = borrowed_device.device();
+        if let Some(char_device) = device.write().as_char_device() {
+            if let Some(byte) = char_device.read_byte() {
+                return byte as usize;
+            }
+        }
     }
+    
+    0 // Return 0 if no data available or no character device found
 }
 
 pub fn sys_exit(trapframe: &mut Trapframe) -> usize {

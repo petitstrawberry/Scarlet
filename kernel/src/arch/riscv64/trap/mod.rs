@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use crate::println;
+use crate::{early_println, println};
 
 use super::Trapframe;
 
@@ -16,7 +16,7 @@ pub fn print_traplog(tf: &Trapframe) {
         asm!("csrr {}, scause", out(reg) cause);
         asm!("csrr {}, stval", out(reg) tval);
     }
-    println!("trapframe:\n{:#x?}", tf);
-    println!("cause: {}", cause);
-    println!("tval: 0x{:x}", tval);
+    early_println!("trapframe:\n{:#x?}", tf);
+    early_println!("cause: {}", cause);
+    early_println!("tval: 0x{:x}", tval);
 }
