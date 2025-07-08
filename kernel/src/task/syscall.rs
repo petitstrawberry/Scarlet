@@ -23,7 +23,7 @@ use crate::library::std::string::{parse_c_string_from_userspace, parse_string_ar
 use crate::arch::{get_cpu, Trapframe};
 use crate::print;
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{CloneFlags, WaitError};
+use crate::task::{get_task_waker, CloneFlags, WaitError};
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 
@@ -239,10 +239,11 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     let _options = trapframe.get_arg(2) as i32; // Not used in this implementation
 
     if pid == -1 {
+        // Wait for any child process
         for pid in task.get_children().clone() {
             match task.wait(pid) {
                 Ok(status) => {
-                    // If the child task is exited, we can return the status
+                    // Child has exited, return the status
                     if status_ptr != core::ptr::null_mut() {
                         let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
                         unsafe {
@@ -263,14 +264,18 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 }
             }
         }
-        // Any child process has exited
-        trapframe.increment_pc_next(task);
-        return usize::MAX;
+        
+        // No child has exited yet, block until one does
+        // We wait on any child's waker since we're waiting for any child (-1)
+        // In this case, we use a general waker for the parent task
+        let parent_waker = get_task_waker(task.get_id());
+        parent_waker.wait(task, trapframe);
     }
     
+    // Wait for specific child process
     match task.wait(pid as usize) {
         Ok(status) => {
-            // If the child task is exited, we can return the status
+            // Child has exited, return the status
             if status_ptr != core::ptr::null_mut() {
                 let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
                 unsafe {
@@ -278,21 +283,23 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 }
             }
             trapframe.increment_pc_next(task);
-            pid as usize
+            return pid as usize;
         }
         Err(error) => {
             match error {
                 WaitError::NoSuchChild(_) => {
                     trapframe.increment_pc_next(task);
-                    usize::MAX
+                    return usize::MAX;
                 },
                 WaitError::ChildTaskNotFound(_) => {
                     trapframe.increment_pc_next(task);
-                    usize::MAX
+                    crate::print!("Child task with PID {} not found", pid);
+                    return usize::MAX;
                 },
                 WaitError::ChildNotExited(_) => {
                     // If the child task is not exited, we need to wait for it
-                    get_scheduler().schedule(trapframe);
+                    let child_waker = get_task_waker(pid as usize);
+                    child_waker.wait(task, trapframe);
                 },
             }
         }

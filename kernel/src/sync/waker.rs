@@ -9,7 +9,8 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use spin::Mutex;
 use core::fmt;
-use crate::task::{BlockedType, TaskState, mytask};
+use crate::arch::Arch;
+use crate::task::{BlockedType, Task, TaskState};
 use crate::sched::scheduler::get_scheduler;
 
 /// A synchronization primitive that manages waiting and waking of tasks
@@ -101,25 +102,23 @@ impl Waker {
     /// 
     /// # Note
     /// 
-    /// This function will block until the task is woken up. After waking,
-    /// execution continues from this point.
-    pub fn wait(&self) {
-        if let Some(task) = mytask() {
-            let task_id = task.get_id();
-            
-            // Add task to wait queue first
-            {
-                let mut queue = self.wait_queue.lock();
-                queue.push_back(task_id);
-            }
-            
-            // Set task state to blocked
-            task.set_state(TaskState::Blocked(self.block_type));
-            
-            // Yield CPU to scheduler
-            let cpu = crate::arch::get_cpu();
-            get_scheduler().schedule(cpu);
+    /// This function never returns normally. The task will be blocked and only
+    /// resume execution when the entire syscall is restarted after being woken up.
+    /// The `!` return type indicates this function diverges (never returns).
+    pub fn wait(&self, task: &mut Task, cpu: &mut Arch) -> ! {
+        let task_id = task.get_id();
+                
+        // Add task to wait queue first
+        {
+            let mut queue = self.wait_queue.lock();
+            queue.push_back(task_id);
         }
+        
+        // Set task state to blocked
+        task.set_state(TaskState::Blocked(self.block_type));
+
+        // Yield CPU to scheduler - this never returns
+        get_scheduler().schedule(cpu);
     }
 
     /// Wake up one waiting task
