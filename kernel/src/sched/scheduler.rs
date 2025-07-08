@@ -33,7 +33,6 @@ pub fn get_scheduler() -> &'static mut Scheduler {
 
 pub struct Scheduler {
     task_queue: [VecDeque<Task>; NUM_OF_CPUS],
-    add_req_queue: [VecDeque<Task>; NUM_OF_CPUS],
     dispatcher: [Dispatcher; NUM_OF_CPUS],
     interval: u64, /* in microseconds */
     current_task_id: [Option<usize>; NUM_OF_CPUS],
@@ -43,7 +42,6 @@ impl Scheduler {
     pub const fn new() -> Self {
         Scheduler {
             task_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            add_req_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             dispatcher: [const { Dispatcher::new() }; NUM_OF_CPUS],
             interval: 10000, /* 1ms */
             current_task_id: [const { None }; NUM_OF_CPUS],
@@ -56,12 +54,6 @@ impl Scheduler {
 
     fn run(&mut self, cpu: &mut Arch) {
         let cpu_id = cpu.get_cpuid();
-
-        if !self.add_req_queue[cpu_id].is_empty() {
-            for task in self.add_req_queue[cpu_id].drain(..) {
-                self.task_queue[cpu_id].push_back(task);
-            }
-        }
 
         loop {
             let task = self.task_queue[cpu_id].pop_front();
