@@ -166,7 +166,7 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     } else {
         arch_exception_handler(trapframe, cause);
     }
-    // Jump direc_tly to user trap exit via trampoline
+    // Jump directly to user trap exit via trampoline
     arch_switch_to_user_space(trapframe);
 }
 
