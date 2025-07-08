@@ -1,11 +1,17 @@
 //! Scheduler module
 //! 
 //! The scheduler module is responsible for scheduling tasks on the CPU.
-//! Currently, the scheduler is a simple round-robin scheduler.
+//! Currently, the scheduler is a simple round-robin scheduler with separate
+//! queues for different task states to improve efficiency:
+//! 
+//! - `ready_queue`: Tasks that are ready to run
+//! - `blocked_queue`: Tasks waiting for I/O or other events  
+//! - `zombie_queue`: Finished tasks waiting to be cleaned up
+//! 
+//! This separation avoids unnecessary iteration over blocked/zombie tasks
+//! during normal scheduling operations.
 
 extern crate alloc;
-
-use core::panic;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
@@ -32,7 +38,12 @@ pub fn get_scheduler() -> &'static mut Scheduler {
 }
 
 pub struct Scheduler {
-    task_queue: [VecDeque<Task>; NUM_OF_CPUS],
+    /// Queue for ready-to-run tasks
+    ready_queue: [VecDeque<Task>; NUM_OF_CPUS],
+    /// Queue for blocked tasks (waiting for I/O, etc.)
+    blocked_queue: [VecDeque<Task>; NUM_OF_CPUS],
+    /// Queue for zombie tasks (finished but not yet cleaned up)
+    zombie_queue: [VecDeque<Task>; NUM_OF_CPUS],
     dispatcher: [Dispatcher; NUM_OF_CPUS],
     interval: u64, /* in microseconds */
     current_task_id: [Option<usize>; NUM_OF_CPUS],
@@ -41,7 +52,9 @@ pub struct Scheduler {
 impl Scheduler {
     pub const fn new() -> Self {
         Scheduler {
-            task_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
+            ready_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
+            blocked_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
+            zombie_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             dispatcher: [const { Dispatcher::new() }; NUM_OF_CPUS],
             interval: 10000, /* 1ms */
             current_task_id: [const { None }; NUM_OF_CPUS],
@@ -49,17 +62,19 @@ impl Scheduler {
     }
 
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
-        self.task_queue[cpu_id].push_back(task);
+        // Add new tasks to the ready queue by default
+        self.ready_queue[cpu_id].push_back(task);
     }
 
     fn run(&mut self, cpu: &mut Arch) {
         let cpu_id = cpu.get_cpuid();
 
+        // Continue trying to run tasks until we successfully dispatch one or run out of ready tasks
         loop {
-            let task = self.task_queue[cpu_id].pop_front();
+            let task = self.ready_queue[cpu_id].pop_front();
 
             /* If there are no subsequent tasks */
-            if self.task_queue[cpu_id].is_empty() {
+            if self.ready_queue[cpu_id].is_empty() {
                 match task {
                     Some(mut t) => {
                         match t.state {
@@ -71,7 +86,7 @@ impl Scheduler {
                             },
                             TaskState::Blocked(_) => {
                                 // Put blocked task back to the end of queue without running it
-                                self.task_queue[cpu_id].push_back(t);
+                                self.ready_queue[cpu_id].push_back(t);
                                 continue;
                             },
                             _ => {
@@ -79,7 +94,7 @@ impl Scheduler {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
                                 }
                                 self.current_task_id[cpu_id] = Some(t.get_id());
-                                self.task_queue[cpu_id].push_back(t);
+                                self.ready_queue[cpu_id].push_back(t);
                                 break;
                             }
                         }
@@ -92,7 +107,7 @@ impl Scheduler {
                     Some(mut t) => {
                         match t.state {
                             TaskState::Zombie => {
-                                self.task_queue[cpu_id].push_back(t);
+                                self.zombie_queue[cpu_id].push_back(t);
                                 continue;
                             },
                             TaskState::Terminated => {
@@ -100,19 +115,19 @@ impl Scheduler {
                             },
                             TaskState::Blocked(_) => {
                                 // Put blocked task back to the end of queue without running it
-                                self.task_queue[cpu_id].push_back(t);
+                                self.blocked_queue[cpu_id].push_back(t);
                                 continue;
                             },
                             _ => {
                                 let prev_task = match self.current_task_id[cpu_id] {
-                                    Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
+                                    Some(task_id) => self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
                                     None => None
                                 };
                                 if prev_task.is_some() {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
                                 }
                                 self.current_task_id[cpu_id] = Some(t.get_id());
-                                self.task_queue[cpu_id].push_back(t);
+                                self.ready_queue[cpu_id].push_back(t);
                                 break;
                             }
                         }
@@ -130,7 +145,7 @@ impl Scheduler {
         timer.stop(cpu_id);
         timer.set_interval_us(cpu_id, self.interval);
 
-        if !self.task_queue[cpu_id].is_empty() {
+        if !self.ready_queue[cpu_id].is_empty() {
             self.run(cpu);
             timer.start(cpu_id);
         }
@@ -161,12 +176,15 @@ impl Scheduler {
 
     pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
         match self.current_task_id[cpu_id] {
-            Some(task_id) => self.task_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
+            Some(task_id) => self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
             None => None
         }
     }
 
     /// Returns a mutable reference to the task with the specified ID, if found.
+    /// 
+    /// This method searches across all task queues (ready, blocked, zombie) to find
+    /// the task with the specified ID. This is needed for Waker integration.
     /// 
     /// # Arguments
     /// * `task_id` - The ID of the task to search for.
@@ -174,12 +192,53 @@ impl Scheduler {
     /// # Returns
     /// A mutable reference to the task if found, or None otherwise.
     pub fn get_task_by_id(&mut self, task_id: usize) -> Option<&mut Task> {
-        for task_queue in self.task_queue.iter_mut() {
-            if let Some(task) = task_queue.iter_mut().find(|t| t.get_id() == task_id) {
+        // Search in ready queues
+        for ready_queue in self.ready_queue.iter_mut() {
+            if let Some(task) = ready_queue.iter_mut().find(|t| t.get_id() == task_id) {
                 return Some(task);
             }
         }
+        
+        // Search in blocked queues
+        for blocked_queue in self.blocked_queue.iter_mut() {
+            if let Some(task) = blocked_queue.iter_mut().find(|t| t.get_id() == task_id) {
+                return Some(task);
+            }
+        }
+        
+        // Search in zombie queues
+        for zombie_queue in self.zombie_queue.iter_mut() {
+            if let Some(task) = zombie_queue.iter_mut().find(|t| t.get_id() == task_id) {
+                return Some(task);
+            }
+        }
+        
         None
+    }
+
+    /// Move a task from blocked queue to ready queue when it's woken up
+    /// 
+    /// This method is called by Waker when a blocked task needs to be woken up.
+    /// 
+    /// # Arguments
+    /// * `task_id` - The ID of the task to move to ready queue
+    /// 
+    /// # Returns
+    /// true if the task was found and moved, false otherwise
+    pub fn wake_task(&mut self, task_id: usize) -> bool {
+        // Search for the task in blocked queues
+        for cpu_id in 0..self.blocked_queue.len() {
+            if let Some(pos) = self.blocked_queue[cpu_id].iter().position(|t| t.get_id() == task_id) {
+                if let Some(mut task) = self.blocked_queue[cpu_id].remove(pos) {
+                    // Set task state to Ready
+                    task.state = TaskState::Ready;
+                    // Move to ready queue
+                    self.ready_queue[cpu_id].push_back(task);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -265,6 +324,6 @@ mod tests {
         let mut scheduler = Scheduler::new();
         let task = Task::new("TestTask".to_string(), 1, TaskType::Kernel);
         scheduler.add_task(task, 0);
-        assert_eq!(scheduler.task_queue[0].len(), 1);
+        assert_eq!(scheduler.ready_queue[0].len(), 1);
     }
 }

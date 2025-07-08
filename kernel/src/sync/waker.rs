@@ -123,8 +123,8 @@ impl Waker {
 
     /// Wake up one waiting task
     /// 
-    /// This method removes one task from the wait queue and sets its state
-    /// to `Ready`, making it eligible for scheduling again.
+    /// This method removes one task from the wait queue and moves it from
+    /// the blocked queue to the ready queue, making it eligible for scheduling again.
     /// 
     /// # Returns
     /// 
@@ -146,20 +146,17 @@ impl Waker {
         };
 
         if let Some(task_id) = task_id {
-            // Get the task and set it to Ready state
-            if let Some(task) = get_scheduler().get_task_by_id(task_id) {
-                task.set_state(TaskState::Ready);
-                return true;
-            }
+            // Use the scheduler's wake_task method to move from blocked to ready queue
+            get_scheduler().wake_task(task_id)
+        } else {
+            false
         }
-        
-        false
     }
 
     /// Wake up all waiting tasks
     /// 
-    /// This method removes all tasks from the wait queue and sets their
-    /// states to `Ready`, making them all eligible for scheduling again.
+    /// This method removes all tasks from the wait queue and moves them from
+    /// the blocked queue to the ready queue, making them all eligible for scheduling again.
     /// 
     /// # Returns
     /// 
@@ -181,8 +178,8 @@ impl Waker {
 
         let mut woken_count = 0;
         for task_id in task_ids {
-            if let Some(task) = get_scheduler().get_task_by_id(task_id) {
-                task.set_state(TaskState::Ready);
+            // Use the scheduler's wake_task method to move from blocked to ready queue
+            if get_scheduler().wake_task(task_id) {
                 woken_count += 1;
             }
         }
