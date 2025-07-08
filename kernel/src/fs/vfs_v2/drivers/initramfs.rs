@@ -27,7 +27,9 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
     let size = original_area.size();
     early_println!("[InitRamFS] Original initramfs at {:#x}, size: {} bytes", original_area.start, size);
     let new_ptr = usable_area.start as *mut u8;
-    usable_area.start = new_ptr as usize + size;
+    // IMPORTANT: Create the new memory area BEFORE modifying usable_area.start
+    // to prevent compiler optimizations from affecting pointer calculations
+    let new_area = MemoryArea::new(new_ptr as usize, (new_ptr as usize) + size - 1);
     unsafe {
         ptr::copy_nonoverlapping(
             original_area.start as *const u8,
@@ -35,7 +37,8 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
             size
         );
     }
-    let new_area = MemoryArea::new(new_ptr as usize, (new_ptr as usize) + size - 1);
+    // Update usable_area start AFTER copying to avoid memory corruption
+    usable_area.start = new_ptr as usize + size;
     early_println!("[InitRamFS] Relocated initramfs to {:#x}", new_area.start);
     unsafe { INITRAMFS_AREA = Some(new_area) };
     Ok(())
