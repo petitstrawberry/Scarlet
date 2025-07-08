@@ -77,6 +77,11 @@ impl Scheduler {
                             TaskState::Terminated => {
                                 panic!("At least one task must be scheduled");
                             },
+                            TaskState::Blocked(_) => {
+                                // Put blocked task back to the end of queue without running it
+                                self.task_queue[cpu_id].push_back(t);
+                                continue;
+                            },
                             _ => {
                                 if self.current_task_id[cpu_id].is_none() {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
@@ -99,6 +104,11 @@ impl Scheduler {
                                 continue;
                             },
                             TaskState::Terminated => {
+                                continue;
+                            },
+                            TaskState::Blocked(_) => {
+                                // Put blocked task back to the end of queue without running it
+                                self.task_queue[cpu_id].push_back(t);
                                 continue;
                             },
                             _ => {

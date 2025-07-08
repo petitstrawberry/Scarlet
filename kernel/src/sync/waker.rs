@@ -106,7 +106,7 @@ impl Waker {
         if let Some(task) = mytask() {
             let task_id = task.get_id();
             
-            // Add task to wait queue
+            // Add task to wait queue first
             {
                 let mut queue = self.wait_queue.lock();
                 queue.push_back(task_id);
@@ -116,8 +116,8 @@ impl Waker {
             task.set_state(TaskState::Blocked(self.block_type));
             
             // Yield CPU to scheduler
-            // TODO: Call scheduler to switch to another task
-            // This will be implemented in Phase 3 when scheduler integration is done
+            let cpu = crate::arch::get_cpu();
+            get_scheduler().schedule(cpu);
         }
     }
 
@@ -240,5 +240,42 @@ mod tests {
         let waker = Waker::new_interruptible("empty_test");
         assert_eq!(waker.wake_one(), false);
         assert_eq!(waker.wake_all(), 0);
+    }
+
+    #[test_case]
+    fn test_block_type_enum() {
+        assert_eq!(BlockedType::Interruptible, BlockedType::Interruptible);
+        assert_eq!(BlockedType::Uninterruptible, BlockedType::Uninterruptible);
+        assert_ne!(BlockedType::Interruptible, BlockedType::Uninterruptible);
+    }
+
+    #[test_case]
+    fn test_waker_properties() {
+        let waker = Waker::new_interruptible("properties_test");
+        
+        // Test initial state
+        assert_eq!(waker.waiting_count(), 0);
+        assert_eq!(waker.name(), "properties_test");
+        assert_eq!(waker.block_type(), BlockedType::Interruptible);
+        
+        // Test wake operations on empty queue
+        assert_eq!(waker.wake_one(), false);
+        assert_eq!(waker.wake_all(), 0);
+        assert_eq!(waker.waiting_count(), 0);
+    }
+
+    #[test_case] 
+    fn test_multiple_wakers() {
+        let waker1 = Waker::new_interruptible("waker1");
+        let waker2 = Waker::new_uninterruptible("waker2");
+        
+        assert_eq!(waker1.name(), "waker1");
+        assert_eq!(waker2.name(), "waker2");
+        assert_eq!(waker1.block_type(), BlockedType::Interruptible);
+        assert_eq!(waker2.block_type(), BlockedType::Uninterruptible);
+        
+        // Both should start empty
+        assert_eq!(waker1.waiting_count(), 0);
+        assert_eq!(waker2.waiting_count(), 0);
     }
 }
