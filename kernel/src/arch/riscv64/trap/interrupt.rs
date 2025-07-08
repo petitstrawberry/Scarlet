@@ -25,10 +25,11 @@ fn handle_software_interrupt() {
 }
 
 /// Handle timer interrupt from CLINT
-fn handle_timer_interrupt(trapframe: &mut Trapframe) {    
+fn handle_timer_interrupt(_trapframe: &mut Trapframe) {        
     // Call the existing scheduler
     let scheduler = get_scheduler();
-    scheduler.schedule(trapframe);
+    let cpu = crate::arch::get_cpu();
+    scheduler.schedule(cpu);
 }
 
 /// Handle external interrupt from PLIC

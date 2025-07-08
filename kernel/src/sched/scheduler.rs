@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -138,7 +138,13 @@ impl Scheduler {
         }
     }
 
-    pub fn schedule(&mut self, cpu: &mut Arch) {
+    // Schedule tasks on the CPU
+    // This function is called by the timer interrupt handler.
+    // It runs the current task and switches to user space if there are tasks in the queue
+    // or goes to idle if the queue is empty.
+    // This function should not raise any exceptions before the idle loop.
+    // It is expected to be called from the timer interrupt handler.
+    pub fn schedule(&mut self, cpu: &mut Arch) -> ! {
         let cpu_id = cpu.get_cpuid();
 
         let timer = get_kernel_timer();
@@ -148,7 +154,11 @@ impl Scheduler {
         if !self.ready_queue[cpu_id].is_empty() {
             self.run(cpu);
             timer.start(cpu_id);
+            arch_switch_to_user_space(cpu);
         }
+        // If the task queue is empty, go to idle
+        timer.start(cpu_id);
+        idle();
     }
 
     /* MUST NOT raise any exception in this function before the idle loop */

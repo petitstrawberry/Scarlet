@@ -2,7 +2,7 @@ use core::{arch::asm, ptr::read_unaligned};
 
 pub mod sbi;
 
-pub fn idle() {
+pub fn idle() -> ! {
     loop {
         unsafe {
             asm!("wfi", options(nostack));
