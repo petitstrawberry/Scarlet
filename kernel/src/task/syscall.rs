@@ -89,7 +89,6 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(get_cpu());
-    trapframe.get_arg(0) as usize
 }
 
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
@@ -294,7 +293,6 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 WaitError::ChildNotExited(_) => {
                     // If the child task is not exited, we need to wait for it
                     get_scheduler().schedule(trapframe);
-                    trapframe.get_return_value()
                 },
             }
         }
