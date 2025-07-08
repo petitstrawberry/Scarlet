@@ -16,7 +16,9 @@ const PLIC_ENABLE_BASE: usize = 0x0000_2000;
 const PLIC_THRESHOLD_BASE: usize = 0x0020_0000;
 const PLIC_CLAIM_BASE: usize = 0x0020_0004;
 
-/// PLIC context stride (per CPU)
+/// PLIC context stride for enable registers (per context)
+const PLIC_ENABLE_CONTEXT_STRIDE: usize = 0x80;
+/// PLIC context stride for threshold/claim registers (per context)
 const PLIC_CONTEXT_STRIDE: usize = 0x1000;
 
 /// Maximum number of interrupts supported by this PLIC implementation
@@ -51,6 +53,12 @@ impl Plic {
         }
     }
 
+    /// Convert CPU ID to PLIC context ID for Supervisor mode.
+    /// Hart 0 S-Mode -> Context 1, Hart 1 S-Mode -> Context 3, etc.
+    fn context_id_for_cpu(&self, cpu_id: CpuId) -> usize {
+        (cpu_id as usize * 2) + 1
+    }
+
     /// Get the address of a priority register for an interrupt
     fn priority_addr(&self, interrupt_id: InterruptId) -> usize {
         self.base_addr + PLIC_PRIORITY_BASE + (interrupt_id as usize * 4)
@@ -65,19 +73,22 @@ impl Plic {
     /// Get the address of an enable register for a CPU and interrupt
     fn enable_addr(&self, cpu_id: CpuId, interrupt_id: InterruptId) -> usize {
         let word_offset = interrupt_id / 32;
-        let context_offset = cpu_id as usize * PLIC_CONTEXT_STRIDE;
+        let context_id = self.context_id_for_cpu(cpu_id);
+        let context_offset = context_id * PLIC_ENABLE_CONTEXT_STRIDE;
         self.base_addr + PLIC_ENABLE_BASE + context_offset + (word_offset as usize * 4)
     }
 
     /// Get the address of a threshold register for a CPU
     fn threshold_addr(&self, cpu_id: CpuId) -> usize {
-        let context_offset = cpu_id as usize * PLIC_CONTEXT_STRIDE;
+        let context_id = self.context_id_for_cpu(cpu_id);
+        let context_offset = context_id * PLIC_CONTEXT_STRIDE;
         self.base_addr + PLIC_THRESHOLD_BASE + context_offset
     }
 
     /// Get the address of a claim register for a CPU
     fn claim_addr(&self, cpu_id: CpuId) -> usize {
-        let context_offset = cpu_id as usize * PLIC_CONTEXT_STRIDE;
+        let context_id = self.context_id_for_cpu(cpu_id);
+        let context_offset = context_id * PLIC_CONTEXT_STRIDE;
         self.base_addr + PLIC_CLAIM_BASE + context_offset
     }
 
@@ -105,8 +116,13 @@ impl ExternalInterruptController for Plic {
     fn init(&mut self) -> InterruptResult<()> {
         // Disable all interrupts for all CPUs initially
         for cpu_id in 0..self.max_cpus {
-            for interrupt_id in 1..=self.max_interrupts {
-                let _ = self.disable_interrupt(interrupt_id, cpu_id);
+            // Disable all interrupts for this CPU's context
+            for word in 0..=(self.max_interrupts / 32) {
+                let interrupt_id_base = word * 32;
+                if interrupt_id_base > 0 { // Interrupt ID 0 is not used
+                    let addr = self.enable_addr(cpu_id, interrupt_id_base);
+                    unsafe { write_volatile(addr as *mut u32, 0); }
+                }
             }
             // Set threshold to 0 (allow all priorities)
             let _ = self.set_threshold(cpu_id, 0);
@@ -327,17 +343,23 @@ mod tests {
         assert_eq!(plic.priority_addr(1), 0x1000_0004);
         assert_eq!(plic.priority_addr(10), 0x1000_0028);
         
-        // Test enable address
-        assert_eq!(plic.enable_addr(0, 1), 0x1000_2000);
-        assert_eq!(plic.enable_addr(1, 1), 0x1000_3000);
+        // Test enable address for S-Mode
+        // CPU 0 -> Context 1
+        assert_eq!(plic.enable_addr(0, 10), 0x1000_2080);
+        // CPU 1 -> Context 3
+        assert_eq!(plic.enable_addr(1, 40), 0x1000_2184);
         
-        // Test threshold address
-        assert_eq!(plic.threshold_addr(0), 0x1020_0000);
-        assert_eq!(plic.threshold_addr(1), 0x1020_1000);
+        // Test threshold address for S-Mode
+        // CPU 0 -> Context 1
+        assert_eq!(plic.threshold_addr(0), 0x1020_1000);
+        // CPU 1 -> Context 3
+        assert_eq!(plic.threshold_addr(1), 0x1020_3000);
         
-        // Test claim address
-        assert_eq!(plic.claim_addr(0), 0x1020_0004);
-        assert_eq!(plic.claim_addr(1), 0x1020_1004);
+        // Test claim address for S-Mode
+        // CPU 0 -> Context 1
+        assert_eq!(plic.claim_addr(0), 0x1020_1004);
+        // CPU 1 -> Context 3
+        assert_eq!(plic.claim_addr(1), 0x1020_3004);
     }
 
     #[test_case]
