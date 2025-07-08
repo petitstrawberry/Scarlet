@@ -190,6 +190,7 @@ pub mod library;
 pub mod mem;
 pub mod traits;
 pub mod sched;
+pub mod sync;
 pub mod earlycon;
 pub mod environment;
 pub mod vm;

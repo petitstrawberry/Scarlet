@@ -13,12 +13,21 @@ use spin::Mutex;
 use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::{Handle, HandleTable, KernelObject}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 
+/// Types of blocked states for tasks
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum BlockedType {
+    /// Interruptible blocking - can be interrupted by signals
+    Interruptible,
+    /// Uninterruptible blocking - cannot be interrupted, must wait for completion
+    Uninterruptible,
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
     NotInitialized,
     Ready,
     Running,
-    Blocked,
+    Blocked(BlockedType),
     Zombie,
     Terminated,
 }
