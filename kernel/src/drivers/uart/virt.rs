@@ -35,6 +35,7 @@ pub const THR_OFFSET: usize = 0x00;
 pub const IER_OFFSET: usize = 0x01;  // Interrupt Enable Register
 pub const IIR_OFFSET: usize = 0x02;  // Interrupt Identification Register
 pub const FCR_OFFSET: usize = 0x02;  // FIFO Control Register (write only)
+pub const MCR_OFFSET: usize = 0x04;  // Modem Control Register
 pub const LSR_OFFSET: usize = 0x05;
 
 pub const LSR_THRE: u8 = 0x20;
@@ -54,6 +55,9 @@ pub const IIR_THRE: u8 = 0x02;    // Transmit Holding Register Empty
 pub const FCR_ENABLE: u8 = 0x01;   // FIFO enable
 pub const FCR_CLEAR_RX: u8 = 0x02; // Clear receive FIFO
 pub const FCR_CLEAR_TX: u8 = 0x04; // Clear transmit FIFO
+
+// MCR bits
+pub const MCR_OUT2: u8 = 0x08; // OUT2 signal
 
 impl Uart {
     pub fn new(base: usize) -> Self {
@@ -98,6 +102,8 @@ impl Uart {
         
         // Enable receive data available interrupt
         self.reg_write(IER_OFFSET, IER_RDA);
+
+        self.reg_write(MCR_OFFSET, MCR_OUT2);
         
         // Register interrupt with interrupt manager
         InterruptManager::with_manager(|mgr| {
