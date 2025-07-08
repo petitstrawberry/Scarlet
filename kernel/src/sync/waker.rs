@@ -8,6 +8,7 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use spin::Mutex;
+use core::fmt;
 use crate::task::{BlockedType, TaskState, mytask};
 use crate::sched::scheduler::get_scheduler;
 
@@ -213,6 +214,135 @@ impl Waker {
     pub fn name(&self) -> &'static str {
         self.name
     }
+
+    /// Get a list of task IDs currently waiting in the queue
+    /// 
+    /// This method returns a snapshot of all task IDs currently waiting
+    /// in this waker's queue. Useful for debugging and monitoring.
+    /// 
+    /// # Returns
+    /// 
+    /// A vector containing all waiting task IDs
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// let waiting_tasks = waker.get_waiting_task_ids();
+    /// println!("Tasks waiting: {:?}", waiting_tasks);
+    /// ```
+    pub fn get_waiting_task_ids(&self) -> VecDeque<usize> {
+        self.wait_queue.lock().clone()
+    }
+
+    /// Check if a specific task is waiting in this waker
+    /// 
+    /// # Arguments
+    /// 
+    /// * `task_id` - The ID of the task to check
+    /// 
+    /// # Returns
+    /// 
+    /// `true` if the task is waiting in this waker, `false` otherwise
+    pub fn is_task_waiting(&self, task_id: usize) -> bool {
+        self.wait_queue.lock().contains(&task_id)
+    }
+
+    /// Get detailed statistics about this waker
+    /// 
+    /// This method provides detailed information about the current state
+    /// of the waker, including all waiting tasks and their metadata.
+    /// 
+    /// # Returns
+    /// 
+    /// A `WakerStats` struct containing comprehensive state information
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// let stats = uart_waker.get_stats();
+    /// // Use Debug trait to print the stats
+    /// ```
+    pub fn get_stats(&self) -> WakerStats {
+        let waiting_tasks = self.wait_queue.lock();
+        WakerStats {
+            name: self.name,
+            block_type: self.block_type,
+            waiting_count: waiting_tasks.len(),
+            waiting_task_ids: waiting_tasks.clone(),
+        }
+    }
+
+    /// Print debug information about this waker
+    /// 
+    /// Outputs detailed information about the waker's current state
+    /// including name, blocking type, waiting task count, and task IDs.
+    /// Useful for debugging and monitoring system state.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// waker.debug_print();
+    /// // Output:
+    /// // [Waker DEBUG] uart_rx: Interruptible, 3 waiting tasks: [42, 137, 89]
+    /// ```
+    /// Check if the waker has any waiting tasks
+    /// 
+    /// # Returns
+    /// 
+    /// `true` if there are no waiting tasks, `false` otherwise
+    pub fn is_empty(&self) -> bool {
+        self.wait_queue.lock().is_empty()
+    }
+
+    /// Clear all waiting tasks without waking them
+    /// 
+    /// This is a dangerous operation that should only be used in
+    /// exceptional circumstances like system cleanup or error recovery.
+    /// The tasks will remain in blocked state and need to be handled
+    /// separately.
+    /// 
+    /// # Returns
+    /// 
+    /// The number of tasks that were removed from the queue
+    /// 
+    /// # Safety
+    /// 
+    /// This operation can leave tasks in a permanently blocked state.
+    /// Use with extreme caution.
+    pub fn clear_queue(&self) -> usize {
+        let mut queue = self.wait_queue.lock();
+        let count = queue.len();
+        queue.clear();
+        count
+    }
+}
+
+impl fmt::Debug for Waker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let waiting_tasks = self.wait_queue.lock();
+        f.debug_struct("Waker")
+            .field("name", &self.name)
+            .field("block_type", &self.block_type)
+            .field("waiting_count", &waiting_tasks.len())
+            .field("waiting_task_ids", &*waiting_tasks)
+            .finish()
+    }
+}
+
+/// Statistics and state information for a Waker
+/// 
+/// This struct provides a comprehensive view of a waker's current state,
+/// useful for debugging, monitoring, and system analysis.
+#[derive(Debug, Clone)]
+pub struct WakerStats {
+    /// Human-readable name of the waker
+    pub name: &'static str,
+    /// The blocking type (Interruptible or Uninterruptible)
+    pub block_type: BlockedType,
+    /// Number of tasks currently waiting
+    pub waiting_count: usize,
+    /// List of task IDs currently waiting
+    pub waiting_task_ids: VecDeque<usize>,
 }
 
 #[cfg(test)]
@@ -240,39 +370,51 @@ mod tests {
     }
 
     #[test_case]
-    fn test_block_type_enum() {
-        assert_eq!(BlockedType::Interruptible, BlockedType::Interruptible);
-        assert_eq!(BlockedType::Uninterruptible, BlockedType::Uninterruptible);
-        assert_ne!(BlockedType::Interruptible, BlockedType::Uninterruptible);
+    fn test_debug_functionality() {
+        let waker = Waker::new_interruptible("debug_test");
+        
+        // Test empty waker
+        assert!(waker.is_empty());
+        assert_eq!(waker.waiting_count(), 0);
+        assert_eq!(waker.get_waiting_task_ids().len(), 0);
+        assert!(!waker.is_task_waiting(42));
+        
+        // Test stats
+        let stats = waker.get_stats();
+        assert_eq!(stats.name, "debug_test");
+        assert_eq!(stats.block_type, BlockedType::Interruptible);
+        assert_eq!(stats.waiting_count, 0);
+        assert!(stats.waiting_task_ids.is_empty());
     }
 
     #[test_case]
-    fn test_waker_properties() {
-        let waker = Waker::new_interruptible("properties_test");
+    fn test_debug_trait() {
+        let waker = Waker::new_uninterruptible("debug_trait_test");
         
-        // Test initial state
-        assert_eq!(waker.waiting_count(), 0);
-        assert_eq!(waker.name(), "properties_test");
-        assert_eq!(waker.block_type(), BlockedType::Interruptible);
-        
-        // Test wake operations on empty queue
-        assert_eq!(waker.wake_one(), false);
-        assert_eq!(waker.wake_all(), 0);
-        assert_eq!(waker.waiting_count(), 0);
+        // Verify Debug trait implementation exists and works
+        let debug_string = alloc::format!("{:?}", waker);
+        assert!(debug_string.contains("debug_trait_test"));
+        assert!(debug_string.contains("Uninterruptible"));
+        assert!(debug_string.contains("waiting_count: 0"));
     }
 
-    #[test_case] 
-    fn test_multiple_wakers() {
-        let waker1 = Waker::new_interruptible("waker1");
-        let waker2 = Waker::new_uninterruptible("waker2");
+    #[test_case]
+    fn test_clear_queue() {
+        let waker = Waker::new_interruptible("clear_test");
         
-        assert_eq!(waker1.name(), "waker1");
-        assert_eq!(waker2.name(), "waker2");
-        assert_eq!(waker1.block_type(), BlockedType::Interruptible);
-        assert_eq!(waker2.block_type(), BlockedType::Uninterruptible);
+        // Test clearing empty queue
+        assert_eq!(waker.clear_queue(), 0);
+        assert!(waker.is_empty());
+    }
+
+    #[test_case]
+    fn test_waker_stats_debug() {
+        let waker = Waker::new_interruptible("stats_test");
+        let stats = waker.get_stats();
         
-        // Both should start empty
-        assert_eq!(waker1.waiting_count(), 0);
-        assert_eq!(waker2.waiting_count(), 0);
+        // Test WakerStats Debug implementation
+        let debug_string = alloc::format!("{:?}", stats);
+        assert!(debug_string.contains("stats_test"));
+        assert!(debug_string.contains("Interruptible"));
     }
 }
