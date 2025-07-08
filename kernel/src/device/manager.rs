@@ -51,6 +51,7 @@ use spin::rwlock::RwLock;
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::PlatformDeviceInfo;
+use crate::early_println;
 use crate::println;
 
 use super::fdt::FdtManager;
@@ -333,7 +334,7 @@ impl DeviceManager {
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
-            println!("FDT not initialized");
+            early_println!("FDT not initialized");
             return;
         }
         let fdt = fdt.unwrap();
@@ -341,11 +342,11 @@ impl DeviceManager {
         let priority_list = priorities.unwrap_or(DriverPriority::all());
         
         for &priority in priority_list {
-            println!("Populating devices with {} drivers from FDT...", priority.description());
+            early_println!("Populating devices with {} drivers from FDT...", priority.description());
             
             let soc = fdt.find_node("/soc");
             if soc.is_none() {
-                println!("No /soc node found");
+                early_println!("No /soc node found");
                 continue;
             }
 
@@ -396,9 +397,9 @@ impl DeviceManager {
                                 resources,
                             ));
                             if let Err(e) = driver.probe(&*device) {
-                                println!("Failed to probe {} device {}: {}", priority.description(), device.name(), e);
+                                early_println!("Failed to probe {} device {}: {}", priority.description(), device.name(), e);
                             } else {
-                                println!("Successfully probed {} device: {}", priority.description(), device.name());
+                                early_println!("Successfully probed {} device: {}", priority.description(), device.name());
                                 idx += 1;
                             }
                             break; // Found matching driver, move to next device
