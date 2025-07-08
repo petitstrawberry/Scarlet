@@ -85,6 +85,10 @@ impl Scheduler {
                                 panic!("At least one task must be scheduled");
                             },
                             TaskState::Blocked(_) => {
+                                // Reset current_task_id since this task is no longer current
+                                if self.current_task_id[cpu_id] == Some(t.get_id()) {
+                                    self.current_task_id[cpu_id] = None;
+                                }
                                 // Put blocked task back to the end of queue without running it
                                 self.ready_queue[cpu_id].push_back(t);
                                 continue;
@@ -114,6 +118,10 @@ impl Scheduler {
                                 continue;
                             },
                             TaskState::Blocked(_) => {
+                                // Reset current_task_id since this task is no longer current
+                                if self.current_task_id[cpu_id] == Some(t.get_id()) {
+                                    self.current_task_id[cpu_id] = None;
+                                }
                                 // Put blocked task back to the end of queue without running it
                                 self.blocked_queue[cpu_id].push_back(t);
                                 continue;
@@ -240,8 +248,8 @@ impl Scheduler {
         for cpu_id in 0..self.blocked_queue.len() {
             if let Some(pos) = self.blocked_queue[cpu_id].iter().position(|t| t.get_id() == task_id) {
                 if let Some(mut task) = self.blocked_queue[cpu_id].remove(pos) {
-                    // Set task state to Ready
-                    task.state = TaskState::Ready;
+                    // Set task state to Running
+                    task.state = TaskState::Running;
                     // Move to ready queue
                     self.ready_queue[cpu_id].push_back(task);
                     return true;
