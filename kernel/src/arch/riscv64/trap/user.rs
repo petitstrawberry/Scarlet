@@ -1,10 +1,11 @@
 use core::arch::naked_asm;
+use core::sync::atomic::compiler_fence;
 use core::{arch::asm, mem::transmute};
 
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
-use crate::arch::Trapframe;
+use crate::arch::{trap, Trapframe};
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
@@ -76,8 +77,22 @@ pub extern "C" fn _user_trap_entry() {
                 /* Call the user trap handler */
                 /* Load the function pointer from the trapframe */
                 ld      ra, 288(a0)
-                jalr    ra, 0(ra)
+                jr      ra
+            "
+        );
+    }
+}
 
+
+#[unsafe(link_section = ".trampoline.text")]
+#[unsafe(export_name = "_user_trap_exit")]
+#[unsafe(naked)]
+pub extern "C" fn _user_trap_exit() -> ! {
+    unsafe {
+        naked_asm!("
+        .option norvc
+        .option norelax
+        .align 8
                 /* Restore the user memory space */
                 ld     t0, 272(a0)
                 csrrw  t0, satp, t0
@@ -133,9 +148,8 @@ pub extern "C" fn _user_trap_entry() {
     }
 }
 
-
 #[unsafe(export_name = "arch_user_trap_handler")]
-pub extern "C" fn arch_user_trap_handler(addr: usize) -> usize {
+pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     let trapframe: &mut Trapframe = unsafe { transmute(addr) };
 
     let cause: usize;
@@ -146,15 +160,43 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> usize {
         );
     }
 
-    /* Switch to kernel memory space */
-    // switch_to_kernel_vm();
-
     let interrupt = cause & 0x8000000000000000 != 0;
     if interrupt {
         arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
         arch_exception_handler(trapframe, cause);
     }
+    // Jump direc_tly to user trap exit via trampoline
+    arch_switch_to_user_space(trapframe);
+}
 
-    addr
+/// Switch to user space using the trampoline mechanism
+/// 
+/// This function prepares the trapframe for user space execution
+/// and jumps to the user trap exit handler using a trampoline.
+/// 
+/// # Arguments
+/// * `trapframe` - A mutable reference to the trapframe that contains the state to switch to user space.
+///
+/// This function is marked as `noreturn` because it will not return to the caller.
+/// It will jump to the user trap exit handler, which will then return to user space.
+#[unsafe(export_name = "arch_switch_to_user_space")]
+pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+    let addr = trapframe as *mut Trapframe as usize;
+    
+    // Get the trampoline address for _user_trap_exit
+    let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
+    let trampoline_base = crate::vm::get_trampoline_trap_vector();
+    let trap_exit_addr = trampoline_base + trap_exit_offset;
+    
+    unsafe {
+        asm!(
+            "mv t0, {trap_exit_addr}",    // Load jump target into t0 first
+            "mv a0, {trapframe_addr}",    // Load trapframe addr into a0
+            "jr t0",                      // Jump using t0 (preserves a0)
+            trapframe_addr = in(reg) addr,
+            trap_exit_addr = in(reg) trap_exit_addr,
+            options(noreturn, nostack)
+        );
+    }
 }
