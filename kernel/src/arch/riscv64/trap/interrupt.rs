@@ -40,7 +40,7 @@ fn handle_external_interrupt(trapframe: &mut Trapframe) {
         mgr.claim_and_handle_external_interrupt(cpu_id)
     }) {
         Ok(Some(interrupt_id)) => {
-            crate::early_println!("[interrupt] Handled external interrupt {} on CPU {}", interrupt_id, cpu_id);
+            // crate::early_println!("[interrupt] Handled external interrupt {} on CPU {}", interrupt_id, cpu_id);
         }
         Ok(None) => {
             crate::early_println!("[interrupt] No pending external interrupt on CPU {}", cpu_id);
