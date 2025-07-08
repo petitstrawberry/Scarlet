@@ -35,7 +35,7 @@ pub const THR_OFFSET: usize = 0x00;
 pub const IER_OFFSET: usize = 0x01;  // Interrupt Enable Register
 pub const IIR_OFFSET: usize = 0x02;  // Interrupt Identification Register
 pub const FCR_OFFSET: usize = 0x02;  // FIFO Control Register (write only)
-pub const MCR_OFFSET: usize = 0x04;  // Modem Control Register
+pub const LCR_OFFSET: usize = 0x03;  // Line Control Register
 pub const LSR_OFFSET: usize = 0x05;
 
 pub const LSR_THRE: u8 = 0x20;
@@ -56,8 +56,7 @@ pub const FCR_ENABLE: u8 = 0x01;   // FIFO enable
 pub const FCR_CLEAR_RX: u8 = 0x02; // Clear receive FIFO
 pub const FCR_CLEAR_TX: u8 = 0x04; // Clear transmit FIFO
 
-// MCR bits
-pub const MCR_OUT2: u8 = 0x08; // OUT2 signal
+pub const LCR_BAUD_LATCH: u8 = 0x80; // Set baud rate divisor latch access bit
 
 impl Uart {
     pub fn new(base: usize) -> Self {
@@ -66,6 +65,26 @@ impl Uart {
             interrupt_id: None,
             rx_buffer: None,
         }
+    }
+
+    pub fn init(&mut self) {
+        // Disable all interrupts
+        self.reg_write(IER_OFFSET, 0x00);
+
+        // Set special mode to set baud rate
+        self.reg_write(LCR_OFFSET, LCR_BAUD_LATCH);
+
+        // LSB of baud rate divisor
+        self.reg_write(0x00, 0x03);
+
+        // MSB of baud rate divisor
+        self.reg_write(0x01, 0x00);
+
+        // Set line control register for 8 data bits, no parity, 1 stop bit
+        self.reg_write(LCR_OFFSET, 0x03); // 8 bits, no
+
+        // Enable FIFO
+        self.reg_write(FCR_OFFSET, FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX);
     }
 
     fn reg_write(&self, offset: usize, value: u8) {
@@ -97,14 +116,9 @@ impl Uart {
         // Create shared receive buffer
         self.rx_buffer = Some(alloc::sync::Arc::new(Mutex::new(VecDeque::new())));
         
-        // Enable FIFO
-        self.reg_write(FCR_OFFSET, FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX);
-        
         // Enable receive data available interrupt
         self.reg_write(IER_OFFSET, IER_RDA);
 
-        self.reg_write(MCR_OFFSET, MCR_OUT2);
-        
         // Register interrupt with interrupt manager
         InterruptManager::with_manager(|mgr| {
             mgr.enable_external_interrupt(interrupt_id, 0) // Enable for CPU 0
@@ -120,11 +134,6 @@ impl Uart {
 }
 
 impl Serial for Uart {
-    fn init(&mut self) {
-        // Initialization code for the UART can be added here if needed.
-        // For now, we assume the UART is already initialized by the QEMU virt machine.
-    }
-
     /// Writes a character to the UART. (blocking)
     /// 
     /// This function will block until the UART is ready to accept the character.
@@ -310,6 +319,9 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
     
     // Create UART instance
     let mut uart = Uart::new(base_addr);
+
+    // Initialize UART
+    uart.init();
     
     // Get interrupt resource if available
     if let Some(irq_resource) = device_info.get_resources()
