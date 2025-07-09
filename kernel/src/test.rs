@@ -35,6 +35,6 @@ pub fn test_runner(tests: &[&dyn TestableFn]) {
         test.run();
     }
 
-    early_println!("[Test Runner] All tests passed");
+    early_println!("[Test Runner] All {} tests passed", tests.len());
     arch::shutdown();
 }
