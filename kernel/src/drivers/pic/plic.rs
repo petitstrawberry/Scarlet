@@ -295,10 +295,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     match InterruptManager::global().lock().register_external_controller(controller) {
         Ok(_) => {
-            crate::println!("[interrupt] PLIC registered at base address: {:#x}", base_addr);
+            crate::early_println!("[interrupt] PLIC registered at base address: {:#x}", base_addr);
         },
         Err(e) => {
-            crate::println!("[interrupt] Failed to register PLIC: {}", e);
+            crate::early_println!("[interrupt] Failed to register PLIC: {}", e);
             return Err("Failed to register PLIC");
         }
     }
