@@ -391,9 +391,10 @@ mod tests {
             |_device| Ok(()),
             vec!["sifive,test0"]
         ));
-        DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Standard);
+        let mut manager = DeviceManager::new();
+        manager.register_driver(driver, DriverPriority::Standard);
 
-        DeviceManager::get_mut_manager().populate_devices();
+        manager.populate_devices();
         let result = unsafe { TEST_RESULT };
         assert_eq!(result, true);
     }
@@ -401,7 +402,7 @@ mod tests {
     #[test_case]
     fn test_get_device_from_manager() {
         let device = Arc::new(GenericDevice::new("test", 1));
-        let manager = DeviceManager::get_mut_manager();
+        let manager = DeviceManager::new();
         let id = manager.register_device(device);
         let retrieved_device = manager.get_device(id);
         assert!(retrieved_device.is_some());
@@ -412,7 +413,7 @@ mod tests {
     #[test_case]
     fn test_get_device_by_name() {
         let device = Arc::new(GenericDevice::new("test_named", 2));
-        let manager = DeviceManager::get_mut_manager();
+        let manager = DeviceManager::new();
         let _id = manager.register_device_with_name("test_device".into(), device);
         let retrieved_device = manager.get_device_by_name("test_device");
         assert!(retrieved_device.is_some());
@@ -424,7 +425,7 @@ mod tests {
     fn test_get_first_device_by_type() {
         let device1 = Arc::new(GenericDevice::new("test_char", 3));
         let device2 = Arc::new(GenericDevice::new("test_block", 4));
-        let manager = DeviceManager::get_mut_manager();
+        let manager = DeviceManager::new();
         let _id1 = manager.register_device(device1);
         let _id2 = manager.register_device(device2);
         
@@ -436,14 +437,14 @@ mod tests {
 
     #[test_case]
     fn test_get_device_out_of_bounds() {
-        let manager = DeviceManager::get_manager();
+        let manager = DeviceManager::new();
         let device = manager.get_device(999);
         assert!(device.is_none());
     }
 
     #[test_case]
     fn test_get_device_by_name_not_found() {
-        let manager = DeviceManager::get_manager();
+        let manager = DeviceManager::new();
         let device = manager.get_device_by_name("non_existent");
         assert!(device.is_none());
     }
