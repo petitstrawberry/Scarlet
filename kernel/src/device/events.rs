@@ -126,7 +126,7 @@ impl DeviceEvent for ErrorEvent {
 /// Interrupt capable device trait.
 /// 
 /// Devices that can handle interrupts must implement this trait.
-pub trait InterruptCapableDevice {
-    fn handle_interrupt(&mut self) -> crate::interrupt::InterruptResult<()>;
+pub trait InterruptCapableDevice: Send + Sync {
+    fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()>;
     fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId>;
 }
