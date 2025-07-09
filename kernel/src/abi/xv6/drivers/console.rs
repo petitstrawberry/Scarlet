@@ -2,7 +2,7 @@ use core::any::Any;
 
 use crate::{device::{char::CharDevice, manager::DeviceManager, Device, DeviceType}};
 
-/// Character device for xv6 console
+/// Character device for xv6 console that bridges to TTY
 pub struct ConsoleDevice {
     id: usize,
     name: &'static str,
@@ -38,42 +38,57 @@ impl Device for ConsoleDevice {
         self
     }
     
-    fn as_char_device(&mut self) -> Option<&mut dyn CharDevice> {
+    fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
 }
 
 impl CharDevice for ConsoleDevice {
-    fn read_byte(&mut self) -> Option<u8> {
-        let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0)?;
-        let mut c = serial.get();
-
-        while c.is_none() {
-            // Wait for input
-            // This is a blocking read, in a real implementation you might want to handle this differently
-            c = serial.get();
+    fn read_byte(&self) -> Option<u8> {
+        // Bridge to TTY device instead of direct serial access
+        let device_manager = DeviceManager::get_manager();
+        if let Some(tty_device) = device_manager.get_device_by_name("tty0") {
+            if let Some(char_device) = tty_device.as_char_device() {
+                return char_device.read_byte();
+            }
         }
-        let c = c.unwrap();
-        if c == '\r' {
-            serial.put('\n').ok(); // Convert carriage return to newline
-        }
-        serial.put(c).ok(); // Echo back the character
-        Some(c as u8)
+        
+        // Fallback: return None if TTY is not available
+        None
     }
 
-    fn write_byte(&mut self, byte: u8) -> Result<(), &'static str> {
-        let serial = DeviceManager::get_mut_manager().basic.borrow_mut_serial(0)
-            .ok_or("Failed to borrow serial device")?;
-        serial.put(byte as char)
-            .map_err(|_| "Failed to write byte to console")
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        // Bridge to TTY device instead of direct serial access
+        let device_manager = DeviceManager::get_manager();
+        if let Some(tty_device) = device_manager.get_device_by_name("tty0") {
+            if let Some(char_device) = tty_device.as_char_device() {
+                return char_device.write_byte(byte);
+            }
+        }
+        
+        Err("TTY device not available")
     }
 
     fn can_read(&self) -> bool {
-        true
+        // Check TTY availability and read capability
+        let device_manager = DeviceManager::get_manager();
+        if let Some(tty_device) = device_manager.get_device_by_name("tty0") {
+            if let Some(char_device) = tty_device.as_char_device() {
+                return char_device.can_read();
+            }
+        }
+        false
     }
 
     fn can_write(&self) -> bool {
-        true // Mock device can always write
+        // Check TTY availability and write capability
+        let device_manager = DeviceManager::get_manager();
+        if let Some(tty_device) = device_manager.get_device_by_name("tty0") {
+            if let Some(char_device) = tty_device.as_char_device() {
+                return char_device.can_write();
+            }
+        }
+        false
     }
 }
 
