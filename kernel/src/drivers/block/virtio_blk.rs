@@ -25,13 +25,15 @@
 
 use alloc::{boxed::Box, vec::Vec};
 use alloc::vec;
+use spin::{Mutex, RwLock};
 
 use core::{mem, ptr};
 
 use crate::defer;
 use crate::device::{Device, DeviceType};
 use crate::{
-    device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
+    device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, 
+    drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
 };
 
 // VirtIO Block Request Type
@@ -101,24 +103,24 @@ pub struct VirtioBlkReqHeader {
 
 pub struct VirtioBlockDevice {
     base_addr: usize,
-    virtqueues: [VirtQueue<'static>; 1], // Only one queue for request/response
-    capacity: u64,
-    sector_size: u32,
-    features: u32,
-    read_only: bool,
-    request_queue: Vec<Box<BlockIORequest>>,
+    virtqueues: Mutex<[VirtQueue<'static>; 1]>, // Only one queue for request/response
+    capacity: RwLock<u64>,
+    sector_size: RwLock<u32>,
+    features: RwLock<u32>,
+    read_only: RwLock<bool>,
+    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
 }
 
 impl VirtioBlockDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: [VirtQueue::new(8)],
-            capacity: 0,
-            sector_size: 512, // Default sector size
-            features: 0,
-            read_only: false,
-            request_queue: Vec::new(),
+            virtqueues: Mutex::new([VirtQueue::new(8)]),
+            capacity: RwLock::new(0),
+            sector_size: RwLock::new(512), // Default sector size
+            features: RwLock::new(0),
+            read_only: RwLock::new(false),
+            request_queue: Mutex::new(Vec::new()),
         };
         
         // Initialize the device
@@ -127,24 +129,24 @@ impl VirtioBlockDevice {
         }
 
         // Read device configuration
-        device.capacity = device.read_config::<u64>(0); // Capacity at offset 0
+        *device.capacity.write() = device.read_config::<u64>(0); // Capacity at offset 0
 
         // Read device features
-        device.features = device.read32_register(Register::DeviceFeatures);
-        device.sector_size = 0;
+        let features = device.read32_register(Register::DeviceFeatures);
+        *device.features.write() = features;
         
         // Check if block size feature is supported
-        if device.features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
-            device.sector_size = device.read_config::<u32>(20); // blk_size at offset 20
+        if features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
+            *device.sector_size.write() = device.read_config::<u32>(20); // blk_size at offset 20
         }
         
         // Check if device is read-only
-        device.read_only = device.features & (1 << VIRTIO_BLK_F_RO) != 0;
+        *device.read_only.write() = features & (1 << VIRTIO_BLK_F_RO) != 0;
 
         device
     }
     
-    fn process_request(&mut self, req: &mut BlockIORequest) -> Result<(), &'static str> {
+    fn process_request(&self, req: &mut BlockIORequest) -> Result<(), &'static str> {
         // Allocate memory for request header, data, and status
         let header = Box::new(VirtioBlkReqHeader {
             type_: match req.request_type {
@@ -183,54 +185,54 @@ impl VirtioBlockDevice {
             }
         }
         
+        // Lock the virtqueues for processing
+        let mut virtqueues = self.virtqueues.lock();
+        
         // Allocate descriptors for the request
-        let header_desc = self.virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
-        let data_desc = self.virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
-        let status_desc = self.virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
+        let header_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
+        let data_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
+        let status_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
         
         // Set up header descriptor
-        self.virtqueues[0].desc[header_desc].addr = (header_ptr as usize) as u64;
-        self.virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
-        self.virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
-        self.virtqueues[0].desc[header_desc].next = data_desc as u16;
+        virtqueues[0].desc[header_desc].addr = (header_ptr as usize) as u64;
+        virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
+        virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
+        virtqueues[0].desc[header_desc].next = data_desc as u16;
         
         // Set up data descriptor
-        self.virtqueues[0].desc[data_desc].addr = (data_ptr as *mut u8 as usize) as u64;
-        self.virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
+        virtqueues[0].desc[data_desc].addr = (data_ptr as *mut u8 as usize) as u64;
+        virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
         
         // Set flags based on request type
         match req.request_type {
             BlockIORequestType::Read => {
-                // self.virtqueues[0].desc[data_desc].flags = 
-                //     DescriptorFlag::Next as u16 | DescriptorFlag::Write as u16;
-                DescriptorFlag::Next.set(&mut self.virtqueues[0].desc[data_desc].flags);
-                DescriptorFlag::Write.set(&mut self.virtqueues[0].desc[data_desc].flags);
+                DescriptorFlag::Next.set(&mut virtqueues[0].desc[data_desc].flags);
+                DescriptorFlag::Write.set(&mut virtqueues[0].desc[data_desc].flags);
             },
             BlockIORequestType::Write => {
-                // self.virtqueues[0].desc[data_desc].flags = DescriptorFlag::Next as u16;
-                DescriptorFlag::Next.set(&mut self.virtqueues[0].desc[data_desc].flags);
+                DescriptorFlag::Next.set(&mut virtqueues[0].desc[data_desc].flags);
             }
         }
         
-        self.virtqueues[0].desc[data_desc].next = status_desc as u16;
+        virtqueues[0].desc[data_desc].next = status_desc as u16;
         
         // Set up status descriptor
-        self.virtqueues[0].desc[status_desc].addr = (status_ptr as usize) as u64;
-        self.virtqueues[0].desc[status_desc].len = 1;
-        self.virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
+        virtqueues[0].desc[status_desc].addr = (status_ptr as usize) as u64;
+        virtqueues[0].desc[status_desc].len = 1;
+        virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
         
         // Submit the request to the queue
-        self.virtqueues[0].push(header_desc)?;
+        virtqueues[0].push(header_desc)?;
 
         // Notify the device
         self.notify(0);
         
         // Wait for the response (polling)
-        while self.virtqueues[0].is_busy() {}
-        while *self.virtqueues[0].used.idx as usize == self.virtqueues[0].last_used_idx {}
+        while virtqueues[0].is_busy() {}
+        while *virtqueues[0].used.idx as usize == virtqueues[0].last_used_idx {}
 
         // Process completed request
-        let desc_idx = self.virtqueues[0].pop().ok_or("No response from device")?;
+        let desc_idx = virtqueues[0].pop().ok_or("No response from device")?;
         if desc_idx != header_desc {
             return Err("Invalid descriptor index");
         }
@@ -245,7 +247,7 @@ impl VirtioBlockDevice {
                         req.buffer.clear();
                         req.buffer.extend_from_slice(core::slice::from_raw_parts(
                             data_ptr as *const u8,
-                            self.virtqueues[0].desc[data_desc].len as usize
+                            virtqueues[0].desc[data_desc].len as usize
                         ));
                     }
                 }
@@ -290,25 +292,11 @@ impl VirtioDevice for VirtioBlockDevice {
     }
     
     fn get_virtqueue_count(&self) -> usize {
-        self.virtqueues.len()
-    }
-
-    fn get_virtqueue(&self, queue_idx: usize) -> &VirtQueue {
-        &self.virtqueues[queue_idx]
+        1 // We have one virtqueue
     }
     
     fn get_supported_features(&self, device_features: u32) -> u32 {
         // Accept most features but we might want to be selective
-        // device_features
-        // NOT Negotiated
-        // - VIRTIO_BLK_F_RO
-        // - VIRTIO_BLK_F_SCSI
-        // - VIRTIO_BLK_F_CONFIG_WCE
-        // - VIRTIO_BLK_F_MQ
-        // - VIRTIO_F_ANY_LAYOUT
-        // - VIRTIO_RING_F_EVENT_IDX
-        // - VIRTIO_RING_F_INDIRECT_DESC
-
         device_features & !(1 << VIRTIO_BLK_F_RO |
             1 << VIRTIO_BLK_F_SCSI |
             1 << VIRTIO_BLK_F_CONFIG_WCE |
@@ -316,6 +304,33 @@ impl VirtioDevice for VirtioBlockDevice {
             1 << VIRTIO_F_ANY_LAYOUT |
             1 << VIRTIO_RING_F_EVENT_IDX |
             1 << VIRTIO_RING_F_INDIRECT_DESC)
+    }
+    
+    fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
+        if queue_idx >= 1 {
+            return None;
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].get_raw_ptr() as u64)
+    }
+    
+    fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
+        if queue_idx >= 1 {
+            return None;
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].avail.flags as *const _ as u64)
+    }
+    
+    fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
+        if queue_idx >= 1 {
+            return None;
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].used.flags as *const _ as u64)
     }
 }
 
@@ -329,19 +344,24 @@ impl BlockDevice for VirtioBlockDevice {
     }
     
     fn get_disk_size(&self) -> usize {
-        (self.capacity * self.sector_size as u64) as usize
+        let capacity = *self.capacity.read();
+        let sector_size = *self.sector_size.read();
+        (capacity * sector_size as u64) as usize
     }
     
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
         // Enqueue the request
-        self.request_queue.push(request);
+        self.request_queue.lock().push(request);
     }
     
     fn process_requests(&self) -> Vec<BlockIOResult> {
         let mut results = Vec::new();
-        while let Some(mut request) = self.request_queue.pop() {
+        let mut queue = self.request_queue.lock();
+        while let Some(mut request) = queue.pop() {
+            drop(queue); // Release the lock before processing
             let result = self.process_request(&mut *request);
             results.push(BlockIOResult { request, result });
+            queue = self.request_queue.lock(); // Reacquire the lock
         }
         
         results
@@ -360,26 +380,27 @@ pub mod tests {
         
         assert_eq!(device.get_id(), base_addr);
         assert_eq!(device.get_disk_name(), "virtio-blk");
-        assert_eq!(device.get_disk_size(), (device.capacity * device.sector_size as u64) as usize);
+        assert_eq!(device.get_disk_size(), (*device.capacity.read() * *device.sector_size.read() as u64) as usize);
     }
     
     #[test_case]
     fn test_virtio_block_device() {
         let base_addr = 0x10001000; // Example base address
-        let mut device = VirtioBlockDevice::new(base_addr);
+        let device = VirtioBlockDevice::new(base_addr);
         
         assert_eq!(device.get_id(), base_addr);
         assert_eq!(device.get_disk_name(), "virtio-blk");
-        assert_eq!(device.get_disk_size(), (device.capacity * device.sector_size as u64) as usize);
+        assert_eq!(device.get_disk_size(), (*device.capacity.read() * *device.sector_size.read() as u64) as usize);
         
         // Test enqueue and process requests
+        let sector_size = *device.sector_size.read();
         let request = BlockIORequest {
             request_type: BlockIORequestType::Read,
             sector: 0,
             sector_count: 1,
             head: 0,
             cylinder: 0,
-            buffer: vec![0; device.sector_size as usize],
+            buffer: vec![0; sector_size as usize],
         };
         device.enqueue_request(Box::new(request));
         
