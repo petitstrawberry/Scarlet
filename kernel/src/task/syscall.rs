@@ -88,6 +88,7 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
+    // The scheduler will handle saving the current task state internally
     get_scheduler().schedule(get_cpu());
 }
 

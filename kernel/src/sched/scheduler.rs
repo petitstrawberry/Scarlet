@@ -101,8 +101,8 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
-                                if self.current_task_id[cpu_id].is_none() {
-                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, None);
+                                if self.current_task_id[cpu_id] != Some(t.get_id()) {
+                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 }
                                 self.current_task_id[cpu_id] = Some(t.get_id());
                                 self.ready_queue[cpu_id].push_back(t);
@@ -138,13 +138,8 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
-                                let prev_task = match self.current_task_id[cpu_id] {
-                                    Some(task_id) => self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
-                                    None => None
-                                };
-                                if prev_task.is_some() {
-                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t, prev_task);
-                                }
+                                // Simply dispatch the task without prev_task logic
+                                self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 self.current_task_id[cpu_id] = Some(t.get_id());
                                 self.ready_queue[cpu_id].push_back(t);
                                 break;
@@ -157,18 +152,52 @@ impl Scheduler {
         }
     }
 
-    // Schedule tasks on the CPU
-    // This function is called by the timer interrupt handler.
-    // It runs the current task and switches to user space if there are tasks in the queue
-    // or goes to idle if the queue is empty.
-    // This function should not raise any exceptions before the idle loop.
-    // It is expected to be called from the timer interrupt handler.
+    /// Schedule tasks on the CPU, saving the currently running task's state
+    /// 
+    /// This function is called by the timer interrupt handler. It saves the current
+    /// task's state and switches to the next task.
+    /// 
+    /// # Arguments
+    /// * `cpu` - The CPU architecture state
     pub fn schedule(&mut self, cpu: &mut Arch) -> ! {
         let cpu_id = cpu.get_cpuid();
 
         let timer = get_kernel_timer();
         timer.stop(cpu_id);
         timer.set_interval_us(cpu_id, self.interval);
+
+        // Save current task state if there is one
+        if let Some(current_task_id) = self.current_task_id[cpu_id] {
+            if let Some(current_task) = self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == current_task_id) {
+                current_task.vcpu.store(cpu);
+            }
+        }
+
+        if !self.ready_queue[cpu_id].is_empty() {
+            self.run(cpu);
+            timer.start(cpu_id);
+            arch_switch_to_user_space(cpu);
+        }
+        // If the task queue is empty, go to idle
+        timer.start(cpu_id);
+        idle();
+    }
+
+    /// Schedule tasks on the CPU without current task (for initial startup)
+    /// 
+    /// This function is called at initial startup when there is no current task
+    /// to save state for. It should only be used during system initialization.
+    /// 
+    /// # Arguments
+    /// * `cpu` - The CPU architecture state
+    pub fn schedule_initial(&mut self, cpu: &mut Arch) -> ! {
+        let cpu_id = cpu.get_cpuid();
+
+        let timer = get_kernel_timer();
+        timer.stop(cpu_id);
+        timer.set_interval_us(cpu_id, self.interval);
+
+        // No current task state to save during initial startup
 
         if !self.ready_queue[cpu_id].is_empty() {
             self.run(cpu);

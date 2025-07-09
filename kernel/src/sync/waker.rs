@@ -121,6 +121,7 @@ impl Waker {
         task.vcpu.store(cpu);
 
         // Yield CPU to scheduler - this never returns
+        // The scheduler will handle saving the current task state internally
         get_scheduler().schedule(cpu);
     }
 
