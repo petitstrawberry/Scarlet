@@ -28,18 +28,26 @@ impl VirtioDevice for TestVirtioDevice {
     fn get_virtqueue_count(&self) -> usize {
         self.virtqueues.len()
     }
-    
-    fn with_virtqueue<R>(&self, queue_idx: usize, f: impl FnOnce(&VirtQueue) -> R) -> Option<R> {
+
+    fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
         if queue_idx < self.virtqueues.len() {
-            unsafe { Some(f(&*self.virtqueues[queue_idx].get())) }
+            Some(self.base_addr as u64 + (queue_idx * 0x1000) as u64) // Example offset
         } else {
             None
         }
     }
     
-    fn with_virtqueue_mut<R>(&self, queue_idx: usize, f: impl FnOnce(&mut VirtQueue) -> R) -> Option<R> {
+    fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
         if queue_idx < self.virtqueues.len() {
-            unsafe { Some(f(&mut *self.virtqueues[queue_idx].get())) }
+            Some(self.base_addr as u64 + (queue_idx * 0x1000 + 0x80) as u64) // Example offset
+        } else {
+            None
+        }
+    }
+
+    fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
+        if queue_idx < self.virtqueues.len() {
+            Some(self.base_addr as u64 + (queue_idx * 0x1000 + 0x100) as u64) // Example offset
         } else {
             None
         }

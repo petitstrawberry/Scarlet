@@ -1,6 +1,7 @@
 use core::any::Any;
 
 use alloc::{boxed::Box, vec::Vec};
+use spin::Mutex;
 use request::{BlockIORequest, BlockIOResult};
 
 use super::Device;
@@ -40,12 +41,12 @@ pub struct GenericBlockDevice {
     disk_name: &'static str,
     disk_size: usize,
     request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>,
-    request_queue: Vec<Box<BlockIORequest>>,
+    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
 }
 
 impl GenericBlockDevice {
     pub fn new(id: usize, disk_name: &'static str, disk_size: usize, request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>) -> Self {
-        Self { id, disk_name, disk_size, request_fn, request_queue: Vec::new() }
+        Self { id, disk_name, disk_size, request_fn, request_queue: Mutex::new(Vec::new()) }
     }
 }
 
@@ -88,14 +89,24 @@ impl BlockDevice for GenericBlockDevice {
         self.disk_size
     }
 
-    fn enqueue_request(&self, _request: Box<BlockIORequest>) {
-        // TODO: Implement internal mutability with Mutex
-        panic!("enqueue_request needs internal mutability implementation");
+    fn enqueue_request(&self, request: Box<BlockIORequest>) {
+        // Use Mutex for internal mutability
+        self.request_queue.lock().push(request);
     }
 
     fn process_requests(&self) -> Vec<BlockIOResult> {
-        // TODO: Implement internal mutability with Mutex
-        panic!("process_requests needs internal mutability implementation");
+        let mut results = Vec::new();
+        let mut queue = self.request_queue.lock();
+        
+        while let Some(mut request) = queue.pop() {
+            // Process the request using the function pointer
+            let result = (self.request_fn)(&mut *request);
+            
+            // Add the result to the results vector
+            results.push(BlockIOResult { request, result });
+        }
+        
+        results
     }
 }
 

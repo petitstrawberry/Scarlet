@@ -15,7 +15,7 @@ fn test_block_device_creation() {
     assert_eq!(device.get_id(), 1);
     assert_eq!(device.get_disk_name(), "test_disk");
     assert_eq!(device.get_disk_size(), 1024);
-    assert_eq!(device.request_queue.len(), 0);
+    assert_eq!(device.request_queue.lock().len(), 0);
 }
 
 #[test_case]
@@ -30,7 +30,7 @@ fn test_block_device_add_request() {
         buffer: vec![0; 512],
     });
     device.enqueue_request(request);
-    assert_eq!(device.request_queue.len(), 1);
+    assert_eq!(device.request_queue.lock().len(), 1);
 }
 
 #[test_case]
