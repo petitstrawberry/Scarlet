@@ -83,12 +83,6 @@ pub fn cleanup_task_waker(task_id: usize) {
     wakers.remove(&task_id);
 }
 
-/// Global waker for waitpid syscall
-/// 
-/// This waker is used to notify parent processes when their child processes exit.
-/// When a child process exits, it will wake up any parent process waiting in waitpid.
-pub static WAITPID_WAKER: Waker = Waker::new_interruptible("waitpid");
-
 /// Types of blocked states for tasks
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BlockedType {
