@@ -2,7 +2,6 @@ use core::panic::PanicInfo;
 
 use crate::arch;
 use crate::early_println;
-use crate::println;
 
 pub trait TestableFn {
     fn run(&self) -> ();
@@ -30,14 +29,12 @@ fn panic(info: &PanicInfo) -> ! {
 #[cfg(test)]
 pub fn test_runner(tests: &[&dyn TestableFn]) {
 
-    use crate::println;
-
-    println!("[Test Runner] Running {} tests", tests.len());
+    early_println!("[Test Runner] Running {} tests", tests.len());
     for test in tests {
         // println!("[Test Runner] Running test: {:?}", test as *const _);
         test.run();
     }
 
-    println!("[Test Runner] All {} tests passed", tests.len());
+    early_println!("[Test Runner] All {} tests passed", tests.len());
     arch::shutdown();
 }

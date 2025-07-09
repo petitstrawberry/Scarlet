@@ -10,11 +10,10 @@ use alloc::{
 use spin::{rwlock::RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
 
-use crate::{device::DeviceType, driver_initcall, fs::{
+use crate::{device::{Device, DeviceType}, driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
 }};
 use crate::object::capability::{StreamOps, StreamError};
-use crate::device::manager::BorrowedDeviceGuard;
 use crate::device::manager::DeviceManager;
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
@@ -630,7 +629,7 @@ pub struct TmpFileObject {
     position: RwLock<u64>,
     
     /// Optional device guard for device files
-    device_guard: Option<BorrowedDeviceGuard>,
+    device_guard: Option<Arc<dyn Device>>,
 }
 
 impl TmpFileObject {
@@ -655,29 +654,28 @@ impl TmpFileObject {
     /// Create a new file object for device files
     pub fn new_device(node: Arc<TmpNode>, info: DeviceFileInfo) -> Self {
         // Try to borrow the device from DeviceManager
-        match DeviceManager::get_manager().borrow_device(info.device_id) {
-            Ok(device_guard) => {
+        match DeviceManager::get_manager().get_device(info.device_id) {
+            Some(device_guard) => {
                 Self {
                     node,
                     position: RwLock::new(0),
                     device_guard: Some(device_guard),
                 }
             },
-            Err(e) => {
+            None => {
                 // If borrowing fails, return an error
-                panic!("Failed to borrow device {}: {}", info.device_id, e);
+                panic!("Failed to borrow device {}", info.device_id);
             }
         }
     }
                         
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.device();
-            let mut device_read = device_guard_ref.write();
+            let device_guard_ref = device_guard.as_ref();
             
-            match device_read.device_type() {
+            match device_guard_ref.device_type() {
                 DeviceType::Char => {
-                    if let Some(char_device) = device_read.as_char_device() {
+                    if let Some(char_device) = device_guard_ref.as_char_device() {
                         let mut bytes_read = 0;
                         for byte in buffer.iter_mut() {
                             match char_device.read_byte() {
@@ -697,7 +695,7 @@ impl TmpFileObject {
                     }
                 },
                 DeviceType::Block => {
-                    if let Some(block_device) = device_read.as_block_device() {
+                    if let Some(block_device) = device_guard_ref.as_block_device() {
                         // For block devices, we can read a single sector
                         let request = Box::new(crate::device::block::request::BlockIORequest {
                             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -768,12 +766,11 @@ impl TmpFileObject {
 
     fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
-            let device_guard_ref = device_guard.device();
-            let mut device_write = device_guard_ref.write();
+            let device_guard_ref = device_guard.as_ref();
             
-            match device_write.device_type() {
+            match device_guard_ref.device_type() {
                 DeviceType::Char => {
-                    if let Some(char_device) = device_write.as_char_device() {
+                    if let Some(char_device) = device_guard_ref.as_char_device() {
                         let mut bytes_written = 0;
                         for &byte in buffer {
                             match char_device.write_byte(byte) {
@@ -790,7 +787,7 @@ impl TmpFileObject {
                     }
                 },
                 DeviceType::Block => {
-                    if let Some(block_device) = device_write.as_block_device() {
+                    if let Some(block_device) = device_guard_ref.as_block_device() {
                         let request = Box::new(crate::device::block::request::BlockIORequest {
                             request_type: crate::device::block::request::BlockIORequestType::Write,
                             sector: 0,
@@ -842,7 +839,7 @@ impl TmpFileObject {
         
         // Use the direct node reference instead of finding it by path
         let mut content_guard = self.node.content.write();
-        let old_size = content_guard.len();
+        let _old_size = content_guard.len();
         let new_position = *position as usize + buffer.len();
         
         // Expand file if necessary

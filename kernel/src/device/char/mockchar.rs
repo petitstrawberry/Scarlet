@@ -1,5 +1,6 @@
 use core::any::Any;
 use alloc::vec::Vec;
+use spin::Mutex;
 
 use super::{CharDevice, super::{Device, DeviceType}};
 
@@ -8,8 +9,8 @@ pub struct MockCharDevice {
     id: usize,
     name: &'static str,
     read_buffer: Vec<u8>,
-    write_buffer: Vec<u8>,
-    read_index: usize,
+    write_buffer: Mutex<Vec<u8>>,
+    read_index: Mutex<usize>,
 }
 
 impl MockCharDevice {
@@ -18,30 +19,30 @@ impl MockCharDevice {
             id,
             name,
             read_buffer: Vec::new(),
-            write_buffer: Vec::new(),
-            read_index: 0,
+            write_buffer: Mutex::new(Vec::new()),
+            read_index: Mutex::new(0),
         }
     }
 
     /// Set the data that will be returned by read operations
     pub fn set_read_data(&mut self, data: Vec<u8>) {
         self.read_buffer = data;
-        self.read_index = 0;
+        *self.read_index.lock() = 0;
     }
 
     /// Get the data that was written to the device
-    pub fn get_written_data(&self) -> &Vec<u8> {
-        &self.write_buffer
+    pub fn get_written_data(&self) -> Vec<u8> {
+        self.write_buffer.lock().clone()
     }
 
     /// Clear the written data buffer
-    pub fn clear_written_data(&mut self) {
-        self.write_buffer.clear();
+    pub fn clear_written_data(&self) {
+        self.write_buffer.lock().clear();
     }
 
     /// Reset the read index to start reading from the beginning
-    pub fn reset_read_index(&mut self) {
-        self.read_index = 0;
+    pub fn reset_read_index(&self) {
+        *self.read_index.lock() = 0;
     }
 }
 
@@ -66,29 +67,30 @@ impl Device for MockCharDevice {
         self
     }
     
-    fn as_char_device(&mut self) -> Option<&mut dyn CharDevice> {
+    fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
 }
 
 impl CharDevice for MockCharDevice {
-    fn read_byte(&mut self) -> Option<u8> {
-        if self.read_index < self.read_buffer.len() {
-            let byte = self.read_buffer[self.read_index];
-            self.read_index += 1;
+    fn read_byte(&self) -> Option<u8> {
+        let mut read_index = self.read_index.lock();
+        if *read_index < self.read_buffer.len() {
+            let byte = self.read_buffer[*read_index];
+            *read_index += 1;
             Some(byte)
         } else {
             None
         }
     }
 
-    fn write_byte(&mut self, byte: u8) -> Result<(), &'static str> {
-        self.write_buffer.push(byte);
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        self.write_buffer.lock().push(byte);
         Ok(())
     }
 
     fn can_read(&self) -> bool {
-        self.read_index < self.read_buffer.len()
+        *self.read_index.lock() < self.read_buffer.len()
     }
 
     fn can_write(&self) -> bool {

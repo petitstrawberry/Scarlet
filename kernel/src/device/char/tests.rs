@@ -34,7 +34,7 @@ fn test_generic_char_device_read_write() {
     let can_read_fn = || true;
     let can_write_fn = || true;
 
-    let mut device = GenericCharDevice::new(
+    let device = GenericCharDevice::new(
         2,
         "test_char_rw",
         read_fn,
@@ -77,7 +77,7 @@ fn test_mock_char_device() {
     assert!(device.write_byte(b'd').is_ok());
 
     let written_data = device.get_written_data();
-    assert_eq!(written_data, &vec![b'W', b'o', b'r', b'l', b'd']);
+    assert_eq!(written_data, vec![b'W', b'o', b'r', b'l', b'd']);
 
     // Test can_read/can_write
     assert!(device.can_read()); // Still has data to read
@@ -105,7 +105,7 @@ fn test_char_device_buffer_operations() {
     assert_eq!(result.unwrap(), 5);
 
     let written = device.get_written_data();
-    assert_eq!(written, &vec![b'H', b'e', b'l', b'l', b'o']);
+    assert_eq!(written, vec![b'H', b'e', b'l', b'l', b'o']);
 }
 
 #[test_case]

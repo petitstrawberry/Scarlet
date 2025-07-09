@@ -236,17 +236,17 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     
     // Initialize CLINT (Currently only initializes for CPU 0)
     if let Err(e) = controller.init(0) {
-        crate::println!("[interrupt] Failed to initialize CLINT for CPU {}: {}", 0, e);
+        crate::early_println!("[interrupt] Failed to initialize CLINT for CPU {}: {}", 0, e);
         return Err("Failed to initialize CLINT");
     }
 
     // Register with InterruptManager instead of DeviceManager
     match InterruptManager::global().lock().register_local_controller_for_range(controller, 0..4) {
         Ok(_) => {
-            crate::println!("[interrupt] CLINT registered at base address: {:#x}", base_addr);
+            crate::early_println!("[interrupt] CLINT registered at base address: {:#x}", base_addr);
         },
         Err(e) => {
-            crate::println!("[interrupt] Failed to register CLINT: {}", e);
+            crate::early_println!("[interrupt] Failed to register CLINT: {}", e);
             return Err("Failed to register CLINT");
         }
     }

@@ -3,7 +3,7 @@
 
 use core::result::Result;
 
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, sync::Arc, vec};
 
 use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
 use super::queue::VirtQueue;
@@ -355,24 +355,32 @@ pub trait VirtioDevice {
         // Set queue size
         self.write32_register(Register::QueueNum, queue_size);
         
-        let virtqueue = self.get_virtqueue(queue_idx);
-
+        // Get queue addresses directly - safer than closures
+        let desc_addr = self.get_queue_desc_addr(queue_idx);
+        let driver_addr = self.get_queue_driver_addr(queue_idx);
+        let device_addr = self.get_queue_device_addr(queue_idx);
+        
+        if desc_addr.is_none() || driver_addr.is_none() || device_addr.is_none() {
+            return false;
+        }
+        
+        let desc_addr = desc_addr.unwrap();
+        let driver_addr = driver_addr.unwrap();
+        let device_addr = device_addr.unwrap();
+        
         // Set the queue descriptor address
-        let desc_addr = virtqueue.get_raw_ptr() as u64;
         let desc_addr_low = (desc_addr & 0xffffffff) as u32;
         let desc_addr_high = (desc_addr >> 32) as u32;
         self.write32_register(Register::QueueDescLow, desc_addr_low);
         self.write32_register(Register::QueueDescHigh, desc_addr_high);
 
-        // Set the driver area (available ring)  address
-        let driver_addr = virtqueue.avail.flags as *const _ as u64;
+        // Set the driver area (available ring) address
         let driver_addr_low = (driver_addr & 0xffffffff) as u32;
         let driver_addr_high = (driver_addr >> 32) as u32;
         self.write32_register(Register::DriverDescLow, driver_addr_low);
         self.write32_register(Register::DriverDescHigh, driver_addr_high);
 
         // Set the device area (used ring) address
-        let device_addr = virtqueue.used.flags as *const _ as u64;
         let device_addr_low = (device_addr & 0xffffffff) as u32;
         let device_addr_high = (device_addr >> 32) as u32;
         self.write32_register(Register::DeviceDescLow, device_addr_low);
@@ -477,7 +485,7 @@ pub trait VirtioDevice {
     /// # Panics
     ///
     /// Panics if the virtqueue index is invalid
-    fn notify(&mut self, virtqueue_idx: usize) {
+    fn notify(&self, virtqueue_idx: usize) {
         if virtqueue_idx >= self.get_virtqueue_count() {
             panic!("Invalid virtqueue index");
         }
@@ -540,7 +548,15 @@ pub trait VirtioDevice {
 
     fn get_base_addr(&self) -> usize;
     fn get_virtqueue_count(&self) -> usize;
-    fn get_virtqueue(&self, queue_idx: usize) -> &VirtQueue;
+    
+    /// Get the descriptor address for a virtqueue
+    fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64>;
+    
+    /// Get the driver area address for a virtqueue
+    fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64>;
+    
+    /// Get the device area address for a virtqueue
+    fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64>;
 }
 
 
@@ -620,9 +636,19 @@ impl VirtioDevice for VirtioDeviceCommon {
         0
     }
 
-    fn get_virtqueue(&self, _queue_idx: usize) -> &VirtQueue {
+    fn get_queue_desc_addr(&self, _queue_idx: usize) -> Option<u64> {
         // This should be overridden by specific device implementations
-        unimplemented!()
+        None
+    }
+    
+    fn get_queue_driver_addr(&self, _queue_idx: usize) -> Option<u64> {
+        // This should be overridden by specific device implementations
+        None
+    }
+    
+    fn get_queue_device_addr(&self, _queue_idx: usize) -> Option<u64> {
+        // This should be overridden by specific device implementations
+        None
     }
 }
 
@@ -646,7 +672,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     
     match device_type {
         VirtioDeviceType::Block => {
-            let dev: Box<dyn Device> = Box::new(VirtioBlockDevice::new(base_addr));
+            let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new(base_addr));
             DeviceManager::get_mut_manager().register_device(dev);
         }
         _ => {
