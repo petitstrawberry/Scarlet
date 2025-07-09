@@ -255,7 +255,7 @@ impl Scheduler {
     /// # Returns
     /// true if the task was found and moved, false otherwise
     pub fn wake_task(&mut self, task_id: usize) -> bool {
-        crate::println!("Scheduler: Waking up task {}", task_id);
+        // crate::println!("Scheduler: Waking up task {}", task_id);
         // Search for the task in blocked queues
         for cpu_id in 0..self.blocked_queue.len() {
             if let Some(pos) = self.blocked_queue[cpu_id].iter().position(|t| t.get_id() == task_id) {
