@@ -191,12 +191,8 @@ impl Device for Uart {
 impl CharDevice for Uart {
     fn read_byte(&self) -> Option<u8> {
         let mut buffer = self.rx_buffer.lock();
-            // Try to read from interrupt buffer
-        if let Some(byte) = buffer.pop_front() {
-            return Some(byte);
-        }
-
-        None
+        // Try to read from interrupt buffer
+        buffer.pop_front()
     }
 
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {

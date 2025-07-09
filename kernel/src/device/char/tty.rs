@@ -8,11 +8,14 @@ use core::any::Any;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
+use crate::arch::get_cpu;
 use crate::device::{Device, DeviceType};
 use crate::device::char::CharDevice;
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
 use crate::device::manager::DeviceManager;
+use crate::sync::waker::Waker;
 use crate::late_initcall;
+use crate::task::mytask;
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -66,6 +69,9 @@ pub struct TtyDevice {
     // Input buffer for line discipline
     input_buffer: Arc<Mutex<VecDeque<u8>>>,
     
+    // Waker for blocking reads
+    input_waker: Waker,
+    
     // Line discipline flags (Phase 2 expansion)
     canonical_mode: bool,
     echo_enabled: bool,
@@ -82,6 +88,7 @@ impl TtyDevice {
             name,
             uart_device_id,
             input_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            input_waker: Waker::new_interruptible("tty_input"),
             canonical_mode: true,
             echo_enabled: true,
         }
@@ -114,7 +121,9 @@ impl TtyDevice {
                     let mut input_buffer = self.input_buffer.lock();
                     input_buffer.push_back(b'\n');
                     // crate::early_println!("TTY: Line added to buffer, size now: {}", input_buffer.len());
-                    // TODO: Wake up waiting processes
+                    // Wake up waiting processes
+                    drop(input_buffer);
+                    self.input_waker.wake_all();
                 }
                 // Control characters (placeholder for signal processing)
                 0x03 => {
@@ -136,12 +145,20 @@ impl TtyDevice {
                     let mut input_buffer = self.input_buffer.lock();
                     input_buffer.push_back(byte);
                     // crate::early_println!("TTY: Character added to buffer, size now: {}", input_buffer.len());
+                    // Wake up waiting processes in RAW mode or for immediate input
+                    drop(input_buffer);
+                    if !self.canonical_mode {
+                        self.input_waker.wake_all();
+                    }
                 }
             }
         } else {
             // RAW mode: Pass through directly
             let mut input_buffer = self.input_buffer.lock();
             input_buffer.push_back(byte);
+            drop(input_buffer);
+            // Wake up waiting processes immediately in RAW mode
+            self.input_waker.wake_all();
         }
     }
     
@@ -214,7 +231,20 @@ impl Device for TtyDevice {
 impl CharDevice for TtyDevice {
     fn read_byte(&self) -> Option<u8> {
         let mut input_buffer = self.input_buffer.lock();
-        input_buffer.pop_front()
+        if let Some(byte) = input_buffer.pop_front() {
+            return Some(byte);
+        }
+        drop(input_buffer);
+        
+        // No data available, block the current task
+        if let Some(mut task) = mytask() {
+            let mut cpu = get_cpu();
+
+            // This never returns - the syscall will be restarted when the task is woken up
+            self.input_waker.wait(&mut task, &mut cpu);
+        }
+
+        None
     }
     
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {

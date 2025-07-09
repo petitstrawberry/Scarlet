@@ -12,6 +12,9 @@ extern crate alloc;
 pub trait CharDevice: Device {
     /// Read a single byte from the device
     /// 
+    /// For blocking devices (like TTY), this method will block until data is available.
+    /// For non-blocking devices, this returns None if no data is available.
+    /// 
     /// # Returns
     /// 
     /// The byte read from the device, or None if no data is available
