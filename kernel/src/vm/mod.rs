@@ -15,6 +15,7 @@ use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
 use crate::arch::Arch;
+use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
@@ -111,8 +112,8 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
-    println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
-    println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
+    early_println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
+    early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
 
     setup_trampoline(manager);
 

@@ -62,6 +62,7 @@ use super::*;
 use resource::*;
 
 /// Struct representing platform device information.
+#[derive(Debug)]
 pub struct PlatformDeviceInfo {
     name: &'static str,
     id: usize,

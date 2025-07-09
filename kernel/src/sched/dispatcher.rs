@@ -16,10 +16,11 @@ impl Dispatcher {
     }
 
     #[allow(static_mut_refs)]
-    pub fn dispatch(&mut self, cpu: &mut Arch, task: &mut Task, prev_task: Option<&mut Task>) {
-        if let Some(prev_task) = prev_task {
-            prev_task.vcpu.store(cpu);
-        }
+    pub fn dispatch(&mut self, cpu: &mut Arch, task: &mut Task) {
+        // crate::println!("Dispatcher: Dispatching task {} (state: {:?})", task.get_id(), task.state);
+        
+        // The current task's state has already been saved by the scheduler
+        // We just need to load the next task's state
 
         match task.state {
             TaskState::NotInitialized => {
