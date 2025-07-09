@@ -38,6 +38,6 @@ pub fn test_runner(tests: &[&dyn TestableFn]) {
         test.run();
     }
 
-    println!("[Test Runner] All tests passed");
+    println!("[Test Runner] All {} tests passed", tests.len());
     arch::shutdown();
 }
