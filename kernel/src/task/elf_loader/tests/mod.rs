@@ -154,8 +154,6 @@ fn test_load_elf_invalid_magic() {
     // Attempt to load the invalid ELF file
     let result = load_elf_into_task(file, &mut task);
 
-    crate::early_println!("Result of loading invalid ELF: {:?}", result);
-
     // Assert that the result is an error
     assert!(result.is_err(), "Expected error when loading ELF with invalid magic number");
 }
