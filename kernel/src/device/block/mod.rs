@@ -94,11 +94,33 @@ impl BlockDevice for GenericBlockDevice {
         self.request_queue.lock().push(request);
     }
 
+    /// Process all queued block I/O requests
+    /// 
+    /// This method processes all pending requests using a lock-efficient approach:
+    /// 
+    /// 1. Acquires the request_queue lock once
+    /// 2. Extracts all requests at once using mem::replace
+    /// 3. Releases the lock immediately
+    /// 4. Processes all requests without holding any locks
+    /// 
+    /// This approach minimizes lock contention and prevents deadlocks by:
+    /// - Never holding the lock during request processing
+    /// - Allowing other threads to enqueue requests while processing
+    /// - Avoiding any circular lock dependencies
+    /// 
+    /// # Returns
+    /// Vector of `BlockIOResult` containing completed requests and their results
     fn process_requests(&self) -> Vec<BlockIOResult> {
         let mut results = Vec::new();
-        let mut queue = self.request_queue.lock();
         
-        while let Some(mut request) = queue.pop() {
+        // Extract all requests at once to minimize lock time
+        let requests = {
+            let mut queue = self.request_queue.lock();
+            core::mem::replace(&mut *queue, Vec::new())
+        }; // Lock is automatically released here
+        
+        // Process all requests without holding any locks
+        for mut request in requests {
             // Process the request using the function pointer
             let result = (self.request_fn)(&mut *request);
             
