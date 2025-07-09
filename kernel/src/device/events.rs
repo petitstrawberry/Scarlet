@@ -29,8 +29,8 @@ pub trait DeviceEventListener: Send + Sync {
 /// 
 /// Devices that can emit events must implement this trait.
 pub trait EventCapableDevice {
-    fn register_event_listener(&mut self, listener: Weak<dyn DeviceEventListener>);
-    fn unregister_event_listener(&mut self, listener_id: &str);
+    fn register_event_listener(&self, listener: Weak<dyn DeviceEventListener>);
+    fn unregister_event_listener(&self, listener_id: &str);
     fn emit_event(&self, event: &dyn DeviceEvent);
 }
 
@@ -48,7 +48,7 @@ impl DeviceEventEmitter {
         }
     }
     
-    pub fn register_listener(&mut self, listener: Weak<dyn DeviceEventListener>) {
+    pub fn register_listener(&self, listener: Weak<dyn DeviceEventListener>) {
         let mut listeners = self.listeners.lock();
         listeners.push(listener);
     }

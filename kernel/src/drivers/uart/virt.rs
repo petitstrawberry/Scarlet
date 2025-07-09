@@ -289,11 +289,11 @@ fn uart_interrupt_handler(handle: &mut crate::interrupt::InterruptHandle) -> cra
 }
 
 impl EventCapableDevice for Uart {
-    fn register_event_listener(&mut self, listener: alloc::sync::Weak<dyn DeviceEventListener>) {
+    fn register_event_listener(&self, listener: alloc::sync::Weak<dyn DeviceEventListener>) {
         self.event_emitter.register_listener(listener);
     }
     
-    fn unregister_event_listener(&mut self, _listener_id: &str) {
+    fn unregister_event_listener(&self, _listener_id: &str) {
         // Implementation later - normally WeakRef is automatically removed
     }
     
