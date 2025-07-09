@@ -1,0 +1,236 @@
+//! TTY (Terminal) device implementation.
+//! 
+//! This module implements a TTY device that acts as a terminal interface
+//! providing line discipline, echo, and basic terminal I/O operations.
+
+extern crate alloc;
+use core::any::Any;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use spin::Mutex;
+use crate::device::{Device, DeviceType};
+use crate::device::char::CharDevice;
+use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent};
+use crate::device::manager::DeviceManager;
+use crate::late_initcall;
+
+/// TTY subsystem initialization
+fn init_tty_subsystem() {
+    let result = try_init_tty_subsystem();
+    if let Err(e) = result {
+        crate::early_println!("Failed to initialize TTY subsystem: {}", e);
+    }
+}
+
+fn try_init_tty_subsystem() -> Result<(), &'static str> {
+    let device_manager = DeviceManager::get_manager();
+    
+    // Find the first UART device
+    if let Some(uart_device) = device_manager.get_first_device_by_type(crate::device::DeviceType::Char) {
+        let uart_device_id = uart_device.id();
+        
+        // Create TTY device
+        let tty_device = Arc::new(TtyDevice::new(0, "tty0", uart_device_id));
+        
+        // Register TTY device as event listener for UART
+        // Note: With Arc-based design, we can safely share the device
+        if let Some(_uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
+            let _weak_tty = Arc::downgrade(&tty_device);
+            // TODO: When UART API is updated to support event listeners, register here
+            // uart.register_event_listener(weak_tty);
+        }
+        
+        // Register TTY device with device manager
+        let _tty_id = device_manager.register_device_with_name("tty0".into(), tty_device);
+        
+        crate::early_println!("TTY subsystem initialized successfully");
+        Ok(())
+    } else {
+        Err("No UART device found for TTY initialization")
+    }
+}
+
+late_initcall!(init_tty_subsystem);
+
+/// TTY device implementation.
+/// 
+/// This device provides terminal functionality including line discipline,
+/// echo, and basic terminal I/O operations.
+pub struct TtyDevice {
+    id: usize,
+    name: &'static str,
+    uart_device_id: usize,
+    
+    // Input buffer for line discipline
+    input_buffer: Arc<Mutex<VecDeque<u8>>>,
+    
+    // Line discipline flags (Phase 2 expansion)
+    canonical_mode: bool,
+    echo_enabled: bool,
+    
+    // Terminal state (placeholder for future features)
+    // process_group: Option<ProcessGroupId>,  // Job control placeholder
+    // session_id: Option<SessionId>,           // Session management placeholder
+}
+
+impl TtyDevice {
+    pub fn new(id: usize, name: &'static str, uart_device_id: usize) -> Self {
+        Self {
+            id,
+            name,
+            uart_device_id,
+            input_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            canonical_mode: true,
+            echo_enabled: true,
+        }
+    }
+    
+    /// Handle input byte from UART device.
+    /// 
+    /// This method processes incoming bytes and applies line discipline.
+    fn handle_input_byte(&self, byte: u8) {
+        // Phase 2: Canonical mode processing
+        if self.canonical_mode {
+            match byte {
+                // Backspace/DEL
+                0x08 | 0x7F => {
+                    let mut input_buffer = self.input_buffer.lock();
+                    if input_buffer.pop_back().is_some() && self.echo_enabled {
+                        self.echo_backspace();
+                    }
+                }
+                // Enter/Line feed
+                b'\r' | b'\n' => {
+                    if self.echo_enabled {
+                        self.echo_char(b'\r');
+                        self.echo_char(b'\n');
+                    }
+                    let mut input_buffer = self.input_buffer.lock();
+                    input_buffer.push_back(b'\n');
+                    // TODO: Wake up waiting processes
+                }
+                // Control characters (placeholder for signal processing)
+                0x03 => {
+                    // Ctrl+C: Send SIGINT (placeholder)
+                    // TODO: Implement signal processing when process management is ready
+                }
+                0x1A => {
+                    // Ctrl+Z: Send SIGTSTP (placeholder)
+                    // TODO: Implement job control when process management is ready
+                }
+                // Regular characters
+                byte => {
+                    if self.echo_enabled {
+                        self.echo_char(byte);
+                    }
+                    let mut input_buffer = self.input_buffer.lock();
+                    input_buffer.push_back(byte);
+                }
+            }
+        } else {
+            // RAW mode: Pass through directly
+            let mut input_buffer = self.input_buffer.lock();
+            input_buffer.push_back(byte);
+        }
+    }
+    
+    /// Echo character back to output.
+    fn echo_char(&self, byte: u8) {
+        // Get actual UART device and output
+        let device_manager = DeviceManager::get_manager();
+        if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
+            // Use the new CharDevice API with internal mutability
+            if let Some(char_device) = uart_device.as_char_device() {
+                let _ = char_device.write_byte(byte);
+            }
+        }
+    }
+    
+    /// Echo backspace sequence.
+    fn echo_backspace(&self) {
+        // Backspace echo: BS + space + BS
+        self.echo_char(0x08);
+        self.echo_char(b' ');
+        self.echo_char(0x08);
+    }
+}
+
+impl DeviceEventListener for TtyDevice {
+    fn on_device_event(&self, event: &dyn DeviceEvent) {
+        if let Some(input_event) = event.as_any().downcast_ref::<InputEvent>() {
+            self.handle_input_byte(input_event.data);
+        }
+    }
+    
+    fn interested_in(&self, event_type: &str) -> bool {
+        event_type == "input"
+    }
+}
+
+impl Device for TtyDevice {
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Char
+    }
+    
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    
+    fn id(&self) -> usize {
+        self.id
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    
+    fn as_char_device(&self) -> Option<&dyn CharDevice> {
+        Some(self)
+    }
+}
+
+impl CharDevice for TtyDevice {
+    fn read_byte(&self) -> Option<u8> {
+        let mut input_buffer = self.input_buffer.lock();
+        input_buffer.pop_front()
+    }
+    
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        // Forward to UART device with line ending conversion
+        let device_manager = DeviceManager::get_manager();
+        if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
+            // Use the new CharDevice API with internal mutability
+            if let Some(char_device) = uart_device.as_char_device() {
+                // Handle line ending conversion for terminals
+                if byte == b'\n' {
+                    char_device.write_byte(b'\r')?;
+                    char_device.write_byte(b'\n')?;
+                } else {
+                    char_device.write_byte(byte)?;
+                }
+                return Ok(());
+            }
+        }
+        Err("UART device not available")
+    }
+    
+    fn can_read(&self) -> bool {
+        let input_buffer = self.input_buffer.lock();
+        !input_buffer.is_empty()
+    }
+    
+    fn can_write(&self) -> bool {
+        // Check if UART device is available
+        let device_manager = DeviceManager::get_manager();
+        if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
+            if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
+                return uart.can_write();
+            }
+        }
+        false
+    }
+}

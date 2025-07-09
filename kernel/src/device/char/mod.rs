@@ -154,3 +154,5 @@ mod tests;
 
 #[cfg(test)]
 pub mod mockchar;
+
+pub mod tty;
