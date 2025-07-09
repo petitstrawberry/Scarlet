@@ -1,3 +1,5 @@
+use core::{ptr::read_volatile, sync::atomic::compiler_fence};
+
 use crate::early_println;
 
 
@@ -16,19 +18,19 @@ unsafe extern "C" {
 }
 
 pub fn early_initcall_call() {
-    unsafe {
-        let size = core::mem::size_of::<fn()>();
+     unsafe {
+         let size = core::mem::size_of::<fn()>();
 
-        early_println!("Running early initcalls... ");
-        let mut func = &__INITCALL_EARLY_START as *const usize as usize;
-        let end = &__INITCALL_EARLY_END as *const usize as usize;
-        let num = (end - func) / size;
+         early_println!("Running early initcalls... ");
+         let mut func_addr = &__INITCALL_EARLY_START as *const usize as usize;
+         let end_addr = &__INITCALL_EARLY_END as *const usize as usize;
 
-        for i in 0..num {
-            early_println!("Early initcalls {} / {}", i + 1, num);
-            let initcall = *(func as *const fn());
-            initcall();
-            func += size;
-        }
-    }
-}
+         while func_addr < end_addr {
+             let initcall = read_volatile(func_addr as *const fn());
+
+             initcall();
+
+             func_addr += size;
+         }
+     }
+ }
