@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 use crate::device::{Device, DeviceType};
 use crate::device::char::CharDevice;
-use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent};
+use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
 use crate::device::manager::DeviceManager;
 use crate::late_initcall;
 
@@ -33,11 +33,13 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
         let tty_device = Arc::new(TtyDevice::new(0, "tty0", uart_device_id));
         
         // Register TTY device as event listener for UART
-        // Note: With Arc-based design, we can safely share the device
-        if let Some(_uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
-            let _weak_tty = Arc::downgrade(&tty_device);
-            // TODO: When UART API is updated to support event listeners, register here
-            // uart.register_event_listener(weak_tty);
+        if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
+            let weak_tty = Arc::downgrade(&tty_device);
+            // Register TTY as event listener for UART input events
+            uart.register_event_listener(weak_tty);
+            crate::early_println!("TTY registered as UART event listener");
+        } else {
+            crate::early_println!("Failed to cast UART device to specific type");
         }
         
         // Register TTY device with device manager
@@ -89,11 +91,14 @@ impl TtyDevice {
     /// 
     /// This method processes incoming bytes and applies line discipline.
     fn handle_input_byte(&self, byte: u8) {
+        // crate::early_println!("TTY processing byte: {:02x}", byte);
+        
         // Phase 2: Canonical mode processing
         if self.canonical_mode {
             match byte {
                 // Backspace/DEL
                 0x08 | 0x7F => {
+                    // crate::early_println!("TTY: Backspace detected");
                     let mut input_buffer = self.input_buffer.lock();
                     if input_buffer.pop_back().is_some() && self.echo_enabled {
                         self.echo_backspace();
@@ -101,30 +106,36 @@ impl TtyDevice {
                 }
                 // Enter/Line feed
                 b'\r' | b'\n' => {
+                    // crate::early_println!("TTY: Enter/newline detected");
                     if self.echo_enabled {
                         self.echo_char(b'\r');
                         self.echo_char(b'\n');
                     }
                     let mut input_buffer = self.input_buffer.lock();
                     input_buffer.push_back(b'\n');
+                    // crate::early_println!("TTY: Line added to buffer, size now: {}", input_buffer.len());
                     // TODO: Wake up waiting processes
                 }
                 // Control characters (placeholder for signal processing)
                 0x03 => {
+                    crate::early_println!("TTY: Ctrl+C detected");
                     // Ctrl+C: Send SIGINT (placeholder)
                     // TODO: Implement signal processing when process management is ready
                 }
                 0x1A => {
+                    crate::early_println!("TTY: Ctrl+Z detected");
                     // Ctrl+Z: Send SIGTSTP (placeholder)
                     // TODO: Implement job control when process management is ready
                 }
                 // Regular characters
                 byte => {
+                    // crate::early_println!("TTY: Regular character: {:02x}", byte);
                     if self.echo_enabled {
                         self.echo_char(byte);
                     }
                     let mut input_buffer = self.input_buffer.lock();
                     input_buffer.push_back(byte);
+                    // crate::early_println!("TTY: Character added to buffer, size now: {}", input_buffer.len());
                 }
             }
         } else {
@@ -158,6 +169,13 @@ impl TtyDevice {
 impl DeviceEventListener for TtyDevice {
     fn on_device_event(&self, event: &dyn DeviceEvent) {
         if let Some(input_event) = event.as_any().downcast_ref::<InputEvent>() {
+            // crate::early_println!("TTY received input event: byte={:02x} ('{}')", 
+            //     input_event.data, 
+            //     if input_event.data.is_ascii_graphic() || input_event.data == b' ' { 
+            //         input_event.data as char 
+            //     } else { 
+            //         '?' 
+            //     });
             self.handle_input_byte(input_event.data);
         }
     }
