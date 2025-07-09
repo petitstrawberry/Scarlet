@@ -115,9 +115,9 @@ impl Scheduler {
                     // If no tasks are ready, we can either go idle or wait for an interrupt
                     None => {
                         // panic!("MUST NOT reach here: No tasks ready to run");
-                        crate::println!("[Warning] Scheduler: No tasks ready, going idle");
-                        crate::println!("[Warning] This is wrong, there should always be at least one task (idle task) ready to run");
-                        crate::println!("[Warning] Creating idle task for CPU {}", cpu_id);
+                        // crate::println!("[Warning] Scheduler: No tasks ready, going idle");
+                        // crate::println!("[Warning] This is wrong, there should always be at least one task (idle task) ready to run");
+                        // crate::println!("[Warning] Creating idle task for CPU {}", cpu_id);
                         let mut kernel_task = new_kernel_task("idle".to_string(), 0, || {
                             // Idle loop
                             loop {
