@@ -57,7 +57,7 @@ impl Device for MockBlockDevice {
         self
     }
     
-    fn as_block_device(&mut self) -> Option<&mut dyn BlockDevice> {
+    fn as_block_device(&self) -> Option<&dyn BlockDevice> {
         Some(self)
     }
 }
@@ -76,11 +76,11 @@ impl BlockDevice for MockBlockDevice {
         self.disk_size
     }
     
-    fn enqueue_request(&mut self, request: Box<BlockIORequest>) {
+    fn enqueue_request(&self, request: Box<BlockIORequest>) {
         self.request_queue.lock().push(request);
     }
     
-    fn process_requests(&mut self) -> Vec<BlockIOResult> {
+    fn process_requests(&self) -> Vec<BlockIOResult> {
         let mut results = Vec::new();
         let requests = {
             let mut queue = self.request_queue.lock();

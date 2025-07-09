@@ -64,12 +64,12 @@ pub trait Device: Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn Any;
     
     /// Cast to CharDevice if this device is a character device
-    fn as_char_device(&mut self) -> Option<&mut dyn char::CharDevice> {
+    fn as_char_device(&self) -> Option<&dyn char::CharDevice> {
         None
     }
     
     /// Cast to BlockDevice if this device is a block device  
-    fn as_block_device(&mut self) -> Option<&mut dyn block::BlockDevice> {
+    fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
         None
     }
 }

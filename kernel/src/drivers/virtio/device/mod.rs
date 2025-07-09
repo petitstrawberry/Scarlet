@@ -3,7 +3,7 @@
 
 use core::result::Result;
 
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, vec, sync::Arc};
 
 use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::block::virtio_blk::VirtioBlockDevice};
 use super::queue::VirtQueue;
@@ -355,28 +355,51 @@ pub trait VirtioDevice {
         // Set queue size
         self.write32_register(Register::QueueNum, queue_size);
         
-        let virtqueue = self.get_virtqueue(queue_idx);
+        // Get base address outside the closure to avoid deadlock
+        let base_addr = self.get_base_addr();
+        
+        if let Some(()) = self.with_virtqueue(queue_idx, |virtqueue| {
+            // Set the queue descriptor address
+            let desc_addr = virtqueue.get_raw_ptr() as u64;
+            let desc_addr_low = (desc_addr & 0xffffffff) as u32;
+            let desc_addr_high = (desc_addr >> 32) as u32;
+            
+            // Write registers directly to avoid deadlock
+            unsafe {
+                let addr_low = base_addr + Register::QueueDescLow.offset();
+                let addr_high = base_addr + Register::QueueDescHigh.offset();
+                core::ptr::write_volatile(addr_low as *mut u32, desc_addr_low);
+                core::ptr::write_volatile(addr_high as *mut u32, desc_addr_high);
+            }
 
-        // Set the queue descriptor address
-        let desc_addr = virtqueue.get_raw_ptr() as u64;
-        let desc_addr_low = (desc_addr & 0xffffffff) as u32;
-        let desc_addr_high = (desc_addr >> 32) as u32;
-        self.write32_register(Register::QueueDescLow, desc_addr_low);
-        self.write32_register(Register::QueueDescHigh, desc_addr_high);
+            // Set the driver area (available ring) address
+            let driver_addr = virtqueue.avail.flags as *const _ as u64;
+            let driver_addr_low = (driver_addr & 0xffffffff) as u32;
+            let driver_addr_high = (driver_addr >> 32) as u32;
+            
+            unsafe {
+                let addr_low = base_addr + Register::DriverDescLow.offset();
+                let addr_high = base_addr + Register::DriverDescHigh.offset();
+                core::ptr::write_volatile(addr_low as *mut u32, driver_addr_low);
+                core::ptr::write_volatile(addr_high as *mut u32, driver_addr_high);
+            }
 
-        // Set the driver area (available ring)  address
-        let driver_addr = virtqueue.avail.flags as *const _ as u64;
-        let driver_addr_low = (driver_addr & 0xffffffff) as u32;
-        let driver_addr_high = (driver_addr >> 32) as u32;
-        self.write32_register(Register::DriverDescLow, driver_addr_low);
-        self.write32_register(Register::DriverDescHigh, driver_addr_high);
-
-        // Set the device area (used ring) address
-        let device_addr = virtqueue.used.flags as *const _ as u64;
-        let device_addr_low = (device_addr & 0xffffffff) as u32;
-        let device_addr_high = (device_addr >> 32) as u32;
-        self.write32_register(Register::DeviceDescLow, device_addr_low);
-        self.write32_register(Register::DeviceDescHigh, device_addr_high);
+            // Set the device area (used ring) address
+            let device_addr = virtqueue.used.flags as *const _ as u64;
+            let device_addr_low = (device_addr & 0xffffffff) as u32;
+            let device_addr_high = (device_addr >> 32) as u32;
+            
+            unsafe {
+                let addr_low = base_addr + Register::DeviceDescLow.offset();
+                let addr_high = base_addr + Register::DeviceDescHigh.offset();
+                core::ptr::write_volatile(addr_low as *mut u32, device_addr_low);
+                core::ptr::write_volatile(addr_high as *mut u32, device_addr_high);
+            }
+        }) {
+            // Success
+        } else {
+            return false;
+        }
 
         // Check the status of the queue
         let status = self.read32_register(Register::Status);
@@ -540,7 +563,8 @@ pub trait VirtioDevice {
 
     fn get_base_addr(&self) -> usize;
     fn get_virtqueue_count(&self) -> usize;
-    fn get_virtqueue(&self, queue_idx: usize) -> &VirtQueue;
+    fn with_virtqueue<R>(&self, queue_idx: usize, f: impl FnOnce(&VirtQueue) -> R) -> Option<R>;
+    fn with_virtqueue_mut<R>(&self, queue_idx: usize, f: impl FnOnce(&mut VirtQueue) -> R) -> Option<R>;
 }
 
 
@@ -620,9 +644,14 @@ impl VirtioDevice for VirtioDeviceCommon {
         0
     }
 
-    fn get_virtqueue(&self, _queue_idx: usize) -> &VirtQueue {
+    fn with_virtqueue<R>(&self, _queue_idx: usize, _f: impl FnOnce(&VirtQueue) -> R) -> Option<R> {
         // This should be overridden by specific device implementations
-        unimplemented!()
+        None
+    }
+    
+    fn with_virtqueue_mut<R>(&self, _queue_idx: usize, _f: impl FnOnce(&mut VirtQueue) -> R) -> Option<R> {
+        // This should be overridden by specific device implementations
+        None
     }
 }
 
@@ -646,7 +675,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     
     match device_type {
         VirtioDeviceType::Block => {
-            let dev: Box<dyn Device> = Box::new(VirtioBlockDevice::new(base_addr));
+            let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new(base_addr));
             DeviceManager::get_mut_manager().register_device(dev);
         }
         _ => {

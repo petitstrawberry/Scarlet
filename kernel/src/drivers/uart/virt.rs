@@ -2,32 +2,26 @@
 
 use core::{fmt, any::Any, ptr::{read_volatile, write_volatile}};
 use core::fmt::Write;
-use alloc::{boxed::Box, collections::VecDeque};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use spin::Mutex;
 
 use crate::{
     device::{
-        char::CharDevice, 
-        Device, 
-        DeviceInfo,
-        DeviceType, 
-        platform::{
-            PlatformDeviceDriver, 
-            PlatformDeviceInfo,
-            resource::PlatformDeviceResourceType
-        },
-        manager::{DeviceManager, DriverPriority}
-    }, 
-    driver_initcall, 
-    interrupt::{InterruptId, InterruptManager}, 
-    traits::serial::Serial
+        char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
+            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo
+        }, Device, DeviceInfo, DeviceType
+    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial
 };
 
-#[derive(Clone)]
-pub struct Uart {
+pub struct UartInner {
     base: usize,
     interrupt_id: Option<InterruptId>,
-    rx_buffer: Option<alloc::sync::Arc<Mutex<VecDeque<u8>>>>,
+    rx_buffer: Option<Arc<Mutex<VecDeque<u8>>>>,
+}
+
+pub struct Uart {
+    inner: Arc<Mutex<UartInner>>,
+    event_emitter: DeviceEventEmitter,
 }
 
 pub const RHR_OFFSET: usize = 0x00;
@@ -60,64 +54,49 @@ pub const LCR_BAUD_LATCH: u8 = 0x80; // Set baud rate divisor latch access bit
 
 impl Uart {
     pub fn new(base: usize) -> Self {
-        Uart { 
+        let inner = UartInner { 
             base,
             interrupt_id: None,
             rx_buffer: None,
+        };
+        Uart { 
+            inner: Arc::new(Mutex::new(inner)),
+            event_emitter: DeviceEventEmitter::new(),
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&self) {
+        let inner = self.inner.lock();
         // Disable all interrupts
-        self.reg_write(IER_OFFSET, 0x00);
+        inner.reg_write(IER_OFFSET, 0x00);
 
         // Set special mode to set baud rate
-        self.reg_write(LCR_OFFSET, LCR_BAUD_LATCH);
+        inner.reg_write(LCR_OFFSET, LCR_BAUD_LATCH);
 
         // LSB of baud rate divisor
-        self.reg_write(0x00, 0x03);
+        inner.reg_write(0x00, 0x03);
 
         // MSB of baud rate divisor
-        self.reg_write(0x01, 0x00);
+        inner.reg_write(0x01, 0x00);
 
         // Set line control register for 8 data bits, no parity, 1 stop bit
-        self.reg_write(LCR_OFFSET, 0x03); // 8 bits, no
+        inner.reg_write(LCR_OFFSET, 0x03); // 8 bits, no
 
         // Enable FIFO
-        self.reg_write(FCR_OFFSET, FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX);
-    }
-
-    fn reg_write(&self, offset: usize, value: u8) {
-        let addr = self.base + offset;
-        unsafe { write_volatile(addr as *mut u8, value) }
-    }
-
-    fn reg_read(&self, offset: usize) -> u8 {
-        let addr = self.base + offset;
-        unsafe { read_volatile(addr as *const u8) }
-    }
-
-    fn write_byte_internal(&self, c: u8) {
-        while self.reg_read(LSR_OFFSET) & LSR_THRE == 0 {}
-        self.reg_write(THR_OFFSET, c);
-    }
-
-    fn read_byte_internal(&self) -> u8 {
-        if self.reg_read(LSR_OFFSET) & LSR_DR == 0 {
-            return 0;
-        }
-        self.reg_read(RHR_OFFSET)
+        inner.reg_write(FCR_OFFSET, FCR_ENABLE | FCR_CLEAR_RX | FCR_CLEAR_TX);
     }
 
     /// Enable UART interrupts
-    pub fn enable_interrupts(&mut self, interrupt_id: InterruptId) -> Result<(), &'static str> {
-        self.interrupt_id = Some(interrupt_id);
+    pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
+        let mut inner = self.inner.lock();
+        inner.interrupt_id = Some(interrupt_id);
         
         // Create shared receive buffer
-        self.rx_buffer = Some(alloc::sync::Arc::new(Mutex::new(VecDeque::new())));
+        inner.rx_buffer = Some(Arc::new(Mutex::new(VecDeque::new())));
         
         // Enable receive data available interrupt
-        self.reg_write(IER_OFFSET, IER_RDA);
+        inner.reg_write(IER_OFFSET, IER_RDA);
+        drop(inner);
 
         // Register interrupt with interrupt manager
         InterruptManager::with_manager(|mgr| {
@@ -128,8 +107,8 @@ impl Uart {
     }
 
     /// Get the receive buffer (used by interrupt handler)
-    pub fn get_rx_buffer(&self) -> Option<alloc::sync::Arc<Mutex<VecDeque<u8>>>> {
-        self.rx_buffer.clone()
+    pub fn get_rx_buffer(&self) -> Option<Arc<Mutex<VecDeque<u8>>>> {
+        self.inner.lock().rx_buffer.clone()
     }
 }
 
@@ -145,7 +124,8 @@ impl Serial for Uart {
     /// A `fmt::Result` indicating success or failure.
     /// 
     fn put(&mut self, c: char) -> fmt::Result {
-        self.write_byte_internal(c as u8); // Block until ready
+        let inner = self.inner.lock();
+        inner.write_byte_internal(c as u8); // Block until ready
         Ok(())
     }
 
@@ -156,18 +136,28 @@ impl Serial for Uart {
     /// Otherwise, falls back to polling mode.
     /// 
     fn get(&mut self) -> Option<char> {
+        let inner = self.inner.lock();
         // Try to read from interrupt buffer first
-        if let Some(buffer) = &self.rx_buffer {
+        if let Some(buffer) = &inner.rx_buffer {
+            let buffer = buffer.clone();
+            drop(inner); // Release lock before accessing buffer
             if let Some(byte) = buffer.lock().pop_front() {
                 return Some(byte as char);
             }
-        }
-        
-        // Fallback to polling mode
-        if self.can_read() {
-            Some(self.read_byte_internal() as char)
+            // Re-acquire lock for polling mode
+            let inner = self.inner.lock();
+            if inner.can_read() {
+                Some(inner.read_byte_internal() as char)
+            } else {
+                None
+            }
         } else {
-            None
+            // Fallback to polling mode
+            if inner.can_read() {
+                Some(inner.read_byte_internal() as char)
+            } else {
+                None
+            }
         }
     }
 
@@ -198,39 +188,50 @@ impl Device for Uart {
         self
     }
     
-    fn as_char_device(&mut self) -> Option<&mut dyn CharDevice> {
+    fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
 }
 
 impl CharDevice for Uart {
-    fn read_byte(&mut self) -> Option<u8> {
+    fn read_byte(&self) -> Option<u8> {
+        let inner = self.inner.lock();
         // Try to read from interrupt buffer first
-        if let Some(buffer) = &self.rx_buffer {
+        if let Some(buffer) = &inner.rx_buffer {
+            let buffer = buffer.clone();
+            drop(inner); // Release lock before accessing buffer
             if let Some(byte) = buffer.lock().pop_front() {
                 return Some(byte);
             }
-        }
-        
-        // Fallback to polling mode
-        if self.can_read() {
-            Some(self.read_byte_internal())
+            let inner = self.inner.lock(); // Re-acquire lock
+            // Fallback to polling mode
+            if inner.can_read() {
+                Some(inner.read_byte_internal())
+            } else {
+                None
+            }
         } else {
-            None
+            // Fallback to polling mode
+            if inner.can_read() {
+                Some(inner.read_byte_internal())
+            } else {
+                None
+            }
         }
     }
 
-    fn write_byte(&mut self, byte: u8) -> Result<(), &'static str> {
-        self.write_byte_internal(byte); // Block until ready
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        let inner = self.inner.lock();
+        inner.write_byte_internal(byte); // Block until ready
         Ok(())
     }
 
     fn can_read(&self) -> bool {
-        self.reg_read(LSR_OFFSET) & LSR_DR != 0
+        self.inner.lock().can_read()
     }
 
     fn can_write(&self) -> bool {
-        self.reg_read(LSR_OFFSET) & LSR_THRE != 0
+        self.inner.lock().can_write()
     }
     
 }
@@ -253,14 +254,12 @@ fn uart_interrupt_handler(handle: &mut crate::interrupt::InterruptHandle) -> cra
     let device_manager = crate::device::manager::DeviceManager::get_manager();
     
     // Find a character device (UART)
-    if let Some(borrowed_device) = device_manager.borrow_first_device_by_type(crate::device::DeviceType::Char) {
-        let device = borrowed_device.device();
-        let mut device_guard = device.write();
-        
+    if let Some(device) = device_manager.get_first_device_by_type(crate::device::DeviceType::Char) {
+
         // Cast to Uart to access interrupt-specific methods
-        if let Some(uart) = device_guard.as_any_mut().downcast_mut::<Uart>() {
+        if let Some(uart) = device.as_any().downcast_ref::<Uart>() {
             // Check interrupt identification register
-            let iir = uart.reg_read(IIR_OFFSET);
+            let iir = uart.inner.lock().reg_read(IIR_OFFSET);
             
             if iir & IIR_PENDING == 0 { // Interrupt pending
                 match iir & 0x0E { // Interrupt type
@@ -268,7 +267,7 @@ fn uart_interrupt_handler(handle: &mut crate::interrupt::InterruptHandle) -> cra
                         // Received Data Available interrupt
                         if let Some(buffer) = uart.get_rx_buffer() {
                             while uart.can_read() {
-                                let byte = uart.read_byte_internal();
+                                let byte = uart.inner.lock().read_byte_internal();
                                 buffer.lock().push_back(byte);
                             }
                         }
@@ -287,6 +286,93 @@ fn uart_interrupt_handler(handle: &mut crate::interrupt::InterruptHandle) -> cra
     
     // Complete the interrupt
     handle.complete()
+}
+
+impl EventCapableDevice for Uart {
+    fn register_event_listener(&mut self, listener: alloc::sync::Weak<dyn DeviceEventListener>) {
+        self.event_emitter.register_listener(listener);
+    }
+    
+    fn unregister_event_listener(&mut self, _listener_id: &str) {
+        // Implementation later - normally WeakRef is automatically removed
+    }
+    
+    fn emit_event(&self, event: &dyn crate::device::events::DeviceEvent) {
+        self.event_emitter.emit(event);
+    }
+}
+
+impl InterruptCapableDevice for Uart {
+    fn handle_interrupt(&mut self) -> crate::interrupt::InterruptResult<()> {
+        let inner = self.inner.lock();
+        // Check interrupt identification register
+        let iir = inner.reg_read(IIR_OFFSET);
+        
+        if iir & IIR_PENDING == 0 { // Interrupt pending
+            match iir & 0x0E { // Interrupt type
+                IIR_RDA => {
+                    // Received Data Available interrupt
+                    while inner.can_read() {
+                        let byte = inner.read_byte_internal();
+                        
+                        // Emit input event
+                        let input_event = InputEvent { data: byte };
+                        self.emit_event(&input_event);
+                        
+                        // Also store in buffer for backward compatibility
+                        if let Some(buffer) = &inner.rx_buffer {
+                            buffer.lock().push_back(byte);
+                        }
+                    }
+                }
+                IIR_THRE => {
+                    // Transmit Holding Register Empty interrupt
+                    // TODO: Handle transmit interrupt if needed
+                }
+                _ => {
+                    // Other interrupt types
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        self.inner.lock().interrupt_id
+    }
+}
+
+impl UartInner {
+    fn reg_write(&self, offset: usize, value: u8) {
+        let addr = self.base + offset;
+        unsafe { write_volatile(addr as *mut u8, value) }
+    }
+
+    fn reg_read(&self, offset: usize) -> u8 {
+        let addr = self.base + offset;
+        unsafe { read_volatile(addr as *const u8) }
+    }
+
+    fn write_byte_internal(&self, c: u8) {
+        while self.reg_read(LSR_OFFSET) & LSR_THRE == 0 {}
+        self.reg_write(THR_OFFSET, c);
+    }
+
+    fn read_byte_internal(&self) -> u8 {
+        if self.reg_read(LSR_OFFSET) & LSR_DR == 0 {
+            return 0;
+        }
+        self.reg_read(RHR_OFFSET)
+    }
+
+    fn can_read(&self) -> bool {
+        self.reg_read(LSR_OFFSET) & LSR_DR != 0
+    }
+
+    fn can_write(&self) -> bool {
+        self.reg_read(LSR_OFFSET) & LSR_THRE != 0
+    }
 }
 
 fn register_uart() {
@@ -318,11 +404,11 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
     crate::early_println!("UART base address: 0x{:x}", base_addr);
     
     // Create UART instance
-    let mut uart = Uart::new(base_addr);
+    let uart = Uart::new(base_addr);
 
     // Initialize UART
     uart.init();
-    
+
     // Get interrupt resource if available
     if let Some(irq_resource) = device_info.get_resources()
         .iter()
@@ -344,7 +430,7 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
             }) {
                 crate::early_println!("Failed to register UART interrupt handler: {}", e);
             } else {
-                crate::early_println!("UART interrupt handler registered");
+                crate::early_println!("UART interrupt handler registered using generic system");
             }
         }
     } else {
@@ -352,9 +438,9 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
     
     // Register the UART device with the device manager
-    let device_id = DeviceManager::get_mut_manager().register_device(Box::new(uart));
+    let device_id = DeviceManager::get_mut_manager().register_device(Arc::new(uart));
     crate::early_println!("UART device registered with ID: {}", device_id);
-    
+
     Ok(())
 }
 

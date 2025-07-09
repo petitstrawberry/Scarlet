@@ -1,10 +1,11 @@
 use crate::{drivers::virtio::queue::VirtQueue, mem::page::allocate_raw_pages};
+use core::cell::UnsafeCell;
 
 use super::*;
 
 struct TestVirtioDevice {
     base_addr: usize,
-    virtqueues: [VirtQueue<'static>; 2],
+    virtqueues: [UnsafeCell<VirtQueue<'static>>; 2],
 }
 
 impl TestVirtioDevice {
@@ -12,8 +13,8 @@ impl TestVirtioDevice {
         Self {
             base_addr,
             virtqueues: [
-                VirtQueue::new(queue_size),
-                VirtQueue::new(queue_size),
+                UnsafeCell::new(VirtQueue::new(queue_size)),
+                UnsafeCell::new(VirtQueue::new(queue_size)),
             ],
         }
     }
@@ -28,8 +29,20 @@ impl VirtioDevice for TestVirtioDevice {
         self.virtqueues.len()
     }
     
-    fn get_virtqueue(&self, queue_idx: usize) -> &VirtQueue {
-        &self.virtqueues[queue_idx]
+    fn with_virtqueue<R>(&self, queue_idx: usize, f: impl FnOnce(&VirtQueue) -> R) -> Option<R> {
+        if queue_idx < self.virtqueues.len() {
+            unsafe { Some(f(&*self.virtqueues[queue_idx].get())) }
+        } else {
+            None
+        }
+    }
+    
+    fn with_virtqueue_mut<R>(&self, queue_idx: usize, f: impl FnOnce(&mut VirtQueue) -> R) -> Option<R> {
+        if queue_idx < self.virtqueues.len() {
+            unsafe { Some(f(&mut *self.virtqueues[queue_idx].get())) }
+        } else {
+            None
+        }
     }
 }
 

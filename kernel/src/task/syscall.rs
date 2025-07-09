@@ -71,9 +71,8 @@ pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
     
     // Find a character device (UART) 
     let manager = DeviceManager::get_manager();
-    if let Some(borrowed_device) = manager.borrow_first_device_by_type(crate::device::DeviceType::Char) {
-        let device = borrowed_device.device();
-        if let Some(char_device) = device.write().as_char_device() {
+    if let Some(borrowed_device) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
+        if let Some(char_device) = borrowed_device.as_char_device() {
             if let Some(byte) = char_device.read_byte() {
                 return byte as usize;
             }

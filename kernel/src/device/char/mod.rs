@@ -1,7 +1,5 @@
 use core::any::Any;
 
-use alloc::{boxed::Box, vec::Vec};
-
 use super::Device;
 
 extern crate alloc;
@@ -10,13 +8,14 @@ extern crate alloc;
 /// 
 /// This trait defines the interface for character devices.
 /// It provides methods for querying device information and handling character I/O operations.
+/// Uses internal mutability for thread-safe shared access.
 pub trait CharDevice: Device {
     /// Read a single byte from the device
     /// 
     /// # Returns
     /// 
     /// The byte read from the device, or None if no data is available
-    fn read_byte(&mut self) -> Option<u8>;
+    fn read_byte(&self) -> Option<u8>;
     
     /// Write a single byte to the device
     /// 
@@ -27,7 +26,7 @@ pub trait CharDevice: Device {
     /// # Returns
     /// 
     /// Result indicating success or failure
-    fn write_byte(&mut self, byte: u8) -> Result<(), &'static str>;
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str>;
     
     /// Read multiple bytes from the device
     /// 
@@ -38,7 +37,7 @@ pub trait CharDevice: Device {
     /// # Returns
     /// 
     /// The number of bytes actually read
-    fn read(&mut self, buffer: &mut [u8]) -> usize {
+    fn read(&self, buffer: &mut [u8]) -> usize {
         let mut bytes_read = 0;
         for i in 0..buffer.len() {
             if let Some(byte) = self.read_byte() {
@@ -60,7 +59,7 @@ pub trait CharDevice: Device {
     /// # Returns
     /// 
     /// Result containing the number of bytes written or an error
-    fn write(&mut self, buffer: &[u8]) -> Result<usize, &'static str> {
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
         let mut bytes_written = 0;
         for &byte in buffer {
             self.write_byte(byte)?;
@@ -127,17 +126,17 @@ impl Device for GenericCharDevice {
         self
     }
     
-    fn as_char_device(&mut self) -> Option<&mut dyn CharDevice> {
+    fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
     }
 }
 
 impl CharDevice for GenericCharDevice {
-    fn read_byte(&mut self) -> Option<u8> {
+    fn read_byte(&self) -> Option<u8> {
         (self.read_fn)()
     }
 
-    fn write_byte(&mut self, byte: u8) -> Result<(), &'static str> {
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
         (self.write_fn)(byte)
     }
 
