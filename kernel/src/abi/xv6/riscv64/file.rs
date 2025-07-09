@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, string::{String, ToString}, vec, vec::Vec};
+use alloc::{string::{String, ToString}, sync::Arc, vec::Vec, vec};
 use crate::{
     abi::xv6::riscv64::fs::xv6fs::{Dirent, Stat}, 
     arch::Trapframe, 
@@ -281,7 +281,6 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                         trapframe.epc = epc;
                         task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
                         get_scheduler().schedule(trapframe); // Yield to the scheduler
-                        trapframe.get_return_value() // Return the value from the trapframe
                     },
                     _ => usize::MAX, // Other errors
                 }
@@ -301,7 +300,6 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                         trapframe.epc = epc;
                         task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
                         get_scheduler().schedule(trapframe); // Yield to the scheduler
-                        trapframe.get_return_value() // Return the value from the trapframe
                     },
                     _ => {
                         // Other errors, return -1
@@ -398,7 +396,7 @@ pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     match (major, minor) {
         (1, 0) => {
             // Create a console device
-            let console_dev = Some(DeviceManager::get_mut_manager().register_device(Box::new(
+            let console_dev = Some(DeviceManager::get_mut_manager().register_device(Arc::new(
                 crate::abi::xv6::drivers::console::ConsoleDevice::new(0, "console")
             )));
         
