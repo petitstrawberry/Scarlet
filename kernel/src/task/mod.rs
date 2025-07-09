@@ -12,13 +12,92 @@ use spin::Mutex;
 
 use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::{Handle, HandleTable, KernelObject}, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
+use crate::sync::waker::Waker;
+use alloc::collections::BTreeMap;
+use spin::Once;
+
+/// Global registry of task-specific wakers for waitpid
+static TASK_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+
+/// Initialize the task wakers registry
+fn init_task_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+    Mutex::new(BTreeMap::new())
+}
+
+/// Get or create a waker for a specific task
+/// 
+/// This function returns a reference to the waker associated with the given task ID.
+/// If no waker exists for the task, a new one is created.
+/// 
+/// # Arguments
+/// 
+/// * `task_id` - The ID of the task to get a waker for
+/// 
+/// # Returns
+/// 
+/// A reference to the waker for the specified task
+pub fn get_task_waker(task_id: usize) -> &'static Waker {
+    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let mut wakers = wakers_mutex.lock();
+    if !wakers.contains_key(&task_id) {
+        let waker_name = alloc::format!("task_{}", task_id);
+        // We need to create a static string for the waker name
+        let static_name = Box::leak(waker_name.into_boxed_str());
+        wakers.insert(task_id, Waker::new_interruptible(static_name));
+    }
+    // This is safe because we know the waker exists and won't be removed
+    // until the task is cleaned up
+    unsafe {
+        let waker_ptr = wakers.get(&task_id).unwrap() as *const Waker;
+        &*waker_ptr
+    }
+}
+
+/// Wake up any processes waiting for a specific task
+/// 
+/// This function should be called when a task exits to wake up
+/// any parent processes that are waiting for this specific task.
+/// 
+/// # Arguments
+/// 
+/// * `task_id` - The ID of the task that has exited
+pub fn wake_task_waiters(task_id: usize) {
+    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers = wakers_mutex.lock();
+    if let Some(waker) = wakers.get(&task_id) {
+        waker.wake_all();
+    }
+}
+
+/// Clean up the waker for a specific task
+/// 
+/// This function should be called when a task is completely cleaned up
+/// to remove its waker from the global registry.
+/// 
+/// # Arguments
+/// 
+/// * `task_id` - The ID of the task to clean up
+pub fn cleanup_task_waker(task_id: usize) {
+    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let mut wakers = wakers_mutex.lock();
+    wakers.remove(&task_id);
+}
+
+/// Types of blocked states for tasks
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum BlockedType {
+    /// Interruptible blocking - can be interrupted by signals
+    Interruptible,
+    /// Uninterruptible blocking - cannot be interrupted, must wait for completion
+    Uninterruptible,
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
     NotInitialized,
     Ready,
     Running,
-    Blocked,
+    Blocked(BlockedType),
     Zombie,
     Terminated,
 }
