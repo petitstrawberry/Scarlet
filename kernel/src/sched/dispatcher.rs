@@ -17,8 +17,13 @@ impl Dispatcher {
 
     #[allow(static_mut_refs)]
     pub fn dispatch(&mut self, cpu: &mut Arch, task: &mut Task, prev_task: Option<&mut Task>) {
+        // crate::println!("Dispatcher: Dispatching task {} (state: {:?})", task.get_id(), task.state);
+        
         if let Some(prev_task) = prev_task {
+            // crate::println!("Dispatcher: Storing prev_task {} state", prev_task.get_id());
             prev_task.vcpu.store(cpu);
+        } else {
+            // crate::println!("Dispatcher: No prev_task to store");
         }
 
         match task.state {

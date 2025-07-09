@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -79,7 +79,14 @@ impl Scheduler {
                     Some(mut t) => {
                         match t.state {
                             TaskState::Zombie => {
-                                panic!("At least one task must be scheduled");
+                                let task_id = t.get_id();
+                                self.zombie_queue[cpu_id].push_back(t);
+                                // crate::println!("Scheduler: Task {} is now a zombie", task_id);
+                                self.current_task_id[cpu_id] = None;
+                                // Wake up any processes waiting for this task
+                                wake_task_waiters(task_id);
+                                continue;
+                                // panic!("At least one task must be scheduled");
                             },
                             TaskState::Terminated => {
                                 panic!("At least one task must be scheduled");
@@ -89,8 +96,8 @@ impl Scheduler {
                                 if self.current_task_id[cpu_id] == Some(t.get_id()) {
                                     self.current_task_id[cpu_id] = None;
                                 }
-                                // Put blocked task back to the end of queue without running it
-                                self.ready_queue[cpu_id].push_back(t);
+                                // Put blocked task to blocked queue without running it
+                                self.blocked_queue[cpu_id].push_back(t);
                                 continue;
                             },
                             _ => {
@@ -111,7 +118,11 @@ impl Scheduler {
                     Some(mut t) => {
                         match t.state {
                             TaskState::Zombie => {
+                                let task_id = t.get_id();
                                 self.zombie_queue[cpu_id].push_back(t);
+                                // Wake up any processes waiting for this task
+                                // crate::println!("Scheduler[not empty]: Task {} is now a zombie", task_id);
+                                wake_task_waiters(task_id);
                                 continue;
                             },
                             TaskState::Terminated => {
@@ -244,14 +255,17 @@ impl Scheduler {
     /// # Returns
     /// true if the task was found and moved, false otherwise
     pub fn wake_task(&mut self, task_id: usize) -> bool {
+        crate::println!("Scheduler: Waking up task {}", task_id);
         // Search for the task in blocked queues
         for cpu_id in 0..self.blocked_queue.len() {
             if let Some(pos) = self.blocked_queue[cpu_id].iter().position(|t| t.get_id() == task_id) {
                 if let Some(mut task) = self.blocked_queue[cpu_id].remove(pos) {
                     // Set task state to Running
                     task.state = TaskState::Running;
+                    // crate::println!("Scheduler: Task {} waking up with PC: 0x{:x}", task_id, task.vcpu.get_pc());
                     // Move to ready queue
                     self.ready_queue[cpu_id].push_back(task);
+                    // crate::println!("Scheduler: Woke up task {} and moved it to ready queue", task_id);
                     return true;
                 }
             }

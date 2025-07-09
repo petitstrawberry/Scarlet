@@ -117,6 +117,9 @@ impl Waker {
         // Set task state to blocked
         task.set_state(TaskState::Blocked(self.block_type));
 
+        // Store current CPU state to task before yielding
+        task.vcpu.store(cpu);
+
         // Yield CPU to scheduler - this never returns
         get_scheduler().schedule(cpu);
     }
