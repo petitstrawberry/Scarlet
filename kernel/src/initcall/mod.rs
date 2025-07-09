@@ -34,19 +34,17 @@ unsafe extern "C" {
 
 #[allow(static_mut_refs)]
 pub fn call_initcalls() {
-    let size = core::mem::size_of::<fn()>();
-    
-    println!("Running initcalls... ");
-    let mut func = unsafe { &__INITCALL_DRIVER_END as *const usize as usize };
-    let end = unsafe { &__INITCALL_END as *const usize as usize };
-    let num = (end - func) / size;
+    unsafe {
+        let size = core::mem::size_of::<fn()>();
+        
+        println!("Running initcalls... ");
+        let mut func_addr = &__INITCALL_DRIVER_END as *const usize as usize;
+        let end_addr = &__INITCALL_END as *const usize as usize;
 
-    for i in 0..num {
-        println!("Initcalls {} / {}", i + 1, num);
-        let initcall = unsafe { *(func as *const fn()) };
-        initcall();
-        func += size;
+        while func_addr < end_addr {
+            let initcall = core::ptr::read_volatile(func_addr as *const fn());
+            initcall();
+            func_addr += size;
+        }
     }
-
-    println!("Initcalls done.");
 }

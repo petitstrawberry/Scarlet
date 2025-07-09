@@ -1,5 +1,6 @@
 use alloc::{boxed::Box, vec::Vec};
 
+#[derive(Debug)]
 pub struct BlockIORequest {
     pub request_type: BlockIORequestType,
     pub sector: usize,
@@ -9,6 +10,7 @@ pub struct BlockIORequest {
     pub buffer: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockIORequestType {
     Read,
     Write,

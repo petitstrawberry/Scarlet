@@ -56,13 +56,10 @@ pub fn _print(args: fmt::Arguments) {
     let manager = DeviceManager::get_manager();
     
     // Try to find a character device (UART)
-    if let Some(borrowed_device) = manager.borrow_first_device_by_type(crate::device::DeviceType::Char) {
-        let device = borrowed_device.device();
-        let mut device_guard = device.write();
-        
-        if let Some(char_device) = device_guard.as_char_device() {
+    if let Some(borrowed_device) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
+        if let Some(char_device) = borrowed_device.as_char_device() {
             // Use CharDevice trait methods to write
-            struct CharDeviceWriter<'a>(&'a mut dyn CharDevice);
+            struct CharDeviceWriter<'a>(&'a dyn CharDevice);
             
             impl<'a> fmt::Write for CharDeviceWriter<'a> {
                 fn write_str(&mut self, s: &str) -> fmt::Result {

@@ -13,9 +13,11 @@
 
 extern crate alloc;
 
+use core::panic;
+
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::{enable_external_interrupts, enable_interrupts}, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -110,8 +112,24 @@ impl Scheduler {
                             }
                         }
                     }
-                    /* If the task queue is empty, run the same task again */
-                    None => break,
+                    // If no tasks are ready, we can either go idle or wait for an interrupt
+                    None => {
+                        // panic!("MUST NOT reach here: No tasks ready to run");
+                        crate::println!("[Warning] Scheduler: No tasks ready, going idle");
+                        crate::println!("[Warning] This is wrong, there should always be at least one task (idle task) ready to run");
+                        crate::println!("[Warning] Creating idle task for CPU {}", cpu_id);
+                        let mut kernel_task = new_kernel_task("idle".to_string(), 0, || {
+                            // Idle loop
+                            loop {
+                                // Wait for an interrupt to wake up
+                                enable_external_interrupts();
+                                idle();
+                            }
+                        });
+                        kernel_task.init();
+                        // Add idle task to the ready queue
+                        self.ready_queue[cpu_id].push_back(kernel_task);
+                    }
                 }
             } else {
                 match task {
@@ -129,6 +147,7 @@ impl Scheduler {
                                 continue;
                             },
                             TaskState::Blocked(_) => {
+                                // crate::println!("Scheduler: Task {} is blocked, moving to blocked queue", t.get_id());
                                 // Reset current_task_id since this task is no longer current
                                 if self.current_task_id[cpu_id] == Some(t.get_id()) {
                                     self.current_task_id[cpu_id] = None;

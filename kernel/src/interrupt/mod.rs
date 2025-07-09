@@ -159,6 +159,7 @@ pub fn are_interrupts_enabled() -> bool {
 pub struct InterruptManager {
     controllers: controllers::InterruptControllers,
     external_handlers: spin::Mutex<alloc::collections::BTreeMap<InterruptId, ExternalInterruptHandler>>,
+    interrupt_devices: spin::Mutex<alloc::collections::BTreeMap<InterruptId, alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>>>,
 }
 
 impl InterruptManager {
@@ -168,6 +169,7 @@ impl InterruptManager {
         Self {
             controllers: controllers::InterruptControllers::new(),
             external_handlers: spin::Mutex::new(alloc::collections::BTreeMap::new()),
+            interrupt_devices: spin::Mutex::new(alloc::collections::BTreeMap::new()),
         }
     }
 
@@ -220,17 +222,30 @@ impl InterruptManager {
 
     /// Handle an external interrupt
     pub fn handle_external_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
-        let handler = {
-            let handlers = self.external_handlers.lock();
-            handlers.get(&interrupt_id).copied()
+        // First, check for device-based handlers
+        let device = {
+            let devices = self.interrupt_devices.lock();
+            devices.get(&interrupt_id).cloned()
         };
         
-        if let Some(handler_fn) = handler {
-            let mut handle = InterruptHandle::new(interrupt_id, cpu_id, self);
-            handler_fn(&mut handle)
-        } else {
-            // No handler registered - just complete the interrupt
+        if let Some(device) = device {
+            // Call device's interrupt handler
+            device.handle_interrupt()?;
             self.complete_external_interrupt(cpu_id, interrupt_id)
+        } else {
+            // Fall back to function-based handlers
+            let handler = {
+                let handlers = self.external_handlers.lock();
+                handlers.get(&interrupt_id).copied()
+            };
+            
+            if let Some(handler_fn) = handler {
+                let mut handle = InterruptHandle::new(interrupt_id, cpu_id, self);
+                handler_fn(&mut handle)
+            } else {
+                // No handler registered - just complete the interrupt
+                self.complete_external_interrupt(cpu_id, interrupt_id)
+            }
         }
     }
 
@@ -317,6 +332,16 @@ impl InterruptManager {
             return Err(InterruptError::HandlerAlreadyRegistered);
         }
         handlers.insert(interrupt_id, handler);
+        Ok(())
+    }
+
+    /// Register a device-based handler for a specific external interrupt
+    pub fn register_interrupt_device(&mut self, interrupt_id: InterruptId, device: alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>) -> InterruptResult<()> {
+        let mut devices = self.interrupt_devices.lock();
+        if devices.contains_key(&interrupt_id) {
+            return Err(InterruptError::HandlerAlreadyRegistered);
+        }
+        devices.insert(interrupt_id, device);
         Ok(())
     }
 

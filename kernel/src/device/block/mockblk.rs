@@ -57,7 +57,7 @@ impl Device for MockBlockDevice {
         self
     }
     
-    fn as_block_device(&mut self) -> Option<&mut dyn BlockDevice> {
+    fn as_block_device(&self) -> Option<&dyn BlockDevice> {
         Some(self)
     }
 }
@@ -76,21 +76,40 @@ impl BlockDevice for MockBlockDevice {
         self.disk_size
     }
     
-    fn enqueue_request(&mut self, request: Box<BlockIORequest>) {
+    fn enqueue_request(&self, request: Box<BlockIORequest>) {
         self.request_queue.lock().push(request);
     }
     
-    fn process_requests(&mut self) -> Vec<BlockIOResult> {
+    /// Process all queued block I/O requests
+    /// 
+    /// This method processes all pending requests using a deadlock-safe approach:
+    /// 
+    /// 1. Extracts all requests at once using mem::replace
+    /// 2. Processes requests without holding the request_queue lock
+    /// 3. Acquires data lock only when needed for each request
+    /// 
+    /// This prevents deadlocks by:
+    /// - Never holding multiple locks simultaneously
+    /// - Minimizing lock hold time
+    /// - Using a consistent lock ordering
+    /// 
+    /// # Returns
+    /// Vector of `BlockIOResult` containing completed requests and their results
+    fn process_requests(&self) -> Vec<BlockIOResult> {
         let mut results = Vec::new();
+        
+        // Extract all requests at once to minimize lock time
         let requests = {
             let mut queue = self.request_queue.lock();
             core::mem::replace(&mut *queue, Vec::new())
-        };
+        }; // request_queue lock is automatically released here
         
+        // Process all requests without holding the request_queue lock
         for mut request in requests {
             let result = match request.request_type {
                 BlockIORequestType::Read => {
                     let sector = request.sector;
+                    // Acquire data lock only for this operation
                     let data = self.data.lock();
                     if sector < data.len() {
                         request.buffer = data[sector].clone();
@@ -98,9 +117,11 @@ impl BlockDevice for MockBlockDevice {
                     } else {
                         Err("Invalid sector")
                     }
+                    // data lock is automatically released here
                 },
                 BlockIORequestType::Write => {
                     let sector = request.sector;
+                    // Acquire data lock only for this operation
                     let mut data = self.data.lock();
                     if sector < data.len() {
                         let buffer_len = request.buffer.len();
@@ -112,6 +133,7 @@ impl BlockDevice for MockBlockDevice {
                     } else {
                         Err("Invalid sector")
                     }
+                    // data lock is automatically released here
                 }
             };
             
