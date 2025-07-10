@@ -225,20 +225,21 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
     let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
     let count = trapframe.get_arg(2) as usize;
 
-    let epc = trapframe.epc;
-
-    // Increment PC to avoid infinite loop if read fails
-    trapframe.increment_pc_next(task);
-
     // Get handle from XV6 fd
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
-        None => return usize::MAX, // Invalid file descriptor
+        None => {
+            trapframe.increment_pc_next(task);
+            return usize::MAX; // Invalid file descriptor
+        }
     };
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
-        None => return usize::MAX, // Invalid file descriptor
+        None => {
+            trapframe.increment_pc_next(task);
+            return usize::MAX; // Invalid file descriptor
+        }
     };
 
     // Check if this is a directory by getting file metadata
@@ -254,7 +255,10 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
 
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
-        None => return usize::MAX, // Not a stream object
+        None => {
+            trapframe.increment_pc_next(task);
+            return usize::MAX; // Not a stream object
+        }
     };
 
     if is_directory {
@@ -264,6 +268,7 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
         
         match stream.read(&mut temp_buffer) {
             Ok(n) => {
+                trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
                 if n > 0 && n >= directory_entry_size {
                     // Convert DirectoryEntry to xv6 Dirent
                     let converted_bytes = read_directory_as_xv6_dirent(buf_ptr, count, &temp_buffer[..n]);
@@ -278,11 +283,14 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                     StreamError::EndOfStream => 0, // EOF
                     StreamError::WouldBlock => {
                         // If the stream would block, we need to set the trapframe's EPC
-                        trapframe.epc = epc;
-                        task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
+                        // trapframe.epc = epc;
+                        // task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
                         get_scheduler().schedule(trapframe); // Yield to the scheduler
                     },
-                    _ => usize::MAX, // Other errors
+                    _ => {
+                        trapframe.increment_pc_next(task);
+                        usize::MAX // Other errors
+                    }
                 }
             }
         }
@@ -291,18 +299,17 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
         let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
         
         match stream.read(&mut buffer) {
-            Ok(n) => n, // Return original read size for regular files
+            Ok(n) => {
+                trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                n
+            }, // Return original read size for regular files
             Err(e) => {
                 match e {
                     StreamError::EndOfStream => 0, // EOF
-                    StreamError::WouldBlock => {
-                        // If the stream would block, we need to set the trapframe's EPC
-                        trapframe.epc = epc;
-                        task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
-                        get_scheduler().schedule(trapframe); // Yield to the scheduler
-                    },
+                    StreamError::WouldBlock => get_scheduler().schedule(trapframe), // Yield to the scheduler
                     _ => {
                         // Other errors, return -1
+                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
                         usize::MAX
                     }
                 }

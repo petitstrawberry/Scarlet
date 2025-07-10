@@ -48,9 +48,7 @@ impl CharDevice for ConsoleDevice {
         // Bridge to TTY device instead of direct serial access
         let device_manager = DeviceManager::get_manager();
         if let Some(tty_device) = device_manager.get_device_by_name("tty0") {
-            if let Some(char_device) = tty_device.as_char_device() {
-                return char_device.read_byte();
-            }
+            return tty_device.as_char_device().and_then(|char_device| char_device.read_byte());
         }
         
         // Fallback: return None if TTY is not available
