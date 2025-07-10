@@ -17,7 +17,7 @@ use core::panic;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::{enable_external_interrupts, enable_interrupts}, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -82,11 +82,16 @@ impl Scheduler {
                         match t.state {
                             TaskState::Zombie => {
                                 let task_id = t.get_id();
+                                let parent_id = t.get_parent_id();
                                 self.zombie_queue[cpu_id].push_back(t);
                                 // crate::println!("Scheduler: Task {} is now a zombie", task_id);
                                 self.current_task_id[cpu_id] = None;
-                                // Wake up any processes waiting for this task
+                                // Wake up any processes waiting for this specific task
                                 wake_task_waiters(task_id);
+                                // Also wake up parent process for waitpid(-1)
+                                if let Some(parent_id) = parent_id {
+                                    wake_parent_waiters(parent_id);
+                                }
                                 continue;
                                 // panic!("At least one task must be scheduled");
                             },
@@ -137,10 +142,14 @@ impl Scheduler {
                         match t.state {
                             TaskState::Zombie => {
                                 let task_id = t.get_id();
+                                let parent_id = t.get_parent_id();
                                 self.zombie_queue[cpu_id].push_back(t);
-                                // Wake up any processes waiting for this task
-                                // crate::println!("Scheduler[not empty]: Task {} is now a zombie", task_id);
+                                // Wake up any processes waiting for this specific task
                                 wake_task_waiters(task_id);
+                                // Also wake up parent process for waitpid(-1)
+                                if let Some(parent_id) = parent_id {
+                                    wake_parent_waiters(parent_id);
+                                }
                                 continue;
                             },
                             TaskState::Terminated => {

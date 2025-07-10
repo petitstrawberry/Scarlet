@@ -19,8 +19,17 @@ use spin::Once;
 /// Global registry of task-specific wakers for waitpid
 static TASK_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
+/// Global registry of parent task wakers for waitpid(-1) operations
+/// Each parent task has a waker that gets triggered when any of its children exit
+static PARENT_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+
 /// Initialize the task wakers registry
 fn init_task_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+    Mutex::new(BTreeMap::new())
+}
+
+/// Initialize the parent waker registry
+fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
@@ -53,6 +62,38 @@ pub fn get_task_waker(task_id: usize) -> &'static Waker {
     }
 }
 
+/// Get or create a parent waker for waitpid(-1) operations
+/// 
+/// This waker is used when a parent process calls waitpid(-1) to wait for any child.
+/// It's separate from the task-specific wakers to avoid conflicts.
+/// 
+/// # Arguments
+/// 
+/// * `parent_id` - The ID of the parent task
+/// 
+/// # Returns
+/// 
+/// A reference to the parent waker
+pub fn get_parent_waker(parent_id: usize) -> &'static Waker {
+    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let mut wakers = wakers_mutex.lock();
+    
+    // Create a new waker if it doesn't exist
+    if !wakers.contains_key(&parent_id) {
+        let waker_name = alloc::format!("parent_waker_{}", parent_id);
+        // We need to leak the string to make it 'static
+        let static_name = alloc::boxed::Box::leak(waker_name.into_boxed_str());
+        wakers.insert(parent_id, Waker::new_interruptible(static_name));
+    }
+    
+    // Return a reference to the waker
+    // This is safe because the BTreeMap is never dropped and the Waker is never moved
+    unsafe {
+        let waker_ptr = wakers.get(&parent_id).unwrap() as *const Waker;
+        &*waker_ptr
+    }
+}
+
 /// Wake up any processes waiting for a specific task
 /// 
 /// This function should be called when a task exits to wake up
@@ -69,6 +110,21 @@ pub fn wake_task_waiters(task_id: usize) {
     }
 }
 
+/// Wake up a parent process waiting for any child (waitpid(-1))
+/// 
+/// This function should be called when any child of a parent exits.
+/// 
+/// # Arguments
+/// 
+/// * `parent_id` - The ID of the parent task
+pub fn wake_parent_waiters(parent_id: usize) {
+    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers = wakers_mutex.lock();
+    if let Some(waker) = wakers.get(&parent_id) {
+        waker.wake_all();
+    }
+}
+
 /// Clean up the waker for a specific task
 /// 
 /// This function should be called when a task is completely cleaned up
@@ -81,6 +137,19 @@ pub fn cleanup_task_waker(task_id: usize) {
     let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&task_id);
+}
+
+/// Clean up the parent waker for a specific task
+/// 
+/// This function should be called when a parent task is completely cleaned up.
+/// 
+/// # Arguments
+/// 
+/// * `parent_id` - The ID of the parent task to clean up
+pub fn cleanup_parent_waker(parent_id: usize) {
+    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let mut wakers = wakers_mutex.lock();
+    wakers.remove(&parent_id);
 }
 
 /// Types of blocked states for tasks
@@ -897,18 +966,23 @@ impl Task {
     /// * `status` - The exit status
     /// 
     pub fn exit(&mut self, status: i32) {
+        // crate::println!("Task {} ({}) exiting with status {}", self.id, self.name, status);
+        
         match self.parent_id {
             Some(parent_id) => {
                 if get_scheduler().get_task_by_id(parent_id).is_none() {
+                    // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
                     self.state = TaskState::Terminated;
                     return;
                 }
                 /* Set the exit status */
                 self.set_exit_status(status);
                 self.state = TaskState::Zombie;
+                // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
             },
             None => {
                 /* If the task has no parent, it is terminated */
+                // crate::println!("Task {}: No parent, terminating", self.id);
                 self.state = TaskState::Terminated;
             }
         }
@@ -966,6 +1040,7 @@ impl Task {
     }
 }
 
+#[derive(Debug)]
 pub enum WaitError {
     NoSuchChild(String),
     ChildNotExited(String),

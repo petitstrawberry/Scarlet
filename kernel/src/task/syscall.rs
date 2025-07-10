@@ -21,9 +21,8 @@ use crate::fs::MAX_PATH_LENGTH;
 use crate::library::std::string::{parse_c_string_from_userspace, parse_string_array_from_userspace};
 
 use crate::arch::{get_cpu, Trapframe};
-use crate::print;
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{get_task_waker, CloneFlags, WaitError};
+use crate::task::{get_parent_waker, get_task_waker, CloneFlags, WaitError};
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 
@@ -276,9 +275,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
         }
         
         // No child has exited yet, block until one does
-        // We wait on any child's waker since we're waiting for any child (-1)
-        // In this case, we use a general waker for the parent task
-        let parent_waker = get_task_waker(task.get_id());
+        // We wait on the parent's waker since we're waiting for any child (-1)
+        // This is different from waiting for a specific child
+        let parent_waker = get_parent_waker(task.get_id());
         parent_waker.wait(task, trapframe);
     }
     
