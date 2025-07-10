@@ -4,7 +4,7 @@ use crate::{
     fs::FileType, 
     library::std::string::cstring_to_string,
     sched::scheduler::get_scheduler, 
-    task::{mytask, CloneFlags, WaitError}
+    task::{get_parent_waker, mytask, CloneFlags, WaitError}
 };
 
 /// VFS v2 helper function for path absolutization
@@ -68,7 +68,6 @@ pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(get_cpu());
-    trapframe.get_arg(0) as usize
 }
 
 pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -98,7 +97,11 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
             }
         }
     }
-    return trapframe.get_return_value();
+    
+    // No child has exited yet, block until one does
+    // xv6's wait() is equivalent to waitpid(-1), so we use the parent waker
+    let parent_waker = get_parent_waker(task.get_id());
+    parent_waker.wait(task, trapframe);
 }
 
 pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut Trapframe) -> usize {
