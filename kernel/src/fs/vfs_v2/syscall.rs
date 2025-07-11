@@ -107,6 +107,23 @@ pub fn sys_close(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as u32; // Handle is u32
+    trapframe.increment_pc_next(task);
+
+    // Check if the file descriptor exists
+    if let Some(kernel_obj) = task.handle_table.get(fd) {
+        // Insert a new handle for the same object
+        match task.handle_table.insert(kernel_obj.clone()) {
+            Ok(new_handle) => new_handle as usize,
+            Err(_) => usize::MAX, // Handle table full
+        }
+    } else {
+        usize::MAX // Invalid file descriptor
+    }
+}
+
 pub fn sys_read(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as u32; // Handle is u32
