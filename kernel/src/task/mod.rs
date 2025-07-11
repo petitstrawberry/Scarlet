@@ -968,6 +968,9 @@ impl Task {
     pub fn exit(&mut self, status: i32) {
         // crate::println!("Task {} ({}) exiting with status {}", self.id, self.name, status);
         
+        // Close all open handles when task exits
+        self.handle_table.close_all();
+        
         match self.parent_id {
             Some(parent_id) => {
                 if get_scheduler().get_task_by_id(parent_id).is_none() {
