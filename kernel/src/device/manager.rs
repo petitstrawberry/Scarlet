@@ -116,8 +116,6 @@ pub struct DeviceManager {
     device_by_name: Mutex<BTreeMap<String, SharedDevice>>,
     /* Device drivers organized by priority */
     drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
-    /* Interrupt ID to device mapping */
-    interrupt_devices: Mutex<BTreeMap<InterruptId, usize>>,
 }
 
 impl DeviceManager {
@@ -126,7 +124,6 @@ impl DeviceManager {
             devices: Mutex::new(Vec::new()),
             device_by_name: Mutex::new(BTreeMap::new()),
             drivers: Mutex::new(BTreeMap::new()),
-            interrupt_devices: Mutex::new(BTreeMap::new()),
         }
     }
 

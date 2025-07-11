@@ -4,6 +4,8 @@
 //! It supports both local interrupts (via CLINT) and external interrupts (via PLIC) on RISC-V architecture.
 
 use core::fmt;
+use hashbrown::HashMap;
+
 use crate::arch::{self, interrupt::enable_external_interrupts};
 
 pub mod controllers;
@@ -158,8 +160,8 @@ pub fn are_interrupts_enabled() -> bool {
 /// This manages both local and external interrupts in a single structure.
 pub struct InterruptManager {
     controllers: controllers::InterruptControllers,
-    external_handlers: spin::Mutex<alloc::collections::BTreeMap<InterruptId, ExternalInterruptHandler>>,
-    interrupt_devices: spin::Mutex<alloc::collections::BTreeMap<InterruptId, alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>>>,
+    external_handlers: spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>,
+    interrupt_devices: spin::Mutex<HashMap<InterruptId, alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>>>,
 }
 
 impl InterruptManager {
@@ -168,8 +170,8 @@ impl InterruptManager {
     pub fn new() -> Self {
         Self {
             controllers: controllers::InterruptControllers::new(),
-            external_handlers: spin::Mutex::new(alloc::collections::BTreeMap::new()),
-            interrupt_devices: spin::Mutex::new(alloc::collections::BTreeMap::new()),
+            external_handlers: spin::Mutex::new(HashMap::new()),
+            interrupt_devices: spin::Mutex::new(HashMap::new()),
         }
     }
 
