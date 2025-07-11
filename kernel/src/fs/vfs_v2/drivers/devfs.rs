@@ -71,42 +71,43 @@ impl DevFS {
         // Clear existing devices (for dynamic updates)
         root.clear_children();
         
-        // Add device files for all registered devices
-        let device_count = device_manager.get_devices_count();
-        for device_id in 0..device_count {
-            if let Some(device) = device_manager.get_device(device_id) {
-                let device_name = device.name().to_string();
-                let device_type = device.device_type();
-                
-                // Only add char and block devices to devfs
-                match device_type {
-                    DeviceType::Char | DeviceType::Block => {
-                        let device_file_info = DeviceFileInfo {
-                            device_id,
-                            device_type,
-                        };
-                        
-                        let file_type = match device_type {
-                            DeviceType::Char => FileType::CharDevice(device_file_info),
-                            DeviceType::Block => FileType::BlockDevice(device_file_info),
-                            _ => continue, // Skip other device types
-                        };
-                        
-                        let device_node = Arc::new(DevNode::new_device_file(
-                            device_name.clone(),
-                            file_type,
-                            device_id as u64 + 1, // file_id = device_id + 1 (root is 0)
-                        ));
-                        
-                        // Set filesystem reference for the device node
-                        if let Some(fs_ref) = root.filesystem() {
-                            device_node.set_filesystem(fs_ref);
-                        }
-                        
-                        root.add_child(device_name, device_node)?;
+        // Get all devices that were registered with explicit names
+        let named_devices = device_manager.get_named_devices();
+        
+        for (device_name, device) in named_devices {
+            let device_type = device.device_type();
+            
+            // Only add char and block devices to devfs
+            match device_type {
+                DeviceType::Char | DeviceType::Block => {
+                    // Find the device ID by looking it up in the device manager
+                    let device_id = device.id();
+                    
+                    let device_file_info = DeviceFileInfo {
+                        device_id,
+                        device_type,
+                    };
+                    
+                    let file_type = match device_type {
+                        DeviceType::Char => FileType::CharDevice(device_file_info),
+                        DeviceType::Block => FileType::BlockDevice(device_file_info),
+                        _ => continue, // Skip other device types
+                    };
+                    
+                    let device_node = Arc::new(DevNode::new_device_file(
+                        device_name.clone(),
+                        file_type,
+                        device_id as u64 + 1, // file_id = device_id + 1 (root is 0)
+                    ));
+                    
+                    // Set filesystem reference for the device node
+                    if let Some(fs_ref) = root.filesystem() {
+                        device_node.set_filesystem(fs_ref);
                     }
-                    _ => {} // Skip non-device files
+                    
+                    root.add_child(device_name, device_node)?;
                 }
+                _ => {} // Skip non-device files
             }
         }
         
@@ -427,6 +428,75 @@ mod tests {
         
         let error = result.unwrap_err();
         assert_eq!(error.kind, FileSystemErrorKind::NotFound);
+    }
+
+    #[test_case]
+    fn test_devfs_with_real_devices() {
+        use crate::device::char::mockchar::MockCharDevice;
+        use crate::device::block::mockblk::MockBlockDevice;
+        
+        // Register actual character and block devices
+        let device_manager = DeviceManager::get_manager();
+        
+        // Register a character device (TTY-like)
+        let char_device = Arc::new(MockCharDevice::new(100, "tty0"));
+        let char_device_id = device_manager.register_device_with_name("tty0".to_string(), char_device.clone());
+        
+        // Register a block device (disk-like)  
+        let block_device = Arc::new(MockBlockDevice::new(200, "sda", 512, 1000));
+        let block_device_id = device_manager.register_device_with_name("sda".to_string(), block_device.clone());
+        
+        // Create devfs and verify devices appear
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+        
+        // Read directory contents
+        let entries = devfs.readdir(&root).unwrap();
+        
+        // Debug: print all entries to see what we actually have
+        for entry in &entries {
+            // Note: In test environment we can't use println, but let's check the entries
+        }
+        
+        // Should contain both our devices
+        let has_tty0 = entries.iter().any(|entry| {
+            entry.name == "tty0" && matches!(entry.file_type, FileType::CharDevice(_))
+        });
+        let has_sda = entries.iter().any(|entry| {
+            entry.name == "sda" && matches!(entry.file_type, FileType::BlockDevice(_))
+        });
+        
+        assert!(has_tty0, "DevFS should contain tty0 character device");
+        assert!(has_sda, "DevFS should contain sda block device");
+        
+        // Test lookup functionality for character device
+        let tty0_result = devfs.lookup(&root, &"tty0".to_string());
+        assert!(tty0_result.is_ok(), "Should be able to lookup tty0");
+        
+        // Test lookup functionality for block device  
+        let sda_result = devfs.lookup(&root, &"sda".to_string());
+        assert!(sda_result.is_ok(), "Should be able to lookup sda");
+    }
+
+    #[test_case]
+    fn test_devfs_driver_registration() {
+        // Test that the DevFS driver is properly registered
+        let fs_driver_manager = get_fs_driver_manager();
+        
+        // Check if devfs driver is registered
+        assert!(fs_driver_manager.has_driver("devfs"), "DevFS driver should be registered");
+        
+        // Check driver type
+        let driver_type = fs_driver_manager.get_driver_type("devfs");
+        assert_eq!(driver_type, Some(FileSystemType::Device));
+        
+        // Test creating a devfs instance through the driver manager
+        let devfs_result = fs_driver_manager.create_from_option_string("devfs", "");
+        assert!(devfs_result.is_ok(), "Should be able to create DevFS through driver manager");
+        
+        let devfs_instance = devfs_result.unwrap();
+        assert_eq!(devfs_instance.name(), "devfs");
+        assert!(devfs_instance.is_read_only());
     }
 
     #[test_case]
