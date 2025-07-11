@@ -280,7 +280,10 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
             },
             Err(e) => {
                 match e {
-                    StreamError::EndOfStream => 0, // EOF
+                    StreamError::EndOfStream => {
+                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                        0 // EOF
+                    },
                     StreamError::WouldBlock => {
                         // If the stream would block, we need to set the trapframe's EPC
                         // trapframe.epc = epc;
@@ -305,7 +308,10 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
             }, // Return original read size for regular files
             Err(e) => {
                 match e {
-                    StreamError::EndOfStream => 0, // EOF
+                    StreamError::EndOfStream => {
+                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                        0 // EOF
+                    },
                     StreamError::WouldBlock => get_scheduler().schedule(trapframe), // Yield to the scheduler
                     _ => {
                         // Other errors, return -1
