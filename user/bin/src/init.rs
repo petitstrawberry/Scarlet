@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, fs::{close, mkdir, mkfile, mount, open, pivot_root, readdir}, println, task::{execve_with_flags, exit, waitpid, EXECVE_FORCE_ABI_REBUILD}};
+use std::{format, fs::{close, dup, mkdir, mkfile, mount, open, pivot_root, readdir}, println, task::{execve_with_flags, exit, waitpid, EXECVE_FORCE_ABI_REBUILD}};
 
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
@@ -41,14 +41,7 @@ fn setup_new_root() -> bool {
 }
 
 fn setup_devfs() -> Result<(), &'static str> {
-    // Check if /dev directory already exists
-    if open("/dev", 0) < 0 {
-        println!("init: /dev directory does not exist, creating it...");
-        // Create /dev directory if it doesn't exist
-        if mkdir("/dev", 0) != 0 {
-            return Err("Failed to create /dev directory");
-        }
-    }
+    mkdir("/dev", 0); // Create /dev directory if it doesn't exist
     
     // Mount devfs at /dev
     if mount("devfs", "/dev", "devfs", 0, None) == 0 {
@@ -56,6 +49,30 @@ fn setup_devfs() -> Result<(), &'static str> {
     } else {
         Err("Failed to mount devfs")
     }
+}
+
+fn setup_stdio() {
+    // Set up standard input, output, and error
+    // Handle 0
+    let stdin_fd = open("/dev/tty0", 0); // Open TTY for reading
+    if stdin_fd != 0 {
+        exit(-1);
+    }
+    // Handle 1
+    let stdout_fd = dup(stdin_fd); // Duplicate stdin for stdout
+    if stdout_fd < 0 {
+        close(stdin_fd);
+        exit(-1);
+    }
+    // Handle 2
+    let stderr_fd = dup(stdin_fd); // Duplicate stdin for stderr
+    if stderr_fd < 0 {
+        close(stdin_fd);
+        close(stdout_fd);
+        exit(-1);
+    }
+    
+    println!("init: Standard I/O setup complete");
 }
 
 fn perform_pivot_root() -> bool {
@@ -169,6 +186,13 @@ fn copy_file(src: &str, dest: &str) -> bool {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    // Initialize the device filesystem
+    if setup_devfs().is_err() {
+        exit(-1); // Exit if we cannot set up the device filesystem
+    }
+    // Set up standard input, output, and error
+    setup_stdio();
+
     println!("init: I'm the init process: PID={}", std::task::getpid());
     println!("init: Starting root filesystem transition...");
     

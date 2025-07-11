@@ -1,26 +1,25 @@
-use crate::syscall::{self, syscall0, syscall1, Syscall};
+use crate::fs::{read, write};
 use core::fmt;
 
 // Functions related to character output
 /// Outputs a single character to the console
 /// 
-/// This is a temporary implementation that will eventually be replaced
-/// by standard output or device files.
+/// This function uses fd 1 (stdout) to output characters.
 /// 
 /// # Arguments
 /// * `c` - The character to output
 /// 
 /// # Returns
-/// 0: Success
-/// -1: Failure
+/// The number of bytes written on success, 0 on failure
 /// 
 pub fn putchar(c: char) -> usize {
-    sys_putchar(c)
+    let mut buf = [0u8; 4];
+    let char_str = c.encode_utf8(&mut buf);
+    write_to_stdout(char_str.as_bytes())
 }
 
 /// Reads a single character from the console
-/// This is a temporary implementation that will eventually be replaced
-/// by standard input or device files.
+/// This function uses fd 0 (stdin) to read characters.
 /// 
 /// # Note
 /// This function is blocking and will wait for user input.
@@ -29,11 +28,13 @@ pub fn putchar(c: char) -> usize {
 /// The character read from the console.
 /// 
 pub fn get_char() -> char {
+    let mut buf = [0u8; 1];
     loop {
-        let c = syscall0(syscall::Syscall::Getchar) as u8;
-        if c != 0 {
-            return c as char;
+        let bytes_read = read(0, &mut buf);
+        if bytes_read > 0 {
+            return buf[0] as char;
         }
+        // If no data available, continue trying
     }
 }
 
@@ -45,19 +46,23 @@ pub fn get_char() -> char {
 /// # Returns
 /// The number of characters output
 pub fn puts(s: &str) -> usize {
-    let mut count = 0;
-    for c in s.chars() {
-        if putchar(c) != 0 {
-            return count;
-        }
-        count += 1;
-    }
-    count
+    write_to_stdout(s.as_bytes())
 }
 
-// Wrapper function for character output
-pub fn sys_putchar(c: char) -> usize {
-    syscall1(Syscall::Putchar, c as usize)
+/// Write data to standard output (fd 1)
+/// 
+/// # Arguments
+/// * `buf` - The buffer to write
+/// 
+/// # Returns
+/// The number of bytes written on success, 0 on failure
+fn write_to_stdout(buf: &[u8]) -> usize {
+    let result = write(1, buf);
+    if result as i32 >= 0 {
+        result as usize
+    } else {
+        0
+    }
 }
 
 /// Internal function to handle formatted output
@@ -93,4 +98,54 @@ macro_rules! println {
     ($fmt:expr, $($arg:tt)*) => {
         $crate::print!(concat!($fmt, "\n"), $($arg)*);
     };
+}
+
+/// Read data from standard input (fd 0)
+/// 
+/// # Arguments
+/// * `buf` - The buffer to read into
+/// 
+/// # Returns
+/// The number of bytes read on success, negative value on error
+fn read_from_stdin(buf: &mut [u8]) -> i32 {
+    read(0, buf)
+}
+
+/// Read a line from standard input
+/// 
+/// # Arguments
+/// * `buf` - The buffer to read into
+/// * `max_len` - Maximum number of characters to read
+/// 
+/// # Returns
+/// The number of characters read (excluding newline)
+pub fn gets(buf: &mut [u8], max_len: usize) -> usize {
+    let mut count = 0;
+    let actual_max = core::cmp::min(max_len, buf.len().saturating_sub(1));
+    
+    while count < actual_max {
+        let mut single_char = [0u8; 1];
+        let bytes_read = read_from_stdin(&mut single_char);
+        
+        if bytes_read <= 0 {
+            break;
+        }
+        
+        let c = single_char[0] as char;
+        
+        // Stop on newline
+        if c == '\n' || c == '\r' {
+            break;
+        }
+        
+        buf[count] = single_char[0];
+        count += 1;
+    }
+    
+    // Null-terminate if there's space
+    if count < buf.len() {
+        buf[count] = 0;
+    }
+    
+    count
 }
