@@ -371,6 +371,11 @@ impl AbiModule for Xv6Riscv64Abi {
             }
         }
     }
+
+    fn initialize_from_existing_handles(&self, task: &mut crate::task::Task) -> Result<(), &'static str> {
+        task.handle_table.close_all();
+        Ok(())
+    }
 }
 
 syscall_table! {

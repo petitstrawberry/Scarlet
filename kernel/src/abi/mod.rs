@@ -96,7 +96,7 @@ pub trait AbiModule: 'static {
     }
     
     /// Handle conversion when switching ABIs
-    fn initialize_from_existing_handles(&self, _task: &crate::task::Task) -> Result<(), &'static str> {
+    fn initialize_from_existing_handles(&self, _task: &mut crate::task::Task) -> Result<(), &'static str> {
         Ok(()) // Default: no conversion needed
     }
     
