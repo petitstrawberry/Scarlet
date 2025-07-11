@@ -32,9 +32,10 @@ use core::any::Any;
 
 use crate::{driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, 
-    FileSystemError, FileSystemErrorKind, FileSystemType, FileType
+    FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom
 }};
-use crate::device::{manager::DeviceManager, DeviceType};
+use crate::device::{manager::DeviceManager, DeviceType, Device};
+use crate::object::capability::{StreamOps, StreamError};
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
 
@@ -203,6 +204,18 @@ pub struct DevNode {
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
 }
 
+impl Clone for DevNode {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            file_type: self.file_type,
+            file_id: self.file_id,
+            children: RwLock::new(self.children.read().clone()),
+            filesystem: RwLock::new(self.filesystem.read().clone()),
+        }
+    }
+}
+
 impl DevNode {
     /// Create a new directory node
     pub fn new_directory(name: String) -> Self {
@@ -284,21 +297,8 @@ impl DevNode {
     pub fn open(&self) -> Result<Arc<dyn FileObject>, FileSystemError> {
         match self.file_type {
             FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) => {
-                // Get the actual device from DeviceManager
-                let device_manager = DeviceManager::get_manager();
-                if let Some(_device) = device_manager.get_device(device_info.device_id) {
-                    // For device files, we need to create a wrapper that provides FileObject interface
-                    // For now, return an error as device file operations require more complex implementation
-                    Err(FileSystemError::new(
-                        FileSystemErrorKind::NotSupported,
-                        "Device file operations not yet implemented"
-                    ))
-                } else {
-                    Err(FileSystemError::new(
-                        FileSystemErrorKind::DeviceError,
-                        "Device not found in DeviceManager"
-                    ))
-                }
+                // Create a device file object that can handle device operations
+                Ok(Arc::new(DevFileObject::new(Arc::new(self.clone()), device_info)?))
             }
             FileType::Directory => {
                 Err(FileSystemError::new(
@@ -349,6 +349,242 @@ impl VfsNode for DevNode {
 
 /// DevFS filesystem driver
 pub struct DevFSDriver;
+
+/// A file object for device files in DevFS
+/// 
+/// This struct provides a FileObject implementation that delegates
+/// device operations to the underlying device registered in DeviceManager.
+pub struct DevFileObject {
+    /// Reference to the DevNode
+    node: Arc<DevNode>,
+    /// Current file position (for seekable devices)
+    position: RwLock<u64>,
+    /// Device information
+    device_info: DeviceFileInfo,
+    /// Optional device guard for device files
+    device_guard: Option<Arc<dyn Device>>,
+}
+
+impl DevFileObject {
+    /// Create a new file object for device files
+    pub fn new(node: Arc<DevNode>, device_info: DeviceFileInfo) -> Result<Self, FileSystemError> {
+        // Try to get the device from DeviceManager
+        match DeviceManager::get_manager().get_device(device_info.device_id) {
+            Some(device_guard) => {
+                Ok(Self {
+                    node,
+                    position: RwLock::new(0),
+                    device_info,
+                    device_guard: Some(device_guard),
+                })
+            }
+            None => {
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    format!("Device {} not found in DeviceManager", device_info.device_id)
+                ))
+            }
+        }
+    }
+
+    /// Read from the underlying device
+    fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            
+            match device_guard_ref.device_type() {
+                DeviceType::Char => {
+                    if let Some(char_device) = device_guard_ref.as_char_device() {
+                        let mut bytes_read = 0;
+                        for byte in buffer.iter_mut() {
+                            match char_device.read_byte() {
+                                Some(b) => {
+                                    *byte = b;
+                                    bytes_read += 1;
+                                },
+                                None => break,
+                            }
+                        }
+                        return Ok(bytes_read);
+                    } else {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Device does not support character operations"
+                        ));
+                    }
+                },
+                DeviceType::Block => {
+                    if let Some(block_device) = device_guard_ref.as_block_device() {
+                        // For block devices, we read sectors using the request system
+                        let request = Box::new(crate::device::block::request::BlockIORequest {
+                            request_type: crate::device::block::request::BlockIORequestType::Read,
+                            sector: 0,
+                            sector_count: 1,
+                            head: 0,
+                            cylinder: 0,
+                            buffer: buffer.to_vec(),
+                        });
+                        
+                        block_device.enqueue_request(request);
+                        let results = block_device.process_requests();
+                        
+                        if let Some(result) = results.first() {
+                            match &result.result {
+                                Ok(_) => {
+                                    // Copy the data back to the buffer
+                                    let bytes_to_copy = core::cmp::min(buffer.len(), result.request.buffer.len());
+                                    buffer[..bytes_to_copy].copy_from_slice(&result.request.buffer[..bytes_to_copy]);
+                                    return Ok(bytes_to_copy);
+                                },
+                                Err(e) => {
+                                    return Err(FileSystemError::new(
+                                        FileSystemErrorKind::IoError,
+                                        format!("Block device read failed: {}", e)
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(0);
+                    } else {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Device does not support block operations"
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Unsupported device type"
+                    ));
+                }
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                "No device guard available"
+            ))
+        }
+    }
+
+    /// Write to the underlying device
+    fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            
+            match device_guard_ref.device_type() {
+                DeviceType::Char => {
+                    if let Some(char_device) = device_guard_ref.as_char_device() {
+                        let mut bytes_written = 0;
+                        for &byte in buffer {
+                            match char_device.write_byte(byte) {
+                                Ok(_) => bytes_written += 1,
+                                Err(_) => break,
+                            }
+                        }
+                        return Ok(bytes_written);
+                    } else {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Device does not support character operations"
+                        ));
+                    }
+                },
+                DeviceType::Block => {
+                    if let Some(block_device) = device_guard_ref.as_block_device() {
+                        let request = Box::new(crate::device::block::request::BlockIORequest {
+                            request_type: crate::device::block::request::BlockIORequestType::Write,
+                            sector: 0,
+                            sector_count: 1,
+                            head: 0,
+                            cylinder: 0,
+                            buffer: buffer.to_vec(),
+                        });
+                        
+                        block_device.enqueue_request(request);
+                        let results = block_device.process_requests();
+                        
+                        if let Some(result) = results.first() {
+                            match &result.result {
+                                Ok(_) => return Ok(buffer.len()),
+                                Err(e) => {
+                                    return Err(FileSystemError::new(
+                                        FileSystemErrorKind::IoError,
+                                        format!("Block device write failed: {}", e)
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(0);
+                    } else {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::DeviceError,
+                            "Device does not support block operations"
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DeviceError,
+                        "Unsupported device type"
+                    ));
+                }
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                "No device guard available"
+            ))
+        }
+    }
+}
+
+impl StreamOps for DevFileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.read_device(buffer).map_err(StreamError::from)
+    }
+    
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.write_device(buffer).map_err(StreamError::from)
+    }
+}
+
+impl FileObject for DevFileObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        let mut position = self.position.write();
+        
+        let new_pos = match whence {
+            SeekFrom::Start(offset) => offset,
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    *position + offset as u64
+                } else {
+                    position.saturating_sub((-offset) as u64)
+                }
+            },
+            SeekFrom::End(_) => {
+                // For device files, seeking from end is not well-defined
+                // Return current position
+                *position
+            }
+        };
+        
+        *position = new_pos;
+        Ok(new_pos)
+    }
+    
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        self.node.metadata().map_err(StreamError::from)
+    }
+
+    fn truncate(&self, _size: u64) -> Result<(), StreamError> {
+        // Device files cannot be truncated
+        Err(StreamError::from(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Cannot truncate device files"
+        )))
+    }
+}
 
 impl FileSystemDriver for DevFSDriver {
     fn name(&self) -> &'static str {
@@ -513,5 +749,53 @@ mod tests {
         let remove_result = devfs.remove(&root, &"test_file".to_string());
         assert!(remove_result.is_err());
         assert_eq!(remove_result.unwrap_err().kind, FileSystemErrorKind::ReadOnly);
+    }
+
+    #[test_case]
+    fn test_devfs_device_file_operations() {
+        use crate::device::char::mockchar::MockCharDevice;
+        use crate::object::capability::StreamOps;
+        
+        // Register a character device for testing
+        let device_manager = DeviceManager::get_manager();
+        let char_device = Arc::new(MockCharDevice::new(300, "test_char_dev"));
+        let _device_id = device_manager.register_device_with_name("test_char_dev".to_string(), char_device.clone());
+        
+        // Create devfs and lookup the device
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+        
+        let device_node_result = devfs.lookup(&root, &"test_char_dev".to_string());
+        assert!(device_node_result.is_ok(), "Should be able to lookup character device");
+        
+        let device_node = device_node_result.unwrap();
+        
+        // Test opening the device file
+        let file_result = devfs.open(&device_node, 0);
+        assert!(file_result.is_ok(), "Should be able to open character device file");
+        
+        let file_obj = file_result.unwrap();
+        
+        // Test basic FileObject operations
+        let metadata_result = file_obj.metadata();
+        assert!(metadata_result.is_ok(), "Should be able to get device file metadata");
+        
+        // Test read operation (should work even if device returns no data)
+        let mut read_buffer = [0u8; 10];
+        let read_result = file_obj.read(&mut read_buffer);
+        assert!(read_result.is_ok(), "Read operation should succeed");
+        
+        // Test write operation
+        let write_data = b"test";
+        let write_result = file_obj.write(write_data);
+        assert!(write_result.is_ok(), "Write operation should succeed");
+        
+        // Test seek operation
+        let seek_result = file_obj.seek(crate::fs::SeekFrom::Start(0));
+        assert!(seek_result.is_ok(), "Seek operation should succeed");
+        
+        // Test truncate operation (should fail for device files)
+        let truncate_result = file_obj.truncate(100);
+        assert!(truncate_result.is_err(), "Truncate should fail for device files");
     }
 }
