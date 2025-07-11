@@ -40,22 +40,21 @@ fn setup_new_root() -> bool {
     true
 }
 
-fn setup_devfs() -> bool {
-    println!("init: Creating /dev directory");
-    // Create /dev directory if it doesn't exist
-    if mkdir("/dev", 0) != 0 {
-        println!("init: /dev directory already exists or creation failed");
-        // Continue anyway, it might already exist
+fn setup_devfs() -> Result<(), &'static str> {
+    // Check if /dev directory already exists
+    if open("/dev", 0) < 0 {
+        println!("init: /dev directory does not exist, creating it...");
+        // Create /dev directory if it doesn't exist
+        if mkdir("/dev", 0) != 0 {
+            return Err("Failed to create /dev directory");
+        }
     }
     
     // Mount devfs at /dev
-    println!("init: Mounting devfs at /dev");
     if mount("devfs", "/dev", "devfs", 0, None) == 0 {
-        println!("init: Successfully mounted devfs at /dev");
-        return true;
+        Ok(())
     } else {
-        println!("init: Failed to mount devfs at /dev");
-        return false;
+        Err("Failed to mount devfs")
     }
 }
 
@@ -180,10 +179,12 @@ fn main() -> i32 {
             
             // Mount devfs at /dev to make devices accessible
             println!("init: Setting up device filesystem...");
-            if setup_devfs() {
-                println!("init: DevFS mounted successfully at /dev");
-            } else {
-                println!("init: Warning: Failed to mount DevFS at /dev");
+            match setup_devfs() {
+                Ok(_) => println!("init: Device filesystem mounted at /dev"),
+                Err(e) => {
+                    println!("init: Failed to setup device filesystem: {}", e);
+                    // Continue anyway, but devices might not be accessible
+                }
             }
             
             // Verify the new root by trying to access files
