@@ -3,7 +3,7 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, fs::{self, close, mkdir, mkfile, mount, open, pivot_root, readdir, umount}, println, task::{execve, execve_with_flags, exit, waitpid, EXECVE_FORCE_ABI_REBUILD}, vec::Vec};
+use std::{format, fs::{close, mkdir, mkfile, mount, open, pivot_root, readdir}, println, task::{execve_with_flags, exit, waitpid, EXECVE_FORCE_ABI_REBUILD}};
 
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
@@ -38,6 +38,25 @@ fn setup_new_root() -> bool {
     // Again, this would typically require mkdir, but we'll assume it exists
     
     true
+}
+
+fn setup_devfs() -> bool {
+    println!("init: Creating /dev directory");
+    // Create /dev directory if it doesn't exist
+    if mkdir("/dev", 0) != 0 {
+        println!("init: /dev directory already exists or creation failed");
+        // Continue anyway, it might already exist
+    }
+    
+    // Mount devfs at /dev
+    println!("init: Mounting devfs at /dev");
+    if mount("devfs", "/dev", "devfs", 0, None) == 0 {
+        println!("init: Successfully mounted devfs at /dev");
+        return true;
+    } else {
+        println!("init: Failed to mount devfs at /dev");
+        return false;
+    }
 }
 
 fn perform_pivot_root() -> bool {
@@ -158,6 +177,14 @@ fn main() -> i32 {
     if setup_new_root() {
         if perform_pivot_root() {
             println!("init: Root filesystem transition completed successfully");
+            
+            // Mount devfs at /dev to make devices accessible
+            println!("init: Setting up device filesystem...");
+            if setup_devfs() {
+                println!("init: DevFS mounted successfully at /dev");
+            } else {
+                println!("init: Warning: Failed to mount DevFS at /dev");
+            }
             
             // Verify the new root by trying to access files
             println!("init: Current working directory after pivot_root");
