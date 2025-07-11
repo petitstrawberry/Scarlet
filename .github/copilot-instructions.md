@@ -10,13 +10,6 @@ which implements a transparent ABI conversion layer for executing binaries acros
 Use the docker container of ` scarlet-dev` for development to ensure a consistent environment.
 If the image is not available, you can build it using the provided Dockerfile in the repository.
 
-If you are a GitHub Copilot "Coding Agent", you must first create a container and attach it to your shell before executing commands such as cargo make.To do so, execute the following commands.Build and test are allowed only in the container.
-
-```
-docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev /bin/bash
-```
-
-
 Executing commands in the Docker container at the root of the repository:
 - Build: `cargo make build`
 
