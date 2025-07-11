@@ -24,6 +24,7 @@ pub enum Syscall {
     Lseek = 24,
     Ftruncate = 25,
     Truncate = 26,
+    Dup = 27,
     // Filesystem operations
     Mkfile = 30,
     Mkdir = 31,

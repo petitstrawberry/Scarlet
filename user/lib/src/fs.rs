@@ -52,6 +52,20 @@ pub fn close(fd: i32) -> i32 {
     res as i32
 }
 
+/// Duplicate a file descriptor.
+/// 
+/// # Arguments
+/// * `fd` - File descriptor to duplicate
+/// 
+/// # Return Value
+/// - On success: new file descriptor
+/// - On error: -1
+pub fn dup(fd: i32) -> i32 {
+    let res = syscall1(Syscall::Dup, fd as usize);
+    // Return the result of the syscall
+    res as i32
+}
+
 /// Read from a file.
 /// 
 /// # Arguments

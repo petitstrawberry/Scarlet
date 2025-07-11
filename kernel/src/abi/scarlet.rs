@@ -283,6 +283,22 @@ impl AbiModule for ScarletAbi {
             }
         }
 
+        // Bind mount /dev for device access
+        match create_dir_if_not_exists(target_vfs, "/dev") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /dev directory for Scarlet: {}", e.message);
+                return Err("Failed to create /dev directory for Scarlet");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/dev", "/dev") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /dev for Scarlet: {}", e.message);
+                return Err("Failed to bind mount /dev for Scarlet");
+            }
+        }
+
         // Setup gateway to native Scarlet environment (read-only for security)
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
