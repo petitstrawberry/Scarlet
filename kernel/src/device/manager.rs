@@ -233,6 +233,19 @@ impl DeviceManager {
         None
     }
 
+    /// Get all devices registered by name
+    /// 
+    /// Returns an iterator over (name, device) pairs for all devices
+    /// that were registered with explicit names.
+    /// 
+    /// # Returns
+    /// 
+    /// Vector of (name, device) tuples
+    pub fn get_named_devices(&self) -> Vec<(String, SharedDevice)> {
+        let device_by_name = self.device_by_name.lock();
+        device_by_name.iter().map(|(name, device)| (name.clone(), device.clone())).collect()
+    }
+
     pub fn borrow_drivers(&self) -> &Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>> {
         &self.drivers
     }
