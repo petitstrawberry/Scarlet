@@ -89,7 +89,7 @@ fn run_parent_test() -> i32 {
         0 => {
             // Child process - exec the same program with different args/env
             println!("Child: About to execve with args: {:?}", child_args);
-            if execve(&args[0], &child_args, &child_env) != 0 {
+            if execve(&"/bin/env_test", &child_args, &child_env) != 0 {
                 println!("execve failed");
                 std::task::exit(1);
             }
