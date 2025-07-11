@@ -26,10 +26,6 @@ impl Device for ConsoleDevice {
         self.name
     }
 
-    fn id(&self) -> usize {
-        self.id
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
