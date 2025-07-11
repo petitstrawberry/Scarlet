@@ -283,6 +283,22 @@ impl DevNode {
         let children = self.children.read();
         let mut entries = Vec::new();
 
+        // Add "." entry (current directory)
+        entries.push(DirectoryEntryInternal {
+            name: ".".to_string(),
+            file_type: FileType::Directory,
+            file_id: self.file_id,
+        });
+
+        // Add ".." entry (parent directory)
+        // For DevFS root, parent is itself
+        entries.push(DirectoryEntryInternal {
+            name: "..".to_string(),
+            file_type: FileType::Directory,
+            file_id: self.file_id, // DevFS is always at root level, so parent is self
+        });
+
+        // Add actual child entries
         for (name, child) in children.iter() {
             entries.push(DirectoryEntryInternal {
                 name: name.clone(),
@@ -306,10 +322,8 @@ impl DevNode {
                 )?))
             }
             FileType::Directory => {
-                Err(FileSystemError::new(
-                    FileSystemErrorKind::IsADirectory,
-                    "Cannot open directory as file"
-                ))
+                // Create a directory file object that can handle directory operations
+                Ok(Arc::new(DevDirectoryObject::new(Arc::new(self.clone()))))
             }
             _ => {
                 Err(FileSystemError::new(
@@ -365,8 +379,10 @@ pub struct DevFileObject {
     /// Current file position (for seekable devices)
     position: RwLock<u64>,
     /// Device ID for lookup in DeviceManager
+    #[allow(dead_code)]
     device_id: usize,
     /// Device type
+    #[allow(dead_code)]
     device_type: DeviceType,
     /// Optional device guard for device files
     device_guard: Option<Arc<dyn Device>>,
@@ -594,6 +610,122 @@ impl FileObject for DevFileObject {
     }
 }
 
+/// A file object for directories in DevFS
+/// 
+/// This struct provides a FileObject implementation for directories
+/// that allows reading directory entries as binary DirectoryEntry data.
+pub struct DevDirectoryObject {
+    /// Reference to the DevNode
+    node: Arc<DevNode>,
+    /// Current position in directory entries (entry index)
+    position: RwLock<usize>,
+}
+
+impl DevDirectoryObject {
+    /// Create a new directory file object
+    pub fn new(node: Arc<DevNode>) -> Self {
+        Self {
+            node,
+            position: RwLock::new(0),
+        }
+    }
+}
+
+impl StreamOps for DevDirectoryObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        // Get all directory entries
+        let entries = self.node.readdir().map_err(StreamError::from)?;
+        let position = *self.position.read();
+        
+        if position >= entries.len() {
+            return Ok(0); // EOF
+        }
+        
+        // Convert the entry at current position to DirectoryEntry format
+        let internal_entry = &entries[position];
+        
+        // Create DirectoryEntryInternal with size field for DirectoryEntry::from_internal
+        let internal_with_size = crate::fs::DirectoryEntryInternal {
+            name: internal_entry.name.clone(),
+            file_type: internal_entry.file_type,
+            size: 0, // Device files have no meaningful size
+            file_id: internal_entry.file_id,
+            metadata: None,
+        };
+        
+        let dir_entry = crate::fs::DirectoryEntry::from_internal(&internal_with_size);
+        let entry_size = dir_entry.entry_size();
+        
+        if buffer.len() < entry_size {
+            return Err(StreamError::InvalidArgument); // Buffer too small
+        }
+        
+        // Copy entry as bytes
+        let entry_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &dir_entry as *const _ as *const u8,
+                entry_size
+            )
+        };
+        
+        buffer[..entry_size].copy_from_slice(entry_bytes);
+        
+        // Move to next entry
+        *self.position.write() += 1;
+        
+        Ok(entry_size)
+    }
+    
+    fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::from(FileSystemError::new(
+            FileSystemErrorKind::ReadOnly,
+            "Cannot write to directory in devfs"
+        )))
+    }
+}
+
+impl FileObject for DevDirectoryObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        // Get directory entries to know the count
+        let entries = self.node.readdir().map_err(StreamError::from)?;
+        let entry_count = entries.len() as u64;
+        
+        let mut position = self.position.write();
+        
+        let new_pos = match whence {
+            SeekFrom::Start(offset) => offset,
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    *position as u64 + offset as u64
+                } else {
+                    (*position as u64).saturating_sub((-offset) as u64)
+                }
+            },
+            SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    entry_count + offset as u64
+                } else {
+                    entry_count.saturating_sub((-offset) as u64)
+                }
+            }
+        };
+        
+        *position = new_pos as usize;
+        Ok(new_pos)
+    }
+    
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        self.node.metadata().map_err(StreamError::from)
+    }
+
+    fn truncate(&self, _size: u64) -> Result<(), StreamError> {
+        Err(StreamError::from(FileSystemError::new(
+            FileSystemErrorKind::ReadOnly,
+            "Cannot truncate directory in devfs"
+        )))
+    }
+}
+
 impl FileSystemDriver for DevFSDriver {
     fn name(&self) -> &'static str {
         "devfs"
@@ -802,5 +934,55 @@ mod tests {
         // Test truncate operation (should fail for device files)
         let truncate_result = file_obj.truncate(100);
         assert!(truncate_result.is_err(), "Truncate should fail for device files");
+    }
+
+    #[test_case]
+    fn test_devfs_directory_operations() {
+        use crate::device::char::mockchar::MockCharDevice;
+        
+        // Register a character device for testing
+        let device_manager = DeviceManager::get_manager();
+        let char_device = Arc::new(MockCharDevice::new("test_dir_ops"));
+        let _device_id = device_manager.register_device_with_name("test_dir_ops".to_string(), char_device.clone());
+        
+        // Create devfs
+        let devfs = DevFS::new();
+        let root = devfs.root_node();
+        
+        // Test opening directory
+        let dir_file_result = devfs.open(&root, 0);
+        assert!(dir_file_result.is_ok(), "Should be able to open directory in devfs");
+        
+        let dir_file = dir_file_result.unwrap();
+        
+        // Test reading directory contents (should return DirectoryEntry structs)
+        let mut read_buffer = [0u8; 512]; // Buffer for one directory entry
+        let read_result = dir_file.read(&mut read_buffer);
+        assert!(read_result.is_ok(), "Should be able to read directory contents");
+        
+        let bytes_read = read_result.unwrap();
+        assert!(bytes_read > 0, "Should read some directory data");
+        
+        // Parse the directory entry
+        let dir_entry = crate::fs::DirectoryEntry::parse(&read_buffer[..bytes_read]);
+        assert!(dir_entry.is_some(), "Should be able to parse directory entry");
+        
+        let entry = dir_entry.unwrap();
+        let name = entry.name_str().unwrap();
+        
+        // Should be either "." or ".." or our test device
+        assert!(name == "." || name == ".." || name == "test_dir_ops", 
+               "Entry name should be '.', '..' or 'test_dir_ops', got: {}", name);
+        
+        // Test seek operations
+        let seek_result = dir_file.seek(SeekFrom::Start(0));
+        assert!(seek_result.is_ok(), "Should be able to seek in directory");
+        
+        // Test metadata
+        let metadata_result = dir_file.metadata();
+        assert!(metadata_result.is_ok(), "Should be able to get directory metadata");
+        
+        let metadata = metadata_result.unwrap();
+        assert_eq!(metadata.file_type, FileType::Directory, "Should be directory type");
     }
 }
