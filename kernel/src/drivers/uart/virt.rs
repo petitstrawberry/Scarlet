@@ -261,38 +261,6 @@ impl InterruptCapableDevice for Uart {
     }
 }
 
-// impl UartInner {
-//     fn reg_write(&self, offset: usize, value: u8) {
-//         let addr = self.base + offset;
-//         unsafe { write_volatile(addr as *mut u8, value) }
-//     }
-
-//     fn reg_read(&self, offset: usize) -> u8 {
-//         let addr = self.base + offset;
-//         unsafe { read_volatile(addr as *const u8) }
-//     }
-
-//     fn write_byte_internal(&self, c: u8) {
-//         while self.reg_read(LSR_OFFSET) & LSR_THRE == 0 {}
-//         self.reg_write(THR_OFFSET, c);
-//     }
-
-//     fn read_byte_internal(&self) -> u8 {
-//         if self.reg_read(LSR_OFFSET) & LSR_DR == 0 {
-//             return 0;
-//         }
-//         self.reg_read(RHR_OFFSET)
-//     }
-
-//     fn can_read(&self) -> bool {
-//         self.reg_read(LSR_OFFSET) & LSR_DR != 0
-//     }
-
-//     fn can_write(&self) -> bool {
-//         self.reg_read(LSR_OFFSET) & LSR_THRE != 0
-//     }
-// }
-
 fn register_uart() {
     use alloc::vec;
     
