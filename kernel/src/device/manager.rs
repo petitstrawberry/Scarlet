@@ -245,13 +245,13 @@ impl DeviceManager {
     /// * `device_type`: The device type to find.
     /// 
     /// # Returns
-    /// * The first device of the specified type, or None if not found.
+    /// * The first device ID of the specified type, or None if not found.
     /// 
-    pub fn get_first_device_by_type(&self, device_type: super::DeviceType) -> Option<SharedDevice> {
+    pub fn get_first_device_by_type(&self, device_type: super::DeviceType) -> Option<usize> {
         let devices = self.devices.lock();
-        for (_id, device) in devices.iter() {
+        for (id, device) in devices.iter() {
             if device.device_type() == device_type {
-                return Some(device.clone());
+                return Some(*id);
             }
         }
         None
@@ -463,9 +463,10 @@ mod tests {
         let _id1 = manager.register_device(device1);
         let _id2 = manager.register_device(device2);
         
-        let char_device = manager.get_first_device_by_type(crate::device::DeviceType::Generic);
-        assert!(char_device.is_some());
-        let char_device = char_device.unwrap();
+        let char_device_id = manager.get_first_device_by_type(crate::device::DeviceType::Generic);
+        assert!(char_device_id.is_some());
+        let char_device_id = char_device_id.unwrap();
+        let char_device = manager.get_device(char_device_id).unwrap();
         assert_eq!(char_device.name(), "test_char");
     }
 

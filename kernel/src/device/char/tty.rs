@@ -13,6 +13,7 @@ use crate::device::{Device, DeviceType};
 use crate::device::char::CharDevice;
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
 use crate::device::manager::DeviceManager;
+use crate::drivers::uart;
 use crate::sync::waker::Waker;
 use crate::late_initcall;
 use crate::task::mytask;
@@ -29,14 +30,10 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
     let device_manager = DeviceManager::get_manager();
     
     // Find the first UART device and use its ID for TTY initialization
-    if let Some(uart_device) = device_manager.get_first_device_by_type(crate::device::DeviceType::Char) {
-        let uart_device_name = uart_device.name();
-        
-        // Get the UART device ID from DeviceManager
-        let uart_device_id = device_manager.get_device_id_by_name(uart_device_name).unwrap_or(0);
-        
+    if let Some(uart_device_id) = device_manager.get_first_device_by_type(crate::device::DeviceType::Char) {
         // Create TTY device with UART device ID for lookup
         let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
+        let uart_device = device_manager.get_device(uart_device_id).ok_or("UART device not found")?;
         
         // Register TTY device as event listener for UART
         if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {

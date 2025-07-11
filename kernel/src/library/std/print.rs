@@ -56,8 +56,8 @@ pub fn _print(args: fmt::Arguments) {
     let manager = DeviceManager::get_manager();
     
     // Try to find a character device (UART)
-    if let Some(borrowed_device) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
-        if let Some(char_device) = borrowed_device.as_char_device() {
+    if let Some(device_id) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
+        if let Some(char_device) = manager.get_device(device_id).unwrap().as_char_device() {
             // Use CharDevice trait methods to write
             struct CharDeviceWriter<'a>(&'a dyn CharDevice);
             
