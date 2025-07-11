@@ -55,11 +55,11 @@ pub enum DeviceType {
 /// Device trait.
 /// 
 /// This trait defines the interface for devices in the kernel.
+/// Device IDs are assigned by DeviceManager when devices are registered.
 /// 
 pub trait Device: Send + Sync {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
-    fn id(&self) -> usize;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     
@@ -77,12 +77,11 @@ pub trait Device: Send + Sync {
 pub struct GenericDevice {
     device_type: DeviceType,
     name: &'static str,
-    id: usize,
 }
 
 impl GenericDevice {
-    pub fn new(name: &'static str, id: usize) -> Self {
-        Self { device_type: DeviceType::Generic, name, id }
+    pub fn new(name: &'static str) -> Self {
+        Self { device_type: DeviceType::Generic, name }
     }
 }
 
@@ -93,10 +92,6 @@ impl Device for GenericDevice {
 
     fn name(&self) -> &'static str {
         self.name
-    }
-
-    fn id(&self) -> usize {
-        self.id
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -28,12 +28,15 @@ fn init_tty_subsystem() {
 fn try_init_tty_subsystem() -> Result<(), &'static str> {
     let device_manager = DeviceManager::get_manager();
     
-    // Find the first UART device
+    // Find the first UART device and use its ID for TTY initialization
     if let Some(uart_device) = device_manager.get_first_device_by_type(crate::device::DeviceType::Char) {
-        let uart_device_id = uart_device.id();
+        let uart_device_name = uart_device.name();
         
-        // Create TTY device
-        let tty_device = Arc::new(TtyDevice::new(0, "tty0", uart_device_id));
+        // Get the UART device ID from DeviceManager
+        let uart_device_id = device_manager.get_device_id_by_name(uart_device_name).unwrap_or(0);
+        
+        // Create TTY device with UART device ID for lookup
+        let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
         
         // Register TTY device as event listener for UART
         if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
@@ -62,7 +65,6 @@ late_initcall!(init_tty_subsystem);
 /// This device provides terminal functionality including line discipline,
 /// echo, and basic terminal I/O operations.
 pub struct TtyDevice {
-    id: usize,
     name: &'static str,
     uart_device_id: usize,
     
@@ -82,9 +84,8 @@ pub struct TtyDevice {
 }
 
 impl TtyDevice {
-    pub fn new(id: usize, name: &'static str, uart_device_id: usize) -> Self {
+    pub fn new(name: &'static str, uart_device_id: usize) -> Self {
         Self {
-            id,
             name,
             uart_device_id,
             input_buffer: Arc::new(Mutex::new(VecDeque::new())),
@@ -209,10 +210,6 @@ impl Device for TtyDevice {
     
     fn name(&self) -> &'static str {
         self.name
-    }
-    
-    fn id(&self) -> usize {
-        self.id
     }
     
     fn as_any(&self) -> &dyn Any {

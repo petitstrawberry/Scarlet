@@ -12,7 +12,6 @@ use crate::device::{Device, DeviceType};
 
 // Mock block device
 pub struct MockBlockDevice {
-    id: usize,
     disk_name: &'static str,
     disk_size: usize,
     data: Mutex<Vec<Vec<u8>>>,
@@ -20,14 +19,13 @@ pub struct MockBlockDevice {
 }
 
 impl MockBlockDevice {
-    pub fn new(id: usize, disk_name: &'static str, sector_size: usize, sector_count: usize) -> Self {
+    pub fn new(disk_name: &'static str, sector_size: usize, sector_count: usize) -> Self {
         let mut data = Vec::with_capacity(sector_count);
         for _ in 0..sector_count {
             data.push(vec![0; sector_size]);
         }
         
         Self {
-            id,
             disk_name,
             disk_size: sector_size * sector_count,
             data: Mutex::new(data),
@@ -45,10 +43,6 @@ impl Device for MockBlockDevice {
         "MockBlockDevice"
     }
 
-    fn id(&self) -> usize {
-        self.id
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -64,10 +58,6 @@ impl Device for MockBlockDevice {
 
 
 impl BlockDevice for MockBlockDevice {
-    fn get_id(&self) -> usize {
-        self.id
-    }
-    
     fn get_disk_name(&self) -> &'static str {
         self.disk_name
     }

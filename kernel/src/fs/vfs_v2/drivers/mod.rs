@@ -10,6 +10,7 @@
 //! - **cpiofs**: Read-only CPIO archive filesystem for initramfs
 //! - **overlayfs**: Union/overlay filesystem combining multiple layers
 //! - **initramfs**: Helper module for mounting initramfs during boot
+//! - **devfs**: Device filesystem that automatically exposes all registered devices
 //!
 //! ## Adding New Drivers
 //!
@@ -29,3 +30,4 @@ pub mod overlayfs;
 pub mod cpiofs;
 pub mod tmpfs;
 pub mod initramfs;
+pub mod devfs;

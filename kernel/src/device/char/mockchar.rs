@@ -6,7 +6,6 @@ use super::{CharDevice, super::{Device, DeviceType}};
 
 /// Mock character device for testing
 pub struct MockCharDevice {
-    id: usize,
     name: &'static str,
     read_buffer: Vec<u8>,
     write_buffer: Mutex<Vec<u8>>,
@@ -14,9 +13,8 @@ pub struct MockCharDevice {
 }
 
 impl MockCharDevice {
-    pub fn new(id: usize, name: &'static str) -> Self {
+    pub fn new(name: &'static str) -> Self {
         Self {
-            id,
             name,
             read_buffer: Vec::new(),
             write_buffer: Mutex::new(Vec::new()),
@@ -53,10 +51,6 @@ impl Device for MockCharDevice {
 
     fn name(&self) -> &'static str {
         self.name
-    }
-
-    fn id(&self) -> usize {
-        self.id
     }
 
     fn as_any(&self) -> &dyn Any {

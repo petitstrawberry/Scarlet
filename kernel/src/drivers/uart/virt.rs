@@ -171,10 +171,6 @@ impl Device for Uart {
         "virt-uart"
     }
 
-    fn id(&self) -> usize {
-        0
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }

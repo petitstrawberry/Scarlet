@@ -15,9 +15,6 @@ extern crate alloc;
 /// This trait defines the interface for block devices.
 /// It provides methods for querying device information and handling I/O requests.
 pub trait BlockDevice: Device {
-    /// Get the device identifier
-    fn get_id(&self) -> usize;
-    
     /// Get the disk name
     fn get_disk_name(&self) -> &'static str;
     
@@ -37,7 +34,6 @@ pub trait BlockDevice: Device {
 
 /// A generic implementation of a block device
 pub struct GenericBlockDevice {
-    id: usize,
     disk_name: &'static str,
     disk_size: usize,
     request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>,
@@ -45,8 +41,8 @@ pub struct GenericBlockDevice {
 }
 
 impl GenericBlockDevice {
-    pub fn new(id: usize, disk_name: &'static str, disk_size: usize, request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>) -> Self {
-        Self { id, disk_name, disk_size, request_fn, request_queue: Mutex::new(Vec::new()) }
+    pub fn new(disk_name: &'static str, disk_size: usize, request_fn: fn(&mut BlockIORequest) -> Result<(), &'static str>) -> Self {
+        Self { disk_name, disk_size, request_fn, request_queue: Mutex::new(Vec::new()) }
     }
 }
 
@@ -57,10 +53,6 @@ impl Device for GenericBlockDevice {
 
     fn name(&self) -> &'static str {
         self.disk_name
-    }
-
-    fn id(&self) -> usize {
-        self.id
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -77,10 +69,6 @@ impl Device for GenericBlockDevice {
 }
 
 impl BlockDevice for GenericBlockDevice {
-    fn get_id(&self) -> usize {
-        self.id
-    }
-
     fn get_disk_name(&self) -> &'static str {
         self.disk_name
     }

@@ -80,7 +80,6 @@ pub trait CharDevice: Device {
 
 /// A generic implementation of a character device
 pub struct GenericCharDevice {
-    id: usize,
     device_name: &'static str,
     read_fn: fn() -> Option<u8>,
     write_fn: fn(u8) -> Result<(), &'static str>,
@@ -90,7 +89,6 @@ pub struct GenericCharDevice {
 
 impl GenericCharDevice {
     pub fn new(
-        id: usize, 
         device_name: &'static str, 
         read_fn: fn() -> Option<u8>,
         write_fn: fn(u8) -> Result<(), &'static str>,
@@ -98,7 +96,6 @@ impl GenericCharDevice {
         can_write_fn: fn() -> bool,
     ) -> Self {
         Self { 
-            id, 
             device_name, 
             read_fn, 
             write_fn,
@@ -115,10 +112,6 @@ impl Device for GenericCharDevice {
 
     fn name(&self) -> &'static str {
         self.device_name
-    }
-
-    fn id(&self) -> usize {
-        self.id
     }
 
     fn as_any(&self) -> &dyn Any {
