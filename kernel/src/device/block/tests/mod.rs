@@ -11,8 +11,7 @@ fn dummy_request_fn(_request: &mut BlockIORequest) -> Result<(), &'static str> {
 
 #[test_case]
 fn test_block_device_creation() {
-    let device = GenericBlockDevice::new(1, "test_disk", 1024, dummy_request_fn);
-    assert_eq!(device.get_id(), 1);
+    let device = GenericBlockDevice::new( "test_disk", 1024, dummy_request_fn);
     assert_eq!(device.get_disk_name(), "test_disk");
     assert_eq!(device.get_disk_size(), 1024);
     assert_eq!(device.request_queue.lock().len(), 0);
@@ -20,7 +19,7 @@ fn test_block_device_creation() {
 
 #[test_case]
 fn test_block_device_add_request() {
-    let device = GenericBlockDevice::new(1, "test_disk", 1024, dummy_request_fn);
+    let device = GenericBlockDevice::new("test_disk", 1024, dummy_request_fn);
     let request = Box::new(BlockIORequest {
         request_type: request::BlockIORequestType::Read,
         sector: 0,
@@ -35,7 +34,7 @@ fn test_block_device_add_request() {
 
 #[test_case]
 fn test_block_device_process_requests() {
-    let device = GenericBlockDevice::new(1, "test_disk", 1024, dummy_request_fn);
+    let device = GenericBlockDevice::new("test_disk", 1024, dummy_request_fn);
     let request = Box::new(BlockIORequest {
         request_type: request::BlockIORequestType::Read,
         sector: 0,

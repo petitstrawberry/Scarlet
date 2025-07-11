@@ -269,10 +269,6 @@ impl Device for VirtioBlockDevice {
         "virtio-blk"
     }
     
-    fn id(&self) -> usize {
-        self.base_addr
-    }
-    
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
@@ -335,10 +331,6 @@ impl VirtioDevice for VirtioBlockDevice {
 }
 
 impl BlockDevice for VirtioBlockDevice {
-    fn get_id(&self) -> usize {
-        self.base_addr // Use base address as ID
-    }
-    
     fn get_disk_name(&self) -> &'static str {
         "virtio-blk"
     }
@@ -378,7 +370,6 @@ pub mod tests {
         let base_addr = 0x10001000; // Example base address
         let device = VirtioBlockDevice::new(base_addr);
         
-        assert_eq!(device.get_id(), base_addr);
         assert_eq!(device.get_disk_name(), "virtio-blk");
         assert_eq!(device.get_disk_size(), (*device.capacity.read() * *device.sector_size.read() as u64) as usize);
     }
@@ -388,7 +379,6 @@ pub mod tests {
         let base_addr = 0x10001000; // Example base address
         let device = VirtioBlockDevice::new(base_addr);
         
-        assert_eq!(device.get_id(), base_addr);
         assert_eq!(device.get_disk_name(), "virtio-blk");
         assert_eq!(device.get_disk_size(), (*device.capacity.read() * *device.sector_size.read() as u64) as usize);
         

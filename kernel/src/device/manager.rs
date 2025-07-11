@@ -41,13 +41,15 @@
 
 extern crate alloc;
 
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering;
+
 use alloc::collections::btree_map::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::string::String;
 use spin::mutex::Mutex;
-use spin::rwlock::RwLock;
 
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
@@ -58,7 +60,6 @@ use super::fdt::FdtManager;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
-use crate::interrupt::InterruptId;
 
 /// Simplified shared device type
 pub type SharedDevice = Arc<dyn Device>;
@@ -106,24 +107,32 @@ static mut MANAGER: DeviceManager = DeviceManager::new();
 /// It handles all devices and drivers with priority-based initialization.
 /// 
 /// # Fields
-/// - `devices`: A mutex-protected vector of all registered devices.
+/// - `devices`: A mutex-protected map of all registered devices by ID.
 /// - `device_by_name`: A mutex-protected map of devices by name.
+/// - `name_to_id`: A mutex-protected map from device name to device ID.
 /// - `drivers`: A mutex-protected map of device drivers organized by priority.
+/// - `next_device_id`: Atomic counter for generating unique device IDs.
 pub struct DeviceManager {
     /* Devices stored by ID */
-    devices: Mutex<Vec<SharedDevice>>,
+    devices: Mutex<BTreeMap<usize, SharedDevice>>,
     /* Devices stored by name */
     device_by_name: Mutex<BTreeMap<String, SharedDevice>>,
+    /* Name to ID mapping */
+    name_to_id: Mutex<BTreeMap<String, usize>>,
     /* Device drivers organized by priority */
     drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
+    /* Next device ID to assign */
+    next_device_id: AtomicUsize,
 }
 
 impl DeviceManager {
     const fn new() -> Self {
         DeviceManager {
-            devices: Mutex::new(Vec::new()),
+            devices: Mutex::new(BTreeMap::new()),
             device_by_name: Mutex::new(BTreeMap::new()),
+            name_to_id: Mutex::new(BTreeMap::new()),
             drivers: Mutex::new(BTreeMap::new()),
+            next_device_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
         }
     }
 
@@ -154,8 +163,8 @@ impl DeviceManager {
     /// 
     pub fn register_device(&self, device: Arc<dyn Device>) -> usize {
         let mut devices = self.devices.lock();
-        let id = devices.len();
-        devices.push(device);
+        let id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
+        devices.insert(id, device);
         id
     }
 
@@ -171,10 +180,12 @@ impl DeviceManager {
     pub fn register_device_with_name(&self, name: String, device: Arc<dyn Device>) -> usize {
         let mut devices = self.devices.lock();
         let mut device_by_name = self.device_by_name.lock();
+        let mut name_to_id = self.name_to_id.lock();
         
-        let id = devices.len();
-        devices.push(device.clone());
-        device_by_name.insert(name, device);
+        let id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
+        devices.insert(id, device.clone());
+        device_by_name.insert(name.clone(), device);
+        name_to_id.insert(name, id);
         id
     }
 
@@ -188,7 +199,7 @@ impl DeviceManager {
     /// 
     pub fn get_device(&self, id: usize) -> Option<SharedDevice> {
         let devices = self.devices.lock();
-        devices.get(id).cloned()
+        devices.get(&id).cloned()
     }
 
     /// Get a device by name
@@ -202,6 +213,19 @@ impl DeviceManager {
     pub fn get_device_by_name(&self, name: &str) -> Option<SharedDevice> {
         let device_by_name = self.device_by_name.lock();
         device_by_name.get(name).cloned()
+    }
+
+    /// Get a device ID by name
+    /// 
+    /// # Arguments
+    /// * `name`: The name of the device to find.
+    /// 
+    /// # Returns
+    /// * The device ID if found, or None if not found.
+    /// 
+    pub fn get_device_id_by_name(&self, name: &str) -> Option<usize> {
+        let name_to_id = self.name_to_id.lock();
+        name_to_id.get(name).cloned()
     }
 
     /// Get the number of devices
@@ -225,7 +249,7 @@ impl DeviceManager {
     /// 
     pub fn get_first_device_by_type(&self, device_type: super::DeviceType) -> Option<SharedDevice> {
         let devices = self.devices.lock();
-        for device in devices.iter() {
+        for (_id, device) in devices.iter() {
             if device.device_type() == device_type {
                 return Some(device.clone());
             }
@@ -411,7 +435,7 @@ mod tests {
 
     #[test_case]
     fn test_get_device_from_manager() {
-        let device = Arc::new(GenericDevice::new("test", 1));
+        let device = Arc::new(GenericDevice::new("test"));
         let manager = DeviceManager::new();
         let id = manager.register_device(device);
         let retrieved_device = manager.get_device(id);
@@ -422,7 +446,7 @@ mod tests {
 
     #[test_case]
     fn test_get_device_by_name() {
-        let device = Arc::new(GenericDevice::new("test_named", 2));
+        let device = Arc::new(GenericDevice::new("test_named"));
         let manager = DeviceManager::new();
         let _id = manager.register_device_with_name("test_device".into(), device);
         let retrieved_device = manager.get_device_by_name("test_device");
@@ -433,8 +457,8 @@ mod tests {
 
     #[test_case]
     fn test_get_first_device_by_type() {
-        let device1 = Arc::new(GenericDevice::new("test_char", 3));
-        let device2 = Arc::new(GenericDevice::new("test_block", 4));
+        let device1 = Arc::new(GenericDevice::new("test_char"));
+        let device2 = Arc::new(GenericDevice::new("test_block"));
         let manager = DeviceManager::new();
         let _id1 = manager.register_device(device1);
         let _id2 = manager.register_device(device2);

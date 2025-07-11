@@ -81,8 +81,9 @@ impl DevFS {
             // Only add char and block devices to devfs
             match device_type {
                 DeviceType::Char | DeviceType::Block => {
-                    // Find the device ID by looking it up in the device manager
-                    let device_id = device.id();
+                    // Get the actual device ID from the name
+                    let device_id = device_manager.get_device_id_by_name(&device_name)
+                        .unwrap_or(0); // fallback to 0 if not found
                     
                     let device_file_info = DeviceFileInfo {
                         device_id,
@@ -98,7 +99,7 @@ impl DevFS {
                     let device_node = Arc::new(DevNode::new_device_file(
                         device_name.clone(),
                         file_type,
-                        device_id as u64 + 1, // file_id = device_id + 1 (root is 0)
+                        device_id as u64, // Use the device ID as file ID too
                     ));
                     
                     // Set filesystem reference for the device node
@@ -298,7 +299,11 @@ impl DevNode {
         match self.file_type {
             FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) => {
                 // Create a device file object that can handle device operations
-                Ok(Arc::new(DevFileObject::new(Arc::new(self.clone()), device_info)?))
+                Ok(Arc::new(DevFileObject::new(
+                    Arc::new(self.clone()), 
+                    device_info.device_id, 
+                    device_info.device_type
+                )?))
             }
             FileType::Directory => {
                 Err(FileSystemError::new(
@@ -359,29 +364,32 @@ pub struct DevFileObject {
     node: Arc<DevNode>,
     /// Current file position (for seekable devices)
     position: RwLock<u64>,
-    /// Device information
-    device_info: DeviceFileInfo,
+    /// Device ID for lookup in DeviceManager
+    device_id: usize,
+    /// Device type
+    device_type: DeviceType,
     /// Optional device guard for device files
     device_guard: Option<Arc<dyn Device>>,
 }
 
 impl DevFileObject {
     /// Create a new file object for device files
-    pub fn new(node: Arc<DevNode>, device_info: DeviceFileInfo) -> Result<Self, FileSystemError> {
-        // Try to get the device from DeviceManager
-        match DeviceManager::get_manager().get_device(device_info.device_id) {
+    pub fn new(node: Arc<DevNode>, device_id: usize, device_type: DeviceType) -> Result<Self, FileSystemError> {
+        // Try to get the device from DeviceManager by ID
+        match DeviceManager::get_manager().get_device(device_id) {
             Some(device_guard) => {
                 Ok(Self {
                     node,
                     position: RwLock::new(0),
-                    device_info,
+                    device_id,
+                    device_type,
                     device_guard: Some(device_guard),
                 })
             }
             None => {
                 Err(FileSystemError::new(
                     FileSystemErrorKind::DeviceError,
-                    format!("Device {} not found in DeviceManager", device_info.device_id)
+                    format!("Device with ID {} not found in DeviceManager", device_id)
                 ))
             }
         }
@@ -639,7 +647,7 @@ mod tests {
     fn test_devfs_device_discovery() {
         // Register a test device
         let device_manager = DeviceManager::get_manager();
-        let test_device = Arc::new(GenericDevice::new("test_devfs_device", 999));
+        let test_device = Arc::new(GenericDevice::new("test_devfs_device"));
         let _device_id = device_manager.register_device_with_name("test_devfs_device".to_string(), test_device);
 
         let devfs = DevFS::new();
@@ -650,7 +658,7 @@ mod tests {
         
         // Note: Generic devices are not currently exposed in devfs (only Char/Block devices)
         // So this test checks that the readdir operation works without error
-        assert!(entries.len() >= 0, "DevFS readdir should work without error");
+        assert!(entries.len() == 0 || entries.len() > 0, "DevFS readdir should work without error");
     }
 
     #[test_case]
@@ -675,12 +683,12 @@ mod tests {
         let device_manager = DeviceManager::get_manager();
         
         // Register a character device (TTY-like)
-        let char_device = Arc::new(MockCharDevice::new(100, "tty0"));
-        let char_device_id = device_manager.register_device_with_name("tty0".to_string(), char_device.clone());
+        let char_device = Arc::new(MockCharDevice::new("tty0"));
+        let _char_device_id = device_manager.register_device_with_name("tty0".to_string(), char_device.clone());
         
         // Register a block device (disk-like)  
-        let block_device = Arc::new(MockBlockDevice::new(200, "sda", 512, 1000));
-        let block_device_id = device_manager.register_device_with_name("sda".to_string(), block_device.clone());
+        let block_device = Arc::new(MockBlockDevice::new("sda", 512, 1000));
+        let _block_device_id = device_manager.register_device_with_name("sda".to_string(), block_device.clone());
         
         // Create devfs and verify devices appear
         let devfs = DevFS::new();
@@ -690,9 +698,7 @@ mod tests {
         let entries = devfs.readdir(&root).unwrap();
         
         // Debug: print all entries to see what we actually have
-        for entry in &entries {
-            // Note: In test environment we can't use println, but let's check the entries
-        }
+        let _unused_entries = &entries;
         
         // Should contain both our devices
         let has_tty0 = entries.iter().any(|entry| {
@@ -754,11 +760,10 @@ mod tests {
     #[test_case]
     fn test_devfs_device_file_operations() {
         use crate::device::char::mockchar::MockCharDevice;
-        use crate::object::capability::StreamOps;
         
         // Register a character device for testing
         let device_manager = DeviceManager::get_manager();
-        let char_device = Arc::new(MockCharDevice::new(300, "test_char_dev"));
+        let char_device = Arc::new(MockCharDevice::new("test_char_dev"));
         let _device_id = device_manager.register_device_with_name("test_char_dev".to_string(), char_device.clone());
         
         // Create devfs and lookup the device
