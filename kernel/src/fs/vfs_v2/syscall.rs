@@ -133,87 +133,22 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Legacy close wrapper - redirects to HandleClose
-#[deprecated(note = "Use sys_handle_close instead")]
-pub fn sys_close(trapframe: &mut Trapframe) -> usize {
-    crate::object::handle::syscall::sys_handle_close(trapframe)
-}
 
-/// Legacy dup wrapper - redirects to HandleDuplicate
-#[deprecated(note = "Use sys_handle_duplicate instead")]
-pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
-    crate::object::handle::syscall::sys_handle_duplicate(trapframe)
-}
 
-pub fn sys_read(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
-    let count = trapframe.get_arg(2) as usize;
-
-    // Increment PC to avoid infinite loop if read fails
-    trapframe.increment_pc_next(task);
-
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-
-    let kernel_obj = kernel_obj.unwrap();
-    let stream = kernel_obj.as_stream();
-    if stream.is_none() {
-        return usize::MAX; // Object doesn't support stream operations
-    }
-
-    let stream = stream.unwrap();
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-    
-    match stream.read(buffer) {
-        Ok(n) => {
-            n
-        }
-        Err(_) => {
-            return usize::MAX; // Read error
-        }
-    }
-}
-
-pub fn sys_write(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
-    let count = trapframe.get_arg(2) as usize;
-
-    // Increment PC to avoid infinite loop if write fails
-    trapframe.increment_pc_next(task);
-
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-
-    let kernel_obj = kernel_obj.unwrap();
-    let stream = kernel_obj.as_stream();
-    if stream.is_none() {
-        return usize::MAX; // Object doesn't support stream operations
-    }
-
-    let stream = stream.unwrap();
-    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-    
-    match stream.write(buffer) {
-        Ok(n) => {
-            n
-        }
-        Err(_) => {
-            return usize::MAX; // Write error
-        }
-    }
-}
-
-// sys_lseek is now deprecated - use FileSeek (300) syscall for file seek operations
-
-pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
+/// Truncate a file by path (VfsTruncate)
+/// 
+/// This system call truncates a file at the specified path to the given length.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// * `trapframe.get_arg(1)` - New length for the file
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (file not found, permission denied, etc.)
+pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let length = trapframe.get_arg(1) as u64;
@@ -686,12 +621,6 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     sys_chdir(trapframe)
 }
 
-/// Legacy open wrapper - redirects to VfsOpen
-#[deprecated(note = "Use sys_vfs_open instead")]
-pub fn sys_open(trapframe: &mut Trapframe) -> usize {
-    sys_vfs_open(trapframe)
-}
-
 /// Mount a filesystem (FsMount)
 /// 
 /// This system call mounts a filesystem at the specified target path.
@@ -745,25 +674,6 @@ pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
 pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     sys_pivot_root(trapframe)
 }
-
-/// Legacy mount wrapper - redirects to FsMount
-#[deprecated(note = "Use sys_fs_mount instead")]
-pub fn sys_mount_legacy(trapframe: &mut Trapframe) -> usize {
-    sys_mount(trapframe)
-}
-
-/// Legacy umount wrapper - redirects to FsUmount
-#[deprecated(note = "Use sys_fs_umount instead")]
-pub fn sys_umount_legacy(trapframe: &mut Trapframe) -> usize {
-    sys_umount(trapframe)
-}
-
-/// Legacy pivot_root wrapper - redirects to FsPivotRoot
-#[deprecated(note = "Use sys_fs_pivot_root instead")]
-pub fn sys_pivot_root_legacy(trapframe: &mut Trapframe) -> usize {
-    sys_pivot_root(trapframe)
-}
-
 
 // Use a local path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
