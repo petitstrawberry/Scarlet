@@ -66,7 +66,7 @@ impl Handle {
         };
         
         let result = syscall3(
-            Syscall::Open,
+            Syscall::VfsOpen,
             path_bytes.as_ptr() as usize,
             flags,
             0, // mode (unused for now)
@@ -92,7 +92,7 @@ impl Handle {
     /// 
     /// After calling this method, the Handle becomes invalid
     pub fn close(self) -> HandleResult<()> {
-        let result = syscall1(Syscall::Close, self.raw as usize);
+        let result = syscall1(Syscall::HandleClose, self.raw as usize);
         HandleError::from_syscall_result(result).map(|_| ())
     }
 
@@ -100,7 +100,7 @@ impl Handle {
     /// 
     /// Creates a new Handle pointing to the same KernelObject
     pub fn duplicate(&self) -> HandleResult<Handle> {
-        let result = syscall1(Syscall::Dup, self.raw as usize);
+        let result = syscall1(Syscall::HandleDuplicate, self.raw as usize);
         HandleError::from_syscall_result(result).map(|raw| Handle { raw })
     }
 
@@ -156,7 +156,7 @@ impl Drop for Handle {
     fn drop(&mut self) {
         // Automatically close the handle when it goes out of scope
         // Ignore errors during drop
-        let _ = syscall1(Syscall::Close, self.raw as usize);
+        let _ = syscall1(Syscall::HandleClose, self.raw as usize);
     }
 }
 

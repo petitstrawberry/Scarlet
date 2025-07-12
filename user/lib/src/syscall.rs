@@ -16,16 +16,6 @@ pub enum Syscall {
     // BASIC I/O
     Putchar = 16,
     Getchar = 17,
-    // === Legacy POSIX-like Operations (compatibility) ===
-    // File operations - prefer VfsOps (400+) for new code
-    Open = 20,        // Legacy - prefer VfsOpen (400)
-    Close = 21,       // Legacy - prefer VfsClose (401) 
-    Read = 22,        // Legacy - prefer StreamRead (200)
-    Write = 23,       // Legacy - prefer StreamWrite (201)
-    Lseek = 24,       // Legacy - prefer FileSeek (300)
-    Ftruncate = 25,   // Legacy - prefer FileTruncate (301)
-    Truncate = 26,    // Legacy - prefer FileTruncate (301)
-    Dup = 27,         // Legacy - prefer VfsDup (402)
     
     // === Handle Management ===
     HandleQuery = 100,
@@ -47,8 +37,10 @@ pub enum Syscall {
     // === VFS Operations (VFS layer management and file access) ===
     VfsOpen = 400,          // Open files/directories through VFS
     VfsRemove = 401,        // Remove files or directories (unified Remove/Unlink)
-    VfsCreateDirectory = 402, // Create directories through VFS
-    VfsChangeDirectory = 403, // Change current working directory
+    VfsCreateFile = 402,    // Create regular files through VFS
+    VfsCreateDirectory = 403, // Create directories through VFS
+    VfsChangeDirectory = 404, // Change current working directory
+    VfsTruncate = 405,      // Truncate files by path
     
     // === Filesystem Operations (mount management) ===
     FsMount = 500,
@@ -59,18 +51,8 @@ pub enum Syscall {
 // Backward compatibility aliases
 #[allow(non_upper_case_globals)]
 impl Syscall {
-    // Legacy names for compatibility
-    pub const CreateDir: Self = Self::VfsCreateDirectory;
-    pub const Chdir: Self = Self::VfsChangeDirectory;
-    pub const CreateDirectory: Self = Self::VfsCreateDirectory;  // Previous naming
-    pub const ChangeDirectory: Self = Self::VfsChangeDirectory;  // Previous naming
-    pub const Remove: Self = Self::VfsRemove;
-    pub const Unlink: Self = Self::VfsRemove;
-    pub const Mount: Self = Self::FsMount;
-    pub const Umount: Self = Self::FsUmount;
-    pub const PivotRoot: Self = Self::FsPivotRoot;
-    pub const Close: Self = Self::HandleClose;
-    pub const Dup: Self = Self::HandleDuplicate;
+    // Legacy names for compatibility - these map to the actual legacy syscall numbers
+    // defined above (30-35) which redirect to the new implementations
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

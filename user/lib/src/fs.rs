@@ -2,6 +2,22 @@
 //!
 //! This module provides a Rust standard library-like file system interface
 //! using the OpenOptions builder pattern and high-level convenience functions.
+//!
+//! ## Core Functions
+//!
+//! ### File Operations
+//! - [`create_file`]: Create a new regular file
+//! - File access via [`File::open`], [`File::create`], and [`OpenOptions`]
+//!
+//! ### Directory Operations  
+//! - [`create_directory`]: Create a new directory
+//! - [`change_directory`]: Change current working directory
+//! - [`remove`]: Remove files or directories (unified)
+//!
+//! ### Filesystem Operations
+//! - [`mount`]: Mount filesystems
+//! - [`unmount`]: Unmount filesystems
+//! - [`pivot_root`]: Change root filesystem
 
 use crate::handle::Handle;
 use crate::handle::capability::{SeekFrom as ScarletSeekFrom, FileMetadata};
@@ -563,9 +579,9 @@ pub mod mount_flags {
 ///
 /// Mount a tmpfs:
 /// ```
-/// use scarlet::fs::mount;
+/// use scarlet::fs;
 /// 
-/// mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=100M"))?;
+/// fs::mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=100M"))?;
 /// ```
 ///
 /// Bind mount:
@@ -605,7 +621,7 @@ pub fn mount(
     };
 
     let result = syscall5(
-        Syscall::Mount,
+        Syscall::FsMount,
         source_c.as_ptr() as usize,
         target_c.as_ptr() as usize,
         fstype_c.as_ptr() as usize,
@@ -648,7 +664,7 @@ pub fn unmount(target: &str, flags: u32) -> Result<()> {
     let target_c = str_to_cstr_bytes(target).map_err(|_| Error::new(ErrorKind::InvalidInput, "target contains null byte"))?;
 
     let result = syscall2(
-        Syscall::Umount,
+        Syscall::FsUmount,
         target_c.as_ptr() as usize,
         flags as usize,
     );
@@ -695,7 +711,7 @@ pub fn pivot_root(new_root: &str, old_root: &str) -> Result<()> {
     let old_root_c = str_to_cstr_bytes(old_root).map_err(|_| Error::new(ErrorKind::InvalidInput, "old_root contains null byte"))?;
 
     let result = syscall2(
-        Syscall::PivotRoot,
+        Syscall::FsPivotRoot,
         new_root_c.as_ptr() as usize,
         old_root_c.as_ptr() as usize,
     );
