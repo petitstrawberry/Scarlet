@@ -42,7 +42,7 @@
 //! - FileSeek (300), FileTruncate (301), FileMetadata (302)
 //! 
 //! ### VFS Operations (400-499)
-//! - VfsOpen (400), VfsRemove (401), VfsCreateDirectory (402), VfsChangeDirectory (403), VfsTruncate (404)
+//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405)
 //! 
 //! ### Filesystem Operations (500-599)
 //! - FsMount (500), FsUmount (501), FsPivotRoot (502)
@@ -64,7 +64,7 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
+use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
 use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate};
@@ -103,6 +103,7 @@ syscall_table! {
     
     // === Legacy Compatibility ===
     CreateDir = 30 => sys_vfs_create_directory, // Legacy alias for VfsCreateDirectory
+    CreateFile = 31 => sys_vfs_create_file,     // Legacy alias for VfsCreateFile
     Mount = 32 => sys_fs_mount,                 // Legacy alias for FsMount  
     Umount = 33 => sys_fs_umount,               // Legacy alias for FsUmount
     PivotRoot = 34 => sys_fs_pivot_root,        // Legacy alias for FsPivotRoot
@@ -129,9 +130,10 @@ syscall_table! {
     // === VFS Operations ===
     VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open
     VfsRemove = 401 => sys_vfs_remove,         // Remove files or directories (unified)
-    VfsCreateDirectory = 402 => sys_vfs_create_directory, // Create directories through VFS
-    VfsChangeDirectory = 403 => sys_vfs_change_directory, // Change current working directory
-    VfsTruncate = 404 => sys_vfs_truncate,     // Truncate file by path
+    VfsCreateFile = 402 => sys_vfs_create_file, // Create regular files through VFS
+    VfsCreateDirectory = 403 => sys_vfs_create_directory, // Create directories through VFS
+    VfsChangeDirectory = 404 => sys_vfs_change_directory, // Change current working directory
+    VfsTruncate = 405 => sys_vfs_truncate,     // Truncate file by path
     
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

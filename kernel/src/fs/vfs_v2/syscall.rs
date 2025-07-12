@@ -1,29 +1,26 @@
 //! VFS v2 System Call Interface
 //!
 //! This module implements system call handlers for VFS v2, providing the user-space
-//! interface to filesystem operations. All system calls follow POSIX-like semantics
-//! and work with the task's VFS namespace.
+//! interface to filesystem operations. All system calls follow capability-based
+//! semantics and work with the task's VFS namespace.
 //!
 //! ## Supported System Calls
 //!
-//! ### File Operations
-//! - `sys_open()`: Open files and directories
-//! - `sys_close()`: Close file descriptors
-//! - `sys_read()`: Read data from files (legacy - prefer StreamRead 200)
-//! - `sys_write()`: Write data to files (legacy - prefer StreamWrite 201)
-//! - `sys_lseek()`: DEPRECATED - use FileSeek (300) for file seek operations
-//! - `sys_truncate()`: Truncate files by path
-//! - `sys_ftruncate()`: DEPRECATED - use FileTruncate (301) for file truncate operations
+//! ### VFS Operations (400-series)
+//! - `sys_vfs_open()`: Open files and directories (VfsOpen 400)
+//! - `sys_vfs_remove()`: Unified remove for files/directories (VfsRemove 401)
+//! - `sys_vfs_create_file()`: Create regular files (VfsCreateFile 402)
+//! - `sys_vfs_create_directory()`: Create directories (VfsCreateDirectory 403)
+//! - `sys_vfs_change_directory()`: Change working directory (VfsChangeDirectory 404)
+//! - `sys_vfs_truncate()`: Truncate files by path (VfsTruncate 405)
 //!
+//! ### Filesystem Operations (500-series)
+//! - `sys_fs_mount()`: Mount filesystems (FsMount 500)
+//! - `sys_fs_umount()`: Unmount filesystems (FsUmount 501)
+//! - `sys_fs_pivot_root()`: Change root filesystem (FsPivotRoot 502)
 //!
-//! ### Directory Operations
-//! - `sys_mkdir()`: Create directories
-//! - `sys_mkfile()`: Create regular files
-//!
-//! ### Mount Operations
-//! - `sys_mount()`: Mount filesystems
-//! - `sys_umount()`: Unmount filesystems
-//! - `sys_pivot_root()`: Change root filesystem
+//! ### Utility Operations
+//! - (deprecated - use VfsCreateFile 402 instead)
 //!
 //! ## VFS Namespace Isolation
 //!
@@ -183,9 +180,20 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-// sys_ftruncate is now deprecated - use FileTruncate (301) syscall for file truncate operations
-
-pub fn sys_mkfile(trapframe: &mut Trapframe) -> usize {
+/// Create a regular file using VFS (VfsCreateFile)
+/// 
+/// This system call creates a new regular file at the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// * `trapframe.get_arg(1)` - File mode (reserved for future use)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path already exists, permission denied, etc.)
+pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let _mode = trapframe.get_arg(1) as i32;
@@ -212,7 +220,19 @@ pub fn sys_mkfile(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
+/// Create a directory using VFS (VfsCreateDirectory)
+/// 
+/// This system call creates a new directory at the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path already exists, permission denied, etc.)
+pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     
@@ -238,7 +258,23 @@ pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
+/// Mount a filesystem (FsMount)
+/// 
+/// This system call mounts a filesystem at the specified target path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to source path (device/filesystem)
+/// * `trapframe.get_arg(1)` - Pointer to target mount point path
+/// * `trapframe.get_arg(2)` - Pointer to filesystem type string
+/// * `trapframe.get_arg(3)` - Mount flags
+/// * `trapframe.get_arg(4)` - Pointer to mount data/options
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, filesystem not supported, etc.)
+pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let source_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
@@ -347,7 +383,20 @@ fn create_filesystem_and_mount(
     Ok(())
 }
 
-pub fn sys_umount(trapframe: &mut Trapframe) -> usize {
+/// Unmount a filesystem (FsUmount)
+/// 
+/// This system call unmounts a filesystem at the specified path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to target path to unmount
+/// * `trapframe.get_arg(1)` - Unmount flags (reserved for future use)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, filesystem busy, etc.)
+pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let _flags = trapframe.get_arg(1) as u32; // Reserved for future use
@@ -376,7 +425,48 @@ pub fn sys_umount(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
+/// 
+/// This system call mounts a filesystem at the specified target path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to source path (device/filesystem)
+/// * `trapframe.get_arg(1)` - Pointer to target mount point path
+/// * `trapframe.get_arg(2)` - Pointer to filesystem type string
+/// * `trapframe.get_arg(3)` - Mount flags
+/// * `trapframe.get_arg(4)` - Pointer to mount data/options
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, filesystem not supported, etc.)
+/// Unmount a filesystem (FsUmount)
+/// 
+/// This system call unmounts a filesystem at the specified path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to target path to unmount
+/// * `trapframe.get_arg(1)` - Unmount flags (reserved for future use)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, filesystem busy, etc.)
+/// Change root filesystem (FsPivotRoot)
+/// 
+/// This system call changes the root filesystem of the calling process.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to new root path
+/// * `trapframe.get_arg(1)` - Pointer to old root mount point
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, operation not permitted, etc.)
+pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let new_root_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let old_root_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
@@ -494,7 +584,20 @@ fn pivot_root_in_place(
     Ok(())
 }
 
-pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
+/// Change current working directory using VFS (VfsChangeDirectory)
+/// 
+/// This system call changes the current working directory of the calling task
+/// to the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, not a directory, etc.)
+pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     
@@ -588,92 +691,6 @@ pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Create a directory using VFS (VfsCreateDirectory)
-/// 
-/// This system call creates a new directory at the specified path using the VFS layer.
-/// 
-/// # Arguments
-/// 
-/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
-/// 
-/// # Returns
-/// 
-/// * `0` on success
-/// * `usize::MAX` on error (path already exists, permission denied, etc.)
-pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
-    sys_mkdir(trapframe)
-}
-
-/// Change current working directory using VFS (VfsChangeDirectory)
-/// 
-/// This system call changes the current working directory of the calling task
-/// to the specified path using the VFS layer.
-/// 
-/// # Arguments
-/// 
-/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
-/// 
-/// # Returns
-/// 
-/// * `0` on success
-/// * `usize::MAX` on error (path not found, not a directory, etc.)
-pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
-    sys_chdir(trapframe)
-}
-
-/// Mount a filesystem (FsMount)
-/// 
-/// This system call mounts a filesystem at the specified target path.
-/// 
-/// # Arguments
-/// 
-/// * `trapframe.get_arg(0)` - Pointer to source path (device/filesystem)
-/// * `trapframe.get_arg(1)` - Pointer to target mount point path
-/// * `trapframe.get_arg(2)` - Pointer to filesystem type string
-/// * `trapframe.get_arg(3)` - Mount flags
-/// * `trapframe.get_arg(4)` - Pointer to mount data/options
-/// 
-/// # Returns
-/// 
-/// * `0` on success
-/// * `usize::MAX` on error (invalid path, filesystem not supported, etc.)
-pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
-    sys_mount(trapframe)
-}
-
-/// Unmount a filesystem (FsUmount)
-/// 
-/// This system call unmounts a filesystem at the specified path.
-/// 
-/// # Arguments
-/// 
-/// * `trapframe.get_arg(0)` - Pointer to target path to unmount
-/// * `trapframe.get_arg(1)` - Unmount flags (reserved for future use)
-/// 
-/// # Returns
-/// 
-/// * `0` on success
-/// * `usize::MAX` on error (path not found, filesystem busy, etc.)
-pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
-    sys_umount(trapframe)
-}
-
-/// Change root filesystem (FsPivotRoot)
-/// 
-/// This system call changes the root filesystem of the calling process.
-/// 
-/// # Arguments
-/// 
-/// * `trapframe.get_arg(0)` - Pointer to new root path
-/// * `trapframe.get_arg(1)` - Pointer to old root mount point
-/// 
-/// # Returns
-/// 
-/// * `0` on success
-/// * `usize::MAX` on error (invalid path, operation not permitted, etc.)
-pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
-    sys_pivot_root(trapframe)
-}
 
 // Use a local path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
