@@ -170,9 +170,16 @@ pub mod params;
 pub use params::*;
 pub use vfs_v2::manager::VfsManager;
 
+// Re-export syscalls for backward compatibility  
+pub mod syscall {
+    pub use super::vfs_v2::syscall::*;
+}
+
+// Re-export file capability types for VFS compatibility
+pub use crate::object::capability::file::{SeekFrom, FileObject};
+
 use alloc::{boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 use crate::{device::{block::{BlockDevice}, DeviceType}, vm::vmem::MemoryArea};
-use crate::object::capability::{StreamOps, StreamError};
 
 use spin::RwLock;
 use ::core::fmt;
@@ -405,47 +412,6 @@ impl Directory {
         Self {
             path,
         }
-    }
-}
-
-pub enum SeekFrom {
-    Start(u64),
-    Current(i64),
-    End(i64),
-}
-
-/// Trait for file object
-/// 
-/// This trait represents a file-like object that supports both stream operations
-/// and file-specific operations like seeking and metadata access.
-/// Directory reading is handled through normal read() operations.
-pub trait FileObject: StreamOps {
-    /// Seek to a position in the file stream
-    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
-    
-    /// Get metadata about the file
-    fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
-
-    /// Truncate the file to the specified size
-    /// 
-    /// This method changes the size of the file to the specified length.
-    /// If the new size is smaller than the current size, the file is truncated.
-    /// If the new size is larger, the file is extended with zero bytes.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `size` - New size of the file in bytes
-    /// 
-    /// # Returns
-    /// 
-    /// * `Result<(), StreamError>` - Ok if the file was truncated successfully
-    /// 
-    /// # Errors
-    /// 
-    /// * `StreamError` - If the file is a directory or the operation is not supported
-    fn truncate(&self, size: u64) -> Result<(), StreamError> {
-        let _ = size;
-        Err(StreamError::NotSupported)
     }
 }
 

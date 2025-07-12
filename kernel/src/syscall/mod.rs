@@ -13,11 +13,12 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::fs::syscall::{sys_chdir, sys_close, sys_dup, sys_ftruncate, sys_lseek, sys_mkdir, sys_mkfile, sys_mount, sys_open, sys_pivot_root, sys_read, sys_truncate, sys_umount, sys_write};
+use crate::fs::syscall::{sys_chdir, sys_close, sys_dup, sys_mkdir, sys_mkfile, sys_mount, sys_open, sys_pivot_root, sys_read, sys_truncate, sys_umount, sys_write};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
 use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
+use crate::object::capability::file::{sys_file_seek, sys_file_truncate, sys_file_metadata};
 
 #[macro_use]
 mod macros;
@@ -45,8 +46,8 @@ syscall_table! {
     Close = 21 => sys_close,
     Read = 22 => sys_read,
     Write = 23 => sys_write,
-    Lseek = 24 => sys_lseek,
-    Ftruncate = 25 => sys_ftruncate,
+    // Lseek (24) deprecated - use FileSeek (300)
+    // Ftruncate (25) deprecated - use FileTruncate (301)
     Truncate = 26 => sys_truncate,
     Dup = 27 => sys_dup,         // Supports SCARLET_* flags for metadata
     
@@ -62,6 +63,12 @@ syscall_table! {
     // Stream operations for any KernelObject with StreamOps capability
     StreamRead = 200 => sys_stream_read,   // StreamOps::read
     StreamWrite = 201 => sys_stream_write, // StreamOps::write
+    
+    // === FileObject Capability ===
+    // File operations for any KernelObject with FileObject capability
+    FileSeek = 300 => sys_file_seek,       // FileObject::seek
+    FileTruncate = 301 => sys_file_truncate, // FileObject::truncate
+    FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
     
     // === Filesystem Operations ===
     Mkfile = 30 => sys_mkfile,

@@ -36,6 +36,13 @@ pub enum Syscall {
     Chdir = 35,
     // Handle introspection (matching kernel syscall table)
     HandleQuery = 100,
+    // === StreamOps Capability ===
+    StreamRead = 200,
+    StreamWrite = 201,
+    // === FileObject Capability ===
+    FileSeek = 300,
+    FileTruncate = 301,
+    FileMetadata = 302,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

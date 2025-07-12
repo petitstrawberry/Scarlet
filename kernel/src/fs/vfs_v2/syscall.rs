@@ -9,11 +9,12 @@
 //! ### File Operations
 //! - `sys_open()`: Open files and directories
 //! - `sys_close()`: Close file descriptors
-//! - `sys_read()`: Read data from files
-//! - `sys_write()`: Write data to files
-//! - `sys_lseek()`: Seek within files
+//! - `sys_read()`: Read data from files (legacy - prefer StreamRead 200)
+//! - `sys_write()`: Write data to files (legacy - prefer StreamWrite 201)
+//! - `sys_lseek()`: DEPRECATED - use FileSeek (300) for file seek operations
 //! - `sys_truncate()`: Truncate files by path
-//! - `sys_ftruncate()`: Truncate files by descriptor
+//! - `sys_ftruncate()`: DEPRECATED - use FileTruncate (301) for file truncate operations
+//!
 //!
 //! ### Directory Operations
 //! - `sys_mkdir()`: Create directories
@@ -39,7 +40,7 @@ use alloc::{string::String, vec::Vec, string::ToString, sync::Arc};
 
 use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_string, task::mytask};
 
-use crate::fs::{SeekFrom, VfsManager, MAX_PATH_LENGTH};
+use crate::fs::{VfsManager, MAX_PATH_LENGTH};
 
 pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
@@ -212,43 +213,7 @@ pub fn sys_write(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    let offset = trapframe.get_arg(1) as i64;
-    let whence = trapframe.get_arg(2) as i32;
-
-    // Increment PC to avoid infinite loop if lseek fails
-    trapframe.increment_pc_next(task);
-
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-
-    let kernel_obj = kernel_obj.unwrap();
-    let file = kernel_obj.as_file();
-    if file.is_none() {
-        return usize::MAX; // Object doesn't support file operations
-    }
-
-    let file = file.unwrap();
-    let whence = match whence {
-        0 => SeekFrom::Start(offset as u64),
-        1 => SeekFrom::Current(offset),
-        2 => SeekFrom::End(offset),
-        _ => return usize::MAX, // Invalid whence
-    };
-
-    match file.seek(whence) {
-        Ok(pos) => {
-            pos as usize
-        }
-        Err(_) => {
-            return usize::MAX; // Lseek error
-        }
-    }
-}
+// sys_lseek is now deprecated - use FileSeek (300) syscall for file seek operations
 
 pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
@@ -285,30 +250,7 @@ pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32;
-    let length = trapframe.get_arg(1) as u64;
-    
-    trapframe.increment_pc_next(task);
-    
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-    
-    let kernel_obj = kernel_obj.unwrap();
-    let file = kernel_obj.as_file();
-    if file.is_none() {
-        return usize::MAX; // Object doesn't support file operations
-    }
-    
-    let file = file.unwrap();
-    match file.truncate(length) {
-        Ok(_) => 0,
-        Err(_) => usize::MAX, // -1
-    }
-}
+// sys_ftruncate is now deprecated - use FileTruncate (301) syscall for file truncate operations
 
 pub fn sys_mkfile(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();

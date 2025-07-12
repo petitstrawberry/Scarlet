@@ -4,11 +4,15 @@
 //! that can be performed on different types of kernel objects.
 
 pub mod stream;
+pub mod file;
 
 use crate::object::KernelObject;
 
 // Re-export stream types for backward compatibility
 pub use stream::{StreamError, StreamOps};
+
+// Re-export file types for backward compatibility
+pub use file::{FileObject, SeekFrom};
 
 /// Clone operations capability
 /// 
