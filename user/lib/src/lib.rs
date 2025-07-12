@@ -73,13 +73,19 @@ mod allocator;
 pub mod syscall;
 pub mod io;
 pub mod task;
-pub mod fs;
 pub mod ffi;
 pub mod env;
 pub mod handle;
 
 pub use core_exports::*;
 pub use alloc_exports::*;
+
+// Re-export the primary Scarlet Native API at top level for convenience
+pub use handle::{Handle, HandleError, HandleResult};
+pub use handle::capability::{
+    StreamOps, StreamError, StreamResult,
+    FileObject, FileError, FileResult, SeekFrom, FileMetadata,
+};
 
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -88,6 +94,6 @@ pub fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[alloc_error_handler]
-fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+fn alloc_error_handler(_layout: core::alloc::Layout) -> ! {
     loop {}
 }

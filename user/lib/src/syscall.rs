@@ -34,8 +34,11 @@ pub enum Syscall {
     PivotRoot = 34,
     // Change directory
     Chdir = 35,
-    // Handle introspection (matching kernel syscall table)
+    // Handle introspection and management
     HandleQuery = 100,
+    HandleSetRole = 101,
+    // Pipe operations
+    Pipe = 102,
     // === StreamOps Capability ===
     StreamRead = 200,
     StreamWrite = 201,
