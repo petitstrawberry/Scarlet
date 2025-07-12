@@ -34,6 +34,8 @@ pub enum Syscall {
     PivotRoot = 34,
     // Change directory
     Chdir = 35,
+    // Handle introspection (matching kernel syscall table)
+    HandleQuery = 100,
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

@@ -85,8 +85,30 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let file_obj = vfs.open(&path_str, 0);
     match file_obj {
         Ok(kernel_obj) => {
-            // file_obj is already a KernelObject::File
-            let handle = task.handle_table.insert(kernel_obj);
+            // Use simplified handle role classification
+            use crate::object::handle::{HandleMetadata, HandleType, AccessMode};
+            
+            // For now, all opened files are classified as Regular usage
+            // Future enhancements could infer specific roles based on path patterns,
+            // but keeping it simple with the 3-category system: IpcChannel, StandardInputOutput, Regular
+            let handle_type = HandleType::Regular;
+            
+            // Infer access mode from flags (simplified - full implementation would parse all open flags)
+            let access_mode = if _flags & 0x1 != 0 { // O_WRONLY-like
+                AccessMode::WriteOnly
+            } else if _flags & 0x2 != 0 { // O_RDWR-like
+                AccessMode::ReadWrite
+            } else {
+                AccessMode::ReadOnly // Default
+            };
+            
+            let metadata = HandleMetadata {
+                handle_type,
+                access_mode,
+                special_semantics: None, // Could be inferred from flags like O_CLOEXEC
+            };
+            
+            let handle = task.handle_table.insert_with_metadata(kernel_obj, metadata);
             match handle {
                 Ok(handle) => handle as usize,
                 Err(_) => usize::MAX, // Handle table full

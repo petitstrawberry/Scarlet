@@ -76,6 +76,7 @@ pub mod task;
 pub mod fs;
 pub mod ffi;
 pub mod env;
+pub mod handle;
 
 pub use core_exports::*;
 pub use alloc_exports::*;

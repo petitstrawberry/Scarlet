@@ -15,6 +15,8 @@
 use crate::arch::Trapframe;
 use crate::fs::syscall::{sys_chdir, sys_close, sys_dup, sys_ftruncate, sys_lseek, sys_mkdir, sys_mkfile, sys_mount, sys_open, sys_pivot_root, sys_read, sys_truncate, sys_umount, sys_write};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
+use crate::ipc::syscall::sys_pipe;
+use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role};
 
 #[macro_use]
 mod macros;
@@ -35,22 +37,31 @@ syscall_table! {
     // BASIC I/O
     Putchar = 16 => sys_putchar,
     Getchar = 17 => sys_getchar,
-    // File operations
-    Open = 20 => sys_open,
+    
+    // === Unified Handle Operations ===
+    // Enhanced versions with Scarlet Native support via flags
+    Open = 20 => sys_open,       // Supports SCARLET_* flags for metadata
     Close = 21 => sys_close,
     Read = 22 => sys_read,
     Write = 23 => sys_write,
     Lseek = 24 => sys_lseek,
     Ftruncate = 25 => sys_ftruncate,
     Truncate = 26 => sys_truncate,
-    Dup = 27 => sys_dup,
-    // Filesystem operations
+    Dup = 27 => sys_dup,         // Supports SCARLET_* flags for metadata
+    
+    // === Scarlet Native Extensions ===
+    // Specialized operations that don't fit in POSIX model
+    HandleQuery = 100 => sys_handle_query,     // Query handle metadata/capabilities
+    HandleSetRole = 101 => sys_handle_set_role, // Change handle role after creation
+    
+    // Pipe operations with enhanced metadata
+    Pipe = 102 => sys_pipe,      // Enhanced with Scarlet metadata support
+    
+    // === Filesystem Operations ===
     Mkfile = 30 => sys_mkfile,
     Mkdir = 31 => sys_mkdir,
-    // Mount operations
     Mount = 32 => sys_mount,
     Umount = 33 => sys_umount,
     PivotRoot = 34 => sys_pivot_root,
-    // Change directory
     Chdir = 35 => sys_chdir,
 }

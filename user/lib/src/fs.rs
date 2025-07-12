@@ -2,6 +2,7 @@ use crate::ffi::str_to_cstr_bytes;
 use crate::boxed::Box;
 use crate::syscall::{syscall1, syscall2, syscall3, syscall5, Syscall};
 use crate::string::String;
+use crate::handle;
 
 // Mount flags (similar to Linux mount flags)
 pub const MS_RDONLY: u32 = 1;        // Mount read-only
@@ -15,87 +16,124 @@ pub const MS_REC: u32 = 16384;       // Recursive bind mount
 pub const MS_SILENT: u32 = 32768;    // Suppress kernel messages
 pub const MS_REMOUNT: u32 = 32;      // Remount filesystem
 
-/// Open a file.
+/// Open a file and return a handle to the resulting KernelObject.
 /// 
 /// # Arguments
 /// * `path` - Path to the file
 /// * `flags` - Flags for opening the file
 /// 
 /// # Return Value
-/// - On success: file descriptor
+/// - On success: handle to the KernelObject (compatible with POSIX fd)
 /// - On error: -1
 /// 
+/// # Scarlet Design Notes
+/// This function creates a KernelObject (File, Device, etc.) and returns a Handle
+/// for accessing it. While the API is POSIX-compatible for portability, internally
+/// Scarlet uses typed KernelObjects instead of traditional file descriptors.
+/// 
+/// This is a thin wrapper around handle::open() for POSIX compatibility.
+/// 
 pub fn open(path: &str, flags: usize) -> i32 {
-    let path_bytes = str_to_cstr_bytes(path).unwrap();
-    let path_boxed_slice = path_bytes.into_boxed_slice();
-    let path_len = path_boxed_slice.len();
-    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
-    let res = syscall2(Syscall::Open, path_ptr, flags);
-    // Properly free the allocated memory with correct size information
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
-    // Return the result of the syscall
-    res as i32
+    match handle::open(path, flags) {
+        Ok(handle) => handle.as_raw(),
+        Err(_) => -1,
+    }
 }
 
-/// Close a file.
+/// Close a KernelObject handle.
 /// 
 /// # Arguments
-/// * `fd` - File descriptor
+/// * `handle` - Handle to the KernelObject (POSIX fd-compatible)
 /// 
 /// # Return Value
 /// - On success: 0
 /// - On error: -1
 /// 
-pub fn close(fd: i32) -> i32 {
-    let res = syscall2(Syscall::Close, fd as usize, 0);
-    // Return the result of the syscall
-    res as i32
+/// # Scarlet Design Notes
+/// This removes the KernelObject from the task's HandleTable, automatically
+/// dropping the underlying resource (File, Pipe, etc.) when no more references exist.
+/// 
+/// This is a thin wrapper around handle::Handle::close() for POSIX compatibility.
+/// 
+pub fn close(handle: i32) -> i32 {
+    let handle_obj = handle::Handle::from_raw(handle);
+    match handle_obj.close() {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
 }
 
-/// Duplicate a file descriptor.
+/// Duplicate a KernelObject handle.
 /// 
 /// # Arguments
-/// * `fd` - File descriptor to duplicate
+/// * `handle` - Handle to duplicate (POSIX fd-compatible)
 /// 
 /// # Return Value
-/// - On success: new file descriptor
+/// - On success: new handle to the same KernelObject
 /// - On error: -1
-pub fn dup(fd: i32) -> i32 {
-    let res = syscall1(Syscall::Dup, fd as usize);
-    // Return the result of the syscall
-    res as i32
+/// 
+/// # Scarlet Design Notes
+/// Creates a new Handle pointing to the same KernelObject. The underlying
+/// resource (File, Pipe, etc.) is reference-counted, so both handles
+/// operate on the same object until closed.
+/// 
+/// This is a thin wrapper around handle::dup() for POSIX compatibility.
+/// 
+pub fn dup(handle: i32) -> i32 {
+    match handle::dup(handle) {
+        Ok(new_handle) => new_handle.as_raw(),
+        Err(_) => -1,
+    }
 }
 
-/// Read from a file.
+/// Read from a KernelObject through its handle.
 /// 
 /// # Arguments
-/// * `fd` - File descriptor
+/// * `handle` - Handle to the KernelObject (POSIX fd-compatible)
 /// * `buf` - Buffer to read into
 ///
 /// # Return Value
 /// - On success: number of bytes read
 /// - On error: -1
 /// 
-pub fn read(fd: i32, buf: &mut [u8]) -> i32 {
-    let res = syscall3(Syscall::Read, fd as usize, buf.as_mut_ptr() as usize, buf.len());
-    // Return the result of the syscall
-    res as i32
+/// # Scarlet Design Notes
+/// Reads from any KernelObject that supports the StreamOps capability
+/// (Files, Pipes, Character Devices, etc.). The kernel automatically
+/// dispatches to the appropriate read implementation.
+/// 
+/// This is a thin wrapper around handle::Handle::read() for POSIX compatibility.
+/// 
+pub fn read(handle: i32, buf: &mut [u8]) -> i32 {
+    let handle_obj = handle::Handle::from_raw(handle);
+    match handle_obj.read(buf) {
+        Ok(bytes_read) => bytes_read as i32,
+        Err(_) => -1,
+    }
 }
 
-/// Write to a file.
+/// Write to a KernelObject through its handle.
 /// 
 /// # Arguments
-/// * `fd` - File descriptor
+/// * `handle` - Handle to the KernelObject (POSIX fd-compatible)
 /// * `buf` - Buffer to write from
 /// 
 /// # Return Value
 /// - On success: number of bytes written
 /// - On error: -1
 /// 
-pub fn write(fd: i32, buf: &[u8]) -> i32 {
-    let res = syscall3(Syscall::Write, fd as usize, buf.as_ptr() as usize, buf.len());
-    // Return the result of the syscall
-    res as i32
+/// # Scarlet Design Notes
+/// Writes to any KernelObject that supports the StreamOps capability
+/// (Files, Pipes, Character Devices, etc.). The kernel automatically
+/// dispatches to the appropriate write implementation.
+/// 
+/// This is a thin wrapper around handle::Handle::write() for POSIX compatibility.
+/// 
+pub fn write(handle: i32, buf: &[u8]) -> i32 {
+    let handle_obj = handle::Handle::from_raw(handle);
+    match handle_obj.write(buf) {
+        Ok(bytes_written) => bytes_written as i32,
+        Err(_) => -1,
+    }
 }
 
 /// Seek to a position in a file.
@@ -108,6 +146,10 @@ pub fn write(fd: i32, buf: &[u8]) -> i32 {
 /// # Return Value
 /// - On success: new position in the file
 /// - On error: -1
+/// 
+/// # Scarlet Design Notes
+/// This function performs seek operations on files. For POSIX compatibility,
+/// it uses the raw syscall interface directly.
 /// 
 pub fn lseek(fd: i32, offset: i64, whence: u32) -> i32 {
     let res = syscall3(Syscall::Lseek, fd as usize, offset as usize, whence as usize);
