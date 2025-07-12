@@ -17,6 +17,7 @@ use crate::fs::syscall::{sys_chdir, sys_close, sys_dup, sys_ftruncate, sys_lseek
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
 use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role};
+use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
 
 #[macro_use]
 mod macros;
@@ -56,6 +57,11 @@ syscall_table! {
     
     // Pipe operations with enhanced metadata
     Pipe = 102 => sys_pipe,      // Enhanced with Scarlet metadata support
+    
+    // === StreamOps Capability ===
+    // Stream operations for any KernelObject with StreamOps capability
+    StreamRead = 200 => sys_stream_read,   // StreamOps::read
+    StreamWrite = 201 => sys_stream_write, // StreamOps::write
     
     // === Filesystem Operations ===
     Mkfile = 30 => sys_mkfile,
