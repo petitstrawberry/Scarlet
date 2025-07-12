@@ -722,3 +722,42 @@ pub fn pivot_root(new_root: &str, old_root: &str) -> Result<()> {
         Ok(())
     }
 }
+
+/// Change the current working directory
+///
+/// # Arguments
+///
+/// * `path` - Path to the new working directory
+///
+/// # Examples
+///
+/// ```
+/// use scarlet::fs::change_directory;
+///
+/// change_directory("/tmp")?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the directory change fails, such as:
+/// - Directory does not exist
+/// - Permission denied
+/// - Invalid path
+pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
+    use crate::syscall::{syscall1, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let path_c = str_to_cstr_bytes(path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let result = syscall1(
+        Syscall::VfsChangeDirectory,
+        path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "change directory failed"))
+    } else {
+        Ok(())
+    }
+}
