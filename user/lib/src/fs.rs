@@ -6,18 +6,25 @@
 //! ## Core Functions
 //!
 //! ### File Operations
-//! - [`create_file`]: Create a new regular file
-//! - File access via [`File::open`], [`File::create`], and [`OpenOptions`]
+//! - [`File::open`], [`File::create`]: Open and create files
+//! - [`OpenOptions`]: Flexible file opening with various options
 //!
 //! ### Directory Operations  
-//! - [`create_directory`]: Create a new directory
 //! - [`change_directory`]: Change current working directory
-//! - [`remove`]: Remove files or directories (unified)
+//! - [`File::read_dir`]: Read directory entries from an open directory
+//! - [`list_directory`]: List all entries in a directory (convenience function)
+//! - [`count_directory_entries`]: Count files and directories (example function)
+//!
+//! ### Directory Entry Parsing
+//! - [`DirectoryEntry`]: High-level directory entry structure
+//! - [`DirectoryEntryRaw`]: Low-level raw directory entry structure
+//! - [`parse_dir_entry`]: Parse raw directory entry data
+//! - [`parse_dir_entry_safe`]: Safe directory entry parsing (backward compatibility)
 //!
 //! ### Filesystem Operations
-//! - [`mount`]: Mount filesystems
+//! - [`mount`]: Mount filesystems with various options
 //! - [`unmount`]: Unmount filesystems
-//! - [`pivot_root`]: Change root filesystem
+//! - [`pivot_root`]: Change root filesystem (system initialization)
 
 use crate::handle::Handle;
 use crate::handle::capability::{SeekFrom as ScarletSeekFrom, FileMetadata};
@@ -416,7 +423,44 @@ impl File {
         stream.read(buf)
             .map_err(|_| Error::new(ErrorKind::Other, "Read operation failed"))
     }
-    
+
+    /// Read directory entries from a directory file
+    ///
+    /// This method reads an entry from a directory file and returns a DirectoryEntry
+    /// 
+    /// # Returns
+    /// * `Ok(entries)` - Vector of directory entries on success
+    /// * `Err(errno)` - Error code on failure
+    pub fn read_dir(&mut self) -> Result<Option<DirectoryEntry>> {
+        let file_handle = self.handle.as_file()
+            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
+        let metadata = file_handle.metadata()
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to get file metadata"))?;
+
+        if !metadata.is_directory() {
+            return Err(Error::new(ErrorKind::InvalidInput, "Handle is not a directory"));
+        }
+
+        let mut buf = [0u8; core::mem::size_of::<DirectoryEntryRaw>()];
+        let bytes_read = self.handle.as_stream().unwrap().read(&mut buf);
+
+        if bytes_read.is_err() {
+            return Err(Error::new(ErrorKind::Other, "Failed to read directory entry"));
+        }
+        let bytes_read = bytes_read.unwrap();
+
+        if bytes_read == 0 {
+            return Ok(None); // EOF - no more entries
+        }
+        
+        // Parse the directory entry
+        if let Some(entry) = parse_dir_entry(&buf[..bytes_read as usize]) {
+            Ok(Some(DirectoryEntry::from_raw(entry)))
+        } else {
+            Err(Error::new(ErrorKind::InvalidData, "Failed to parse directory entry"))
+        }
+    }
+
     /// Write data to the file
     /// 
     /// # Arguments
@@ -760,4 +804,241 @@ pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Raw Directory entry structure (must match kernel definition)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DirectoryEntryRaw {
+    /// Unique file identifier
+    pub file_id: u64,
+    /// File size in bytes
+    pub size: u64,
+    /// File type as a byte value
+    pub file_type: u8,
+    /// Length of the file name
+    pub name_len: u8,
+    /// Reserved bytes for alignment
+    pub _reserved: [u8; 6],
+    /// File name (null-terminated, max 255 characters)
+    pub name: [u8; 256],
+}
+
+impl DirectoryEntryRaw {
+    /// Get the name as a string
+    pub fn name_str(&self) -> core::result::Result<&str, core::str::Utf8Error> {
+        let name_bytes = &self.name[..self.name_len as usize];
+        core::str::from_utf8(name_bytes)
+    }
+    
+    /// Get the name as an owned String
+    pub fn name_string(&self) -> core::result::Result<crate::string::String, core::str::Utf8Error> {
+        let name_str = self.name_str()?;
+        let mut owned_name = crate::string::String::new();
+        for c in name_str.chars() {
+            owned_name.push(c);
+        }
+        Ok(owned_name)
+    }
+    
+    /// Check if this entry is a directory
+    pub fn is_directory(&self) -> bool {
+        self.file_type == 1 // FileType::Directory as u8
+    }
+    
+    /// Check if this entry is a regular file
+    pub fn is_file(&self) -> bool {
+        self.file_type == 0 // FileType::RegularFile as u8
+    }
+    
+    /// Check if this entry is a symbolic link
+    pub fn is_symlink(&self) -> bool {
+        self.file_type == 2 // FileType::SymbolicLink as u8
+    }
+    
+    /// Get file type as a human-readable string
+    pub fn file_type_str(&self) -> &'static str {
+        match self.file_type {
+            0 => "file",
+            1 => "directory",
+            2 => "symlink",
+            3 => "device",
+            4 => "pipe",
+            5 => "socket",
+            _ => "unknown",
+        }
+    }
+}
+
+/// Directory entry structure for user space
+/// This structure is a higher-level representation of a directory entry
+/// that can be used in user space
+
+#[derive(Debug, Clone)]
+pub struct DirectoryEntry {
+    /// Unique file identifier
+    pub file_id: u64,
+    /// File size in bytes
+    pub size: u64,
+    /// File type as a byte value
+    pub file_type: u8,
+    /// File name
+    pub name: String,
+}
+
+impl DirectoryEntry {
+    /// Create a new DirectoryEntry from raw data
+    pub fn from_raw(entry: DirectoryEntryRaw) -> Self {
+        Self {
+            file_id: entry.file_id,
+            size: entry.size,
+            file_type: entry.file_type,
+            name: entry.name_string().unwrap_or_else(|_| String::new()),
+        }
+    }
+    
+    /// Get the name as a string slice
+    pub fn name_str(&self) -> &str {
+        &self.name
+    }
+    
+    /// Check if this entry is a directory
+    pub fn is_directory(&self) -> bool {
+        self.file_type == 1 // FileType::Directory as u8
+    }
+    
+    /// Check if this entry is a regular file
+    pub fn is_file(&self) -> bool {
+        self.file_type == 0 // FileType::RegularFile as u8
+    }
+}
+
+/// Helper function to parse directory entries from readdir buffer (backward compatibility)
+/// 
+/// This function is kept for backward compatibility with older code that manually
+/// handles directory entry parsing. Consider using [`File::read_dir`] or 
+/// [`list_directory`] for new code, which handle parsing automatically.
+/// 
+/// # Arguments
+/// * `buf` - Buffer containing directory entry from readdir
+/// * `bytes_read` - Number of bytes actually read
+/// 
+/// # Returns
+/// * `Some((name, file_type, file_id, size))` - Parsed directory entry data
+/// * `None` - If parsing failed or EOF reached
+/// 
+pub fn parse_dir_entry_safe(buf: &[u8], bytes_read: usize) -> Option<(crate::string::String, u8, u64, u64)> {
+    if bytes_read == 0 {
+        return None; // EOF
+    }
+    
+    if let Some(entry) = parse_dir_entry(&buf[..bytes_read]) {
+        if let Ok(owned_name) = entry.name_string() {
+            return Some((
+                owned_name,
+                entry.file_type,
+                entry.file_id,
+                entry.size
+            ));
+        }
+    }
+    
+    None
+}
+
+/// Parse a single directory entry from buffer (low-level function)
+pub fn parse_dir_entry(buf: &[u8]) -> Option<DirectoryEntryRaw> {
+    if buf.len() < core::mem::size_of::<DirectoryEntryRaw>() {
+        return None;
+    }
+    
+    unsafe {
+        Some(*(buf.as_ptr() as *const DirectoryEntryRaw))
+    }
+}
+
+/// List all files and directories in a directory
+/// 
+/// This is a convenience function that opens a directory and reads all entries.
+/// It demonstrates how to use the new directory reading API.
+/// 
+/// # Arguments
+/// * `path` - Path to the directory to list
+/// 
+/// # Returns
+/// * `Ok(entries)` - Vector of directory entries on success
+/// * `Err(error)` - I/O error on failure
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs;
+/// 
+/// let entries = fs::list_directory("/tmp")?;
+/// for entry in entries {
+///     println!("{}: {} bytes", entry.name, entry.size);
+/// }
+/// ```
+/// 
+pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>> {
+    use crate::vec::Vec;
+
+    let dir_file = File::open(path);
+    if dir_file.is_err() {
+        return Err(dir_file.err().unwrap());
+    }
+    
+    let mut entries = Vec::new();
+
+    let mut file = dir_file.unwrap();
+    
+    loop {
+        match file.read_dir() {
+            Ok(Some(entry)) => {
+                entries.push(entry);
+            }
+            Ok(None) => break, // EOF
+            Err(errno) => return Err(errno),
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Count files and directories in a directory
+/// 
+/// This is an example function that demonstrates using the directory listing API
+/// to analyze directory contents.
+/// 
+/// # Arguments
+/// * `path` - Path to the directory to analyze
+/// 
+/// # Returns
+/// * `Ok((file_count, dir_count))` - Tuple of (number of files, number of directories)
+/// * `Err(error)` - I/O error on failure
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs;
+/// 
+/// let (files, dirs) = fs::count_directory_entries("/home")?;
+/// println!("Found {} files and {} directories", files, dirs);
+/// ```
+/// 
+pub fn count_directory_entries(path: &str) -> Result<(usize, usize)> {
+    let entries = list_directory(path)?;
+    
+    let mut file_count = 0;
+    let mut dir_count = 0;
+
+    for entry in entries {
+        if entry.is_file() {
+            file_count += 1;
+        } else if entry.is_directory() {
+            dir_count += 1;
+        }
+    }
+
+    Ok((file_count, dir_count))
 }

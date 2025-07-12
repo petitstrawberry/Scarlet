@@ -76,6 +76,36 @@ pub struct FileMetadata {
     pub accessed: u64,
 }
 
+impl FileMetadata {
+    /// Check if this entry is a directory
+    pub fn is_directory(&self) -> bool {
+        self.file_type == 1 // FileType::Directory as u8
+    }
+    
+    /// Check if this entry is a regular file
+    pub fn is_file(&self) -> bool {
+        self.file_type == 0 // FileType::RegularFile as u8
+    }
+    
+    /// Check if this entry is a symbolic link
+    pub fn is_symlink(&self) -> bool {
+        self.file_type == 2 // FileType::SymbolicLink as u8
+    }
+    
+    /// Get file type as a human-readable string
+    pub fn file_type_str(&self) -> &'static str {
+        match self.file_type {
+            0 => "file",
+            1 => "directory",
+            2 => "symlink",
+            3 => "device",
+            4 => "pipe",
+            5 => "socket",
+            _ => "unknown",
+        }
+    }
+}
+
 /// File object capability for file-specific operations
 pub struct FileObject {
     handle: i32,
