@@ -161,6 +161,6 @@ impl Drop for Handle {
 }
 
 /// Convenience function to duplicate a raw handle
-pub fn dup(handle: i32) -> HandleResult<Handle> {
-    Handle::from_raw(handle).duplicate()
+pub fn dup(handle: &Handle) -> HandleResult<Handle> {
+    handle.duplicate()
 }
