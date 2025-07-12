@@ -26,8 +26,8 @@
 //! - Basic I/O: Putchar (16), Getchar (17)
 //! 
 //! ### Legacy POSIX Compatibility (20-35)
-//! - Open (20) → VfsOpen, Close (21), Read (22), Write (23)
-//! - Lseek (24) → FileSeek, Truncate (26), Dup (27)
+//! - Open (20) → VfsOpen, Close (21) → HandleClose, Read (22), Write (23)
+//! - Lseek (24) → FileSeek, Truncate (26), Dup (27) → HandleDuplicate
 //! - CreateDir (30) → VfsCreateDirectory, Mount (32) → FsMount
 //! - Umount (33) → FsUmount, PivotRoot (34) → FsPivotRoot, Chdir (35) → VfsChangeDirectory
 //! 
@@ -64,11 +64,11 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::fs::syscall::{sys_close, sys_dup, sys_read, sys_truncate, sys_write};
+use crate::fs::syscall::{sys_read, sys_truncate, sys_write};
 use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
 use crate::ipc::syscall::sys_pipe;
-use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role};
+use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate, sys_file_metadata};
 
@@ -93,14 +93,14 @@ syscall_table! {
     Getchar = 17 => sys_getchar,
     
     // === Legacy POSIX-like Operations ===
-    Open = 20 => sys_vfs_open,   // Legacy - redirects to VfsOpen
-    Close = 21 => sys_close,
+    Open = 20 => sys_vfs_open,      // Legacy - redirects to VfsOpen
+    Close = 21 => sys_handle_close,  // Legacy - redirects to HandleClose
     Read = 22 => sys_read,
     Write = 23 => sys_write,
-    Lseek = 24 => sys_file_seek, // Redirect to FileSeek for compatibility
+    Lseek = 24 => sys_file_seek,     // Redirect to FileSeek for compatibility
     // Ftruncate (25) deprecated - use FileTruncate (301)
     Truncate = 26 => sys_truncate,
-    Dup = 27 => sys_dup,         // Supports SCARLET_* flags for metadata
+    Dup = 27 => sys_handle_duplicate, // Legacy - redirects to HandleDuplicate
     
     // === Legacy Compatibility ===
     CreateDir = 30 => sys_vfs_create_directory, // Legacy alias for VfsCreateDirectory
@@ -112,8 +112,8 @@ syscall_table! {
     // === Handle Management ===
     HandleQuery = 100 => sys_handle_query,     // Query handle metadata/capabilities
     HandleSetRole = 101 => sys_handle_set_role, // Change handle role after creation
-    HandleClose = 102 => sys_close,            // Close any handle (files, pipes, etc.)
-    HandleDuplicate = 103 => sys_dup,          // Duplicate any handle  
+    HandleClose = 102 => sys_handle_close,     // Close any handle (files, pipes, etc.)
+    HandleDuplicate = 103 => sys_handle_duplicate, // Duplicate any handle  
     Pipe = 104 => sys_pipe,                    // Create pipe handles
     
     // === StreamOps Capability ===

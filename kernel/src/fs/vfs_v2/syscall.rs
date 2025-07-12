@@ -42,7 +42,21 @@ use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_stri
 
 use crate::fs::{VfsManager, MAX_PATH_LENGTH};
 
-pub fn sys_open(trapframe: &mut Trapframe) -> usize {
+/// Open a file or directory using VFS (VfsOpen)
+/// 
+/// This system call opens a file or directory at the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// * `trapframe.get_arg(1)` - Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
+/// * `trapframe.get_arg(2)` - File mode for creation (if applicable)
+/// 
+/// # Returns
+/// 
+/// * Handle number on success
+/// * `usize::MAX` on error (file not found, permission denied, etc.)
+pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let _flags = trapframe.get_arg(1) as i32;
@@ -119,32 +133,16 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+/// Legacy close wrapper - redirects to HandleClose
+#[deprecated(note = "Use sys_handle_close instead")]
 pub fn sys_close(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    trapframe.increment_pc_next(task);
-    if task.handle_table.remove(fd).is_some() {
-        0
-    } else {
-        usize::MAX // -1
-    }
+    crate::object::handle::syscall::sys_handle_close(trapframe)
 }
 
+/// Legacy dup wrapper - redirects to HandleDuplicate
+#[deprecated(note = "Use sys_handle_duplicate instead")]
 pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    trapframe.increment_pc_next(task);
-
-    // Check if the file descriptor exists
-    if let Some(kernel_obj) = task.handle_table.get(fd) {
-        // Insert a new handle for the same object
-        match task.handle_table.insert(kernel_obj.clone()) {
-            Ok(new_handle) => new_handle as usize,
-            Err(_) => usize::MAX, // Handle table full
-        }
-    } else {
-        usize::MAX // Invalid file descriptor
-    }
+    crate::object::handle::syscall::sys_handle_duplicate(trapframe)
 }
 
 pub fn sys_read(trapframe: &mut Trapframe) -> usize {
@@ -600,6 +598,172 @@ pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Path resolution error
     }
 }
+
+/// Remove a file or directory (unified VfsRemove)
+/// 
+/// This system call provides a unified interface for removing both files and directories,
+/// replacing the traditional separate `unlink` (for files) and `rmdir` (for directories)
+/// operations with a single system call.
+/// 
+/// For directories, they must be empty to be removed successfully.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (file/directory not found, permission denied, directory not empty, etc.)
+pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+
+    // Increment PC to avoid infinite loop if remove fails
+    trapframe.increment_pc_next(task);
+
+    // Convert path pointer to Rust string
+    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX,
+    };
+
+    // Resolve absolute path
+    let absolute_path = match to_absolute_path_v2(&task, &path) {
+        Ok(path) => path,
+        Err(_) => return usize::MAX,
+    };
+
+    // Get VFS manager instance
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+
+    // Try to resolve the path to check if it exists
+    match vfs.resolve_path(&absolute_path) {
+        Ok(_) => {
+            // Path exists, attempt to remove it using unified VFS remove method
+            match vfs.remove(&absolute_path) {
+                Ok(_) => 0,
+                Err(_) => usize::MAX,
+            }
+        }
+        Err(_) => usize::MAX, // Path not found
+    }
+}
+
+/// Create a directory using VFS (VfsCreateDirectory)
+/// 
+/// This system call creates a new directory at the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path already exists, permission denied, etc.)
+pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
+    sys_mkdir(trapframe)
+}
+
+/// Change current working directory using VFS (VfsChangeDirectory)
+/// 
+/// This system call changes the current working directory of the calling task
+/// to the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, not a directory, etc.)
+pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
+    sys_chdir(trapframe)
+}
+
+/// Legacy open wrapper - redirects to VfsOpen
+#[deprecated(note = "Use sys_vfs_open instead")]
+pub fn sys_open(trapframe: &mut Trapframe) -> usize {
+    sys_vfs_open(trapframe)
+}
+
+/// Mount a filesystem (FsMount)
+/// 
+/// This system call mounts a filesystem at the specified target path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to source path (device/filesystem)
+/// * `trapframe.get_arg(1)` - Pointer to target mount point path
+/// * `trapframe.get_arg(2)` - Pointer to filesystem type string
+/// * `trapframe.get_arg(3)` - Mount flags
+/// * `trapframe.get_arg(4)` - Pointer to mount data/options
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, filesystem not supported, etc.)
+pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
+    sys_mount(trapframe)
+}
+
+/// Unmount a filesystem (FsUmount)
+/// 
+/// This system call unmounts a filesystem at the specified path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to target path to unmount
+/// * `trapframe.get_arg(1)` - Unmount flags (reserved for future use)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, filesystem busy, etc.)
+pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
+    sys_umount(trapframe)
+}
+
+/// Change root filesystem (FsPivotRoot)
+/// 
+/// This system call changes the root filesystem of the calling process.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to new root path
+/// * `trapframe.get_arg(1)` - Pointer to old root mount point
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, operation not permitted, etc.)
+pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
+    sys_pivot_root(trapframe)
+}
+
+/// Legacy mount wrapper - redirects to FsMount
+#[deprecated(note = "Use sys_fs_mount instead")]
+pub fn sys_mount_legacy(trapframe: &mut Trapframe) -> usize {
+    sys_mount(trapframe)
+}
+
+/// Legacy umount wrapper - redirects to FsUmount
+#[deprecated(note = "Use sys_fs_umount instead")]
+pub fn sys_umount_legacy(trapframe: &mut Trapframe) -> usize {
+    sys_umount(trapframe)
+}
+
+/// Legacy pivot_root wrapper - redirects to FsPivotRoot
+#[deprecated(note = "Use sys_fs_pivot_root instead")]
+pub fn sys_pivot_root_legacy(trapframe: &mut Trapframe) -> usize {
+    sys_pivot_root(trapframe)
+}
+
 
 // Use a local path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {

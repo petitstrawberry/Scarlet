@@ -105,6 +105,64 @@ pub fn sys_handle_set_role(trapframe: &mut Trapframe) -> usize {
     0 // Success
 }
 
+/// Close a handle (sys_handle_close)
+/// 
+/// This system call closes a handle and removes it from the handle table.
+/// 
+/// # Arguments
+/// - handle: The handle to close
+/// 
+/// # Returns
+/// - 0 on success
+/// - usize::MAX on error (invalid handle)
+pub fn sys_handle_close(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    
+    let handle = trapframe.get_arg(0) as u32;
+    trapframe.increment_pc_next(task);
+    
+    if task.handle_table.remove(handle).is_some() {
+        0 // Success
+    } else {
+        usize::MAX // Invalid handle
+    }
+}
+
+/// Duplicate a handle (sys_handle_duplicate)
+/// 
+/// This system call creates a new handle that refers to the same kernel object
+/// as the original handle.
+/// 
+/// # Arguments
+/// - handle: The handle to duplicate
+/// 
+/// # Returns
+/// - New handle number on success
+/// - usize::MAX on error (invalid handle, handle table full)
+pub fn sys_handle_duplicate(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    
+    let handle = trapframe.get_arg(0) as u32;
+    trapframe.increment_pc_next(task);
+    
+    // Check if the handle exists and get the kernel object
+    if let Some(kernel_obj) = task.handle_table.get(handle) {
+        // Insert a new handle for the same object
+        match task.handle_table.insert(kernel_obj.clone()) {
+            Ok(new_handle) => new_handle as usize,
+            Err(_) => usize::MAX, // Handle table full
+        }
+    } else {
+        usize::MAX // Invalid handle
+    }
+}
+
 /// Decode HandleType from raw value
 fn decode_handle_type(raw: usize) -> Option<HandleType> {
     match raw {
