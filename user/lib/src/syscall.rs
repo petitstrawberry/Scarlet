@@ -16,36 +16,61 @@ pub enum Syscall {
     // BASIC I/O
     Putchar = 16,
     Getchar = 17,
-    // File operations
-    Open = 20,
-    Close = 21,
-    Read = 22,
-    Write = 23,
-    Lseek = 24,
-    Ftruncate = 25,
-    Truncate = 26,
-    Dup = 27,
-    // Filesystem operations
-    Mkfile = 30,
-    Mkdir = 31,
-    // Mount operations
-    Mount = 32,
-    Umount = 33,
-    PivotRoot = 34,
-    // Change directory
-    Chdir = 35,
-    // Handle introspection and management
+    // === Legacy POSIX-like Operations (compatibility) ===
+    // File operations - prefer VfsOps (400+) for new code
+    Open = 20,        // Legacy - prefer VfsOpen (400)
+    Close = 21,       // Legacy - prefer VfsClose (401) 
+    Read = 22,        // Legacy - prefer StreamRead (200)
+    Write = 23,       // Legacy - prefer StreamWrite (201)
+    Lseek = 24,       // Legacy - prefer FileSeek (300)
+    Ftruncate = 25,   // Legacy - prefer FileTruncate (301)
+    Truncate = 26,    // Legacy - prefer FileTruncate (301)
+    Dup = 27,         // Legacy - prefer VfsDup (402)
+    
+    // === Handle Management ===
     HandleQuery = 100,
     HandleSetRole = 101,
-    // Pipe operations
-    Pipe = 102,
-    // === StreamOps Capability ===
+    HandleClose = 102,      // Close any handle (files, pipes, etc.)
+    HandleDuplicate = 103,  // Duplicate any handle
+    Pipe = 104,             // Create pipe handles
+    
+    // === Core Capabilities (Object-oriented) ===
+    // StreamOps Capability - read/write operations
     StreamRead = 200,
     StreamWrite = 201,
-    // === FileObject Capability ===
+    
+    // FileObject Capability - file-specific operations (extends StreamOps)
     FileSeek = 300,
     FileTruncate = 301,
     FileMetadata = 302,
+    
+    // === VFS Operations (VFS layer management and file access) ===
+    VfsOpen = 400,          // Open files/directories through VFS
+    VfsRemove = 401,        // Remove files or directories (unified Remove/Unlink)
+    VfsCreateDirectory = 402, // Create directories through VFS
+    VfsChangeDirectory = 403, // Change current working directory
+    
+    // === Filesystem Operations (mount management) ===
+    FsMount = 500,
+    FsUmount = 501,
+    FsPivotRoot = 502
+}
+
+// Backward compatibility aliases
+#[allow(non_upper_case_globals)]
+impl Syscall {
+    // Legacy names for compatibility
+    pub const CreateDir: Self = Self::VfsCreateDirectory;
+    pub const Chdir: Self = Self::VfsChangeDirectory;
+    pub const CreateDirectory: Self = Self::VfsCreateDirectory;  // Previous naming
+    pub const ChangeDirectory: Self = Self::VfsChangeDirectory;  // Previous naming
+    pub const Remove: Self = Self::VfsRemove;
+    pub const Unlink: Self = Self::VfsRemove;
+    pub const Mount: Self = Self::FsMount;
+    pub const Umount: Self = Self::FsUmount;
+    pub const PivotRoot: Self = Self::FsPivotRoot;
+    pub const Close: Self = Self::HandleClose;
+    pub const Dup: Self = Self::HandleDuplicate;
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
