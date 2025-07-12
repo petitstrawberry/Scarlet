@@ -522,3 +522,187 @@ impl Seek for File {
         File::seek(self, pos)
     }
 }
+
+//
+// Mount Operations
+//
+
+/// Mount flags for mount operations
+///
+/// These flags are passed to the mount() system call to control mount behavior.
+pub mod mount_flags {
+    /// Mount filesystem read-only
+    pub const MS_RDONLY: u32 = 0x01;
+    /// Ignore suid and sgid bits
+    pub const MS_NOSUID: u32 = 0x02;
+    /// Disallow access to device special files
+    pub const MS_NODEV: u32 = 0x04;
+    /// Disallow program execution
+    pub const MS_NOEXEC: u32 = 0x08;
+    /// Writes are synced at once
+    pub const MS_SYNCHRONOUS: u32 = 0x10;
+    /// Bind mount
+    pub const MS_BIND: u32 = 0x1000;
+}
+
+//
+// File system operations  
+//
+
+/// Mount a filesystem
+///
+/// # Arguments
+///
+/// * `source` - Source device or filesystem name (e.g., "/dev/sda1", "tmpfs")
+/// * `target` - Target mount point (e.g., "/mnt/data")
+/// * `fstype` - Filesystem type (e.g., "ext4", "tmpfs", "bind")
+/// * `flags` - Mount flags (see `mount_flags` module)
+/// * `data` - Optional filesystem-specific data
+///
+/// # Examples
+///
+/// Mount a tmpfs:
+/// ```
+/// use scarlet::fs::mount;
+/// 
+/// mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=100M"))?;
+/// ```
+///
+/// Bind mount:
+/// ```
+/// use scarlet::fs::{mount, mount_flags};
+///
+/// mount("/source/dir", "/target/dir", "bind", mount_flags::MS_BIND, None)?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the mount operation fails, such as:
+/// - Invalid mount point
+/// - Filesystem type not supported
+/// - Permission denied
+/// - Mount point already mounted
+pub fn mount(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: u32,
+    data: Option<&str>,
+) -> Result<()> {
+    use crate::syscall::{syscall5, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let source_c = str_to_cstr_bytes(source).map_err(|_| Error::new(ErrorKind::InvalidInput, "source contains null byte"))?;
+    let target_c = str_to_cstr_bytes(target).map_err(|_| Error::new(ErrorKind::InvalidInput, "target contains null byte"))?;
+    let fstype_c = str_to_cstr_bytes(fstype).map_err(|_| Error::new(ErrorKind::InvalidInput, "fstype contains null byte"))?;
+    
+    let data_c;
+    let data_ptr = if let Some(data_str) = data {
+        data_c = str_to_cstr_bytes(data_str).map_err(|_| Error::new(ErrorKind::InvalidInput, "data contains null byte"))?;
+        data_c.as_ptr() as usize
+    } else {
+        0
+    };
+
+    let result = syscall5(
+        Syscall::Mount,
+        source_c.as_ptr() as usize,
+        target_c.as_ptr() as usize,
+        fstype_c.as_ptr() as usize,
+        flags as usize,
+        data_ptr,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "mount failed"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Unmount a filesystem
+///
+/// # Arguments
+///
+/// * `target` - Mount point to unmount (e.g., "/mnt/data")
+/// * `flags` - Unmount flags (reserved for future use, pass 0)
+///
+/// # Examples
+///
+/// ```
+/// use scarlet::fs::unmount;
+///
+/// unmount("/mnt/data", 0)?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the unmount operation fails, such as:
+/// - Mount point not found
+/// - Filesystem busy (files still open)
+/// - Permission denied
+pub fn unmount(target: &str, flags: u32) -> Result<()> {
+    use crate::syscall::{syscall2, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let target_c = str_to_cstr_bytes(target).map_err(|_| Error::new(ErrorKind::InvalidInput, "target contains null byte"))?;
+
+    let result = syscall2(
+        Syscall::Umount,
+        target_c.as_ptr() as usize,
+        flags as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "unmount failed"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Change the root filesystem (pivot_root)
+///
+/// This system call moves the old root filesystem to `old_root` and makes
+/// `new_root` the new root filesystem. This is typically used during system
+/// initialization to switch from an initramfs to the real root filesystem.
+///
+/// # Arguments
+///
+/// * `new_root` - Path to the new root filesystem
+/// * `old_root` - Path where the old root filesystem will be moved
+///
+/// # Examples
+///
+/// ```
+/// use scarlet::fs::pivot_root;
+///
+/// // Switch to new root, moving old root to /old_root
+/// pivot_root("/mnt/newroot", "/mnt/newroot/old_root")?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the pivot_root operation fails, such as:
+/// - New root path does not exist or is not a mount point
+/// - Old root path is invalid
+/// - Permission denied
+/// - Operation not supported in current namespace
+pub fn pivot_root(new_root: &str, old_root: &str) -> Result<()> {
+    use crate::syscall::{syscall2, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let new_root_c = str_to_cstr_bytes(new_root).map_err(|_| Error::new(ErrorKind::InvalidInput, "new_root contains null byte"))?;
+    let old_root_c = str_to_cstr_bytes(old_root).map_err(|_| Error::new(ErrorKind::InvalidInput, "old_root contains null byte"))?;
+
+    let result = syscall2(
+        Syscall::PivotRoot,
+        new_root_c.as_ptr() as usize,
+        old_root_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "pivot_root failed"))
+    } else {
+        Ok(())
+    }
+}
