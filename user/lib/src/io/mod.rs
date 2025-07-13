@@ -330,17 +330,11 @@ pub fn putchar(c: char) -> usize {
 /// The character read from the console.
 /// 
 pub fn get_char() -> char {
-    let mut buf = [0u8; 4];
-    let mut bytes_read = 0;
+    let mut buf = [0u8; 1];
     loop {
-        match stdin().read(&mut buf[bytes_read..]) {
-            Ok(n) if n > 0 => {
-                bytes_read += n;
-                if let Ok(utf8_str) = std::str::from_utf8(&buf[..bytes_read]) {
-                    if let Some(c) = utf8_str.chars().next() {
-                        return c;
-                    }
-                }
+        match stdin().read(&mut buf) {
+            Ok(bytes_read) if bytes_read > 0 => {
+                return buf[0] as char;
             }
             _ => {
                 // If no data available, continue trying
