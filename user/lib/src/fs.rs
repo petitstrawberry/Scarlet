@@ -27,10 +27,8 @@
 //! - [`pivot_root`]: Change root filesystem (system initialization)
 
 use crate::handle::Handle;
-use crate::handle::capability::{SeekFrom as ScarletSeekFrom, FileMetadata};
-use crate::println;
+use crate::handle::capability::{SeekFrom as ScarletSeekFrom};
 use crate::string::String;
-use crate::vec::Vec;
 use crate::io::{Error, ErrorKind, Seek, SeekFrom, Write, Read, Result};
 
 
@@ -252,59 +250,38 @@ impl OpenOptions {
     /// let file = OpenOptions::new().read(true).open("foo.txt");
     /// ```
     pub fn open<P: AsRef<str>>(&self, path: P) -> Result<File> {
-        // Convert options to flags
-        let flags = self.to_flags()?;
+        use crate::syscall::{syscall2, Syscall};
+        
+        // If we need to create the file, use VfsCreateFile first
+        if self.create || self.create_new {
+            // Check if we have write access
+            if !self.write && !self.append {
+                return Err(Error::new(ErrorKind::InvalidInput, "Cannot create file without write access"));
+            }
+            
+            // For create_new, we should check if file exists first
+            // For now, just attempt to create and handle errors
+            let result = syscall2(
+                Syscall::VfsCreateFile,
+                path.as_ref().as_ptr() as usize,
+                path.as_ref().len()
+            );
+            
+            // For create_new, creation failure is an error
+            // For create, we continue even if creation fails (file might already exist)
+            if self.create_new && result == usize::MAX {
+                return Err(Error::new(ErrorKind::Other, "File already exists"));
+            }
+        }
+        
+        // Currently, we don't support any flags that require special handling
+        let flags = 0;
         
         // Use Handle::open and wrap in File
         let handle = Handle::open(path.as_ref(), flags)
             .map_err(|_| Error::new(ErrorKind::Other, "Failed to open file"))?;
         
         Ok(File::from_handle(handle))
-    }
-    
-    /// Convert OpenOptions to system flags
-    fn to_flags(&self) -> Result<usize> {
-        let mut flags = 0usize;
-        
-        // Validate option combinations
-        if !self.read && !self.write && !self.append {
-            return Err(Error::new(ErrorKind::InvalidInput, "Must specify at least one access mode"));
-        }
-        
-        if self.truncate && !self.write && !self.append {
-            return Err(Error::new(ErrorKind::InvalidInput, "Cannot truncate without write access"));
-        }
-        
-        if self.create_new && !self.write && !self.append {
-            return Err(Error::new(ErrorKind::InvalidInput, "Cannot create new file without write access"));
-        }
-        
-        // Set access mode flags
-        if self.read && self.write {
-            flags |= 0x2; // O_RDWR
-        } else if self.write || self.append {
-            flags |= 0x1; // O_WRONLY
-        } else {
-            flags |= 0x0; // O_RDONLY (default)
-        }
-        
-        // Set creation flags
-        if self.create_new {
-            flags |= 0x200 | 0x80; // O_CREAT | O_EXCL
-        } else if self.create {
-            flags |= 0x200; // O_CREAT
-        }
-        
-        // Set other flags
-        if self.append {
-            flags |= 0x8; // O_APPEND
-        }
-        
-        if self.truncate && !self.create_new {
-            flags |= 0x400; // O_TRUNC
-        }
-        
-        Ok(flags)
     }
 }
 
@@ -372,9 +349,22 @@ impl File {
     /// # Returns
     /// File instance or error
     pub fn create<P: AsRef<str>>(path: P) -> Result<Self> {
-        // O_CREAT | O_WRONLY | O_TRUNC
-        let handle = Handle::open(path.as_ref(), 0x200 | 0x1 | 0x400)
-            .map_err(|_| Error::new(ErrorKind::Other, "Failed to create file"))?;
+        use crate::syscall::{syscall2, Syscall};
+        
+        // Use VfsCreateFile syscall to create the file
+        let result = syscall2(
+            Syscall::VfsCreateFile,
+            path.as_ref().as_ptr() as usize,
+            path.as_ref().len()
+        );
+        
+        if result == usize::MAX {
+            return Err(Error::new(ErrorKind::Other, "Failed to create file"));
+        }
+        
+        // Open the created file for writing
+        let handle = Handle::open(path.as_ref(), 0x1) // O_WRONLY
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to open created file"))?;
         Ok(File { handle })
     }
     
