@@ -248,10 +248,37 @@ impl TransparentExecutor {
     }
 
     /// Open binary file through task's VFS
+    /// 
+    /// TODO: Improve VFS API to handle relative paths natively
+    /// Current implementation manually resolves relative paths, but this should
+    /// be handled by VFS layer for consistency and better error handling.
     fn open_file(path: &str, task: &Task) -> ExecutorResult<crate::object::KernelObject> {
         if let Some(vfs) = task.get_vfs() {
-            vfs.open(path, 0) // O_RDONLY
-                .map_err(|_| ExecutorError::ResourceAllocationFailed)
+            
+            // FIXME: This manual path resolution should be moved to VFS layer
+            // Convert relative path to absolute path if necessary
+            let absolute_path = if path.starts_with('/') {
+                // Already absolute path
+                path.to_string()
+            } else {
+                // Relative path - combine with current working directory
+                let default_cwd = "/".to_string();
+                let cwd = task.cwd.as_ref().unwrap_or(&default_cwd);
+                if cwd.ends_with('/') {
+                    alloc::format!("{}{}", cwd, path)
+                } else {
+                    alloc::format!("{}/{}", cwd, path)
+                }
+            };
+            
+            match vfs.open(&absolute_path, 0) { // O_RDONLY
+                Ok(obj) => {
+                    Ok(obj)
+                }
+                Err(e) => {
+                    Err(ExecutorError::ResourceAllocationFailed)
+                }
+            }
         } else {
             Err(ExecutorError::ResourceAllocationFailed)
         }
