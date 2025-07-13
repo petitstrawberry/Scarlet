@@ -31,5 +31,9 @@ path = "src/test.rs"
 name = "env_test"
 path = "src/env_test.rs"
 
+[[bin]]
+name = "cat"
+path = "src/cat.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib" }

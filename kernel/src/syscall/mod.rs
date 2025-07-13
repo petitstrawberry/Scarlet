@@ -1,20 +1,69 @@
 //! System call interface module.
 //! 
-//! This module provides the system call interface for the Scarlet kernel.
-//! It defines the system call table and the functions that handle various system
-//! calls.
-//! User programs can invoke these system calls to request services from the kernel.
+//! This module provides the system call interface for the Scarlet kernel
+//! using a hybrid capability-based design that balances type safety with
+//! practical usability.
+//! 
+//! ## System Call Number Organization
+//! 
+//! The system calls are organized into logical ranges:
+//! 
+//! - **1-99**: Process and task management (exit, clone, exec, getpid, brk, etc.)
+//! - **100-199**: Handle management operations (handle_query, handle_close, dup)
+//! - **200-299**: StreamOps capability (stream_read, stream_write operations)
+//! - **300-399**: FileObject capability (file_seek, file_truncate, file_metadata)
+//! - **400-499**: VFS operations (vfs_open, vfs_remove, vfs_create_directory, vfs_change_directory, vfs_truncate)
+//! - **500-599**: Filesystem operations (fs_mount, fs_umount, fs_pivot_root)
+//! - **600-699**: IPC operations (pipe, shared memory, message queues)
+//! 
+//! Legacy POSIX-like system calls (20-35) are maintained for backward compatibility
+//! and redirect to the appropriate capability-based implementations.
+//! 
+//! ## Current Implementation Status
+//! 
+//! ### Process Management (1-99)
+//! - Exit (1), Clone (2), Execve (3), ExecveABI (4), Waitpid (5)
+//! - Getpid (7), Getppid (8), Brk (12), Sbrk (13)
+//! - Basic I/O: Putchar (16), Getchar (17)
+//! 
+//! ### Handle Management (100-199)
+//! - HandleQuery (100), HandleSetRole (101), HandleClose (102), HandleDuplicate (103)
+//! 
+//! ### StreamOps Capability (200-299)
+//! - StreamRead (200), StreamWrite (201)
+//! 
+//! ### FileObject Capability (300-399)
+//! - FileSeek (300), FileTruncate (301), FileMetadata (302)
+//! 
+//! ### VFS Operations (400-499)
+//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405)
+//! 
+//! ### Filesystem Operations (500-599)
+//! - FsMount (500), FsUmount (501), FsPivotRoot (502)
+//! 
+//! ### IPC Operations (600-699)
+//! - Pipe (600)
+//! 
+//! ## Design Principles
+//! 
+//! - **Capability-based security**: Objects expose specific capabilities
+//! - **Type safety**: Compile-time checking of valid operations
+//! - **Backward compatibility**: Legacy APIs redirect to new implementations
+//! - **Clear semantics**: Descriptive names (CreateDirectory vs mkdir)
 //! 
 //! ## System Call Table
 //! 
-//! The system call table is a mapping between system call numbers and their
-//! corresponding handler functions. Each entry in the table is defined using the
-//! `syscall_table!` macro.
+//! The system call table maps numbers to handler functions using the
+//! `syscall_table!` macro for type safety and consistency.
 //! 
 
 use crate::arch::Trapframe;
-use crate::fs::syscall::{sys_chdir, sys_close, sys_dup, sys_ftruncate, sys_lseek, sys_mkdir, sys_mkfile, sys_mount, sys_open, sys_pivot_root, sys_read, sys_truncate, sys_umount, sys_write};
+use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
+use crate::ipc::syscall::sys_pipe;
+use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate};
+use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
+use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
 
 #[macro_use]
 mod macros;
@@ -35,22 +84,37 @@ syscall_table! {
     // BASIC I/O
     Putchar = 16 => sys_putchar,
     Getchar = 17 => sys_getchar,
-    // File operations
-    Open = 20 => sys_open,
-    Close = 21 => sys_close,
-    Read = 22 => sys_read,
-    Write = 23 => sys_write,
-    Lseek = 24 => sys_lseek,
-    Ftruncate = 25 => sys_ftruncate,
-    Truncate = 26 => sys_truncate,
-    Dup = 27 => sys_dup,
-    // Filesystem operations
-    Mkfile = 30 => sys_mkfile,
-    Mkdir = 31 => sys_mkdir,
-    // Mount operations
-    Mount = 32 => sys_mount,
-    Umount = 33 => sys_umount,
-    PivotRoot = 34 => sys_pivot_root,
-    // Change directory
-    Chdir = 35 => sys_chdir,
+    
+    // === Handle Management ===
+    HandleQuery = 100 => sys_handle_query,     // Query handle metadata/capabilities
+    HandleSetRole = 101 => sys_handle_set_role, // Change handle role after creation
+    HandleClose = 102 => sys_handle_close,     // Close any handle (files, pipes, etc.)
+    HandleDuplicate = 103 => sys_handle_duplicate, // Duplicate any handle  
+    
+    // === StreamOps Capability ===
+    // Stream operations for any KernelObject with StreamOps capability
+    StreamRead = 200 => sys_stream_read,   // StreamOps::read
+    StreamWrite = 201 => sys_stream_write, // StreamOps::write
+    
+    // === FileObject Capability ===
+    // File operations for any KernelObject with FileObject capability
+    FileSeek = 300 => sys_file_seek,       // FileObject::seek
+    FileTruncate = 301 => sys_file_truncate, // FileObject::truncate
+    // FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
+    
+    // === VFS Operations ===
+    VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open
+    VfsRemove = 401 => sys_vfs_remove,         // Remove files or directories (unified)
+    VfsCreateFile = 402 => sys_vfs_create_file, // Create regular files through VFS
+    VfsCreateDirectory = 403 => sys_vfs_create_directory, // Create directories through VFS
+    VfsChangeDirectory = 404 => sys_vfs_change_directory, // Change current working directory
+    VfsTruncate = 405 => sys_vfs_truncate,     // Truncate file by path
+    
+    // === Filesystem Operations ===
+    FsMount = 500 => sys_fs_mount,         // Mount filesystem
+    FsUmount = 501 => sys_fs_umount,       // Unmount filesystem  
+    FsPivotRoot = 502 => sys_fs_pivot_root, // Change root filesystem
+    
+    // === IPC Operations ===
+    Pipe = 600 => sys_pipe,                // Create pipe handles
 }

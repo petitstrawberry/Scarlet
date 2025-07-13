@@ -1,28 +1,26 @@
 //! VFS v2 System Call Interface
 //!
 //! This module implements system call handlers for VFS v2, providing the user-space
-//! interface to filesystem operations. All system calls follow POSIX-like semantics
-//! and work with the task's VFS namespace.
+//! interface to filesystem operations. All system calls follow capability-based
+//! semantics and work with the task's VFS namespace.
 //!
 //! ## Supported System Calls
 //!
-//! ### File Operations
-//! - `sys_open()`: Open files and directories
-//! - `sys_close()`: Close file descriptors
-//! - `sys_read()`: Read data from files
-//! - `sys_write()`: Write data to files
-//! - `sys_lseek()`: Seek within files
-//! - `sys_truncate()`: Truncate files by path
-//! - `sys_ftruncate()`: Truncate files by descriptor
+//! ### VFS Operations (400-series)
+//! - `sys_vfs_open()`: Open files and directories (VfsOpen 400)
+//! - `sys_vfs_remove()`: Unified remove for files/directories (VfsRemove 401)
+//! - `sys_vfs_create_file()`: Create regular files (VfsCreateFile 402)
+//! - `sys_vfs_create_directory()`: Create directories (VfsCreateDirectory 403)
+//! - `sys_vfs_change_directory()`: Change working directory (VfsChangeDirectory 404)
+//! - `sys_vfs_truncate()`: Truncate files by path (VfsTruncate 405)
 //!
-//! ### Directory Operations
-//! - `sys_mkdir()`: Create directories
-//! - `sys_mkfile()`: Create regular files
+//! ### Filesystem Operations (500-series)
+//! - `sys_fs_mount()`: Mount filesystems (FsMount 500)
+//! - `sys_fs_umount()`: Unmount filesystems (FsUmount 501)
+//! - `sys_fs_pivot_root()`: Change root filesystem (FsPivotRoot 502)
 //!
-//! ### Mount Operations
-//! - `sys_mount()`: Mount filesystems
-//! - `sys_umount()`: Unmount filesystems
-//! - `sys_pivot_root()`: Change root filesystem
+//! ### Utility Operations
+//! - (deprecated - use VfsCreateFile 402 instead)
 //!
 //! ## VFS Namespace Isolation
 //!
@@ -39,9 +37,23 @@ use alloc::{string::String, vec::Vec, string::ToString, sync::Arc};
 
 use crate::{arch::Trapframe, fs::FileType, library::std::string::cstring_to_string, task::mytask};
 
-use crate::fs::{SeekFrom, VfsManager, MAX_PATH_LENGTH};
+use crate::fs::{VfsManager, MAX_PATH_LENGTH};
 
-pub fn sys_open(trapframe: &mut Trapframe) -> usize {
+/// Open a file or directory using VFS (VfsOpen)
+/// 
+/// This system call opens a file or directory at the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// * `trapframe.get_arg(1)` - Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
+/// * `trapframe.get_arg(2)` - File mode for creation (if applicable)
+/// 
+/// # Returns
+/// 
+/// * Handle number on success
+/// * `usize::MAX` on error (file not found, permission denied, etc.)
+pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let _flags = trapframe.get_arg(1) as i32;
@@ -85,8 +97,30 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     let file_obj = vfs.open(&path_str, 0);
     match file_obj {
         Ok(kernel_obj) => {
-            // file_obj is already a KernelObject::File
-            let handle = task.handle_table.insert(kernel_obj);
+            // Use simplified handle role classification
+            use crate::object::handle::{HandleMetadata, HandleType, AccessMode};
+            
+            // For now, all opened files are classified as Regular usage
+            // Future enhancements could infer specific roles based on path patterns,
+            // but keeping it simple with the 3-category system: IpcChannel, StandardInputOutput, Regular
+            let handle_type = HandleType::Regular;
+            
+            // Infer access mode from flags (simplified - full implementation would parse all open flags)
+            let access_mode = if _flags & 0x1 != 0 { // O_WRONLY-like
+                AccessMode::WriteOnly
+            } else if _flags & 0x2 != 0 { // O_RDWR-like
+                AccessMode::ReadWrite
+            } else {
+                AccessMode::ReadOnly // Default
+            };
+            
+            let metadata = HandleMetadata {
+                handle_type,
+                access_mode,
+                special_semantics: None, // Could be inferred from flags like O_CLOEXEC
+            };
+            
+            let handle = task.handle_table.insert_with_metadata(kernel_obj, metadata);
             match handle {
                 Ok(handle) => handle as usize,
                 Err(_) => usize::MAX, // Handle table full
@@ -96,139 +130,22 @@ pub fn sys_open(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_close(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    trapframe.increment_pc_next(task);
-    if task.handle_table.remove(fd).is_some() {
-        0
-    } else {
-        usize::MAX // -1
-    }
-}
 
-pub fn sys_dup(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    trapframe.increment_pc_next(task);
 
-    // Check if the file descriptor exists
-    if let Some(kernel_obj) = task.handle_table.get(fd) {
-        // Insert a new handle for the same object
-        match task.handle_table.insert(kernel_obj.clone()) {
-            Ok(new_handle) => new_handle as usize,
-            Err(_) => usize::MAX, // Handle table full
-        }
-    } else {
-        usize::MAX // Invalid file descriptor
-    }
-}
-
-pub fn sys_read(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
-    let count = trapframe.get_arg(2) as usize;
-
-    // Increment PC to avoid infinite loop if read fails
-    trapframe.increment_pc_next(task);
-
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-
-    let kernel_obj = kernel_obj.unwrap();
-    let stream = kernel_obj.as_stream();
-    if stream.is_none() {
-        return usize::MAX; // Object doesn't support stream operations
-    }
-
-    let stream = stream.unwrap();
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-    
-    match stream.read(buffer) {
-        Ok(n) => {
-            n
-        }
-        Err(_) => {
-            return usize::MAX; // Read error
-        }
-    }
-}
-
-pub fn sys_write(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
-    let count = trapframe.get_arg(2) as usize;
-
-    // Increment PC to avoid infinite loop if write fails
-    trapframe.increment_pc_next(task);
-
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-
-    let kernel_obj = kernel_obj.unwrap();
-    let stream = kernel_obj.as_stream();
-    if stream.is_none() {
-        return usize::MAX; // Object doesn't support stream operations
-    }
-
-    let stream = stream.unwrap();
-    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-    
-    match stream.write(buffer) {
-        Ok(n) => {
-            n
-        }
-        Err(_) => {
-            return usize::MAX; // Write error
-        }
-    }
-}
-
-pub fn sys_lseek(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32; // Handle is u32
-    let offset = trapframe.get_arg(1) as i64;
-    let whence = trapframe.get_arg(2) as i32;
-
-    // Increment PC to avoid infinite loop if lseek fails
-    trapframe.increment_pc_next(task);
-
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-
-    let kernel_obj = kernel_obj.unwrap();
-    let file = kernel_obj.as_file();
-    if file.is_none() {
-        return usize::MAX; // Object doesn't support file operations
-    }
-
-    let file = file.unwrap();
-    let whence = match whence {
-        0 => SeekFrom::Start(offset as u64),
-        1 => SeekFrom::Current(offset),
-        2 => SeekFrom::End(offset),
-        _ => return usize::MAX, // Invalid whence
-    };
-
-    match file.seek(whence) {
-        Ok(pos) => {
-            pos as usize
-        }
-        Err(_) => {
-            return usize::MAX; // Lseek error
-        }
-    }
-}
-
-pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
+/// Truncate a file by path (VfsTruncate)
+/// 
+/// This system call truncates a file at the specified path to the given length.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// * `trapframe.get_arg(1)` - New length for the file
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (file not found, permission denied, etc.)
+pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let length = trapframe.get_arg(1) as u64;
@@ -263,32 +180,20 @@ pub fn sys_truncate(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_ftruncate(trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as u32;
-    let length = trapframe.get_arg(1) as u64;
-    
-    trapframe.increment_pc_next(task);
-    
-    let kernel_obj = task.handle_table.get(fd);
-    if kernel_obj.is_none() {
-        return usize::MAX; // Invalid file descriptor
-    }
-    
-    let kernel_obj = kernel_obj.unwrap();
-    let file = kernel_obj.as_file();
-    if file.is_none() {
-        return usize::MAX; // Object doesn't support file operations
-    }
-    
-    let file = file.unwrap();
-    match file.truncate(length) {
-        Ok(_) => 0,
-        Err(_) => usize::MAX, // -1
-    }
-}
-
-pub fn sys_mkfile(trapframe: &mut Trapframe) -> usize {
+/// Create a regular file using VFS (VfsCreateFile)
+/// 
+/// This system call creates a new regular file at the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// * `trapframe.get_arg(1)` - File mode (reserved for future use)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path already exists, permission denied, etc.)
+pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let _mode = trapframe.get_arg(1) as i32;
@@ -315,7 +220,19 @@ pub fn sys_mkfile(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
+/// Create a directory using VFS (VfsCreateDirectory)
+/// 
+/// This system call creates a new directory at the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path already exists, permission denied, etc.)
+pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     
@@ -341,7 +258,23 @@ pub fn sys_mkdir(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_mount(trapframe: &mut Trapframe) -> usize {
+/// Mount a filesystem (FsMount)
+/// 
+/// This system call mounts a filesystem at the specified target path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to source path (device/filesystem)
+/// * `trapframe.get_arg(1)` - Pointer to target mount point path
+/// * `trapframe.get_arg(2)` - Pointer to filesystem type string
+/// * `trapframe.get_arg(3)` - Mount flags
+/// * `trapframe.get_arg(4)` - Pointer to mount data/options
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, filesystem not supported, etc.)
+pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let source_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
@@ -450,7 +383,20 @@ fn create_filesystem_and_mount(
     Ok(())
 }
 
-pub fn sys_umount(trapframe: &mut Trapframe) -> usize {
+/// Unmount a filesystem (FsUmount)
+/// 
+/// This system call unmounts a filesystem at the specified path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to target path to unmount
+/// * `trapframe.get_arg(1)` - Unmount flags (reserved for future use)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, filesystem busy, etc.)
+pub fn sys_fs_umount(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let target_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let _flags = trapframe.get_arg(1) as u32; // Reserved for future use
@@ -479,7 +425,48 @@ pub fn sys_umount(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
+/// 
+/// This system call mounts a filesystem at the specified target path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to source path (device/filesystem)
+/// * `trapframe.get_arg(1)` - Pointer to target mount point path
+/// * `trapframe.get_arg(2)` - Pointer to filesystem type string
+/// * `trapframe.get_arg(3)` - Mount flags
+/// * `trapframe.get_arg(4)` - Pointer to mount data/options
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, filesystem not supported, etc.)
+/// Unmount a filesystem (FsUmount)
+/// 
+/// This system call unmounts a filesystem at the specified path.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to target path to unmount
+/// * `trapframe.get_arg(1)` - Unmount flags (reserved for future use)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, filesystem busy, etc.)
+/// Change root filesystem (FsPivotRoot)
+/// 
+/// This system call changes the root filesystem of the calling process.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to new root path
+/// * `trapframe.get_arg(1)` - Pointer to old root mount point
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (invalid path, operation not permitted, etc.)
+pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let new_root_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     let old_root_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
@@ -518,7 +505,10 @@ pub fn sys_pivot_root(trapframe: &mut Trapframe) -> usize {
     // Perform pivot_root by replacing the mount_tree inside the existing VfsManager
     match pivot_root_in_place(&current_vfs, &new_root_str, &old_root_str) {
         Ok(_) => 0,
-        Err(_) => usize::MAX,
+        Err(e) => {
+            crate::println!("Failed to pivot root: {}", e.message);
+            usize::MAX // -1
+        }
     }
 }
 
@@ -572,7 +562,16 @@ fn pivot_root_in_place(
         }
     }
 
-    temp_vfs.create_dir(old_root_path)?;
+    // Create old_root directory if it doesn't exist
+    if temp_vfs.resolve_path(old_root_path).is_err() {
+        match temp_vfs.create_dir(old_root_path) {
+            Ok(_) => {},
+            Err(e) if e.kind == crate::fs::FileSystemErrorKind::AlreadyExists => {
+                // Directory already exists, which is fine
+            },
+            Err(e) => return Err(e),
+        }
+    }
 
     match temp_vfs.bind_mount_from(&vfs, "/", old_root_path) {
         Ok(_) => {},
@@ -597,7 +596,20 @@ fn pivot_root_in_place(
     Ok(())
 }
 
-pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
+/// Change current working directory using VFS (VfsChangeDirectory)
+/// 
+/// This system call changes the current working directory of the calling task
+/// to the specified path using the VFS layer.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path not found, not a directory, etc.)
+pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
     
@@ -636,6 +648,61 @@ pub fn sys_chdir(trapframe: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX, // Path resolution error
     }
 }
+
+/// Remove a file or directory (unified VfsRemove)
+/// 
+/// This system call provides a unified interface for removing both files and directories,
+/// replacing the traditional separate `unlink` (for files) and `rmdir` (for directories)
+/// operations with a single system call.
+/// 
+/// For directories, they must be empty to be removed successfully.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to the null-terminated path string
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (file/directory not found, permission denied, directory not empty, etc.)
+pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+
+    // Increment PC to avoid infinite loop if remove fails
+    trapframe.increment_pc_next(task);
+
+    // Convert path pointer to Rust string
+    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX,
+    };
+
+    // Resolve absolute path
+    let absolute_path = match to_absolute_path_v2(&task, &path) {
+        Ok(path) => path,
+        Err(_) => return usize::MAX,
+    };
+
+    // Get VFS manager instance
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+
+    // Try to resolve the path to check if it exists
+    match vfs.resolve_path(&absolute_path) {
+        Ok(_) => {
+            // Path exists, attempt to remove it using unified VFS remove method
+            match vfs.remove(&absolute_path) {
+                Ok(_) => 0,
+                Err(_) => usize::MAX,
+            }
+        }
+        Err(_) => usize::MAX, // Path not found
+    }
+}
+
 
 // Use a local path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {

@@ -42,13 +42,27 @@ pub fn sys_pipe(trapframe: &mut Trapframe) -> usize {
     const DEFAULT_PIPE_BUFFER_SIZE: usize = 4096;
     let (read_obj, write_obj) = UnidirectionalPipe::create_pair(DEFAULT_PIPE_BUFFER_SIZE);
     
-    // Insert into handle table
-    let read_handle = match task.handle_table.insert(read_obj) {
+    // Insert into handle table with explicit IPC metadata
+    use crate::object::handle::{HandleMetadata, HandleType, AccessMode};
+    
+    let read_metadata = HandleMetadata {
+        handle_type: HandleType::IpcChannel,
+        access_mode: AccessMode::ReadOnly,
+        special_semantics: None,
+    };
+    
+    let write_metadata = HandleMetadata {
+        handle_type: HandleType::IpcChannel,
+        access_mode: AccessMode::WriteOnly,
+        special_semantics: None,
+    };
+    
+    let read_handle = match task.handle_table.insert_with_metadata(read_obj, read_metadata) {
         Ok(handle) => handle,
         Err(_) => return usize::MAX, // Too many open handles
     };
     
-    let write_handle = match task.handle_table.insert(write_obj) {
+    let write_handle = match task.handle_table.insert_with_metadata(write_obj, write_metadata) {
         Ok(handle) => handle,
         Err(_) => {
             // Clean up the read handle if write handle allocation fails

@@ -1,10 +1,14 @@
-//! Capability traits for KernelObject resources
+//! Stream operations capability module
 //! 
-//! This module defines capability traits that represent the operations
-//! that can be performed on different types of kernel objects.
+//! This module provides system calls and traits for StreamOps capability,
+//! which enables read and write operations on KernelObjects.
 
-use crate::{fs::FileSystemError, object::KernelObject};
+use crate::fs::FileSystemError;
 use alloc::string::String;
+
+pub mod syscall;
+
+pub use syscall::{sys_stream_read, sys_stream_write};
 
 /// Represents errors that can occur during stream I/O operations
 #[derive(Debug, Clone)]
@@ -55,21 +59,4 @@ pub trait StreamOps: Send + Sync {
     
     /// Write data to the stream
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError>;
-}
-
-/// Clone operations capability
-/// 
-/// This trait represents the ability to properly clone an object
-/// with custom semantics. Objects that need special cloning behavior
-/// (like pipes that need to update reader/writer counts) should implement this.
-/// 
-/// The presence of this capability indicates that the object needs custom
-/// clone semantics beyond simple Arc::clone.
-pub trait CloneOps: Send + Sync {
-    /// Perform a custom clone operation and return the cloned object
-    /// 
-    /// This method should handle any object-specific cloning logic,
-    /// such as incrementing reference counts for pipes or other shared resources.
-    /// Returns the cloned object as a KernelObject.
-    fn custom_clone(&self) -> KernelObject;
 }

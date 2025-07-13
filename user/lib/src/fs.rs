@@ -1,475 +1,858 @@
-use crate::ffi::str_to_cstr_bytes;
-use crate::boxed::Box;
-use crate::syscall::{syscall1, syscall2, syscall3, syscall5, Syscall};
+//! File system abstraction for Scarlet Native API
+//!
+//! This module provides a Rust standard library-like file system interface
+//! using the OpenOptions builder pattern and high-level convenience functions.
+//!
+//! ## Core Functions
+//!
+//! ### File Operations
+//! - [`File::open`], [`File::create`]: Open and create files
+//! - [`OpenOptions`]: Flexible file opening with various options
+//!
+//! ### Directory Operations  
+//! - [`change_directory`]: Change current working directory
+//! - [`File::read_dir`]: Read directory entries from an open directory
+//! - [`list_directory`]: List all entries in a directory (convenience function)
+//! - [`count_directory_entries`]: Count files and directories (example function)
+//!
+//! ### Directory Entry Parsing
+//! - [`DirectoryEntry`]: High-level directory entry structure
+//! - [`DirectoryEntryRaw`]: Low-level raw directory entry structure
+//! - [`parse_dir_entry`]: Parse raw directory entry data
+//! - [`parse_dir_entry_safe`]: Safe directory entry parsing (backward compatibility)
+//!
+//! ### Filesystem Operations
+//! - [`mount`]: Mount filesystems with various options
+//! - [`unmount`]: Unmount filesystems
+//! - [`pivot_root`]: Change root filesystem (system initialization)
+
+use crate::handle::Handle;
+use crate::handle::capability::{SeekFrom as ScarletSeekFrom};
 use crate::string::String;
+use crate::io::{Error, ErrorKind, Seek, SeekFrom, Write, Read, Result};
 
-// Mount flags (similar to Linux mount flags)
-pub const MS_RDONLY: u32 = 1;        // Mount read-only
-pub const MS_NOSUID: u32 = 2;        // Ignore suid and sgid bits
-pub const MS_NODEV: u32 = 4;         // Disallow access to device special files
-pub const MS_NOEXEC: u32 = 8;        // Disallow program execution
-pub const MS_SYNCHRONOUS: u32 = 16;  // Writes are synced at once
-pub const MS_BIND: u32 = 4096;       // Create bind mount
-pub const MS_MOVE: u32 = 8192;       // Move mount point
-pub const MS_REC: u32 = 16384;       // Recursive bind mount
-pub const MS_SILENT: u32 = 32768;    // Suppress kernel messages
-pub const MS_REMOUNT: u32 = 32;      // Remount filesystem
 
-/// Open a file.
-/// 
-/// # Arguments
-/// * `path` - Path to the file
-/// * `flags` - Flags for opening the file
-/// 
-/// # Return Value
-/// - On success: file descriptor
-/// - On error: -1
-/// 
-pub fn open(path: &str, flags: usize) -> i32 {
-    let path_bytes = str_to_cstr_bytes(path).unwrap();
-    let path_boxed_slice = path_bytes.into_boxed_slice();
-    let path_len = path_boxed_slice.len();
-    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
-    let res = syscall2(Syscall::Open, path_ptr, flags);
-    // Properly free the allocated memory with correct size information
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Close a file.
-/// 
-/// # Arguments
-/// * `fd` - File descriptor
-/// 
-/// # Return Value
-/// - On success: 0
-/// - On error: -1
-/// 
-pub fn close(fd: i32) -> i32 {
-    let res = syscall2(Syscall::Close, fd as usize, 0);
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Duplicate a file descriptor.
-/// 
-/// # Arguments
-/// * `fd` - File descriptor to duplicate
-/// 
-/// # Return Value
-/// - On success: new file descriptor
-/// - On error: -1
-pub fn dup(fd: i32) -> i32 {
-    let res = syscall1(Syscall::Dup, fd as usize);
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Read from a file.
-/// 
-/// # Arguments
-/// * `fd` - File descriptor
-/// * `buf` - Buffer to read into
+/// Options and flags which can be used to configure how a file is opened
 ///
-/// # Return Value
-/// - On success: number of bytes read
-/// - On error: -1
-/// 
-pub fn read(fd: i32, buf: &mut [u8]) -> i32 {
-    let res = syscall3(Syscall::Read, fd as usize, buf.as_mut_ptr() as usize, buf.len());
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Write to a file.
-/// 
-/// # Arguments
-/// * `fd` - File descriptor
-/// * `buf` - Buffer to write from
-/// 
-/// # Return Value
-/// - On success: number of bytes written
-/// - On error: -1
-/// 
-pub fn write(fd: i32, buf: &[u8]) -> i32 {
-    let res = syscall3(Syscall::Write, fd as usize, buf.as_ptr() as usize, buf.len());
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Seek to a position in a file.
-/// 
-/// # Arguments
-/// * `fd` - File descriptor
-/// * `offset` - Offset to seek to
-/// * `whence` - Whence for the seek operation
-/// 
-/// # Return Value
-/// - On success: new position in the file
-/// - On error: -1
-/// 
-pub fn lseek(fd: i32, offset: i64, whence: u32) -> i32 {
-    let res = syscall3(Syscall::Lseek, fd as usize, offset as usize, whence as usize);
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Create a new file
-/// 
-/// This function creates a new file at the specified path with the given mode.
-/// 
-/// # Arguments
-/// * `path` - Path to the file to create
-/// * `mode` - Permissions for the new file (e.g., 0o644)
-/// 
-/// # Return Value
-/// * `0` on success, `-1` on error
-/// 
-pub fn mkfile(path: &str, mode: u32) -> i32 {
-    let path_boxed = str_to_cstr_bytes(path).unwrap().into_boxed_slice();
-    let path_ptr = path_boxed.as_ptr() as usize;
-    let res = syscall2(Syscall::Mkfile, path_ptr, mode as usize);
-    // The allocated memory will be safely dropped when `path_boxed` goes out of scope
-    res as i32
-}
-
-/// Create a directory
-/// 
-/// This function creates a new directory at the specified path with the given mode.
-/// 
-/// # Arguments
-/// * `path` - Path to the directory to create
-/// * `mode` - Permissions for the new directory (e.g., 0o755)
-/// 
-/// # Return Value
-/// * `0` on success, `-1` on error
-/// 
-pub fn mkdir(path: &str, mode: u32) -> i32 {
-    let path_bytes = str_to_cstr_bytes(path).unwrap();
-    let path_boxed_slice = path_bytes.into_boxed_slice();
-    let path_len = path_boxed_slice.len();
-    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
-    let res = syscall2(Syscall::Mkdir, path_ptr, mode as usize);
-    // Free the allocated memory
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Change current working directory.
-/// 
-/// # Arguments
-/// * `path` - Path to the new working directory
-/// 
-/// # Return Value
-/// * `0` on success, `-1` on error
-/// 
-pub fn chdir(path: &str) -> i32 {
-    let path_bytes = match str_to_cstr_bytes(path) {
-        Ok(bytes) => bytes,
-        Err(_) => return -1, // Return -1 on failure to match POSIX semantics
-    };
-    let path_boxed_slice = path_bytes.into_boxed_slice();
-    let path_len = path_boxed_slice.len();
-    let path_ptr = Box::into_raw(path_boxed_slice) as *const u8 as usize;
-    let res = syscall1(Syscall::Chdir, path_ptr);
-    // Free the allocated memory
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(path_ptr as *mut u8, path_len)) };
-    // Return the result of the syscall
-    res as i32
-}
-
-/// Mount a filesystem
-/// 
-/// This function provides a POSIX-like mount interface that internally uses
-/// Scarlet's powerful VFS system. The mount type is automatically determined
-/// based on the source and filesystem type.
-/// 
-/// # Arguments
-/// 
-/// * `source` - Device path, memory area, or filesystem source
-/// * `target` - Mount point path
-/// * `fstype` - Filesystem type: "ext4", "tmpfs", "cpiofs", "bind", "overlay", etc.
-/// * `flags` - Mount flags (MS_RDONLY, MS_BIND, etc.)
-/// * `data` - Mount-specific data (optional)
-/// 
-/// # Returns
-/// 
-/// * `0` on success, `-1` on error
-/// 
-/// # Mount Types Supported
-/// 
-/// * **Block devices**: `mount("/dev/sda1", "/mnt", "ext4", 0, None)`
-/// * **Tmpfs**: `mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=10M"))`
-/// * **Bind mounts**: `mount("/source", "/target", "bind", MS_BIND, None)`
-/// * **Overlay**: `mount("overlay", "/overlay", "overlay", 0, Some("lowerdir=/lower,upperdir=/upper"))`
-/// * **Memory FS**: `mount("initramfs", "/", "cpiofs", 0, Some("0x80000000,0x81000000"))`
-/// 
-/// # Example
-/// 
-/// ```rust
-/// use crate::fs::{mount, MS_BIND, MS_RDONLY};
-/// 
-/// // Mount a bind mount
-/// let result = mount("/source", "/target", "bind", MS_BIND, None);
-/// if result == 0 {
-///     println!("Bind mount successful");
-/// }
-/// 
-/// // Create tmpfs with size limit
-/// let result = mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=10M"));
-/// if result == 0 {
-///     println!("Tmpfs mounted successfully");
-/// }
-/// 
-/// // Create overlay mount
-/// let result = mount(
-///     "overlay", 
-///     "/overlay", 
-///     "overlay", 
-///     0, 
-///     Some("lowerdir=/lower1:/lower2,upperdir=/upper")
-/// );
+/// This builder exposes the ability to configure how a [`File`] is opened
+/// and what operations are permitted on the open file. The [`File::open`]
+/// and [`File::create`] methods are aliases for commonly used options
+/// using this builder.
+///
+/// # Examples
+///
+/// Opening a file to read:
+///
 /// ```
-pub fn mount(source: &str, target: &str, fstype: &str, flags: u32, data: Option<&str>) -> i32 {
-    let source_bytes = str_to_cstr_bytes(source).unwrap();
-    let source_boxed_slice = source_bytes.into_boxed_slice();
-    let source_len = source_boxed_slice.len();
-    let source_ptr = Box::into_raw(source_boxed_slice) as *const u8 as usize;
-    
-    let target_bytes = str_to_cstr_bytes(target).unwrap();
-    let target_boxed_slice = target_bytes.into_boxed_slice();
-    let target_len = target_boxed_slice.len();
-    let target_ptr = Box::into_raw(target_boxed_slice) as *const u8 as usize;
-    
-    let fstype_bytes = str_to_cstr_bytes(fstype).unwrap();
-    let fstype_boxed_slice = fstype_bytes.into_boxed_slice();
-    let fstype_len = fstype_boxed_slice.len();
-    let fstype_ptr = Box::into_raw(fstype_boxed_slice) as *const u8 as usize;
-    
-    let (data_ptr, data_len) = if let Some(data_str) = data {
-        let data_bytes = str_to_cstr_bytes(data_str).unwrap();
-        let data_boxed_slice = data_bytes.into_boxed_slice();
-        let data_len = data_boxed_slice.len();
-        let data_ptr = Box::into_raw(data_boxed_slice) as *const u8 as usize;
-        (data_ptr, data_len)
-    } else {
-        (0, 0) // null pointer
-    };
-    
-    let res = syscall5(
-        Syscall::Mount,
-        source_ptr,
-        target_ptr,
-        fstype_ptr,
-        flags as usize,
-        data_ptr
-    );
-    
-    // Free allocated memory
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(source_ptr as *mut u8, source_len)) };
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(target_ptr as *mut u8, target_len)) };
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(fstype_ptr as *mut u8, fstype_len)) };
-    if data_ptr != 0 {
-        let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(data_ptr as *mut u8, data_len)) };
+/// use scarlet::fs::OpenOptions;
+///
+/// let file = OpenOptions::new()
+///     .read(true)
+///     .open("foo.txt")?;
+/// ```
+///
+/// Opening a file for both reading and writing, creating it if it doesn't exist:
+///
+/// ```
+/// use scarlet::fs::OpenOptions;
+///
+/// let file = OpenOptions::new()
+///     .read(true)
+///     .write(true)
+///     .create(true)
+///     .open("foo.txt")?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct OpenOptions {
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+    create_new: bool,
+}
+
+impl OpenOptions {
+    /// Creates a blank new set of options ready for configuration
+    ///
+    /// All options are initially set to `false`.
+    pub fn new() -> Self {
+        Self {
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
     }
     
-    res as i32
+    /// Sets the option for read access
+    ///
+    /// This option, when true, will indicate that the file should be
+    /// readable if opened.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scarlet::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().read(true).open("foo.txt");
+    /// ```
+    pub fn read(&mut self, read: bool) -> &mut Self {
+        self.read = read;
+        self
+    }
+    
+    /// Sets the option for write access
+    ///
+    /// This option, when true, will indicate that the file should be
+    /// writable if opened.
+    ///
+    /// If the file already exists, any write calls on it will overwrite
+    /// its contents, without truncating it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scarlet::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().write(true).open("foo.txt");
+    /// ```
+    pub fn write(&mut self, write: bool) -> &mut Self {
+        self.write = write;
+        self
+    }
+    
+    /// Sets the option for the append mode
+    ///
+    /// This option, when true, means that writes will append to a file instead
+    /// of overwriting previous contents.
+    /// Note that setting `.write(true).append(true)` has the same effect as
+    /// setting only `.append(true)`.
+    ///
+    /// For most filesystems, the operating system guarantees that all writes are
+    /// atomic: no reads-in-progress will see a half-written file.
+    ///
+    /// ## Note
+    ///
+    /// This function doesn't create the file if it doesn't exist. Use the
+    /// [`OpenOptions::create`] method to do so.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scarlet::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().append(true).open("foo.txt");
+    /// ```
+    pub fn append(&mut self, append: bool) -> &mut Self {
+        self.append = append;
+        self
+    }
+    
+    /// Sets the option for truncating a previous file
+    ///
+    /// If a file is successfully opened with this option set it will truncate
+    /// the file to 0 length if it already exists.
+    ///
+    /// The file must be opened with write access for truncate to work.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scarlet::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().write(true).truncate(true).open("foo.txt");
+    /// ```
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self.truncate = truncate;
+        self
+    }
+    
+    /// Sets the option to create a new file, or open it if it already exists
+    ///
+    /// In order for the file to be created, [`OpenOptions::write`] or
+    /// [`OpenOptions::append`] access must be used.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scarlet::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().write(true).create(true).open("foo.txt");
+    /// ```
+    pub fn create(&mut self, create: bool) -> &mut Self {
+        self.create = create;
+        self
+    }
+    
+    /// Sets the option to create a new file, failing if it already exists
+    ///
+    /// No file is allowed to exist at the target location, also no (dangling) symlink.
+    /// In this way, if the call succeeds, the file returned is guaranteed to be new.
+    ///
+    /// This option is useful because it is atomic. Otherwise between checking
+    /// whether a file exists and creating a new one, the file may have been
+    /// created by another process (a TOCTOU race condition / attack).
+    ///
+    /// If `.create_new(true)` is set, [`.create()`] and [`.truncate()`] are
+    /// ignored.
+    ///
+    /// The file must be opened with write or append access in order to create
+    /// a new file.
+    ///
+    /// [`.create()`]: OpenOptions::create
+    /// [`.truncate()`]: OpenOptions::truncate
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scarlet::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().write(true).create_new(true).open("foo.txt");
+    /// ```
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.create_new = create_new;
+        self
+    }
+    
+    /// Opens a file at `path` with the options specified by `self`
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error under a number of different
+    /// circumstances. Some of these error conditions are listed here, together
+    /// with their [`ErrorKind`]. The mapping to [`ErrorKind`]s is not part of
+    /// the compatibility contract of the function.
+    ///
+    /// * [`NotFound`]: The specified file does not exist and neither `create`
+    ///   or `create_new` is set.
+    /// * [`NotFound`]: One of the directory components of the file path does
+    ///   not exist.
+    /// * [`PermissionDenied`]: The user lacks permission to get the specified
+    ///   access rights for the file.
+    /// * [`PermissionDenied`]: The user lacks permission to open one of the
+    ///   directory components of the specified path.
+    /// * [`InvalidInput`]: Invalid combinations of open options (truncate
+    ///   without write access, no access mode set, etc.).
+    ///
+    /// [`ErrorKind`]: Error
+    /// [`InvalidInput`]: ErrorKind::InvalidInput
+    /// [`NotFound`]: ErrorKind::NotFound
+    /// [`PermissionDenied`]: ErrorKind::PermissionDenied
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use scarlet::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().read(true).open("foo.txt");
+    /// ```
+    pub fn open<P: AsRef<str>>(&self, path: P) -> Result<File> {
+        use crate::syscall::{syscall2, Syscall};
+        
+        // If we need to create the file, use VfsCreateFile first
+        if self.create || self.create_new {
+            // Check if we have write access
+            if !self.write && !self.append {
+                return Err(Error::new(ErrorKind::InvalidInput, "Cannot create file without write access"));
+            }
+            
+            // For create_new, we should check if file exists first
+            // For now, just attempt to create and handle errors
+            let result = syscall2(
+                Syscall::VfsCreateFile,
+                path.as_ref().as_ptr() as usize,
+                path.as_ref().len()
+            );
+            
+            // For create_new, creation failure is an error
+            // For create, we continue even if creation fails (file might already exist)
+            if self.create_new && result == usize::MAX {
+                return Err(Error::new(ErrorKind::Other, "File already exists"));
+            }
+        }
+        
+        // Currently, we don't support any flags that require special handling
+        let flags = 0;
+        
+        // Use Handle::open and wrap in File
+        let handle = Handle::open(path.as_ref(), flags)
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to open file"))?;
+        
+        Ok(File::from_handle(handle))
+    }
+}
+
+impl Default for OpenOptions {
+    /// Creates a blank new set of options ready for configuration
+    ///
+    /// This is equivalent to [`OpenOptions::new()`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// File system types and structures
+
+/// High-level File wrapper with automatic resource management
+/// 
+/// This provides a Rust standard library-like interface while using
+/// Scarlet Native capabilities under the hood. The file is automatically
+/// closed when the File instance is dropped.
+/// 
+/// Files are not cloneable to ensure clear ownership semantics.
+pub struct File {
+    handle: Handle,
+}
+
+impl File {
+    /// Create a File from an existing Handle
+    /// 
+    /// This is used internally by OpenOptions and other high-level APIs.
+    /// 
+    /// # Arguments
+    /// * `handle` - The handle to wrap
+    /// 
+    /// # Returns
+    /// File instance
+    pub fn from_handle(handle: Handle) -> Self {
+        File { handle }
+    }
+    
+    /// Open a file with automatic resource management
+    /// 
+    /// This is a convenience method. For more control over file opening options, 
+    /// use OpenOptions.
+    /// 
+    /// # Arguments
+    /// * `path` - Path to the file
+    /// 
+    /// # Returns
+    /// File instance or error
+    pub fn open<P: AsRef<str>>(path: P) -> Result<Self> {
+        // Open for read-only
+        let handle = Handle::open(path.as_ref(), 0x0) // O_RDONLY
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to open file"))?;
+        Ok(File { handle })
+    }
+    
+    /// Create a new file (equivalent to open with create, write, truncate)
+    /// 
+    /// This is a convenience method. For more control over file creation options,
+    /// use OpenOptions.
+    /// 
+    /// # Arguments
+    /// * `path` - Path to the file to create
+    /// 
+    /// # Returns
+    /// File instance or error
+    pub fn create<P: AsRef<str>>(path: P) -> Result<Self> {
+        use crate::syscall::{syscall2, Syscall};
+        
+        // Use VfsCreateFile syscall to create the file
+        let result = syscall2(
+            Syscall::VfsCreateFile,
+            path.as_ref().as_ptr() as usize,
+            path.as_ref().len()
+        );
+        
+        if result == usize::MAX {
+            return Err(Error::new(ErrorKind::Other, "Failed to create file"));
+        }
+        
+        // Open the created file for writing
+        let handle = Handle::open(path.as_ref(), 0x1) // O_WRONLY
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to open created file"))?;
+        Ok(File { handle })
+    }
+    
+    /// Open a file with specific flags (low-level interface)
+    /// 
+    /// This method provides direct access to system-level flags.
+    /// Prefer using [`File::open`], [`File::create`], or [`OpenOptions`]
+    /// for most use cases.
+    /// 
+    /// # Arguments
+    /// * `path` - Path to the file
+    /// * `flags` - Open flags (implementation-specific)
+    /// 
+    /// # Returns
+    /// File instance or error
+    pub fn open_with_flags<P: AsRef<str>>(path: P, flags: usize) -> Result<Self> {
+        let handle = Handle::open(path.as_ref(), flags)
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to open file"))?;
+        Ok(File { handle })
+    }
+    
+    /// Get the underlying handle (for advanced usage)
+    /// 
+    /// This allows access to the low-level Handle and its capabilities
+    /// when you need more control than the high-level File interface provides.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Convert the File into a Handle
+    /// 
+    /// This consumes the File and returns the underlying Handle.
+    /// 
+    /// # Returns
+    /// Handle instance
+    pub fn into_handle(self) -> Handle {
+        // Prevent the File's Drop from running
+        let handle = unsafe {
+            let handle_ptr = &self.handle as *const Handle;
+            core::mem::forget(self);
+            core::ptr::read(handle_ptr)
+        };
+        handle
+    }
+
+    /// Clone the underlying handle via duplication
+    /// 
+    /// This creates a new Handle that duplicates the underlying kernel object.
+    /// This requires a syscall and creates an independent handle.
+    /// 
+    /// # Returns
+    /// Cloned Handle instance or error
+    pub fn clone_handle(&self) -> Result<Handle> {
+        self.handle.duplicate()
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to duplicate handle"))
+    }
+    
+    /// Get the raw handle ID
+    pub fn as_raw(&self) -> i32 {
+        self.handle.as_raw()
+    }
+}
+
+// Implement Rust standard library-like methods
+impl File {
+    /// Read data from the file
+    /// 
+    /// # Arguments
+    /// * `buf` - Buffer to read data into
+    /// 
+    /// # Returns
+    /// Number of bytes read or error
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let stream = self.handle.as_stream()
+            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support stream operations"))?;
+        
+        stream.read(buf)
+            .map_err(|_| Error::new(ErrorKind::Other, "Read operation failed"))
+    }
+
+    /// Read directory entries from a directory file
+    ///
+    /// This method reads an entry from a directory file and returns a DirectoryEntry
+    /// 
+    /// # Returns
+    /// * `Ok(entries)` - Vector of directory entries on success
+    /// * `Err(errno)` - Error code on failure
+    pub fn read_dir(&mut self) -> Result<Option<DirectoryEntry>> {
+        // let file_handle = self.handle.as_file()
+        //     .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
+        // let metadata = file_handle.metadata()
+        //     .map_err(|_| Error::new(ErrorKind::Other, "Failed to get file metadata"))?;
+
+        // crate::println!("metadata: {:?}", metadata);
+
+        // if !metadata.is_directory() {
+        //     return Err(Error::new(ErrorKind::InvalidInput, "Handle is not a directory"));
+        // }
+
+        let mut buf = [0u8; core::mem::size_of::<DirectoryEntryRaw>()];
+        let bytes_read = self.handle.as_stream().unwrap().read(&mut buf);
+
+        if bytes_read.is_err() {
+            return Err(Error::new(ErrorKind::Other, "Failed to read directory entry"));
+        }
+        let bytes_read = bytes_read.unwrap();
+
+
+        if bytes_read == 0 {
+            return Ok(None); // EOF - no more entries
+        }
+        
+        // Parse the directory entry
+        if let Some(entry) = parse_dir_entry(&buf[..bytes_read as usize]) {
+            Ok(Some(DirectoryEntry::from_raw(entry)))
+        } else {
+            Err(Error::new(ErrorKind::InvalidData, "Failed to parse directory entry"))
+        }
+    }
+
+    /// Write data to the file
+    /// 
+    /// # Arguments
+    /// * `buf` - Data to write
+    /// 
+    /// # Returns
+    /// Number of bytes written or error
+    pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        let stream = self.handle.as_stream()
+            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support stream operations"))?;
+            
+        stream.write(buf)
+            .map_err(|_| Error::new(ErrorKind::Other, "Write operation failed"))
+    }
+    
+    /// Write all data to the file
+    /// 
+    /// This is a convenience method that ensures all data is written.
+    /// 
+    /// # Arguments
+    /// * `buf` - Data to write
+    /// 
+    /// # Returns
+    /// Success or error
+    pub fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        let stream = self.handle.as_stream()
+            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support stream operations"))?;
+            
+        stream.write_all(buf)
+            .map_err(|_| Error::new(ErrorKind::Other, "Write all operation failed"))
+    }
+    
+    /// Seek to a position in the file
+    /// 
+    /// # Arguments
+    /// * `pos` - Position to seek to
+    /// 
+    /// # Returns
+    /// New absolute position or error
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        let file_obj = self.handle.as_file()
+            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
+            
+        let scarlet_pos = match pos {
+            SeekFrom::Start(offset) => ScarletSeekFrom::Start(offset),
+            SeekFrom::Current(offset) => ScarletSeekFrom::Current(offset),
+            SeekFrom::End(offset) => ScarletSeekFrom::End(offset),
+        };
+        
+        file_obj.seek(scarlet_pos)
+            .map_err(|_| Error::new(ErrorKind::Other, "Seek operation failed"))
+    }
+    
+    /// Truncate the file to the specified size
+    /// 
+    /// # Arguments
+    /// * `size` - New size of the file in bytes
+    /// 
+    /// # Returns
+    /// Success or error
+    pub fn set_len(&mut self, size: u64) -> Result<()> {
+        let file_obj = self.handle.as_file()
+            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
+            
+        file_obj.truncate(size)
+            .map_err(|_| Error::new(ErrorKind::Other, "Truncate operation failed"))
+    }
+    
+    // /// Get file metadata
+    // /// 
+    // /// # Returns
+    // /// File metadata or error
+    // pub fn metadata(&self) -> Result<FileMetadata> {
+    //     let file_obj = self.handle.as_file()
+    //         .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
+            
+    //     file_obj.metadata()
+    //         .map_err(|_| Error::new(ErrorKind::Other, "Metadata operation failed"))
+    // }
+    
+    /// Get the current position in the file
+    /// 
+    /// # Returns
+    /// Current position or error
+    pub fn stream_position(&mut self) -> Result<u64> {
+        self.seek(SeekFrom::Current(0))
+    }
+}
+
+// Automatic resource cleanup
+impl Drop for File {
+    fn drop(&mut self) {
+        // Handle already implements Drop, so the file will be automatically
+        // closed when the File goes out of scope
+    }
+}
+
+// Standard library-like traits for compatibility
+impl Read for File {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        File::read(self, buf)
+    }
+}
+
+impl Write for File {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        File::write(self, buf)
+    }
+    
+    fn flush(&mut self) -> Result<()> {
+        // For now, we don't have explicit flush capability
+        // This could be added as a future enhancement
+        Ok(())
+    }
+}
+
+impl Seek for File {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        File::seek(self, pos)
+    }
+}
+
+//
+// Mount Operations
+//
+
+/// Mount flags for mount operations
+///
+/// These flags are passed to the mount() system call to control mount behavior.
+pub mod mount_flags {
+    /// Mount filesystem read-only
+    pub const MS_RDONLY: u32 = 0x01;
+    /// Ignore suid and sgid bits
+    pub const MS_NOSUID: u32 = 0x02;
+    /// Disallow access to device special files
+    pub const MS_NODEV: u32 = 0x04;
+    /// Disallow program execution
+    pub const MS_NOEXEC: u32 = 0x08;
+    /// Writes are synced at once
+    pub const MS_SYNCHRONOUS: u32 = 0x10;
+    /// Bind mount
+    pub const MS_BIND: u32 = 0x1000;
+}
+
+//
+// File system operations  
+//
+
+/// Mount a filesystem
+///
+/// # Arguments
+///
+/// * `source` - Source device or filesystem name (e.g., "/dev/sda1", "tmpfs")
+/// * `target` - Target mount point (e.g., "/mnt/data")
+/// * `fstype` - Filesystem type (e.g., "ext4", "tmpfs", "bind")
+/// * `flags` - Mount flags (see `mount_flags` module)
+/// * `data` - Optional filesystem-specific data
+///
+/// # Examples
+///
+/// Mount a tmpfs:
+/// ```
+/// use scarlet::fs;
+/// 
+/// fs::mount("tmpfs", "/tmp", "tmpfs", 0, Some("size=100M"))?;
+/// ```
+///
+/// Bind mount:
+/// ```
+/// use scarlet::fs::{mount, mount_flags};
+///
+/// mount("/source/dir", "/target/dir", "bind", mount_flags::MS_BIND, None)?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the mount operation fails, such as:
+/// - Invalid mount point
+/// - Filesystem type not supported
+/// - Permission denied
+/// - Mount point already mounted
+pub fn mount(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: u32,
+    data: Option<&str>,
+) -> Result<()> {
+    use crate::syscall::{syscall5, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let source_c = str_to_cstr_bytes(source).map_err(|_| Error::new(ErrorKind::InvalidInput, "source contains null byte"))?;
+    let target_c = str_to_cstr_bytes(target).map_err(|_| Error::new(ErrorKind::InvalidInput, "target contains null byte"))?;
+    let fstype_c = str_to_cstr_bytes(fstype).map_err(|_| Error::new(ErrorKind::InvalidInput, "fstype contains null byte"))?;
+    
+    let data_c;
+    let data_ptr = if let Some(data_str) = data {
+        data_c = str_to_cstr_bytes(data_str).map_err(|_| Error::new(ErrorKind::InvalidInput, "data contains null byte"))?;
+        data_c.as_ptr() as usize
+    } else {
+        0
+    };
+
+    let result = syscall5(
+        Syscall::FsMount,
+        source_c.as_ptr() as usize,
+        target_c.as_ptr() as usize,
+        fstype_c.as_ptr() as usize,
+        flags as usize,
+        data_ptr,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "mount failed"))
+    } else {
+        Ok(())
+    }
 }
 
 /// Unmount a filesystem
-/// 
-/// This function unmounts a filesystem from the specified mount point.
-/// All files and directories under the mount point will become inaccessible
-/// after the unmount operation completes.
-/// 
+///
 /// # Arguments
-/// 
-/// * `target` - Mount point path to unmount
-/// * `flags` - Unmount flags (for future extension, currently unused)
-/// 
-/// # Returns
-/// 
-/// * `0` on success, `-1` on error
-/// 
+///
+/// * `target` - Mount point to unmount (e.g., "/mnt/data")
+/// * `flags` - Unmount flags (reserved for future use, pass 0)
+///
 /// # Examples
-/// 
-/// ```rust
-/// use crate::fs::umount;
-/// 
-/// // Unmount a filesystem
-/// let result = umount("/mnt", 0);
-/// if result == 0 {
-///     println!("Filesystem unmounted successfully");
-/// } else {
-///     println!("Failed to unmount filesystem");
-/// }
-/// 
-/// // Unmount a bind mount
-/// let result = umount("/target", 0);
-/// if result == 0 {
-///     println!("Bind mount unmounted successfully");
-/// }
+///
 /// ```
-pub fn umount(target: &str, flags: u32) -> i32 {
-    let target_bytes = str_to_cstr_bytes(target).unwrap();
-    let target_boxed_slice = target_bytes.into_boxed_slice();
-    let target_len = target_boxed_slice.len();
-    let target_ptr = Box::into_raw(target_boxed_slice) as *const u8 as usize;
-    
-    let res = syscall2(
-        Syscall::Umount,
-        target_ptr,
-        flags as usize
-    );
-    
-    // Free allocated memory
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(target_ptr as *mut u8, target_len)) };
-    
-    res as i32
-}
+/// use scarlet::fs::unmount;
+///
+/// unmount("/mnt/data", 0)?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the unmount operation fails, such as:
+/// - Mount point not found
+/// - Filesystem busy (files still open)
+/// - Permission denied
+pub fn unmount(target: &str, flags: u32) -> Result<()> {
+    use crate::syscall::{syscall2, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
 
-/// Change the root filesystem
-/// 
-/// This function performs a pivot_root operation, which atomically moves the
-/// root filesystem to a new location and makes the new filesystem the root.
-/// This is commonly used during system initialization to switch from an
-/// initramfs to the real root filesystem.
-/// 
-/// # Arguments
-/// 
-/// * `new_root` - Path to the directory that will become the new root
-/// * `old_root` - Path where the old root will be moved (relative to new_root)
-/// 
-/// # Returns
-/// 
-/// * `0` on success, `-1` on error
-/// 
-/// # Requirements
-/// 
-/// * The calling process must have its own VFS namespace (isolated filesystem)
-/// * The new_root must be a mount point of a different filesystem than the current root
-/// * The old_root must be a valid path under the new root filesystem
-/// 
-/// # Examples
-/// 
-/// ```rust
-/// use crate::fs::pivot_root;
-/// 
-/// // Switch from initramfs to real root filesystem
-/// // 1. Mount the real root filesystem
-/// mount("/dev/sda1", "/mnt/newroot", "ext4", 0, None);
-/// 
-/// // 2. Create directory for old root
-/// // (This would typically be done via mkdir syscall)
-/// 
-/// // 3. Pivot to new root
-/// let result = pivot_root("/mnt/newroot", "/mnt/newroot/old_root");
-/// if result == 0 {
-///     println!("Successfully pivoted to new root");
-///     // At this point:
-///     // - "/" points to what was previously "/mnt/newroot"
-///     // - "/old_root" contains the old root filesystem (initramfs)
-/// } else {
-///     println!("Failed to pivot root");
-/// }
-/// ```
-/// 
-/// # Container Usage
-/// 
-/// ```rust
-/// // In a container setup
-/// mount("/host/container/root", "/mnt/container", "bind", MS_BIND, None);
-/// let result = pivot_root("/mnt/container", "/mnt/container/host");
-/// if result == 0 {
-///     // Container now has isolated root filesystem
-///     // Host filesystem accessible at /host
-/// }
-/// ```
-pub fn pivot_root(new_root: &str, old_root: &str) -> i32 {
-    // Convert the new_root and old_root strings to C-style strings
-    let new_root_bytes = match str_to_cstr_bytes(new_root) {
-        Ok(bytes) => bytes,
-        Err(_) => return -1, // Return -1 if conversion fails
-    };
-    let old_root_bytes = match str_to_cstr_bytes(old_root) {
-        Ok(bytes) => bytes,
-        Err(_) => return -1, // Return -1 if conversion fails
-    };
-    
-    let new_root_boxed_slice = new_root_bytes.into_boxed_slice();
-    let new_root_len = new_root_boxed_slice.len();
-    let new_root_ptr = Box::into_raw(new_root_boxed_slice) as *const u8 as usize;
-    
-    let old_root_boxed_slice = old_root_bytes.into_boxed_slice();
-    let old_root_len = old_root_boxed_slice.len();
-    let old_root_ptr = Box::into_raw(old_root_boxed_slice) as *const u8 as usize;
-    
-    let res = syscall2(
-        Syscall::PivotRoot,
-        new_root_ptr,
-        old_root_ptr
-    );
-    
-    // Free allocated memory
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(new_root_ptr as *mut u8, new_root_len)) };
-    let _ = unsafe { Box::<[u8]>::from_raw(core::slice::from_raw_parts_mut(old_root_ptr as *mut u8, old_root_len)) };
-    
-    res as i32
-}
+    let target_c = str_to_cstr_bytes(target).map_err(|_| Error::new(ErrorKind::InvalidInput, "target contains null byte"))?;
 
-/// Read directory entries.
-/// 
-/// This function reads directory entries one at a time from an opened directory.
-/// Each call returns the next directory entry or None if end of directory is reached.
-/// 
-/// # Arguments
-/// * `fd` - File descriptor of an opened directory
-/// 
-/// # Return Value
-/// - `Ok(Some(entry))` - Successfully read a directory entry
-/// - `Ok(None)` - End of directory reached (EOF)
-/// - `Err(errno)` - Error occurred (errno value from kernel)
-/// 
-/// # Example
-/// ```rust
-/// let dir_fd = open("/tmp", 0);
-/// if dir_fd >= 0 {
-///     loop {
-///         match readdir(dir_fd) {
-///             Ok(Some(entry)) => {
-///                 if let Ok(name) = entry.name_str() {
-///                     println!("Found: {} (type: {})", name, entry.file_type);
-///                 }
-///             }
-///             Ok(None) => break, // End of directory
-///             Err(errno) => {
-///                 println!("Error reading directory: {}", errno);
-///                 break;
-///             }
-///         }
-///     }
-///     close(dir_fd);
-/// }
-/// ```
-pub fn readdir(fd: i32) -> Result<Option<DirectoryEntry>, i32> {
-    let mut buf = [0u8; core::mem::size_of::<DirectoryEntryRaw>()];
-    let bytes_read = read(fd, &mut buf);
-    
-    if bytes_read < 0 {
-        return Err(bytes_read); // Return error code
-    }
-    
-    if bytes_read == 0 {
-        return Ok(None); // EOF - no more entries
-    }
-    
-    // Parse the directory entry
-    if let Some(entry) = parse_dir_entry(&buf[..bytes_read as usize]) {
-        Ok(Some(DirectoryEntry::from_raw(entry)))
+    let result = syscall2(
+        Syscall::FsUmount,
+        target_c.as_ptr() as usize,
+        flags as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "unmount failed"))
     } else {
-        Err(-1) // Parse error
+        Ok(())
+    }
+}
+
+/// Change the root filesystem (pivot_root)
+///
+/// This system call moves the old root filesystem to `old_root` and makes
+/// `new_root` the new root filesystem. This is typically used during system
+/// initialization to switch from an initramfs to the real root filesystem.
+///
+/// # Arguments
+///
+/// * `new_root` - Path to the new root filesystem
+/// * `old_root` - Path where the old root filesystem will be moved
+///
+/// # Examples
+///
+/// ```
+/// use scarlet::fs::pivot_root;
+///
+/// // Switch to new root, moving old root to /old_root
+/// pivot_root("/mnt/newroot", "/mnt/newroot/old_root")?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the pivot_root operation fails, such as:
+/// - New root path does not exist or is not a mount point
+/// - Old root path is invalid
+/// - Permission denied
+/// - Operation not supported in current namespace
+pub fn pivot_root(new_root: &str, old_root: &str) -> Result<()> {
+    use crate::syscall::{syscall2, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let new_root_c = str_to_cstr_bytes(new_root).map_err(|_| Error::new(ErrorKind::InvalidInput, "new_root contains null byte"))?;
+    let old_root_c = str_to_cstr_bytes(old_root).map_err(|_| Error::new(ErrorKind::InvalidInput, "old_root contains null byte"))?;
+
+    let result = syscall2(
+        Syscall::FsPivotRoot,
+        new_root_c.as_ptr() as usize,
+        old_root_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "pivot_root failed"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Create a new directory
+/// 
+/// This function creates a new directory at the specified path.
+/// 
+/// # Arguments
+/// * `path` - Path to the new directory
+/// 
+pub fn create_directory<P: AsRef<str>>(path: P) -> Result<()> {
+    use crate::syscall::{syscall1, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let path_c = str_to_cstr_bytes(path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let result = syscall1(
+        Syscall::VfsCreateDirectory,
+        path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "create directory failed"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Change the current working directory
+///
+/// # Arguments
+///
+/// * `path` - Path to the new working directory
+///
+/// # Examples
+///
+/// ```
+/// use scarlet::fs::change_directory;
+///
+/// change_directory("/tmp")?;
+/// ```
+///
+/// # Errors
+///
+/// Returns `Err` if the directory change fails, such as:
+/// - Directory does not exist
+/// - Permission denied
+/// - Invalid path
+pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
+    use crate::syscall::{syscall1, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let path_c = str_to_cstr_bytes(path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let result = syscall1(
+        Syscall::VfsChangeDirectory,
+        path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "change directory failed"))
+    } else {
+        Ok(())
     }
 }
 
@@ -493,13 +876,13 @@ pub struct DirectoryEntryRaw {
 
 impl DirectoryEntryRaw {
     /// Get the name as a string
-    pub fn name_str(&self) -> Result<&str, core::str::Utf8Error> {
+    pub fn name_str(&self) -> core::result::Result<&str, core::str::Utf8Error> {
         let name_bytes = &self.name[..self.name_len as usize];
         core::str::from_utf8(name_bytes)
     }
     
     /// Get the name as an owned String
-    pub fn name_string(&self) -> Result<crate::string::String, core::str::Utf8Error> {
+    pub fn name_string(&self) -> core::result::Result<crate::string::String, core::str::Utf8Error> {
         let name_str = self.name_str()?;
         let mut owned_name = crate::string::String::new();
         for c in name_str.chars() {
@@ -580,17 +963,19 @@ impl DirectoryEntry {
     }
 }
 
-/// Helper function to parse directory entries from readdir buffer (backward compatibility).
+/// Helper function to parse directory entries from readdir buffer (backward compatibility)
 /// 
-/// This function is kept for backward compatibility. Consider using the new
-/// `readdir()` function instead, which handles parsing automatically.
+/// This function is kept for backward compatibility with older code that manually
+/// handles directory entry parsing. Consider using [`File::read_dir`] or 
+/// [`list_directory`] for new code, which handle parsing automatically.
 /// 
 /// # Arguments
 /// * `buf` - Buffer containing directory entry from readdir
 /// * `bytes_read` - Number of bytes actually read
 /// 
-/// # Return Value
-/// Option containing the parsed directory entry data as a tuple
+/// # Returns
+/// * `Some((name, file_type, file_id, size))` - Parsed directory entry data
+/// * `None` - If parsing failed or EOF reached
 /// 
 pub fn parse_dir_entry_safe(buf: &[u8], bytes_read: usize) -> Option<(crate::string::String, u8, u64, u64)> {
     if bytes_read == 0 {
@@ -622,80 +1007,90 @@ pub fn parse_dir_entry(buf: &[u8]) -> Option<DirectoryEntryRaw> {
     }
 }
 
-/// Example: List all files in a directory
+/// List all files and directories in a directory
 /// 
-/// This is a demonstration of how to use the new readdir API to collect
-/// all entries in a directory.
+/// This is a convenience function that opens a directory and reads all entries.
+/// It demonstrates how to use the new directory reading API.
 /// 
 /// # Arguments
 /// * `path` - Path to the directory to list
 /// 
 /// # Returns
 /// * `Ok(entries)` - Vector of directory entries on success
-/// * `Err(errno)` - Error code on failure
+/// * `Err(error)` - I/O error on failure
 /// 
-pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>, i32> {
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs;
+/// 
+/// let entries = fs::list_directory("/tmp")?;
+/// for entry in entries {
+///     println!("{}: {} bytes", entry.name, entry.size);
+/// }
+/// ```
+/// 
+pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>> {
     use crate::vec::Vec;
-    
-    let dir_fd = open(path, 0);
-    if dir_fd < 0 {
-        return Err(dir_fd);
+
+    let dir_file = File::open(path);
+    if dir_file.is_err() {
+        return Err(dir_file.err().unwrap());
     }
     
     let mut entries = Vec::new();
+
+    let mut file = dir_file.unwrap();
     
     loop {
-        match readdir(dir_fd) {
+        match file.read_dir() {
             Ok(Some(entry)) => {
                 entries.push(entry);
             }
-            Ok(None) => break, // End of directory
+            Ok(None) => break, // EOF
             Err(errno) => {
-                close(dir_fd);
                 return Err(errno);
             }
         }
     }
-    
-    close(dir_fd);
+
     Ok(entries)
 }
 
-/// Example: Count files and directories
+/// Count files and directories in a directory
+/// 
+/// This is an example function that demonstrates using the directory listing API
+/// to analyze directory contents.
 /// 
 /// # Arguments
 /// * `path` - Path to the directory to analyze
 /// 
 /// # Returns
-/// * `Ok((file_count, dir_count))` on success
-/// * `Err(errno)` on error
+/// * `Ok((file_count, dir_count))` - Tuple of (number of files, number of directories)
+/// * `Err(error)` - I/O error on failure
 /// 
-pub fn count_directory_entries(path: &str) -> Result<(usize, usize), i32> {
-    let dir_fd = open(path, 0);
-    if dir_fd < 0 {
-        return Err(dir_fd);
-    }
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs;
+/// 
+/// let (files, dirs) = fs::count_directory_entries("/home")?;
+/// println!("Found {} files and {} directories", files, dirs);
+/// ```
+/// 
+pub fn count_directory_entries(path: &str) -> Result<(usize, usize)> {
+    let entries = list_directory(path)?;
     
     let mut file_count = 0;
     let mut dir_count = 0;
-    
-    loop {
-        match readdir(dir_fd) {
-            Ok(Some(entry)) => {
-                if entry.is_file() {
-                    file_count += 1;
-                } else if entry.is_directory() {
-                    dir_count += 1;
-                }
-            }
-            Ok(None) => break,
-            Err(errno) => {
-                close(dir_fd);
-                return Err(errno);
-            }
+
+    for entry in entries {
+        if entry.is_file() {
+            file_count += 1;
+        } else if entry.is_directory() {
+            dir_count += 1;
         }
     }
-    
-    close(dir_fd);
+
     Ok((file_count, dir_count))
 }
