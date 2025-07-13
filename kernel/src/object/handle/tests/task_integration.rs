@@ -1,5 +1,6 @@
 use super::super::*;
 use super::mock::{MockTaskFileObject};
+use crate::object::handle::HandleTable;
 use crate::task::{new_user_task, CloneFlags};
 use alloc::sync::Arc;
 use alloc::vec::Vec;

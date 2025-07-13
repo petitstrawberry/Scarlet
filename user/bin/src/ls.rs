@@ -4,7 +4,6 @@
 extern crate scarlet_std as std;
 
 use std::{format, println};
-use std::ffi::cstr_ptr_to_str;
 use std::string::String;
 use std::vec::Vec;
 
@@ -14,13 +13,8 @@ fn main() -> i32 {
     let path;
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
-        match unsafe { cstr_ptr_to_str(args[1].as_ptr()) } {
-            Some(p) => path = p,
-            None => {
-                println!("Invalid path argument");
-                return -1;
-            }
-        }
+        // Use the string directly, no need for cstr_ptr_to_str
+        path = args[1].as_str();
     } else {
         path = ".";
     }

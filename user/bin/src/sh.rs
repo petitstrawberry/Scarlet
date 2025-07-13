@@ -4,6 +4,7 @@
 extern crate scarlet_std as std;
 
 use std::{format, print, println, string::String, vec::Vec, task::{execve, exit, fork, waitpid}};
+use std::io::Read;
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
@@ -71,10 +72,9 @@ fn find_executable_in_path(program: &str) -> Option<String> {
                 };
                 
                 // Check if file exists by trying to open it
-                let fd = std::fs::open(&full_path, 0);
-                if fd >= 0 {
-                    std::fs::close(fd); // Close the file descriptor we just opened
-                    return Some(full_path);
+                match std::fs::File::open(&full_path) {
+                    Ok(_) => return Some(full_path),
+                    Err(_) => continue,
                 }
             }
             None
@@ -82,12 +82,9 @@ fn find_executable_in_path(program: &str) -> Option<String> {
         None => {
             // No PATH set, try current directory
             let current_path = format!("./{}", program);
-            let fd = std::fs::open(&current_path, 0);
-            if fd >= 0 {
-                std::fs::close(fd);
-                Some(current_path)
-            } else {
-                None
+            match std::fs::File::open(&current_path) {
+                Ok(_) => Some(current_path),
+                Err(_) => None,
             }
         }
     }
@@ -147,31 +144,30 @@ fn execute_script(script_path: &str) -> i32 {
 
 /// Read a file and return its content as a string
 fn read_file(file_path: &str) -> Result<String, i32> {
-    let fd = std::fs::open(file_path, 0);
-    if fd < 0 {
-        return Err(fd);
-    }
-    
-    let mut content = String::new();
-    let mut buffer = [0u8; 1024];
-    
-    loop {
-        let bytes_read = std::fs::read(fd, &mut buffer);
-        if bytes_read <= 0 {
-            break;
+    match std::fs::File::open(file_path) {
+        Ok(mut file) => {
+            let mut content = String::new();
+            let mut buffer = [0u8; 1024];
+            
+            loop {
+                match file.read(&mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(bytes_read) => {
+                        // Convert bytes to string (assuming UTF-8)
+                        if let Ok(text) = std::str::from_utf8(&buffer[..bytes_read]) {
+                            content.push_str(text);
+                        } else {
+                            return Err(-1); // Invalid UTF-8
+                        }
+                    }
+                    Err(_) => return Err(-1),
+                }
+            }
+            
+            Ok(content)
         }
-        
-        // Convert bytes to string (assuming UTF-8)
-        if let Ok(text) = std::str::from_utf8(&buffer[..bytes_read as usize]) {
-            content.push_str(text);
-        } else {
-            std::fs::close(fd);
-            return Err(-1); // Invalid UTF-8
-        }
+        Err(_) => Err(-1),
     }
-    
-    std::fs::close(fd);
-    Ok(content)
 }
 
 /// Execute script content line by line
@@ -429,13 +425,13 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 }
             };
             
-            match std::fs::chdir(target_dir) {
-                0 => {
+            match std::fs::change_directory(target_dir) {
+                Ok(()) => {
                     // Success - update PWD environment variable
                     std::env::set_var("PWD", target_dir);
                     Some(0)
                 }
-                _ => {
+                Err(_) => {
                     println!("cd: {}: No such file or directory", target_dir);
                     Some(1)
                 }
@@ -557,15 +553,16 @@ fn execute_shrc() {
     
     for shrc_path in &shrc_paths {
         // Check if file exists by trying to open it
-        let fd = std::fs::open(shrc_path, 0);
-        if fd >= 0 {
-            std::fs::close(fd);
-            println!("Loading {}", shrc_path);
-            let exit_code = execute_script(shrc_path);
-            if exit_code != 0 {
-                println!("Warning: {} exited with code {}", shrc_path, exit_code);
+        match std::fs::File::open(shrc_path) {
+            Ok(_) => {
+                println!("Loading {}", shrc_path);
+                let exit_code = execute_script(shrc_path);
+                if exit_code != 0 {
+                    println!("Warning: {} exited with code {}", shrc_path, exit_code);
+                }
+                return; // Only execute the first found .shrc
             }
-            return; // Only execute the first found .shrc
+            Err(_) => continue,
         }
     }
     

@@ -72,10 +72,11 @@ mod arch;
 mod allocator;
 pub mod syscall;
 pub mod io;
-pub mod task;
 pub mod fs;
+pub mod task;
 pub mod ffi;
 pub mod env;
+pub mod handle;
 
 pub use core_exports::*;
 pub use alloc_exports::*;
@@ -87,6 +88,6 @@ pub fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[alloc_error_handler]
-fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+fn alloc_error_handler(_layout: core::alloc::Layout) -> ! {
     loop {}
 }

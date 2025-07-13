@@ -1,7 +1,7 @@
 //! HandleTable tests
 
 use super::mock::MockFileObject;
-use crate::object::{HandleTable, KernelObject, Handle};
+use super::super::{HandleTable, KernelObject, Handle};
 use alloc::{sync::Arc, format, vec::Vec};
 
 #[test_case]

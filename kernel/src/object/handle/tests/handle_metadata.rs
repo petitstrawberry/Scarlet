@@ -3,8 +3,8 @@
 //! This module contains tests for HandleMetadata, HandleType, AccessMode,
 //! and SpecialSemantics functionality.
 
-use crate::object::{
-    HandleMetadata, HandleType, StandardStreamType, AccessMode, SpecialSemantics,
+use super::super::{
+    HandleMetadata, HandleType, StandardInputOutput, AccessMode, SpecialSemantics,
     HandleTable, KernelObject
 };
 use super::mock::{MockFileObject, MockPipeObject};
@@ -28,36 +28,36 @@ fn test_handle_metadata_creation() {
 fn test_standard_stream_metadata() {
     // Test standard stream metadata
     let stdin_metadata = HandleMetadata {
-        handle_type: HandleType::StandardStream(StandardStreamType::Stdin),
+        handle_type: HandleType::StandardInputOutput(StandardInputOutput::Stdin),
         access_mode: AccessMode::ReadOnly,
         special_semantics: None,
     };
     
     let stdout_metadata = HandleMetadata {
-        handle_type: HandleType::StandardStream(StandardStreamType::Stdout),
+        handle_type: HandleType::StandardInputOutput(StandardInputOutput::Stdout),
         access_mode: AccessMode::WriteOnly,
         special_semantics: None,
     };
     
     let stderr_metadata = HandleMetadata {
-        handle_type: HandleType::StandardStream(StandardStreamType::Stderr),
+        handle_type: HandleType::StandardInputOutput(StandardInputOutput::Stderr),
         access_mode: AccessMode::WriteOnly,
         special_semantics: None,
     };
     
     // Verify types
     match stdin_metadata.handle_type {
-        HandleType::StandardStream(StandardStreamType::Stdin) => {},
+        HandleType::StandardInputOutput(StandardInputOutput::Stdin) => {},
         _ => panic!("Expected stdin type"),
     }
     
     match stdout_metadata.handle_type {
-        HandleType::StandardStream(StandardStreamType::Stdout) => {},
+        HandleType::StandardInputOutput(StandardInputOutput::Stdout) => {},
         _ => panic!("Expected stdout type"),
     }
     
     match stderr_metadata.handle_type {
-        HandleType::StandardStream(StandardStreamType::Stderr) => {},
+        HandleType::StandardInputOutput(StandardInputOutput::Stderr) => {},
         _ => panic!("Expected stderr type"),
     }
     
@@ -149,7 +149,7 @@ fn test_explicit_metadata_insertion() {
     
     // Create explicit metadata for stdin
     let stdin_metadata = HandleMetadata {
-        handle_type: HandleType::StandardStream(StandardStreamType::Stdin),
+        handle_type: HandleType::StandardInputOutput(StandardInputOutput::Stdin),
         access_mode: AccessMode::ReadOnly,
         special_semantics: None,
     };
@@ -206,7 +206,7 @@ fn test_metadata_with_iterator() {
     };
     
     let stdin_metadata = HandleMetadata {
-        handle_type: HandleType::StandardStream(StandardStreamType::Stdin),
+        handle_type: HandleType::StandardInputOutput(StandardInputOutput::Stdin),
         access_mode: AccessMode::ReadOnly,
         special_semantics: None,
     };
@@ -231,7 +231,7 @@ fn test_metadata_with_iterator() {
         count += 1;
         match metadata.handle_type {
             HandleType::Regular => found_regular = true,
-            HandleType::StandardStream(StandardStreamType::Stdin) => found_stdin = true,
+            HandleType::StandardInputOutput(StandardInputOutput::Stdin) => found_stdin = true,
             HandleType::IpcChannel => found_ipc = true,
             _ => {}
         }
@@ -246,7 +246,7 @@ fn test_metadata_with_iterator() {
 #[test_case]
 fn test_metadata_clone() {
     let original = HandleMetadata {
-        handle_type: HandleType::StandardStream(StandardStreamType::Stdout),
+        handle_type: HandleType::StandardInputOutput(StandardInputOutput::Stdout),
         access_mode: AccessMode::WriteOnly,
         special_semantics: Some(SpecialSemantics::CloseOnExec),
     };
