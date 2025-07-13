@@ -44,7 +44,8 @@ impl HandleError {
 /// A typed handle to a KernelObject
 /// 
 /// Handles represent ownership of a KernelObject and provide type-safe
-/// access to the object's capabilities.
+/// access to the object's capabilities. Handles are not cloneable to
+/// ensure clear ownership semantics.
 #[derive(Debug)]
 pub struct Handle {
     raw: i32,
@@ -79,7 +80,7 @@ impl Handle {
     /// 
     /// # Safety
     /// The caller must ensure that the raw handle is valid
-    pub fn from_raw(raw: i32) -> Self {
+    pub unsafe fn from_raw(raw: i32) -> Self {
         Self { raw }
     }
 
@@ -102,28 +103,6 @@ impl Handle {
     pub fn duplicate(&self) -> HandleResult<Handle> {
         let result = syscall1(Syscall::HandleDuplicate, self.raw as usize);
         HandleError::from_syscall_result(result).map(|raw| Handle { raw })
-    }
-
-    /// Attempt to use this handle as a StreamOps capability
-    /// 
-    /// # Returns
-    /// StreamOps interface if the underlying KernelObject supports streaming,
-    /// or HandleError::Unsupported if it doesn't
-    pub fn as_stream(&self) -> HandleResult<StreamOps> {
-        // For now, we assume all handles can be used as streams
-        // In the future, this could use capability introspection
-        Ok(StreamOps::from_handle(self.raw))
-    }
-
-    /// Attempt to use this handle as a FileObject capability
-    /// 
-    /// # Returns
-    /// FileObject interface if the underlying KernelObject supports file operations,
-    /// or HandleError::Unsupported if it doesn't
-    pub fn as_file(&self) -> HandleResult<FileObject> {
-        // For now, we assume all handles can be used as files
-        // In the future, this could use capability introspection
-        Ok(FileObject::from_handle(self.raw))
     }
 
     /// Query the capabilities supported by this handle
@@ -150,6 +129,26 @@ impl Handle {
         );
         HandleError::from_syscall_result(result).map(|_| ())
     }
+
+    /// Get a StreamOps capability for this handle
+    /// 
+    /// # Returns
+    /// StreamOps capability if the handle supports stream operations
+    pub fn as_stream(&self) -> HandleResult<StreamOps> {
+        // For now, assume all handles support stream operations
+        // In the future, we might want to check capabilities
+        Ok(StreamOps::from_handle(self.raw))
+    }
+
+    /// Get a FileObject capability for this handle
+    /// 
+    /// # Returns
+    /// FileObject capability if the handle supports file operations
+    pub fn as_file(&self) -> HandleResult<FileObject> {
+        // For now, assume all handles support file operations
+        // In the future, we might want to check capabilities
+        Ok(FileObject::from_handle(self.raw))
+    }
 }
 
 impl Drop for Handle {
@@ -158,9 +157,4 @@ impl Drop for Handle {
         // Ignore errors during drop
         let _ = syscall1(Syscall::HandleClose, self.raw as usize);
     }
-}
-
-/// Convenience function to duplicate a raw handle
-pub fn dup(handle: &Handle) -> HandleResult<Handle> {
-    handle.duplicate()
 }

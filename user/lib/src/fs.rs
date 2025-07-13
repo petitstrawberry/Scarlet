@@ -323,6 +323,8 @@ impl Default for OpenOptions {
 /// This provides a Rust standard library-like interface while using
 /// Scarlet Native capabilities under the hood. The file is automatically
 /// closed when the File instance is dropped.
+/// 
+/// Files are not cloneable to ensure clear ownership semantics.
 pub struct File {
     handle: Handle,
 }
@@ -337,7 +339,7 @@ impl File {
     /// 
     /// # Returns
     /// File instance
-    pub(crate) fn from_handle(handle: Handle) -> Self {
+    pub fn from_handle(handle: Handle) -> Self {
         File { handle }
     }
     
@@ -397,8 +399,36 @@ impl File {
     /// 
     /// This allows access to the low-level Handle and its capabilities
     /// when you need more control than the high-level File interface provides.
-    pub fn handle(&self) -> &Handle {
+    pub fn as_handle(&self) -> &Handle {
         &self.handle
+    }
+
+    /// Convert the File into a Handle
+    /// 
+    /// This consumes the File and returns the underlying Handle.
+    /// 
+    /// # Returns
+    /// Handle instance
+    pub fn into_handle(self) -> Handle {
+        // Prevent the File's Drop from running
+        let handle = unsafe {
+            let handle_ptr = &self.handle as *const Handle;
+            core::mem::forget(self);
+            core::ptr::read(handle_ptr)
+        };
+        handle
+    }
+
+    /// Clone the underlying handle via duplication
+    /// 
+    /// This creates a new Handle that duplicates the underlying kernel object.
+    /// This requires a syscall and creates an independent handle.
+    /// 
+    /// # Returns
+    /// Cloned Handle instance or error
+    pub fn clone_handle(&self) -> Result<Handle> {
+        self.handle.duplicate()
+            .map_err(|_| Error::new(ErrorKind::Other, "Failed to duplicate handle"))
     }
     
     /// Get the raw handle ID

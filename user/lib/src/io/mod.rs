@@ -130,7 +130,8 @@ use crate::handle::Handle;
 /// Write data to stdout (handle 1)
 fn write_to_stdout(data: &[u8]) -> usize {
     // Use handle 1 (stdout) directly
-    let stdout = Handle::from_raw(1);
+    let stdout = unsafe { Handle::from_raw(1) };
+
     if let Ok(stream) = stdout.as_stream() {
         match stream.write(data) {
             Ok(bytes_written) => bytes_written,
@@ -144,7 +145,7 @@ fn write_to_stdout(data: &[u8]) -> usize {
 /// Read data from stdin (handle 0)
 fn read_from_stdin(buffer: &mut [u8]) -> usize {
     // Use handle 0 (stdin) directly
-    let stdin = Handle::from_raw(0);
+    let stdin = unsafe { Handle::from_raw(0) };
     if let Ok(stream) = stdin.as_stream() {
         match stream.read(buffer) {
             Ok(bytes_read) => bytes_read,

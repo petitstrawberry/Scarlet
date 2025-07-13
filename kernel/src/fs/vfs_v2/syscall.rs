@@ -505,7 +505,10 @@ pub fn sys_fs_pivot_root(trapframe: &mut Trapframe) -> usize {
     // Perform pivot_root by replacing the mount_tree inside the existing VfsManager
     match pivot_root_in_place(&current_vfs, &new_root_str, &old_root_str) {
         Ok(_) => 0,
-        Err(_) => usize::MAX,
+        Err(e) => {
+            crate::println!("Failed to pivot root: {}", e.message);
+            usize::MAX // -1
+        }
     }
 }
 
@@ -559,7 +562,16 @@ fn pivot_root_in_place(
         }
     }
 
-    temp_vfs.create_dir(old_root_path)?;
+    // Create old_root directory if it doesn't exist
+    if temp_vfs.resolve_path(old_root_path).is_err() {
+        match temp_vfs.create_dir(old_root_path) {
+            Ok(_) => {},
+            Err(e) if e.kind == crate::fs::FileSystemErrorKind::AlreadyExists => {
+                // Directory already exists, which is fine
+            },
+            Err(e) => return Err(e),
+        }
+    }
 
     match temp_vfs.bind_mount_from(&vfs, "/", old_root_path) {
         Ok(_) => {},

@@ -3,48 +3,58 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, fs::{close, dup, mkdir, mkfile, mount, open, pivot_root, readdir}, println, task::{execve_with_flags, exit, waitpid, EXECVE_FORCE_ABI_REBUILD}};
+use std::{
+    format, fs::{create_directory, list_directory, mount, pivot_root, File}, handle::Handle, println, task::{execve_with_flags, exit, fork, getpid, waitpid, EXECVE_FORCE_ABI_REBUILD}
+};
+
+// Global variables for standard I/O handles to hold references
+static mut STDIN: Option<Handle> = None;
+static mut STDOUT: Option<Handle> = None;
+static mut STDERR: Option<Handle> = None;
 
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
     
     // 1. Create a tmpfs for demonstration (in a real system, this might be mounting a real device)
     println!("init: Creating tmpfs for new root at /mnt/newroot");
-    if mount("tmpfs", "/mnt/newroot", "tmpfs", 0, Some("size=50M")) != 0 {
-        println!("init: Failed to mount tmpfs at /mnt/newroot");
-        return false;
+    match mount("tmpfs", "/mnt/newroot", "tmpfs", 0, Some("size=50M")) {
+        Ok(_) => {
+            println!("init: New root filesystem mounted successfully");
+        }
+        Err(_) => {
+            println!("init: Failed to mount tmpfs at /mnt/newroot");
+            return false;
+        }
     }
     
     // 2. Create necessary directories in the new root
-    // Note: In a real implementation, we'd need mkdir syscall or use existing directories
-    println!("init: New root filesystem mounted successfully");
+    println!("init: Creating necessary directories in new root");
     
     // 3. Copy essential binaries (in practice, these would already exist in the new filesystem)
     // For this demo, we'll assume /mnt/newroot already has the necessary structure
     copy_dir("/bin", "/mnt/newroot/bin");
     copy_dir("/system", "/mnt/newroot/system");
     copy_dir("/data", "/mnt/newroot/data");
-    // mkdir("/mnt/newroot/bin", 0); // Create /bin directory in new root
-    // copy_file("/bin/sh", "/mnt/newroot/bin/sh"); // Copy shell binary
-    // copy_file("/bin/hello", "/mnt/newroot/bin/hello"); // Copy hello binary
-
-    // mkdir("/mnt/newroot/bin", 0);
-    // mount("/bin", "/mnt/newroot/bin", "bind", 0, None);
-
-    // mkdir("/mnt/newroot/system/", 0);
-    // mount("/system", "/mnt/newroot/system", "bind", 0, None);
     
-    // 4. Create old_root directory in the new root (where the old root will be moved)
-    // Again, this would typically require mkdir, but we'll assume it exists
+    // Create old_root directory in the new root (where the old root will be moved)
+    match create_directory("/mnt/newroot/old_root") {
+        Ok(_) => {
+            println!("init: Created old_root directory in new root");
+        }
+        Err(_) => {
+            println!("init: Warning: Could not create old_root directory (may already exist)");
+            // Continue anyway as it might already exist
+        }
+    }
     
     true
 }
 
 fn setup_devfs() -> Result<(), &'static str> {
-    mkdir("/dev", 0); // Create /dev directory if it doesn't exist
-    
+    let _ = create_directory("/dev"); // Create /dev directory if it doesn't exist
+
     // Mount devfs at /dev
-    if mount("devfs", "/dev", "devfs", 0, None) == 0 {
+    if mount("devfs", "/dev", "devfs", 0, None).is_ok() {
         Ok(())
     } else {
         Err("Failed to mount devfs")
@@ -53,25 +63,22 @@ fn setup_devfs() -> Result<(), &'static str> {
 
 fn setup_stdio() {
     // Set up standard input, output, and error
-    // Handle 0
-    let stdin_fd = open("/dev/tty0", 0); // Open TTY for reading
-    if stdin_fd != 0 {
-        exit(-1);
-    }
-    // Handle 1
-    let stdout_fd = dup(stdin_fd); // Duplicate stdin for stdout
-    if stdout_fd < 0 {
-        close(stdin_fd);
-        exit(-1);
-    }
-    // Handle 2
-    let stderr_fd = dup(stdin_fd); // Duplicate stdin for stderr
-    if stderr_fd < 0 {
-        close(stdin_fd);
-        close(stdout_fd);
-        exit(-1);
-    }
+    let tty_file = File::open("/dev/tty0").expect("Failed to open /dev/tty0");
     
+    // Handle 0 - convert File to Handle
+    let stdin_handle = tty_file.into_handle();
+    // Handle 1 - duplicate stdin for stdout
+    let stdout_handle = stdin_handle.duplicate().expect("Failed to duplicate stdin handle");
+    // Handle 2 - duplicate stdin for stderr
+    let stderr_handle = stdin_handle.duplicate().expect("Failed to duplicate stdin handle");
+
+    // Store the handles in global variables
+    unsafe {
+        STDIN = Some(stdin_handle);
+        STDOUT = Some(stdout_handle);
+        STDERR = Some(stderr_handle);
+    }
+
     println!("init: Standard I/O setup complete");
 }
 
@@ -79,109 +86,113 @@ fn perform_pivot_root() -> bool {
     println!("init: Performing pivot_root operation...");
     
     // Pivot root: move current root to /mnt/newroot/old_root, make /mnt/newroot the new root
-    if pivot_root("/mnt/newroot", "/mnt/newroot/old_root") != 0 {
-        println!("init: pivot_root failed");
-        return false;
+    match pivot_root("/mnt/newroot", "/mnt/newroot/old_root") {
+        Ok(_) => {
+            println!("init: pivot_root successful!");
+            println!("init: New root is now active, old root accessible at /old_root");
+            
+            // Optional: Clean up the old root (in a real system, you might want to keep it for a while)
+            // umount("/old_root", 0);
+            
+            true
+        }
+        Err(_) => {
+            println!("init: pivot_root failed");
+            false
+        }
     }
-    
-    println!("init: pivot_root successful!");
-    println!("init: New root is now active, old root accessible at /old_root");
-    
-    // Optional: Clean up the old root (in a real system, you might want to keep it for a while)
-    // umount("/old_root", 0);
-    
-    true
 }
 
 // Copy a directory from src to dest recursively
 fn copy_dir(src: &str, dest: &str) -> bool {
-    let src_dir = open(src, 0);
-    if src_dir < 0 {
-        println!("init: Failed to open source directory: {}", src);
-        return false;
-    }
-
-    let dest_dir = open(dest, 0); // Open for writing
-    if dest_dir < 0 { // If the destination directory does not exist, we should create it
-        if std::fs::mkdir(dest, 0) < 0 {
-            println!("init: Failed to create destination directory: {}", dest);
-            close(src_dir);
-            return false;
+    println!("init: Copying directory from {} to {}", src, dest);
+    
+    // Create destination directory if it doesn't exist
+    match create_directory(dest) {
+        Ok(_) => {
+            println!("init: Created directory: {}", dest);
+        }
+        Err(_) => {
+            // Directory might already exist, that's okay
+            println!("init: Directory {} might already exist (continuing)", dest);
         }
     }
-
-    loop {
-        let entry = match readdir(src_dir) {
-            Ok(Some(entry)) => entry,
-            Ok(None) => break, // No more entries
-            Err(e) => {
-                println!("init: Failed to read directory {}: {}", src, e);
-                close(src_dir);
-                close(dest_dir);
-                return false;
+    
+    // Use the new API to read directory entries
+    match list_directory(src) {
+        Ok(entries) => {
+            println!("init: Successfully read directory entries from {}", src);
+            for entry in entries {
+                let src_path = format!("{}/{}", src, entry.name);
+                let dest_path = format!("{}/{}", dest, entry.name);
+                
+                // Skip . and .. entries
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                
+                if entry.is_directory() {
+                    // Recursively copy subdirectory
+                    copy_dir(&src_path, &dest_path);
+                } else if entry.is_file() {
+                    // Copy file
+                    copy_file(&src_path, &dest_path);
+                } else {
+                    println!("init: Skipping special file: {}", src_path);
+                }
             }
-        };
-        let src_path = format!("{}/{}", src, entry.name);
-        let dest_path = format!("{}/{}", dest, entry.name);
-
-        // Skip the current directory (.) and parent directory (..)
-        if entry.name == "." || entry.name == ".." {
-            continue;
+            true
         }
-
-        if entry.is_file() {
-            copy_file(&src_path, &dest_path);
-        } else if entry.is_directory() {
-            // Recursively copy the directory
-            if !copy_dir(&src_path, &dest_path) {
-                println!("init: Failed to copy directory {} to {}", src_path, dest_path);
-                close(src_dir);
-                close(dest_dir);
-                return false;
-            }
+        Err(_) => {
+            println!("init: Failed to read directory entries from {}", src);
+            false
         }
     }
-
-    close(src_dir);
-    close(dest_dir);
-
-    true
 }
 
 fn copy_file(src: &str, dest: &str) -> bool {
-    mkfile(dest, 0); // Create the destination file if it doesn't exist
-    let src_fd = open(src, 0);
-    if src_fd < 0 {
-        println!("init: Failed to open source file: {}", src);
-        return false;
-    }
-    
-    let dest_fd = open(dest, 0); // Open for writing
-    if dest_fd < 0 {
-        println!("init: Failed to open destination file: {}", dest);
-        close(src_fd);
-        return false;
-    }
-    
-    println!("init: Copying file from {} to {}", src, dest);
-    let mut buffer = [0u8; 4096]; // Buffer size of 4KB
-    loop {
-        let bytes_read = std::fs::read(src_fd, &mut buffer);
-        if bytes_read <= 0 {
-            break; // EOF or error
+    // Read source file
+    match File::open(src) {
+        Ok(mut src_file) => {
+            // Create destination file
+            match File::create(dest) {
+                Ok(mut dest_file) => {
+                    println!("init: Copying file from {} to {}", src, dest);
+                    let mut buffer = [0u8; 4096]; // Buffer size of 4KB
+                    
+                    loop {
+                        match src_file.read(&mut buffer) {
+                            Ok(0) => break, // EOF
+                            Ok(bytes_read) => {
+                                match dest_file.write(&buffer[..bytes_read]) {
+                                    Ok(bytes_written) if bytes_written == bytes_read => {
+                                        // Success, continue
+                                    }
+                                    _ => {
+                                        println!("init: Failed to write to destination file: {}", dest);
+                                        return false;
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                println!("init: Failed to read from source file: {}", src);
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }
+                Err(_) => {
+                    println!("init: Failed to create destination file: {}", dest);
+                    false
+                }
+            }
         }
-        let bytes_read = bytes_read as usize;
-        if std::fs::write(dest_fd, &buffer[..bytes_read]) != bytes_read as i32 {
-            println!("init: Failed to write to destination file: {}", dest);
-            close(src_fd);
-            close(dest_fd);
-            return false;
+        Err(_) => {
+            println!("init: Failed to open source file: {}", src);
+            false
         }
     }
-
-    close(src_fd);
-    close(dest_fd);
-    true
 }
 
 #[unsafe(no_mangle)]
@@ -193,7 +204,7 @@ fn main() -> i32 {
     // Set up standard input, output, and error
     setup_stdio();
 
-    println!("init: I'm the init process: PID={}", std::task::getpid());
+    println!("init: I'm the init process: PID={}", getpid());
     println!("init: Starting root filesystem transition...");
     
     // Demonstrate pivot_root functionality
@@ -224,7 +235,7 @@ fn main() -> i32 {
     
     println!("init: Starting shell process...");
 
-    match std::task::fork() {
+    match fork() {
         0 => {
             // Child process: Execute the login program
             if execve_with_flags("/system/scarlet/bin/login", &["/bin/login"], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
