@@ -65,6 +65,9 @@ pub enum ErrorKind {
     Unsupported,
     /// An error returned when an operation could not be completed because an "end of file" was reached prematurely
     UnexpectedEof,
+    /// An error returned when an operation could not be completed because a
+    /// call to `write` returned `Ok(0)`
+    WriteZero,
     /// Any I/O error not part of this list
     Other,
 }
@@ -86,6 +89,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Interrupted => write!(f, "operation interrupted"),
             ErrorKind::Unsupported => write!(f, "operation not supported"),
             ErrorKind::UnexpectedEof => write!(f, "unexpected end of file"),
+            ErrorKind::WriteZero => write!(f, "write zero"),
             ErrorKind::Other => write!(f, "other error"),
         }
     }
@@ -126,33 +130,174 @@ pub enum SeekFrom {
 }
 
 use crate::handle::Handle;
+use core::mem;
 
-/// Write data to stdout (handle 1)
-fn write_to_stdout(data: &[u8]) -> usize {
-    // Use handle 1 (stdout) directly
-    let stdout = unsafe { Handle::from_raw(1) };
+/// A handle to the standard input stream of a process
+///
+/// This handle is created from the global file descriptor 0. This is similar
+/// to the standard library's `Stdin` type.
+pub struct Stdin {
+    // Private to prevent direct construction
+    _private: (),
+}
 
-    if let Ok(stream) = stdout.as_stream() {
-        match stream.write(data) {
-            Ok(bytes_written) => bytes_written,
-            Err(_) => 0,
-        }
-    } else {
-        0
+/// A handle to the standard output stream of a process
+///
+/// This handle is created from the global file descriptor 1. This is similar
+/// to the standard library's `Stdout` type.
+pub struct Stdout {
+    // Private to prevent direct construction
+    _private: (),
+}
+
+/// A handle to the standard error stream of a process
+///
+/// This handle is created from the global file descriptor 2. This is similar
+/// to the standard library's `Stderr` type.
+pub struct Stderr {
+    // Private to prevent direct construction
+    _private: (),
+}
+
+/// Constructs a new handle to the standard input of this process
+///
+/// The returned handle allows reading from the standard input stream.
+/// Multiple calls to this function will return handles that share
+/// the same underlying file descriptor.
+pub fn stdin() -> Stdin {
+    Stdin { _private: () }
+}
+
+/// Constructs a new handle to the standard output of this process
+///
+/// The returned handle allows writing to the standard output stream.
+/// Multiple calls to this function will return handles that share
+/// the same underlying file descriptor.
+pub fn stdout() -> Stdout {
+    Stdout { _private: () }
+}
+
+/// Constructs a new handle to the standard error of this process
+///
+/// The returned handle allows writing to the standard error stream.
+/// Multiple calls to this function will return handles that share
+/// the same underlying file descriptor.
+pub fn stderr() -> Stderr {
+    Stderr { _private: () }
+}
+
+impl Stdin {
+    /// Read data from stdin
+    ///
+    /// # Arguments
+    /// * `buffer` - Buffer to read data into
+    ///
+    /// # Returns
+    /// Number of bytes read or error
+    pub fn read(&self, buffer: &mut [u8]) -> Result<usize> {
+        let handle = unsafe { Handle::from_raw(0) };
+        let result = if let Ok(stream) = handle.as_stream() {
+            stream.read(buffer)
+                .map_err(|_| Error::new(ErrorKind::Other, "Read from stdin failed"))
+        } else {
+            Err(Error::new(ErrorKind::Unsupported, "Stdin does not support read operations"))
+        };
+        
+        // Prevent handle from being dropped and closing stdin
+        mem::forget(handle);
+        result
     }
 }
 
-/// Read data from stdin (handle 0)
-fn read_from_stdin(buffer: &mut [u8]) -> usize {
-    // Use handle 0 (stdin) directly
-    let stdin = unsafe { Handle::from_raw(0) };
-    if let Ok(stream) = stdin.as_stream() {
-        match stream.read(buffer) {
-            Ok(bytes_read) => bytes_read,
-            Err(_) => 0,
+impl Stdout {
+    /// Write data to stdout
+    ///
+    /// # Arguments
+    /// * `data` - Data to write
+    ///
+    /// # Returns
+    /// Number of bytes written or error
+    pub fn write(&self, data: &[u8]) -> Result<usize> {
+        let handle = unsafe { Handle::from_raw(1) };
+        let result = if let Ok(stream) = handle.as_stream() {
+            stream.write(data)
+                .map_err(|_| Error::new(ErrorKind::Other, "Write to stdout failed"))
+        } else {
+            Err(Error::new(ErrorKind::Unsupported, "Stdout does not support write operations"))
+        };
+        
+        // Prevent handle from being dropped and closing stdout
+        mem::forget(handle);
+        result
+    }
+
+    /// Write all data to stdout
+    ///
+    /// This is a convenience method that ensures all data is written.
+    pub fn write_all(&self, data: &[u8]) -> Result<()> {
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let bytes_written = self.write(remaining)?;
+            if bytes_written == 0 {
+                return Err(Error::new(ErrorKind::WriteZero, "Failed to write whole buffer"));
+            }
+            remaining = &remaining[bytes_written..];
         }
-    } else {
-        0
+        Ok(())
+    }
+
+    /// Flush this output stream, ensuring that all intermediately buffered
+    /// contents reach their destination
+    ///
+    /// For now, this is a no-op as we don't implement buffering.
+    pub fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Stderr {
+    /// Write data to stderr
+    ///
+    /// # Arguments
+    /// * `data` - Data to write
+    ///
+    /// # Returns
+    /// Number of bytes written or error
+    pub fn write(&self, data: &[u8]) -> Result<usize> {
+        let handle = unsafe { Handle::from_raw(2) };
+        let result = if let Ok(stream) = handle.as_stream() {
+            stream.write(data)
+                .map_err(|_| Error::new(ErrorKind::Other, "Write to stderr failed"))
+        } else {
+            Err(Error::new(ErrorKind::Unsupported, "Stderr does not support write operations"))
+        };
+        
+        // Prevent handle from being dropped and closing stderr
+        mem::forget(handle);
+        result
+    }
+
+    /// Write all data to stderr
+    ///
+    /// This is a convenience method that ensures all data is written.
+    pub fn write_all(&self, data: &[u8]) -> Result<()> {
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let bytes_written = self.write(remaining)?;
+            if bytes_written == 0 {
+                return Err(Error::new(ErrorKind::WriteZero, "Failed to write whole buffer"));
+            }
+            remaining = &remaining[bytes_written..];
+        }
+        Ok(())
+    }
+
+    /// Flush this output stream, ensuring that all intermediately buffered
+    /// contents reach their destination
+    ///
+    /// For now, this is a no-op as we don't implement buffering.
+    pub fn flush(&self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -169,7 +314,10 @@ fn read_from_stdin(buffer: &mut [u8]) -> usize {
 pub fn putchar(c: char) -> usize {
     let mut buf = [0u8; 4];
     let char_str = c.encode_utf8(&mut buf);
-    write_to_stdout(char_str.as_bytes())
+    match stdout().write(char_str.as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(_) => 0,
+    }
 }
 
 /// Reads a single character from the console
@@ -184,11 +332,14 @@ pub fn putchar(c: char) -> usize {
 pub fn get_char() -> char {
     let mut buf = [0u8; 1];
     loop {
-        let bytes_read = read_from_stdin(&mut buf);
-        if bytes_read > 0 {
-            return buf[0] as char;
+        match stdin().read(&mut buf) {
+            Ok(bytes_read) if bytes_read > 0 => {
+                return buf[0] as char;
+            }
+            _ => {
+                // If no data available, continue trying
+            }
         }
-        // If no data available, continue trying
     }
 }
 
@@ -200,7 +351,10 @@ pub fn get_char() -> char {
 /// # Returns
 /// The number of characters output
 pub fn puts(s: &str) -> usize {
-    write_to_stdout(s.as_bytes())
+    match stdout().write(s.as_bytes()) {
+        Ok(bytes) => bytes,
+        Err(_) => 0,
+    }
 }
 
 /// Print implementation for Scarlet
@@ -216,8 +370,10 @@ struct StdoutWriter;
 
 impl fmt::Write for StdoutWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        write_to_stdout(s.as_bytes());
-        Ok(())
+        match stdout().write(s.as_bytes()) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(fmt::Error),
+        }
     }
 }
 
