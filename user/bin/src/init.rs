@@ -30,41 +30,11 @@ fn setup_new_root() -> bool {
     // 2. Create necessary directories in the new root
     println!("init: Creating necessary directories in new root");
     
-    // 3. Debug: First check what's actually in the current root
-    // println!("init: DEBUG - Checking current root contents:");
-    // match list_directory("/") {
-    //     Ok(entries) => {
-    //         for entry in entries {
-    //             println!("init: DEBUG - Root contains: {} ({})", entry.name, 
-    //                 if entry.is_directory() { "dir" } else { "file" });
-    //         }
-    //     }
-    //     Err(_) => {
-    //         println!("init: DEBUG - Failed to read root directory");
-    //     }
-    // }
-    
-    // Check if /system/scarlet/bin exists (where initramfs puts the binaries)
-    println!("init: DEBUG - Checking /system/scarlet/bin:");
-    match list_directory("/system/scarlet/bin") {
-        Ok(entries) => {
-            for entry in entries {
-                println!("init: DEBUG - /system/scarlet/bin contains: {}", entry.name);
-            }
-        }
-        Err(e) => {
-            println!("init: DEBUG - /system/scarlet/bin not accessible: {}", e);
-        }
-    }
-    
-    // 4. Copy essential binaries (update paths based on actual initramfs structure)
+    // 3. Copy essential binaries (update paths based on actual initramfs structure)
     // Copy from the actual location in initramfs
+    copy_dir("/bin", "/mnt/newroot/bin");
     copy_dir("/system", "/mnt/newroot/system");
-    
-    // Also create some standard directories that might be expected
-    let _ = create_directory("/mnt/newroot/bin");
-    let _ = create_directory("/mnt/newroot/usr");
-    let _ = create_directory("/mnt/newroot/usr/bin");
+    copy_dir("/data", "/mnt/newroot/data");
     
     // Create old_root directory in the new root (where the old root will be moved)
     match create_directory("/mnt/newroot/old_root") {
@@ -204,16 +174,16 @@ fn copy_file(src: &str, dest: &str) -> bool {
                                     }
                                 }
                             }
-                            Err(_) => {
-                                println!("init: Failed to read from source file: {}", src);
+                            Err(e) => {
+                                println!("init: Failed to read from source file: {}: {}", src, e);
                                 return false;
                             }
                         }
                     }
                     true
                 }
-                Err(_) => {
-                    println!("init: Failed to create destination file: {}", dest);
+                Err(e) => {
+                    println!("init: Failed to create destination file: {}: {}", dest, e);
                     false
                 }
             }
@@ -231,6 +201,7 @@ fn main() -> i32 {
     if setup_devfs().is_err() {
         exit(-1); // Exit if we cannot set up the device filesystem
     }
+
     // Set up standard input, output, and error
     setup_stdio();
 
@@ -254,51 +225,6 @@ fn main() -> i32 {
             
             // Verify the new root by trying to access files
             println!("init: Current working directory after pivot_root");
-            
-            // Debug: Check what's in the new root after pivot_root
-            println!("init: DEBUG - New root contents after pivot_root:");
-            match list_directory("/") {
-                Ok(entries) => {
-                    for entry in entries {
-                        println!("init: DEBUG - New root contains: {} ({})", entry.name, 
-                            if entry.is_directory() { "dir" } else { "file" });
-                    }
-                }
-                Err(_) => {
-                    println!("init: DEBUG - Failed to read new root directory");
-                }
-            }
-            
-            // Check if our copied system directory exists
-            match list_directory("/system") {
-                Ok(entries) => {
-                    println!("init: DEBUG - /system contains {} entries", entries.len());
-                    for entry in entries {
-                        println!("init: DEBUG - /system/{} ({})", entry.name, 
-                            if entry.is_directory() { "dir" } else { "file" });
-                    }
-                }
-                Err(_) => {
-                    println!("init: DEBUG - /system not accessible in new root");
-                }
-            }
-            
-            // Check the old root
-            match list_directory("/old_root") {
-                Ok(entries) => {
-                    println!("init: DEBUG - /old_root contains {} entries", entries.len());
-                    for entry in entries {
-                        if entry.name != "." && entry.name != ".." {
-                            println!("init: DEBUG - /old_root/{} ({})", entry.name, 
-                                if entry.is_directory() { "dir" } else { "file" });
-                        }
-                    }
-                }
-                Err(_) => {
-                    println!("init: DEBUG - /old_root not accessible");
-                }
-            }
-            
         } else {
             println!("init: Failed to pivot root, continuing with current root");
         }
@@ -313,11 +239,9 @@ fn main() -> i32 {
             // Child process: Execute the login program
             // After pivot_root, try the most likely locations for login binary
             let login_paths = [
-                "/system/scarlet/bin/login",      // In new root (copied from initramfs)
+                "/system/scarlet/bin/login",
+                "/scarlet/system/scarlet/bin/login", // In new root (copied from initramfs)
                 "/old_root/system/scarlet/bin/login", // In old root (original initramfs)
-                "/bin/login",                     // Standard location
-                "/usr/bin/login",                 // Alternative standard location
-                "/old_root/bin/login",           // Standard location in old root
             ];
             
             for login_path in &login_paths {
