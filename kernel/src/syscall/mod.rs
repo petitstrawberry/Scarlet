@@ -25,12 +25,6 @@
 //! - Getpid (7), Getppid (8), Brk (12), Sbrk (13)
 //! - Basic I/O: Putchar (16), Getchar (17)
 //! 
-//! ### Legacy POSIX Compatibility (20-35)
-//! - Open (20) → VfsOpen, Close (21) → HandleClose, Read (22) → StreamRead, Write (23) → StreamWrite
-//! - Lseek (24) → FileSeek, Truncate (26) → VfsTruncate, Dup (27) → HandleDuplicate
-//! - CreateDir (30) → VfsCreateDirectory, Mount (32) → FsMount
-//! - Umount (33) → FsUmount, PivotRoot (34) → FsPivotRoot, Chdir (35) → VfsChangeDirectory
-//! 
 //! ### Handle Management (100-199)
 //! - HandleQuery (100), HandleSetRole (101), HandleClose (102), HandleDuplicate (103)
 //! - Pipe (104)
@@ -90,24 +84,6 @@ syscall_table! {
     // BASIC I/O
     Putchar = 16 => sys_putchar,
     Getchar = 17 => sys_getchar,
-    
-    // === Legacy POSIX-like Operations ===
-    Open = 20 => sys_vfs_open,          // Legacy - redirects to VfsOpen
-    Close = 21 => sys_handle_close,      // Legacy - redirects to HandleClose
-    Read = 22 => sys_stream_read,        // Legacy - redirects to StreamRead
-    Write = 23 => sys_stream_write,      // Legacy - redirects to StreamWrite
-    Lseek = 24 => sys_file_seek,         // Redirect to FileSeek for compatibility
-    // Ftruncate (25) deprecated - use FileTruncate (301)
-    Truncate = 26 => sys_vfs_truncate,   // Legacy - redirects to VfsTruncate
-    Dup = 27 => sys_handle_duplicate,    // Legacy - redirects to HandleDuplicate
-    
-    // === Legacy Compatibility ===
-    CreateDir = 30 => sys_vfs_create_directory, // Legacy alias for VfsCreateDirectory
-    CreateFile = 31 => sys_vfs_create_file,     // Legacy alias for VfsCreateFile
-    Mount = 32 => sys_fs_mount,                 // Legacy alias for FsMount  
-    Umount = 33 => sys_fs_umount,               // Legacy alias for FsUmount
-    PivotRoot = 34 => sys_fs_pivot_root,        // Legacy alias for FsPivotRoot
-    Chdir = 35 => sys_vfs_change_directory,     // Legacy alias for VfsChangeDirectory
     
     // === Handle Management ===
     HandleQuery = 100 => sys_handle_query,     // Query handle metadata/capabilities

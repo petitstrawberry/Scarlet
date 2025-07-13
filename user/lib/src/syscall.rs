@@ -48,13 +48,6 @@ pub enum Syscall {
     FsPivotRoot = 502
 }
 
-// Backward compatibility aliases
-#[allow(non_upper_case_globals)]
-impl Syscall {
-    // Legacy names for compatibility - these map to the actual legacy syscall numbers
-    // defined above (30-35) which redirect to the new implementations
-}
-
 pub fn syscall0(syscall: Syscall) -> usize {
     arch_syscall0(syscall)
 }
