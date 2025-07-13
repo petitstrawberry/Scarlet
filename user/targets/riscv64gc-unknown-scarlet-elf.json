@@ -6,27 +6,27 @@
     "data-layout": "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
     "eh-frame-header": false,
     "emit-debug-gdb-scripts": false,
-    "features": "+m,+a,+f,+d",
+    "features": "+m,+a,+f,+d,+c",
     "linker": "rust-lld",
-    "linker-flavor": "gnu-lld",
+    "linker-flavor": "ld.lld",
     "llvm-abiname": "lp64d",
     "llvm-target": "riscv64",
     "max-atomic-width": 64,
     "metadata": {
-      "description": "Scarlet user program RISC-V (RV64IMAFD ISA)",
+      "description": "Scarlet user program RISC-V (RV64IMAFDC ISA)",
       "host_tools": false,
       "std": false,
       "tier": 2
     },
     "panic-strategy": "abort",
     "pre-link-args": {
-      "gnu-lld": [
+      "ld.lld": [
         "-T", "../lds/user.ld",
         "--entry=_entry"
       ]
     },
     "post-link-args": {
-    "gnu-lld": ["--print-memory-usage"]
+      "ld.lld": ["--print-memory-usage"]
     },
     "relocation-model": "static",
     "supported-sanitizers": [

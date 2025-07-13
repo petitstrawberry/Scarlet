@@ -5,22 +5,21 @@
 //! ## Overview
 //!
 //! The device manager is responsible for:
-//! - Registering and managing serial devices
-//! - Tracking available device drivers
-//! - Device discovery and initialization
-//! - Managing device information
+//! - Tracking available device drivers with priority-based initialization
+//! - Device discovery and initialization through FDT
+//! - Managing device information and lifecycle
 //!
 //! ## Key Components
 //!
-//! - `BasicDeviceManager`: Manages fundamental I/O devices like serial ports
 //! - `DeviceManager`: The main device management system that handles all devices and drivers
+//! - `DriverPriority`: Priority levels for controlling driver initialization order
 //!
 //! ## Device Discovery
 //!
 //! Devices are discovered through the Flattened Device Tree (FDT). The manager:
 //! 1. Parses the device tree
-//! 2. Matches compatible devices with registered drivers
-//! 3. Probes devices with appropriate drivers
+//! 2. Matches compatible devices with registered drivers based on priority
+//! 3. Probes devices with appropriate drivers in priority order
 //!
 //! ## Usage
 //!
@@ -28,174 +27,74 @@
 //! - `DeviceManager::get_manager()` - Immutable access
 //! - `DeviceManager::get_mut_manager()` - Mutable access
 //!
-//! ### Example: Registering a serial device
+//! ### Example: Registering a device driver
 //!
 //! ```
-//! use crate::device::manager::register_serial;
+//! use crate::device::manager::{DeviceManager, DriverPriority};
 //! 
-//! // Create a new serial device
-//! let my_serial = Box::new(MySerialImplementation::new());
+//! // Create a new device driver
+//! let my_driver = Box::new(MyDeviceDriver::new());
 //! 
-//! // Register with the device manager
-//! register_serial(my_serial);
+//! // Register with the device manager at Core priority
+//! DeviceManager::get_mut_manager().register_driver(my_driver, DriverPriority::Core);
 //! ```
 
 extern crate alloc;
+
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering;
 
 use alloc::collections::btree_map::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::string::String;
 use spin::mutex::Mutex;
-use spin::rwlock::RwLock;
 
 use crate::device::platform::resource::PlatformDeviceResource;
 use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::PlatformDeviceInfo;
-use crate::println;
-
-use crate::traits::serial::Serial;
+use crate::early_println;
 
 use super::fdt::FdtManager;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
-use super::DeviceType;
 
-/// BasicDeviceManager
-///
-/// This struct manages basic I/O devices, such as serial ports.
-/// It provides methods to register, borrow, and manage serial devices.
-/// It is a part of the DeviceManager, which handles all devices and drivers.
-///
-/// # Fields
-/// - `serials`: A vector of serial devices managed by this manager.
-/// 
-pub struct BasicDeviceManager {
-    /* Basic I/O */
-    serials: Vec<Box<dyn Serial>>,
+/// Simplified shared device type
+pub type SharedDevice = Arc<dyn Device>;
+
+/// Driver priority levels for initialization order
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DriverPriority {
+    /// Critical infrastructure drivers (interrupt controllers, memory controllers)
+    Critical = 0,
+    /// Core system drivers (timers, basic I/O)
+    Core = 1,
+    /// Standard device drivers (network, storage)
+    Standard = 2,
+    /// Late initialization drivers (filesystems, user interface)
+    Late = 3,
 }
 
-impl BasicDeviceManager {
-    pub fn register_serial(&mut self, serial: Box<dyn Serial>) {
-        self.serials.push(serial);
-        println!("Registered serial device");
+impl DriverPriority {
+    /// Get all priority levels in order
+    pub fn all() -> &'static [DriverPriority] {
+        &[
+            DriverPriority::Critical,
+            DriverPriority::Core,
+            DriverPriority::Standard,
+            DriverPriority::Late,
+        ]
     }
 
-    pub fn register_serials(&mut self, serias: Vec<Box<dyn Serial>>) {
-        let len = serias.len();
-        for serial in serias {
-            self.serials.push(serial);
-        }
-        println!("Registered serial devices: {}", len);
-    }
-
-    pub fn borrow_serial(&self, idx: usize) -> Option<&Box<dyn Serial>> {
-        self.serials.get(idx)
-    }
-
-    pub fn borrow_mut_serial(&mut self, idx: usize) -> Option<&mut Box<dyn Serial>> {
-        self.serials.get_mut(idx)
-    }
-
-    pub fn borrow_serials(&self) -> &Vec<Box<dyn Serial>> {
-        &self.serials
-    }
-
-    pub fn borrow_mut_serials(&mut self) -> &mut Vec<Box<dyn Serial>> {
-        &mut self.serials
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-pub enum DeviceState {
-    Available,
-    InUse,
-    InUseExclusive,
-}
-
-pub struct DeviceHandle {
-    device: Arc<RwLock<Box<dyn Device>>>,
-    state: RwLock<DeviceState>,
-    borrow_count: RwLock<usize>,
-}
-
-impl DeviceHandle {
-    pub fn new(device: Arc<RwLock<Box<dyn Device>>>) -> Self {
-        Self {
-            device,
-            state: RwLock::new(DeviceState::Available),
-            borrow_count: RwLock::new(0),
-        }
-    }
-
-    pub fn is_in_use(&self) -> bool {
-        *self.state.read() == DeviceState::InUse || *self.state.read() == DeviceState::InUseExclusive
-    }
-
-    pub fn is_in_use_exclusive(&self) -> bool {
-        *self.state.read() == DeviceState::InUseExclusive
-    }
-
-    fn set_in_use(&self) {
-        let mut state = self.state.write();
-        *state = DeviceState::InUse;
-    }
-
-    fn set_available(&self) {
-        let mut state = self.state.write();
-        *state = DeviceState::Available;
-    }
-
-    fn set_in_use_exclusive(&self) {
-        let mut state = self.state.write();
-        *state = DeviceState::InUseExclusive;
-    }
-
-    fn increment_borrow_count(&self) {
-        let mut count = self.borrow_count.write();
-        *count += 1;
-    }
-
-    fn decrement_borrow_count(&self) {
-        let mut count = self.borrow_count.write();
-        if *count > 0 {
-            *count -= 1;
-        }
-    }
-
-    pub fn get_borrow_count(&self) -> usize {
-        *self.borrow_count.read()
-    }
-}
-
-pub type BorrowedDevice = Arc<RwLock<Box<dyn Device>>>;
-
-pub struct BorrowedDeviceGuard {
-    handle: Arc<DeviceHandle>,
-}
-
-impl BorrowedDeviceGuard {
-    pub fn new(handle: Arc<DeviceHandle>) -> Self {
-        Self { handle }
-    }
-}
-
-impl BorrowedDeviceGuard {
-    pub fn device(&self) -> BorrowedDevice {
-        Arc::clone(&self.handle.device)
-    }
-}
-
-impl Drop for BorrowedDeviceGuard {
-    fn drop(&mut self) {
-        self.handle.decrement_borrow_count();
-        if self.handle.get_borrow_count() == 0 {
-            if self.handle.is_in_use_exclusive() {
-                self.handle.set_available();
-            } else {
-                self.handle.set_available();
-            }
+    /// Get a human-readable description of the priority level
+    pub fn description(&self) -> &'static str {
+        match self {
+            DriverPriority::Critical => "Critical Infrastructure",
+            DriverPriority::Core => "Core System",
+            DriverPriority::Standard => "Standard Devices",
+            DriverPriority::Late => "Late Initialization",
         }
     }
 }
@@ -205,31 +104,35 @@ static mut MANAGER: DeviceManager = DeviceManager::new();
 /// DeviceManager
 /// 
 /// This struct is the main device management system.
-/// It handles all devices and drivers, including basic I/O devices.
-/// It provides methods to register devices, populate devices from the FDT,
-/// and manage device drivers.
+/// It handles all devices and drivers with priority-based initialization.
 /// 
 /// # Fields
-/// - `basic`: An instance of `BasicDeviceManager` for managing basic I/O devices.
-/// - `devices`: A mutex-protected vector of all registered devices.
-/// - `drivers`: A mutex-protected vector of all registered device drivers.
+/// - `devices`: A mutex-protected map of all registered devices by ID.
+/// - `device_by_name`: A mutex-protected map of devices by name.
+/// - `name_to_id`: A mutex-protected map from device name to device ID.
+/// - `drivers`: A mutex-protected map of device drivers organized by priority.
+/// - `next_device_id`: Atomic counter for generating unique device IDs.
 pub struct DeviceManager {
-    /* Manager for basic devices */
-    pub basic: BasicDeviceManager,
-    /* Other devices */
-    devices: Mutex<Vec<Arc<DeviceHandle>>>,
-    /* Device drivers */
-    drivers: Mutex<Vec<Box<dyn DeviceDriver>>>,
+    /* Devices stored by ID */
+    devices: Mutex<BTreeMap<usize, SharedDevice>>,
+    /* Devices stored by name */
+    device_by_name: Mutex<BTreeMap<String, SharedDevice>>,
+    /* Name to ID mapping */
+    name_to_id: Mutex<BTreeMap<String, usize>>,
+    /* Device drivers organized by priority */
+    drivers: Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>>,
+    /* Next device ID to assign */
+    next_device_id: AtomicUsize,
 }
 
 impl DeviceManager {
     const fn new() -> Self {
         DeviceManager {
-            basic: BasicDeviceManager {
-                serials: Vec::new(),
-            },
-            devices: Mutex::new(Vec::new()),
-            drivers: Mutex::new(Vec::new()),
+            devices: Mutex::new(BTreeMap::new()),
+            device_by_name: Mutex::new(BTreeMap::new()),
+            name_to_id: Mutex::new(BTreeMap::new()),
+            drivers: Mutex::new(BTreeMap::new()),
+            next_device_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
         }
     }
 
@@ -254,84 +157,120 @@ impl DeviceManager {
     /// # Example
     /// 
     /// ```rust
-    /// let device = Box::new(MyDevice::new());
+    /// let device = Arc::new(MyDevice::new());
     /// let id = DeviceManager::get_mut_manager().register_device(device);
     /// ```
     /// 
-    pub fn register_device(&self, device: Box<dyn Device>) -> usize {
+    pub fn register_device(&self, device: Arc<dyn Device>) -> usize {
         let mut devices = self.devices.lock();
-        let device = Arc::new(RwLock::new(device));
-        let handle = DeviceHandle::new(device).into();
-        let id = devices.len();
-        devices.push(handle);
+        let id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
+        devices.insert(id, device);
         id
     }
 
-    /// Borrow a device by type and index
+    /// Register a device with the manager by name
     /// 
     /// # Arguments
-    /// 
-    /// * `id`: The id of the device to borrow.
+    /// * `name`: The name of the device.
+    /// * `device`: The device to register.
     /// 
     /// # Returns
+    ///  * The id of the registered device.
     /// 
-    /// A result containing a reference to the borrowed device, or an error if the device type is not found or the index is out of bounds.
-    /// 
-    pub fn borrow_device(&self, id: usize) -> Result<BorrowedDeviceGuard, &'static str> {
-        let devices = self.devices.lock();    
-        if id < devices.len() {
-            let device = &devices[id];
-            if device.is_in_use_exclusive() {
-                return Err("Device is already in use exclusively");
-            }
-            device.increment_borrow_count(); // Increment borrow count
-            device.set_in_use(); // Mark the device as in use
-            return Ok(BorrowedDeviceGuard::new(Arc::clone(device)));
-        } else {
-            return Err("Index out of bounds");
-        }
+    pub fn register_device_with_name(&self, name: String, device: Arc<dyn Device>) -> usize {
+        let mut devices = self.devices.lock();
+        let mut device_by_name = self.device_by_name.lock();
+        let mut name_to_id = self.name_to_id.lock();
+        
+        let id = self.next_device_id.fetch_add(1, Ordering::SeqCst);
+        devices.insert(id, device.clone());
+        device_by_name.insert(name.clone(), device);
+        name_to_id.insert(name, id);
+        id
     }
 
-    /// Borrow an exclusive device by type and index
+    /// Get a device by ID
     /// 
     /// # Arguments
-    /// 
-    /// * `id`: The id of the device to borrow.
+    /// * `id`: The id of the device to get.
     /// 
     /// # Returns
+    /// * The device if found, or None if not found.
     /// 
-    /// A result containing a reference to the borrowed device, or an error if the device type is not found or the index is out of bounds.
-    /// 
-    pub fn borrow_exclusive_device(&self, id: usize) -> Result<BorrowedDeviceGuard, &'static str> {
-    let devices = self.devices.lock();
-        if id < devices.len() {
-            let handle = &devices[id];
-            if handle.is_in_use() {
-                return Err("Device is already in use");
-            }
-            handle.increment_borrow_count(); // Increment borrow count
-            handle.set_in_use_exclusive(); // Mark the device as in use
-            return Ok(BorrowedDeviceGuard::new(Arc::clone(handle)));
-        } else {
-            return Err("Index out of bounds");
-        }
+    pub fn get_device(&self, id: usize) -> Option<SharedDevice> {
+        let devices = self.devices.lock();
+        devices.get(&id).cloned()
     }
 
+    /// Get a device by name
+    /// 
+    /// # Arguments
+    /// * `name`: The name of the device to get.
+    /// 
+    /// # Returns
+    /// * The device if found, or None if not found.
+    /// 
+    pub fn get_device_by_name(&self, name: &str) -> Option<SharedDevice> {
+        let device_by_name = self.device_by_name.lock();
+        device_by_name.get(name).cloned()
+    }
 
+    /// Get a device ID by name
+    /// 
+    /// # Arguments
+    /// * `name`: The name of the device to find.
+    /// 
+    /// # Returns
+    /// * The device ID if found, or None if not found.
+    /// 
+    pub fn get_device_id_by_name(&self, name: &str) -> Option<usize> {
+        let name_to_id = self.name_to_id.lock();
+        name_to_id.get(name).cloned()
+    }
 
-
-    /// Get the number of devices of a specific type
+    /// Get the number of devices
     /// 
     /// # Returns
     /// 
-    /// The number of devices of the specified type.
+    /// The number of devices.
     /// 
     pub fn get_devices_count(&self) -> usize {
         let devices = self.devices.lock();
         devices.len()
     }
 
-    pub fn borrow_drivers(&self) -> &Mutex<Vec<Box<dyn DeviceDriver>>> {
+    /// Get the first device of a specific type
+    /// 
+    /// # Arguments
+    /// * `device_type`: The device type to find.
+    /// 
+    /// # Returns
+    /// * The first device ID of the specified type, or None if not found.
+    /// 
+    pub fn get_first_device_by_type(&self, device_type: super::DeviceType) -> Option<usize> {
+        let devices = self.devices.lock();
+        for (id, device) in devices.iter() {
+            if device.device_type() == device_type {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    /// Get all devices registered by name
+    /// 
+    /// Returns an iterator over (name, device) pairs for all devices
+    /// that were registered with explicit names.
+    /// 
+    /// # Returns
+    /// 
+    /// Vector of (name, device) tuples
+    pub fn get_named_devices(&self) -> Vec<(String, SharedDevice)> {
+        let device_by_name = self.device_by_name.lock();
+        device_by_name.iter().map(|(name, device)| (name.clone(), device.clone())).collect()
+    }
+
+    pub fn borrow_drivers(&self) -> &Mutex<BTreeMap<DriverPriority, Vec<Box<dyn DeviceDriver>>>> {
         &self.drivers
     }
 
@@ -342,68 +281,89 @@ impl DeviceManager {
     /// If a matching driver is found, it probes the device using the driver's `probe` method.
     /// If the probe is successful, the device is registered with the driver.
     pub fn populate_devices(&mut self) {
+        // Use all priority levels in order
+        self.populate_devices_by_priority(None);
+    }
+
+    /// Populate devices using drivers of specific priority levels
+    /// 
+    /// # Arguments
+    /// 
+    /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
+    pub fn populate_devices_by_priority(&mut self, priorities: Option<&[DriverPriority]>) {
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
-            println!("FDT not initialized");
+            early_println!("FDT not initialized");
             return;
         }
         let fdt = fdt.unwrap();
-        println!("Populating devices from FDT...");
-
-        let soc = fdt.find_node("/soc");
-        if soc.is_none() {
-            println!("No /soc node found");
-            return;
-        }
-
-        let soc = soc.unwrap();
-        let mut idx = 0;
-        for child in soc.children() {
-            let compatible = child.compatible();
-            if compatible.is_none() {
+        
+        let priority_list = priorities.unwrap_or(DriverPriority::all());
+        
+        for &priority in priority_list {
+            early_println!("Populating devices with {} drivers from FDT...", priority.description());
+            
+            let soc = fdt.find_node("/soc");
+            if soc.is_none() {
+                early_println!("No /soc node found");
                 continue;
             }
-            let compatible = compatible.unwrap().all().collect::<Vec<_>>();
-            
-            for driver in self.drivers.lock().iter() {
-                if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
-                    let mut resources = Vec::new();
-                    
-                    // Memory regions
-                    if let Some(regions) = child.reg() {
-                        for region in regions {
-                            let res = PlatformDeviceResource {
-                                res_type: PlatformDeviceResourceType::MEM,
-                                start: region.starting_address as usize,
-                                end: region.starting_address as usize + region.size.unwrap() - 1,
-                            };
-                            resources.push(res);
-                        }
-                    }
 
-                    // IRQs
-                    if let Some(irqs) = child.interrupts() {
-                        for irq in irqs {
-                            let res = PlatformDeviceResource {
-                                res_type: PlatformDeviceResourceType::IRQ,
-                                start: irq,
-                                end: irq,
-                            };
-                            resources.push(res);
-                        }
-                    }
+            let soc = soc.unwrap();
+            let mut idx = 0;
+            for child in soc.children() {
+                let compatible = child.compatible();
+                if compatible.is_none() {
+                    continue;
+                }
+                let compatible = compatible.unwrap().all().collect::<Vec<_>>();
+                
+                // Get drivers for this priority level
+                let drivers = self.drivers.lock();
+                if let Some(driver_list) = drivers.get(&priority) {
+                    for driver in driver_list.iter() {
+                        if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
+                            let mut resources = Vec::new();
+                            
+                            // Memory regions
+                            if let Some(regions) = child.reg() {
+                                for region in regions {
+                                    let res = PlatformDeviceResource {
+                                        res_type: PlatformDeviceResourceType::MEM,
+                                        start: region.starting_address as usize,
+                                        end: region.starting_address as usize + region.size.unwrap() - 1,
+                                    };
+                                    resources.push(res);
+                                }
+                            }
 
-                    let device: Box<dyn DeviceInfo> = Box::new(PlatformDeviceInfo::new(
-                        child.name,
-                        idx,
-                        compatible.clone(),
-                        resources,
-                    ));
-                    if let Err(e) = driver.probe(&*device) {
-                        println!("Failed to probe device {}: {}", device.name(), e);
-                    } else {
-                        idx += 1;
+                            // IRQs
+                            if let Some(irqs) = child.interrupts() {
+                                for irq in irqs {
+                                    let res = PlatformDeviceResource {
+                                        res_type: PlatformDeviceResourceType::IRQ,
+                                        start: irq,
+                                        end: irq,
+                                    };
+                                    resources.push(res);
+                                }
+                            }
+
+                            let device: Box<dyn DeviceInfo> = Box::new(PlatformDeviceInfo::new(
+                                child.name,
+                                idx,
+                                compatible.clone(),
+                                resources,
+                            ));
+                            if let Err(e) = driver.probe(&*device) {
+                                early_println!("Failed to probe {} device {}: {}", priority.description(), device.name(), e);
+                            } else {
+                                early_println!("Successfully probed {} device: {}", priority.description(), device.name());
+                                idx += 1;
+                            }
+                            break; // Found matching driver, move to next device
+                        }
                     }
                 }
             }
@@ -412,42 +372,35 @@ impl DeviceManager {
 
     /// Registers a device driver with the device manager.
     /// 
-    /// This function takes a boxed device driver and adds it to the list of registered drivers.
-    /// It is used to register drivers that can be used to probe and manage devices.
+    /// This function takes a boxed device driver and adds it to the list of registered drivers
+    /// at the specified priority level.
     /// 
     /// # Arguments
     /// 
     /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
+    /// * `priority` - The priority level for this driver.
     /// 
     /// # Example
     /// 
     /// ```rust
     /// let driver = Box::new(MyDeviceDriver::new());
-    /// DeviceManager::get_mut_manager().register_driver(driver);
+    /// DeviceManager::get_mut_manager().register_driver(driver, DriverPriority::Standard);
     /// ```
-    pub fn register_driver(&mut self, driver: Box<dyn DeviceDriver>) {
-        self.drivers.lock().push(driver);
+    pub fn register_driver(&mut self, driver: Box<dyn DeviceDriver>, priority: DriverPriority) {
+        let mut drivers = self.drivers.lock();
+        drivers.entry(priority).or_insert_with(Vec::new).push(driver);
     }
-}
 
-/// Registers a serial device with the device manager.
-/// 
-/// This function takes a boxed serial device and adds it to the list of registered serial devices.
-/// It is used to register serial devices that can be used for I/O operations.
-/// 
-/// # Arguments
-/// 
-/// * `serial` - A boxed serial device that implements the `Serial` trait.
-/// 
-/// # Example
-/// 
-/// ```rust
-/// let serial = Box::new(MySerialDevice::new());
-/// register_serial(serial);
-/// ```
-pub fn register_serial(serial: Box<dyn Serial>) {
-    let manager = DeviceManager::get_mut_manager();
-    manager.basic.register_serial(serial);
+    /// Registers a device driver with default Standard priority.
+    /// 
+    /// This is a convenience method for backward compatibility.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `driver` - A boxed device driver that implements the `DeviceDriver` trait.
+    pub fn register_driver_default(&mut self, driver: Box<dyn DeviceDriver>) {
+        self.register_driver(driver, DriverPriority::Standard);
+    }
 }
 
 #[cfg(test)]
@@ -472,138 +425,62 @@ mod tests {
             |_device| Ok(()),
             vec!["sifive,test0"]
         ));
-        DeviceManager::get_mut_manager().register_driver(driver);
+        let mut manager = DeviceManager::new();
+        manager.register_driver(driver, DriverPriority::Standard);
 
-        DeviceManager::get_mut_manager().populate_devices();
+        manager.populate_devices();
         let result = unsafe { TEST_RESULT };
         assert_eq!(result, true);
     }
 
     #[test_case]
-    fn test_borrow_device_from_manager() {
-        let device = Box::new(GenericDevice::new(
-            "test",
-            1,
-        ));
-        let manager = DeviceManager::get_mut_manager();
+    fn test_get_device_from_manager() {
+        let device = Arc::new(GenericDevice::new("test"));
+        let manager = DeviceManager::new();
         let id = manager.register_device(device);
-        let borrowed_device = manager.borrow_device(id);
-        assert!(borrowed_device.is_ok());
-        let borrowed_device = borrowed_device.unwrap();
-        let device = borrowed_device.device();
-        assert_eq!(device.read().name(), "test");
+        let retrieved_device = manager.get_device(id);
+        assert!(retrieved_device.is_some());
+        let retrieved_device = retrieved_device.unwrap();
+        assert_eq!(retrieved_device.name(), "test");
     }
 
     #[test_case]
-    fn test_borrow_exclusive_device_from_manager() {
-        let device = Box::new(GenericDevice::new(
-            "test",
-            1,
-        ));
-        let manager = DeviceManager::get_mut_manager();
-        let id = manager.register_device(device);
-        let borrowed_device = manager.borrow_exclusive_device(id);
-        assert!(borrowed_device.is_ok());
-        let borrowed_device = borrowed_device.unwrap();
-        let device = borrowed_device.device();
-        assert_eq!(device.read().name(), "test");
+    fn test_get_device_by_name() {
+        let device = Arc::new(GenericDevice::new("test_named"));
+        let manager = DeviceManager::new();
+        let _id = manager.register_device_with_name("test_device".into(), device);
+        let retrieved_device = manager.get_device_by_name("test_device");
+        assert!(retrieved_device.is_some());
+        let retrieved_device = retrieved_device.unwrap();
+        assert_eq!(retrieved_device.name(), "test_named");
     }
 
     #[test_case]
-    fn test_borrow_exclusive_device_from_manager_fail() {
-        let device = Box::new(GenericDevice::new(
-            "test",
-            1,
-        ));
-        let manager = DeviceManager::get_mut_manager();
-        let id = manager.register_device(device);
-        let borrowed_device = manager.borrow_exclusive_device(id);
-        assert!(borrowed_device.is_ok());
-        let borrowed_device = borrowed_device.unwrap();
-        let device = borrowed_device.device();
-        assert_eq!(device.read().name(), "test");
-        let borrowed_device2 = manager.borrow_exclusive_device(id);
-        assert!(borrowed_device2.is_err());
+    fn test_get_first_device_by_type() {
+        let device1 = Arc::new(GenericDevice::new("test_char"));
+        let device2 = Arc::new(GenericDevice::new("test_block"));
+        let manager = DeviceManager::new();
+        let _id1 = manager.register_device(device1);
+        let _id2 = manager.register_device(device2);
+        
+        let char_device_id = manager.get_first_device_by_type(crate::device::DeviceType::Generic);
+        assert!(char_device_id.is_some());
+        let char_device_id = char_device_id.unwrap();
+        let char_device = manager.get_device(char_device_id).unwrap();
+        assert_eq!(char_device.name(), "test_char");
     }
 
     #[test_case]
-    fn test_drop_borrowed_device() {
-        let device = Box::new(GenericDevice::new(
-            "test",
-            1,
-        ));
-        let manager = DeviceManager::get_mut_manager();
-        let id = manager.register_device(device);
-        {
-            let borrowed_device = manager.borrow_device(id);
-            assert!(borrowed_device.is_ok());
-            let borrowed_device = borrowed_device.unwrap();
-            let device = borrowed_device.device();
-            assert_eq!(device.read().name(), "test");
-            // The device should be in use now
-            assert!(borrowed_device.handle.is_in_use());
-            assert_eq!(borrowed_device.handle.get_borrow_count(), 1);
-        }
-        // After the borrowed device goes out of scope, we should be able to borrow it again
-        let borrowed_device = manager.borrow_exclusive_device(id);
-        assert!(borrowed_device.is_ok());
+    fn test_get_device_out_of_bounds() {
+        let manager = DeviceManager::new();
+        let device = manager.get_device(999);
+        assert!(device.is_none());
     }
 
     #[test_case]
-    fn test_drop_multiple_borrowed_device() {
-        let device = Box::new(GenericDevice::new(
-            "test",
-            1,
-        ));
-        let manager = DeviceManager::get_mut_manager();
-        let id = manager.register_device(device);
-        {
-            let borrowed_device = manager.borrow_device(id);
-            assert!(borrowed_device.is_ok());
-            let borrowed_device = borrowed_device.unwrap();
-            let device = borrowed_device.device();
-            assert_eq!(device.read().name(), "test");
-            // The device should be in use now
-            assert!(borrowed_device.handle.is_in_use());
-            assert_eq!(borrowed_device.handle.get_borrow_count(), 1);
-            
-            {
-                // Second borrow
-                let borrowed_device = manager.borrow_device(id).unwrap();
-                let device = borrowed_device.device();
-                assert_eq!(device.read().name(), "test");
-                // The device should still be in use
-                assert!(borrowed_device.handle.is_in_use());
-                assert_eq!(borrowed_device.handle.get_borrow_count(), 2);
-                // Drop the second borrow
-            }
-            // The device should still be in use
-            assert!(borrowed_device.handle.is_in_use());
-            // The borrow count should be 1
-            assert_eq!(borrowed_device.handle.get_borrow_count(), 1);
-        }
-        // After the borrowed device goes out of scope, we should be able to borrow it again
-        let borrowed_device = manager.borrow_exclusive_device(id);
-        assert!(borrowed_device.is_ok());
-    }
-
-    #[test_case]
-    fn test_borrow_out_of_bounds() {
-        let manager = DeviceManager::get_manager();
-        let borrowed_device = manager.borrow_device(999);
-        assert!(borrowed_device.is_err());
-    }
-
-    #[test_case]
-    fn test_borrow_while_exclusive() {
-        let device = Box::new(GenericDevice::new("test", 1));
-        let manager = DeviceManager::get_mut_manager();
-        let id = manager.register_device(device);
-
-        let borrowed_device = manager.borrow_exclusive_device(id);
-        assert!(borrowed_device.is_ok());
-
-        let borrowed_device2 = manager.borrow_device(id);
-        assert!(borrowed_device2.is_err());
+    fn test_get_device_by_name_not_found() {
+        let manager = DeviceManager::new();
+        let device = manager.get_device_by_name("non_existent");
+        assert!(device.is_none());
     }
 }

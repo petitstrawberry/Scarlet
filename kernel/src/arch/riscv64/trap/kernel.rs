@@ -1,6 +1,7 @@
 use core::arch::naked_asm;
 use core::{arch::asm, mem::transmute};
 
+use crate::arch::trap::print_traplog;
 use crate::arch::{get_cpu, Trapframe};
 use crate::println;
 use crate::vm::get_kernel_vm_manager;
@@ -137,7 +138,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     match manager.get_root_page_table() {
                         Some(root_page_table) => {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(vaddr, paddr, mmap.permissions);
+                            root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
                         }
                         None => panic!("Root page table is not found"),
                     }
@@ -157,7 +158,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     match manager.get_root_page_table() {
                         Some(root_page_table) => {
                             let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(vaddr, paddr, mmap.permissions);
+                            root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
                         }
                         None => panic!("Root page table is not found"),
                     }
@@ -166,7 +167,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
         },
         _ => {
-            println!("(Trapframe)\n{:#x?}", trapframe);
+            print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);
         }
     }

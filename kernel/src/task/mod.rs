@@ -10,20 +10,163 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::{File, VfsManager}, library::std::print, mem::page::{allocate_raw_pages, free_boxed_page, Page}, println, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
+use crate::sync::waker::Waker;
+use alloc::collections::BTreeMap;
+use spin::Once;
 
-/// The maximum number of file descriptors a task can have.
-/// This value is set to 256 as a reasonable default for most use cases,
-/// balancing resource usage and typical application needs. Adjust if necessary.
-const NUM_OF_FDS: usize = 256;
+/// Global registry of task-specific wakers for waitpid
+static TASK_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+
+/// Global registry of parent task wakers for waitpid(-1) operations
+/// Each parent task has a waker that gets triggered when any of its children exit
+static PARENT_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+
+/// Initialize the task wakers registry
+fn init_task_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+    Mutex::new(BTreeMap::new())
+}
+
+/// Initialize the parent waker registry
+fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+    Mutex::new(BTreeMap::new())
+}
+
+/// Get or create a waker for a specific task
+/// 
+/// This function returns a reference to the waker associated with the given task ID.
+/// If no waker exists for the task, a new one is created.
+/// 
+/// # Arguments
+/// 
+/// * `task_id` - The ID of the task to get a waker for
+/// 
+/// # Returns
+/// 
+/// A reference to the waker for the specified task
+pub fn get_task_waker(task_id: usize) -> &'static Waker {
+    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let mut wakers = wakers_mutex.lock();
+    if !wakers.contains_key(&task_id) {
+        let waker_name = alloc::format!("task_{}", task_id);
+        // We need to create a static string for the waker name
+        let static_name = Box::leak(waker_name.into_boxed_str());
+        wakers.insert(task_id, Waker::new_interruptible(static_name));
+    }
+    // This is safe because we know the waker exists and won't be removed
+    // until the task is cleaned up
+    unsafe {
+        let waker_ptr = wakers.get(&task_id).unwrap() as *const Waker;
+        &*waker_ptr
+    }
+}
+
+/// Get or create a parent waker for waitpid(-1) operations
+/// 
+/// This waker is used when a parent process calls waitpid(-1) to wait for any child.
+/// It's separate from the task-specific wakers to avoid conflicts.
+/// 
+/// # Arguments
+/// 
+/// * `parent_id` - The ID of the parent task
+/// 
+/// # Returns
+/// 
+/// A reference to the parent waker
+pub fn get_parent_waker(parent_id: usize) -> &'static Waker {
+    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let mut wakers = wakers_mutex.lock();
+    
+    // Create a new waker if it doesn't exist
+    if !wakers.contains_key(&parent_id) {
+        let waker_name = alloc::format!("parent_waker_{}", parent_id);
+        // We need to leak the string to make it 'static
+        let static_name = alloc::boxed::Box::leak(waker_name.into_boxed_str());
+        wakers.insert(parent_id, Waker::new_interruptible(static_name));
+    }
+    
+    // Return a reference to the waker
+    // This is safe because the BTreeMap is never dropped and the Waker is never moved
+    unsafe {
+        let waker_ptr = wakers.get(&parent_id).unwrap() as *const Waker;
+        &*waker_ptr
+    }
+}
+
+/// Wake up any processes waiting for a specific task
+/// 
+/// This function should be called when a task exits to wake up
+/// any parent processes that are waiting for this specific task.
+/// 
+/// # Arguments
+/// 
+/// * `task_id` - The ID of the task that has exited
+pub fn wake_task_waiters(task_id: usize) {
+    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers = wakers_mutex.lock();
+    if let Some(waker) = wakers.get(&task_id) {
+        waker.wake_all();
+    }
+}
+
+/// Wake up a parent process waiting for any child (waitpid(-1))
+/// 
+/// This function should be called when any child of a parent exits.
+/// 
+/// # Arguments
+/// 
+/// * `parent_id` - The ID of the parent task
+pub fn wake_parent_waiters(parent_id: usize) {
+    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers = wakers_mutex.lock();
+    if let Some(waker) = wakers.get(&parent_id) {
+        waker.wake_all();
+    }
+}
+
+/// Clean up the waker for a specific task
+/// 
+/// This function should be called when a task is completely cleaned up
+/// to remove its waker from the global registry.
+/// 
+/// # Arguments
+/// 
+/// * `task_id` - The ID of the task to clean up
+pub fn cleanup_task_waker(task_id: usize) {
+    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let mut wakers = wakers_mutex.lock();
+    wakers.remove(&task_id);
+}
+
+/// Clean up the parent waker for a specific task
+/// 
+/// This function should be called when a parent task is completely cleaned up.
+/// 
+/// # Arguments
+/// 
+/// * `parent_id` - The ID of the parent task to clean up
+pub fn cleanup_parent_waker(parent_id: usize) {
+    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let mut wakers = wakers_mutex.lock();
+    wakers.remove(&parent_id);
+}
+
+/// Types of blocked states for tasks
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum BlockedType {
+    /// Interruptible blocking - can be interrupted by signals
+    Interruptible,
+    /// Uninterruptible blocking - cannot be interrupted, must wait for completion
+    Uninterruptible,
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TaskState {
     NotInitialized,
     Ready,
     Running,
-    Blocked,
+    Blocked(BlockedType),
     Zombie,
     Terminated,
 }
@@ -61,9 +204,6 @@ pub struct Task {
     /// Dynamic ABI
     pub abi: Option<Box<dyn AbiModule>>,
 
-    // File descriptors (File) table
-    fd_table: Vec<usize>,
-    files: [Option<File>; 256],
     // Current working directory
     pub cwd: Option<String>,
 
@@ -91,6 +231,11 @@ pub struct Task {
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
     /// All internal operations use RwLock for concurrent access protection.
     pub vfs: Option<Arc<VfsManager>>,
+
+
+
+    // KernelObject table
+    pub handle_table: HandleTable,
 }
 
 #[derive(Debug, Clone)]
@@ -99,12 +244,56 @@ pub struct ManagedPage {
     pub page: Box<Page>,
 }
 
+pub enum CloneFlagsDef {
+    Vm      = 0b00000001, // Clone the VM
+    Fs      = 0b00000010, // Clone the filesystem
+    Files   = 0b00000100, // Clone the file descriptors
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CloneFlags {
+    raw: u64,
+}
+
+impl CloneFlags {
+    pub fn new() -> Self {
+        CloneFlags { raw: 0 }
+    }
+
+    pub fn from_raw(raw: u64) -> Self {
+        CloneFlags { raw }
+    }
+
+    pub fn set(&mut self, flag: CloneFlagsDef) {
+        self.raw |= flag as u64;
+    }
+
+    pub fn clear(&mut self, flag: CloneFlagsDef) {
+        self.raw &= !(flag as u64);
+    }
+
+    pub fn is_set(&self, flag: CloneFlagsDef) -> bool {
+        (self.raw & (flag as u64)) != 0
+    }
+
+    pub fn get_raw(&self) -> u64 {
+        self.raw
+    }
+}
+
+impl Default for CloneFlags {
+    fn default() -> Self {
+        let raw = CloneFlagsDef::Fs as u64 | CloneFlagsDef::Files as u64;
+        CloneFlags { raw }
+    }
+}
+
 static TASK_ID: Mutex<usize> = Mutex::new(1);
 
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
-        let mut task = Task {
+        let task = Task {
             id: *taskid,
             name,
             priority,
@@ -128,15 +317,10 @@ impl Task {
             children: Vec::new(),
             exit_status: None,
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
-            fd_table: Vec::new(),
-            files: [ const { None }; NUM_OF_FDS],
             cwd: None,
             vfs: None,
+            handle_table: HandleTable::new(),
         };
-        
-        for i in (0..NUM_OF_FDS).rev() {
-            task.fd_table.push(i);
-        }
 
         *taskid += 1;
         task
@@ -545,6 +729,7 @@ impl Task {
         None
     }
 
+
     // Set the entry point
     pub fn set_entry_point(&mut self, entry: usize) {
         self.vcpu.set_pc(entry as u64);
@@ -621,114 +806,9 @@ impl Task {
     /// # Returns
     /// A reference to the file descriptor table
     /// 
-    pub fn get_fd_table(&self) -> &Vec<usize> {
-        &self.fd_table
-    }
-
-    /// Get the file at the specified index
-    /// 
-    /// # Arguments
-    /// * `index` - The index of the file
-    /// 
-    /// # Returns
-    /// The file at the specified index, or None if not found
-    /// 
-    pub fn get_file(&self, index: usize) -> Option<&File> {
-        if index < NUM_OF_FDS {
-            self.files[index].as_ref()
-        } else {
-            None
-        }
-    }
-
-    /// Get the mutable file at the specified file descriptor
-    /// 
-    /// # Arguments
-    /// * `fd` - The file descriptor of the file
-    /// 
-    /// # Returns
-    /// The mutable file at the specified file descriptor, or None if not found
-    /// 
-    pub fn get_mut_file(&mut self, fd: usize) -> Option<&mut File> {
-        if fd < NUM_OF_FDS {
-            self.files[fd].as_mut()
-        } else {
-            None
-        }
-    }
-
-    /// Set the file at the specified file descriptor
-    /// 
-    /// # Arguments
-    /// * `fd` - The file descriptor of the file
-    /// * `file` - The file to set
-    /// 
-    /// # Returns
-    /// The result of setting the file, which is Ok(()) if successful or an error message if not.
-    /// 
-    pub fn set_file(&mut self, fd: usize, file: File) -> Result<(), &'static str> {
-        if fd < NUM_OF_FDS {
-            self.files[fd] = Some(file);
-            Ok(())
-        } else {
-            Err("Index out of bounds")
-        }
-    }
-
-    /// Add a file to the task
-    /// 
-    /// # Arguments
-    /// * `file` - The file handle to add
-    /// 
-    /// # Returns
-    /// The file descriptor of the file, or an error message if the file descriptor table is full
-    /// 
-    pub fn add_file(&mut self, file: File) -> Result<usize, &'static str> {
-        if let Some(fd) = self.allocate_fd() {
-            self.files[fd] = Some(file);
-            Ok(fd)
-        } else {
-            Err("File descriptor table is full")
-        }
-    }
-
-    /// Remove a file from the task
-    /// 
-    /// # Arguments
-    /// * `fd` - The file descriptor to remove
-    /// 
-    /// # Returns
-    /// The result of removing the file, which is Ok(()) if successful or an error message if not.
-    /// 
-    pub fn remove_file(&mut self, fd: usize) -> Result<(), &'static str> {
-        if fd < NUM_OF_FDS {
-            if self.files[fd].is_none() {
-                return Err("File descriptor is already empty");
-            }
-            self.files[fd] = None;
-            self.fd_table.push(fd);
-            Ok(())
-        } else {
-            Err("File descriptor out of bounds")
-        }
-    }
-
-    /// Allocate a file descriptor
-    /// 
-    /// # Returns
-    /// The allocated file descriptor, or None if no file descriptors are available
-    /// 
-    fn allocate_fd(&mut self) -> Option<usize> {
-        if let Some(fd) = self.fd_table.pop() {
-            Some(fd)
-        } else {
-            None
-        }
-    }
-
-
-
     /// Clone this task, creating a near-identical copy
+    /// 
+    /// # Arguments
     /// 
     /// # Returns
     /// The cloned task
@@ -736,7 +816,7 @@ impl Task {
     /// # Errors 
     /// If the task cannot be cloned, an error is returned.
     ///
-    pub fn clone_task(&mut self) -> Result<Task, &'static str> {
+    pub fn clone_task(&mut self, flags: CloneFlags) -> Result<Task, &'static str> {
         // Create a new task (but don't call init() yet)
         let mut child = Task::new(
             self.name.clone(),
@@ -751,85 +831,95 @@ impl Task {
                 child.init();
             },
             TaskType::User => {
-                // For user tasks, manually set up VM without calling init()
-                // to avoid creating new stack that would overwrite parent's stack content
-                use crate::arch::vm::alloc_virtual_address_space;
-                let asid = alloc_virtual_address_space();
-                child.vm_manager.set_asid(asid);
-                child.state = TaskState::Ready;
-            }
-        }
-        
-        // Copy or share memory maps from parent to child
-        for mmap in self.vm_manager.get_memmap() {
-            let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-            let vaddr = mmap.vmarea.start;
-            
-            if num_pages > 0 {
-                if mmap.is_shared {
-                    // Shared memory regions: just reference the same physical pages
-                    let shared_mmap = VirtualMemoryMap {
-                        pmarea: mmap.pmarea, // Same physical memory
-                        vmarea: mmap.vmarea, // Same virtual addresses
-                        permissions: mmap.permissions,
-                        is_shared: true,
-                    };
-                    // Add the shared memory map directly to the child task
-                    child.vm_manager.add_memory_map(shared_mmap)
-                        .map_err(|_| "Failed to add shared memory map to child task")?;
-
-                    // TODO: Add logic to determine if the memory map is a trampoline
-                    // If the memory map is the trampoline, pre-map it
-                    if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                        // Pre-map the trampoline page
-                        let root_pagetable = child.vm_manager.get_root_page_table().unwrap();
-                        root_pagetable.map_memory_area(shared_mmap)?;
-                    }
-
-                } else {
-                    // Private memory regions: allocate new pages and copy contents
-                    let permissions = mmap.permissions;
-                    let pages = allocate_raw_pages(num_pages);
-                    let size = num_pages * PAGE_SIZE;
-                    let paddr = pages as usize;
-                    let new_mmap = VirtualMemoryMap {
-                        pmarea: MemoryArea {
-                            start: paddr,
-                            end: paddr + (size - 1),
-                        },
-                        vmarea: MemoryArea {
-                            start: vaddr,
-                            end: vaddr + (size - 1),
-                        },
-                        permissions,
-                        is_shared: false,
-                    };
-                    
-                    // Copy the contents of the original memory (including stack contents)
-                    for i in 0..num_pages {
-                        let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
-                        let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                src_page_addr as *const u8,
-                                dst_page_addr as *mut u8,
-                                PAGE_SIZE
-                            );
-                        }
-                        // Manage the new pages in the child task
-                        child.add_managed_page(ManagedPage {
-                            vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
-                            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
-                        });
-                    }
-                    // Add the new memory map to the child task
-                    child.vm_manager.add_memory_map(new_mmap)
-                        .map_err(|_| "Failed to add memory map to child task")?;
+                if !flags.is_set(CloneFlagsDef::Vm) {
+                    // For user tasks, manually set up VM without calling init()
+                    // to avoid creating new stack that would overwrite parent's stack content
+                    let asid = alloc_virtual_address_space();
+                    child.vm_manager.set_asid(asid);
                 }
             }
         }
+        
+        if !flags.is_set(CloneFlagsDef::Vm) {
+            // Copy or share memory maps from parent to child
+            for mmap in self.vm_manager.get_memmap() {
+                let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                let vaddr = mmap.vmarea.start;
+                
+                if num_pages > 0 {
+                    if mmap.is_shared {
+                        // Shared memory regions: just reference the same physical pages
+                        let shared_mmap = VirtualMemoryMap {
+                            pmarea: mmap.pmarea, // Same physical memory
+                            vmarea: mmap.vmarea, // Same virtual addresses
+                            permissions: mmap.permissions,
+                            is_shared: true,
+                        };
+                        // Add the shared memory map directly to the child task
+                        child.vm_manager.add_memory_map(shared_mmap)
+                            .map_err(|_| "Failed to add shared memory map to child task")?;
+
+                        // TODO: Add logic to determine if the memory map is a trampoline
+                        // If the memory map is the trampoline, pre-map it
+                        if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
+                            // Pre-map the trampoline page
+                            let root_pagetable = child.vm_manager.get_root_page_table().unwrap();
+                            root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)?;
+                        }
+
+                    } else {
+                        // Private memory regions: allocate new pages and copy contents
+                        let permissions = mmap.permissions;
+                        let pages = allocate_raw_pages(num_pages);
+                        let size = num_pages * PAGE_SIZE;
+                        let paddr = pages as usize;
+                        let new_mmap = VirtualMemoryMap {
+                            pmarea: MemoryArea {
+                                start: paddr,
+                                end: paddr + (size - 1),
+                            },
+                            vmarea: MemoryArea {
+                                start: vaddr,
+                                end: vaddr + (size - 1),
+                            },
+                            permissions,
+                            is_shared: false,
+                        };
+                        
+                        // Copy the contents of the original memory (including stack contents)
+                        for i in 0..num_pages {
+                            let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
+                            let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    src_page_addr as *const u8,
+                                    dst_page_addr as *mut u8,
+                                    PAGE_SIZE
+                                );
+                            }
+                            // Manage the new pages in the child task
+                            child.add_managed_page(ManagedPage {
+                                vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
+                                page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+                            });
+                        }
+                        // Add the new memory map to the child task
+                        child.vm_manager.add_memory_map(new_mmap)
+                            .map_err(|_| "Failed to add memory map to child task")?;
+                    }
+                }
+            }
+        }
+
         // Copy register states
         child.vcpu.regs = self.vcpu.regs.clone();
+        
+        // Set the ABI
+        if let Some(abi) = &self.abi {
+            child.abi = Some(abi.clone_boxed());
+        } else {
+            child.abi = None; // No ABI set
+        }
         
         // Copy state such as data size
         child.stack_size = self.stack_size;
@@ -843,20 +933,23 @@ impl Task {
         child.entry = self.entry;
         child.vcpu.set_pc(self.vcpu.get_pc());
 
-        // Copy file descriptors
-        child.fd_table = self.fd_table.clone();
-        child.files = self.files.clone();
-
-        // Clone vfs manager pointer
-        if let Some(vfs) = &self.vfs {
-            child.vfs = Some(vfs.clone());
-        } else {
-            child.vfs = None;
+        if flags.is_set(CloneFlagsDef::Files) {
+            // Clone the file descriptor table
+            child.handle_table = self.handle_table.clone();
+        }
+        
+        if flags.is_set(CloneFlagsDef::Fs) {
+            // Clone the filesystem manager
+            if let Some(vfs) = &self.vfs {
+                child.vfs = Some(vfs.clone());
+                // Copy the current working directory
+                child.cwd = self.cwd.clone();
+            } else {
+                child.vfs = None;
+                child.cwd = None; // No filesystem manager, no current working directory
+            }
         }
 
-        // Copy the current working directory
-        child.cwd = self.cwd.clone();
-        
         // Set the state to Ready
         child.state = self.state;
 
@@ -873,18 +966,26 @@ impl Task {
     /// * `status` - The exit status
     /// 
     pub fn exit(&mut self, status: i32) {
+        // crate::println!("Task {} ({}) exiting with status {}", self.id, self.name, status);
+        
+        // Close all open handles when task exits
+        self.handle_table.close_all();
+        
         match self.parent_id {
             Some(parent_id) => {
                 if get_scheduler().get_task_by_id(parent_id).is_none() {
+                    // crate::println!("Task {}: Parent {} not found, terminating", self.id, parent_id);
                     self.state = TaskState::Terminated;
                     return;
                 }
                 /* Set the exit status */
                 self.set_exit_status(status);
                 self.state = TaskState::Zombie;
+                // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
             },
             None => {
                 /* If the task has no parent, it is terminated */
+                // crate::println!("Task {}: No parent, terminating", self.id);
                 self.state = TaskState::Terminated;
             }
         }
@@ -915,8 +1016,34 @@ impl Task {
             Err(WaitError::ChildTaskNotFound("Child task not found".to_string()))
         }
     }
+
+    // VFS Helper Methods
+    
+    /// Set the VFS manager
+    /// 
+    /// # Arguments
+    /// * `vfs` - The VfsManager to set as the VFS
+    pub fn set_vfs(&mut self, vfs: Arc<VfsManager>) {
+        self.vfs = Some(vfs);
+    }
+    
+    /// Get a reference to the VFS
+    pub fn get_vfs(&self) -> Option<&Arc<VfsManager>> {
+        self.vfs.as_ref()
+    }
+
+    /// Set the current working directory
+    pub fn set_cwd(&mut self, cwd: String) {
+        self.cwd = Some(cwd);
+    }
+
+    /// Get the current working directory
+    pub fn get_cwd(&self) -> Option<&String> {
+        self.cwd.as_ref()
+    }
 }
 
+#[derive(Debug)]
 pub enum WaitError {
     NoSuchChild(String),
     ChildNotExited(String),
@@ -969,9 +1096,27 @@ pub fn mytask() -> Option<&'static mut Task> {
     get_scheduler().get_current_task(cpu.get_cpuid())
 }
 
+/// Set the current working directory for the current task
+/// 
+/// # Arguments
+/// * `cwd` - New current working directory path
+/// 
+/// # Returns
+/// * `true` if successful, `false` if no current task
+pub fn set_current_task_cwd(cwd: String) -> bool {
+    if let Some(task) = mytask() {
+        task.set_cwd(cwd);
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
+
+    use crate::task::CloneFlags;
 
     #[test_case]
     fn test_set_brk() {
@@ -1047,7 +1192,7 @@ mod tests {
         let parent_id = parent_task.get_id();
 
         // Clone the parent task
-        let child_task = parent_task.clone_task().unwrap();
+        let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Get child memory map count after cloning
         let child_memmap_count = child_task.vm_manager.get_memmap().len();
@@ -1153,7 +1298,7 @@ mod tests {
         }
 
         // Clone the parent task
-        let child_task = parent_task.clone_task().unwrap();
+        let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the corresponding stack memory map in child
         let child_stack_mmap = child_task.vm_manager.get_memmap().iter()
@@ -1242,7 +1387,7 @@ mod tests {
         }
 
         // Clone the parent task
-        let child_task = parent_task.clone_task().unwrap();
+        let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the shared memory map in child
         let child_shared_mmap = child_task.vm_manager.get_memmap().iter()

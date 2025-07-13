@@ -2,14 +2,18 @@ OUTPUT_ARCH("riscv")
 ENTRY(_entry);
 
 MEMORY {
-  RAM (rwx) : ORIGIN = 0x84000000, LENGTH = 64M
+  RAM (rwx) : ORIGIN = 0x84000000, LENGTH = 128M
 }
 
 /* Define sections */
 SECTIONS {
     . = ORIGIN(RAM);
     __KERNEL_SPACE_START = .;
-    .init : { *(.init .init.*) } > RAM 
+    .init : { 
+        *(.init .init.*)
+        /* Place arch-specific entry points close to init */
+        *(.text.arch_start_kernel .text._entry)
+    } > RAM 
     .text : { *(.text .text.*) } > RAM
     .initcall : { 
       __INITCALL_START = .;

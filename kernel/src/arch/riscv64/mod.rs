@@ -6,16 +6,18 @@ use trap::kernel::_kernel_trap_entry;
 use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
 use vcpu::Mode;
-use vm::get_page_table;
-use vm::get_root_page_table_idx;
 
+use crate::arch::instruction::Instruction;
+use crate::arch::vm::get_root_pagetable;
 use crate::early_println;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::STACK_SIZE;
 use crate::mem::KERNEL_STACK;
+use crate::task::Task;
 
 pub mod boot;
 pub mod instruction;
+pub mod interrupt;
 pub mod kernel;
 pub mod trap;
 pub mod earlycon;
@@ -34,7 +36,7 @@ pub type Trapframe = Riscv64;
 static mut TRAPFRAME: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
 
 #[repr(align(4))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Riscv64 {
     pub regs: Registers,
     pub epc: u64,
@@ -76,14 +78,10 @@ impl Trapframe {
         self.kernel_trap = addr as u64;
     }
 
-    pub fn set_next_address_space(&mut self, asid: usize) {
-        let root_page_table_idx = get_root_page_table_idx(asid);
-        if root_page_table_idx.is_none() {
-            panic!("No root page table found for ASID {}", asid);
-        }
-        let root_page_table = get_page_table(root_page_table_idx.unwrap()).unwrap();
-        
-        let satp = root_page_table.get_val_for_satp(asid);
+    pub fn set_next_address_space(&mut self, asid: u16) {
+        let root_pagetable = get_root_pagetable(asid).expect("No root page table found for ASID");
+
+        let satp = root_pagetable.get_val_for_satp(asid);
         self.satp = satp as u64;
     }
 
@@ -110,6 +108,23 @@ impl Trapframe {
 
     pub fn set_arg(&mut self, index: usize, value: usize) {
         self.regs.reg[index + 10] = value; // a0 - a7
+    }
+
+    /// Increment the program counter (epc) to the next instruction
+    /// This is typically used after handling a trap or syscall to continue execution.
+    /// 
+    pub fn increment_pc_next(&mut self, task: &Task) {
+        let instruction = Instruction::fetch(
+            task.vm_manager.translate_vaddr(self.epc as usize).unwrap()
+        );
+        let len = instruction.len();
+        if len == 0 {
+            debug_assert!(len > 0, "Invalid instruction length: {}", len);
+            early_println!("Warning: Invalid instruction length encountered. Defaulting to 4 bytes.");
+            self.epc += 4; // Default to 4 bytes for invalid instruction length
+        } else {
+            self.epc += len as u64;
+        }
     }
 }
 

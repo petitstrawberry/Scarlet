@@ -8,27 +8,66 @@ default_task = "build"
 skip_core_tasks = true
 
 [tasks.build]
-description = "Build all components"
-dependencies = ["build-kernel", "build-userlib", "build-userbin", "build-initramfs"]
+description = "Build all components (default: debug)"
+dependencies = ["build-debug"]
+
+[tasks.build-debug]
+description = "Build all components in debug mode"
+dependencies = ["build-kernel-debug", "build-userlib-debug", "build-userbin-debug", "build-initramfs-debug"]
+
+[tasks.build-release]
+description = "Build all components in release mode"
+dependencies = ["build-kernel-release", "build-userlib-release", "build-userbin-release", "build-initramfs-release"]
 
 [tasks.build-kernel]
-description = "Build the kernel"
+description = "Build the kernel (default: debug)"
+dependencies = ["build-kernel-debug"]
+
+[tasks.build-kernel-debug]
+description = "Build the kernel in debug mode"
 cwd = "kernel"
 command = "cargo"
 args = ["build"]
 
+[tasks.build-kernel-release]
+description = "Build the kernel in release mode"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--release"]
+
 [tasks.build-userlib]
-description = "Build user libraries"
+description = "Build user libraries (default: debug)"
+dependencies = ["build-userlib-debug"]
+
+[tasks.build-userlib-debug]
+description = "Build user libraries in debug mode"
 cwd = "user/lib"
 command = "cargo"
 args = ["build"]
 
+[tasks.build-userlib-release]
+description = "Build user libraries in release mode"
+cwd = "user/lib"
+command = "cargo"
+args = ["build", "--release"]
+
 [tasks.build-userbin]
-description = "Build user programs"
+description = "Build user programs (default: debug)"
+dependencies = ["build-userbin-debug"]
+
+[tasks.build-userbin-debug]
+description = "Build user programs in debug mode"
 cwd = "user/bin"
 command = "cargo"
-args = ["build", "--out-dir", "dist"]
-dependencies = ["build-userlib"]
+args = ["make", "build"]
+dependencies = ["build-userlib-debug"]
+
+[tasks.build-userbin-release]
+description = "Build user programs in release mode"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "build-release"]
+dependencies = ["build-userlib-release"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
@@ -64,17 +103,17 @@ args = ["test"]
 dependencies = ["build-initramfs"]
 
 [tasks.run]
-description = "Run the kernel"
+description = "Run the kernel in release mode"
 cwd = "kernel"
 command = "cargo"
-args = ["run"]
-dependencies = ["build"]
+args = ["run", "--release"]
+dependencies = ["build-release"]
 
 [tasks.debug]
 description = "Run the kernel in debug mode"
 cwd = "kernel"
 command = "./tools/debug.sh"
-dependencies = ["build-kernel"]
+dependencies = ["build-debug"]
 
 [tasks.doc]
 description = "Generate documentation for all components"
@@ -93,11 +132,25 @@ command = "cargo"
 args = ["doc", "--no-deps"]
 
 [tasks.build-initramfs]
-description = "Create initramfs archive"
+description = "Create initramfs archive (default: debug)"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh"]
-dependencies = ["build-userbin"]
+dependencies = ["build-userbin-debug"]
+
+[tasks.build-initramfs-release]
+description = "Create initramfs archive in release mode"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh"]
+dependencies = ["build-userbin-release"]
+
+[tasks.build-initramfs-debug]
+description = "Create initramfs archive in debug mode"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh"]
+dependencies = ["build-userbin-debug"]
 
 [tasks.clean-initramfs]
 description = "Clean initramfs archive"

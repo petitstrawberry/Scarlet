@@ -1,6 +1,6 @@
 [package]
 name = "userprogram"
-version = "0.11.2"
+version = "0.12.0"
 edition = "2024"
 
 [[bin]]
@@ -8,8 +8,16 @@ name = "init"
 path = "src/init.rs"
 
 [[bin]]
+name = "login"
+path = "src/login.rs"
+
+[[bin]]
 name = "sh"
 path = "src/sh.rs"
+
+[[bin]]
+name = "ls"
+path = "src/ls.rs"
 
 [[bin]]
 name = "hello"
@@ -18,6 +26,14 @@ path = "src/hello.rs"
 [[bin]]
 name = "test"
 path = "src/test.rs"
+
+[[bin]]
+name = "env_test"
+path = "src/env_test.rs"
+
+[[bin]]
+name = "cat"
+path = "src/cat.rs"
 
 [dependencies]
 scarlet_std = { path = "../lib" }

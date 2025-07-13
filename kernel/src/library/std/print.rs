@@ -35,8 +35,10 @@
 ///
 /// This allows the UART to be used with the standard formatting macros.
 use core::fmt;
+use core::fmt::Write;
 
 use crate::device::manager::DeviceManager;
+use crate::device::char::CharDevice;
 use crate::early_println;
 
 #[macro_export]
@@ -51,14 +53,32 @@ macro_rules! println {
 }
 
 pub fn _print(args: fmt::Arguments) {
-    let manager = DeviceManager::get_mut_manager();
-    let serial = manager.basic.borrow_mut_serial(0);
-    match serial {
-        Some(serial) => {
-            serial.write_fmt(args).unwrap();
+    let manager = DeviceManager::get_manager();
+    
+    // Try to find a character device (UART)
+    if let Some(device_id) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
+        if let Some(char_device) = manager.get_device(device_id).unwrap().as_char_device() {
+            // Use CharDevice trait methods to write
+            struct CharDeviceWriter<'a>(&'a dyn CharDevice);
+            
+            impl<'a> fmt::Write for CharDeviceWriter<'a> {
+                fn write_str(&mut self, s: &str) -> fmt::Result {
+                    for byte in s.bytes() {
+                        if self.0.write_byte(byte).is_err() {
+                            return Err(fmt::Error);
+                        }
+                    }
+                    Ok(())
+                }
+            }
+            
+            let mut writer = CharDeviceWriter(char_device);
+            if writer.write_fmt(args).is_ok() {
+                return;
+            }
         }
-        None => {
-            early_println!("[print] No serial device found!");
-        }
-    }    
+    }
+    
+    // Fallback to early_println if no character device found
+    early_println!("[print] No character device found, using early console");
 }

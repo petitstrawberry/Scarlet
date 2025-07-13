@@ -9,6 +9,7 @@
 /// This struct represents a resource associated with a platform device.
 /// It contains the resource type (memory, I/O, IRQ, or DMA),
 /// the starting address, and the ending address of the resource.
+#[derive(Debug)]
 pub struct PlatformDeviceResource {
     pub res_type: PlatformDeviceResourceType,
     pub start: usize,
@@ -20,7 +21,7 @@ pub struct PlatformDeviceResource {
 /// This enum defines the types of resources that can be associated with a platform device.
 /// The types include memory (MEM), I/O (IO), interrupt request (IRQ), and direct memory access (DMA).
 /// Each type is represented as a variant of the enum.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum PlatformDeviceResourceType {
     MEM,
     IO,

@@ -9,6 +9,7 @@ use crate::{device::fdt::FdtManager, environment::STACK_SIZE, start_kernel};
 pub extern "C" fn _entry() {
     unsafe {
         naked_asm!("
+        .attribute arch, \"rv64gc\"
         .option norvc
         .option norelax
         .align 8
@@ -33,6 +34,7 @@ pub extern "C" fn _entry() {
 pub extern "C" fn _entry_ap() {
     unsafe {
         naked_asm!("
+        .attribute arch, \"rv64gc\"
         .option norvc
         .option norelax
         .align 8

@@ -13,9 +13,9 @@ use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::get_user_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
-use crate::arch::vm::get_page_table;
-use crate::arch::vm::get_root_page_table_idx;
+use crate::arch::vm::get_root_pagetable;
 use crate::arch::Arch;
+use crate::early_println;
 use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
@@ -68,8 +68,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     let manager = get_kernel_vm_manager();
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
-    let root_page_table_idx = get_root_page_table_idx(asid).unwrap();
-    let root_page_table = get_page_table(root_page_table_idx).unwrap();
+    let root_page_table = get_root_pagetable(asid).unwrap();
     manager.set_asid(asid);
 
     /* Map kernel space */
@@ -95,7 +94,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     manager.add_memory_map(kernel_map).map_err(|e| panic!("Failed to add kernel memory map: {}", e)).unwrap();
     /* Pre-map the kernel space */
-    root_page_table.map_memory_area(kernel_map).map_err(|e| panic!("Failed to map kernel memory area: {}", e)).unwrap();
+    root_page_table.map_memory_area(asid, kernel_map).map_err(|e| panic!("Failed to map kernel memory area: {}", e)).unwrap();
 
     let dev_map = VirtualMemoryMap {
         vmarea: MemoryArea {
@@ -113,8 +112,8 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
-    println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
-    println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
+    early_println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
+    early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
 
     setup_trampoline(manager);
 
@@ -126,7 +125,7 @@ pub fn user_vm_init(task: &mut Task) {
     task.vm_manager.set_asid(asid);
 
     /* User stack page */
-    let num_of_stack_page = 2; // 2 pages for user stack
+    let num_of_stack_page = 4; // 4 pages for user stack
     let stack_start = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
 
@@ -138,8 +137,7 @@ pub fn user_vm_init(task: &mut Task) {
 
 pub fn user_kernel_vm_init(task: &mut Task) {
     let asid = alloc_virtual_address_space();
-    let root_page_table_idx = get_root_page_table_idx(asid).unwrap();
-    let root_page_table = get_page_table(root_page_table_idx).unwrap();
+    let root_page_table = get_root_pagetable(asid).unwrap();
     task.vm_manager.set_asid(asid);
 
     let kernel_area = unsafe { KERNEL_AREA.unwrap() };
@@ -157,7 +155,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         panic!("Failed to add kernel memory map: {}", e);
     }).unwrap();
     /* Pre-map the kernel space */
-    root_page_table.map_memory_area(kernel_map).map_err(|e| {
+    root_page_table.map_memory_area(asid, kernel_map).map_err(|e| {
         panic!("Failed to map kernel memory area: {}", e);
     }).unwrap();
     task.data_size = kernel_area.end + 1;
@@ -186,7 +184,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
 
 pub fn setup_user_stack(task: &mut Task) -> usize{
     /* User stack page */
-    let num_of_stack_page = 2; // 2 pages for user stack
+    let num_of_stack_page = 4; // 4 pages for user stack
     let stack_start = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
     /* Guard page */
@@ -242,7 +240,7 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     manager.add_memory_map(trampoline_map)
         .map_err(|e| panic!("Failed to add trampoline memory map: {}", e)).unwrap();
     /* Pre-map the trampoline space */
-    manager.get_root_page_table().unwrap().map_memory_area(trampoline_map)
+    manager.get_root_page_table().unwrap().map_memory_area(manager.get_asid(), trampoline_map)
         .map_err(|e| panic!("Failed to map trampoline memory area: {}", e)).unwrap();
 
     set_trampoline_trap_vector(trap_entry_vaddr);

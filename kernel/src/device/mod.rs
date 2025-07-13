@@ -10,6 +10,7 @@ pub mod fdt;
 pub mod platform;
 pub mod block;
 pub mod char;
+pub mod events;
 
 extern crate alloc;
 use core::any::Any;
@@ -54,21 +55,21 @@ pub enum DeviceType {
 /// Device trait.
 /// 
 /// This trait defines the interface for devices in the kernel.
+/// Device IDs are assigned by DeviceManager when devices are registered.
 /// 
 pub trait Device: Send + Sync {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
-    fn id(&self) -> usize;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     
     /// Cast to CharDevice if this device is a character device
-    fn as_char_device(&mut self) -> Option<&mut dyn char::CharDevice> {
+    fn as_char_device(&self) -> Option<&dyn char::CharDevice> {
         None
     }
     
     /// Cast to BlockDevice if this device is a block device  
-    fn as_block_device(&mut self) -> Option<&mut dyn block::BlockDevice> {
+    fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
         None
     }
 }
@@ -76,12 +77,11 @@ pub trait Device: Send + Sync {
 pub struct GenericDevice {
     device_type: DeviceType,
     name: &'static str,
-    id: usize,
 }
 
 impl GenericDevice {
-    pub fn new(name: &'static str, id: usize) -> Self {
-        Self { device_type: DeviceType::Generic, name, id }
+    pub fn new(name: &'static str) -> Self {
+        Self { device_type: DeviceType::Generic, name }
     }
 }
 
@@ -92,10 +92,6 @@ impl Device for GenericDevice {
 
     fn name(&self) -> &'static str {
         self.name
-    }
-
-    fn id(&self) -> usize {
-        self.id
     }
 
     fn as_any(&self) -> &dyn Any {

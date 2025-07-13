@@ -1,6 +1,6 @@
 use core::arch::asm;
 
-use crate::{arch::instruction::sbi::sbi_set_timer, environment::RISCV_STIMER_FREQ};
+use crate::{arch::{get_cpu, instruction::sbi::sbi_set_timer}, environment::RISCV_STIMER_FREQ, interrupt::InterruptManager};
 
 pub type ArchTimer = Stimer;
 
@@ -24,7 +24,13 @@ impl Stimer {
 
     pub fn start(&mut self) {
         self.running = true;
-        sbi_set_timer(self.next_event);
+        InterruptManager::with_manager(|manager| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            if manager.set_timer(cpu_id, self.get_next_event()).is_err() {
+                panic!("Failed to set timer for CPU {}", cpu_id);
+            }
+        });
+
         let mut sie: usize;
         unsafe {
             asm!(
@@ -42,7 +48,13 @@ impl Stimer {
 
     pub fn stop(&mut self) {
         self.running = false;
-        sbi_set_timer(0xffffffff_ffffffff);
+        InterruptManager::with_manager(|manager| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            if manager.set_timer(cpu_id, 0xFFFFFFFFFFFFFFFF).is_err() {
+                panic!("Failed to stop timer for CPU {}", cpu_id);
+            }
+        });
+
         let mut sie: usize;
         unsafe {
             asm!(

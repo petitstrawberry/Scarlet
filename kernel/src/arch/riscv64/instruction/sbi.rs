@@ -46,6 +46,9 @@ impl SbiError {
     }
 }
 
+/// More robust SBI call implementation with additional safety measures
+#[inline(never)]
+#[unsafe(no_mangle)]
 pub fn sbi_call(extension: Extension, function: usize, arg0: usize, arg1: usize) -> Result<usize, SbiError> {
     let error: usize;
     let ret: usize;
@@ -55,19 +58,23 @@ pub fn sbi_call(extension: Extension, function: usize, arg0: usize, arg1: usize)
             "ecall",
             inout("a0") arg0 => error,
             inout("a1") arg1 => ret,
-            in("a2") 0,
-            in("a3") 0,
-            in("a4") 0,
-            in("a5") 0,
-            in("a6") function,
-            in("a7") extension as usize,
+            inout("a2") 0 => _,
+            inout("a3") 0 => _,
+            inout("a4") 0 => _,
+            inout("a5") 0 => _,
+            inout("a6") function => _,
+            inout("a7") extension as usize => _,
+            clobber_abi("C"),
             options(nostack),
         );
     }
 
     match error {
         0 => Ok(ret),
-        _ => Err(SbiError::from_error(error)),
+        error_code if error_code <= 8 => Err(SbiError::from_error(error_code)),
+        _ => {
+            Err(SbiError::Failed)
+        }
     }
 }
 
