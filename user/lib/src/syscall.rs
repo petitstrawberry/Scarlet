@@ -22,7 +22,6 @@ pub enum Syscall {
     HandleSetRole = 101,
     HandleClose = 102,      // Close any handle (files, pipes, etc.)
     HandleDuplicate = 103,  // Duplicate any handle
-    Pipe = 104,             // Create pipe handles
     
     // === Core Capabilities (Object-oriented) ===
     // StreamOps Capability - read/write operations
@@ -45,7 +44,10 @@ pub enum Syscall {
     // === Filesystem Operations (mount management) ===
     FsMount = 500,
     FsUmount = 501,
-    FsPivotRoot = 502
+    FsPivotRoot = 502,
+    
+    // === IPC Operations ===
+    Pipe = 600,             // Create pipe handles
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

@@ -9,11 +9,12 @@
 //! The system calls are organized into logical ranges:
 //! 
 //! - **1-99**: Process and task management (exit, clone, exec, getpid, brk, etc.)
-//! - **100-199**: Handle management and IPC operations (handle_query, handle_close, dup, pipe)
+//! - **100-199**: Handle management operations (handle_query, handle_close, dup)
 //! - **200-299**: StreamOps capability (stream_read, stream_write operations)
 //! - **300-399**: FileObject capability (file_seek, file_truncate, file_metadata)
 //! - **400-499**: VFS operations (vfs_open, vfs_remove, vfs_create_directory, vfs_change_directory, vfs_truncate)
 //! - **500-599**: Filesystem operations (fs_mount, fs_umount, fs_pivot_root)
+//! - **600-699**: IPC operations (pipe, shared memory, message queues)
 //! 
 //! Legacy POSIX-like system calls (20-35) are maintained for backward compatibility
 //! and redirect to the appropriate capability-based implementations.
@@ -27,7 +28,6 @@
 //! 
 //! ### Handle Management (100-199)
 //! - HandleQuery (100), HandleSetRole (101), HandleClose (102), HandleDuplicate (103)
-//! - Pipe (104)
 //! 
 //! ### StreamOps Capability (200-299)
 //! - StreamRead (200), StreamWrite (201)
@@ -41,8 +41,8 @@
 //! ### Filesystem Operations (500-599)
 //! - FsMount (500), FsUmount (501), FsPivotRoot (502)
 //! 
-//! Legacy POSIX-like system calls (20-35) are maintained for compatibility
-//! but new code should prefer the capability-based variants.
+//! ### IPC Operations (600-699)
+//! - Pipe (600)
 //! 
 //! ## Design Principles
 //! 
@@ -90,7 +90,6 @@ syscall_table! {
     HandleSetRole = 101 => sys_handle_set_role, // Change handle role after creation
     HandleClose = 102 => sys_handle_close,     // Close any handle (files, pipes, etc.)
     HandleDuplicate = 103 => sys_handle_duplicate, // Duplicate any handle  
-    Pipe = 104 => sys_pipe,                    // Create pipe handles
     
     // === StreamOps Capability ===
     // Stream operations for any KernelObject with StreamOps capability
@@ -115,4 +114,7 @@ syscall_table! {
     FsMount = 500 => sys_fs_mount,         // Mount filesystem
     FsUmount = 501 => sys_fs_umount,       // Unmount filesystem  
     FsPivotRoot = 502 => sys_fs_pivot_root, // Change root filesystem
+    
+    // === IPC Operations ===
+    Pipe = 600 => sys_pipe,                // Create pipe handles
 }
