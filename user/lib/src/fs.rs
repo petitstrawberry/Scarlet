@@ -1049,7 +1049,6 @@ pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>> {
             }
             Ok(None) => break, // EOF
             Err(errno) => {
-                crate::println!("Error reading directory {}: {}", path, errno);
                 return Err(errno);
             }
         }
