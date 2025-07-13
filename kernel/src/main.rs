@@ -1,53 +1,72 @@
 //! # Scarlet Kernel
 //!
-//! The Scarlet Kernel is a bare metal, `no_std` operating system kernel designed with architecture 
-//! flexibility in mind. It aims to provide a clean design with strong safety guarantees 
-//! through Rust's ownership model.
+//! Scarlet is an operating system kernel written in Rust that implements a transparent ABI 
+//! conversion layer for executing binaries across different operating systems and architectures. 
+//! The kernel provides a universal container runtime environment with strong isolation capabilities 
+//! and comprehensive filesystem support.
 //!
-//! While the current implementation establishes fundamental kernel functionality, our long-term
-//! vision is to develop a fully modular operating system where components can be dynamically
-//! loaded and unloaded at runtime, similar to loadable kernel modules in other systems.
+//! ## Multi-ABI Execution System
 //!
-//! ## Core Features
+//! The core innovation of Scarlet is its ability to run binaries from different operating systems
+//! transparently within the same runtime environment:
 //!
-//! - **No Standard Library**: Built using `#![no_std]` for bare metal environments, implementing only the essential
-//!   functionality needed for kernel operation without relying on OS-specific features
-//! - **Multi-Architecture Design**: Currently implemented for RISC-V 64-bit, with a clean abstraction layer designed
-//!   for supporting multiple architectures in the future
-//! - **Memory Management**: Custom heap allocator with virtual memory support that handles physical and virtual memory
-//!   mapping, page tables, and memory protection
-//! - **Task Scheduling**: Cooperative and preemptive multitasking with priority-based scheduling and support for
-//!   kernel and user tasks
-//! - **Driver Framework**: Organized driver architecture with device discovery through FDT (Flattened Device Tree),
-//!   supporting hot-pluggable and fixed devices
-//! - **Filesystem Support**: Flexible Virtual File System (VFS) layer with support for mounting multiple filesystem
-//!   implementations and unified path handling
-//! - **Hardware Abstraction**: Clean architecture-specific abstractions that isolate architecture-dependent code
-//!   to facilitate porting to different architectures
-//! - **Future Modularity**: Working toward a fully modular design with runtime-loadable kernel components
+//! ### ABI Module Architecture
 //!
-//! ## Resource Management with Rust's Ownership Model
+//! - **Modular ABI Implementation**: Each ABI module implements its own complete syscall interface
+//!   using shared kernel APIs, rather than translating between syscalls
+//! - **Binary Detection**: Automatic identification of binary format and target ABI through
+//!   ELF header analysis and magic number detection
+//! - **Shared Kernel Resources**: All ABIs operate on common kernel objects (VFS, memory, devices)
+//!   ensuring consistent behavior and efficient resource utilization
+//! - **Native Implementation**: Each ABI provides full syscall implementation using underlying
+//!   kernel abstractions, enabling complete OS compatibility
 //!
-//! Scarlet leverages Rust's ownership and borrowing system to provide memory safety without garbage collection:
+//! ### Supported ABIs
 //!
-//! - **Zero-Cost Abstractions**: Using Rust's type system for resource management without runtime overhead. For example,
-//!   the device driver system uses traits to define common interfaces while allowing specialized implementations
-//!   with no virtual dispatch cost when statically resolvable.
+//! - **Scarlet Native ABI**: Direct kernel interface with optimal performance, featuring:
+//!   - Handle-based resource management with capability-based security
+//!   - Modern VFS operations with namespace isolation
+//!   - Advanced IPC mechanisms including pipes and shared memory
+//!   - Container-native filesystem operations
 //!
-//! - **RAII Resource Management**: Kernel resources are automatically cleaned up when they go out of scope, including:
-//!   - File objects that automatically close when dropped
-//!   - Memory allocations that are properly freed
-//!   - Device resources that are released when no longer needed
+//! - **Linux Compatibility ABI** *(in development)*: Full POSIX syscall implementation
+//! - **xv6 Compatibility ABI** *(in development)*: Educational OS syscall implementation
 //!
-//! - **Mutex and RwLock**: Thread-safe concurrent access to shared resources using the `spin` crate's lock implementations:
-//!   - The scheduler uses locks to protect its internal state during task switching
-//!   - Device drivers use locks to ensure exclusive access to hardware
-//!   - Filesystem operations use RwLocks to allow concurrent reads but exclusive writes
+//! ## Container Runtime Environment
 //!
-//! - **Arc** (Atomic Reference Counting): Safe sharing of resources between kernel components:
-//!   - Filesystem implementations are shared between multiple mount points
-//!   - Device instances can be referenced by multiple drivers
-//!   - System-wide singletons are managed safely with interior mutability patterns
+//! Scarlet provides enterprise-grade containerization features:
+//!
+//! ### Filesystem Isolation
+//!
+//! - **Mount Namespace Isolation**: Per-task filesystem namespaces enabling complete isolation
+//! - **Bind Mount Operations**: Selective resource sharing between containers
+//! - **Overlay Filesystem**: Copy-on-write semantics with whiteout support for efficient layering
+//! - **Device File Management**: Controlled access to hardware through DevFS integration
+//!
+//! ### Resource Management
+//!
+//! - **Handle-Based Security**: Capability-based access control with fine-grained permissions
+//! - **Memory Isolation**: Per-task memory spaces with controlled sharing mechanisms
+//! - **Task Lifecycle Management**: Complete process management with environment variable support
+//! - **IPC Mechanisms**: Pipes, shared memory, and other inter-process communication primitives
+//!
+//! ## Virtual File System v2
+//!
+//! Scarlet implements a modern VFS architecture designed for container environments:
+//!
+//! ### Core Architecture
+//!
+//! - **VfsEntry**: Path hierarchy cache providing fast O(1) path resolution with automatic cleanup
+//! - **VfsNode**: Abstract file entity interface with metadata access and clean downcasting
+//! - **FileSystemOperations**: Unified driver API consolidating all filesystem operations
+//! - **Mount Tree Management**: Hierarchical mount point management with O(log n) resolution
+//!
+//! ### Filesystem Drivers
+//!
+//! - **TmpFS**: High-performance memory-based filesystem with configurable size limits
+//! - **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs and embedded data
+//! - **OverlayFS**: Advanced union filesystem with copy-up semantics and whiteout support
+//! - **DevFS**: Device file system providing controlled hardware access
 //!
 //! - **Memory Safety**: Prevention of use-after-free, double-free, and data races at compile time:
 //!   - The type system ensures resources are not used after being freed
@@ -61,117 +80,136 @@
 //!
 //! ## Virtual File System v2
 //!
-//! Scarlet implements an advanced Virtual File System (VFS v2) layer providing high-performance
-//! unified file operations with container support and POSIX compatibility:
+//! Scarlet implements a modern VFS architecture designed for container environments:
 //!
-//! ### Core Architecture
+//! - **VfsEntry**: Path hierarchy cache providing fast O(1) path resolution with automatic cleanup
+//! - **VfsNode**: Abstract file entity interface with metadata access and clean downcasting
+//! - **FileSystemOperations**: Unified driver API consolidating all filesystem operations
+//! - **Mount Tree Management**: Hierarchical mount point management with O(log n) resolution
 //!
-//! - **Type-Safe File System Interface**: Modern API design with compile-time safety:
-//!   - `FileSystem` trait providing standardized operations across all filesystem types
-//!   - Type-safe metadata operations with `Metadata` structure for file attributes
-//!   - Generic `Result<T, VfsError>` error handling with detailed error classification
-//!   - Zero-copy operations where possible reducing memory allocation overhead
-//!
-//! - **Unified VFS Manager**: Single global filesystem namespace with isolation capabilities:
-//!   - Global `VfsManager` providing unified access to all mounted filesystems
-//!   - Per-process mount namespace support for container isolation
-//!   - Thread-safe concurrent operations via fine-grained RwLock protection
-//!   - O(1) path cache lookup improving repeated access performance
-//!
-//! - **Hierarchical Mount Tree**: Advanced mount management with B-tree optimization:
-//!   - `MountTree` implementing efficient O(log n) mount point resolution
-//!   - Support for nested mounts and complex mount hierarchies
-//!   - Automatic mount point validation preventing invalid mount operations
-//!   - Dynamic mount/unmount operations with consistency guarantees
-//!
-//! ### FileSystem Driver Architecture
-//!
-//! Modular driver system supporting diverse storage backends and virtual filesystems:
-//!
-//! - **Driver Registration System**: Dynamic filesystem driver management:
-//!   - `DriverManager` singleton for runtime driver registration and discovery
-//!   - Type-safe driver parameters replacing legacy string-based configuration
-//!   - Support for both static (compile-time) and dynamic (runtime) driver loading
-//!   - Driver versioning and compatibility checking
-//!
-//! - **Built-in Filesystem Drivers**:
-//!   - **TmpFS**: High-performance in-memory filesystem with optional persistence
-//!   - **CpioFS**: Read-only filesystem for boot archives and embedded data
-//!   - **InitramFS**: Boot-time filesystem initialization with automatic extraction
-//!   - **OverlayFS**: Copy-on-write layered filesystem for container images
-//!
-//! ### Advanced Features
-//!
-//! - **Path Resolution & Security**: Robust path handling with security emphasis:
-//!   - Automatic path normalization preventing directory traversal attacks
-//!   - Symlink resolution with loop detection and depth limits
-//!   - Permission checking at each path component for security compliance
-//!   - Case-sensitive and case-insensitive filesystem support
-//!
-//! - **File Handle Management**: Resource-safe file operations:
-//!   - RAII-based automatic resource cleanup preventing file descriptor leaks
-//!   - Reference-counted file objects (`Arc<dyn FileObject>`) for safe sharing
-//!   - Lazy file loading reducing memory footprint for large directories
-//!   - Efficient buffering strategies for optimal I/O performance
-//!
-//! - **System Call Integration**: Full POSIX-compatible system call support:
-//!   - Direct mapping from POSIX system calls to VFS operations
-//!   - Efficient `openat()`, `readdir()`, `stat()` family implementations
-//!   - Advanced features like `splice()`, `sendfile()` for zero-copy operations
-//!   - Support for file locks, memory mapping, and extended attributes
-//!
-//! ### Container & Namespace Support
-//!
-//! - **Mount Namespaces**: Complete filesystem isolation for containers
-//! - **Bind Mounts**: Flexible directory sharing between namespaces
-//! - **Read-Only Mounts**: Security-enhanced mounting with write protection
-//! - **Private/Shared Mount Propagation**: Advanced mount event propagation control
+//! Supported filesystems: TmpFS, CpioFS, OverlayFS, and DevFS. See individual driver modules for implementation details.
 //!
 //! ## Boot Process
 //!
-//! The kernel has two main entry points:
-//! - `start_kernel`: Main boot entry point for the bootstrap processor
-//! - `start_ap`: Entry point for application processors (APs) in multicore systems
+//! Scarlet follows a structured initialization sequence:
 //!
-//! The initialization sequence for the bootstrap processor includes:
-//! 1. `.bss` section initialization (zeroing)
-//! 2. Architecture-specific initialization (setting up CPU features)
-//! 3. FDT (Flattened Device Tree) parsing for hardware discovery
-//! 4. Heap initialization enabling dynamic memory allocation
-//! 5. Early driver initialization via the initcall mechanism
-//! 6. Driver registration and initialization (serial, block devices, etc.)
-//! 7. Virtual memory setup with kernel page tables
-//! 8. Device discovery and initialization based on FDT data
-//! 9. Timer initialization for scheduling and timeouts
-//! 10. Scheduler initialization and initial task creation
-//! 11. Task scheduling and transition to the kernel main loop
+//! 1. **Early Architecture Init**: CPU feature detection, interrupt vector setup
+//! 2. **FDT Parsing**: Hardware discovery from Flattened Device Tree
+//! 3. **Memory Subsystem**: Heap allocator initialization, virtual memory setup
+//! 4. **Device Discovery**: Platform device enumeration and driver binding
+//! 5. **Interrupt Setup**: CLINT/PLIC initialization for timer and external interrupts
+//! 6. **VFS Initialization**: Mount root filesystem, initialize global VFS manager
+//! 7. **Task System**: Scheduler setup, initial task creation
+//! 8. **User Space Transition**: Load initial programs and switch to user mode
 //!
-//! ## Current Architecture Implementation
+//! Each stage validates successful completion before proceeding, with detailed logging
+//! available through the early console interface.
 //!
-//! The current RISC-V implementation includes:
-//! - Boot sequence utilizing SBI (Supervisor Binary Interface) for hardware interaction
-//! - Support for S-mode operation
-//! - Interrupt handling through trap frames with proper context saving/restoring
-//! - Memory management with Sv48 virtual memory addressing
-//! - Architecture-specific timer implementation
-//! - Support for multiple privilege levels
-//! - Instruction abstractions for atomic operations and privileged instructions
+//! ## System Integration
 //!
-//! ## Testing Framework
+//! ### Core Subsystems
 //!
-//! Scarlet includes a custom testing framework that allows:
-//! - Unit tests for kernel components
-//! - Integration tests for subsystem interaction
-//! - Boot tests to verify initialization sequence
-//! - Hardware-in-the-loop tests when running on real or emulated hardware
+//! - **Task Management**: Complete process lifecycle with environment variables and IPC
+//! - **Memory Management**: Virtual memory with per-task address spaces and shared regions
+//! - **Device Framework**: Unified device interface supporting block, character, and platform devices
+//! - **Interrupt Handling**: Event-driven architecture with proper context switching
+//! - **Handle System**: Capability-based resource access with fine-grained permissions
 //!
-//! ## Development Notes
+//! ### ABI Module Integration
 //!
-//! The kernel uses Rust's advanced features like naked functions and custom test frameworks.
-//! In non-test builds, a simple panic handler is provided that prints the panic information 
-//! and enters an infinite loop. The kernel makes extensive use of Rust's unsafe code where
-//! necessary for hardware interaction while maintaining safety guarantees through careful
-//! abstraction boundaries.
+//! Each ABI module integrates with the kernel through standardized interfaces:
+//!
+//! - **Binary Loading**: ELF loader with format detection and validation
+//! - **Syscall Dispatch**: Per-ABI syscall tables with transparent routing
+//! - **Resource Management**: Shared kernel object access through common APIs
+//! - **Environment Setup**: ABI-specific process initialization and cleanup
+//! - **Mount Operations**: `mount()`, `umount()`, `pivot_root()` for dynamic filesystem management
+//! - **Process Management**: `execve()`, `fork()`, `wait()`, `exit()` with proper cleanup
+//! - **IPC Operations**: Pipe creation, communication, and resource sharing
+//!
+//! ## Architecture Support
+//!
+//! Currently implemented for RISC-V 64-bit architecture with comprehensive hardware support:
+//!
+//! - **Interrupt Handling**: Complete trap frame management with timer and external interrupts
+//! - **Memory Management**: Virtual memory with page tables and memory protection
+//! - **SBI Interface**: Supervisor Binary Interface for firmware communication
+//! - **Instruction Abstractions**: RISC-V specific optimizations with compressed instruction support
+//!
+//! ## Rust Language Features
+//!
+//! ## Architecture Support
+//!
+//! Current RISC-V 64-bit implementation includes:
+//!
+//! - **Interrupt Handling**: Complete trap frame management with timer and external interrupts
+//! - **Memory Management**: Sv48 virtual memory with hardware page table support
+//! - **SBI Interface**: Supervisor Binary Interface for firmware communication
+//! - **Instruction Support**: RISC-V base ISA with compressed instruction extensions
+//! - **Privilege Levels**: S-mode operation with U-mode user space support
+//!
+//! ## Development Framework
+//!
+//! ### Testing Infrastructure
+//!
+//! Scarlet provides a comprehensive testing framework designed for kernel development:
+//!
+//! ```rust
+//! #[test_case]
+//! fn test_vfs_operations() {
+//!     // Kernel unit tests run in privileged mode
+//!     let vfs = VfsManager::new();
+//!     // ... test implementation
+//! }
+//! ```
+//!
+//! - **Custom Test Runner**: `#[test_case]` attribute for kernel-specific testing
+//! - **No-std Testing**: Tests run directly in kernel mode without standard library
+//! - **Integration Tests**: Full subsystem testing including multi-ABI scenarios
+//! - **Hardware-in-the-Loop**: Testing on real hardware and QEMU emulation
+//! - **Performance Benchmarks**: Kernel performance measurement and regression testing
+//!
+//! ### Debugging Support
+//!
+//! - **Early Console**: Serial output available from early boot stages
+//! - **Panic Handler**: Detailed panic information with stack traces
+//! - **GDB Integration**: Full debugging support through QEMU's GDB stub
+//! - **Memory Debugging**: Allocation tracking and leak detection
+//! - **Tracing**: Event tracing for performance analysis and debugging
+//!
+//! ### Build System Integration
+//!
+//! The kernel integrates with `cargo-make` for streamlined development:
+//!
+//! - `cargo make build`: Full kernel build with user programs
+//! - `cargo make test`: Run all kernel tests
+//! - `cargo make debug`: Launch kernel with GDB support
+//! - `cargo make run`: Quick development cycle execution
+//!
+//! ## Entry Points
+//!
+//! The kernel provides multiple entry points for different scenarios:
+//!
+//! - **`start_kernel()`**: Main bootstrap processor initialization
+//! - **`start_ap()`**: Application processor startup for multicore systems
+//! - **`test_main()`**: Test framework entry point when built with testing enabled
+//!
+//! ## Module Organization
+//!
+//! Core kernel modules provide focused functionality:
+//!
+//! - **`abi/`**: Multi-ABI implementation modules (Scarlet Native, Linux, xv6)
+//! - **`arch/`**: Architecture-specific code (currently RISC-V 64-bit)
+//! - **`drivers/`**: Hardware device drivers (UART, block devices, VirtIO)
+//! - **`fs/`**: Filesystem implementations and VFS v2 core
+//! - **`task/`**: Task management, scheduling, and process lifecycle
+//! - **`mem/`**: Memory management, allocators, and virtual memory
+//! - **`syscall/`**: System call dispatch and implementation
+//! - **`object/`**: Kernel object system with handle management
+//! - **`interrupt/`**: Interrupt handling and controller support
+//!
+//! *Note: Currently, Scarlet Native ABI is fully implemented. Linux and xv6 ABI support 
+//! are under development and will be available in future releases.*
 
 #![no_std]
 #![no_main]
