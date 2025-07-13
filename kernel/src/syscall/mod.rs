@@ -69,7 +69,7 @@ use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_e
 use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
-use crate::object::capability::file::{sys_file_seek, sys_file_truncate, sys_file_metadata};
+use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
 
 #[macro_use]
 mod macros;
@@ -125,7 +125,7 @@ syscall_table! {
     // File operations for any KernelObject with FileObject capability
     FileSeek = 300 => sys_file_seek,       // FileObject::seek
     FileTruncate = 301 => sys_file_truncate, // FileObject::truncate
-    FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
+    // FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
     
     // === VFS Operations ===
     VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open

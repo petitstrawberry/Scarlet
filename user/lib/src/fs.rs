@@ -28,6 +28,7 @@
 
 use crate::handle::Handle;
 use crate::handle::capability::{SeekFrom as ScarletSeekFrom, FileMetadata};
+use crate::println;
 use crate::string::String;
 use crate::vec::Vec;
 use crate::io::{Error, ErrorKind, Seek, SeekFrom, Write, Read, Result};
@@ -462,14 +463,16 @@ impl File {
     /// * `Ok(entries)` - Vector of directory entries on success
     /// * `Err(errno)` - Error code on failure
     pub fn read_dir(&mut self) -> Result<Option<DirectoryEntry>> {
-        let file_handle = self.handle.as_file()
-            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
-        let metadata = file_handle.metadata()
-            .map_err(|_| Error::new(ErrorKind::Other, "Failed to get file metadata"))?;
+        // let file_handle = self.handle.as_file()
+        //     .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
+        // let metadata = file_handle.metadata()
+        //     .map_err(|_| Error::new(ErrorKind::Other, "Failed to get file metadata"))?;
 
-        if !metadata.is_directory() {
-            return Err(Error::new(ErrorKind::InvalidInput, "Handle is not a directory"));
-        }
+        // crate::println!("metadata: {:?}", metadata);
+
+        // if !metadata.is_directory() {
+        //     return Err(Error::new(ErrorKind::InvalidInput, "Handle is not a directory"));
+        // }
 
         let mut buf = [0u8; core::mem::size_of::<DirectoryEntryRaw>()];
         let bytes_read = self.handle.as_stream().unwrap().read(&mut buf);
@@ -478,6 +481,7 @@ impl File {
             return Err(Error::new(ErrorKind::Other, "Failed to read directory entry"));
         }
         let bytes_read = bytes_read.unwrap();
+
 
         if bytes_read == 0 {
             return Ok(None); // EOF - no more entries
@@ -559,17 +563,17 @@ impl File {
             .map_err(|_| Error::new(ErrorKind::Other, "Truncate operation failed"))
     }
     
-    /// Get file metadata
-    /// 
-    /// # Returns
-    /// File metadata or error
-    pub fn metadata(&self) -> Result<FileMetadata> {
-        let file_obj = self.handle.as_file()
-            .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
+    // /// Get file metadata
+    // /// 
+    // /// # Returns
+    // /// File metadata or error
+    // pub fn metadata(&self) -> Result<FileMetadata> {
+    //     let file_obj = self.handle.as_file()
+    //         .map_err(|_| Error::new(ErrorKind::Unsupported, "Object does not support file operations"))?;
             
-        file_obj.metadata()
-            .map_err(|_| Error::new(ErrorKind::Other, "Metadata operation failed"))
-    }
+    //     file_obj.metadata()
+    //         .map_err(|_| Error::new(ErrorKind::Other, "Metadata operation failed"))
+    // }
     
     /// Get the current position in the file
     /// 
@@ -1054,7 +1058,10 @@ pub fn list_directory(path: &str) -> Result<crate::vec::Vec<DirectoryEntry>> {
                 entries.push(entry);
             }
             Ok(None) => break, // EOF
-            Err(errno) => return Err(errno),
+            Err(errno) => {
+                crate::println!("Error reading directory {}: {}", path, errno);
+                return Err(errno);
+            }
         }
     }
 

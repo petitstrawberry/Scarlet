@@ -30,11 +30,41 @@ fn setup_new_root() -> bool {
     // 2. Create necessary directories in the new root
     println!("init: Creating necessary directories in new root");
     
-    // 3. Copy essential binaries (in practice, these would already exist in the new filesystem)
-    // For this demo, we'll assume /mnt/newroot already has the necessary structure
-    copy_dir("/bin", "/mnt/newroot/bin");
+    // 3. Debug: First check what's actually in the current root
+    // println!("init: DEBUG - Checking current root contents:");
+    // match list_directory("/") {
+    //     Ok(entries) => {
+    //         for entry in entries {
+    //             println!("init: DEBUG - Root contains: {} ({})", entry.name, 
+    //                 if entry.is_directory() { "dir" } else { "file" });
+    //         }
+    //     }
+    //     Err(_) => {
+    //         println!("init: DEBUG - Failed to read root directory");
+    //     }
+    // }
+    
+    // Check if /system/scarlet/bin exists (where initramfs puts the binaries)
+    println!("init: DEBUG - Checking /system/scarlet/bin:");
+    match list_directory("/system/scarlet/bin") {
+        Ok(entries) => {
+            for entry in entries {
+                println!("init: DEBUG - /system/scarlet/bin contains: {}", entry.name);
+            }
+        }
+        Err(e) => {
+            println!("init: DEBUG - /system/scarlet/bin not accessible: {}", e);
+        }
+    }
+    
+    // 4. Copy essential binaries (update paths based on actual initramfs structure)
+    // Copy from the actual location in initramfs
     copy_dir("/system", "/mnt/newroot/system");
-    copy_dir("/data", "/mnt/newroot/data");
+    
+    // Also create some standard directories that might be expected
+    let _ = create_directory("/mnt/newroot/bin");
+    let _ = create_directory("/mnt/newroot/usr");
+    let _ = create_directory("/mnt/newroot/usr/bin");
     
     // Create old_root directory in the new root (where the old root will be moved)
     match create_directory("/mnt/newroot/old_root") {
@@ -224,7 +254,50 @@ fn main() -> i32 {
             
             // Verify the new root by trying to access files
             println!("init: Current working directory after pivot_root");
-            // In a real system, you'd verify that essential files are accessible
+            
+            // Debug: Check what's in the new root after pivot_root
+            println!("init: DEBUG - New root contents after pivot_root:");
+            match list_directory("/") {
+                Ok(entries) => {
+                    for entry in entries {
+                        println!("init: DEBUG - New root contains: {} ({})", entry.name, 
+                            if entry.is_directory() { "dir" } else { "file" });
+                    }
+                }
+                Err(_) => {
+                    println!("init: DEBUG - Failed to read new root directory");
+                }
+            }
+            
+            // Check if our copied system directory exists
+            match list_directory("/system") {
+                Ok(entries) => {
+                    println!("init: DEBUG - /system contains {} entries", entries.len());
+                    for entry in entries {
+                        println!("init: DEBUG - /system/{} ({})", entry.name, 
+                            if entry.is_directory() { "dir" } else { "file" });
+                    }
+                }
+                Err(_) => {
+                    println!("init: DEBUG - /system not accessible in new root");
+                }
+            }
+            
+            // Check the old root
+            match list_directory("/old_root") {
+                Ok(entries) => {
+                    println!("init: DEBUG - /old_root contains {} entries", entries.len());
+                    for entry in entries {
+                        if entry.name != "." && entry.name != ".." {
+                            println!("init: DEBUG - /old_root/{} ({})", entry.name, 
+                                if entry.is_directory() { "dir" } else { "file" });
+                        }
+                    }
+                }
+                Err(_) => {
+                    println!("init: DEBUG - /old_root not accessible");
+                }
+            }
             
         } else {
             println!("init: Failed to pivot root, continuing with current root");
@@ -238,13 +311,38 @@ fn main() -> i32 {
     match fork() {
         0 => {
             // Child process: Execute the login program
-            if execve_with_flags("/system/scarlet/bin/login", &["/bin/login"], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
-                println!("Failed to execve /system/scarlet/bin/login");
-                // Try to execute from old root if pivot_root was successful
-                if execve_with_flags("/old_root/system/scarlet/bin/login", &["/bin/login"], &[], EXECVE_FORCE_ABI_REBUILD) != 0 {
-                    println!("Failed to execve /old_root/system/scarlet/bin/login");
+            // After pivot_root, try the most likely locations for login binary
+            let login_paths = [
+                "/system/scarlet/bin/login",      // In new root (copied from initramfs)
+                "/old_root/system/scarlet/bin/login", // In old root (original initramfs)
+                "/bin/login",                     // Standard location
+                "/usr/bin/login",                 // Alternative standard location
+                "/old_root/bin/login",           // Standard location in old root
+            ];
+            
+            for login_path in &login_paths {
+                println!("init: Trying to execute login at: {}", login_path);
+                
+                // Try to open the file first to see if it exists
+                match File::open(login_path) {
+                    Ok(_) => {
+                        println!("init: Login binary exists at {}", login_path);
+                    }
+                    Err(_) => {
+                        println!("init: Login binary not found at {}", login_path);
+                        continue;
+                    }
+                }
+                
+                if execve_with_flags(login_path, &[login_path], &[], EXECVE_FORCE_ABI_REBUILD) == 0 {
+                    // This should not be reached if execve succeeds
+                    break;
+                } else {
+                    println!("init: Failed to execve {} (binary exists but execve failed)", login_path);
                 }
             }
+            
+            println!("init: All login paths failed, exiting child process");
             exit(-1);
         }
         -1 => {

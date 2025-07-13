@@ -97,54 +97,54 @@ pub fn sys_file_truncate(trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// System call for getting file metadata
-/// 
-/// # Arguments
-/// - handle: Handle to the KernelObject (must support FileObject)
-/// - metadata_ptr: Pointer to FileMetadata structure to fill
-/// 
-/// # Returns
-/// - On success: 0
-/// - On error: usize::MAX
-pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return usize::MAX,
-    };
+// /// System call for getting file metadata
+// /// 
+// /// # Arguments
+// /// - handle: Handle to the KernelObject (must support FileObject)
+// /// - metadata_ptr: Pointer to FileMetadata structure to fill
+// /// 
+// /// # Returns
+// /// - On success: 0
+// /// - On error: usize::MAX
+// pub fn sys_file_metadata(trapframe: &mut Trapframe) -> usize {
+//     let task = match mytask() {
+//         Some(task) => task,
+//         None => return usize::MAX,
+//     };
     
-    let handle = trapframe.get_arg(0) as u32;
-    let metadata_ptr = trapframe.get_arg(1);
+//     let handle = trapframe.get_arg(0) as u32;
+//     let metadata_ptr = trapframe.get_arg(1);
     
-    // Increment PC to avoid infinite loop if metadata fails
-    trapframe.increment_pc_next(task);
+//     // Increment PC to avoid infinite loop if metadata fails
+//     trapframe.increment_pc_next(task);
     
-    // Translate the pointer to get access to the metadata structure
-    let metadata_vaddr = match task.vm_manager.translate_vaddr(metadata_ptr) {
-        Some(addr) => addr as *mut crate::fs::FileMetadata,
-        None => return usize::MAX, // Invalid pointer
-    };
+//     // Translate the pointer to get access to the metadata structure
+//     let metadata_vaddr = match task.vm_manager.translate_vaddr(metadata_ptr) {
+//         Some(addr) => addr as *mut crate::fs::FileMetadata,
+//         None => return usize::MAX, // Invalid pointer
+//     };
     
-    // Get KernelObject from handle table
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid handle
-    };
+//     // Get KernelObject from handle table
+//     let kernel_obj = match task.handle_table.get(handle) {
+//         Some(obj) => obj,
+//         None => return usize::MAX, // Invalid handle
+//     };
     
-    // Check if object supports FileObject operations
-    let file = match kernel_obj.as_file() {
-        Some(file) => file,
-        None => return usize::MAX, // Object doesn't support file operations
-    };
+//     // Check if object supports FileObject operations
+//     let file = match kernel_obj.as_file() {
+//         Some(file) => file,
+//         None => return usize::MAX, // Object doesn't support file operations
+//     };
     
-    // Get metadata
-    match file.metadata() {
-        Ok(metadata) => {
-            // Write the metadata to user space
-            unsafe {
-                *metadata_vaddr = metadata;
-            }
-            0 // Success
-        }
-        Err(_) => usize::MAX, // Metadata error
-    }
-}
+//     // Get metadata
+//     match file.metadata() {
+//         Ok(metadata) => {
+//             // Write the metadata to user space
+//             unsafe {
+//                 *metadata_vaddr = metadata;
+//             }
+//             0 // Success
+//         }
+//         Err(_) => usize::MAX, // Metadata error
+//     }
+// }

@@ -32,7 +32,7 @@ pub enum Syscall {
     // FileObject Capability - file-specific operations (extends StreamOps)
     FileSeek = 300,
     FileTruncate = 301,
-    FileMetadata = 302,
+    // FileMetadata = 302,
     
     // === VFS Operations (VFS layer management and file access) ===
     VfsOpen = 400,          // Open files/directories through VFS

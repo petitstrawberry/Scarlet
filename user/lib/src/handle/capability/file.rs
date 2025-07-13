@@ -61,6 +61,7 @@ impl SeekFrom {
 
 /// File metadata information
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct FileMetadata {
     /// Size of the file in bytes
     pub size: u64,
@@ -157,37 +158,37 @@ impl FileObject {
         FileError::from_syscall_result(result).map(|_| ())
     }
 
-    /// Get metadata about the file
-    /// 
-    /// # Returns
-    /// FileMetadata structure or FileError on failure
-    pub fn metadata(&self) -> FileResult<FileMetadata> {
-        // For now, we'll use a simple implementation
-        // In the future, this could be enhanced to use a more sophisticated metadata syscall
+    // /// Get metadata about the file
+    // /// 
+    // /// # Returns
+    // /// FileMetadata structure or FileError on failure
+    // pub fn metadata(&self) -> FileResult<FileMetadata> {
+    //     // For now, we'll use a simple implementation
+    //     // In the future, this could be enhanced to use a more sophisticated metadata syscall
         
-        // Allocate space for metadata on the stack
-        let mut metadata_raw = [0u64; 8]; // Size to hold kernel FileMetadata
+    //     // Allocate space for metadata on the stack
+    //     let mut metadata_raw = [0u64; 8]; // Size to hold kernel FileMetadata
         
-        let result = syscall2(
-            Syscall::FileMetadata,
-            self.handle as usize,
-            metadata_raw.as_mut_ptr() as usize,
-        );
+    //     let result = syscall2(
+    //         Syscall::FileMetadata,
+    //         self.handle as usize,
+    //         metadata_raw.as_mut_ptr() as usize,
+    //     );
         
-        match FileError::from_syscall_result(result) {
-            Ok(_) => {
-                Ok(FileMetadata {
-                    size: metadata_raw[0],
-                    file_type: metadata_raw[1] as u32,
-                    permissions: metadata_raw[2] as u32,
-                    created: metadata_raw[3],
-                    modified: metadata_raw[4],
-                    accessed: metadata_raw[5],
-                })
-            }
-            Err(e) => Err(e),
-        }
-    }
+    //     match FileError::from_syscall_result(result) {
+    //         Ok(_) => {
+    //             Ok(FileMetadata {
+    //                 size: metadata_raw[0],
+    //                 file_type: metadata_raw[1] as u32,
+    //                 permissions: metadata_raw[2] as u32,
+    //                 created: metadata_raw[3],
+    //                 modified: metadata_raw[4],
+    //                 accessed: metadata_raw[5],
+    //             })
+    //         }
+    //         Err(e) => Err(e),
+    //     }
+    // }
 
     /// Get the current position in the file
     /// 
@@ -200,6 +201,7 @@ impl FileObject {
     /// 
     /// This is a convenience method that gets metadata and returns just the size
     pub fn size(&self) -> FileResult<u64> {
-        self.metadata().map(|meta| meta.size)
+        // self.metadata().map(|meta| meta.size)
+        todo!("Implement size retrieval using metadata syscall")
     }
 }
