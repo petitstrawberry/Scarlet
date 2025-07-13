@@ -90,8 +90,6 @@ Scarlet implements a modern Virtual File System (VFS v2) with support for multip
 
 ## Development
 
-## Development
-
 ### Docker Environment (Recommended)
 
 ```bash
