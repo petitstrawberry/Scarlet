@@ -78,17 +78,6 @@
 //!   - The `SerialDevice` trait provides a common interface for UART and console devices
 //!   - The `FileSystem` trait provides unified filesystem operations for VFS v2 integration
 //!
-//! ## Virtual File System v2
-//!
-//! Scarlet implements a modern VFS architecture designed for container environments:
-//!
-//! - **VfsEntry**: Path hierarchy cache providing fast O(1) path resolution with automatic cleanup
-//! - **VfsNode**: Abstract file entity interface with metadata access and clean downcasting
-//! - **FileSystemOperations**: Unified driver API consolidating all filesystem operations
-//! - **Mount Tree Management**: Hierarchical mount point management with O(log n) resolution
-//!
-//! Supported filesystems: TmpFS, CpioFS, OverlayFS, and DevFS. See individual driver modules for implementation details.
-//!
 //! ## Boot Process
 //!
 //! Scarlet follows a structured initialization sequence:
@@ -135,18 +124,6 @@
 //! - **Memory Management**: Virtual memory with page tables and memory protection
 //! - **SBI Interface**: Supervisor Binary Interface for firmware communication
 //! - **Instruction Abstractions**: RISC-V specific optimizations with compressed instruction support
-//!
-//! ## Rust Language Features
-//!
-//! ## Architecture Support
-//!
-//! Current RISC-V 64-bit implementation includes:
-//!
-//! - **Interrupt Handling**: Complete trap frame management with timer and external interrupts
-//! - **Memory Management**: Sv48 virtual memory with hardware page table support
-//! - **SBI Interface**: Supervisor Binary Interface for firmware communication
-//! - **Instruction Support**: RISC-V base ISA with compressed instruction extensions
-//! - **Privilege Levels**: S-mode operation with U-mode user space support
 //!
 //! ## Development Framework
 //!
