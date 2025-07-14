@@ -26,6 +26,30 @@ use super::{
 /// Filesystem ID type
 pub type FSId = u64;
 
+/// Path resolution options for VFS operations
+#[derive(Debug, Clone)]
+pub struct PathResolutionOptions {
+    /// Don't follow symbolic links in the final component (like lstat behavior)
+    pub no_follow: bool,
+}
+
+impl PathResolutionOptions {
+    /// Create options with no_follow flag set (don't follow final symlink)
+    pub fn no_follow() -> Self {
+        Self {
+            no_follow: true,
+        }
+    }
+}
+
+impl Default for PathResolutionOptions {
+    fn default() -> Self {
+        Self {
+            no_follow: false,
+        }
+    }
+}
+
 // Helper function to create FileSystemError
 fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
     FileSystemError::new(kind, message)
@@ -371,8 +395,10 @@ impl VfsManager {
     /// the filesystem cannot be resolved.
     /// 
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
-        // Resolve the entry to be removed
-        let (entry_to_remove, mount_point) = self.mount_tree.resolve_path(path)?;
+        // Resolve the entry to be removed - use no_follow to follow intermediate symlinks
+        // but not the final component (like POSIX rm behavior)
+        let options = PathResolutionOptions::no_follow();
+        let (entry_to_remove, mount_point) = self.mount_tree.resolve_path_with_options(path, &options)?;
 
         // Check if the entry is involved in any mount, which would make it busy
         if self.mount_tree.is_entry_used_in_mount(&entry_to_remove, &mount_point) {
@@ -382,7 +408,7 @@ impl VfsManager {
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
         
-        // Resolve parent directory using MountTreeV2
+        // Resolve parent directory using MountTreeV2 (follow all symlinks for parent path)
         let parent_entry = self.mount_tree.resolve_path(&parent_path)?.0;
         let parent_node = parent_entry.node();
         
@@ -537,8 +563,13 @@ impl VfsManager {
     }
 
     pub fn resolve_path(&self, path: &str) -> Result<Arc<VfsEntry>, FileSystemError> {
-        // Use MountTreeV2 to resolve the path
-        let (entry, _mount_point) = self.mount_tree.resolve_path(path)?;
+        self.resolve_path_with_options(path, &PathResolutionOptions::default())
+    }
+
+    /// Resolve a path with specified options
+    pub fn resolve_path_with_options(&self, path: &str, options: &PathResolutionOptions) -> Result<Arc<VfsEntry>, FileSystemError> {
+        // Use MountTreeV2 to resolve the path with options
+        let (entry, _mount_point) = self.mount_tree.resolve_path_with_options(path, options)?;
         Ok(entry)
     }
     

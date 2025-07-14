@@ -3,7 +3,7 @@ mod tests {
     use crate::fs::drivers::tmpfs::TmpFS;
     use crate::fs::vfs_v2::manager::VfsManager;
     use crate::fs::{FileType, FileSystemErrorKind};
-    use alloc::{sync::Arc, string::ToString};
+    use alloc::string::ToString;
 
     /// Test basic hard link creation and functionality
     #[test_case]
@@ -198,6 +198,8 @@ mod tests {
     /// Test basic symbolic link creation and target reading
     #[test_case]
     fn test_symlink_basic() {
+        use crate::fs::vfs_v2::manager::PathResolutionOptions;
+        
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
@@ -207,8 +209,15 @@ mod tests {
         // Create symbolic link
         vfs.create_symlink("/symlink.txt", "/target.txt").unwrap();
         
-        let symlink_entry = vfs.resolve_path("/symlink.txt").unwrap();
+        // Use no_follow option to get the symlink itself, not the target
+        let symlink_entry = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
+        
+        // Debug output
+        let metadata = symlink_node.metadata().unwrap();
+        crate::println!("Debug: symlink metadata: {:?}", metadata);
+        let file_type = symlink_node.file_type().unwrap();
+        crate::println!("Debug: symlink file_type: {:?}", file_type);
         
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
@@ -217,11 +226,18 @@ mod tests {
         // Read the target
         let target = symlink_node.read_link().unwrap();
         assert_eq!(target, "/target.txt");
+        
+        // Also test that normal resolution follows the symlink
+        let target_entry = vfs.resolve_path("/symlink.txt").unwrap();
+        let target_node = target_entry.node();
+        assert_eq!(target_node.file_type().unwrap(), FileType::RegularFile);
     }
 
     /// Test symlink with relative path
     #[test_case]
     fn test_symlink_relative_path() {
+        use crate::fs::vfs_v2::manager::PathResolutionOptions;
+        
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
@@ -232,17 +248,28 @@ mod tests {
         // Create symbolic link with relative path
         vfs.create_symlink("/subdir/link_to_target.txt", "target.txt").unwrap();
         
-        let symlink_entry = vfs.resolve_path("/subdir/link_to_target.txt").unwrap();
+        // Use no_follow to get the symlink itself
+        let symlink_entry = vfs.resolve_path_with_options("/subdir/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
+        
+        // Verify it's a symbolic link
+        assert!(symlink_node.is_symlink().unwrap());
         
         // Read the target
         let target = symlink_node.read_link().unwrap();
         assert_eq!(target, "target.txt");
+        
+        // Test that normal resolution follows the symlink
+        let target_entry = vfs.resolve_path("/subdir/link_to_target.txt").unwrap();
+        let target_node = target_entry.node();
+        assert_eq!(target_node.file_type().unwrap(), FileType::RegularFile);
     }
 
     /// Test symlink metadata
     #[test_case]
     fn test_symlink_metadata() {
+        use crate::fs::vfs_v2::manager::PathResolutionOptions;
+        
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
@@ -251,11 +278,12 @@ mod tests {
         // Create symbolic link
         vfs.create_symlink("/symlink.txt", &target_path).unwrap();
         
-        let symlink_entry = vfs.resolve_path("/symlink.txt").unwrap();
+        // Use no_follow to get the symlink itself
+        let symlink_entry = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
         let metadata = symlink_node.metadata().unwrap();
-        
-        // Check metadata
+
+        // Check metadata properties
         assert!(matches!(metadata.file_type, FileType::SymbolicLink(_)));
         assert_eq!(metadata.size, target_path.len()); // Size should be target path length
         assert_eq!(metadata.link_count, 1);
@@ -317,16 +345,43 @@ mod tests {
     /// Test symlink removal and memory cleanup
     #[test_case]
     fn test_symlink_removal() {
+        use crate::fs::vfs_v2::manager::PathResolutionOptions;
+        
         let tmpfs = TmpFS::new(1024); // Limited memory to test cleanup
         let vfs = VfsManager::new_with_root(tmpfs);
 
         let target_path = "/very/long/target/path/for/memory/test.txt".to_string();
         
         // Create symbolic link
-        vfs.create_symlink("/symlink.txt", &target_path).unwrap();
+        let create_result = vfs.create_symlink("/symlink.txt", &target_path);
+        if let Err(ref e) = create_result {
+            crate::println!("Debug: Create symlink failed with error: {:?}", e);
+        }
+        create_result.unwrap();
+
+        // Verify symlink was created
+        let symlink_result = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow());
+        if let Err(ref e) = symlink_result {
+            crate::println!("Debug: Resolve symlink failed with error: {:?}", e);
+            // Try to list root directory to see what's there
+            match vfs.readdir("/") {
+                Ok(entries) => {
+                    crate::println!("Debug: Root directory contents:");
+                    for entry in entries {
+                        crate::println!("  - {}", entry.name);
+                    }
+                }
+                Err(e) => crate::println!("Debug: Failed to read root directory: {:?}", e),
+            }
+        }
+        assert!(symlink_result.is_ok(), "Symlink should exist after creation");
 
         // Remove the symlink
-        vfs.remove("/symlink.txt").unwrap();
+        let remove_result = vfs.remove("/symlink.txt");
+        if let Err(ref e) = remove_result {
+            crate::println!("Debug: Remove failed with error: {:?}", e);
+        }
+        remove_result.unwrap();
 
         // Verify symlink is gone
         let result = vfs.resolve_path("/symlink.txt");
@@ -336,6 +391,8 @@ mod tests {
     /// Test symlinks in subdirectories
     #[test_case]
     fn test_symlink_subdirectories() {
+        use crate::fs::vfs_v2::manager::PathResolutionOptions;
+        
         let tmpfs = TmpFS::new(0);
         let vfs = VfsManager::new_with_root(tmpfs);
 
@@ -347,11 +404,115 @@ mod tests {
         // Create symlink in different directory
         vfs.create_symlink("/dir2/link_to_target.txt", "/dir1/target.txt").unwrap();
         
-        let symlink_entry = vfs.resolve_path("/dir2/link_to_target.txt").unwrap();
+        // Use no_follow to get the symlink itself, not the target
+        let symlink_entry = vfs.resolve_path_with_options("/dir2/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
         
-        // Verify target
+        // Verify it's a symlink and get target
+        assert!(symlink_node.is_symlink().unwrap());
         let target = symlink_node.read_link().unwrap();
         assert_eq!(target, "/dir1/target.txt");
+    }
+
+    /// Test symlink creation directly in TmpFS (not through VFS)
+    #[test_case]
+    fn test_symlink_direct_tmpfs() {
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+        
+        let tmpfs = TmpFS::new(0);
+        let root_node = tmpfs.root_node();
+        
+        // Create symbolic link directly through TmpFS
+        let symlink_node = tmpfs.create(
+            &root_node,
+            &"symlink.txt".to_string(),
+            FileType::SymbolicLink("/target.txt".to_string()),
+            0o644,
+        ).unwrap();
+        
+        // Debug output
+        let metadata = symlink_node.metadata().unwrap();
+        crate::println!("Debug: direct tmpfs symlink metadata: {:?}", metadata);
+        let file_type = symlink_node.file_type().unwrap();
+        crate::println!("Debug: direct tmpfs symlink file_type: {:?}", file_type);
+        
+        // Verify it's a symbolic link
+        assert!(symlink_node.is_symlink().unwrap());
+        assert!(matches!(symlink_node.file_type().unwrap(), FileType::SymbolicLink(_)));
+        
+        // Read the target
+        let target = symlink_node.read_link().unwrap();
+        assert_eq!(target, "/target.txt");
+    }
+
+    /// Test removing files through symlink directories (ensuring intermediate symlinks are followed)
+    #[test_case] 
+    fn test_remove_through_symlink_directory() {
+        use crate::fs::vfs_v2::manager::PathResolutionOptions;
+        
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create directory structure: /real_dir/file.txt
+        vfs.create_dir("/real_dir").unwrap();
+        vfs.create_file("/real_dir/file.txt", FileType::RegularFile).unwrap();
+        
+        // Create symlink to directory: /symlink_dir -> /real_dir
+        vfs.create_symlink("/symlink_dir", "/real_dir").unwrap();
+        
+        // Verify we can access file through symlink directory
+        let file_through_symlink = vfs.resolve_path("/symlink_dir/file.txt").unwrap();
+        assert_eq!(file_through_symlink.node().file_type().unwrap(), FileType::RegularFile);
+        
+        // Remove file through symlink directory path
+        // This should follow the intermediate symlink (/symlink_dir) but remove the actual file
+        vfs.remove("/symlink_dir/file.txt").unwrap();
+        
+        // Verify file is removed from real directory
+        let result = vfs.resolve_path("/real_dir/file.txt");
+        assert!(result.is_err(), "File should be removed from real directory");
+        
+        // Verify symlink directory still exists
+        let symlink_dir = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
+        assert!(symlink_dir.node().is_symlink().unwrap(), "Symlink directory should still exist");
+    }
+
+    /// Test removing a symlink when it's the final component of a path through symlink directories
+    #[test_case]
+    fn test_remove_symlink_through_symlink_directory() {
+        use crate::fs::vfs_v2::manager::PathResolutionOptions;
+        
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create directory structure
+        vfs.create_dir("/real_dir").unwrap();
+        vfs.create_file("/real_dir/target.txt", FileType::RegularFile).unwrap();
+        
+        // Create symlink to directory: /symlink_dir -> /real_dir  
+        vfs.create_symlink("/symlink_dir", "/real_dir").unwrap();
+        
+        // Create symlink inside the real directory: /real_dir/link_to_target -> target.txt
+        vfs.create_symlink("/real_dir/link_to_target", "target.txt").unwrap();
+        
+        // Verify we can access the symlink through symlink directory
+        let symlink_through_dir = vfs.resolve_path_with_options("/symlink_dir/link_to_target", &PathResolutionOptions::no_follow()).unwrap();
+        assert!(symlink_through_dir.node().is_symlink().unwrap());
+        
+        // Remove the symlink through symlink directory path
+        // This should follow /symlink_dir but remove the symlink /real_dir/link_to_target
+        vfs.remove("/symlink_dir/link_to_target").unwrap();
+        
+        // Verify symlink is removed from real directory
+        let result = vfs.resolve_path_with_options("/real_dir/link_to_target", &PathResolutionOptions::no_follow());
+        assert!(result.is_err(), "Symlink should be removed from real directory");
+        
+        // Verify target file still exists
+        let target_file = vfs.resolve_path("/real_dir/target.txt").unwrap();
+        assert_eq!(target_file.node().file_type().unwrap(), FileType::RegularFile);
+        
+        // Verify symlink directory still exists
+        let symlink_dir = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
+        assert!(symlink_dir.node().is_symlink().unwrap());
     }
 }
