@@ -125,6 +125,34 @@
 //! - **SBI Interface**: Supervisor Binary Interface for firmware communication
 //! - **Instruction Abstractions**: RISC-V specific optimizations with compressed instruction support
 //!
+//! ## Rust Language Features
+//!
+//! Scarlet leverages Rust's advanced features for safe and efficient kernel development:
+//!
+//! ### Memory Safety
+//!
+//! - **Zero-cost Abstractions**: High-level constructs compile to efficient machine code
+//! - **Ownership System**: Automatic memory management without garbage collection overhead
+//! - **Lifetime Validation**: Compile-time prevention of use-after-free and dangling pointer errors
+//! - **Borrowing Rules**: Exclusive mutable access prevents data races at compile time
+//! - **No Buffer Overflows**: Array bounds checking and safe pointer arithmetic
+//!
+//! ### Type System Features
+//!
+//! - **Trait-based Design**: Generic programming with zero-cost abstractions for device drivers
+//! - **Pattern Matching**: Exhaustive matching prevents unhandled error cases
+//! - **Option/Result Types**: Explicit error handling without exceptions or null pointer errors
+//! - **Custom Test Framework**: `#[test_case]` attribute for no-std kernel testing
+//! - **Const Generics**: Compile-time array sizing and type-level programming
+//!
+//! ### No-std Environment
+//!
+//! - **Embedded-first Design**: No standard library dependency for minimal kernel footprint
+//! - **Custom Allocators**: Direct control over memory allocation strategies
+//! - **Inline Assembly**: Direct hardware access when needed with type safety
+//! - **Custom Panic Handler**: Controlled kernel panic behavior for debugging
+//! - **Boot-time Initialization**: Static initialization and controlled startup sequence
+//!
 //! ## Development Framework
 //!
 //! ### Testing Infrastructure
