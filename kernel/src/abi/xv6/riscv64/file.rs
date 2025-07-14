@@ -420,7 +420,7 @@ pub fn sys_mknod(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
                     device_type: crate::device::DeviceType::Char,
                 }
             ));
-            crate::println!("Created console device at {}", path);
+            // crate::println!("Created console device at {}", path);
         },
         _ => {},
     }
