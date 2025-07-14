@@ -31,7 +31,7 @@ RUN mkdir -p /opt && cd /opt && \
     # Disable TC (Traffic Control) features to avoid CBQ compilation errors
     sed -i 's/CONFIG_TC=y/# CONFIG_TC is not set/' .config && \
     sed -i 's/CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/' .config && \
-    sed -i 's/CONFIG_STATIC=y/# CONFIG_STATIC is not set/' .config && \
+    sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config && \
     make CROSS_COMPILE=riscv64-linux-gnu- all && \
     make CROSS_COMPILE=riscv64-linux-gnu- install
 
