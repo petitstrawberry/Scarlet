@@ -2,9 +2,9 @@
 
 <div align="center">
   
-**A minimal operating system kernel written in Rust**
+**A kernel in Rust designed to provide a universal, multi-ABI container runtime.**
 
-[![Version](https://img.shields.io/badge/version-0.11.2-blue.svg)](https://github.com/yourusername/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.12.1-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
@@ -13,211 +13,126 @@
 
 ## Overview
 
-Scarlet is a bare metal, minimalist operating system kernel written in Rust. The project aims to provide a clean design with strong safety guarantees through Rust's ownership model. While the current implementation focuses on essential kernel functionality, our long-term vision is to develop a fully modular operating system with dynamic component loading and unloading capabilities.
+Scarlet is an operating system kernel written in Rust that implements a transparent ABI conversion layer for executing binaries across different operating systems and architectures. The kernel provides a universal container runtime environment with strong isolation capabilities and comprehensive filesystem support.
 
-### Core Features
+## Quick Start
 
-- **No Standard Library**: Built using `#![no_std]` for bare metal environments
-- **Architecture Support**: Currently implemented for RISC-V 64-bit with plans for additional architectures
-- **Memory Management**: Custom heap allocator with virtual memory support
-- **Task Scheduling**: Simple but effective task scheduler
-- **Driver Framework**: Organized device driver architecture with device discovery
-- **Filesystem Support**: Basic filesystem abstractions
-- **Hardware Abstraction**: Clean architecture-specific abstractions for multi-architecture support
-- **Modularity Vision**: Working toward a fully modular OS design where components can be dynamically loaded and unloaded
-
-
-
-
-## Setting Up the Environment
-
-To build and run Scarlet, you need to have the following prerequisites installed:
-- Rust (nightly version)
-- `cargo-make` for build automation
-- `qemu` for emulation
-- Architecture-specific toolchain (currently RISC-V)
-
-Also, you can use docker to set up a development environment.
-
-#### Using Docker (Recommended)
-
-You can set up a development environment using Docker. This is the recommended way to build and run Scarlet.
+Want to see Multi-ABI execution in action? Try Scarlet using Docker:
 
 ```bash
-# Build the Docker image
+# Get started with Docker (recommended)
 docker build -t scarlet-build .
+docker run -it --rm scarlet-build bash -c "cargo make build && cargo make run"
 
-# Run the container
-docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-build
+# Once Scarlet is running, you can try Multi-ABI pipeline communication:
+(scarlet)$ scarlet_cat /etc/passwd | linux_grep "root" | xv6_wc -l
+1
 
-# Inside the container, you can run the following commands:
-# Build the kernel
-cargo make build
+# Different binaries, same environment:
+# - scarlet_cat: Scarlet Native binary using Scarlet syscalls
+# - linux_grep: Linux binary with transparent ABI conversion  
+# - xv6_wc: xv6 binary running through compatibility layer
+# All communicating seamlessly via pipes!
 ```
 
-## Building and Running
+This demonstrates true ABI transparency - binaries from different operating systems working together as if they were native.
 
-To build and run Scarlet, you can use the following commands:
+> **Note**: Currently, Scarlet Native ABI is implemented. Linux and xv6 ABI support are under development and will be available in future releases.
 
-```bash
-# Build all components (kernel, userlib, user programs, initramfs)
-cargo make build
+## Key Features
 
-# Build only specific components:
-cargo make build-kernel    # Build only the kernel
-cargo make build-userlib   # Build only the user library
-cargo make build-userbin   # Build only the user programs
-cargo make build-initramfs # Build only the initial ramfs (copies user programs to initramfs)
+- **Multi-ABI Support**: Transparent execution of binaries from different operating systems
+- **Container Runtime**: Complete filesystem isolation with namespace support
+- **Advanced VFS**: Modern virtual filesystem with overlay, bind mount, and device file support
+- **System Integration**: TTY devices, interrupt handling, and comprehensive device management
+- **Task Management**: Full task lifecycle with environment variables and IPC pipes
+- **Memory Safety**: Built with Rust's safety guarantees for reliable system operation
+- **RISC-V Ready**: Native support for RISC-V 64-bit architecture
 
-# Clean all build artifacts
-cargo make clean
+## ABI Module System
 
-# Run the kernel
-cargo make run
-```
+Scarlet's Multi-ABI support is built around a modular ABI implementation system:
 
-### Debugging
+### How It Works
 
-To debug the kernel, you can use following command:
+- **Binary Detection**: Automatic identification of binary format and target ABI
+- **Native Implementation**: Each ABI module implements its own syscall interface using shared kernel APIs
+- **Shared Kernel Resources**: All ABIs operate on common kernel objects (VFS, memory, devices, etc.)
 
-```bash
-cargo make debug
-```
-This will start the kernel in QEMU with GDB support. You can then attach a GDB session to the running kernel.
+### ABI Modules
 
-### Testing
+- **Scarlet Native**: Direct kernel interface with optimal performance
+- **Linux Compatibility** *(in development)*: Full POSIX syscall implementation
+- **xv6 Compatibility** *(in development)*: Educational OS syscall implementation
 
-```bash
-cargo make test
-```
-
-## Project Structure
-
-```
-kernel/src/           - Kernel source code
-├── arch/             - Architecture specific code
-│   └── riscv64/      - RISC-V 64-bit implementation
-├── device/           - Device abstractions and management
-├── drivers/          - Hardware drivers
-│   ├── block/        - Block device drivers
-│   ├── uart/         - UART drivers
-│   └── virtio/       - VirtIO device drivers
-├── fs/               - Filesystem implementations
-│   └── drivers/      - Filesystem drivers
-│       └── cpio/     - CPIO archive filesystem support
-├── initcall/         - Initialization sequence management
-├── library/          - Internal library code (std replacement)
-├── mem/              - Memory management
-├── sched/            - Scheduler implementation
-├── syscall/          - System call interface
-├── task/             - Task and process management
-│   └── elf_loader/   - ELF executable loader
-├── traits/           - Shared interfaces
-└── vm/               - Virtual memory management
-user/                 - User space code
-├── bin/              - User programs
-└── lib/              - User library code
-mkfs/                 - Filesystem build tools
-├── initramfs/        - Initial RAM filesystem contents
-└── make_initramfs.sh - Script to build the initial RAM filesystem
-```
+This architecture enables true containerization where applications from different operating systems can coexist and communicate without modification.
 
 ## Architecture Support
 
-Currently, Scarlet supports the RISC-V 64-bit architecture, with plans to expand to additional architectures in the future. The clean abstraction layer is designed to facilitate porting to other architectures.
+Currently supports RISC-V 64-bit architecture with plans for additional architectures. The kernel includes hardware abstraction layers for interrupt handling, memory management, and device drivers.
 
-### Current Implementation
+## Filesystem Support
 
-The RISC-V implementation includes:
-- Boot sequence for both bootstrap processors and application processors
-- Interrupt handling through trap frames
-- Memory management with virtual memory support
-- Architecture-specific timer implementation
-- Instruction abstractions and SBI interface
+Scarlet implements a modern Virtual File System (VFS v2) with support for multiple filesystem types and container isolation:
 
-## Boot Process
+### Supported Filesystems
 
-Scarlet's boot process follows this sequence:
-1. Architecture initialization (`init_arch`)
-2. FDT (Flattened Device Tree) parsing
-3. Heap initialization  
-4. Early driver initialization via initcalls
-5. Virtual memory setup
-6. Device discovery and initialization
-7. Timer initialization
-8. Scheduler initialization and task creation
-9. Task scheduling and kernel main loop
+- **TmpFS**: Memory-based temporary filesystem
+- **CpioFS**: Read-only CPIO archive filesystem for initramfs
+- **OverlayFS**: Union filesystem combining multiple layers
+- **DevFS**: Device file system for hardware access
 
-## Resource Management with Rust's Ownership Model
+### Container Features
 
-Scarlet leverages Rust's ownership and borrowing system to provide memory safety without garbage collection:
+- **Mount Namespace Isolation**: Per-task filesystem namespaces
+- **Bind Mount Operations**: Directory mounting across namespaces
+- **Overlay Support**: Layered filesystems with copy-on-write semantics
 
-- **Zero-Cost Abstractions**: Using Rust's type system for resource management without runtime overhead
-- **RAII Resource Management**: Kernel resources are automatically cleaned up when they go out of scope
-- **Mutex and RwLock**: Thread-safe concurrent access to shared resources using the `spin` crate
-- **Arc** (Atomic Reference Counting): Safe sharing of resources between kernel components
-- **Memory Safety**: Prevention of use-after-free, double-free, and data races at compile time
-- **Trait-based Abstractions**: Common interfaces for device drivers and subsystems enabling modularity
+## Development
 
-Examples of this can be seen in device management, filesystem access, and task scheduling, where resources are borrowed rather than copied, and ownership is clearly defined.
+### Docker Environment (Recommended)
 
-## Virtual File System v2
+```bash
+# Build and run development container
+docker build -t scarlet-dev .
+docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
 
-Scarlet implements a modern Virtual File System (VFS v2) designed with clean architecture principles, supporting containerization, process isolation, and advanced filesystem operations:
-
-### VFS v2 Architecture
-
-The new architecture provides three core components inspired by modern operating systems:
-
-- **VfsEntry**: Path hierarchy cache (similar to Linux dentry) providing fast path resolution with weak reference-based cleanup and parent-child relationship management
-- **VfsNode**: File entity interface (similar to Linux inode/BSD vnode) offering abstract file representation with metadata access and clean downcasting support  
-- **FileSystemOperations**: Unified driver API consolidating all filesystem operations (lookup, create, remove, etc.) with clean separation between VFS core and filesystem drivers
-
-### Advanced Mount System
-
-- **Hierarchical Mount Tree**: Efficient mount point management with proper parent-child relationships and mount boundary crossing
-- **Bind Mount Operations**: Mount directories from one location to another, including cross-VFS bind mounting for container resource sharing
-- **Overlay Filesystem**: Union filesystem support combining multiple layers (upper writable, lower read-only) with whiteout file support
-- **Mount Namespace Isolation**: Per-task VFS namespaces enabling complete filesystem isolation or selective resource sharing
-
-### Available Filesystems
-
-- **TmpFS**: Memory-based temporary filesystem with configurable size limits
-- **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs with efficient directory structure parsing  
-- **OverlayFS**: Advanced union filesystem combining multiple layers with copy-up semantics and whiteout support
-- **InitramFS**: Special boot-time filesystem for early kernel initialization and user program loading
-
-### Container and Isolation Support
-
-```rust
-// Create isolated VFS namespace for container
-let container_vfs = VfsManager::new();
-container_vfs.mount(container_fs, "/", 0)?;
-
-// Selectively share host resources via bind mounts
-let host_vfs = get_global_vfs();
-container_vfs.bind_mount_from(&host_vfs, "/host/shared", "/shared")?;
-
-// Assign to task for complete namespace isolation
-task.vfs = Some(Arc::new(container_vfs));
+# Common commands:
+cargo make build && cargo make run    # Build and run
+cargo make test                       # Run tests  
+cargo make debug                      # Debug with GDB
 ```
 
-### Performance Characteristics
+### Local Development
 
-- **Path Resolution Caching**: VfsEntry provides fast lookup of recently accessed paths with automatic weak reference cleanup
-- **Mount Boundary Optimization**: Efficient crossing of mount points during path resolution with O(log k) mount point lookup
-- **Fine-Grained Locking**: Minimal lock contention with component-specific synchronization
-- **Memory Efficiency**: Weak reference-based caching prevents memory leaks while maintaining performance
-### System Call Interface
+Requirements: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 
-VFS v2 provides system calls operating within each task's namespace:
+### Build Commands
 
-- **File Operations**: `open()`, `read()`, `write()`, `close()`, `lseek()`, `truncate()`
-- **Directory Operations**: `mkdir()`, directory listing with proper metadata support
-- **Mount Operations**: `mount()`, `umount()`, `pivot_root()` for dynamic filesystem management
-- **Device File Support**: Integration with character and block device management for /dev filesystem functionality
+```bash
+# Full build (recommended for first time)
+cargo make build
 
-The VFS v2 implementation enables flexible deployment scenarios from simple shared filesystems to complete filesystem isolation with selective resource sharing, making it ideal for containerized applications, modular system architectures, and security-conscious environments.
+# Individual components
+cargo make build-kernel    # Kernel only
+cargo make build-userlib   # User space library
+cargo make build-userbin   # User programs
+cargo make build-initramfs # Initial RAM filesystem
+
+# Clean build artifacts
+cargo make clean
+```
+
+### Testing and Debugging
+
+```bash
+# Run all tests
+cargo make test
+
+# Debug kernel with GDB
+cargo make debug
+# Then in another terminal: gdb and connect to :1234
+```
 
 ## Contributing
 

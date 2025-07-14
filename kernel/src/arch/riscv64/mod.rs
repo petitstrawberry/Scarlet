@@ -267,6 +267,11 @@ pub fn shutdown() -> ! {
     sbi_system_reset(0, 0);
 }
 
+pub fn shutdown_with_code(exit_code: u32) -> ! {
+    // Use reset_reason as exit code for test environments
+    sbi_system_reset(0, exit_code);
+}
+
 pub fn reboot() -> ! {
     sbi_system_reset(1, 0);
 }

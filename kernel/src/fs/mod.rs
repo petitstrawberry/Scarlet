@@ -273,14 +273,14 @@ pub struct DeviceFileInfo {
     pub device_type: DeviceType,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FileType {
     RegularFile,
     Directory,
     CharDevice(DeviceFileInfo),
     BlockDevice(DeviceFileInfo),
     Pipe,
-    SymbolicLink,
+    SymbolicLink(String),
     Socket,
     Unknown,
 }
@@ -346,7 +346,7 @@ impl DirectoryEntry {
         let file_type_byte = match internal.file_type {
             FileType::RegularFile => 0u8,
             FileType::Directory => 1u8,
-            FileType::SymbolicLink => 2u8,
+            FileType::SymbolicLink(_) => 2u8,
             FileType::CharDevice(_) => 3u8,
             FileType::BlockDevice(_) => 4u8,
             FileType::Pipe => 5u8,

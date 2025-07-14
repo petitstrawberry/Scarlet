@@ -5,6 +5,7 @@
 pub mod advanced_tests;
 pub mod performance_tests;
 pub mod cross_vfs_tests;
+pub mod symlink_cross_fs_test;
 
 use crate::fs::vfs_v2::{
     core::*,
