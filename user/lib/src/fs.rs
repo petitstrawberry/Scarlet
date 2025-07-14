@@ -251,6 +251,7 @@ impl OpenOptions {
     /// ```
     pub fn open<P: AsRef<str>>(&self, path: P) -> Result<File> {
         use crate::syscall::{syscall2, Syscall};
+        use crate::ffi::str_to_cstr_bytes;
         
         // If we need to create the file, use VfsCreateFile first
         if self.create || self.create_new {
@@ -259,12 +260,16 @@ impl OpenOptions {
                 return Err(Error::new(ErrorKind::InvalidInput, "Cannot create file without write access"));
             }
             
+            // Convert path to null-terminated C string
+            let path_bytes = str_to_cstr_bytes(path.as_ref())
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+            
             // For create_new, we should check if file exists first
             // For now, just attempt to create and handle errors
             let result = syscall2(
                 Syscall::VfsCreateFile,
-                path.as_ref().as_ptr() as usize,
-                path.as_ref().len()
+                path_bytes.as_ptr() as usize,
+                0  // mode (unused for now)
             );
             
             // For create_new, creation failure is an error
@@ -350,12 +355,17 @@ impl File {
     /// File instance or error
     pub fn create<P: AsRef<str>>(path: P) -> Result<Self> {
         use crate::syscall::{syscall2, Syscall};
+        use crate::ffi::str_to_cstr_bytes;
+        
+        // Convert path to null-terminated C string
+        let path_bytes = str_to_cstr_bytes(path.as_ref())
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
         
         // Use VfsCreateFile syscall to create the file
         let result = syscall2(
             Syscall::VfsCreateFile,
-            path.as_ref().as_ptr() as usize,
-            path.as_ref().len()
+            path_bytes.as_ptr() as usize,
+            0  // mode (unused for now)
         );
         
         if result == usize::MAX {
