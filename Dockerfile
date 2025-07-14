@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
-	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 gdb-multiarch gcc-riscv64-linux-gnu cpio
+	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 gdb-multiarch gcc-riscv64-linux-gnu cpio libncurses5-dev libncursesw5-dev
 
 # Install QEMU
 RUN apt install -y qemu-system-riscv64
@@ -22,5 +22,17 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 
 # Install cargo tools
 RUN cargo install cargo-make
+
+# Download and configure busybox
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://git.busybox.net/busybox && \
+    cd busybox && \
+    make defconfig && \
+    # Disable TC (Traffic Control) features to avoid CBQ compilation errors
+    sed -i 's/CONFIG_TC=y/# CONFIG_TC is not set/' .config && \
+    sed -i 's/CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/' .config && \
+    sed -i 's/CONFIG_STATIC=y/# CONFIG_STATIC is not set/' .config && \
+    make CROSS_COMPILE=riscv64-linux-gnu- all && \
+    make CROSS_COMPILE=riscv64-linux-gnu- install
 
 WORKDIR /workspaces/Scarlet
