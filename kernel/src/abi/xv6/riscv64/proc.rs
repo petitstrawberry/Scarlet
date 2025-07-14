@@ -106,8 +106,8 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
 
 pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut Trapframe) -> usize {
     // Implement the kill syscall
-    // This is a placeholder implementation
-    0
+    // This syscall is not yet implemented. Returning ENOSYS error code (-1).
+    usize::MAX
 }
 
 pub fn sys_sbrk(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
