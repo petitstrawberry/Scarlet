@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use spin::RwLock;
 
 use super::core::{VfsEntry, FileSystemOperations};
-use super::manager::VfsManager;
+use super::manager::{VfsManager, PathResolutionOptions};
 use crate::fs::{FileSystemError, FileSystemErrorKind};
 
 pub type VfsResult<T> = Result<T, FileSystemError>;
@@ -338,16 +338,26 @@ impl MountTree {
 
     /// Resolve a path to a VFS entry, handling mount boundaries
     pub fn resolve_path(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        self.resolve_path_internal(path, false)
+        self.resolve_path_internal(path, false, &PathResolutionOptions { no_follow: false })
     }
 
     /// Resolve a path to the mount point entry (not the mounted content)
     /// This is used for unmount operations where we need the actual mount point
     pub fn resolve_mount_point(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        self.resolve_path_internal(path, true)
+        self.resolve_path_internal(path, true, &PathResolutionOptions { no_follow: false })
     }
 
-    fn resolve_path_internal(&self, path: &str, resolve_mount: bool) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+    /// Resolve a path with specified options
+    pub fn resolve_path_with_options(&self, path: &str, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_path_internal(path, false, options)
+    }
+
+    /// Resolve a path to the mount point entry with options
+    pub fn resolve_mount_point_with_options(&self, path: &str, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_path_internal(path, true, options)
+    }
+
+    fn resolve_path_internal(&self, path: &str, resolve_mount: bool, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
         if path.is_empty() || path == "/" {
             return Ok((self.root_mount.read().root.clone(), self.root_mount.read().clone()));
         }
@@ -358,47 +368,50 @@ impl MountTree {
         
         let mut resolved_path = String::new();
         for (i, component) in components.iter().enumerate() {
+            let is_final_component = i == components.len() - 1;
+            
             if component == ".." {
-                // crate::println!("Processing '..' - current_mount: {:?}, current_entry: {:?}", current_mount.path, current_entry.name());
-                
-                // Check if current entry points to the root node of current mount
+                // Handle parent directory traversal (same as original implementation)
                 let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
-                // crate::println!("Is at mount root? {}", is_at_mount_root);
                 
-                // Handle parent directory traversal
                 if is_at_mount_root {
-                    // We're at the root of current mount - go to parent mount regardless of mount type
                     let parent_info = current_mount.get_parent().zip(current_mount.parent_entry.clone());
                     match parent_info {
                         Some((parent_mount, parent_entry)) => {
-                            // crate::println!("Moving to parent mount: {:?}", parent_mount.path);
                             current_mount = parent_mount;
-                            // Resolve ".." from the mount point in the parent mount
                             current_entry = self.resolve_component(parent_entry, &"..")?;
                         },
                         None => {
-                            // No parent mount - stay at current mount root (this is the VFS root)
-                            // crate::println!("No parent mount - staying at root");
+                            // No parent mount - stay at current mount root
                         }
                     }
                 } else {
-                    // Not at mount root - use normal filesystem navigation
-                    // crate::println!("Not at mount root - resolving within filesystem");
                     current_entry = self.resolve_component(current_entry, &component)?;
                 }
             } else {
-                // Regular path traversal within current mount
-                current_entry = self.resolve_component(current_entry, &component)?;
+                // Regular path traversal with symlink handling based on options
+                let should_follow_symlinks = if is_final_component {
+                    // For the final component, check no_follow option
+                    !options.no_follow
+                } else {
+                    // For intermediate components, always follow symlinks
+                    true
+                };
 
-                // Check if we've reached a mount point but this is the final component
-                // If so, return the mount point entry itself, not the mounted content
-                if resolve_mount && i == components.len() - 1 {
-                    // This is a mount point - return the mount point entry and the parent mount
+                if should_follow_symlinks {
+                    // Use normal component resolution (which follows symlinks)
+                    current_entry = self.resolve_component(current_entry, &component)?;
+                } else {
+                    // Don't follow symlinks - use direct filesystem lookup
+                    current_entry = self.resolve_component_no_symlink(current_entry, &component)?;
+                }
+
+                // Handle mount points (same as original implementation)
+                if resolve_mount && is_final_component {
                     if let Some(_child_mount) = current_mount.get_child(&current_entry) {
                         return Ok((current_entry, current_mount));
                     }
                 } else {
-                    // Not the final component - cross mount boundaries normally
                     if let Some(child_mount) = current_mount.get_child(&current_entry) {
                         current_mount = child_mount;
                         current_entry = current_mount.root.clone();
@@ -408,10 +421,46 @@ impl MountTree {
 
             resolved_path.push('/');
             resolved_path.push_str(&component);
-            // crate::println!("Resolved path: {}", resolved_path);
         }
 
         Ok((current_entry, current_mount))
+    }
+
+    /// Resolve a single path component without following symlinks
+    fn resolve_component_no_symlink(&self, entry: VfsEntryRef, component: &str) -> VfsResult<VfsEntryRef> {
+        // Handle special cases
+        if component == "." {
+            return Ok(entry);
+        }
+
+        // Check cache first (fast path)
+        let component_string = component.to_string();
+        if let Some(cached_child) = entry.get_child(&component_string) {
+            return Ok(cached_child);
+        }
+
+        // Cache miss - perform filesystem lookup without symlink resolution
+        let parent_node = entry.node();
+        debug_assert!(parent_node.filesystem().is_some(), "resolve_component_no_symlink: parent_node.filesystem() is None");
+        let filesystem = parent_node.filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
+        
+        // Ask filesystem to lookup the component
+        let child_node = filesystem.lookup(&parent_node, &component_string)
+            .map_err(|e| vfs_error(e.kind, &e.message))?;
+
+        // Don't resolve symlinks - just create VfsEntry as-is
+        let child_entry = VfsEntry::new(
+            Some(Arc::downgrade(&entry)),
+            component_string.clone(),
+            child_node,
+        );
+
+        // Add to parent's cache
+        entry.add_child(component_string, child_entry.clone());
+
+        Ok(child_entry)
     }
 
     // Helper methods
@@ -452,6 +501,17 @@ impl MountTree {
 
     /// Resolve a single path component within a VFS entry
     fn resolve_component(&self, entry: VfsEntryRef, component: &str) -> VfsResult<VfsEntryRef> {
+        self.resolve_component_with_depth(entry, component, 0)
+    }
+
+    /// Resolve a single path component with symlink depth tracking
+    fn resolve_component_with_depth(&self, entry: VfsEntryRef, component: &str, symlink_depth: u32) -> VfsResult<VfsEntryRef> {
+        const MAX_SYMLINK_DEPTH: u32 = 32; // Prevent infinite symlink loops
+        
+        if symlink_depth > MAX_SYMLINK_DEPTH {
+            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Too many symbolic links"));
+        }
+
         // Handle special cases
         if component == "." {
             return Ok(entry);
@@ -460,7 +520,12 @@ impl MountTree {
         // Check cache first (fast path)
         let component_string = component.to_string();
         if let Some(cached_child) = entry.get_child(&component_string) {
-            // crate::println!("Cache hit for component '{}'", component_string);
+            // Check if cached entry is a symlink that needs resolution
+            if cached_child.node().is_symlink()? {
+                let link_target = cached_child.node().read_link()
+                    .map_err(|e| vfs_error(e.kind, &e.message))?;
+                return self.resolve_symlink_target_with_depth(&entry, &link_target, symlink_depth + 1);
+            }
             return Ok(cached_child);
         }
 
@@ -474,6 +539,16 @@ impl MountTree {
         let child_node = filesystem.lookup(&parent_node, &component_string)
             .map_err(|e| vfs_error(e.kind, &e.message))?;
 
+        // Check if the resolved node is a symbolic link
+        if child_node.is_symlink()? {
+            // Resolve the symbolic link
+            let link_target = child_node.read_link()
+                .map_err(|e| vfs_error(e.kind, &e.message))?;
+            
+            // Recursively resolve the link target
+            return self.resolve_symlink_target_with_depth(&entry, &link_target, symlink_depth + 1);
+        }
+
         // Create new VfsEntry for the child
         let child_entry = VfsEntry::new(
             Some(Arc::downgrade(&entry)),
@@ -485,6 +560,36 @@ impl MountTree {
         entry.add_child(component_string, child_entry.clone());
 
         Ok(child_entry)
+    }
+
+    /// Resolve a symbolic link target
+    fn resolve_symlink_target(&self, base_entry: &VfsEntryRef, target: &str) -> VfsResult<VfsEntryRef> {
+        self.resolve_symlink_target_with_depth(base_entry, target, 0)
+    }
+
+    /// Resolve a symbolic link target with depth tracking
+    fn resolve_symlink_target_with_depth(&self, base_entry: &VfsEntryRef, target: &str, symlink_depth: u32) -> VfsResult<VfsEntryRef> {
+        const MAX_SYMLINK_DEPTH: u32 = 32; // Prevent infinite symlink loops
+        
+        if symlink_depth > MAX_SYMLINK_DEPTH {
+            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Too many symbolic links"));
+        }
+
+        if target.starts_with('/') {
+            // Absolute path - resolve from root
+            let (resolved_entry, _mount) = self.resolve_path_internal(target, false, &PathResolutionOptions { no_follow: false })?;
+            Ok(resolved_entry)
+        } else {
+            // Relative path - resolve from current directory
+            let components = self.parse_path(target);
+            let mut current_entry = base_entry.clone();
+            
+            for component in components {
+                current_entry = self.resolve_component_with_depth(current_entry, &component, symlink_depth)?;
+            }
+            
+            Ok(current_entry)
+        }
     }
 
     // /// Resolve cross-VFS path for bind mounts

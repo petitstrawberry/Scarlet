@@ -177,7 +177,7 @@ pub trait VfsNode: Send + Sync + Any {
 
     /// Returns true if this node is a symbolic link
     fn is_symlink(&self) -> Result<bool, FileSystemError> {
-        Ok(self.file_type()? == FileType::SymbolicLink)
+        Ok(matches!(self.file_type()?, FileType::SymbolicLink(_)))
     }
 
     /// Read the target of a symbolic link (returns error if not a symlink)
@@ -292,6 +292,7 @@ pub trait FileSystemOperations: Send + Sync {
             "Hard links not supported by this filesystem"
         ))
     }
+
 }
 
 impl fmt::Debug for dyn FileSystemOperations {

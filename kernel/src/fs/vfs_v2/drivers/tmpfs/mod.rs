@@ -233,6 +233,11 @@ impl FileSystemOperations for TmpFS {
             FileType::Directory => {
                 Arc::new(TmpNode::new_directory(name.clone().to_string(), file_id))
             }
+            FileType::SymbolicLink(target_path) => {
+                // Account for memory usage (target path length)
+                self.add_memory_usage(target_path.len());
+                Arc::new(TmpNode::new_symlink(name.clone().to_string(), target_path, file_id))
+            }
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 Arc::new(TmpNode::new_device(name.clone().to_string(), file_type, file_id))
             }
@@ -338,6 +343,7 @@ impl FileSystemOperations for TmpFS {
         // Return the same target node (hard link shares the same inode)
         Ok(Arc::clone(target_node))
     }
+
     
     fn remove(
         &self,
@@ -374,10 +380,13 @@ impl FileSystemOperations for TmpFS {
                     }
                 }
                 
-                // Update memory usage for regular files
-                if tmp_node.file_type() == FileType::RegularFile {
-                    let content = tmp_node.content.read();
-                    self.subtract_memory_usage(content.len());
+                // Update memory usage for regular files and symbolic links
+                match tmp_node.file_type() {
+                    FileType::RegularFile | FileType::SymbolicLink(_) => {
+                        let content = tmp_node.content.read();
+                        self.subtract_memory_usage(content.len());
+                    },
+                    _ => {}
                 }
             }
         }
@@ -526,7 +535,7 @@ impl TmpNode {
     pub fn new_device(name: String, file_type: FileType, file_id: u64) -> Self {
         Self {
             name: RwLock::new(name),
-            file_type: RwLock::new(file_type),
+            file_type: RwLock::new(file_type.clone()),
             metadata: RwLock::new(FileMetadata {
                 file_type,
                 size: 0,
@@ -542,6 +551,33 @@ impl TmpNode {
                 link_count: 1,
             }),
             content: RwLock::new(Vec::new()),
+            children: RwLock::new(BTreeMap::new()),
+            parent: RwLock::new(None), // No parent initially
+            filesystem: RwLock::new(None),
+        }
+    }
+    
+    /// Create a new symbolic link node
+    pub fn new_symlink(name: String, target: String, file_id: u64) -> Self {
+        Self {
+            name: RwLock::new(name),
+            file_type: RwLock::new(FileType::SymbolicLink(target.clone())),
+            metadata: RwLock::new(FileMetadata {
+                file_type: FileType::SymbolicLink(target.clone()),
+                size: target.len(),
+                permissions: FilePermission {
+                    read: true,
+                    write: true,
+                    execute: false,
+                },
+                created_time: 0, // TODO: actual timestamp
+                modified_time: 0,
+                accessed_time: 0,
+                file_id,
+                link_count: 1,
+            }),
+            // Store symlink target in content as UTF-8 bytes
+            content: RwLock::new(target.into_bytes()),
             children: RwLock::new(BTreeMap::new()),
             parent: RwLock::new(None), // No parent initially
             filesystem: RwLock::new(None),
@@ -609,10 +645,14 @@ impl VfsNode for TmpNode {
     }
     
     fn read_link(&self) -> Result<String, FileSystemError> {
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "Not a symbolic link"
-        ))
+        // Check if this is actually a symbolic link and return target
+        match &self.file_type() {
+            FileType::SymbolicLink(target) => Ok(target.clone()),
+            _ => Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link"
+            ))
+        }
     }
 }
 
