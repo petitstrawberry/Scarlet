@@ -26,20 +26,58 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
         .ok_or("Failed to get initramfs from device tree")?;
     let size = original_area.size();
     early_println!("[InitRamFS] Original initramfs at {:#x}, size: {} bytes", original_area.start, size);
-    let new_ptr = usable_area.start as *mut u8;
-    // IMPORTANT: Create the new memory area BEFORE modifying usable_area.start
-    // to prevent compiler optimizations from affecting pointer calculations
-    let new_area = MemoryArea::new(new_ptr as usize, (new_ptr as usize) + size - 1);
-    unsafe {
-        ptr::copy_nonoverlapping(
-            original_area.start as *const u8,
-            new_ptr,
-            size
-        );
+    
+    // Validate parameters before proceeding
+    if size == 0 || size > 0x10000000 {
+        return Err("Invalid initramfs size");
     }
-    // Update usable_area start AFTER copying to avoid memory corruption
-    usable_area.start = new_ptr as usize + size;
-    early_println!("[InitRamFS] Relocated initramfs to {:#x}", new_area.start);
+    if original_area.start == 0 {
+        return Err("Invalid initramfs source address");
+    }
+    
+    // Ensure proper 8-byte alignment for destination
+    let raw_ptr = usable_area.start as *mut u8;
+    let aligned_ptr = ((raw_ptr as usize + 7) & !7) as *mut u8;
+    let aligned_addr = aligned_ptr as usize;
+    
+    early_println!("[InitRamFS] Copying from {:#x} to {:#x} (aligned), size: {} bytes", 
+                   original_area.start, aligned_addr, size);
+    
+    // Validate destination memory bounds
+    if aligned_addr + size > usable_area.end {
+        return Err("Insufficient memory for initramfs");
+    }
+    
+    // Create the new memory area BEFORE the copy operation
+    let new_area = MemoryArea::new(aligned_addr, aligned_addr + size - 1);
+    
+    // Perform the copy with explicit memory barriers
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    
+    // Use a safer approach: copy in smaller chunks to avoid stack issues
+    let chunk_size = 4096; // 4KB chunks
+    let mut src_addr = original_area.start as *const u8;
+    let mut dst_addr = aligned_ptr;
+    let mut remaining = size;
+    
+    unsafe {
+        while remaining > 0 {
+            let copy_size = if remaining > chunk_size { chunk_size } else { remaining };
+            ptr::copy_nonoverlapping(src_addr, dst_addr, copy_size);
+            
+            src_addr = src_addr.add(copy_size);
+            dst_addr = dst_addr.add(copy_size);
+            remaining -= copy_size;
+            
+            // Add memory barrier between chunks
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    
+    // Update usable_area start AFTER copying, with alignment
+    usable_area.start = (aligned_addr + size + 7) & !7;
+    early_println!("[InitRamFS] Relocated initramfs to {:#x}, next usable: {:#x}", 
+                   new_area.start, usable_area.start);
     unsafe { INITRAMFS_AREA = Some(new_area) };
     Ok(())
 }
