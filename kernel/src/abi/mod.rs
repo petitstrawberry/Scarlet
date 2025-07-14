@@ -12,6 +12,7 @@ use hashbrown::HashMap;
 use spin::Mutex;
 
 pub mod scarlet;
+pub mod xv6;
 
 pub const MAX_ABI_LENGTH: usize = 64;
 
@@ -95,7 +96,7 @@ pub trait AbiModule: 'static {
     }
     
     /// Handle conversion when switching ABIs
-    fn initialize_from_existing_handles(&self, _task: &crate::task::Task) -> Result<(), &'static str> {
+    fn initialize_from_existing_handles(&self, _task: &mut crate::task::Task) -> Result<(), &'static str> {
         Ok(()) // Default: no conversion needed
     }
     
@@ -285,7 +286,11 @@ impl AbiRegistry {
 
     pub fn instantiate(name: &str) -> Option<Box<dyn AbiModule>> {
         let registry = Self::global().lock();
-        registry.factories.get(name).map(|f| f())
+        if let Some(factory) = registry.factories.get(name) {
+            let abi = factory();
+            return Some(abi);
+        }
+        None
     }
 
     /// Detect the best ABI for a binary from all registered ABI modules
