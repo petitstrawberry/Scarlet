@@ -23,7 +23,7 @@ fn panic(info: &PanicInfo) -> ! {
     early_println!("[Scarlet Kernel] panic: {}", info);
     early_println!("[Test Runner] Test failed");
 
-    arch::shutdown();
+    crate::arch::shutdown_with_code(1);
 }
 
 #[cfg(test)]
@@ -36,5 +36,5 @@ pub fn test_runner(tests: &[&dyn TestableFn]) {
     }
 
     early_println!("[Test Runner] All {} tests passed", tests.len());
-    arch::shutdown();
+    crate::arch::shutdown_with_code(0);
 }

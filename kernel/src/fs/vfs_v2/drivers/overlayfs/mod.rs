@@ -129,7 +129,7 @@ impl Clone for OverlayNode {
             name: self.name.clone(),
             overlay_fs: RwLock::new(None),
             path: self.path.clone(),
-            file_type: self.file_type,
+            file_type: self.file_type.clone(),
             file_id: self.file_id,
         };
         

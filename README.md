@@ -4,7 +4,7 @@
   
 **A kernel in Rust designed to provide a universal, multi-ABI container runtime.**
 
-[![Version](https://img.shields.io/badge/version-0.12.2-blue.svg)](https://github.com/petitstrawberry/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.13.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)

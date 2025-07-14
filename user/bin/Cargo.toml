@@ -1,6 +1,6 @@
 [package]
 name = "userprogram"
-version = "0.12.2"
+version = "0.13.0"
 edition = "2024"
 
 [[bin]]
@@ -26,6 +26,10 @@ path = "src/hello.rs"
 [[bin]]
 name = "test"
 path = "src/test.rs"
+
+[[bin]]
+name = "xv6"
+path = "src/xv6.rs"
 
 [[bin]]
 name = "env_test"

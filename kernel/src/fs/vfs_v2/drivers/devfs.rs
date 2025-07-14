@@ -209,7 +209,7 @@ impl Clone for DevNode {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
-            file_type: self.file_type,
+            file_type: self.file_type.clone(),
             file_id: self.file_id,
             children: RwLock::new(self.children.read().clone()),
             filesystem: RwLock::new(self.filesystem.read().clone()),
@@ -302,7 +302,7 @@ impl DevNode {
         for (name, child) in children.iter() {
             entries.push(DirectoryEntryInternal {
                 name: name.clone(),
-                file_type: child.file_type,
+                file_type: child.file_type.clone(),
                 file_id: child.file_id,
             });
         }
@@ -342,7 +342,7 @@ impl VfsNode for DevNode {
 
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
         Ok(FileMetadata {
-            file_type: self.file_type,
+            file_type: self.file_type.clone(),
             size: 0, // Device files have no size
             permissions: FilePermission {
                 read: true,
@@ -647,7 +647,7 @@ impl StreamOps for DevDirectoryObject {
         // Create DirectoryEntryInternal with size field for DirectoryEntry::from_internal
         let internal_with_size = crate::fs::DirectoryEntryInternal {
             name: internal_entry.name.clone(),
-            file_type: internal_entry.file_type,
+            file_type: internal_entry.file_type.clone(),
             size: 0, // Device files have no meaningful size
             file_id: internal_entry.file_id,
             metadata: None,

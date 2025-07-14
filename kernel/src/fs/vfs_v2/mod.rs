@@ -46,3 +46,4 @@ pub mod tests;
 
 
 pub use core::*;
+pub use manager::{VfsManager, PathResolutionOptions};

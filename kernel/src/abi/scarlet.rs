@@ -114,7 +114,7 @@ impl AbiModule for ScarletAbi {
                         
                         // Setup the new memory environment
                         setup_trampoline(&mut task.vm_manager);
-                        let stack_pointer = setup_user_stack(task);
+                        let stack_pointer = setup_user_stack(task).1;
 
                         // Set the new entry point
                         task.set_entry_point(entry_point as usize);

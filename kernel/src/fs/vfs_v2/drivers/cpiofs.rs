@@ -111,7 +111,7 @@ impl VfsNode for CpioNode {
     
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
         Ok(FileMetadata {
-            file_type: self.file_type,
+            file_type: self.file_type.clone(),
             size: self.content.len(),
             created_time: 0,
             modified_time: 0,
@@ -128,6 +128,17 @@ impl VfsNode for CpioNode {
     
     fn as_any(&self) -> &dyn Any {
         self
+    }
+    
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        // Check if this is actually a symbolic link and return target
+        match &self.file_type {
+            FileType::SymbolicLink(target) => Ok(target.clone()),
+            _ => Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link"
+            ))
+        }
     }
 }
 
@@ -168,7 +179,7 @@ impl CpioFS {
             if magic != b"070701" {
                 break;
             }
-            let inode = match core::str::from_utf8(&data[offset+6..offset+14]) {
+            let _inode = match core::str::from_utf8(&data[offset+6..offset+14]) {
                 Ok(s) => u32::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid inode value"))?,
                 Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in inode field")),
             };
@@ -193,16 +204,18 @@ impl CpioFS {
             let file_end = file_start + filesize;
             if file_end > data.len() { break; }
             if name_str == "TRAILER!!!" { break; }
+            
             // Determine file type
-            let file_type = match mode & 0o170000 {
-                0o040000 => FileType::Directory,
-                0o100000 => FileType::RegularFile,
-                _ => FileType::RegularFile,
-            };
-            let content = if file_type == FileType::RegularFile {
-                data[file_start..file_end].to_vec()
-            } else {
-                Vec::new()
+            let (file_type, content) = match mode & 0o170000 {
+                0o040000 => (FileType::Directory, Vec::new()),
+                0o100000 => (FileType::RegularFile, data[file_start..file_end].to_vec()),
+                0o120000 => {
+                    // For symbolic links, extract target path from content
+                    let target_bytes = data[file_start..file_end].to_vec();
+                    let target_path = String::from_utf8(target_bytes.clone()).unwrap_or_else(|_| String::new());
+                    (FileType::SymbolicLink(target_path), target_bytes)
+                },
+                _ => (FileType::RegularFile, data[file_start..file_end].to_vec()),
             };
             // Build node and insert into tree
             let base_name = if let Some(pos) = name_str.rfind('/') {
@@ -357,12 +370,14 @@ impl FileSystemOperations for CpioFS {
             ));
         }
         let mut entries = Vec::new();
+        
         // Add "." and ".." entries
         entries.push(DirectoryEntryInternal {
             name: ".".to_string(),
             file_type: FileType::Directory,
             file_id: cpio_node.file_id as u64,
         });
+        
         // .. entry should have the parent directory's file_id
         let parent_file_id = cpio_node.parent_file_id().unwrap_or(0);
         entries.push(DirectoryEntryInternal {
@@ -370,14 +385,17 @@ impl FileSystemOperations for CpioFS {
             file_type: FileType::Directory,
             file_id: parent_file_id,
         });
+        
         // Add children
-        for child in cpio_node.children.read().values() {
+        let children = cpio_node.children.read();
+        for child in children.values() {
             entries.push(DirectoryEntryInternal {
                 name: child.name.clone(),
-                file_type: child.file_type,
+                file_type: child.file_type.clone(),
                 file_id: child.file_id as u64,
             });
         }
+        
         Ok(entries)
     }
 }
@@ -508,7 +526,7 @@ impl StreamOps for CpioDirectoryObject {
         for child in cpio_node.children.read().values() {
             all_entries.push(crate::fs::DirectoryEntryInternal {
                 name: child.name.clone(),
-                file_type: child.file_type,
+                file_type: child.file_type.clone(),
                 size: child.content.len(),
                 file_id: child.file_id as u64,
                 metadata: None,
@@ -633,3 +651,7 @@ fn register_driver() {
 }
 
 driver_initcall!(register_driver);
+
+#[cfg(test)]
+#[path = "cpiofs_tests.rs"]
+mod tests;

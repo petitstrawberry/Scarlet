@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "scarlet_std"
-version = "0.12.2"
+version = "0.13.0"
 
 [[package]]
 name = "userprogram"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "scarlet_std",
 ]
