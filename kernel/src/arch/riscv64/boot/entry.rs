@@ -21,7 +21,8 @@ pub extern "C" fn _entry() {
                 la      sp, KERNEL_STACK
                 add     sp, sp, t0
 
-                j       arch_start_kernel
+                la     t0, arch_start_kernel
+                jr      t0
         ", const STACK_SIZE
         );
     }
@@ -46,7 +47,9 @@ pub extern "C" fn _entry_ap() {
                 la      sp, KERNEL_STACK
                 add     sp, sp, t0
 
-                j       start_ap
+                // Use indirect jump to avoid JAL range limitation
+                la      t0, start_ap
+                jr      t0
         ", const STACK_SIZE
         );
     }
