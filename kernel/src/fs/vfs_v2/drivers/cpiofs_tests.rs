@@ -2,7 +2,8 @@
 mod tests {
     use crate::fs::vfs_v2::drivers::cpiofs::CpioFS;
     use crate::fs::{FileType, FileSystemErrorKind};
-    use alloc::vec::Vec;
+    use crate::fs::vfs_v2::core::FileSystemOperations;
+    use alloc::{vec::Vec, string::ToString};
 
     /// Create a minimal CPIO archive with a symbolic link for testing
     /// 
@@ -109,7 +110,7 @@ mod tests {
         
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
-        assert_eq!(symlink_node.file_type().unwrap(), FileType::SymbolicLink);
+        assert!(matches!(symlink_node.file_type().unwrap(), FileType::SymbolicLink(_)));
         
         // Read the target
         let target = symlink_node.read_link().unwrap();
@@ -128,7 +129,7 @@ mod tests {
         let metadata = symlink_node.metadata().unwrap();
         
         // Check metadata
-        assert_eq!(metadata.file_type, FileType::SymbolicLink);
+        assert!(matches!(metadata.file_type, FileType::SymbolicLink(_)));
         assert_eq!(metadata.size, 8); // Length of "file.txt"
         assert_eq!(metadata.link_count, 1);
         assert!(metadata.permissions.read);
@@ -174,7 +175,7 @@ mod tests {
         
         // Find the symlink entry
         let symlink_entry = entries.iter().find(|e| e.name == "link.txt").unwrap();
-        assert_eq!(symlink_entry.file_type, FileType::SymbolicLink);
+        assert!(matches!(symlink_entry.file_type, FileType::SymbolicLink(_)));
         
         // Find the regular file entry
         let file_entry = entries.iter().find(|e| e.name == "file.txt").unwrap();

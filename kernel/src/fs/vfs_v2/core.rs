@@ -177,7 +177,7 @@ pub trait VfsNode: Send + Sync + Any {
 
     /// Returns true if this node is a symbolic link
     fn is_symlink(&self) -> Result<bool, FileSystemError> {
-        Ok(self.file_type()? == FileType::SymbolicLink)
+        Ok(matches!(self.file_type()?, FileType::SymbolicLink(_)))
     }
 
     /// Read the target of a symbolic link (returns error if not a symlink)
@@ -293,38 +293,6 @@ pub trait FileSystemOperations: Send + Sync {
         ))
     }
 
-    /// Create a symbolic link in the specified directory
-    /// 
-    /// This method creates a symbolic link from `link_name` in `link_parent` to the
-    /// target path specified by `target_path`. The symbolic link is a separate file
-    /// that contains the path to the target.
-    /// 
-    /// # Arguments
-    /// * `link_parent` - Parent directory where the symlink will be created
-    /// * `link_name` - Name for the new symbolic link
-    /// * `target_path` - Path that the symbolic link should point to
-    /// 
-    /// # Returns
-    /// Returns the VfsNode representing the new symbolic link on success
-    /// 
-    /// # Errors
-    /// * `NotSupported` - Filesystem doesn't support symbolic links
-    /// * `FileExists` - Link name already exists in parent directory
-    /// * `NotADirectory` - Parent is not a directory
-    /// * `ReadOnly` - Filesystem is read-only
-    fn create_symlink(
-        &self,
-        link_parent: &Arc<dyn VfsNode>,
-        link_name: &String,
-        target_path: &String,
-    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        // Default implementation: not supported
-        let _ = (link_parent, link_name, target_path);
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "Symbolic links not supported by this filesystem"
-        ))
-    }
 }
 
 impl fmt::Debug for dyn FileSystemOperations {

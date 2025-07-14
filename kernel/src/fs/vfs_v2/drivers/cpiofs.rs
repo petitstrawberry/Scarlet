@@ -111,7 +111,7 @@ impl VfsNode for CpioNode {
     
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
         Ok(FileMetadata {
-            file_type: self.file_type,
+            file_type: self.file_type.clone(),
             size: self.content.len(),
             created_time: 0,
             modified_time: 0,
@@ -131,21 +131,14 @@ impl VfsNode for CpioNode {
     }
     
     fn read_link(&self) -> Result<String, FileSystemError> {
-        // Check if this is actually a symbolic link
-        if self.file_type != FileType::SymbolicLink {
-            return Err(FileSystemError::new(
+        // Check if this is actually a symbolic link and return target
+        match &self.file_type {
+            FileType::SymbolicLink(target) => Ok(target.clone()),
+            _ => Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Not a symbolic link"
-            ));
+            ))
         }
-        
-        // Read the target path from content (stored as UTF-8 bytes)
-        String::from_utf8(self.content.clone()).map_err(|_| {
-            FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Invalid UTF-8 in symbolic link target"
-            )
-        })
     }
 }
 
@@ -212,16 +205,16 @@ impl CpioFS {
             if file_end > data.len() { break; }
             if name_str == "TRAILER!!!" { break; }
             // Determine file type
-            let file_type = match mode & 0o170000 {
-                0o040000 => FileType::Directory,
-                0o100000 => FileType::RegularFile,
-                0o120000 => FileType::SymbolicLink,
-                _ => FileType::RegularFile,
-            };
-            let content = if file_type == FileType::RegularFile || file_type == FileType::SymbolicLink {
-                data[file_start..file_end].to_vec()
-            } else {
-                Vec::new()
+            let (file_type, content) = match mode & 0o170000 {
+                0o040000 => (FileType::Directory, Vec::new()),
+                0o100000 => (FileType::RegularFile, data[file_start..file_end].to_vec()),
+                0o120000 => {
+                    // For symbolic links, extract target path from content
+                    let target_bytes = data[file_start..file_end].to_vec();
+                    let target_path = String::from_utf8(target_bytes.clone()).unwrap_or_else(|_| String::new());
+                    (FileType::SymbolicLink(target_path), target_bytes)
+                },
+                _ => (FileType::RegularFile, data[file_start..file_end].to_vec()),
             };
             // Build node and insert into tree
             let base_name = if let Some(pos) = name_str.rfind('/') {
@@ -393,7 +386,7 @@ impl FileSystemOperations for CpioFS {
         for child in cpio_node.children.read().values() {
             entries.push(DirectoryEntryInternal {
                 name: child.name.clone(),
-                file_type: child.file_type,
+                file_type: child.file_type.clone(),
                 file_id: child.file_id as u64,
             });
         }
@@ -527,7 +520,7 @@ impl StreamOps for CpioDirectoryObject {
         for child in cpio_node.children.read().values() {
             all_entries.push(crate::fs::DirectoryEntryInternal {
                 name: child.name.clone(),
-                file_type: child.file_type,
+                file_type: child.file_type.clone(),
                 size: child.content.len(),
                 file_id: child.file_id as u64,
                 metadata: None,

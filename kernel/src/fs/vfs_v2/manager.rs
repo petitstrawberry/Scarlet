@@ -342,6 +342,23 @@ impl VfsManager {
         self.create_file(path, FileType::Directory)
     }
     
+    /// Create a symbolic link at the specified path
+    /// 
+    /// This will create a new symbolic link in the filesystem at the given path,
+    /// pointing to the specified target path.
+    /// 
+    /// # Arguments
+    /// * `path` - The path where the symbolic link should be created.
+    /// * `target_path` - The path that the symbolic link should point to.
+    /// 
+    /// # Errors
+    /// Returns an error if the parent directory does not exist, the filesystem cannot be resolved,
+    /// or if the symbolic link cannot be created.
+    /// 
+    pub fn create_symlink(&self, path: &str, target_path: &str) -> Result<(), FileSystemError> {
+        self.create_file(path, FileType::SymbolicLink(target_path.to_string()))
+    }
+    
     /// Remove a file at the specified path
     /// 
     /// This will remove the file from the filesystem and update the mount tree.

@@ -233,6 +233,11 @@ impl FileSystemOperations for TmpFS {
             FileType::Directory => {
                 Arc::new(TmpNode::new_directory(name.clone().to_string(), file_id))
             }
+            FileType::SymbolicLink(target_path) => {
+                // Account for memory usage (target path length)
+                self.add_memory_usage(target_path.len());
+                Arc::new(TmpNode::new_symlink(name.clone().to_string(), target_path, file_id))
+            }
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 Arc::new(TmpNode::new_device(name.clone().to_string(), file_type, file_id))
             }
@@ -339,81 +344,6 @@ impl FileSystemOperations for TmpFS {
         Ok(Arc::clone(target_node))
     }
 
-    /// Create a symbolic link in the specified directory
-    ///
-    /// This function creates a new symbolic link entry that points to the target path.
-    /// The target path is stored as the content of the symbolic link and can be
-    /// absolute or relative.
-    fn create_symlink(
-        &self,
-        link_parent: &Arc<dyn VfsNode>,
-        link_name: &String,
-        target_path: &String,
-    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        let tmp_parent = link_parent.as_any()
-            .downcast_ref::<TmpNode>()
-            .ok_or_else(|| FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Invalid parent node type for TmpFS"
-            ))?;
-        
-        // Check that parent is a directory
-        if tmp_parent.file_type() != FileType::Directory {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotADirectory,
-                "Parent is not a directory"
-            ));
-        }
-        
-        // Check if link name already exists
-        {
-            let children = tmp_parent.children.read();
-            if children.contains_key(link_name) {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::FileExists,
-                    "Link name already exists"
-                ));
-            }
-        }
-        
-        // Generate file ID
-        let file_id = self.generate_file_id();
-        
-        // Create new symbolic link node
-        let symlink_node = Arc::new(TmpNode::new_symlink(
-            link_name.clone(),
-            target_path.clone(),
-            file_id
-        ));
-        
-        // Set filesystem reference
-        let fs_ref = link_parent.filesystem()
-            .ok_or_else(|| FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Parent node does not have a filesystem reference"
-            ))?;
-        if fs_ref.upgrade().is_none() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Parent node's filesystem reference is dead (cannot upgrade)"
-            ));
-        }
-        if let Some(tmp_node) = symlink_node.as_any().downcast_ref::<TmpNode>() {
-            tmp_node.set_filesystem(fs_ref);
-        }
-        
-        // Add to parent directory
-        {
-            let mut children = tmp_parent.children.write();
-            symlink_node.set_parent(Arc::downgrade(&Arc::downcast::<TmpNode>(link_parent.clone()).unwrap()));
-            children.insert(link_name.clone(), Arc::clone(&symlink_node) as Arc<dyn VfsNode>);
-        }
-        
-        // Account for memory usage (target path length)
-        self.add_memory_usage(target_path.len());
-        
-        Ok(symlink_node as Arc<dyn VfsNode>)
-    }
     
     fn remove(
         &self,
@@ -451,9 +381,12 @@ impl FileSystemOperations for TmpFS {
                 }
                 
                 // Update memory usage for regular files and symbolic links
-                if tmp_node.file_type() == FileType::RegularFile || tmp_node.file_type() == FileType::SymbolicLink {
-                    let content = tmp_node.content.read();
-                    self.subtract_memory_usage(content.len());
+                match tmp_node.file_type() {
+                    FileType::RegularFile | FileType::SymbolicLink(_) => {
+                        let content = tmp_node.content.read();
+                        self.subtract_memory_usage(content.len());
+                    },
+                    _ => {}
                 }
             }
         }
@@ -602,7 +535,7 @@ impl TmpNode {
     pub fn new_device(name: String, file_type: FileType, file_id: u64) -> Self {
         Self {
             name: RwLock::new(name),
-            file_type: RwLock::new(file_type),
+            file_type: RwLock::new(file_type.clone()),
             metadata: RwLock::new(FileMetadata {
                 file_type,
                 size: 0,
@@ -628,9 +561,9 @@ impl TmpNode {
     pub fn new_symlink(name: String, target: String, file_id: u64) -> Self {
         Self {
             name: RwLock::new(name),
-            file_type: RwLock::new(FileType::SymbolicLink),
+            file_type: RwLock::new(FileType::SymbolicLink(target.clone())),
             metadata: RwLock::new(FileMetadata {
-                file_type: FileType::SymbolicLink,
+                file_type: FileType::SymbolicLink(target.clone()),
                 size: target.len(),
                 permissions: FilePermission {
                     read: true,
@@ -712,22 +645,14 @@ impl VfsNode for TmpNode {
     }
     
     fn read_link(&self) -> Result<String, FileSystemError> {
-        // Check if this is actually a symbolic link
-        if self.file_type() != FileType::SymbolicLink {
-            return Err(FileSystemError::new(
+        // Check if this is actually a symbolic link and return target
+        match &self.file_type() {
+            FileType::SymbolicLink(target) => Ok(target.clone()),
+            _ => Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Not a symbolic link"
-            ));
+            ))
         }
-        
-        // Read the target path from content (stored as UTF-8 bytes)
-        let content = self.content.read();
-        String::from_utf8(content.clone()).map_err(|_| {
-            FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Invalid UTF-8 in symbolic link target"
-            )
-        })
     }
 }
 
