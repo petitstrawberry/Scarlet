@@ -192,4 +192,218 @@ mod tests {
         assert_eq!(orig_metadata.link_count, 2);
         assert_eq!(link_metadata.link_count, 2);
     }
+
+    // ===== SYMBOLIC LINK TESTS =====
+
+    /// Test basic symbolic link creation and target reading
+    #[test_case]
+    fn test_symlink_basic() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create a target file
+        vfs.create_file("/target.txt", FileType::RegularFile).unwrap();
+        
+        // Create symbolic link
+        let result = vfs.mount_tree.resolve_path("/").unwrap().0.node()
+            .filesystem().unwrap().upgrade().unwrap()
+            .create_symlink(
+                &vfs.mount_tree.resolve_path("/").unwrap().0.node(),
+                &"symlink.txt".to_string(),
+                &"/target.txt".to_string()
+            );
+        assert!(result.is_ok());
+        
+        let symlink_node = result.unwrap();
+        
+        // Verify it's a symbolic link
+        assert!(symlink_node.is_symlink().unwrap());
+        assert_eq!(symlink_node.file_type().unwrap(), FileType::SymbolicLink);
+        
+        // Read the target
+        let target = symlink_node.read_link().unwrap();
+        assert_eq!(target, "/target.txt");
+    }
+
+    /// Test symlink with relative path
+    #[test_case]
+    fn test_symlink_relative_path() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create directory and file
+        vfs.create_file("/subdir", FileType::Directory).unwrap();
+        vfs.create_file("/subdir/target.txt", FileType::RegularFile).unwrap();
+        
+        // Create symbolic link with relative path
+        let (subdir_entry, _) = vfs.mount_tree.resolve_path("/subdir").unwrap();
+        let result = subdir_entry.node().filesystem().unwrap().upgrade().unwrap()
+            .create_symlink(
+                &subdir_entry.node(),
+                &"link_to_target.txt".to_string(),
+                &"target.txt".to_string()
+            );
+        assert!(result.is_ok());
+        
+        let symlink_node = result.unwrap();
+        
+        // Read the target
+        let target = symlink_node.read_link().unwrap();
+        assert_eq!(target, "target.txt");
+    }
+
+    /// Test symlink metadata
+    #[test_case]
+    fn test_symlink_metadata() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        let target_path = "/some/long/target/path.txt".to_string();
+        
+        // Create symbolic link
+        let result = vfs.mount_tree.resolve_path("/").unwrap().0.node()
+            .filesystem().unwrap().upgrade().unwrap()
+            .create_symlink(
+                &vfs.mount_tree.resolve_path("/").unwrap().0.node(),
+                &"symlink.txt".to_string(),
+                &target_path
+            );
+        assert!(result.is_ok());
+        
+        let symlink_node = result.unwrap();
+        let metadata = symlink_node.metadata().unwrap();
+        
+        // Check metadata
+        assert_eq!(metadata.file_type, FileType::SymbolicLink);
+        assert_eq!(metadata.size, target_path.len()); // Size should be target path length
+        assert_eq!(metadata.link_count, 1);
+        assert!(metadata.permissions.read);
+        assert!(metadata.permissions.write);
+        assert!(!metadata.permissions.execute);
+    }
+
+    /// Test symlink error conditions
+    #[test_case]
+    fn test_symlink_errors() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Test creating symlink with existing name
+        vfs.create_file("/existing.txt", FileType::RegularFile).unwrap();
+        let result = vfs.mount_tree.resolve_path("/").unwrap().0.node()
+            .filesystem().unwrap().upgrade().unwrap()
+            .create_symlink(
+                &vfs.mount_tree.resolve_path("/").unwrap().0.node(),
+                &"existing.txt".to_string(),
+                &"/target.txt".to_string()
+            );
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e.kind, FileSystemErrorKind::FileExists));
+        }
+
+        // Test creating symlink in non-directory
+        vfs.create_file("/file.txt", FileType::RegularFile).unwrap();
+        let (file_entry, _) = vfs.mount_tree.resolve_path("/file.txt").unwrap();
+        let result = file_entry.node().filesystem().unwrap().upgrade().unwrap()
+            .create_symlink(
+                &file_entry.node(),
+                &"symlink.txt".to_string(),
+                &"/target.txt".to_string()
+            );
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e.kind, FileSystemErrorKind::NotADirectory));
+        }
+    }
+
+    /// Test reading link from non-symlink returns error
+    #[test_case]
+    fn test_read_link_error() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create regular file
+        vfs.create_file("/regular.txt", FileType::RegularFile).unwrap();
+        let (file_entry, _) = vfs.mount_tree.resolve_path("/regular.txt").unwrap();
+        
+        // Try to read link from regular file
+        let result = file_entry.node().read_link();
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e.kind, FileSystemErrorKind::NotSupported));
+        }
+
+        // Create directory
+        vfs.create_file("/dir", FileType::Directory).unwrap();
+        let (dir_entry, _) = vfs.mount_tree.resolve_path("/dir").unwrap();
+        
+        // Try to read link from directory
+        let result = dir_entry.node().read_link();
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e.kind, FileSystemErrorKind::NotSupported));
+        }
+    }
+
+    /// Test symlink removal and memory cleanup
+    #[test_case]
+    fn test_symlink_removal() {
+        let tmpfs = TmpFS::new(1024); // Limited memory to test cleanup
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        let target_path = "/very/long/target/path/for/memory/test.txt".to_string();
+        
+        // Create symbolic link
+        let result = vfs.mount_tree.resolve_path("/").unwrap().0.node()
+            .filesystem().unwrap().upgrade().unwrap()
+            .create_symlink(
+                &vfs.mount_tree.resolve_path("/").unwrap().0.node(),
+                &"symlink.txt".to_string(),
+                &target_path
+            );
+        assert!(result.is_ok());
+
+        // Remove the symlink
+        let result = vfs.mount_tree.resolve_path("/").unwrap().0.node()
+            .filesystem().unwrap().upgrade().unwrap()
+            .remove(
+                &vfs.mount_tree.resolve_path("/").unwrap().0.node(),
+                &"symlink.txt".to_string()
+            );
+        assert!(result.is_ok());
+
+        // Verify symlink is gone
+        let result = vfs.mount_tree.resolve_path("/symlink.txt");
+        assert!(result.is_err());
+    }
+
+    /// Test symlinks in subdirectories
+    #[test_case]
+    fn test_symlink_subdirectories() {
+        let tmpfs = TmpFS::new(0);
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create directory structure
+        vfs.create_file("/dir1", FileType::Directory).unwrap();
+        vfs.create_file("/dir2", FileType::Directory).unwrap();
+        vfs.create_file("/dir1/target.txt", FileType::RegularFile).unwrap();
+
+        // Create symlink in different directory
+        let (dir2_entry, _) = vfs.mount_tree.resolve_path("/dir2").unwrap();
+        let result = dir2_entry.node().filesystem().unwrap().upgrade().unwrap()
+            .create_symlink(
+                &dir2_entry.node(),
+                &"link_to_target.txt".to_string(),
+                &"/dir1/target.txt".to_string()
+            );
+        assert!(result.is_ok());
+        
+        let symlink_node = result.unwrap();
+        
+        // Verify target
+        let target = symlink_node.read_link().unwrap();
+        assert_eq!(target, "/dir1/target.txt");
+    }
+}
 }

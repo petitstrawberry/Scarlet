@@ -129,6 +129,24 @@ impl VfsNode for CpioNode {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        // Check if this is actually a symbolic link
+        if self.file_type != FileType::SymbolicLink {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link"
+            ));
+        }
+        
+        // Read the target path from content (stored as UTF-8 bytes)
+        String::from_utf8(self.content.clone()).map_err(|_| {
+            FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid UTF-8 in symbolic link target"
+            )
+        })
+    }
 }
 
 impl CpioFS {
@@ -197,9 +215,10 @@ impl CpioFS {
             let file_type = match mode & 0o170000 {
                 0o040000 => FileType::Directory,
                 0o100000 => FileType::RegularFile,
+                0o120000 => FileType::SymbolicLink,
                 _ => FileType::RegularFile,
             };
-            let content = if file_type == FileType::RegularFile {
+            let content = if file_type == FileType::RegularFile || file_type == FileType::SymbolicLink {
                 data[file_start..file_end].to_vec()
             } else {
                 Vec::new()
@@ -633,3 +652,7 @@ fn register_driver() {
 }
 
 driver_initcall!(register_driver);
+
+#[cfg(test)]
+#[path = "cpiofs_tests.rs"]
+mod tests;
