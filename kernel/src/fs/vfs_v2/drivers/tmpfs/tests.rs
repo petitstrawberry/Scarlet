@@ -406,4 +406,3 @@ mod tests {
         assert_eq!(target, "/dir1/target.txt");
     }
 }
-}
