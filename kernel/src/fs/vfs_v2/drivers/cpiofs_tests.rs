@@ -36,14 +36,17 @@ mod tests {
         
         // File name (padded to 4-byte boundary)
         cpio_data.extend_from_slice(file_name);
-        cpio_data.push(0); // padding to 4-byte boundary
-        cpio_data.push(0);
+        // Add padding to align to 4-byte boundary
+        while cpio_data.len() % 4 != 0 {
+            cpio_data.push(0);
+        }
         
         // File content (padded to 4-byte boundary)
         cpio_data.extend_from_slice(file_content);
-        cpio_data.push(0); // padding to 4-byte boundary
-        cpio_data.push(0);
-        cpio_data.push(0);
+        // Add padding to align to 4-byte boundary
+        while cpio_data.len() % 4 != 0 {
+            cpio_data.push(0);
+        }
         
         // Symbolic link entry: "link.txt" -> "file.txt"
         let symlink_target = b"file.txt";
@@ -67,11 +70,17 @@ mod tests {
         
         // Symlink name (padded to 4-byte boundary)
         cpio_data.extend_from_slice(symlink_name);
-        cpio_data.push(0); // padding to 4-byte boundary
-        cpio_data.push(0);
+        // Add padding to align to 4-byte boundary
+        while cpio_data.len() % 4 != 0 {
+            cpio_data.push(0);
+        }
         
         // Symlink target (padded to 4-byte boundary)
         cpio_data.extend_from_slice(symlink_target);
+        // Add padding to 4-byte boundary for symlink target
+        while cpio_data.len() % 4 != 0 {
+            cpio_data.push(0);
+        }
         
         // TRAILER!!! entry
         cpio_data.extend_from_slice(b"070701");           // magic

@@ -179,7 +179,7 @@ impl CpioFS {
             if magic != b"070701" {
                 break;
             }
-            let inode = match core::str::from_utf8(&data[offset+6..offset+14]) {
+            let _inode = match core::str::from_utf8(&data[offset+6..offset+14]) {
                 Ok(s) => u32::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid inode value"))?,
                 Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in inode field")),
             };
@@ -204,6 +204,7 @@ impl CpioFS {
             let file_end = file_start + filesize;
             if file_end > data.len() { break; }
             if name_str == "TRAILER!!!" { break; }
+            
             // Determine file type
             let (file_type, content) = match mode & 0o170000 {
                 0o040000 => (FileType::Directory, Vec::new()),
@@ -369,12 +370,14 @@ impl FileSystemOperations for CpioFS {
             ));
         }
         let mut entries = Vec::new();
+        
         // Add "." and ".." entries
         entries.push(DirectoryEntryInternal {
             name: ".".to_string(),
             file_type: FileType::Directory,
             file_id: cpio_node.file_id as u64,
         });
+        
         // .. entry should have the parent directory's file_id
         let parent_file_id = cpio_node.parent_file_id().unwrap_or(0);
         entries.push(DirectoryEntryInternal {
@@ -382,14 +385,17 @@ impl FileSystemOperations for CpioFS {
             file_type: FileType::Directory,
             file_id: parent_file_id,
         });
+        
         // Add children
-        for child in cpio_node.children.read().values() {
+        let children = cpio_node.children.read();
+        for child in children.values() {
             entries.push(DirectoryEntryInternal {
                 name: child.name.clone(),
                 file_type: child.file_type.clone(),
                 file_id: child.file_id as u64,
             });
         }
+        
         Ok(entries)
     }
 }
