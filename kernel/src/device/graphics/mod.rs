@@ -7,7 +7,21 @@ use core::any::Any;
 use alloc::{boxed::Box, vec::Vec};
 use spin::Mutex;
 
-use super::Device;
+use alloc::sync::Arc;
+
+use super::{Device, DeviceType, manager::DeviceManager};
+
+/// Get the first available graphics device
+/// 
+/// This is a convenience function to get the first graphics device registered in the system.
+/// Returns None if no graphics devices are available.
+pub fn get_graphics_device() -> Option<Arc<dyn Device>> {
+    let manager = DeviceManager::get_manager();
+    if let Some(device_id) = manager.get_first_device_by_type(DeviceType::Graphics) {
+        return manager.get_device(device_id);
+    }
+    None
+}
 
 /// Pixel format for framebuffer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,5 +242,24 @@ mod tests {
         
         // Test flush operation
         assert!(device.flush_framebuffer(0, 0, 100, 100).is_ok());
+    }
+
+    #[test_case]
+    fn test_get_graphics_device_none() {
+        // Test when no graphics devices are registered
+        // Note: This test assumes no graphics devices are registered in the test environment
+        // In a real scenario with graphics devices, this would return Some(device)
+        let result = get_graphics_device();
+        // We can't assert the exact result since it depends on test environment state
+        // But we can ensure the function doesn't panic and returns the correct type
+        match result {
+            Some(device) => {
+                // If a device is found, it should be a graphics device
+                assert_eq!(device.device_type(), DeviceType::Graphics);
+            },
+            None => {
+                // No graphics device found - this is expected in test environment
+            }
+        }
     }
 }
