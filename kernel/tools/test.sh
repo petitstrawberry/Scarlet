@@ -56,6 +56,7 @@ if [ "$DEBUG_MODE" = true ]; then
         -global virtio-mmio.force-legacy=false \
         -drive id=x0,file=test.txt,format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
         -initrd "$INITRAMFS_PATH" \
         -gdb tcp::12345 -S \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
@@ -71,6 +72,7 @@ else
         -global virtio-mmio.force-legacy=false \
         -drive id=x0,file=test.txt,format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
         -initrd "$INITRAMFS_PATH" \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
 fi

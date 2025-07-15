@@ -51,6 +51,7 @@ qemu-system-riscv64 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
     -vnc :0 \
     $DEBUG_FLAGS \
+    -display vnc=:0 \
     -initrd "$INITRAMFS_PATH" \
     -kernel "$KERNEL_PATH" | tee "$TEMP_OUTPUT"
 
