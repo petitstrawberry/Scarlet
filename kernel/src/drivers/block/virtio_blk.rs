@@ -229,7 +229,6 @@ impl VirtioBlockDevice {
         
         // Wait for the response (polling)
         while virtqueues[0].is_busy() {}
-        while *virtqueues[0].used.idx as usize == virtqueues[0].last_used_idx {}
 
         // Process completed request
         let desc_idx = virtqueues[0].pop().ok_or("No response from device")?;

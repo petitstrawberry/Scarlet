@@ -6,3 +6,4 @@ pub mod virtio;
 pub mod uart;
 pub mod block;
 pub mod pic;
+pub mod graphics;

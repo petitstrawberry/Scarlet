@@ -48,6 +48,8 @@ qemu-system-riscv64 \
     -global virtio-mmio.force-legacy=false \
     -drive id=x0,file=test.txt,format=raw,if=none \
     -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+    -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+    -vnc :0 \
     $DEBUG_FLAGS \
     -initrd "$INITRAMFS_PATH" \
     -kernel "$KERNEL_PATH" | tee "$TEMP_OUTPUT"
