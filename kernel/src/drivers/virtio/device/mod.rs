@@ -5,7 +5,7 @@ use core::result::Result;
 
 use alloc::{boxed::Box, sync::Arc, vec};
 
-use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::{block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice}};
+use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::{block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice, network::virtio_net::VirtioNetDevice}};
 
 /// Register enum for Virtio devices
 /// 
@@ -675,6 +675,11 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         VirtioDeviceType::Block => {
             crate::early_println!("[Virtio] Detected Virtio Block Device at {:#x}", base_addr);
             let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new(base_addr));
+            DeviceManager::get_mut_manager().register_device(dev);
+        }
+        VirtioDeviceType::Net => {
+            crate::early_println!("[Virtio] Detected Virtio Network Device at {:#x}", base_addr);
+            let dev: Arc<dyn Device> = Arc::new(VirtioNetDevice::new(base_addr));
             DeviceManager::get_mut_manager().register_device(dev);
         }
         VirtioDeviceType::GPU => {

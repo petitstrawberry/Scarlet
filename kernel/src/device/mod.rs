@@ -11,6 +11,7 @@ pub mod platform;
 pub mod block;
 pub mod char;
 pub mod graphics;
+pub mod network;
 pub mod events;
 
 extern crate alloc;
@@ -77,6 +78,11 @@ pub trait Device: Send + Sync {
     
     /// Cast to GraphicsDevice if this device is a graphics device
     fn as_graphics_device(&self) -> Option<&dyn graphics::GraphicsDevice> {
+        None
+    }
+    
+    /// Cast to NetworkDevice if this device is a network device
+    fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
         None
     }
 }
