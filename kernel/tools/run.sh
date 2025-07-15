@@ -49,6 +49,8 @@ qemu-system-riscv64 \
     -drive id=x0,file=test.txt,format=raw,if=none \
     -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+    -device virtio-net-device,bus=virtio-mmio-bus.2 \
+    -net user \
     -vnc :0 \
     $DEBUG_FLAGS \
     -initrd "$INITRAMFS_PATH" \

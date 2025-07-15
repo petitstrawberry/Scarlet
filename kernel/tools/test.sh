@@ -57,6 +57,8 @@ if [ "$DEBUG_MODE" = true ]; then
         -drive id=x0,file=test.txt,format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
         -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+        -device virtio-net-device,bus=virtio-mmio-bus.2 \
+        -net user \
         -vnc :0 \
         -initrd "$INITRAMFS_PATH" \
         -gdb tcp::12345 -S \
@@ -74,6 +76,8 @@ else
         -drive id=x0,file=test.txt,format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
         -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+        -device virtio-net-device,bus=virtio-mmio-bus.2 \
+        -net user \
         -vnc :0 \
         -initrd "$INITRAMFS_PATH" \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
