@@ -416,14 +416,8 @@ impl VirtioDevice for VirtioGpuDevice {
             return None;
         }
         
-        // For testing purposes, allocate a small descriptor table
-        // In a real implementation, this would use proper memory allocation
-        let desc_table_size = 16 * 16; // 16 descriptors * 16 bytes each
-        let desc_table_addr = allocate_raw_pages((desc_table_size + 4095) / 4096);
-        if desc_table_addr.is_null() {
-            return None;
-        }
-        Some(desc_table_addr as u64)
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].desc.as_ptr() as u64)
     }
 
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -431,14 +425,8 @@ impl VirtioDevice for VirtioGpuDevice {
             return None;
         }
         
-        // For testing purposes, allocate available ring
-        // In a real implementation, this would use proper memory allocation
-        let avail_ring_size = 6 + 2 * 16; // 6 bytes header + 2 bytes per entry for 16 entries
-        let avail_ring_addr = allocate_raw_pages((avail_ring_size + 4095) / 4096);
-        if avail_ring_addr.is_null() {
-            return None;
-        }
-        Some(avail_ring_addr as u64)
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].avail.flags as *const u16 as u64)
     }
 
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
@@ -446,14 +434,8 @@ impl VirtioDevice for VirtioGpuDevice {
             return None;
         }
         
-        // For testing purposes, allocate used ring
-        // In a real implementation, this would use proper memory allocation  
-        let used_ring_size = 6 + 8 * 16; // 6 bytes header + 8 bytes per entry for 16 entries
-        let used_ring_addr = allocate_raw_pages((used_ring_size + 4095) / 4096);
-        if used_ring_addr.is_null() {
-            return None;
-        }
-        Some(used_ring_addr as u64)
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].used.flags as *const u16 as u64)
     }
 
     fn get_supported_features(&self, _device_features: u32) -> u32 {
