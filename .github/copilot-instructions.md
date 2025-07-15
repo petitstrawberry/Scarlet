@@ -31,3 +31,6 @@ Ensure all tests pass before committing changes to maintain code integrity.
 - Comment rust-doc style for public functions and modules to maintain clarity.
 - Write tests for new features or changes to ensure they work as expected. This project is `no_std`, so tests should be written in a way that does not rely on the standard library and their tests should be written as `#[test_case]` to ensure compatibility with `no_std`.
 - Commit changes frequently to avoid large, unwieldy commits.
+
+## Repository Info
+This repository is hosted at https://github.com/petitstrawberry/Scarlet. You can retrieve information (issues, etc.) remotely from the repository.
