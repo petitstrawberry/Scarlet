@@ -2,7 +2,7 @@
 opt-level = 0
 
 [target.riscv64gc-unknown-none-elf]
-runner = "tools/run.sh"
+runner = "tools/test.sh"
 
 [build]
 target = "targets/riscv64gc-unknown-none-elf.json"
