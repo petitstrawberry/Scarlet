@@ -10,6 +10,7 @@ pub mod fdt;
 pub mod platform;
 pub mod block;
 pub mod char;
+pub mod graphics;
 pub mod events;
 
 extern crate alloc;
@@ -47,6 +48,7 @@ pub enum DeviceType {
     Block,
     Char,
     Network,
+    Graphics,
     Generic,
     #[cfg(test)]
     NonExistent,
@@ -70,6 +72,11 @@ pub trait Device: Send + Sync {
     
     /// Cast to BlockDevice if this device is a block device  
     fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
+        None
+    }
+    
+    /// Cast to GraphicsDevice if this device is a graphics device
+    fn as_graphics_device(&self) -> Option<&dyn graphics::GraphicsDevice> {
         None
     }
 }
