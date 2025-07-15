@@ -316,18 +316,17 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
 
         // For LOAD segments, load them into memory
         if ph.p_type == PT_LOAD {
-            if ph.p_vaddr % PAGE_SIZE as u64 != 0 {
-                return Err(ElfLoaderError {
-                    message: format!("Segment virtual address is not aligned: {:#x}", ph.p_vaddr),
-                });
-            }
-            let aligned_size = if ph.p_memsz % PAGE_SIZE as u64 != 0 {
-                (ph.p_memsz / PAGE_SIZE as u64 + 1) * PAGE_SIZE as u64
-            } else {
-                ph.p_memsz
-            };
-            // Allocate memory for the segment
-            map_elf_segment(task, ph.p_vaddr as usize, aligned_size as usize, ph.p_align as usize, ph.p_flags).map_err(|e| ElfLoaderError {
+            // Calculate proper alignment-aware mapping
+            let align = ph.p_align as usize;
+            let page_offset = (ph.p_vaddr as usize) % align;
+            let mapping_start = (ph.p_vaddr as usize) - page_offset;
+            let mapping_size = (ph.p_memsz as usize) + page_offset;
+            
+            // Align to page boundaries for actual allocation
+            let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            
+            // Allocate memory for the segment with proper alignment handling
+            map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
                 message: format!("Failed to map ELF segment: {:?}", e),
             })?;
 
