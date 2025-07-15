@@ -23,5 +23,27 @@
             "miDebuggerServerAddress": "localhost:12345",
             "preLaunchTask": "kernel"
         },
+        {
+            "name": "attach to test",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/kernel/target/riscv64gc-unknown-none-elf/debug/test-kernel",
+            "args": [],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:12345",
+            "preLaunchTask": "test"
+        },
      ]
 }

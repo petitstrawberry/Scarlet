@@ -112,8 +112,16 @@ dependencies = ["build-release"]
 [tasks.debug]
 description = "Run the kernel in debug mode"
 cwd = "kernel"
-command = "./tools/debug.sh"
+command = "./tools/run.sh"
+args = ["--debug", "target/riscv64gc-unknown-none-elf/debug/kernel"]
 dependencies = ["build-debug"]
+
+[tasks.debug-test]
+description = "Run kernel tests in debug mode with gdb"
+cwd = "kernel"
+command = "cargo"
+args = ["test", "--", "--debug"]
+dependencies = ["build-initramfs-debug"]
 
 [tasks.doc]
 description = "Generate documentation for all components"
