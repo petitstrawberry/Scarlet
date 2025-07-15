@@ -318,6 +318,12 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
         if ph.p_type == PT_LOAD {
             // Calculate proper alignment-aware mapping
             let align = ph.p_align as usize;
+            // Handle zero or invalid alignment (ELF spec: 0 or 1 means no alignment constraint)
+            if align == 0 {
+                return Err(ElfLoaderError {
+                    message: format!("Invalid alignment value: segment has zero alignment requirement"),
+                });
+            }
             let page_offset = (ph.p_vaddr as usize) % align;
             let mapping_start = (ph.p_vaddr as usize) - page_offset;
             let mapping_size = (ph.p_memsz as usize) + page_offset;
