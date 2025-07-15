@@ -161,7 +161,7 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(16), VirtQueue::new(16)]), // Control and Cursor queues with 16 descriptors each
+            virtqueues: Mutex::new([VirtQueue::new(64), VirtQueue::new(64)]), // Control and Cursor queues with 64 descriptors each
             display_info: RwLock::new(None),
             framebuffer_addr: RwLock::new(None),
             resource_id: Mutex::new(1),
@@ -169,21 +169,21 @@ impl VirtioGpuDevice {
             resources: Mutex::new(alloc::collections::BTreeMap::new()),
         };
         
-        // Initialize the VirtIO device
-        if device.init().is_err() {
-            crate::early_println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
-        }
-        
-        // Initialize virtqueues
+        // Initialize virtqueues first
         {
             let mut virtqueues = device.virtqueues.lock();
             for (i, queue) in virtqueues.iter_mut().enumerate() {
                 queue.init();
-                crate::early_println!("[Virtio GPU] Initialized virtqueue {}", i);
+                // crate::early_println!("[Virtio GPU] Initialized virtqueue {}", i);
             }
         }
         
-        crate::early_println!("[Virtio GPU] Device created and initialized at {:#x}", base_addr);
+        // Initialize the VirtIO device - this will set up the queues with the device
+        if device.init().is_err() {
+            crate::early_println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
+        }
+        
+        // crate::early_println!("[Virtio GPU] Device created and initialized at {:#x}", base_addr);
         device
     }
 
@@ -233,8 +233,8 @@ impl VirtioGpuDevice {
         control_queue.desc[resp_desc].len = 64;
         control_queue.desc[resp_desc].flags = DescriptorFlag::Write as u16;
         
-        crate::early_println!("[Virtio GPU] Sending command to control queue: type={}", 
-            unsafe { *(cmd as *const T as *const u32) });
+        // crate::early_println!("[Virtio GPU] Sending command to control queue: type={}", 
+        //     unsafe { *(cmd as *const T as *const u32) });
         
         // Submit the request to the queue
         control_queue.push(cmd_desc)?;
@@ -243,14 +243,14 @@ impl VirtioGpuDevice {
         self.notify(0); // Notify control queue
         
         // Wait for response (simplified polling)
-        crate::early_println!("[Virtio GPU] Waiting for command response...");
+        // crate::early_println!("[Virtio GPU] Waiting for command response...");
         while control_queue.is_busy() {}
         while *control_queue.used.idx as usize == control_queue.last_used_idx {}
         
         // Process response
         let _resp_idx = control_queue.pop().ok_or("No response from device")?;
         
-        crate::early_println!("[Virtio GPU] Command completed successfully");
+        // crate::early_println!("[Virtio GPU] Command completed successfully");
         
         Ok(())
     }
@@ -321,6 +321,40 @@ impl VirtioGpuDevice {
         Ok(resource_id)
     }
 
+    /// Attach backing memory to a resource
+    fn attach_backing_to_resource(&self, resource_id: u32, addr: usize, size: usize) -> Result<(), &'static str> {
+        // Create attach backing command + memory entry in a single buffer
+        #[repr(C)]
+        struct AttachBackingWithEntry {
+            attach: VirtioGpuResourceAttachBacking,
+            entry: VirtioGpuMemEntry,
+        }
+
+        let cmd = AttachBackingWithEntry {
+            attach: VirtioGpuResourceAttachBacking {
+                hdr: VirtioGpuCtrlHdr {
+                    hdr_type: VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+                    flags: 0,
+                    fence_id: 0,
+                    ctx_id: 0,
+                    padding: 0,
+                },
+                resource_id,
+                nr_entries: 1,
+            },
+            entry: VirtioGpuMemEntry {
+                addr: addr as u64,
+                length: size as u32,
+                padding: 0,
+            },
+        };
+
+        // crate::early_println!("[Virtio GPU] Attaching framebuffer memory {:#x} (size {}) to resource {}", 
+        //     addr, size, resource_id);
+        self.send_control_command(&cmd)?;
+        Ok(())
+    }
+
     /// Set up framebuffer
     fn setup_framebuffer(&self) -> Result<(), &'static str> {
         let display_info = self.display_info.read();
@@ -349,21 +383,7 @@ impl VirtioGpuDevice {
         // Attach backing to the resource
         // This command tells the GPU device that our framebuffer memory 
         // should be used as backing storage for the 2D resource
-        let attach_cmd = VirtioGpuResourceAttachBacking {
-            hdr: VirtioGpuCtrlHdr {
-                hdr_type: VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-            resource_id,
-            nr_entries: 1,
-        };
-
-        crate::early_println!("[Virtio GPU] Attaching framebuffer memory {:#x} to resource {}", 
-            fb_addr, resource_id);
-        self.send_control_command(&attach_cmd)?;
+        self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?;
 
         // Set scanout - connects the 2D resource to the display output
         // This makes the resource visible on the display
@@ -385,8 +405,8 @@ impl VirtioGpuDevice {
             resource_id,
         };
 
-        crate::early_println!("[Virtio GPU] Setting scanout for resource {} ({}x{})", 
-            resource_id, width, height);
+        // crate::early_println!("[Virtio GPU] Setting scanout for resource {} ({}x{})", 
+        //     resource_id, width, height);
         self.send_control_command(&scanout_cmd)?;
 
         // Track the resource and its associated memory
@@ -396,8 +416,8 @@ impl VirtioGpuDevice {
         }
 
         *self.framebuffer_addr.write() = Some(fb_addr);
-        crate::early_println!("[Virtio GPU] Framebuffer setup completed: addr={:#x}, size={}", 
-            fb_addr, fb_size);
+        // crate::early_println!("[Virtio GPU] Framebuffer setup completed: addr={:#x}, size={}", 
+        //     fb_addr, fb_size);
         Ok(())
     }
 }
@@ -506,8 +526,8 @@ impl GraphicsDevice for VirtioGpuDevice {
             }
         };
 
-        crate::early_println!("[Virtio GPU] Flushing framebuffer region: ({},{}) {}x{} for resource {}", 
-            x, y, width, height, resource_id);
+        // crate::early_println!("[Virtio GPU] Flushing framebuffer region: ({},{}) {}x{} for resource {}", 
+        //     x, y, width, height, resource_id);
 
         // Transfer to host - copies data from guest memory to host
         // This is necessary because the host GPU driver needs to know
@@ -544,7 +564,7 @@ impl GraphicsDevice for VirtioGpuDevice {
         };
 
         self.send_control_command(&flush_cmd)?;
-        crate::early_println!("[Virtio GPU] Framebuffer flush completed");
+        // crate::early_println!("[Virtio GPU] Framebuffer flush completed");
         Ok(())
     }
 
@@ -557,7 +577,7 @@ impl GraphicsDevice for VirtioGpuDevice {
             *initialized = true;
         }
 
-        crate::early_println!("[Virtio GPU] Initializing graphics subsystem for device at {:#x}", self.base_addr);
+        // crate::early_println!("[Virtio GPU] Initializing graphics subsystem for device at {:#x}", self.base_addr);
 
         // Get display information
         self.get_display_info_internal()?;
@@ -565,7 +585,7 @@ impl GraphicsDevice for VirtioGpuDevice {
         // Set up framebuffer
         self.setup_framebuffer()?;
 
-        crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
+        // crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
         Ok(())
     }
 }
