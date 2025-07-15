@@ -30,6 +30,7 @@ use core::mem;
 
 use crate::defer;
 use crate::device::{Device, DeviceType};
+use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
     device::network::{NetworkDevice, NetworkPacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
     drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
@@ -373,7 +374,9 @@ impl VirtioDevice for VirtioNetDevice {
         device_features & (
             (1 << VIRTIO_NET_F_MAC) |
             (1 << VIRTIO_NET_F_STATUS) |
-            (1 << VIRTIO_NET_F_MTU)
+            (1 << VIRTIO_NET_F_MTU) |
+            (1 << VIRTIO_RING_F_EVENT_IDX) |
+            (1 << VIRTIO_RING_F_INDIRECT_DESC)
         )
     }
     

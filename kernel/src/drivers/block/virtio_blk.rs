@@ -31,6 +31,7 @@ use core::{mem, ptr};
 
 use crate::defer;
 use crate::device::{Device, DeviceType};
+use crate::drivers::virtio::features::{VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
     device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, 
     drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
@@ -56,9 +57,6 @@ const VIRTIO_BLK_F_SCSI: u32 = 7;
 // const VIRTIO_BLK_F_FLUSH: u32 = 9;
 const VIRTIO_BLK_F_CONFIG_WCE: u32 = 11;
 const VIRTIO_BLK_F_MQ: u32 = 12;
-const VIRTIO_F_ANY_LAYOUT: u32 = 27;
-const VIRTIO_RING_F_INDIRECT_DESC: u32 = 28;
-const VIRTIO_RING_F_EVENT_IDX: u32 = 29;
 
 // #define VIRTIO_BLK_F_RO              5	/* Disk is read-only */
 // #define VIRTIO_BLK_F_SCSI            7	/* Supports scsi command passthru */
