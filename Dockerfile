@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ENV PATH=/root/.cargo/bin:$PATH
-ENV MAKEFLAGS=-j$(nproc-2)
+ENV MAKEFLAGS=-j$(($(nproc)-2))
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 ENV DEBIAN_FRONTEND noninteractive
@@ -34,5 +34,11 @@ RUN mkdir -p /opt && cd /opt && \
     sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config && \
     make CROSS_COMPILE=riscv64-linux-gnu- all && \
     make CROSS_COMPILE=riscv64-linux-gnu- install
+
+# Build xv6 and the user programs
+RUN git clone https://github.com/mit-pdos/xv6-riscv.git /opt/xv6-riscv && \
+    cd /opt/xv6-riscv && \
+    git checkout 2a39c5af63906b3dbd0db58b9f6846ad70f4315d && \
+    make fs.img
 
 WORKDIR /workspaces/Scarlet
