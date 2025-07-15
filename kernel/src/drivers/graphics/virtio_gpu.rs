@@ -6,12 +6,12 @@
 //! The driver supports basic framebuffer operations and display management
 //! according to the VirtIO GPU specification.
 
-use alloc::{sync::Arc};
+use alloc::{boxed::Box, vec::Vec};
 use spin::{Mutex, RwLock};
 
 use crate::{
     device::{Device, DeviceType, graphics::{GraphicsDevice, FramebufferConfig, PixelFormat}},
-    drivers::virtio::device::VirtioDevice,
+    drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}},
     mem::page::allocate_raw_pages,
 };
 
@@ -139,6 +139,7 @@ struct VirtioGpuMemEntry {
 /// VirtIO GPU Device
 pub struct VirtioGpuDevice {
     base_addr: usize,
+    virtqueues: Mutex<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
     display_info: RwLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: RwLock<Option<usize>>,
     resource_id: Mutex<u32>,
@@ -160,6 +161,7 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         Self {
             base_addr,
+            virtqueues: Mutex::new([VirtQueue::new(16), VirtQueue::new(16)]), // Control and Cursor queues with 16 descriptors each
             display_info: RwLock::new(None),
             framebuffer_addr: RwLock::new(None),
             resource_id: Mutex::new(1),
@@ -178,22 +180,60 @@ impl VirtioGpuDevice {
 
     /// Send a command to the control queue
     fn send_control_command<T>(&self, cmd: &T) -> Result<(), &'static str> {
-        // In a real implementation, this would:
-        // 1. Get the control virtqueue (queue 0)
-        // 2. Allocate a descriptor for the command
-        // 3. Write the command to a buffer
-        // 4. Submit to the virtqueue
-        // 5. Wait for response
+        let mut virtqueues = self.virtqueues.lock();
+        let control_queue = &mut virtqueues[0]; // Control queue is index 0
         
-        // For testing purposes, we simulate the command processing
-        // In a real implementation, you would:
-        // let queue = self.get_virtqueue(0)?;
-        // queue.add_buffer(cmd_buffer, response_buffer)?;
-        // queue.notify_device();
-        // wait_for_completion();
+        // Create command and response buffers
+        let cmd_buffer = Box::new(unsafe { 
+            core::ptr::read(cmd as *const T)
+        });
+        let resp_buffer = Box::new([0u8; 64]); // Response buffer
         
-        crate::early_println!("[Virtio GPU] Sending command (simulated): type={}", 
+        let cmd_ptr = Box::into_raw(cmd_buffer);
+        let resp_ptr = Box::into_raw(resp_buffer);
+        
+        // Ensure memory cleanup
+        use crate::defer;
+        defer! {
+            unsafe {
+                drop(Box::from_raw(cmd_ptr));
+                drop(Box::from_raw(resp_ptr));
+            }
+        }
+        
+        // Allocate descriptors
+        let cmd_desc = control_queue.alloc_desc().ok_or("Failed to allocate command descriptor")?;
+        let resp_desc = control_queue.alloc_desc().ok_or("Failed to allocate response descriptor")?;
+        
+        // Set up command descriptor (device readable)
+        control_queue.desc[cmd_desc].addr = cmd_ptr as u64;
+        control_queue.desc[cmd_desc].len = core::mem::size_of::<T>() as u32;
+        control_queue.desc[cmd_desc].flags = DescriptorFlag::Next as u16;
+        control_queue.desc[cmd_desc].next = resp_desc as u16;
+        
+        // Set up response descriptor (device writable)
+        control_queue.desc[resp_desc].addr = resp_ptr as u64;
+        control_queue.desc[resp_desc].len = 64;
+        control_queue.desc[resp_desc].flags = DescriptorFlag::Write as u16;
+        
+        crate::early_println!("[Virtio GPU] Sending command to control queue: type={}", 
             unsafe { *(cmd as *const T as *const u32) });
+        
+        // Submit the request to the queue
+        control_queue.push(cmd_desc)?;
+        
+        // Notify the device
+        self.notify(0); // Notify control queue
+        
+        // Wait for response (simplified polling)
+        crate::early_println!("[Virtio GPU] Waiting for command response...");
+        while control_queue.is_busy() {}
+        while *control_queue.used.idx as usize == control_queue.last_used_idx {}
+        
+        // Process response
+        let _resp_idx = control_queue.pop().ok_or("No response from device")?;
+        
+        crate::early_println!("[Virtio GPU] Command completed successfully");
         
         Ok(())
     }
@@ -209,7 +249,7 @@ impl VirtioGpuDevice {
             padding: 0,
         };
 
-        // Send command (simplified)
+        // Send command
         self.send_control_command(&cmd)?;
 
         // For now, create a default display configuration
