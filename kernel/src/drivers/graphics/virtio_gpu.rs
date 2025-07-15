@@ -159,7 +159,7 @@ impl VirtioGpuDevice {
     ///
     /// A new instance of `VirtioGpuDevice`
     pub fn new(base_addr: usize) -> Self {
-        Self {
+        let mut device = Self {
             base_addr,
             virtqueues: Mutex::new([VirtQueue::new(16), VirtQueue::new(16)]), // Control and Cursor queues with 16 descriptors each
             display_info: RwLock::new(None),
@@ -167,7 +167,24 @@ impl VirtioGpuDevice {
             resource_id: Mutex::new(1),
             initialized: Mutex::new(false),
             resources: Mutex::new(alloc::collections::BTreeMap::new()),
+        };
+        
+        // Initialize the VirtIO device
+        if device.init().is_err() {
+            crate::early_println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
         }
+        
+        // Initialize virtqueues
+        {
+            let mut virtqueues = device.virtqueues.lock();
+            for (i, queue) in virtqueues.iter_mut().enumerate() {
+                queue.init();
+                crate::early_println!("[Virtio GPU] Initialized virtqueue {}", i);
+            }
+        }
+        
+        crate::early_println!("[Virtio GPU] Device created and initialized at {:#x}", base_addr);
+        device
     }
 
     /// Get next resource ID
@@ -558,12 +575,7 @@ impl GraphicsDevice for VirtioGpuDevice {
             *initialized = true;
         }
 
-        crate::early_println!("[Virtio GPU] Initializing VirtIO GPU device at {:#x}", self.base_addr);
-
-
-        // Initialize VirtIO device
-        self.init()?;
-
+        crate::early_println!("[Virtio GPU] Initializing graphics subsystem for device at {:#x}", self.base_addr);
 
         // Get display information
         self.get_display_info_internal()?;
@@ -571,6 +583,7 @@ impl GraphicsDevice for VirtioGpuDevice {
         // Set up framebuffer
         self.setup_framebuffer()?;
 
+        crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
         Ok(())
     }
 }
