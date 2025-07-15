@@ -13,31 +13,70 @@
 
 ## Overview
 
-Scarlet is an operating system kernel written in Rust that implements a transparent ABI conversion layer for executing binaries across different operating systems and architectures. The kernel provides a universal container runtime environment with strong isolation capabilities and comprehensive filesystem support.
+Scarlet is an operating system kernel written in Rust that implements native ABI support for executing binaries across different operating systems and architectures. The kernel provides a universal container runtime environment with strong isolation capabilities and comprehensive filesystem support.
 
 ## Quick Start
 
-Want to see Multi-ABI execution in action? Try Scarlet using Docker:
+### Try Scarlet Now
 
 ```bash
 # Get started with Docker (recommended)
 docker build -t scarlet-build .
 docker run -it --rm scarlet-build bash -c "cargo make build && cargo make run"
 
-# Once Scarlet is running, you can try Multi-ABI pipeline communication:
+# Once Scarlet boots, you'll see:
+Login successful for user: root
+Scarlet Shell (Interactive Mode)
+# 
+
+# Try Scarlet native binaries:
+# hello
+Hello, world!
+PID  = 5
+PPID = 3
+
+# Enter xv6 environment (experimental ABI):
+# xv6
+xv6 container
+Preparing to execute xv6 init...
+init: starting sh
+$ 
+
+# Try xv6 binaries:
+$ echo hello from xv6!
+hello from xv6!
+
+# Cross-ABI execution - xv6 calling Scarlet binary with pipe!
+$ /scarlet/system/scarlet/bin/hello | cat
+Hello, world!
+PID  = 10
+PPID = 9
+```
+
+### Multi-ABI Vision (Extended Goals)
+
+```bash
+# Current: Cross-ABI execution already works!
+(xv6)$ /scarlet/system/scarlet/bin/hello | cat    # ✅ Working now
+
+# Future goal: Full Linux ABI integration
 (scarlet)$ scarlet_cat /etc/passwd | linux_grep "root" | xv6_wc -l
 1
 
-# Different binaries, same environment:
+# Complete vision: All ABIs in one seamless environment:
 # - scarlet_cat: Scarlet Native binary using Scarlet syscalls
-# - linux_grep: Linux binary with transparent ABI conversion  
-# - xv6_wc: xv6 binary running through compatibility layer
-# All communicating seamlessly via pipes!
+# - linux_grep: Linux binary with native Linux ABI implementation
+# - xv6_wc: xv6 binary through native xv6 ABI implementation
+# All communicating seamlessly via unified pipe system!
 ```
 
-This demonstrates true ABI transparency - binaries from different operating systems working together as if they were native.
+This demonstrates **real Cross-ABI execution** - the xv6 environment can execute Scarlet native binaries and pipe their output through xv6 utilities! This proves that true multi-ABI functionality is already working.
 
-> **Note**: Currently, Scarlet Native ABI is implemented. Linux and xv6 ABI support are under development and will be available in future releases.
+> **Current Status**: 
+> - ✅ **Scarlet Native ABI**: Fully implemented with interactive shell
+> - 🧪 **xv6 RISC-V 64-bit ABI**: Working with Cross-ABI execution capabilities!
+> - ✅ **Cross-ABI Pipes**: Already functional between xv6 and Scarlet environments
+> - 🚧 **Linux ABI**: Under development (planned for future releases)
 
 ## Key Features
 
@@ -61,11 +100,25 @@ Scarlet's Multi-ABI support is built around a modular ABI implementation system:
 
 ### ABI Modules
 
-- **Scarlet Native**: Direct kernel interface with optimal performance
-- **Linux Compatibility** *(in development)*: Full POSIX syscall implementation
-- **xv6 Compatibility** *(in development)*: Educational OS syscall implementation
+- **Scarlet Native**: ✅ Complete - Direct kernel interface with optimal performance
+- **xv6 RISC-V 64-bit**: 🧪 Experimental - Largely implemented with core functionality available
+  - ✅ File operations (open, close, read, write, etc.)
+  - ✅ Process management (fork, exec, wait, exit)
+  - ✅ Memory management (sbrk)
+  - ✅ Inter-process communication (pipes)
+  - ✅ Device operations (mknod, console integration)
+- **Linux Compatibility**: 🚧 In Development - Full POSIX syscall implementation planned
 
 This architecture enables true containerization where applications from different operating systems can coexist and communicate without modification.
+
+### Experimental Features
+
+The xv6 RISC-V 64-bit ABI implementation is currently available as an experimental feature:
+
+- **Testing Ready**: Core functionality is stable and ready for testing
+- **Binary Compatibility**: Included xv6 binaries (`cat`, `grep`, `wc`, `sh`, etc.) work correctly
+- **Cross-ABI Communication**: Pipes and IPC work seamlessly with other ABI implementations
+- **Production Note**: While functional, this is an experimental implementation subject to changes
 
 ## Architecture Support
 
