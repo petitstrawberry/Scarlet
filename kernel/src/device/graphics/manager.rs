@@ -259,6 +259,45 @@ impl GraphicsManager {
         }
     }
 
+    /// Create a FramebufferCharDevice and register it with DeviceManager
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer (e.g., "fb0")
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure
+    pub fn create_framebuffer_char_device(&mut self, fb_name: &str) -> Result<(), &'static str> {
+        use crate::device::{graphics::framebuffer_device::FramebufferCharDevice, manager::DeviceManager};
+        use alloc::sync::Arc;
+        
+        // Get framebuffer resource
+        let fb_resource = {
+            let framebuffers = self.framebuffers.lock();
+            framebuffers.as_ref()
+                .and_then(|map| map.get(fb_name))
+                .cloned()
+                .ok_or("Framebuffer not found")?
+        };
+        
+        // Create the character device
+        let fb_char_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Register with DeviceManager (this will automatically publish to DevFS)
+        let device_manager = DeviceManager::get_mut_manager();
+        let device_id = device_manager.register_device_with_name(
+            fb_name.to_string(),
+            Arc::new(fb_char_device)
+        );
+        
+        // Update the framebuffer resource with the device ID
+        self.set_char_device_id(fb_name, device_id)?;
+        
+        crate::early_println!("[GraphicsManager] Created framebuffer character device: /dev/{}", fb_name);
+        Ok(())
+    }
+
     /// Update the character device ID for a framebuffer resource
     ///
     /// # Arguments
@@ -285,6 +324,124 @@ impl GraphicsManager {
         } else {
             Err("Framebuffer not found")
         }
+    }
+
+    /// Read a single byte from the specified framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer
+    /// * `position` - The position to read from
+    ///
+    /// # Returns
+    ///
+    /// The byte at the specified position, or None if invalid
+    pub fn read_byte_from_framebuffer(&self, fb_name: &str, position: usize) -> Option<u8> {
+        let fb_resource = self.get_framebuffer(fb_name)?;
+        
+        if position >= fb_resource.size {
+            return None;
+        }
+        
+        // Read byte from framebuffer memory
+        unsafe {
+            let fb_ptr = fb_resource.physical_addr as *const u8;
+            Some(*fb_ptr.add(position))
+        }
+    }
+
+    /// Write a single byte to the specified framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer
+    /// * `position` - The position to write to
+    /// * `byte` - The byte to write
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure
+    pub fn write_byte_to_framebuffer(&self, fb_name: &str, position: usize, byte: u8) -> Result<(), &'static str> {
+        let fb_resource = self.get_framebuffer(fb_name)
+            .ok_or("Framebuffer not found")?;
+        
+        if position >= fb_resource.size {
+            return Err("Position beyond framebuffer size");
+        }
+        
+        // Write byte to framebuffer memory
+        unsafe {
+            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            *fb_ptr.add(position) = byte;
+        }
+        
+        Ok(())
+    }
+
+    /// Read multiple bytes from the specified framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer
+    /// * `position` - The starting position to read from
+    /// * `buffer` - The buffer to read data into
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes actually read
+    pub fn read_framebuffer(&self, fb_name: &str, position: usize, buffer: &mut [u8]) -> usize {
+        let fb_resource = match self.get_framebuffer(fb_name) {
+            Some(resource) => resource,
+            None => return 0,
+        };
+        
+        let available_bytes = fb_resource.size.saturating_sub(position);
+        let bytes_to_read = buffer.len().min(available_bytes);
+        
+        if bytes_to_read == 0 {
+            return 0;
+        }
+        
+        // Read bytes from framebuffer memory
+        unsafe {
+            let fb_ptr = fb_resource.physical_addr as *const u8;
+            let src = fb_ptr.add(position);
+            core::ptr::copy_nonoverlapping(src, buffer.as_mut_ptr(), bytes_to_read);
+        }
+        
+        bytes_to_read
+    }
+
+    /// Write multiple bytes to the specified framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer
+    /// * `position` - The starting position to write to
+    /// * `buffer` - The buffer containing data to write
+    ///
+    /// # Returns
+    ///
+    /// Result containing the number of bytes written or an error
+    pub fn write_framebuffer(&self, fb_name: &str, position: usize, buffer: &[u8]) -> Result<usize, &'static str> {
+        let fb_resource = self.get_framebuffer(fb_name)
+            .ok_or("Framebuffer not found")?;
+        
+        let available_space = fb_resource.size.saturating_sub(position);
+        let bytes_to_write = buffer.len().min(available_space);
+        
+        if bytes_to_write == 0 {
+            return Err("No space available in framebuffer");
+        }
+        
+        // Write bytes to framebuffer memory
+        unsafe {
+            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            let dst = fb_ptr.add(position);
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), dst, bytes_to_write);
+        }
+        
+        Ok(bytes_to_write)
     }
 
     /// Clear all framebuffers (for testing only)

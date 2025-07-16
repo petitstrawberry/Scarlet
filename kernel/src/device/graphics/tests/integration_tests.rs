@@ -9,7 +9,7 @@ mod integration_tests {
     
     use crate::device::{
         graphics::{
-            manager::GraphicsManager,
+            manager::{GraphicsManager, FramebufferResource},
             framebuffer_device::FramebufferCharDevice,
             GenericGraphicsDevice, FramebufferConfig, PixelFormat,
         },
@@ -77,8 +77,11 @@ mod integration_tests {
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         graphics_manager.register_framebuffer_from_device("gpu0", shared_device).unwrap();
         
+        // Get the framebuffer resource that was created
+        let fb_resource = graphics_manager.get_framebuffer("fb0").expect("Framebuffer should exist");
+        
         // Create FramebufferCharDevice
-        let char_device = FramebufferCharDevice::new("fb0".to_string());
+        let char_device = FramebufferCharDevice::new(fb_resource);
         
         // Test device properties
         assert_eq!(char_device.device_type(), DeviceType::Char);
@@ -158,8 +161,8 @@ mod integration_tests {
         assert_ne!(fb0.size, fb1.size); // Different resolutions
         
         // Test character devices for both framebuffers
-        let char_device0 = FramebufferCharDevice::new("fb0".to_string());
-        let char_device1 = FramebufferCharDevice::new("fb1".to_string());
+        let char_device0 = FramebufferCharDevice::new(fb0.clone());
+        let char_device1 = FramebufferCharDevice::new(fb1.clone());
         
         // Write different patterns to each framebuffer
         let pattern0 = [0x10, 0x20, 0x30, 0x40];
@@ -225,8 +228,17 @@ mod integration_tests {
         assert_eq!(graphics_manager.get_framebuffer_count(), 0);
         assert_eq!(graphics_manager.get_framebuffer_names().len(), 0);
         
-        // Test FramebufferCharDevice with non-existent framebuffer
-        let char_device = FramebufferCharDevice::new("non_existent".to_string());
+        // Test FramebufferCharDevice with invalid framebuffer
+        let invalid_config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
+        let invalid_resource = FramebufferResource {
+            source_device_name: "none".to_string(),
+            logical_name: "invalid".to_string(),
+            config: invalid_config.clone(),
+            physical_addr: 0, // Invalid address
+            size: invalid_config.size(),
+            created_char_device_id: None,
+        };
+        let char_device = FramebufferCharDevice::new(invalid_resource);
         assert!(!char_device.can_read());
         assert!(!char_device.can_write());
         assert!(char_device.read_byte().is_none());
@@ -267,7 +279,8 @@ mod integration_tests {
             })
             .expect("Should have framebuffer for this device")
             .clone();
-        let char_device = FramebufferCharDevice::new(fb_name);
+        let fb_resource = graphics_manager.get_framebuffer(&fb_name).expect("Framebuffer should exist");
+        let char_device = FramebufferCharDevice::new(fb_resource);
         
         // Fill the entire framebuffer
         let data = [0xFF; 10]; // More than framebuffer size
