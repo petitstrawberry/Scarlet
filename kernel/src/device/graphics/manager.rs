@@ -32,8 +32,6 @@ use crate::device::{
 /// Framebuffer resource extracted from graphics devices
 #[derive(Debug)]
 pub struct FramebufferResource {
-    // /// DeviceManager's device name (e.g., "gpu0")
-    // pub source_device_name: String,
     /// DeviceManager's device id
     pub source_device_id: usize,
     /// Logical name for user access (e.g., "fb0")
