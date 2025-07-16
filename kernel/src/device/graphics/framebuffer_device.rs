@@ -293,9 +293,9 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_read_write() {
-        // Setup graphics manager with a test framebuffer
-        let mut graphics_manager = GraphicsManager::new();
-        let mut test_device = GenericGraphicsDevice::new("test-gpu");
+        // Setup graphics manager with a test framebuffer (use global singleton)
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-read-write");
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
         
@@ -306,10 +306,21 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu", shared_device).unwrap();
+        graphics_manager.register_framebuffer_from_device("test_gpu_read_write", shared_device).unwrap();
         
-        // Create framebuffer character device
-        let char_device = FramebufferCharDevice::new("fb0".to_string());
+        // Get the framebuffer name that was assigned to this specific device
+        let fb_names = graphics_manager.get_framebuffer_names();
+        let fb_name = fb_names.iter()
+            .find(|name| {
+                if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                    fb_resource.source_device_name == "test_gpu_read_write"
+                } else {
+                    false
+                }
+            })
+            .expect("Should have framebuffer for this device")
+            .clone();
+        let char_device = FramebufferCharDevice::new(fb_name);
         
         // Test write operation
         let test_data = [0x12, 0x34, 0x56, 0x78];
@@ -328,9 +339,9 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_byte_operations() {
-        // Setup graphics manager with a test framebuffer
-        let mut graphics_manager = GraphicsManager::new();
-        let mut test_device = GenericGraphicsDevice::new("test-gpu");
+        // Setup graphics manager with a test framebuffer (use global singleton)
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-byte-ops");
         let config = FramebufferConfig::new(50, 50, PixelFormat::RGB888);
         test_device.set_framebuffer_config(config.clone());
         
@@ -340,9 +351,21 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu", shared_device).unwrap();
+        graphics_manager.register_framebuffer_from_device("test_gpu_byte_ops", shared_device).unwrap();
         
-        let char_device = FramebufferCharDevice::new("fb0".to_string());
+        // Get the framebuffer name that was assigned to this specific device
+        let fb_names = graphics_manager.get_framebuffer_names();
+        let fb_name = fb_names.iter()
+            .find(|name| {
+                if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                    fb_resource.source_device_name == "test_gpu_byte_ops"
+                } else {
+                    false
+                }
+            })
+            .expect("Should have framebuffer for this device")
+            .clone();
+        let char_device = FramebufferCharDevice::new(fb_name);
         
         // Test single byte write
         assert!(char_device.write_byte(0xAB).is_ok());
@@ -357,9 +380,9 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_can_read_write() {
-        // Setup graphics manager with a small test framebuffer
-        let mut graphics_manager = GraphicsManager::new();
-        let mut test_device = GenericGraphicsDevice::new("test-gpu");
+        // Setup graphics manager with a small test framebuffer (use global singleton)
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-can-rw");
         let config = FramebufferConfig::new(10, 10, PixelFormat::RGB565); // Small framebuffer
         test_device.set_framebuffer_config(config.clone());
         
@@ -369,9 +392,21 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu", shared_device).unwrap();
+        graphics_manager.register_framebuffer_from_device("test_gpu_can_rw", shared_device).unwrap();
         
-        let char_device = FramebufferCharDevice::new("fb0".to_string());
+        // Get the framebuffer name that was assigned to this specific device
+        let fb_names = graphics_manager.get_framebuffer_names();
+        let fb_name = fb_names.iter()
+            .find(|name| {
+                if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                    fb_resource.source_device_name == "test_gpu_can_rw"
+                } else {
+                    false
+                }
+            })
+            .expect("Should have framebuffer for this device")
+            .clone();
+        let char_device = FramebufferCharDevice::new(fb_name);
         
         // Initially should be able to read and write
         assert!(char_device.can_read());
@@ -392,9 +427,9 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_boundary_conditions() {
-        // Setup graphics manager with a test framebuffer
-        let mut graphics_manager = GraphicsManager::new();
-        let mut test_device = GenericGraphicsDevice::new("test-gpu");
+        // Setup graphics manager with a test framebuffer (use global singleton)
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-boundary");
         let config = FramebufferConfig::new(5, 5, PixelFormat::RGB888); // Very small framebuffer (75 bytes)
         test_device.set_framebuffer_config(config.clone());
         
@@ -404,9 +439,21 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu", shared_device).unwrap();
+        graphics_manager.register_framebuffer_from_device("test_gpu_boundary", shared_device).unwrap();
         
-        let char_device = FramebufferCharDevice::new("fb0".to_string());
+        // Get the framebuffer name that was assigned to this specific device
+        let fb_names = graphics_manager.get_framebuffer_names();
+        let fb_name = fb_names.iter()
+            .find(|name| {
+                if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                    fb_resource.source_device_name == "test_gpu_boundary"
+                } else {
+                    false
+                }
+            })
+            .expect("Should have framebuffer for this device")
+            .clone();
+        let char_device = FramebufferCharDevice::new(fb_name);
         
         // Write data until framebuffer is full
         let large_data = [0xFF; 100]; // More data than framebuffer can hold

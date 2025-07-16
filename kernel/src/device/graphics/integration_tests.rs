@@ -235,7 +235,7 @@ mod integration_tests {
 
     #[test_case]
     fn test_framebuffer_boundary_conditions() {
-        let mut graphics_manager = GraphicsManager::new();
+        let graphics_manager = GraphicsManager::get_mut_manager();
         
         // Create a very small framebuffer
         let mut device = GenericGraphicsDevice::new("small-gpu");
@@ -247,7 +247,19 @@ mod integration_tests {
         
         graphics_manager.register_framebuffer_from_device("small_gpu", shared_device).unwrap();
         
-        let char_device = FramebufferCharDevice::new("fb0".to_string());
+        // Get the framebuffer name that was assigned to this specific device
+        let fb_names = graphics_manager.get_framebuffer_names();
+        let fb_name = fb_names.iter()
+            .find(|name| {
+                if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                    fb_resource.source_device_name == "small_gpu"
+                } else {
+                    false
+                }
+            })
+            .expect("Should have framebuffer for this device")
+            .clone();
+        let char_device = FramebufferCharDevice::new(fb_name);
         
         // Fill the entire framebuffer
         let data = [0xFF; 10]; // More than framebuffer size

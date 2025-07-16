@@ -17,9 +17,7 @@ pub mod framebuffer_device;
 #[cfg(test)]
 mod integration_tests;
 
-// Example integration with VirtIO GPU (documentation/example code)
-#[allow(dead_code)]
-mod virtio_integration;
+
 
 /// Get the first available graphics device
 /// 
