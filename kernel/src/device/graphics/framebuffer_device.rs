@@ -19,9 +19,7 @@ use alloc::{string::String, sync::Arc};
 use spin::Mutex;
 
 use crate::device::{
-    char::CharDevice,
-    graphics::manager::{FramebufferResource, GraphicsManager},
-    Device, DeviceType,
+    char::CharDevice, graphics::manager::{FramebufferResource, GraphicsManager}, manager::DeviceManager, Device, DeviceType
 };
 
 /// Framebuffer character device implementation
@@ -158,6 +156,18 @@ impl CharDevice for FramebufferCharDevice {
 
         // Advance position
         *position = current_pos + 1;
+
+        {
+            crate::println!("FramebufferCharDevice: framebuffer device: {}", self.fb_resource.source_device_id);
+            let device = DeviceManager::get_mut_manager()
+                .get_device(self.fb_resource.source_device_id)
+                .expect("Framebuffer device should exist");
+            // Notify the device manager that data was written
+            let _ = device.as_graphics_device()
+                .expect("Device should be a graphics device")
+                .flush_framebuffer(0, 0, fb_resource.config.width, fb_resource.config.height);
+        }
+
         Ok(())
     }
 
@@ -254,6 +264,16 @@ impl CharDevice for FramebufferCharDevice {
 
         // Update position
         *position = current_pos + bytes_to_write;
+
+        {
+            let device = DeviceManager::get_mut_manager()
+                .get_device(self.fb_resource.source_device_id)
+                .expect("Framebuffer device should exist");
+            // Notify the device manager that data was written
+            let _ = device.as_graphics_device()
+                .expect("Device should be a graphics device")
+                .flush_framebuffer(0, 0, fb_resource.config.width, fb_resource.config.height);
+        }
         Ok(bytes_to_write)
     }
 }
@@ -280,7 +300,7 @@ mod tests {
     fn create_test_framebuffer_resource(logical_name: &str) -> FramebufferResource {
         let config = FramebufferConfig::new(800, 600, PixelFormat::RGBA8888);
         FramebufferResource::new(
-            "test_gpu".to_string(),
+            0,
             logical_name.to_string(),
             config,
             0x80000000, // test physical address
@@ -293,7 +313,7 @@ mod tests {
         // Create test framebuffer resource
         let config = FramebufferConfig::new(1024, 768, PixelFormat::RGBA8888);
         let fb_resource = Arc::new(FramebufferResource::new(
-            "gpu0".to_string(),
+            0,
             "fb0".to_string(),
             config,
             0x80000000,
@@ -312,7 +332,7 @@ mod tests {
         // Create test framebuffer resource
         let config = FramebufferConfig::new(1024, 768, PixelFormat::RGBA8888);
         let fb_resource = Arc::new(FramebufferResource::new(
-            "gpu0".to_string(),
+            0,
             "fb0".to_string(),
             config,
             0x80000000,
@@ -348,15 +368,15 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu_read_write", shared_device).unwrap();
-        
+        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_name == "test_gpu_read_write"
+                        fb_resource.source_device_id == 0
                     } else {
                         false
                     }
@@ -395,15 +415,15 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu_byte_ops", shared_device).unwrap();
-        
+        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_name == "test_gpu_byte_ops"
+                        fb_resource.source_device_id == 0
                     } else {
                         false
                     }
@@ -438,15 +458,15 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu_can_rw", shared_device).unwrap();
-        
+        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_name == "test_gpu_can_rw"
+                        fb_resource.source_device_id == 0
                     } else {
                         false
                     }
@@ -487,15 +507,15 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device("test_gpu_boundary", shared_device).unwrap();
-        
+        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
             let fb_names = graphics_manager.get_framebuffer_names();
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_name == "test_gpu_boundary"
+                        fb_resource.source_device_id == 0
                     } else {
                         false
                     }
@@ -534,14 +554,14 @@ mod tests {
         // Create an invalid framebuffer resource (zero address)
         let invalid_config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
         let invalid_resource = Arc::new(FramebufferResource {
-            source_device_name: "none".to_string(),
+            source_device_id: 0,
             logical_name: "invalid".to_string(),
             config: invalid_config.clone(),
             physical_addr: 0, // Invalid address
             size: invalid_config.size(),
             created_char_device_id: RwLock::new(None),
         });
-        
+
         let char_device = FramebufferCharDevice::new(invalid_resource);
         
         // Operations on invalid framebuffer should fail gracefully

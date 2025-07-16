@@ -32,8 +32,10 @@ use crate::device::{
 /// Framebuffer resource extracted from graphics devices
 #[derive(Debug)]
 pub struct FramebufferResource {
-    /// DeviceManager's device name (e.g., "gpu0")
-    pub source_device_name: String,
+    // /// DeviceManager's device name (e.g., "gpu0")
+    // pub source_device_name: String,
+    /// DeviceManager's device id
+    pub source_device_id: usize,
     /// Logical name for user access (e.g., "fb0")
     pub logical_name: String,
     /// Framebuffer configuration (resolution, format, etc.)
@@ -49,14 +51,14 @@ pub struct FramebufferResource {
 impl FramebufferResource {
     /// Create a new framebuffer resource
     pub fn new(
-        source_device_name: String,
+        source_device_id: usize,
         logical_name: String,
         config: FramebufferConfig,
         physical_addr: usize,
         size: usize,
     ) -> Self {
         Self {
-            source_device_name,
+            source_device_id,
             logical_name,
             config,
             physical_addr,
@@ -134,14 +136,22 @@ impl GraphicsManager {
     /// and extracts their framebuffer resources for management.
     pub fn discover_graphics_devices(&mut self) {
         let device_manager = DeviceManager::get_manager();
-        let named_devices = device_manager.get_named_devices();
+        let device_count = device_manager.get_devices_count();
 
-        for (device_name, device) in named_devices {
+        for device_id in 0..device_count {
+            let device = match device_manager.get_device(device_id) {
+                Some(device) => device,
+                None => {
+                    crate::early_println!("[GraphicsManager] Device not found: {}", device_id);
+                    continue;
+                }
+            };
+
             if device.device_type() == DeviceType::Graphics {
-                if let Err(e) = self.register_framebuffer_from_device(&device_name, device) {
-                    crate::early_println!("[GraphicsManager] Failed to register framebuffer from device {}: {}", device_name, e);
+                if let Err(e) = self.register_framebuffer_from_device(device_id, device) {
+                    crate::early_println!("[GraphicsManager] Failed to register framebuffer from device {}: {}", device_id, e);
                 } else {
-                    crate::early_println!("[GraphicsManager] Successfully registered framebuffer from device {}", device_name);
+                    crate::early_println!("[GraphicsManager] Successfully registered framebuffer from device {}", device_id);
                 }
             }
         }
@@ -159,7 +169,7 @@ impl GraphicsManager {
     /// Result indicating success or failure
     pub fn register_framebuffer_from_device(
         &mut self,
-        device_name: &str,
+        device_id: usize,
         device: SharedDevice,
     ) -> Result<(), &'static str> {
         // Cast to graphics device
@@ -198,7 +208,7 @@ impl GraphicsManager {
 
         // Create framebuffer resource
         let resource = Arc::new(FramebufferResource::new(
-            device_name.to_string(),
+            device_id,
             logical_name.clone(),
             config,
             physical_addr,
@@ -213,8 +223,8 @@ impl GraphicsManager {
         framebuffers.as_mut().unwrap().insert(logical_name.clone(), resource);
         drop(framebuffers);
 
-        crate::early_println!("[GraphicsManager] Registered framebuffer resource: {} -> {}", device_name, logical_name);
-        
+        crate::early_println!("[GraphicsManager] Registered framebuffer resource: {} -> {}", device_id, logical_name);
+
         // Automatically create and register the character device
         if let Err(e) = self.create_framebuffer_char_device(&logical_name) {
             crate::early_println!("[GraphicsManager] Warning: Failed to create character device for {}: {}", logical_name, e);
@@ -498,14 +508,14 @@ mod tests {
     fn test_framebuffer_resource_creation() {
         let config = FramebufferConfig::new(1024, 768, PixelFormat::RGBA8888);
         let resource = FramebufferResource::new(
-            "gpu0".to_string(),
+            0,
             "fb0".to_string(),
             config.clone(),
             0x80000000,
             config.size(),
         );
 
-        assert_eq!(resource.source_device_name, "gpu0");
+        assert_eq!(resource.source_device_id, 0);
         assert_eq!(resource.logical_name, "fb0");
         assert_eq!(resource.config.width, 1024);
         assert_eq!(resource.config.height, 768);
@@ -543,7 +553,7 @@ mod tests {
         let shared_device: SharedDevice = Arc::new(device);
         
         // Register the device
-        let result = manager.register_framebuffer_from_device("test_gpu", shared_device);
+        let result = manager.register_framebuffer_from_device(0, shared_device);
         assert!(result.is_ok());
         
         // Check that framebuffer was registered
@@ -554,7 +564,7 @@ mod tests {
         
         // Check framebuffer details
         let fb = manager.get_framebuffer("fb0").unwrap();
-        assert_eq!(fb.source_device_name, "test_gpu");
+        assert_eq!(fb.source_device_id, 0);
         assert_eq!(fb.logical_name, "fb0");
         assert_eq!(fb.config.width, 800);
         assert_eq!(fb.config.height, 600);
@@ -581,8 +591,8 @@ mod tests {
         let shared_device2: SharedDevice = Arc::new(device2);
         
         // Register both devices
-        assert!(manager.register_framebuffer_from_device("gpu1", shared_device1).is_ok());
-        assert!(manager.register_framebuffer_from_device("gpu2", shared_device2).is_ok());
+        assert!(manager.register_framebuffer_from_device(1, shared_device1).is_ok());
+        assert!(manager.register_framebuffer_from_device(2, shared_device2).is_ok());
         
         // Check registration
         assert_eq!(manager.get_framebuffer_count(), 2);
@@ -594,9 +604,9 @@ mod tests {
         // Check individual framebuffers
         let fb0 = manager.get_framebuffer("fb0").unwrap();
         let fb1 = manager.get_framebuffer("fb1").unwrap();
-        
-        assert_eq!(fb0.source_device_name, "gpu1");
-        assert_eq!(fb1.source_device_name, "gpu2");
+
+        assert_eq!(fb0.source_device_id, 1);
+        assert_eq!(fb1.source_device_id, 2);
         assert_ne!(fb0.physical_addr, fb1.physical_addr);
     }
 
@@ -610,9 +620,9 @@ mod tests {
         device.set_framebuffer_config(config);
         device.set_framebuffer_address(0x80000000);
         let shared_device: SharedDevice = Arc::new(device);
-        
-        manager.register_framebuffer_from_device("test_gpu", shared_device).unwrap();
-        
+
+        manager.register_framebuffer_from_device(0, shared_device).unwrap();
+
         // Set character device ID
         assert!(manager.set_char_device_id("fb0", 42).is_ok());
         
