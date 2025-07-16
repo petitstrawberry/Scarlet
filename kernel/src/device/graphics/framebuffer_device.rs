@@ -158,7 +158,7 @@ impl CharDevice for FramebufferCharDevice {
         *position = current_pos + 1;
 
         {
-            crate::println!("FramebufferCharDevice: framebuffer device: {}", self.fb_resource.source_device_id);
+            // crate::println!("FramebufferCharDevice: framebuffer device: {}", self.fb_resource.source_device_id);
             let device = DeviceManager::get_mut_manager()
                 .get_device(self.fb_resource.source_device_id)
                 .expect("Framebuffer device should exist");
