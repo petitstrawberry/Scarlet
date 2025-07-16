@@ -266,6 +266,14 @@ mod tests {
     };
     use alloc::{string::ToString, sync::Arc};
 
+    /// Test utility to setup a clean global GraphicsManager for each test
+    fn setup_clean_graphics_manager() -> &'static mut GraphicsManager {
+        let manager = GraphicsManager::get_mut_manager();
+        // Clear any existing state from previous tests
+        manager.clear_for_test();
+        manager
+    }
+
     #[test_case]
     fn test_framebuffer_char_device_creation() {
         let device = FramebufferCharDevice::new("fb0".to_string());
@@ -293,8 +301,8 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_read_write() {
-        // Setup graphics manager with a test framebuffer (use global singleton)
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-read-write");
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
@@ -339,8 +347,8 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_byte_operations() {
-        // Setup graphics manager with a test framebuffer (use global singleton)
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-byte-ops");
         let config = FramebufferConfig::new(50, 50, PixelFormat::RGB888);
         test_device.set_framebuffer_config(config.clone());
@@ -380,8 +388,8 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_can_read_write() {
-        // Setup graphics manager with a small test framebuffer (use global singleton)
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-can-rw");
         let config = FramebufferConfig::new(10, 10, PixelFormat::RGB565); // Small framebuffer
         test_device.set_framebuffer_config(config.clone());
@@ -427,8 +435,8 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_char_device_boundary_conditions() {
-        // Setup graphics manager with a test framebuffer (use global singleton)
-        let graphics_manager = GraphicsManager::get_mut_manager();
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
         let mut test_device = GenericGraphicsDevice::new("test-gpu-boundary");
         let config = FramebufferConfig::new(5, 5, PixelFormat::RGB888); // Very small framebuffer (75 bytes)
         test_device.set_framebuffer_config(config.clone());

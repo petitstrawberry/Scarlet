@@ -286,6 +286,40 @@ impl GraphicsManager {
             Err("Framebuffer not found")
         }
     }
+
+    /// Clear all framebuffers (for testing only)
+    /// This allows tests to start with a clean GraphicsManager state
+    #[cfg(test)]
+    pub fn clear_for_test(&mut self) {
+        let mut framebuffers = self.framebuffers.lock();
+        *framebuffers = None;
+        
+        let mut display_configs = self.display_configs.lock();
+        display_configs.clear();
+        
+        let mut active_mappings = self.active_mappings.lock();
+        active_mappings.clear();
+    }
+}
+
+#[cfg(test)]
+mod test_utils {
+    use super::*;
+
+    /// Create an independent GraphicsManager for testing
+    /// This allows each test to have its own isolated manager instance
+    pub fn create_test_graphics_manager() -> GraphicsManager {
+        GraphicsManager::new()
+    }
+
+    /// Setup a clean GraphicsManager for testing
+    /// This clears the global singleton and returns a mutable reference to it
+    /// ensuring each test starts with a clean state
+    pub fn setup_clean_global_graphics_manager() -> &'static mut GraphicsManager {
+        let manager = GraphicsManager::get_mut_manager();
+        manager.clear_for_test();
+        manager
+    }
 }
 
 #[cfg(test)]
@@ -335,7 +369,7 @@ mod tests {
 
     #[test_case]
     fn test_framebuffer_registration() {
-        let mut manager = GraphicsManager::new();
+        let mut manager = test_utils::create_test_graphics_manager();
         
         // Create a test graphics device
         let mut device = GenericGraphicsDevice::new("test-gpu");
@@ -367,7 +401,7 @@ mod tests {
 
     #[test_case]
     fn test_multiple_framebuffer_registration() {
-        let mut manager = GraphicsManager::new();
+        let mut manager = test_utils::create_test_graphics_manager();
         
         // Create first device
         let mut device1 = GenericGraphicsDevice::new("test-gpu1");
@@ -405,7 +439,7 @@ mod tests {
 
     #[test_case]
     fn test_char_device_id_assignment() {
-        let mut manager = GraphicsManager::new();
+        let mut manager = test_utils::create_test_graphics_manager();
         
         // Create and register a device
         let mut device = GenericGraphicsDevice::new("test-gpu");

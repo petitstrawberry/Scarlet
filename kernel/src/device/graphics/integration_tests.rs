@@ -61,8 +61,10 @@ mod integration_tests {
 
     #[test_case]
     fn test_framebuffer_char_device_integration() {
-        // Setup GraphicsManager with a framebuffer
-        let mut graphics_manager = GraphicsManager::new();
+        // Setup clean graphics manager for this test  
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        graphics_manager.clear_for_test();
+        
         let mut test_device = GenericGraphicsDevice::new("test-gpu");
         let config = FramebufferConfig::new(640, 480, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
@@ -115,7 +117,9 @@ mod integration_tests {
 
     #[test_case]
     fn test_multiple_framebuffer_management() {
-        let mut graphics_manager = GraphicsManager::new();
+        // Setup clean graphics manager for this test
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        graphics_manager.clear_for_test();
         
         // Create first framebuffer device
         let mut device1 = GenericGraphicsDevice::new("gpu-1");
@@ -182,7 +186,9 @@ mod integration_tests {
 
     #[test_case]
     fn test_char_device_id_assignment() {
-        let mut graphics_manager = GraphicsManager::new();
+        // Setup clean graphics manager for this test
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        graphics_manager.clear_for_test();
         
         // Register a device
         let mut device = GenericGraphicsDevice::new("test-gpu");
@@ -235,7 +241,9 @@ mod integration_tests {
 
     #[test_case]
     fn test_framebuffer_boundary_conditions() {
+        // Setup clean graphics manager for this test
         let graphics_manager = GraphicsManager::get_mut_manager();
+        graphics_manager.clear_for_test();
         
         // Create a very small framebuffer
         let mut device = GenericGraphicsDevice::new("small-gpu");
