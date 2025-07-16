@@ -487,4 +487,142 @@ mod integration_tests {
         }
         
     }
+
+    #[test_case]
+    fn test_dev_fb0_gradient_drawing() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        graphics_manager.clear_for_test();
+        
+        // Create a VirtIO GPU device suitable for gradient drawing
+        use crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
+        use crate::device::graphics::GraphicsDevice;
+        
+        // Use a mock VirtIO GPU base address for testing
+        let virtio_gpu_base_addr = 0x10002000; // Typical VirtIO GPU address
+        let mut device = VirtioGpuDevice::new(virtio_gpu_base_addr);
+
+        
+        // Try to initialize the VirtIO GPU graphics capabilities
+        device.init_graphics().expect("Failed to initialize VirtIO GPU device");
+        // Get framebuffer configuration
+        let config = device.get_framebuffer_config().unwrap();
+        assert_eq!(config.width, 1024);
+        assert_eq!(config.height, 768);
+        assert_eq!(config.format, PixelFormat::BGRA8888);
+        let shared_device = Arc::new(device);
+
+        
+
+        // Register device with DeviceManager first  
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("gradient-gpu".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+        
+        // Get the framebuffer resource
+        let fb_resource = graphics_manager.get_framebuffer("fb0").expect("Framebuffer should exist");
+        
+        // Create FramebufferCharDevice representing /dev/fb0
+        let fb_char_device = FramebufferCharDevice::new(fb_resource.clone());
+        
+        // Verify device properties
+        assert_eq!(fb_char_device.device_type(), DeviceType::Char);
+        assert_eq!(fb_char_device.name(), "framebuffer");
+        assert_eq!(fb_char_device.get_framebuffer_name(), "fb0");
+        
+        // Draw a gradient pattern similar to test_virtio_gpu_framebuffer_operations
+        // Each pixel is 4 bytes: R, G, B, A
+        let width = config.width;
+        let height = config.height;
+        let bytes_per_pixel = 4;
+        
+        // Write gradient data row by row (same pattern as VirtIO GPU test)
+        for y in 0..height {
+            for x in 0..width {
+                // Create a simple gradient: red increasing with x, blue with y
+                let red = if width > 1 { ((x * 255) / (width - 1)) as u8 } else { 0 };
+                let blue = if height > 1 { ((y * 255) / (height - 1)) as u8 } else { 0 };
+                let green = 0x80u8; // Fixed green component
+                let alpha = 0xFFu8; // Fully opaque
+                
+                // Write pixel in RGBA format for character device
+                let pixel = [red, green, blue, alpha];
+                
+                // Write pixel to framebuffer through character device
+                let written = fb_char_device.write(&pixel).unwrap();
+                assert_eq!(written, bytes_per_pixel);
+            }
+        }
+
+        {
+            // Flush the framebuffer to ensure all writes are committed
+            // TODO: flush operation should be  triggered by ioctl or similar from user space.
+            // Now we directly call the flush method
+            let device = DeviceManager::get_manager().get_device(device_id).unwrap();
+            let device = device.as_graphics_device()
+                .expect("Device should be a graphics device");
+            device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
+        }
+        
+        // Verify we've written the entire framebuffer
+        let expected_total_bytes = (width * height * bytes_per_pixel as u32) as usize;
+        assert_eq!(fb_char_device.get_position(), expected_total_bytes);
+        
+        // Test reading back some pixels to verify the gradient
+        fb_char_device.reset_position();
+        
+        // Read top-left pixel (should be red=0, blue=0, green=0x80)
+        let mut top_left_pixel = [0u8; 4];
+        let read_count = fb_char_device.read(&mut top_left_pixel);
+        assert_eq!(read_count, 4);
+        assert_eq!(top_left_pixel[0], 0);    // Red should be 0 at x=0
+        assert_eq!(top_left_pixel[1], 0x80); // Fixed green component
+        assert_eq!(top_left_pixel[2], 0);    // Blue should be 0 at y=0
+        assert_eq!(top_left_pixel[3], 0xFF); // Full alpha
+        
+        // Skip to bottom-right pixel position
+        let bottom_right_pos = expected_total_bytes - bytes_per_pixel;
+        fb_char_device.set_position(bottom_right_pos);
+        
+        // Read bottom-right pixel (should be red=255, blue=255, green=0x80)
+        let mut bottom_right_pixel = [0u8; 4];
+        let read_count = fb_char_device.read(&mut bottom_right_pixel);
+        assert_eq!(read_count, 4);
+        assert_eq!(bottom_right_pixel[0], 255); // Red should be max at x=width-1
+        assert_eq!(bottom_right_pixel[1], 0x80); // Fixed green component
+        assert_eq!(bottom_right_pixel[2], 255);  // Blue should be max at y=height-1
+        assert_eq!(bottom_right_pixel[3], 0xFF); // Full alpha
+        
+        // Test middle pixel (should have intermediate values)
+        let middle_pos = (width / 2 * bytes_per_pixel as u32 + (height / 2) * width * bytes_per_pixel as u32) as usize;
+        fb_char_device.set_position(middle_pos);
+        
+        let mut middle_pixel = [0u8; 4];
+        let read_count = fb_char_device.read(&mut middle_pixel);
+        assert_eq!(read_count, 4);
+        // Middle pixel should have intermediate values
+        let expected_red = ((width / 2) * 255 / (width - 1)) as u8;
+        let expected_blue = ((height / 2) * 255 / (height - 1)) as u8;
+        assert_eq!(middle_pixel[0], expected_red);  // Red based on x position
+        assert_eq!(middle_pixel[1], 0x80);          // Fixed green component
+        assert_eq!(middle_pixel[2], expected_blue); // Blue based on y position
+        assert_eq!(middle_pixel[3], 0xFF);          // Full alpha
+        
+        // Verify we can't write beyond framebuffer boundary
+        fb_char_device.set_position(expected_total_bytes);
+        assert!(fb_char_device.write_byte(0xFF).is_err());
+        assert!(!fb_char_device.can_write());
+        
+        // Reset position to within valid range and test read capability
+        fb_char_device.set_position(0);
+        assert!(fb_char_device.can_read());
+        assert!(fb_char_device.can_write());
+        
+        // Gradient successfully drawn through /dev/fb0 character device
+        // Framebuffer: 256x256 pixels, gradient pattern matching test_virtio_gpu_framebuffer_operations
+        // Red increases with x (left to right), blue increases with y (top to bottom), green fixed at 0x80
+        // Verified gradient colors in top-left, bottom-right, and middle pixels
+    }
 }

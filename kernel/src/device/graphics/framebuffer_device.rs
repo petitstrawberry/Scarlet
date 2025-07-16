@@ -157,17 +157,6 @@ impl CharDevice for FramebufferCharDevice {
         // Advance position
         *position = current_pos + 1;
 
-        {
-            // crate::println!("FramebufferCharDevice: framebuffer device: {}", self.fb_resource.source_device_id);
-            let device = DeviceManager::get_mut_manager()
-                .get_device(self.fb_resource.source_device_id)
-                .expect("Framebuffer device should exist");
-            // Notify the device manager that data was written
-            let _ = device.as_graphics_device()
-                .expect("Device should be a graphics device")
-                .flush_framebuffer(0, 0, fb_resource.config.width, fb_resource.config.height);
-        }
-
         Ok(())
     }
 
@@ -265,15 +254,6 @@ impl CharDevice for FramebufferCharDevice {
         // Update position
         *position = current_pos + bytes_to_write;
 
-        {
-            let device = DeviceManager::get_mut_manager()
-                .get_device(self.fb_resource.source_device_id)
-                .expect("Framebuffer device should exist");
-            // Notify the device manager that data was written
-            let _ = device.as_graphics_device()
-                .expect("Device should be a graphics device")
-                .flush_framebuffer(0, 0, fb_resource.config.width, fb_resource.config.height);
-        }
         Ok(bytes_to_write)
     }
 }
