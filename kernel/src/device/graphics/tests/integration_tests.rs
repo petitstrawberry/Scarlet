@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod integration_tests {
     use alloc::{string::ToString, sync::Arc};
+    use spin::RwLock;
     
     use crate::device::{
         graphics::{
@@ -203,16 +204,17 @@ mod integration_tests {
         
         graphics_manager.register_framebuffer_from_device("gpu0", shared_device).unwrap();
         
-        // Initially no character device ID should be set
+        // Character device should be automatically created and registered
         let fb = graphics_manager.get_framebuffer("fb0").unwrap();
-        assert_eq!(fb.created_char_device_id, None);
+        assert!(fb.created_char_device_id.read().is_some(), "Character device should be automatically created");
+        let _initial_device_id = fb.created_char_device_id.read().unwrap();
         
-        // Set a character device ID
+        // Test setting a different character device ID
         assert!(graphics_manager.set_char_device_id("fb0", 42).is_ok());
         
-        // Verify the ID was set
+        // Verify the ID was updated
         let fb = graphics_manager.get_framebuffer("fb0").unwrap();
-        assert_eq!(fb.created_char_device_id, Some(42));
+        assert_eq!(*fb.created_char_device_id.read(), Some(42));
         
         // Test error case
         assert!(graphics_manager.set_char_device_id("fb999", 123).is_err());
@@ -230,14 +232,15 @@ mod integration_tests {
         
         // Test FramebufferCharDevice with invalid framebuffer
         let invalid_config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
-        let invalid_resource = FramebufferResource {
+        let invalid_resource = Arc::new(FramebufferResource {
             source_device_name: "none".to_string(),
             logical_name: "invalid".to_string(),
             config: invalid_config.clone(),
             physical_addr: 0, // Invalid address
             size: invalid_config.size(),
-            created_char_device_id: None,
-        };
+            created_char_device_id: RwLock::new(None),
+        });
+        
         let char_device = FramebufferCharDevice::new(invalid_resource);
         assert!(!char_device.can_read());
         assert!(!char_device.can_write());

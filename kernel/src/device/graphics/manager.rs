@@ -21,7 +21,7 @@ extern crate alloc;
 
 use alloc::{format, string::{String, ToString}, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 
 use crate::device::{
     graphics::{FramebufferConfig, GraphicsDevice},
@@ -30,7 +30,7 @@ use crate::device::{
 };
 
 /// Framebuffer resource extracted from graphics devices
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FramebufferResource {
     /// DeviceManager's device name (e.g., "gpu0")
     pub source_device_name: String,
@@ -43,7 +43,7 @@ pub struct FramebufferResource {
     /// Size of the framebuffer in bytes
     pub size: usize,
     /// ID of the created /dev/fbX character device (if any)
-    pub created_char_device_id: Option<usize>,
+    pub created_char_device_id: RwLock<Option<usize>>,
 }
 
 impl FramebufferResource {
@@ -61,7 +61,7 @@ impl FramebufferResource {
             config,
             physical_addr,
             size,
-            created_char_device_id: None,
+            created_char_device_id: RwLock::new(None),
         }
     }
 }
@@ -97,7 +97,7 @@ pub struct MmapRegion {
 /// Graphics Manager - singleton for managing graphics resources
 pub struct GraphicsManager {
     /// Framebuffer resources mapped by logical name
-    framebuffers: Mutex<Option<HashMap<String, FramebufferResource>>>,
+    framebuffers: Mutex<Option<HashMap<String, Arc<FramebufferResource>>>>,
     /// Multi-display configuration (future use)
     display_configs: Mutex<Vec<DisplayConfiguration>>,
     /// Active mmap regions (future use)
@@ -197,13 +197,13 @@ impl GraphicsManager {
         drop(framebuffers);
 
         // Create framebuffer resource
-        let resource = FramebufferResource::new(
+        let resource = Arc::new(FramebufferResource::new(
             device_name.to_string(),
             logical_name.clone(),
             config,
             physical_addr,
             size,
-        );
+        ));
 
         // Store the resource
         let mut framebuffers = self.framebuffers.lock();
@@ -214,6 +214,12 @@ impl GraphicsManager {
         drop(framebuffers);
 
         crate::early_println!("[GraphicsManager] Registered framebuffer resource: {} -> {}", device_name, logical_name);
+        
+        // Automatically create and register the character device
+        if let Err(e) = self.create_framebuffer_char_device(&logical_name) {
+            crate::early_println!("[GraphicsManager] Warning: Failed to create character device for {}: {}", logical_name, e);
+        }
+        
         Ok(())
     }
 
@@ -226,7 +232,7 @@ impl GraphicsManager {
     /// # Returns
     ///
     /// Optional reference to the framebuffer resource
-    pub fn get_framebuffer(&self, fb_name: &str) -> Option<FramebufferResource> {
+    pub fn get_framebuffer(&self, fb_name: &str) -> Option<Arc<FramebufferResource>> {
         let framebuffers = self.framebuffers.lock();
         framebuffers.as_ref()?.get(fb_name).cloned()
     }
@@ -316,7 +322,7 @@ impl GraphicsManager {
         let mut framebuffers = self.framebuffers.lock();
         if let Some(map) = framebuffers.as_mut() {
             if let Some(resource) = map.get_mut(fb_name) {
-                resource.created_char_device_id = Some(char_device_id);
+                *resource.created_char_device_id.write() = Some(char_device_id);
                 Ok(())
             } else {
                 Err("Framebuffer not found")
@@ -505,7 +511,7 @@ mod tests {
         assert_eq!(resource.config.height, 768);
         assert_eq!(resource.physical_addr, 0x80000000);
         assert_eq!(resource.size, 1024 * 768 * 4);
-        assert_eq!(resource.created_char_device_id, None);
+        assert_eq!(*resource.created_char_device_id.read(), None);
     }
 
     #[test_case]
@@ -612,7 +618,7 @@ mod tests {
         
         // Verify the ID was set
         let fb = manager.get_framebuffer("fb0").unwrap();
-        assert_eq!(fb.created_char_device_id, Some(42));
+        assert_eq!(*fb.created_char_device_id.read(), Some(42));
         
         // Test setting ID for non-existent framebuffer
         assert!(manager.set_char_device_id("fb999", 123).is_err());

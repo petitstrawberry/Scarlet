@@ -15,7 +15,7 @@
 extern crate alloc;
 
 use core::{any::Any};
-use alloc::string::String;
+use alloc::{string::String, sync::Arc};
 use spin::Mutex;
 
 use crate::device::{
@@ -33,7 +33,7 @@ pub struct FramebufferCharDevice {
     /// Current read/write position in the framebuffer
     position: Mutex<usize>,
     /// The framebuffer resource this device represents
-    fb_resource: FramebufferResource,
+    fb_resource: Arc<FramebufferResource>,
 }
 
 impl FramebufferCharDevice {
@@ -46,7 +46,7 @@ impl FramebufferCharDevice {
     /// # Returns
     ///
     /// A new FramebufferCharDevice instance
-    pub fn new(fb_resource: FramebufferResource) -> Self {
+    pub fn new(fb_resource: Arc<FramebufferResource>) -> Self {
         Self {
             fb_resource,
             position: Mutex::new(0),
@@ -266,6 +266,7 @@ mod tests {
         Device,
     };
     use alloc::{string::ToString, sync::Arc};
+    use spin::RwLock;
 
     /// Test utility to setup a clean global GraphicsManager for each test
     fn setup_clean_graphics_manager() -> &'static mut GraphicsManager {
@@ -291,14 +292,14 @@ mod tests {
     fn test_framebuffer_char_device_creation() {
         // Create test framebuffer resource
         let config = FramebufferConfig::new(1024, 768, PixelFormat::RGBA8888);
-        let fb_resource = FramebufferResource::new(
+        let fb_resource = Arc::new(FramebufferResource::new(
             "gpu0".to_string(),
             "fb0".to_string(),
             config,
             0x80000000,
             1024 * 768 * 4,
-        );
-        
+        ));
+
         let device = FramebufferCharDevice::new(fb_resource);
         assert_eq!(device.get_framebuffer_name(), "fb0");
         assert_eq!(device.get_position(), 0);
@@ -310,14 +311,14 @@ mod tests {
     fn test_framebuffer_char_device_position() {
         // Create test framebuffer resource
         let config = FramebufferConfig::new(1024, 768, PixelFormat::RGBA8888);
-        let fb_resource = FramebufferResource::new(
+        let fb_resource = Arc::new(FramebufferResource::new(
             "gpu0".to_string(),
             "fb0".to_string(),
             config,
             0x80000000,
             1024 * 768 * 4,
-        );
-        
+        ));
+
         let device = FramebufferCharDevice::new(fb_resource);
         
         // Test initial position
@@ -532,14 +533,15 @@ mod tests {
     fn test_framebuffer_char_device_invalid_framebuffer() {
         // Create an invalid framebuffer resource (zero address)
         let invalid_config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
-        let invalid_resource = FramebufferResource {
+        let invalid_resource = Arc::new(FramebufferResource {
             source_device_name: "none".to_string(),
             logical_name: "invalid".to_string(),
             config: invalid_config.clone(),
             physical_addr: 0, // Invalid address
             size: invalid_config.size(),
-            created_char_device_id: None,
-        };
+            created_char_device_id: RwLock::new(None),
+        });
+        
         let char_device = FramebufferCharDevice::new(invalid_resource);
         
         // Operations on invalid framebuffer should fail gracefully
