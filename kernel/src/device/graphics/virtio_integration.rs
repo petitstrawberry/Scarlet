@@ -5,7 +5,7 @@
 //! the main kernel but serves as documentation for how the integration
 //! would work in practice.
 
-use alloc::{sync::Arc, string::String};
+use alloc::{format, sync::Arc, string::String};
 use crate::device::{
     graphics::{
         manager::GraphicsManager,
