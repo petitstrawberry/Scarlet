@@ -34,7 +34,7 @@ use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
     device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, 
-    drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
+    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}
 };
 
 // VirtIO Block Request Type
@@ -122,24 +122,33 @@ impl VirtioBlockDevice {
         };
         
         // Initialize the device
-        if device.init().is_err() {
-            panic!("Failed to initialize Virtio Block Device");
-        }
+        let negotiated_features = match device.init() {
+            Ok(features) => features,
+            Err(_) => panic!("Failed to initialize Virtio Block Device"),
+        };
 
         // Read device configuration
         *device.capacity.write() = device.read_config::<u64>(0); // Capacity at offset 0
 
-        // Read device features
-        let features = device.read32_register(Register::DeviceFeatures);
-        *device.features.write() = features;
+        // Store negotiated features
+        *device.features.write() = negotiated_features;
+
+
+        // Debug: Check actual negotiated features after init
+        #[cfg(test)]
+        {
+            use crate::early_println;
+            early_println!("[virtio-blk] Final negotiated features (after init): 0x{:x}", 
+            negotiated_features);
+        }
         
         // Check if block size feature is supported
-        if features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
+        if negotiated_features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
             *device.sector_size.write() = device.read_config::<u32>(20); // blk_size at offset 20
         }
         
         // Check if device is read-only
-        *device.read_only.write() = features & (1 << VIRTIO_BLK_F_RO) != 0;
+        *device.read_only.write() = negotiated_features & (1 << VIRTIO_BLK_F_RO) != 0;
 
         device
     }

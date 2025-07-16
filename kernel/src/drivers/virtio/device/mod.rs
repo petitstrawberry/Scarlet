@@ -201,7 +201,12 @@ pub trait VirtioDevice {
     /// 4. Negotiate features
     /// 5. Set up virtqueues
     /// 6. Set driver OK status
-    fn init(&mut self) -> Result<(), &'static str> {
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(negotiated_features) if initialization was successful,
+    /// Err message otherwise
+    fn init(&mut self) -> Result<u32, &'static str> {
         // Verify device (Magic Value should be "virt")
         if self.read32_register(Register::MagicValue) != 0x74726976 {
             self.set_failed();
@@ -225,10 +230,13 @@ pub trait VirtioDevice {
         self.driver();
 
         // Negotiate features
-        if !self.negotiate_features() {
-            self.set_failed();
-            return Err("Feature negotiation failed");
-        }
+        let negotiated_features = match self.negotiate_features() {
+            Ok(features) => features,
+            Err(e) => {
+                self.set_failed();
+                return Err(e);
+            }
+        };
 
         // Set up virtqueues
         for i in 0..self.get_virtqueue_count() {
@@ -240,7 +248,7 @@ pub trait VirtioDevice {
 
         // Mark driver OK
         self.driver_ok();
-        Ok(())
+        Ok(negotiated_features)
     }
 
     /// Reset the device by writing 0 to the Status register
@@ -283,12 +291,20 @@ pub trait VirtioDevice {
     ///
     /// # Returns
     ///
-    /// Returns true if feature negotiation was successful, false otherwise
-    fn negotiate_features(&mut self) -> bool {
+    /// Returns Ok(negotiated_features) if feature negotiation was successful, 
+    /// Err message otherwise
+    fn negotiate_features(&mut self) -> Result<u32, &'static str> {
         // Read device features
         let device_features = self.read32_register(Register::DeviceFeatures);
         // Select supported features
         let driver_features = self.get_supported_features(device_features);
+        
+        #[cfg(test)]
+        {
+            use crate::early_println;
+            early_println!("[virtio] Negotiating features: device=0x{:x}, driver=0x{:x}", device_features, driver_features);
+        }
+        
         // Write driver features
         self.write32_register(Register::DriverFeatures, driver_features);
         
@@ -298,8 +314,20 @@ pub trait VirtioDevice {
         self.write32_register(Register::Status, status);
         
         // Verify FEATURES_OK status bit
-        let status = self.read32_register(Register::Status);
-        DeviceStatus::FeaturesOK.is_set(status)
+        let final_status = self.read32_register(Register::Status);
+        let success = DeviceStatus::FeaturesOK.is_set(final_status);
+        
+        #[cfg(test)]
+        {
+            use crate::early_println;
+            early_println!("[virtio] Feature negotiation result: success={}, status=0x{:x}", success, final_status);
+        }
+        
+        if success {
+            Ok(driver_features)
+        } else {
+            Err("Feature negotiation failed")
+        }
     }
     
     /// Get device features supported by this driver
@@ -623,9 +651,9 @@ impl VirtioDeviceCommon {
 }
 
 impl VirtioDevice for VirtioDeviceCommon {
-    fn init(&mut self) -> Result<(), &'static str> {
+    fn init(&mut self) -> Result<u32, &'static str> {
         // Initialization is not required for the common device
-        Ok(())
+        Ok(0)
     }
 
     fn get_base_addr(&self) -> usize {

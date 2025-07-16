@@ -119,11 +119,8 @@ fn test_feature_negotiation() {
     device.write32_register(Register::DeviceFeatures, device_features);
     
     // Perform negotiation
-    assert!(device.negotiate_features());
-    
-    // Verify that driver features are correctly set
-    let driver_features = device.read32_register(Register::DriverFeatures);
-    assert_eq!(driver_features, device_features);
+    let negotiated = device.negotiate_features().unwrap();
+    assert_eq!(negotiated, device_features);
     
     // Verify that the FeaturesOK status bit is set
     let status = device.read32_register(Register::Status);

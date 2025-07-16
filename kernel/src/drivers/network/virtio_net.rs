@@ -17,8 +17,8 @@
 //! ## Implementation Details
 //!
 //! The driver uses two virtqueues:
-//! - Transmit queue (index 0): For sending packets to the network
-//! - Receive queue (index 1): For receiving packets from the network
+//! - Receive queue (index 0): For receiving packets from the network
+//! - Transmit queue (index 1): For sending packets to the network
 //!
 //! Each network packet is handled through the VirtIO descriptor chain mechanism,
 //! with proper memory management for packet buffers.
@@ -27,13 +27,11 @@ use alloc::{boxed::Box, vec::Vec, vec};
 use spin::{Mutex, RwLock};
 
 use core::mem;
-
-use crate::defer;
 use crate::device::{Device, DeviceType};
-use crate::drivers::virtio::features::VIRTIO_RING_F_INDIRECT_DESC;
+use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
     device::network::{NetworkDevice, NetworkPacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
-    drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
+    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}
 };
 
 // VirtIO Network Feature bits
@@ -132,12 +130,11 @@ impl VirtioNetHdrBasic {
 /// VirtIO Network Device
 pub struct VirtioNetDevice {
     base_addr: usize,
-    virtqueues: Mutex<[VirtQueue<'static>; 2]>, // TX queue (0) and RX queue (1)
+    virtqueues: Mutex<[VirtQueue<'static>; 2]>, // RX queue (0) and TX queue (1)
     config: RwLock<Option<NetworkInterfaceConfig>>,
     features: RwLock<u32>,
     stats: Mutex<NetworkStats>,
     initialized: Mutex<bool>,
-    // Buffer management for received packets
     rx_buffers: Mutex<Vec<Box<[u8]>>>,
 }
 
@@ -154,7 +151,7 @@ impl VirtioNetDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(64), VirtQueue::new(64)]), // TX and RX queues
+            virtqueues: Mutex::new([VirtQueue::new(8), VirtQueue::new(8)]), // RX and TX queues
             config: RwLock::new(None),
             features: RwLock::new(0),
             stats: Mutex::new(NetworkStats::default()),
@@ -162,50 +159,31 @@ impl VirtioNetDevice {
             rx_buffers: Mutex::new(Vec::new()),
         };
         
-        // Initialize virtqueues
-        {
-            let mut virtqueues = device.virtqueues.lock();
-            for (i, queue) in virtqueues.iter_mut().enumerate() {
-                queue.init();
-            }
-        }
-        
-        // Initialize the VirtIO device
-        if device.init().is_err() {
-            panic!("Failed to initialize VirtIO Network Device");
-        }
+        // Initialize the VirtIO device first
+        let negotiated_features = match device.init() {
+            Ok(features) => features,
+            Err(_) => panic!("Failed to initialize VirtIO Network Device"),
+        };
 
-        // Read device configuration
-        device.read_device_config();
+        // Read device configuration with the negotiated features
+        device.read_device_config(negotiated_features);
 
         device
     }
     
     /// Read device configuration from the VirtIO config space
-    fn read_device_config(&mut self) {
-        // Get actually negotiated features after VirtIO initialization
-        let negotiated_features = self.read32_register(Register::DriverFeatures);
+    fn read_device_config(&mut self, negotiated_features: u32) {
+        // Store actually negotiated features
         *self.features.write() = negotiated_features;
         
         // Debug: Print negotiated features in test builds
         #[cfg(test)]
         {
-            use crate::early_println;
+            use crate::{drivers::virtio::device::Register, early_println};
             // Also read device features for debugging
             let device_features = self.read32_register(Register::DeviceFeatures);
             early_println!("[virtio-net] Device offers features: 0x{:x}", device_features);
             early_println!("[virtio-net] Negotiated features: 0x{:x}", negotiated_features);
-            if negotiated_features & (1 << VIRTIO_NET_F_MRG_RXBUF) != 0 {
-                early_println!("[virtio-net] MRG_RXBUF negotiated");
-            } else {
-                early_println!("[virtio-net] MRG_RXBUF NOT negotiated");
-            }
-            if negotiated_features & (1 << VIRTIO_NET_F_MAC) != 0 {
-                early_println!("[virtio-net] MAC address supported");
-            }
-            if negotiated_features & (1 << VIRTIO_NET_F_STATUS) != 0 {
-                early_println!("[virtio-net] Status supported");
-            }
         }
         
         // Read MAC address if supported
@@ -241,115 +219,110 @@ impl VirtioNetDevice {
     /// Setup receive buffers in the RX queue
     fn setup_rx_buffers(&self) -> Result<(), &'static str> {
         let mut virtqueues = self.virtqueues.lock();
-        let rx_queue = &mut virtqueues[1]; // RX queue is index 1
-        
-        // Pre-populate RX queue with minimal buffers using descriptor chains
-        let buffer_count = 2; // Start with just 2 buffers to minimize potential issues
+        let rx_queue = &mut virtqueues[0]; // RX queue is index 0
+
+        // Use standard single-buffer approach like Linux virtio-net
+        let buffer_count = 2; // Minimal number of buffers
         
         for _ in 0..buffer_count {
             let hdr_size = self.get_header_size(); // 10 bytes for VirtioNetHdrBasic
-            let packet_size = 1500; // Standard MTU size
+            let packet_size = 1514; // Standard Ethernet frame size
+            let total_size = hdr_size + packet_size;
             
-            // Allocate separate header buffer - exactly the header size
-            let hdr_buffer = vec![0u8; hdr_size].into_boxed_slice();
-            let hdr_ptr = Box::into_raw(hdr_buffer);
+            // Allocate single contiguous buffer - this is the standard approach
+            let buffer = vec![0u8; total_size];
+            let buffer_box = buffer.into_boxed_slice();
+            let buffer_ptr = Box::into_raw(buffer_box);
             
-            // Allocate separate packet data buffer
-            let data_buffer = vec![0u8; packet_size].into_boxed_slice();
-            let data_ptr = Box::into_raw(data_buffer);
+            // Allocate single descriptor for the entire receive buffer
+            let desc_idx = rx_queue.alloc_desc().ok_or("Failed to allocate RX descriptor")?;
             
-            // Allocate two descriptors for the chain
-            let hdr_desc_idx = rx_queue.alloc_desc().ok_or("Failed to allocate RX header descriptor")?;
-            let data_desc_idx = rx_queue.alloc_desc().ok_or("Failed to allocate RX data descriptor")?;
+            // Setup descriptor - device writes virtio-net header + packet data here
+            rx_queue.desc[desc_idx].addr = buffer_ptr as *mut u8 as u64;
+            rx_queue.desc[desc_idx].len = total_size as u32;
+            rx_queue.desc[desc_idx].flags = DescriptorFlag::Write as u16; // Device writes
+            rx_queue.desc[desc_idx].next = 0; // No chaining
             
-            // Setup header descriptor - MUST be first in chain for virtio-net
-            rx_queue.desc[hdr_desc_idx].addr = hdr_ptr as *mut u8 as u64;
-            rx_queue.desc[hdr_desc_idx].len = hdr_size as u32;
-            rx_queue.desc[hdr_desc_idx].flags = (DescriptorFlag::Write as u16) | (DescriptorFlag::Next as u16);
-            rx_queue.desc[hdr_desc_idx].next = data_desc_idx as u16;
+            // Add to available ring
+            rx_queue.push(desc_idx)?;
             
-            // Setup data descriptor - second in chain
-            rx_queue.desc[data_desc_idx].addr = data_ptr as *mut u8 as u64;
-            rx_queue.desc[data_desc_idx].len = packet_size as u32;
-            rx_queue.desc[data_desc_idx].flags = DescriptorFlag::Write as u16; // Write only, no next
-            rx_queue.desc[data_desc_idx].next = 0;
-            
-            // Add the header descriptor to available ring (starts the chain)
-            rx_queue.push(hdr_desc_idx)?;
-            
-            // Store buffer pointers for cleanup
-            self.rx_buffers.lock().push(unsafe { Box::from_raw(hdr_ptr) });
-            self.rx_buffers.lock().push(unsafe { Box::from_raw(data_ptr) });
+            // Store buffer pointer for cleanup
+            self.rx_buffers.lock().push(unsafe { Box::from_raw(buffer_ptr) });
         }
         
         // Notify device about available RX buffers
-        self.notify(1); // Notify RX queue
+        self.notify(0); // Notify RX queue
         
         Ok(())
     }
     
     /// Process a single packet transmission
     fn transmit_packet(&self, packet: &NetworkPacket) -> Result<(), &'static str> {
-        // Always use basic header since we don't support mergeable RX buffers
+        // combine header and packet in single buffer like their send() function
         let hdr_size = mem::size_of::<VirtioNetHdrBasic>();
         let total_size = hdr_size + packet.len;
         
-        // Allocate single contiguous buffer with proper alignment
+        // Create single buffer with header first, followed by packet data
         let mut combined_buffer = vec![0u8; total_size];
         
-        // Copy basic header to the beginning of buffer
-        let net_hdr_basic = VirtioNetHdrBasic::new();
+        // Fill header at the beginning
+        let header = VirtioNetHdrBasic::new();
         unsafe {
-            let hdr_ptr = &net_hdr_basic as *const VirtioNetHdrBasic as *const u8;
-            core::ptr::copy_nonoverlapping(hdr_ptr, combined_buffer.as_mut_ptr(), hdr_size);
+            let header_bytes = core::slice::from_raw_parts(
+                &header as *const VirtioNetHdrBasic as *const u8,
+                hdr_size
+            );
+            combined_buffer[..hdr_size].copy_from_slice(header_bytes);
         }
         
         // Copy packet data after header
         combined_buffer[hdr_size..].copy_from_slice(&packet.data[..packet.len]);
         
-        // Convert to boxed slice for stable memory address
+        // Convert to stable memory allocation
         let buffer_box = combined_buffer.into_boxed_slice();
         let buffer_ptr = Box::into_raw(buffer_box);
         
-        defer! {
-            // Cleanup memory
-            unsafe {
-                drop(Box::from_raw(buffer_ptr));
-            }
+        let result = {
+            let mut virtqueues = self.virtqueues.lock();
+            let tx_queue = &mut virtqueues[1]; // TX queue is index 1
+
+            // Single descriptor for the combined buffer (rcore-os pattern)
+            let desc_idx = tx_queue.alloc_desc().ok_or("Failed to allocate TX descriptor")?;
+            
+            // Setup descriptor for the combined buffer (device readable)
+            tx_queue.desc[desc_idx].addr = buffer_ptr as *mut u8 as u64;
+            tx_queue.desc[desc_idx].len = total_size as u32;
+            tx_queue.desc[desc_idx].flags = 0; // No flags, single descriptor
+            tx_queue.desc[desc_idx].next = 0; // No chaining
+            
+            // Submit the request to the queue
+            tx_queue.push(desc_idx)?;
+            
+            // Notify the device
+            self.notify(1); // Notify TX queue
+            
+            // Wait for transmission (polling)
+            while tx_queue.is_busy() {}
+            
+            // Get completion
+            let _completed_desc = tx_queue.pop().ok_or("No TX completion")?;
+            
+            Ok(())
+        };
+        
+        // Cleanup memory
+        unsafe {
+            drop(Box::from_raw(buffer_ptr));
         }
         
-        let mut virtqueues = self.virtqueues.lock();
-        let tx_queue = &mut virtqueues[0]; // TX queue is index 0
-        
-        // Allocate single descriptor for the combined buffer
-        let desc_idx = tx_queue.alloc_desc().ok_or("Failed to allocate TX descriptor")?;
-        
-        // Setup descriptor for the combined buffer (device readable)
-        tx_queue.desc[desc_idx].addr = buffer_ptr as *mut u8 as u64;
-        tx_queue.desc[desc_idx].len = total_size as u32;
-        tx_queue.desc[desc_idx].flags = 0; // No flags, device reads from this buffer
-        tx_queue.desc[desc_idx].next = 0; // No chaining
-        
-        // Submit the request to the queue
-        tx_queue.push(desc_idx)?;
-        
-        // Notify the device
-        self.notify(0); // Notify TX queue
-        
-        // Wait for transmission (polling)
-        while tx_queue.is_busy() {}
-        
-        // Get completion
-        let _completed_desc = tx_queue.pop().ok_or("No TX completion")?;
-        
-        // Update statistics
-        {
+        // Update statistics if transmission succeeded
+        if result.is_ok() {
             let mut stats = self.stats.lock();
             stats.tx_packets += 1;
             stats.tx_bytes += packet.len as u64;
         }
         
-        Ok(())
+        result
     }
     
     /// Process received packets from RX queue
@@ -386,7 +359,7 @@ impl VirtioNetDevice {
         
         // Notify device about recycled buffers
         if !packets.is_empty() {
-            self.notify(1); // Notify RX queue
+            self.notify(0); // Notify RX queue
             
             // Update statistics
             let mut stats = self.stats.lock();
@@ -459,19 +432,19 @@ impl VirtioDevice for VirtioNetDevice {
             }
         }
         
-        // Accept basic network features (don't include high-bit ring features for now)
-        let supported_features = (1 << VIRTIO_NET_F_MAC) |          // bit 5 = 0x20
-                                (1 << VIRTIO_NET_F_STATUS) |         // bit 16 = 0x10000
-                                (1 << VIRTIO_NET_F_MTU) |             // bit 3 = 0x8
-                                (1 << VIRTIO_RING_F_INDIRECT_DESC); // bit 28 = 0x10000000
-        
-        let result = device_features & supported_features;
+        // Use virtio-blk style: accept most features, exclude problematic ones
+        // Start with all device features and exclude specific ones we don't want
+        let result = device_features & (
+            1 << VIRTIO_NET_F_STATUS |
+            1 << VIRTIO_NET_F_MAC |
+            1 << VIRTIO_RING_F_EVENT_IDX |
+            1 << VIRTIO_RING_F_INDIRECT_DESC
+        );
         
         #[cfg(test)]
         {
             use crate::early_println;
-            early_println!("[virtio-net] Supported mask: 0x{:x}", supported_features);
-            early_println!("[virtio-net] Result: 0x{:x}", result);
+            early_println!("[virtio-net] Using all device features: 0x{:x}", result);
         }
         
         result
