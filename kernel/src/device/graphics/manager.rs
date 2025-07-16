@@ -464,6 +464,9 @@ impl GraphicsManager {
     /// This allows tests to start with a clean GraphicsManager state
     #[cfg(test)]
     pub fn clear_for_test(&mut self) {
+        use crate::device::manager::DeviceManager;
+        
+        // Clear GraphicsManager state
         let mut framebuffers = self.framebuffers.lock();
         *framebuffers = None;
         
@@ -472,6 +475,9 @@ impl GraphicsManager {
         
         let mut active_mappings = self.active_mappings.lock();
         active_mappings.clear();
+        
+        // Also clear DeviceManager state to ensure test isolation
+        DeviceManager::get_mut_manager().clear_for_test();
     }
 }
 
