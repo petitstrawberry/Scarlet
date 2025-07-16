@@ -30,6 +30,7 @@ use core::mem;
 
 use crate::defer;
 use crate::device::{Device, DeviceType};
+use crate::drivers::virtio::features::VIRTIO_RING_F_INDIRECT_DESC;
 use crate::{
     device::network::{NetworkDevice, NetworkPacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
     drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
@@ -242,14 +243,14 @@ impl VirtioNetDevice {
         let mut virtqueues = self.virtqueues.lock();
         let rx_queue = &mut virtqueues[1]; // RX queue is index 1
         
-        // Pre-populate RX queue with buffers using separate descriptors for header and data
-        let buffer_count = rx_queue.desc.len().min(8); // Use fewer buffers to avoid issues
+        // Pre-populate RX queue with minimal buffers using descriptor chains
+        let buffer_count = 2; // Start with just 2 buffers to minimize potential issues
         
         for _ in 0..buffer_count {
-            let hdr_size = self.get_header_size();
-            let packet_size = self.get_mtu().unwrap_or(DEFAULT_MTU) + 64;
+            let hdr_size = self.get_header_size(); // 10 bytes for VirtioNetHdrBasic
+            let packet_size = 1500; // Standard MTU size
             
-            // Allocate separate header buffer
+            // Allocate separate header buffer - exactly the header size
             let hdr_buffer = vec![0u8; hdr_size].into_boxed_slice();
             let hdr_ptr = Box::into_raw(hdr_buffer);
             
@@ -257,23 +258,23 @@ impl VirtioNetDevice {
             let data_buffer = vec![0u8; packet_size].into_boxed_slice();
             let data_ptr = Box::into_raw(data_buffer);
             
-            // Allocate two descriptors for the RX chain
+            // Allocate two descriptors for the chain
             let hdr_desc_idx = rx_queue.alloc_desc().ok_or("Failed to allocate RX header descriptor")?;
             let data_desc_idx = rx_queue.alloc_desc().ok_or("Failed to allocate RX data descriptor")?;
             
-            // Setup header descriptor (first element - device writes virtio-net header here)
+            // Setup header descriptor - MUST be first in chain for virtio-net
             rx_queue.desc[hdr_desc_idx].addr = hdr_ptr as *mut u8 as u64;
             rx_queue.desc[hdr_desc_idx].len = hdr_size as u32;
             rx_queue.desc[hdr_desc_idx].flags = (DescriptorFlag::Write as u16) | (DescriptorFlag::Next as u16);
             rx_queue.desc[hdr_desc_idx].next = data_desc_idx as u16;
             
-            // Setup data descriptor (second element - device writes packet data here)
+            // Setup data descriptor - second in chain
             rx_queue.desc[data_desc_idx].addr = data_ptr as *mut u8 as u64;
             rx_queue.desc[data_desc_idx].len = packet_size as u32;
-            rx_queue.desc[data_desc_idx].flags = DescriptorFlag::Write as u16; // Device writes, no next
+            rx_queue.desc[data_desc_idx].flags = DescriptorFlag::Write as u16; // Write only, no next
             rx_queue.desc[data_desc_idx].next = 0;
             
-            // Add header descriptor to available ring (starts the chain)
+            // Add the header descriptor to available ring (starts the chain)
             rx_queue.push(hdr_desc_idx)?;
             
             // Store buffer pointers for cleanup
@@ -442,12 +443,38 @@ impl VirtioDevice for VirtioNetDevice {
     }
     
     fn get_supported_features(&self, device_features: u32) -> u32 {
-        // Accept basic network features (don't include high-bit ring features for now)
-        let supported_features = (1 << VIRTIO_NET_F_MAC) |          // bit 5
-                                (1 << VIRTIO_NET_F_STATUS) |         // bit 16  
-                                (1 << VIRTIO_NET_F_MTU);             // bit 3
+        // Debug: Print detailed feature analysis
+        #[cfg(test)]
+        {
+            use crate::early_println;
+            early_println!("[virtio-net] Analyzing device features: 0x{:x}", device_features);
+            if device_features & (1 << VIRTIO_NET_F_MAC) != 0 {
+                early_println!("[virtio-net] Device supports MAC (bit {})", VIRTIO_NET_F_MAC);
+            }
+            if device_features & (1 << VIRTIO_NET_F_STATUS) != 0 {
+                early_println!("[virtio-net] Device supports STATUS (bit {})", VIRTIO_NET_F_STATUS);
+            }
+            if device_features & (1 << VIRTIO_NET_F_MTU) != 0 {
+                early_println!("[virtio-net] Device supports MTU (bit {})", VIRTIO_NET_F_MTU);
+            }
+        }
         
-        device_features & supported_features
+        // Accept basic network features (don't include high-bit ring features for now)
+        let supported_features = (1 << VIRTIO_NET_F_MAC) |          // bit 5 = 0x20
+                                (1 << VIRTIO_NET_F_STATUS) |         // bit 16 = 0x10000
+                                (1 << VIRTIO_NET_F_MTU) |             // bit 3 = 0x8
+                                (1 << VIRTIO_RING_F_INDIRECT_DESC); // bit 28 = 0x10000000
+        
+        let result = device_features & supported_features;
+        
+        #[cfg(test)]
+        {
+            use crate::early_println;
+            early_println!("[virtio-net] Supported mask: 0x{:x}", supported_features);
+            early_println!("[virtio-net] Result: 0x{:x}", result);
+        }
+        
+        result
     }
     
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
