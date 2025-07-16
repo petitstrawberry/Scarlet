@@ -11,6 +11,16 @@ use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
 
+pub mod manager;
+pub mod framebuffer_device;
+
+#[cfg(test)]
+mod integration_tests;
+
+// Example integration with VirtIO GPU (documentation/example code)
+#[allow(dead_code)]
+mod virtio_integration;
+
 /// Get the first available graphics device
 /// 
 /// This is a convenience function to get the first graphics device registered in the system.
