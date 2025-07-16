@@ -4,6 +4,17 @@ use super::Device;
 
 extern crate alloc;
 
+/// Seek operations for character device positioning
+#[derive(Debug, Clone, Copy)]
+pub enum SeekFrom {
+    /// Seek from the beginning of the device
+    Start(u64),
+    /// Seek relative to the current position
+    Current(i64),
+    /// Seek relative to the end of the device
+    End(i64),
+}
+
 /// Character device interface
 /// 
 /// This trait defines the interface for character devices.
@@ -76,6 +87,47 @@ pub trait CharDevice: Device {
     
     /// Check if the device is ready for writing
     fn can_write(&self) -> bool;
+    
+    /// Seek to a position in the device
+    /// 
+    /// Default implementation returns "not supported" for stream devices.
+    /// Devices that support seeking (like framebuffer, memory devices) should override this.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `whence` - Seek position and mode
+    /// 
+    /// # Returns
+    /// 
+    /// Result containing the new absolute position or an error
+    fn seek(&self, whence: SeekFrom) -> Result<u64, &'static str> {
+        let _ = whence;
+        Err("Seek operation not supported")
+    }
+    
+    /// Get current position in the device
+    /// 
+    /// Default implementation returns 0 for stream devices.
+    /// Devices that support positioning should override this.
+    /// 
+    /// # Returns
+    /// 
+    /// Current position in the device
+    fn get_position(&self) -> u64 {
+        0
+    }
+    
+    /// Check if this device supports seek operations
+    /// 
+    /// Default implementation returns false for stream devices.
+    /// Devices that support seeking should override this.
+    /// 
+    /// # Returns
+    /// 
+    /// True if the device supports seek operations
+    fn can_seek(&self) -> bool {
+        false
+    }
 }
 
 /// A generic implementation of a character device

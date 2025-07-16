@@ -263,7 +263,7 @@ use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
-use crate::{fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
+use crate::{device::graphics::manager::GraphicsManager, fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
 use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
 
 
@@ -345,6 +345,10 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     DeviceManager::get_mut_manager().populate_devices();
     /* After this point, we can use the device manager */
     /* Serial console also works */
+    
+    /* Initialize Graphics Manager and discover graphics devices */
+    early_println!("[Scarlet Kernel] Initializing graphics subsystem...");
+    GraphicsManager::get_mut_manager().discover_graphics_devices();
     
     /* Initcalls */
     call_initcalls();
