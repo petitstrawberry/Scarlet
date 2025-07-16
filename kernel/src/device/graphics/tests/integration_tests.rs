@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod integration_tests {
-    use alloc::{string::ToString, sync::Arc};
+    use alloc::{format, string::ToString, sync::Arc};
     use spin::RwLock;
     
     use crate::device::{
@@ -57,7 +57,6 @@ mod integration_tests {
         assert_eq!(fb_resource.physical_addr, fb_addr);
         assert_eq!(fb_resource.size, 1024 * 768 * 4);
         
-        crate::early_println!("[Test] GraphicsManager basic integration test passed");
     }
 
     #[test_case]
@@ -116,7 +115,6 @@ mod integration_tests {
         let byte = char_device.read_byte().unwrap();
         assert_eq!(byte, 0x12);
         
-        crate::early_println!("[Test] FramebufferCharDevice integration test passed");
     }
 
     #[test_case]
@@ -185,7 +183,6 @@ mod integration_tests {
         assert_eq!(read0, pattern0);
         assert_eq!(read1, pattern1);
         
-        crate::early_println!("[Test] Multiple framebuffer management test passed");
     }
 
     #[test_case]
@@ -219,7 +216,6 @@ mod integration_tests {
         // Test error case
         assert!(graphics_manager.set_char_device_id("fb999", 123).is_err());
         
-        crate::early_println!("[Test] Character device ID assignment test passed");
     }
 
     #[test_case]
@@ -251,7 +247,6 @@ mod integration_tests {
         assert_eq!(char_device.read(&mut buffer), 0);
         assert!(char_device.write(&[0x00, 0x01]).is_err());
         
-        crate::early_println!("[Test] Error conditions test passed");
     }
 
     #[test_case]
@@ -310,6 +305,154 @@ mod integration_tests {
         assert!(char_device.read_byte().is_none());
         assert!(!char_device.can_read());
         
-        crate::early_println!("[Test] Framebuffer boundary conditions test passed");
+    }
+
+    #[test_case]
+    fn test_devfs_framebuffer_write() {
+        use crate::fs::vfs_v2::drivers::devfs::{DevFS, DevFileObject};
+        use crate::fs::{FileType, DeviceFileInfo};
+        use crate::object::capability::StreamOps;
+        
+        // Setup clean graphics manager for this test
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        graphics_manager.clear_for_test();
+        
+        // Create a test framebuffer device
+        let mut device = GenericGraphicsDevice::new("devfs-test-gpu");
+        let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
+        device.set_framebuffer_config(config.clone());
+        let fb_addr = crate::mem::page::allocate_raw_pages((config.size() + 4095) / 4096) as usize;
+        device.set_framebuffer_address(fb_addr);
+        let shared_device: Arc<dyn Device> = Arc::new(device);
+        
+        // Register with GraphicsManager (this also registers with DeviceManager)
+        graphics_manager.register_framebuffer_from_device("devfs_gpu", shared_device).unwrap();
+        
+        // Get the framebuffer and its character device ID
+        let fb_resource = graphics_manager.get_framebuffer("fb0").unwrap();
+        let char_device_id = fb_resource.created_char_device_id.read().unwrap();
+        
+        // Create DevFS filesystem
+        let _devfs = DevFS::new();
+        
+        // Create a DevFileObject directly for the framebuffer device
+        let device_file_info = DeviceFileInfo {
+            device_id: char_device_id,
+            device_type: DeviceType::Char,
+        };
+        let file_type = FileType::CharDevice(device_file_info);
+        
+        // Create a mock DevNode for the test
+        use crate::fs::vfs_v2::drivers::devfs::DevNode;
+        let dev_node = Arc::new(DevNode::new_device_file(
+            "fb0".to_string(),
+            file_type,
+            char_device_id as u64,
+        ));
+        
+        // Create the DevFileObject
+        let dev_file_object = DevFileObject::new(dev_node, char_device_id, DeviceType::Char).unwrap();
+        
+        // Test writing through DevFS
+        let test_pattern = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
+        let bytes_written = dev_file_object.write(&test_pattern).unwrap();
+        assert_eq!(bytes_written, test_pattern.len());
+        
+        // Read back through DevFS to verify
+        let mut read_buffer = [0u8; 6];
+        
+        // Note: For DevFS, we need to use the underlying character device for reading
+        // since DevFileObject uses read_byte which advances the device position
+        let char_device = FramebufferCharDevice::new(fb_resource.clone());
+        char_device.reset_position(); // Reset to beginning
+        let bytes_read = char_device.read(&mut read_buffer);
+        assert_eq!(bytes_read, 6);
+        assert_eq!(read_buffer, test_pattern);
+        
+        // Test writing more data through DevFS
+        let second_pattern = [0x11, 0x22, 0x33, 0x44];
+        char_device.set_position(10); // Set position to 10
+        
+        // Write through DevFS again - note that DevFS uses write_byte which doesn't respect position
+        // So we write additional data that will be appended
+        let bytes_written2 = dev_file_object.write(&second_pattern).unwrap();
+        assert_eq!(bytes_written2, second_pattern.len());
+        
+        // Verify the second write by reading from position 6 onwards
+        char_device.set_position(6);
+        let mut read_buffer2 = [0u8; 4];
+        let bytes_read2 = char_device.read(&mut read_buffer2);
+        assert_eq!(bytes_read2, 4);
+        assert_eq!(read_buffer2, second_pattern);
+        
+    }
+
+    #[test_case]
+    fn test_devfs_integration_with_device_manager() {
+        // Setup clean managers for this test
+        let graphics_manager = GraphicsManager::get_mut_manager();
+        graphics_manager.clear_for_test();
+        
+        // Create multiple framebuffer devices
+        for i in 0..3 {
+            let mut device = GenericGraphicsDevice::new("devfs-test-gpu");
+            let config = FramebufferConfig::new(64 + i * 32, 64 + i * 32, PixelFormat::RGB888);
+            device.set_framebuffer_config(config.clone());
+            let fb_addr = crate::mem::page::allocate_raw_pages((config.size() + 4095) / 4096) as usize;
+            device.set_framebuffer_address(fb_addr);
+            let shared_device: Arc<dyn Device> = Arc::new(device);
+            
+            graphics_manager.register_framebuffer_from_device(
+                &format!("devfs_test_gpu_{}", i), 
+                shared_device
+            ).unwrap();
+        }
+        
+        // Verify all devices are registered
+        assert_eq!(graphics_manager.get_framebuffer_count(), 3);
+        let fb_names = graphics_manager.get_framebuffer_names();
+        assert_eq!(fb_names.len(), 3);
+        
+        // Test DevFS can access all framebuffer devices
+        use crate::fs::vfs_v2::drivers::devfs::{DevFS, DevFileObject};
+        use crate::fs::{FileType, DeviceFileInfo};
+        use crate::object::capability::StreamOps;
+        
+        let _devfs = DevFS::new();
+        
+        for (idx, fb_name) in fb_names.iter().enumerate() {
+            let fb_resource = graphics_manager.get_framebuffer(fb_name).unwrap();
+            let char_device_id = fb_resource.created_char_device_id.read().unwrap();
+            
+            // Create DevFileObject for this framebuffer
+            let device_file_info = DeviceFileInfo {
+                device_id: char_device_id,
+                device_type: DeviceType::Char,
+            };
+            let file_type = FileType::CharDevice(device_file_info);
+            
+            use crate::fs::vfs_v2::drivers::devfs::DevNode;
+            let dev_node = Arc::new(DevNode::new_device_file(
+                fb_name.clone(),
+                file_type,
+                char_device_id as u64,
+            ));
+            
+            let dev_file_object = DevFileObject::new(dev_node, char_device_id, DeviceType::Char).unwrap();
+            
+            // Write unique pattern to each framebuffer
+            let pattern = [0x10 + idx as u8, 0x20 + idx as u8, 0x30 + idx as u8];
+            let bytes_written = dev_file_object.write(&pattern).unwrap();
+            assert_eq!(bytes_written, pattern.len());
+            
+            // Verify the write using direct character device access
+            let char_device = FramebufferCharDevice::new(fb_resource.clone());
+            char_device.reset_position();
+            let mut read_buffer = [0u8; 3];
+            let bytes_read = char_device.read(&mut read_buffer);
+            assert_eq!(bytes_read, 3);
+            assert_eq!(read_buffer, pattern);
+        }
+        
     }
 }
