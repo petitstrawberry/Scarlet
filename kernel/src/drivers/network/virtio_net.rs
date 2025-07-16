@@ -286,7 +286,7 @@ impl VirtioNetDevice {
             let mut virtqueues = self.virtqueues.lock();
             let tx_queue = &mut virtqueues[1]; // TX queue is index 1
 
-            // Single descriptor for the combined buffer (rcore-os pattern)
+            // Single descriptor for the combined buffer
             let desc_idx = tx_queue.alloc_desc().ok_or("Failed to allocate TX descriptor")?;
             
             // Setup descriptor for the combined buffer (device readable)
@@ -329,8 +329,8 @@ impl VirtioNetDevice {
     fn process_received_packets(&self) -> Result<Vec<NetworkPacket>, &'static str> {
         let mut packets = Vec::new();
         let mut virtqueues = self.virtqueues.lock();
-        let rx_queue = &mut virtqueues[1]; // RX queue is index 1
-        
+        let rx_queue = &mut virtqueues[0]; // RX queue is index 0
+
         // Process all completed RX descriptors
         while let Some(desc_idx) = rx_queue.pop() {
             // Get the buffer from the descriptor
