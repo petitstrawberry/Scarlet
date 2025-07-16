@@ -368,7 +368,13 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-read-write".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
 
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
@@ -376,7 +382,7 @@ mod tests {
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_id == 0
+                        fb_resource.source_device_id == device_id
                     } else {
                         false
                     }
@@ -415,7 +421,13 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-byte-ops".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
 
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
@@ -423,7 +435,7 @@ mod tests {
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_id == 0
+                        fb_resource.source_device_id == device_id
                     } else {
                         false
                     }
@@ -458,7 +470,13 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-can-rw".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
 
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
@@ -466,7 +484,7 @@ mod tests {
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_id == 0
+                        fb_resource.source_device_id == device_id
                     } else {
                         false
                     }
@@ -507,7 +525,13 @@ mod tests {
         test_device.set_framebuffer_address(fb_addr);
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
-        graphics_manager.register_framebuffer_from_device(0, shared_device).unwrap();
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-boundary".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
 
         // Get the framebuffer resource that was assigned to this specific device
         let fb_resource = {
@@ -515,7 +539,7 @@ mod tests {
             let fb_name = fb_names.iter()
                 .find(|name| {
                     if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
-                        fb_resource.source_device_id == 0
+                        fb_resource.source_device_id == device_id
                     } else {
                         false
                     }
