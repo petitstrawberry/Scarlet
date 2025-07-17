@@ -909,4 +909,183 @@ mod tests {
         assert_eq!(char_device.read(&mut buffer), 0);
         assert!(char_device.write(&[0x00, 0x01]).is_err());
     }
+
+    #[test_case]
+    fn test_framebuffer_char_device_control_operations() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-control");
+        let config = FramebufferConfig::new(640, 480, PixelFormat::RGBA8888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        // Allocate memory for test framebuffer
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-control".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        // Get the framebuffer resource that was assigned to this specific device
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let fb_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Test supported control commands
+        let commands = fb_device.supported_control_commands();
+        assert!(!commands.is_empty());
+        assert!(commands.iter().any(|(cmd, _)| *cmd == framebuffer_commands::FBIOGET_VSCREENINFO));
+        assert!(commands.iter().any(|(cmd, _)| *cmd == framebuffer_commands::FBIOGET_FSCREENINFO));
+        assert!(commands.iter().any(|(cmd, _)| *cmd == framebuffer_commands::FBIO_FLUSH));
+        
+        // Test FBIO_FLUSH (should succeed with no operation)
+        let result = fb_device.control(framebuffer_commands::FBIO_FLUSH, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        
+        // Test unsupported command
+        let result = fb_device.control(0xFFFF, 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Unsupported framebuffer control command");
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_vscreeninfo() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-vscreen");
+        let config = FramebufferConfig::new(1024, 768, PixelFormat::RGB888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        // Allocate memory for test framebuffer
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-vscreen".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        // Get the framebuffer resource that was assigned to this specific device
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let fb_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Allocate space for variable screen info
+        let mut var_info = FbVarScreenInfo::default();
+        let info_ptr = &mut var_info as *mut FbVarScreenInfo;
+        
+        // Test FBIOGET_VSCREENINFO
+        let result = fb_device.control(framebuffer_commands::FBIOGET_VSCREENINFO, info_ptr as usize);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        
+        // Verify the information was filled correctly
+        assert_eq!(var_info.xres, 1024);
+        assert_eq!(var_info.yres, 768);
+        assert_eq!(var_info.bits_per_pixel, 24); // RGB888 = 24 bits per pixel
+        
+        // Verify RGB bitfields for RGB888
+        assert_eq!(var_info.red.offset, 0);
+        assert_eq!(var_info.red.length, 8);
+        assert_eq!(var_info.green.offset, 8);
+        assert_eq!(var_info.green.length, 8);
+        assert_eq!(var_info.blue.offset, 16);
+        assert_eq!(var_info.blue.length, 8);
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_fscreeninfo() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-fscreen");
+        let config = FramebufferConfig::new(800, 600, PixelFormat::BGRA8888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        // Allocate memory for test framebuffer
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-fscreen".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        // Get the framebuffer resource that was assigned to this specific device
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let fb_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Allocate space for fixed screen info
+        let mut fix_info = FbFixScreenInfo::default();
+        let info_ptr = &mut fix_info as *mut FbFixScreenInfo;
+        
+        // Test FBIOGET_FSCREENINFO
+        let result = fb_device.control(framebuffer_commands::FBIOGET_FSCREENINFO, info_ptr as usize);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        
+        // Verify the information was filled correctly
+        assert_eq!(fix_info.smem_start, fb_addr);
+        assert_eq!(fix_info.smem_len, fb_size as u32);
+        assert_eq!(fix_info.line_length, config.stride);
+        assert_eq!(fix_info.type_, 0); // FB_TYPE_PACKED_PIXELS
+        assert_eq!(fix_info.visual, 2); // FB_VISUAL_TRUECOLOR
+        
+        // Verify the ID string contains the framebuffer logical name
+        let id_str = core::str::from_utf8(&fix_info.id[..7]).unwrap_or("");
+        assert!(id_str.starts_with("fb"));
+    }
 }

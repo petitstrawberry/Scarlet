@@ -7,6 +7,9 @@ pub mod stream;
 pub mod file;
 pub mod control;
 
+#[cfg(test)]
+mod control_tests;
+
 use crate::object::KernelObject;
 
 // Re-export stream types for backward compatibility
