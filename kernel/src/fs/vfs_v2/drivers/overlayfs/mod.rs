@@ -47,7 +47,7 @@ use core::any::Any;
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal, VfsEntry};
 use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager};
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError, ControlOps};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::vm::vmem::MemoryArea;
 
@@ -1088,6 +1088,13 @@ impl StreamOps for OverlayDirectoryObject {
             FileSystemErrorKind::IsADirectory,
             "Cannot write to directory"
         )))
+    }
+}
+
+impl ControlOps for OverlayDirectoryObject {
+    // Overlay directories don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on overlay directories")
     }
 }
 

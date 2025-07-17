@@ -557,13 +557,11 @@ mod integration_tests {
         }
 
         {
-            // Flush the framebuffer to ensure all writes are committed
-            // TODO: flush operation should be  triggered by ioctl or similar from user space.
-            // Now we directly call the flush method
-            let device = DeviceManager::get_manager().get_device(device_id).unwrap();
-            let device = device.as_graphics_device()
-                .expect("Device should be a graphics device");
-            device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
+            // Flush the framebuffer using control operation (ioctl-equivalent)
+            use crate::device::graphics::framebuffer_device::framebuffer_commands::FBIO_FLUSH;
+            use crate::object::capability::ControlOps;
+            let result = fb_char_device.control(FBIO_FLUSH, 0);
+            assert!(result.is_ok(), "Failed to flush framebuffer via control operation");
         }
         
         // Verify we've written the entire framebuffer

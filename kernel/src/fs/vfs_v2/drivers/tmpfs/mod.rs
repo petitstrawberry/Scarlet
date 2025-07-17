@@ -13,7 +13,7 @@ use core::{any::Any, fmt::Debug};
 use crate::{device::{Device, DeviceType}, driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
 }};
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError, ControlOps};
 use crate::device::manager::DeviceManager;
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
@@ -1014,6 +1014,13 @@ impl StreamOps for TmpFileObject {
             }
             _ => Err(StreamError::NotSupported)
         }
+    }
+}
+
+impl ControlOps for TmpFileObject {
+    // Temporary files don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on temporary files")
     }
 }
 

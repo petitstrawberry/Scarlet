@@ -10,6 +10,7 @@ use spin::Mutex;
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
+use crate::object::capability::ControlOps;
 
 /// Get the first available network device
 /// 
@@ -300,6 +301,13 @@ impl Device for GenericNetworkDevice {
     
     fn as_network_device(&self) -> Option<&dyn NetworkDevice> {
         Some(self)
+    }
+}
+
+impl ControlOps for GenericNetworkDevice {
+    // Generic network devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

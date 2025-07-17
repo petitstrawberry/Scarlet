@@ -61,7 +61,7 @@ use crate::arch::Trapframe;
 use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
 use crate::ipc::syscall::sys_pipe;
-use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate};
+use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate, sys_handle_control};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
 
@@ -90,6 +90,7 @@ syscall_table! {
     HandleSetRole = 101 => sys_handle_set_role, // Change handle role after creation
     HandleClose = 102 => sys_handle_close,     // Close any handle (files, pipes, etc.)
     HandleDuplicate = 103 => sys_handle_duplicate, // Duplicate any handle  
+    HandleControl = 110 => sys_handle_control,  // Control operations on handles (ioctl-equivalent)  
     
     // === StreamOps Capability ===
     // Stream operations for any KernelObject with StreamOps capability

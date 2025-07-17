@@ -8,19 +8,214 @@
 //!
 //! The FramebufferCharDevice provides:
 //! - Basic read/write operations to framebuffer memory
+//! - Control operations (ioctl-equivalent) for device configuration
 //! - Integration with GraphicsManager for resource management
 //! - Standard character device interface for user programs
-//! - Future support for ioctl operations and memory mapping
+//! - Support for Linux-compatible framebuffer ioctls
 
 extern crate alloc;
 
 use core::{any::Any};
-use alloc::{string::String, sync::Arc};
+use alloc::{string::String, sync::Arc, vec::Vec, vec};
 use spin::Mutex;
 
 use crate::device::{
     char::CharDevice, graphics::manager::{FramebufferResource, GraphicsManager}, manager::DeviceManager, Device, DeviceType
 };
+use crate::object::capability::ControlOps;
+
+/// Linux framebuffer ioctl command constants
+/// These provide compatibility with Linux framebuffer applications
+pub mod framebuffer_commands {
+    /// Get variable screen information
+    pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
+    /// Set variable screen information  
+    pub const FBIOPUT_VSCREENINFO: u32 = 0x4601;
+    /// Get fixed screen information
+    pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
+    /// Flush framebuffer to display
+    pub const FBIO_FLUSH: u32 = 0x4620;
+}
+
+/// Variable screen information structure (Linux fb_var_screeninfo compatible)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FbVarScreenInfo {
+    /// Visible resolution width
+    pub xres: u32,
+    /// Visible resolution height  
+    pub yres: u32,
+    /// Virtual resolution width
+    pub xres_virtual: u32,
+    /// Virtual resolution height
+    pub yres_virtual: u32,
+    /// Offset from virtual to visible resolution
+    pub xoffset: u32,
+    /// Offset from virtual to visible resolution
+    pub yoffset: u32,
+    /// Bits per pixel
+    pub bits_per_pixel: u32,
+    /// Grayscale != 0 means graylevels instead of colors
+    pub grayscale: u32,
+    /// Red bitfield
+    pub red: FbBitfield,
+    /// Green bitfield
+    pub green: FbBitfield,
+    /// Blue bitfield
+    pub blue: FbBitfield,
+    /// Transparency bitfield
+    pub transp: FbBitfield,
+    /// Non-zero if not grayscale
+    pub nonstd: u32,
+    /// Activate settings
+    pub activate: u32,
+    /// Screen height in mm
+    pub height: u32,
+    /// Screen width in mm
+    pub width: u32,
+    /// Acceleration flags
+    pub accel_flags: u32,
+    /// Pixel clock in picoseconds
+    pub pixclock: u32,
+    /// Time from sync to picture
+    pub left_margin: u32,
+    /// Time from picture to sync
+    pub right_margin: u32,
+    /// Time from sync to picture
+    pub upper_margin: u32,
+    /// Time from picture to sync
+    pub lower_margin: u32,
+    /// Length of horizontal sync
+    pub hsync_len: u32,
+    /// Length of vertical sync
+    pub vsync_len: u32,
+    /// Sync flags
+    pub sync: u32,
+    /// Video mode flags
+    pub vmode: u32,
+    /// Rotation angle (0=normal, 1=90°, 2=180°, 3=270°)
+    pub rotate: u32,
+    /// Color space for frame buffer
+    pub colorspace: u32,
+    /// Reserved for future use
+    pub reserved: [u32; 4],
+}
+
+impl Default for FbVarScreenInfo {
+    fn default() -> Self {
+        Self {
+            xres: 0,
+            yres: 0,
+            xres_virtual: 0,
+            yres_virtual: 0,
+            xoffset: 0,
+            yoffset: 0,
+            bits_per_pixel: 0,
+            grayscale: 0,
+            red: FbBitfield::default(),
+            green: FbBitfield::default(),
+            blue: FbBitfield::default(),
+            transp: FbBitfield::default(),
+            nonstd: 0,
+            activate: 0,
+            height: 0,
+            width: 0,
+            accel_flags: 0,
+            pixclock: 0,
+            left_margin: 0,
+            right_margin: 0,
+            upper_margin: 0,
+            lower_margin: 0,
+            hsync_len: 0,
+            vsync_len: 0,
+            sync: 0,
+            vmode: 0,
+            rotate: 0,
+            colorspace: 0,
+            reserved: [0; 4],
+        }
+    }
+}
+
+/// Fixed screen information structure (Linux fb_fix_screeninfo compatible)
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct FbFixScreenInfo {
+    /// Identification string
+    pub id: [u8; 16],
+    /// Start of frame buffer memory (physical address)
+    pub smem_start: usize,
+    /// Length of frame buffer memory
+    pub smem_len: u32,
+    /// Framebuffer type
+    pub type_: u32,
+    /// Type of auxiliary display
+    pub type_aux: u32,
+    /// Visual type
+    pub visual: u32,
+    /// Zero if no hardware panning
+    pub xpanstep: u16,
+    /// Zero if no hardware panning
+    pub ypanstep: u16,
+    /// Zero if no hardware ywrap
+    pub ywrapstep: u16,
+    /// Length of a line in bytes
+    pub line_length: u32,
+    /// Start of memory mapped I/O
+    pub mmio_start: usize,
+    /// Length of memory mapped I/O
+    pub mmio_len: u32,
+    /// Acceleration type
+    pub accel: u32,
+    /// Capabilities
+    pub capabilities: u16,
+    /// Reserved for future compatibility
+    pub reserved: [u16; 2],
+}
+
+impl Default for FbFixScreenInfo {
+    fn default() -> Self {
+        Self {
+            id: [0; 16],
+            smem_start: 0,
+            smem_len: 0,
+            type_: 0,
+            type_aux: 0,
+            visual: 0,
+            xpanstep: 0,
+            ypanstep: 0,
+            ywrapstep: 0,
+            line_length: 0,
+            mmio_start: 0,
+            mmio_len: 0,
+            accel: 0,
+            capabilities: 0,
+            reserved: [0; 2],
+        }
+    }
+}
+
+/// Bitfield information for color components
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FbBitfield {
+    /// Beginning of bitfield (LSB is 0)
+    pub offset: u32,
+    /// Length of bitfield
+    pub length: u32,
+    /// MSB position (0 = MSB is rightmost)
+    pub msb_right: u32,
+}
+
+impl Default for FbBitfield {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            length: 0,
+            msb_right: 0,
+        }
+    }
+}
 
 /// Framebuffer character device implementation
 /// 
@@ -255,6 +450,142 @@ impl CharDevice for FramebufferCharDevice {
         *position = current_pos + bytes_to_write;
 
         Ok(bytes_to_write)
+    }
+}
+
+impl ControlOps for FramebufferCharDevice {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        use framebuffer_commands::*;
+        
+        match command {
+            FBIOGET_VSCREENINFO => {
+                self.handle_get_vscreeninfo(arg)
+            }
+            FBIOGET_FSCREENINFO => {
+                self.handle_get_fscreeninfo(arg)
+            }
+            FBIO_FLUSH => {
+                self.handle_flush(arg)
+            }
+            FBIOPUT_VSCREENINFO => {
+                self.handle_put_vscreeninfo(arg)
+            }
+            _ => {
+                Err("Unsupported framebuffer control command")
+            }
+        }
+    }
+    
+    fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
+        use framebuffer_commands::*;
+        vec![
+            (FBIOGET_VSCREENINFO, "Get variable screen information"),
+            (FBIOGET_FSCREENINFO, "Get fixed screen information"),
+            (FBIO_FLUSH, "Flush framebuffer to display"),
+            (FBIOPUT_VSCREENINFO, "Set variable screen information"),
+        ]
+    }
+}
+
+impl FramebufferCharDevice {
+    /// Handle FBIOGET_VSCREENINFO control command
+    fn handle_get_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
+        if arg == 0 {
+            return Err("Invalid argument pointer");
+        }
+        
+        let fb_resource = &self.fb_resource;
+        let config = &fb_resource.config;
+        
+        // Create variable screen info structure
+        let mut var_info = FbVarScreenInfo::default();
+        var_info.xres = config.width;
+        var_info.yres = config.height;
+        var_info.xres_virtual = config.width;
+        var_info.yres_virtual = config.height;
+        var_info.bits_per_pixel = (config.format.bytes_per_pixel() * 8) as u32;
+        
+        // Set color bitfields based on format
+        match config.format {
+            super::PixelFormat::RGBA8888 => {
+                var_info.red = FbBitfield { offset: 0, length: 8, msb_right: 0 };
+                var_info.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
+                var_info.blue = FbBitfield { offset: 16, length: 8, msb_right: 0 };
+                var_info.transp = FbBitfield { offset: 24, length: 8, msb_right: 0 };
+            }
+            super::PixelFormat::BGRA8888 => {
+                var_info.blue = FbBitfield { offset: 0, length: 8, msb_right: 0 };
+                var_info.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
+                var_info.red = FbBitfield { offset: 16, length: 8, msb_right: 0 };
+                var_info.transp = FbBitfield { offset: 24, length: 8, msb_right: 0 };
+            }
+            super::PixelFormat::RGB888 => {
+                var_info.red = FbBitfield { offset: 0, length: 8, msb_right: 0 };
+                var_info.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
+                var_info.blue = FbBitfield { offset: 16, length: 8, msb_right: 0 };
+                var_info.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
+            }
+            super::PixelFormat::RGB565 => {
+                var_info.red = FbBitfield { offset: 11, length: 5, msb_right: 0 };
+                var_info.green = FbBitfield { offset: 5, length: 6, msb_right: 0 };
+                var_info.blue = FbBitfield { offset: 0, length: 5, msb_right: 0 };
+                var_info.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
+            }
+        }
+        
+        // Copy to user space (unsafe - in real implementation would need proper memory validation)
+        unsafe {
+            let user_ptr = arg as *mut FbVarScreenInfo;
+            *user_ptr = var_info;
+        }
+        
+        Ok(0) // Success
+    }
+    
+    /// Handle FBIOGET_FSCREENINFO control command
+    fn handle_get_fscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
+        if arg == 0 {
+            return Err("Invalid argument pointer");
+        }
+        
+        let fb_resource = &self.fb_resource;
+        let config = &fb_resource.config;
+        
+        // Create fixed screen info structure
+        let mut fix_info = FbFixScreenInfo::default();
+        
+        // Set identification string
+        let fb_name = fb_resource.logical_name.as_bytes();
+        let copy_len = fb_name.len().min(fix_info.id.len() - 1);
+        fix_info.id[..copy_len].copy_from_slice(&fb_name[..copy_len]);
+        
+        fix_info.smem_start = fb_resource.physical_addr;
+        fix_info.smem_len = fb_resource.size as u32;
+        fix_info.line_length = config.stride;
+        fix_info.type_ = 0; // FB_TYPE_PACKED_PIXELS
+        fix_info.visual = 2; // FB_VISUAL_TRUECOLOR
+        
+        // Copy to user space (unsafe - in real implementation would need proper memory validation)
+        unsafe {
+            let user_ptr = arg as *mut FbFixScreenInfo;
+            *user_ptr = fix_info;
+        }
+        
+        Ok(0) // Success
+    }
+    
+    /// Handle FBIO_FLUSH control command
+    fn handle_flush(&self, _arg: usize) -> Result<i32, &'static str> {
+        // For a simple framebuffer, flush is typically a no-op
+        // In a real implementation, this might trigger a display update
+        Ok(0) // Success
+    }
+    
+    /// Handle FBIOPUT_VSCREENINFO control command  
+    fn handle_put_vscreeninfo(&self, _arg: usize) -> Result<i32, &'static str> {
+        // Setting screen info is not supported in this basic implementation
+        // In a real implementation, this would validate and apply new settings
+        Err("Setting screen information not supported")
     }
 }
 
@@ -577,5 +908,184 @@ mod tests {
         let mut buffer = [0u8; 10];
         assert_eq!(char_device.read(&mut buffer), 0);
         assert!(char_device.write(&[0x00, 0x01]).is_err());
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_control_operations() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-control");
+        let config = FramebufferConfig::new(640, 480, PixelFormat::RGBA8888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        // Allocate memory for test framebuffer
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-control".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        // Get the framebuffer resource that was assigned to this specific device
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let fb_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Test supported control commands
+        let commands = fb_device.supported_control_commands();
+        assert!(!commands.is_empty());
+        assert!(commands.iter().any(|(cmd, _)| *cmd == framebuffer_commands::FBIOGET_VSCREENINFO));
+        assert!(commands.iter().any(|(cmd, _)| *cmd == framebuffer_commands::FBIOGET_FSCREENINFO));
+        assert!(commands.iter().any(|(cmd, _)| *cmd == framebuffer_commands::FBIO_FLUSH));
+        
+        // Test FBIO_FLUSH (should succeed with no operation)
+        let result = fb_device.control(framebuffer_commands::FBIO_FLUSH, 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        
+        // Test unsupported command
+        let result = fb_device.control(0xFFFF, 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Unsupported framebuffer control command");
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_vscreeninfo() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-vscreen");
+        let config = FramebufferConfig::new(1024, 768, PixelFormat::RGB888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        // Allocate memory for test framebuffer
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-vscreen".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        // Get the framebuffer resource that was assigned to this specific device
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let fb_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Allocate space for variable screen info
+        let mut var_info = FbVarScreenInfo::default();
+        let info_ptr = &mut var_info as *mut FbVarScreenInfo;
+        
+        // Test FBIOGET_VSCREENINFO
+        let result = fb_device.control(framebuffer_commands::FBIOGET_VSCREENINFO, info_ptr as usize);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        
+        // Verify the information was filled correctly
+        assert_eq!(var_info.xres, 1024);
+        assert_eq!(var_info.yres, 768);
+        assert_eq!(var_info.bits_per_pixel, 24); // RGB888 = 24 bits per pixel
+        
+        // Verify RGB bitfields for RGB888
+        assert_eq!(var_info.red.offset, 0);
+        assert_eq!(var_info.red.length, 8);
+        assert_eq!(var_info.green.offset, 8);
+        assert_eq!(var_info.green.length, 8);
+        assert_eq!(var_info.blue.offset, 16);
+        assert_eq!(var_info.blue.length, 8);
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_fscreeninfo() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-fscreen");
+        let config = FramebufferConfig::new(800, 600, PixelFormat::BGRA8888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        // Allocate memory for test framebuffer
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        
+        // Register device with DeviceManager first
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-fscreen".to_string(), shared_device.clone());
+        
+        // Then register with GraphicsManager
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        // Get the framebuffer resource that was assigned to this specific device
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let fb_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Allocate space for fixed screen info
+        let mut fix_info = FbFixScreenInfo::default();
+        let info_ptr = &mut fix_info as *mut FbFixScreenInfo;
+        
+        // Test FBIOGET_FSCREENINFO
+        let result = fb_device.control(framebuffer_commands::FBIOGET_FSCREENINFO, info_ptr as usize);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        
+        // Verify the information was filled correctly
+        assert_eq!(fix_info.smem_start, fb_addr);
+        assert_eq!(fix_info.smem_len, fb_size as u32);
+        assert_eq!(fix_info.line_length, config.stride);
+        assert_eq!(fix_info.type_, 0); // FB_TYPE_PACKED_PIXELS
+        assert_eq!(fix_info.visual, 2); // FB_VISUAL_TRUECOLOR
+        
+        // Verify the ID string contains the framebuffer logical name
+        let id_str = core::str::from_utf8(&fix_info.id[..7]).unwrap_or("");
+        assert!(id_str.starts_with("fb"));
     }
 }

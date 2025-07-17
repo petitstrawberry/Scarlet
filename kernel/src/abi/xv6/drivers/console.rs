@@ -1,6 +1,6 @@
 use core::any::Any;
 
-use crate::{device::{char::CharDevice, manager::DeviceManager, Device, DeviceType}};
+use crate::{device::{char::CharDevice, manager::DeviceManager, Device, DeviceType}, object::capability::ControlOps};
 
 /// Character device for xv6 console that bridges to TTY
 pub struct ConsoleDevice {
@@ -83,6 +83,13 @@ impl CharDevice for ConsoleDevice {
             }
         }
         false
+    }
+}
+
+impl ControlOps for ConsoleDevice {
+    // Console devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

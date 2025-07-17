@@ -185,3 +185,52 @@ pub fn encode_handle_type(handle_type: &HandleType) -> usize {
         HandleType::StandardInputOutput(StandardInputOutput::Stderr) => 4,
     }
 }
+
+/// sys_handle_control - Perform control operations on a handle
+/// 
+/// This system call allows user space to perform device-specific control
+/// operations on a handle, similar to ioctl operations in POSIX systems.
+/// 
+/// # Arguments
+/// - handle: The handle to perform the control operation on
+/// - command: The control command identifier
+/// - arg: Command-specific argument (often a pointer to data)
+/// 
+/// # Returns
+/// - i32 value on success (command-specific)
+/// - usize::MAX on error
+pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    
+    let handle = trapframe.get_arg(0) as u32;
+    let command = trapframe.get_arg(1) as u32;
+    let arg = trapframe.get_arg(2);
+    
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+    
+    // Get the kernel object from the handle table
+    let kernel_object = match task.handle_table.get(handle) {
+        Some(obj) => obj.clone(),
+        None => return usize::MAX, // Invalid handle
+    };
+    
+    // Perform the control operation using the ControlOps capability
+    let result = match kernel_object.as_control() {
+        Some(control_ops) => {
+            control_ops.control(command, arg)
+        }
+        None => {
+            Err("Control operations not supported on this object")
+        }
+    };
+    
+    // Convert result to usize for system call return value
+    match result {
+        Ok(value) => value as usize,
+        Err(_) => usize::MAX, // Error
+    }
+}

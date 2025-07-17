@@ -12,7 +12,7 @@ use spin::{Mutex, RwLock};
 use crate::{
     device::{Device, DeviceType, graphics::{GraphicsDevice, FramebufferConfig, PixelFormat}},
     drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}},
-    mem::page::allocate_raw_pages,
+    mem::page::allocate_raw_pages, object::capability::ControlOps,
 };
 
 // VirtIO GPU Constants
@@ -483,6 +483,13 @@ impl Device for VirtioGpuDevice {
 
     fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
         Some(self)
+    }
+}
+
+impl ControlOps for VirtioGpuDevice {
+    // VirtIO GPU devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 
