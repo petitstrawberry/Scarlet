@@ -575,10 +575,58 @@ impl FramebufferCharDevice {
     }
     
     /// Handle FBIO_FLUSH control command
+    /// 
+    /// This command forces any pending framebuffer changes to be displayed.
+    /// For memory-mapped framebuffers, this typically involves ensuring
+    /// CPU caches are flushed and any display controller updates are triggered.
     fn handle_flush(&self, _arg: usize) -> Result<i32, &'static str> {
-        // For a simple framebuffer, flush is typically a no-op
-        // In a real implementation, this might trigger a display update
+        let fb_resource = &self.fb_resource;
+        
+        // Check if framebuffer address is valid
+        if fb_resource.physical_addr == 0 {
+            return Err("Invalid framebuffer address");
+        }
+        
+        // Trigger display controller update if needed
+        // For some hardware, writing to framebuffer memory doesn't immediately update the display
+        self.trigger_display_update()?;
+        
         Ok(0) // Success
+    }
+    
+    /// Trigger display controller update
+    /// 
+    /// Some display controllers require explicit commands to update the display
+    /// from framebuffer contents. This method handles such updates.
+    fn trigger_display_update(&self) -> Result<(), &'static str> {
+        // Try to get the source graphics device to trigger a display update
+        let device_manager = DeviceManager::get_manager();
+        if let Some(device) = device_manager.get_device(self.fb_resource.source_device_id) {
+            // Check if the device supports graphics operations
+            if let Some(graphics_device) = device.as_graphics_device() {
+                // Trigger a full framebuffer flush to ensure display is updated
+                let config = &self.fb_resource.config;
+                graphics_device.flush_framebuffer(0, 0, config.width, config.height)?;
+                
+                // Verify that the framebuffer address is still valid
+                match graphics_device.get_framebuffer_address() {
+                    Ok(addr) => {
+                        if addr == 0 {
+                            return Err("Graphics device framebuffer address is null");
+                        }
+                        if addr != self.fb_resource.physical_addr {
+                            return Err("Graphics device framebuffer address mismatch");
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        
+        // For virtualized environments (like QEMU), framebuffer writes are often
+        // automatically reflected on the display, so no additional action is needed
+        
+        Ok(())
     }
     
     /// Handle FBIOPUT_VSCREENINFO control command  
