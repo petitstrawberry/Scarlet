@@ -586,6 +586,11 @@ impl FramebufferCharDevice {
         if fb_resource.physical_addr == 0 {
             return Err("Invalid framebuffer address");
         }
+
+        // Flush the CPU cache for the framebuffer memory
+        // In a real implementation, this would ensure that any writes to the framebuffer
+        // are visible to the display controller.
+        // TODO: Implement actual cache flushing logic
         
         // Trigger display controller update if needed
         // For some hardware, writing to framebuffer memory doesn't immediately update the display
