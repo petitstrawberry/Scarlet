@@ -9,6 +9,7 @@ use super::request::BlockIORequestType;
 use super::*;
 use crate::device::block::request::BlockIOResult;
 use crate::device::{Device, DeviceType};
+use crate::object::capability::ControlOps;
 
 // Mock block device
 pub struct MockBlockDevice {
@@ -134,5 +135,12 @@ impl BlockDevice for MockBlockDevice {
         }
         
         results
+    }
+}
+
+impl ControlOps for MockBlockDevice {
+    // Mock block devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }

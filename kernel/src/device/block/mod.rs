@@ -5,6 +5,7 @@ use spin::Mutex;
 use request::{BlockIORequest, BlockIOResult};
 
 use super::Device;
+use crate::object::capability::ControlOps;
 
 pub mod request;
 
@@ -65,6 +66,13 @@ impl Device for GenericBlockDevice {
     
     fn as_block_device(&self) -> Option<&dyn BlockDevice> {
         Some(self)
+    }
+}
+
+impl ControlOps for GenericBlockDevice {
+    // Generic block devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

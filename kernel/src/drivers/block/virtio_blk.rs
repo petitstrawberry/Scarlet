@@ -34,7 +34,7 @@ use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
     device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, 
-    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}
+    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
 };
 
 // VirtIO Block Request Type
@@ -363,6 +363,13 @@ impl BlockDevice for VirtioBlockDevice {
         }
         
         results
+    }
+}
+
+impl ControlOps for VirtioBlockDevice {
+    // VirtIO block devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

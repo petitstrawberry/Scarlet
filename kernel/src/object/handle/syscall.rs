@@ -9,9 +9,7 @@ use crate::{
         introspection::KernelObjectInfo,
         handle::HandleType,
         handle::StandardInputOutput,
-        handle::HandleMetadata,
-        capability::ControlOps,
-        KernelObject
+        handle::HandleMetadata
     }
 };
 
@@ -220,15 +218,13 @@ pub fn sys_handle_control(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Invalid handle
     };
     
-    // Perform the control operation based on object type
-    let result = match &kernel_object {
-        KernelObject::File(file_obj) => {
-            // For file objects, delegate to the ControlOps implementation
-            file_obj.control(command, arg)
+    // Perform the control operation using the ControlOps capability
+    let result = match kernel_object.as_control() {
+        Some(control_ops) => {
+            control_ops.control(command, arg)
         }
-        KernelObject::Pipe(_pipe_obj) => {
-            // Pipes don't currently support control operations
-            Err("Control operations not supported on pipes")
+        None => {
+            Err("Control operations not supported on this object")
         }
     };
     

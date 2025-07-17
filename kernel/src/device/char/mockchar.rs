@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::{CharDevice, super::{Device, DeviceType}};
+use crate::object::capability::ControlOps;
 
 /// Mock character device for testing
 pub struct MockCharDevice {
@@ -89,5 +90,12 @@ impl CharDevice for MockCharDevice {
 
     fn can_write(&self) -> bool {
         true // Mock device can always write
+    }
+}
+
+impl ControlOps for MockCharDevice {
+    // Mock character devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }

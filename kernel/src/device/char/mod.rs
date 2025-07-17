@@ -1,6 +1,7 @@
 use core::any::Any;
 
 use super::Device;
+use crate::object::capability::ControlOps;
 
 extern crate alloc;
 
@@ -194,6 +195,13 @@ impl CharDevice for GenericCharDevice {
 
     fn can_write(&self) -> bool {
         (self.can_write_fn)()
+    }
+}
+
+impl ControlOps for GenericCharDevice {
+    // Generic character devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

@@ -31,7 +31,7 @@ use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
     device::network::{NetworkDevice, NetworkPacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
-    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}
+    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
 };
 
 // VirtIO Network Feature bits
@@ -403,6 +403,13 @@ impl Device for VirtioNetDevice {
     
     fn as_network_device(&self) -> Option<&dyn crate::device::network::NetworkDevice> {
         Some(self)
+    }
+}
+
+impl ControlOps for VirtioNetDevice {
+    // VirtIO network devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

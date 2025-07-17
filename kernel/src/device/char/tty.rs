@@ -17,6 +17,7 @@ use crate::drivers::uart;
 use crate::sync::waker::Waker;
 use crate::late_initcall;
 use crate::task::mytask;
+use crate::object::capability::ControlOps;
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -274,5 +275,12 @@ impl CharDevice for TtyDevice {
             }
         }
         false
+    }
+}
+
+impl ControlOps for TtyDevice {
+    // TTY devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }

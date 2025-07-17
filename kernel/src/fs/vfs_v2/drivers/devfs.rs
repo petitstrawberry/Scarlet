@@ -578,49 +578,21 @@ impl ControlOps for DevFileObject {
         // For device files, delegate control operations to the underlying device
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
-            
-            match device_guard_ref.device_type() {
-                DeviceType::Char => {
-                    if let Some(_char_device) = device_guard_ref.as_char_device() {
-                        // Try to downcast to FramebufferCharDevice for control operations
-                        if let Some(fb_device) = device_guard_ref.as_any()
-                            .downcast_ref::<crate::device::graphics::framebuffer_device::FramebufferCharDevice>() 
-                        {
-                            return fb_device.control(command, arg);
-                        } else {
-                            // Generic character device - no control operations supported
-                            return Err("Control operations not supported for this character device");
-                        }
-                    } else {
-                        return Err("Device does not support character operations");
-                    }
-                },
-                DeviceType::Block => {
-                    // Block devices don't currently support control operations
-                    return Err("Control operations not supported for block devices");
-                },
-                _ => {
-                    return Err("Control operations not supported for this device type");
-                }
-            }
+            // Device trait now inherits from ControlOps, so we can delegate directly
+            device_guard_ref.control(command, arg)
+        } else {
+            Err("No device available for control operations")
         }
-        
-        Err("No device guard available for control operations")
     }
     
     fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
         // For device files, delegate to the underlying device
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
-            
-            if let Some(fb_device) = device_guard_ref.as_any()
-                .downcast_ref::<crate::device::graphics::framebuffer_device::FramebufferCharDevice>() 
-            {
-                return fb_device.supported_control_commands();
-            }
+            device_guard_ref.supported_control_commands()
+        } else {
+            alloc::vec![]
         }
-        
-        alloc::vec![]
     }
 }
 

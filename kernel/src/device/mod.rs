@@ -18,6 +18,7 @@ extern crate alloc;
 use core::any::Any;
 
 use alloc::vec::Vec;
+use crate::object::capability::ControlOps;
 
 pub trait DeviceInfo {
     fn name(&self) -> &'static str;
@@ -59,8 +60,9 @@ pub enum DeviceType {
 /// 
 /// This trait defines the interface for devices in the kernel.
 /// Device IDs are assigned by DeviceManager when devices are registered.
+/// All devices must support control operations through the ControlOps trait.
 /// 
-pub trait Device: Send + Sync {
+pub trait Device: Send + Sync + ControlOps {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;
@@ -113,5 +115,12 @@ impl Device for GenericDevice {
     
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl ControlOps for GenericDevice {
+    // Generic devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }

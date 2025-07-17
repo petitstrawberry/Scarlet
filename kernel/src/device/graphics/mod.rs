@@ -10,6 +10,7 @@ use spin::Mutex;
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
+use crate::object::capability::ControlOps;
 
 pub mod manager;
 pub mod framebuffer_device;
@@ -178,6 +179,13 @@ impl Device for GenericGraphicsDevice {
     
     fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
         Some(self)
+    }
+}
+
+impl ControlOps for GenericGraphicsDevice {
+    // Generic graphics devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

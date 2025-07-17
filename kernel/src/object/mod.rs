@@ -10,7 +10,7 @@ pub mod handle;
 use alloc::{sync::Arc, vec::Vec};
 use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
-use capability::{StreamOps, CloneOps};
+use capability::{StreamOps, CloneOps, ControlOps};
 
 /// Unified representation of all kernel-managed resources
 pub enum KernelObject {
@@ -87,6 +87,21 @@ impl KernelObject {
                 // Check if PipeObject implements CloneOps
                 let cloneable: &dyn CloneOps = pipe_object.as_ref();
                 Some(cloneable)
+            }
+        }
+    }
+    
+    /// Try to get ControlOps capability
+    pub fn as_control(&self) -> Option<&dyn ControlOps> {
+        match self {
+            KernelObject::File(file_object) => {
+                // FileObject automatically implements ControlOps
+                let control_ops: &dyn ControlOps = file_object.as_ref();
+                Some(control_ops)
+            }
+            KernelObject::Pipe(_) => {
+                // Pipes don't provide control operations
+                None
             }
         }
     }
