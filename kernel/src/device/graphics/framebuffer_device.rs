@@ -20,7 +20,7 @@ use alloc::{string::String, sync::Arc, vec::Vec, vec};
 use spin::Mutex;
 
 use crate::device::{
-    char::CharDevice, graphics::manager::{FramebufferResource, GraphicsManager}, manager::DeviceManager, Device, DeviceType
+    char::{CharDevice, SeekFrom}, graphics::manager::FramebufferResource, manager::DeviceManager, Device, DeviceType
 };
 use crate::object::capability::ControlOps;
 
@@ -450,6 +450,64 @@ impl CharDevice for FramebufferCharDevice {
         *position = current_pos + bytes_to_write;
 
         Ok(bytes_to_write)
+    }
+
+    /// Seek to a position in the framebuffer
+    ///
+    /// # Arguments
+    ///
+    /// * `whence` - Seek position and mode
+    ///
+    /// # Returns
+    ///
+    /// Result containing the new absolute position or an error
+    fn seek(&self, whence: SeekFrom) -> Result<u64, &'static str> {
+        let fb_resource = &self.fb_resource;
+        let mut position = self.position.lock();
+
+        let new_position = match whence {
+            SeekFrom::Start(offset) => offset as usize,
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    (*position).saturating_add(offset as usize)
+                } else {
+                    (*position).saturating_sub((-offset) as usize)
+                }
+            }
+            SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    fb_resource.size.saturating_add(offset as usize)
+                } else {
+                    fb_resource.size.saturating_sub((-offset) as usize)
+                }
+            }
+        };
+
+        // Ensure position is within bounds
+        if new_position > fb_resource.size {
+            return Err("Seek position beyond framebuffer size");
+        }
+
+        *position = new_position;
+        Ok(new_position as u64)
+    }
+
+    /// Get current position in the framebuffer
+    ///
+    /// # Returns
+    ///
+    /// Current position in the framebuffer
+    fn get_position(&self) -> u64 {
+        *self.position.lock() as u64
+    }
+
+    /// Check if this device supports seek operations
+    ///
+    /// # Returns
+    ///
+    /// True (framebuffer supports seeking)
+    fn can_seek(&self) -> bool {
+        true
     }
 }
 
