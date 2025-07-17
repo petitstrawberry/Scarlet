@@ -10,11 +10,12 @@ which implements a transparent ABI conversion layer for executing binaries acros
 Use the docker container of ` scarlet-dev` for development to ensure a consistent environment.
 If the image is not available, you can build it using the provided Dockerfile in the repository.
 
+❗️ Before installing additional package such as cargo-make, qemu, etc., please **make sure** that the scarlet-dev image is available in your environment!
+If the image is available, use the following command
+- docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev cargo make build`.
+
 Executing commands in the Docker container at the root of the repository:
 - Build: `cargo make build`
-
-❗️ If a cargo make command fails, it's likely because you're not in the container. In that case, run the command from your host machine like this: 
-- `docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev cargo make build`.
 
 #### Testing
 Use `cargo make test` to run all tests at the root of the repository.
