@@ -16,7 +16,7 @@ use crate::{driver_initcall, fs::{core::DirectoryEntryInternal, get_fs_driver_ma
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, FilePermission
 };
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError, ControlOps};
 
 /// CPIO filesystem implementation
 pub struct CpioFS {
@@ -441,6 +441,13 @@ impl StreamOps for CpioFileObject {
     }
 }
 
+impl ControlOps for CpioFileObject {
+    // CPIO files are read-only and don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on CPIO files")
+    }
+}
+
 impl FileObject for CpioFileObject {
     fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         let cpio_node = self.node.as_any()
@@ -558,6 +565,13 @@ impl StreamOps for CpioDirectoryObject {
             FileSystemErrorKind::ReadOnly,
             "CPIO filesystem is read-only"
         )))
+    }
+}
+
+impl ControlOps for CpioDirectoryObject {
+    // CPIO directories don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on CPIO directories")
     }
 }
 

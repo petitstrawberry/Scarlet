@@ -35,7 +35,7 @@ use crate::{driver_initcall, fs::{
     FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom
 }};
 use crate::device::{manager::DeviceManager, DeviceType, Device};
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError, ControlOps};
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
 
@@ -573,6 +573,57 @@ impl StreamOps for DevFileObject {
     }
 }
 
+impl ControlOps for DevFileObject {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        // For device files, delegate control operations to the underlying device
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            
+            match device_guard_ref.device_type() {
+                DeviceType::Char => {
+                    if let Some(_char_device) = device_guard_ref.as_char_device() {
+                        // Try to downcast to FramebufferCharDevice for control operations
+                        if let Some(fb_device) = device_guard_ref.as_any()
+                            .downcast_ref::<crate::device::graphics::framebuffer_device::FramebufferCharDevice>() 
+                        {
+                            return fb_device.control(command, arg);
+                        } else {
+                            // Generic character device - no control operations supported
+                            return Err("Control operations not supported for this character device");
+                        }
+                    } else {
+                        return Err("Device does not support character operations");
+                    }
+                },
+                DeviceType::Block => {
+                    // Block devices don't currently support control operations
+                    return Err("Control operations not supported for block devices");
+                },
+                _ => {
+                    return Err("Control operations not supported for this device type");
+                }
+            }
+        }
+        
+        Err("No device guard available for control operations")
+    }
+    
+    fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
+        // For device files, delegate to the underlying device
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            
+            if let Some(fb_device) = device_guard_ref.as_any()
+                .downcast_ref::<crate::device::graphics::framebuffer_device::FramebufferCharDevice>() 
+            {
+                return fb_device.supported_control_commands();
+            }
+        }
+        
+        alloc::vec![]
+    }
+}
+
 impl FileObject for DevFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
@@ -681,6 +732,13 @@ impl StreamOps for DevDirectoryObject {
             FileSystemErrorKind::ReadOnly,
             "Cannot write to directory in devfs"
         )))
+    }
+}
+
+impl ControlOps for DevDirectoryObject {
+    // Directory objects don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on directories")
     }
 }
 

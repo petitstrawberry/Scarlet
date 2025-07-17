@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use spin::Mutex;
-use crate::object::capability::{StreamOps, StreamError, CloneOps};
+use crate::object::capability::{StreamOps, StreamError, CloneOps, ControlOps};
 use crate::fs::{FileType, FileMetadata, SeekFrom};
 
 /// Mock FileObject for testing purposes
@@ -56,6 +56,13 @@ impl StreamOps for MockFileObject {
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         // Mock implementation - just return the buffer length
         Ok(buffer.len())
+    }
+}
+
+impl ControlOps for MockFileObject {
+    // Mock file objects don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on mock file objects")
     }
 }
 
@@ -133,6 +140,13 @@ impl StreamOps for MockTaskFileObject {
     
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         Ok(buffer.len())
+    }
+}
+
+impl ControlOps for MockTaskFileObject {
+    // Mock task file objects don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on mock task file objects")
     }
 }
 

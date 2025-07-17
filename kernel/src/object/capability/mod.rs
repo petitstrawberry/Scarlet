@@ -5,6 +5,7 @@
 
 pub mod stream;
 pub mod file;
+pub mod control;
 
 use crate::object::KernelObject;
 
@@ -13,6 +14,9 @@ pub use stream::{StreamError, StreamOps};
 
 // Re-export file types for backward compatibility
 pub use file::{FileObject, SeekFrom};
+
+// Re-export control types
+pub use control::ControlOps;
 
 /// Clone operations capability
 /// 
