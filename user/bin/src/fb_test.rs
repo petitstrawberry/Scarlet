@@ -102,11 +102,11 @@ fn main() -> i32 {
         return 1;
     }
     println!("Blue fill completed and flushed");
-    
-    // Test 4: Draw test pattern
-    println!("Test 4: Drawing test pattern...");
-    if let Err(e) = framebuffer.draw_test_pattern() {
-        println!("Failed to draw test pattern: {:?}", e);
+
+    // Test 4a: Draw horizontal gradient
+    println!("Test 5b: Drawing horizontal gradient (red to blue)...");
+    if let Err(e) = framebuffer.draw_horizontal_gradient([0, 0, 255, 255], [255, 0, 0, 255]) {
+        println!("Failed to draw horizontal gradient: {:?}", e);
         return 1;
     }
     
@@ -114,12 +114,12 @@ fn main() -> i32 {
         println!("Failed to flush framebuffer: {:?}", e);
         return 1;
     }
-    println!("Test pattern completed and flushed");
+    println!("Horizontal gradient completed and flushed");
     
-    // Test 5: Draw gradient
-    println!("Test 5: Drawing gradient...");
-    if let Err(e) = framebuffer.draw_gradient() {
-        println!("Failed to draw gradient: {:?}", e);
+    // Test 5b: Draw vertical gradient
+    println!("Test 5c: Drawing vertical gradient (green to yellow)...");
+    if let Err(e) = framebuffer.draw_vertical_gradient([0, 255, 0, 255], [0, 255, 255, 255]) {
+        println!("Failed to draw vertical gradient: {:?}", e);
         return 1;
     }
     
@@ -127,12 +127,12 @@ fn main() -> i32 {
         println!("Failed to flush framebuffer: {:?}", e);
         return 1;
     }
-    println!("Gradient completed and flushed");
+    println!("Vertical gradient completed and flushed");
     
-    // Test 6: Draw some rectangles
-    println!("Test 6: Drawing rectangles...");
-    let _width = var_info.xres;
-    let _height = var_info.yres;
+    // Test 6: Draw some rectangles and gradient rectangles
+    println!("Test 6: Drawing rectangles and gradient rectangles...");
+    let width = var_info.xres;
+    let height = var_info.yres;
     
     // Clear to black first
     if let Err(e) = framebuffer.fill_screen([0, 0, 0, 255]) {
@@ -140,7 +140,7 @@ fn main() -> i32 {
         return 1;
     }
     
-    // Draw colorful rectangles
+    // Draw colorful solid rectangles
     if let Err(e) = framebuffer.fill_rect(50, 50, 100, 100, [0, 0, 255, 255]) {
         println!("Failed to draw red rectangle: {:?}", e);
         return 1;
@@ -156,11 +156,28 @@ fn main() -> i32 {
         return 1;
     }
     
+    // Draw gradient rectangles if screen is large enough
+    if width > 500 && height > 400 {
+        // Horizontal gradient rectangle
+        if let Err(e) = framebuffer.draw_gradient_rect(50, 200, 150, 100, 
+                                                      [255, 0, 0, 255], [0, 0, 255, 255], true) {
+            println!("Failed to draw horizontal gradient rectangle: {:?}", e);
+            return 1;
+        }
+        
+        // Vertical gradient rectangle  
+        if let Err(e) = framebuffer.draw_gradient_rect(250, 200, 150, 100,
+                                                      [0, 255, 0, 255], [255, 255, 0, 255], false) {
+            println!("Failed to draw vertical gradient rectangle: {:?}", e);
+            return 1;
+        }
+    }
+    
     if let Err(e) = framebuffer.flush() {
         println!("Failed to flush framebuffer: {:?}", e);
         return 1;
     }
-    println!("Rectangles completed and flushed");
+    println!("Rectangles and gradient rectangles completed and flushed");
     
     println!("All framebuffer tests completed successfully!");
     0

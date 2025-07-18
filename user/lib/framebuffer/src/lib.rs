@@ -443,55 +443,146 @@ impl Framebuffer {
         self.write_block(x, y, width, height, &line_buffer)
     }
 
-    /// Draw a simple test pattern
+    /// Create a horizontal gradient with specified colors
     /// 
-    /// Creates a colorful test pattern to verify framebuffer functionality.
+    /// # Arguments
+    /// * `start_color` - Starting color [B, G, R, A]
+    /// * `end_color` - Ending color [B, G, R, A]
     /// 
     /// # Returns
     /// Success or HandleError on failure
-    pub fn draw_test_pattern(&mut self) -> HandleResult<()> {
+    pub fn draw_horizontal_gradient(&mut self, start_color: [u8; 4], end_color: [u8; 4]) -> HandleResult<()> {
         let var_info = self.get_var_screen_info()?;
-        let width = var_info.xres;
-        let height = var_info.yres;
+        let width = var_info.xres as usize;
+        let height = var_info.yres as usize;
+        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
         
-        // Draw color bands
-        let band_height = height / 4;
+        // Create line buffer with horizontal gradient
+        let line_bytes = width * bytes_per_pixel;
+        let mut line_buffer = vec![0u8; line_bytes];
         
-        // Red band
-        self.fill_rect(0, 0, width, band_height, [0, 0, 255, 255])?;
+        for x in 0..width {
+            let ratio = x as f32 / width as f32;
+            let color = [
+                (start_color[0] as f32 * (1.0 - ratio) + end_color[0] as f32 * ratio) as u8,
+                (start_color[1] as f32 * (1.0 - ratio) + end_color[1] as f32 * ratio) as u8,
+                (start_color[2] as f32 * (1.0 - ratio) + end_color[2] as f32 * ratio) as u8,
+                (start_color[3] as f32 * (1.0 - ratio) + end_color[3] as f32 * ratio) as u8,
+            ];
+            
+            let pixel_offset = x * bytes_per_pixel;
+            if pixel_offset + bytes_per_pixel <= line_buffer.len() {
+                line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
+                    .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+            }
+        }
         
-        // Green band
-        self.fill_rect(0, band_height, width, band_height, [0, 255, 0, 255])?;
-        
-        // Blue band
-        self.fill_rect(0, band_height * 2, width, band_height, [255, 0, 0, 255])?;
-        
-        // White band
-        self.fill_rect(0, band_height * 3, width, height - band_height * 3, [255, 255, 255, 255])?;
+        // Write the same line to all rows
+        for y in 0..height {
+            self.write_line(y as u32, &line_buffer)?;
+        }
         
         Ok(())
     }
 
-    /// Create a gradient pattern
+    /// Create a vertical gradient with specified colors
+    /// 
+    /// # Arguments
+    /// * `start_color` - Starting color [B, G, R, A]
+    /// * `end_color` - Ending color [B, G, R, A]
     /// 
     /// # Returns
     /// Success or HandleError on failure
-    pub fn draw_gradient(&mut self) -> HandleResult<()> {
+    pub fn draw_vertical_gradient(&mut self, start_color: [u8; 4], end_color: [u8; 4]) -> HandleResult<()> {
         let var_info = self.get_var_screen_info()?;
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
+        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
         
-        // Draw horizontal gradient
         for y in 0..height {
+            let ratio = y as f32 / height as f32;
+            let color = [
+                (start_color[0] as f32 * (1.0 - ratio) + end_color[0] as f32 * ratio) as u8,
+                (start_color[1] as f32 * (1.0 - ratio) + end_color[1] as f32 * ratio) as u8,
+                (start_color[2] as f32 * (1.0 - ratio) + end_color[2] as f32 * ratio) as u8,
+                (start_color[3] as f32 * (1.0 - ratio) + end_color[3] as f32 * ratio) as u8,
+            ];
+            
+            // Create line buffer filled with this color
+            let line_bytes = width * bytes_per_pixel;
+            let mut line_buffer = vec![0u8; line_bytes];
+            
             for x in 0..width {
-                let red = (x * 255 / width) as u8;
-                let green = (y * 255 / height) as u8;
-                let blue = ((x + y) * 255 / (width + height)) as u8;
-                
-                self.write_pixel(x as u32, y as u32, [blue, green, red, 255])?;
+                let pixel_offset = x * bytes_per_pixel;
+                if pixel_offset + bytes_per_pixel <= line_buffer.len() {
+                    line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
+                        .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                }
             }
+            
+            self.write_line(y as u32, &line_buffer)?;
         }
         
         Ok(())
+    }
+
+    /// Draw a gradient rectangle with optimized block writing
+    /// 
+    /// # Arguments
+    /// * `x` - X coordinate of the rectangle
+    /// * `y` - Y coordinate of the rectangle
+    /// * `width` - Width of the rectangle
+    /// * `height` - Height of the rectangle
+    /// * `start_color` - Starting color [B, G, R, A]
+    /// * `end_color` - Ending color [B, G, R, A]
+    /// * `horizontal` - If true, gradient goes horizontally; if false, vertically
+    /// 
+    /// # Returns
+    /// Success or HandleError on failure
+    pub fn draw_gradient_rect(&mut self, x: u32, y: u32, width: u32, height: u32, 
+                             start_color: [u8; 4], end_color: [u8; 4], horizontal: bool) -> HandleResult<()> {
+        let var_info = self.get_var_screen_info()?;
+        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        
+        if horizontal {
+            // Horizontal gradient: create one line buffer and reuse it
+            let line_bytes = width as usize * bytes_per_pixel;
+            let mut line_buffer = vec![0u8; line_bytes];
+            
+            for px in 0..width as usize {
+                let ratio = px as f32 / width as f32;
+                let color = [
+                    (start_color[0] as f32 * (1.0 - ratio) + end_color[0] as f32 * ratio) as u8,
+                    (start_color[1] as f32 * (1.0 - ratio) + end_color[1] as f32 * ratio) as u8,
+                    (start_color[2] as f32 * (1.0 - ratio) + end_color[2] as f32 * ratio) as u8,
+                    (start_color[3] as f32 * (1.0 - ratio) + end_color[3] as f32 * ratio) as u8,
+                ];
+                
+                let pixel_offset = px * bytes_per_pixel;
+                if pixel_offset + bytes_per_pixel <= line_buffer.len() {
+                    line_buffer[pixel_offset..pixel_offset + bytes_per_pixel.min(4)]
+                        .copy_from_slice(&color[..bytes_per_pixel.min(4)]);
+                }
+            }
+            
+            // Write the same line to all rows
+            self.write_block(x, y, width, height, &line_buffer)
+        } else {
+            // Vertical gradient: create each line individually
+            for py in 0..height {
+                let ratio = py as f32 / height as f32;
+                let color = [
+                    (start_color[0] as f32 * (1.0 - ratio) + end_color[0] as f32 * ratio) as u8,
+                    (start_color[1] as f32 * (1.0 - ratio) + end_color[1] as f32 * ratio) as u8,
+                    (start_color[2] as f32 * (1.0 - ratio) + end_color[2] as f32 * ratio) as u8,
+                    (start_color[3] as f32 * (1.0 - ratio) + end_color[3] as f32 * ratio) as u8,
+                ];
+                
+                // Fill line with solid color
+                self.fill_rect(x, y + py, width, 1, color)?;
+            }
+            
+            Ok(())
+        }
     }
 }
