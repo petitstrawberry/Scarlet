@@ -237,13 +237,13 @@ impl Framebuffer {
     /// Fixed screen information or HandleError on failure
     pub fn get_fix_screen_info(&self) -> HandleResult<FbFixScreenInfo> {
         let mut fix_info = FbFixScreenInfo::default();
-        let ptr = &mut fix_info as *mut _ as usize;
+        let ptr = &mut fix_info as *mut FbFixScreenInfo;
         if ptr.is_null() {
-            return Err(HandleError::InvalidPointer);
+            return Err(HandleError::InvalidParameter);
         }
         self.file.as_handle().control(
             commands::FBIOGET_FSCREENINFO,
-            ptr,
+            ptr as usize,
         )?;
         Ok(fix_info)
     }
@@ -256,9 +256,6 @@ impl Framebuffer {
     /// # Returns
     /// Success or HandleError on failure
     pub fn set_var_screen_info(&self, var_info: &FbVarScreenInfo) -> HandleResult<()> {
-        if !is_valid_pointer(var_info as *const _ as *const u8) {
-            return Err(HandleError::InvalidPointer);
-        }
         self.file.as_handle().control(
             commands::FBIOPUT_VSCREENINFO,
             var_info as *const _ as usize,
@@ -470,11 +467,13 @@ impl Framebuffer {
         
         for x in 0..width {
             let ratio = (x * 256) / width; // Fixed-point ratio (scaled by 256)
+            let ratio_u16 = ratio as u16;
+            let inv_ratio_u16 = (256 - ratio) as u16;
             let color = [
-                ((start_color[0] as u16 * (256 - ratio) + end_color[0] as u16 * ratio) / 256) as u8,
-                ((start_color[1] as u16 * (256 - ratio) + end_color[1] as u16 * ratio) / 256) as u8,
-                ((start_color[2] as u16 * (256 - ratio) + end_color[2] as u16 * ratio) / 256) as u8,
-                ((start_color[3] as u16 * (256 - ratio) + end_color[3] as u16 * ratio) / 256) as u8,
+                ((start_color[0] as u16 * inv_ratio_u16 + end_color[0] as u16 * ratio_u16) / 256) as u8,
+                ((start_color[1] as u16 * inv_ratio_u16 + end_color[1] as u16 * ratio_u16) / 256) as u8,
+                ((start_color[2] as u16 * inv_ratio_u16 + end_color[2] as u16 * ratio_u16) / 256) as u8,
+                ((start_color[3] as u16 * inv_ratio_u16 + end_color[3] as u16 * ratio_u16) / 256) as u8,
             ];
             
             let pixel_offset = x * bytes_per_pixel;
@@ -505,20 +504,20 @@ impl Framebuffer {
         let width = var_info.xres as usize;
         let height = var_info.yres as usize;
         let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+
+        // Create line buffer filled with this color
+        let line_bytes = width * bytes_per_pixel;
+        let mut line_buffer = vec![0u8; line_bytes];
         
         for y in 0..height {
-            let scale_factor = 1000; // Scale factor for integer arithmetic
-            let ratio = (y * scale_factor) / height;
+            let scale_factor: u16 = 1000; // Scale factor for integer arithmetic
+            let ratio: u16 = ((y as u32 * scale_factor as u32) / height as u32) as u16;
             let color = [
                 ((start_color[0] as u16 * (scale_factor - ratio) + end_color[0] as u16 * ratio) / scale_factor) as u8,
                 ((start_color[1] as u16 * (scale_factor - ratio) + end_color[1] as u16 * ratio) / scale_factor) as u8,
                 ((start_color[2] as u16 * (scale_factor - ratio) + end_color[2] as u16 * ratio) / scale_factor) as u8,
                 ((start_color[3] as u16 * (scale_factor - ratio) + end_color[3] as u16 * ratio) / scale_factor) as u8,
             ];
-            
-            // Create line buffer filled with this color
-            let line_bytes = width * bytes_per_pixel;
-            let mut line_buffer = vec![0u8; line_bytes];
             
             for x in 0..width {
                 let pixel_offset = x * bytes_per_pixel;
