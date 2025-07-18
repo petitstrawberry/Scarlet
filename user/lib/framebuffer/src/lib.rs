@@ -256,6 +256,9 @@ impl Framebuffer {
     /// # Returns
     /// Success or HandleError on failure
     pub fn set_var_screen_info(&self, var_info: &FbVarScreenInfo) -> HandleResult<()> {
+        if !is_valid_pointer(var_info as *const _ as *const u8) {
+            return Err(HandleError::InvalidPointer);
+        }
         self.file.as_handle().control(
             commands::FBIOPUT_VSCREENINFO,
             var_info as *const _ as usize,
