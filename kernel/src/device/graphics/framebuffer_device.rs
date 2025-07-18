@@ -16,7 +16,7 @@
 extern crate alloc;
 
 use core::{any::Any};
-use alloc::{sync::Arc, vec::Vec, vec};
+use alloc::{sync::Arc, vec::Vec, vec, format};
 
 use crate::device::{
     char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device, DeviceType
@@ -618,6 +618,7 @@ mod tests {
         Device,
     };
     use alloc::{string::ToString, sync::Arc};
+    use spin::RwLock;
 
     /// Test utility to setup a clean global GraphicsManager for each test
     fn setup_clean_graphics_manager() -> &'static mut GraphicsManager {
@@ -694,5 +695,346 @@ mod tests {
         let read_count = char_device.read_at(0, &mut read_buffer).unwrap();
         assert_eq!(read_count, 4);
         assert_eq!(read_buffer, test_data);
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_boundaries() {
+        // Setup clean graphics manager for this test
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-boundaries");
+        let config = FramebufferConfig::new(10, 10, PixelFormat::RGB888); // Small 10x10 framebuffer
+        test_device.set_framebuffer_config(config.clone());
+        
+        let fb_size = config.size(); // 10 * 10 * 3 = 300 bytes
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-boundaries".to_string(), shared_device.clone());
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let char_device = FramebufferCharDevice::new(fb_resource);
+        
+        // First, clear the framebuffer by writing zeros
+        let zero_buffer = vec![0u8; fb_size];
+        assert_eq!(char_device.write_at(0, &zero_buffer).unwrap(), fb_size);
+        
+        // Test writing at the start
+        let start_data = [0xFF, 0x00, 0xFF];
+        assert_eq!(char_device.write_at(0, &start_data).unwrap(), 3);
+        
+        // Test writing at the end (non-overlapping with partial write test)
+        let end_data = [0x00, 0xFF, 0x00];
+        assert_eq!(char_device.write_at((fb_size - 6) as u64, &end_data).unwrap(), 3);
+        
+        // Test writing beyond boundaries (should fail or write partial)
+        let beyond_data = [0xAA, 0xBB, 0xCC, 0xDD];
+        let result = char_device.write_at(fb_size as u64, &beyond_data);
+        assert!(result.is_err() || result.unwrap() == 0);
+        
+        // Test partial write at boundary (this will overwrite the last 2 bytes)
+        let partial_data = [0x11, 0x22, 0x33, 0x44, 0x55];
+        let written = char_device.write_at((fb_size - 2) as u64, &partial_data).unwrap();
+        assert_eq!(written, 2); // Should only write 2 bytes that fit
+        
+        // Verify reads
+        let mut read_start = [0u8; 3];
+        assert_eq!(char_device.read_at(0, &mut read_start).unwrap(), 3);
+        assert_eq!(read_start, start_data);
+        
+        let mut read_end = [0u8; 3];
+        assert_eq!(char_device.read_at((fb_size - 6) as u64, &mut read_end).unwrap(), 3);
+        assert_eq!(read_end, end_data);
+        
+        // Verify the partial write at the very end
+        let mut read_partial = [0u8; 2];
+        assert_eq!(char_device.read_at((fb_size - 2) as u64, &mut read_partial).unwrap(), 2);
+        assert_eq!(read_partial, [0x11, 0x22]);
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_pixel_formats() {
+        for (format, expected_bpp) in [
+            (PixelFormat::RGB565, 2),
+            (PixelFormat::RGB888, 3),
+            (PixelFormat::RGBA8888, 4),
+            (PixelFormat::BGRA8888, 4),
+        ] {
+            let graphics_manager = setup_clean_graphics_manager();
+            let mut test_device = GenericGraphicsDevice::new("test-gpu-pixel-format");
+            let config = FramebufferConfig::new(4, 4, format); // 4x4 pixels
+            test_device.set_framebuffer_config(config.clone());
+            
+            let fb_size = config.size();
+            let expected_size = 4 * 4 * expected_bpp;
+            assert_eq!(fb_size, expected_size);
+            
+            let fb_pages = (fb_size + 4095) / 4096;
+            let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+            test_device.set_framebuffer_address(fb_addr);
+            
+            let shared_device: Arc<dyn Device> = Arc::new(test_device);
+            let device_manager = DeviceManager::get_manager();
+            let device_id = device_manager.register_device_with_name(format!("test-gpu-{:?}", format), shared_device.clone());
+            graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+            let fb_resource = {
+                let fb_names = graphics_manager.get_framebuffer_names();
+                let fb_name = fb_names.iter()
+                    .find(|name| {
+                        if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                            fb_resource.source_device_id == device_id
+                        } else {
+                            false
+                        }
+                    })
+                    .expect("Should have framebuffer for this device");
+                graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+            };
+            let char_device = FramebufferCharDevice::new(fb_resource);
+            
+            // Test writing a single pixel
+            let pixel_data = match expected_bpp {
+                2 => vec![0xFF, 0x00], // RGB565
+                3 => vec![0xFF, 0x00, 0xFF], // RGB888
+                4 => vec![0xFF, 0x00, 0xFF, 0x80], // RGBA8888/BGRA8888
+                _ => unreachable!(),
+            };
+            
+            assert_eq!(char_device.write_at(0, &pixel_data).unwrap(), expected_bpp);
+            
+            // Test reading the pixel back
+            let mut read_pixel = vec![0u8; expected_bpp];
+            assert_eq!(char_device.read_at(0, &mut read_pixel).unwrap(), expected_bpp);
+            assert_eq!(read_pixel, pixel_data);
+        }
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_capabilities() {
+        // Test with valid framebuffer
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-caps");
+        let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-caps".to_string(), shared_device.clone());
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let char_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Test capabilities
+        assert!(char_device.can_read());
+        assert!(char_device.can_write());
+        assert_eq!(char_device.device_type(), DeviceType::Char);
+        assert_eq!(char_device.name(), "framebuffer");
+        
+        // Test with invalid framebuffer (zero address)
+        let invalid_config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
+        let invalid_resource = Arc::new(FramebufferResource {
+            source_device_id: 999,
+            logical_name: "invalid".to_string(),
+            config: invalid_config,
+            physical_addr: 0, // Invalid address
+            size: 300,
+            created_char_device_id: RwLock::new(None),
+        });
+        let invalid_device = FramebufferCharDevice::new(invalid_resource);
+        
+        assert!(!invalid_device.can_read());
+        assert!(!invalid_device.can_write());
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_unsupported_methods() {
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-unsupported");
+        let config = FramebufferConfig::new(10, 10, PixelFormat::RGB888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        let fb_size = config.size();
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-unsupported".to_string(), shared_device.clone());
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let char_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Test that read_byte returns None (unsupported)
+        assert_eq!(char_device.read_byte(), None);
+        
+        // Test that write_byte returns error (unsupported)
+        let result = char_device.write_byte(0xFF);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not supported"));
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_large_operations() {
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-large");
+        let config = FramebufferConfig::new(256, 256, PixelFormat::RGBA8888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        let fb_size = config.size(); // 256 * 256 * 4 = 262,144 bytes
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-large".to_string(), shared_device.clone());
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let char_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Test large write operation
+        let large_data = vec![0x55u8; 4096]; // 4KB
+        let written = char_device.write_at(0, &large_data).unwrap();
+        assert_eq!(written, 4096);
+        
+        // Test large read operation
+        let mut read_buffer = vec![0u8; 4096];
+        let read_count = char_device.read_at(0, &mut read_buffer).unwrap();
+        assert_eq!(read_count, 4096);
+        assert_eq!(read_buffer, large_data);
+        
+        // Test writing across page boundaries
+        let cross_page_data = vec![0xAAu8; 8192]; // 8KB
+        let written = char_device.write_at(2048, &cross_page_data).unwrap();
+        assert_eq!(written, 8192);
+        
+        // Test reading across page boundaries
+        let mut cross_read_buffer = vec![0u8; 8192];
+        let read_count = char_device.read_at(2048, &mut cross_read_buffer).unwrap();
+        assert_eq!(read_count, 8192);
+        assert_eq!(cross_read_buffer, cross_page_data);
+    }
+
+    #[test_case]
+    fn test_framebuffer_char_device_pattern_operations() {
+        let graphics_manager = setup_clean_graphics_manager();
+        let mut test_device = GenericGraphicsDevice::new("test-gpu-pattern");
+        let config = FramebufferConfig::new(16, 16, PixelFormat::RGB888);
+        test_device.set_framebuffer_config(config.clone());
+        
+        let fb_size = config.size(); // 16 * 16 * 3 = 768 bytes
+        let fb_pages = (fb_size + 4095) / 4096;
+        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        test_device.set_framebuffer_address(fb_addr);
+        
+        let shared_device: Arc<dyn Device> = Arc::new(test_device);
+        let device_manager = DeviceManager::get_manager();
+        let device_id = device_manager.register_device_with_name("test-gpu-pattern".to_string(), shared_device.clone());
+        graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
+
+        let fb_resource = {
+            let fb_names = graphics_manager.get_framebuffer_names();
+            let fb_name = fb_names.iter()
+                .find(|name| {
+                    if let Some(fb_resource) = graphics_manager.get_framebuffer(name) {
+                        fb_resource.source_device_id == device_id
+                    } else {
+                        false
+                    }
+                })
+                .expect("Should have framebuffer for this device");
+            graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
+        };
+        let char_device = FramebufferCharDevice::new(fb_resource);
+        
+        // Test checkerboard pattern
+        for y in 0..16 {
+            for x in 0..16 {
+                let pixel_offset = (y * 16 + x) * 3;
+                let color = if (x + y) % 2 == 0 {
+                    [0xFF, 0x00, 0x00] // Red
+                } else {
+                    [0x00, 0xFF, 0x00] // Green
+                };
+                assert_eq!(char_device.write_at(pixel_offset as u64, &color).unwrap(), 3);
+            }
+        }
+        
+        // Verify checkerboard pattern
+        for y in 0..16 {
+            for x in 0..16 {
+                let pixel_offset = (y * 16 + x) * 3;
+                let mut read_color = [0u8; 3];
+                assert_eq!(char_device.read_at(pixel_offset as u64, &mut read_color).unwrap(), 3);
+                
+                let expected_color = if (x + y) % 2 == 0 {
+                    [0xFF, 0x00, 0x00] // Red
+                } else {
+                    [0x00, 0xFF, 0x00] // Green
+                };
+                assert_eq!(read_color, expected_color);
+            }
+        }
     }
 }
