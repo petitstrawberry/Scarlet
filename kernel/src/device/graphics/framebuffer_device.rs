@@ -552,6 +552,17 @@ impl FramebufferCharDevice {
             return Err("Invalid argument pointer");
         }
         
+        // Try to get current task for user pointer translation
+        // If no task (kernel context), use pointer directly
+        let target_ptr = if let Some(current_task) = crate::task::mytask() {
+            // User space: translate virtual address to physical
+            current_task.vm_manager.translate_vaddr(arg)
+                .ok_or("Invalid user pointer - not mapped")?
+        } else {
+            // Kernel space: use pointer directly
+            arg
+        };
+        
         let fb_resource = &self.fb_resource;
         let config = &fb_resource.config;
         
@@ -591,10 +602,10 @@ impl FramebufferCharDevice {
             }
         }
         
-        // Copy to user space (unsafe - in real implementation would need proper memory validation)
+        // Safely copy to user space using translated physical address
         unsafe {
-            let user_ptr = arg as *mut FbVarScreenInfo;
-            *user_ptr = var_info;
+            let user_ptr = target_ptr as *mut FbVarScreenInfo;
+            core::ptr::write(user_ptr, var_info);
         }
         
         Ok(0) // Success
@@ -605,6 +616,17 @@ impl FramebufferCharDevice {
         if arg == 0 {
             return Err("Invalid argument pointer");
         }
+        
+        // Try to get current task for user pointer translation
+        // If no task (kernel context), use pointer directly
+        let target_ptr = if let Some(current_task) = crate::task::mytask() {
+            // User space: translate virtual address to physical
+            current_task.vm_manager.translate_vaddr(arg)
+                .ok_or("Invalid user pointer - not mapped")?
+        } else {
+            // Kernel space: use pointer directly
+            arg
+        };
         
         let fb_resource = &self.fb_resource;
         let config = &fb_resource.config;
@@ -623,10 +645,10 @@ impl FramebufferCharDevice {
         fix_info.type_ = 0; // FB_TYPE_PACKED_PIXELS
         fix_info.visual = 2; // FB_VISUAL_TRUECOLOR
         
-        // Copy to user space (unsafe - in real implementation would need proper memory validation)
+        // Safely copy to user space using translated physical address
         unsafe {
-            let user_ptr = arg as *mut FbFixScreenInfo;
-            *user_ptr = fix_info;
+            let user_ptr = target_ptr as *mut FbFixScreenInfo;
+            core::ptr::write(user_ptr, fix_info);
         }
         
         Ok(0) // Success
