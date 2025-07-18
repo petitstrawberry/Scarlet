@@ -507,12 +507,13 @@ impl Framebuffer {
         let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
         
         for y in 0..height {
-            let ratio = y as f32 / height as f32;
+            let scale_factor = 1000; // Scale factor for integer arithmetic
+            let ratio = (y * scale_factor) / height;
             let color = [
-                (start_color[0] as f32 * (1.0 - ratio) + end_color[0] as f32 * ratio) as u8,
-                (start_color[1] as f32 * (1.0 - ratio) + end_color[1] as f32 * ratio) as u8,
-                (start_color[2] as f32 * (1.0 - ratio) + end_color[2] as f32 * ratio) as u8,
-                (start_color[3] as f32 * (1.0 - ratio) + end_color[3] as f32 * ratio) as u8,
+                ((start_color[0] as u16 * (scale_factor - ratio) + end_color[0] as u16 * ratio) / scale_factor) as u8,
+                ((start_color[1] as u16 * (scale_factor - ratio) + end_color[1] as u16 * ratio) / scale_factor) as u8,
+                ((start_color[2] as u16 * (scale_factor - ratio) + end_color[2] as u16 * ratio) / scale_factor) as u8,
+                ((start_color[3] as u16 * (scale_factor - ratio) + end_color[3] as u16 * ratio) / scale_factor) as u8,
             ];
             
             // Create line buffer filled with this color
