@@ -77,11 +77,6 @@ fn main() -> i32 {
     }
     println!("Red fill completed and flushed");
     
-    // Wait a bit (simple loop)
-    for _ in 0..10000000 { 
-        unsafe { core::arch::asm!("nop"); } 
-    }
-    
     // Test 2: Fill screen with green
     println!("Test 2: Filling screen with green...");
     if let Err(e) = framebuffer.fill_screen([0, 255, 0, 255]) {
@@ -94,11 +89,6 @@ fn main() -> i32 {
         return 1;
     }
     println!("Green fill completed and flushed");
-    
-    // Wait a bit
-    for _ in 0..10000000 { 
-        unsafe { core::arch::asm!("nop"); } 
-    }
     
     // Test 3: Fill screen with blue
     println!("Test 3: Filling screen with blue...");
@@ -113,11 +103,6 @@ fn main() -> i32 {
     }
     println!("Blue fill completed and flushed");
     
-    // Wait a bit
-    for _ in 0..10000000 { 
-        unsafe { core::arch::asm!("nop"); } 
-    }
-    
     // Test 4: Draw test pattern
     println!("Test 4: Drawing test pattern...");
     if let Err(e) = framebuffer.draw_test_pattern() {
@@ -130,11 +115,6 @@ fn main() -> i32 {
         return 1;
     }
     println!("Test pattern completed and flushed");
-    
-    // Wait a bit
-    for _ in 0..10000000 { 
-        unsafe { core::arch::asm!("nop"); } 
-    }
     
     // Test 5: Draw gradient
     println!("Test 5: Drawing gradient...");
