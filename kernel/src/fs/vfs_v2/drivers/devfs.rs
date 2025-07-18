@@ -599,20 +599,32 @@ impl ControlOps for DevFileObject {
 impl FileObject for DevFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
-        
-        let new_pos = match whence {
-            SeekFrom::Start(offset) => offset,
-            SeekFrom::Current(offset) => {
-                if offset >= 0 {
-                    *position + offset as u64
-                } else {
-                    position.saturating_sub((-offset) as u64)
+
+        let device_type = self.device_guard.clone().unwrap().device_type();
+
+        let new_pos = match device_type {
+            DeviceType::Char => {
+                let device = self.device_guard.as_ref().unwrap().as_char_device().unwrap();
+                let dev_whence = match whence {
+                    SeekFrom::Start(offset) => crate::device::char::SeekFrom::Start(offset),
+                    SeekFrom::Current(offset) => crate::device::char::SeekFrom::Current(offset),
+                    SeekFrom::End(offset) => crate::device::char::SeekFrom::End(offset),
+                };
+                match device.seek(dev_whence) {
+                    Ok(pos) => pos,
+                    Err(e) => {
+                        return Err(StreamError::from(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            format!("Seek failed on character device: {}", e)
+                        )));
+                    }
                 }
-            },
-            SeekFrom::End(_) => {
-                // For device files, seeking from end is not well-defined
-                // Return current position
-                *position
+            }
+            _ => {
+                return Err(StreamError::from(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Seek operation not supported for this device type"
+                )));
             }
         };
         
