@@ -1,5 +1,5 @@
 [build]
-target = "../targets/riscv64gc-unknown-scarlet-elf.json"
+target = "../../targets/riscv64gc-unknown-scarlet-elf.json"
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]

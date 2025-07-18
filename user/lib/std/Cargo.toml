@@ -8,4 +8,4 @@ name = "scarlet_std"
 path = "src/lib.rs"
 
 [build]
-target = "../../targets/riscv64-unknown-scarlet.json" 
+target = "../../../targets/riscv64-unknown-scarlet.json" 

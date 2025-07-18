@@ -40,4 +40,4 @@ name = "cat"
 path = "src/cat.rs"
 
 [dependencies]
-scarlet_std = { path = "../lib" }
+scarlet_std = { path = "../lib/std" }

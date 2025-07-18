@@ -1,7 +1,7 @@
 [env]
 # Environment variable settings for build
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "user/lib", "user/bin"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "user/lib/std", "user/bin"]
 
 [config]
 default_task = "build"
@@ -43,13 +43,13 @@ dependencies = ["build-userlib-debug"]
 description = "Build user libraries in debug mode"
 cwd = "user/lib"
 command = "cargo"
-args = ["build"]
+args = ["make", "build-userlib-debug"]
 
 [tasks.build-userlib-release]
 description = "Build user libraries in release mode"
 cwd = "user/lib"
 command = "cargo"
-args = ["build", "--release"]
+args = ["make", "build-userlib-release"]
 
 [tasks.build-userbin]
 description = "Build user programs (default: debug)"
@@ -83,7 +83,7 @@ args = ["clean"]
 description = "Clean user library build artifacts"
 cwd = "user/lib"
 command = "cargo"
-args = ["clean"]
+args = ["clean", "--workspace"]
 
 [tasks.clean-userbin]
 description = "Clean user program build artifacts"
