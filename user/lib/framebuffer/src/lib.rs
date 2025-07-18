@@ -466,12 +466,12 @@ impl Framebuffer {
         let mut line_buffer = vec![0u8; line_bytes];
         
         for x in 0..width {
-            let ratio = x as f32 / width as f32;
+            let ratio = (x * 256) / width; // Fixed-point ratio (scaled by 256)
             let color = [
-                (start_color[0] as f32 * (1.0 - ratio) + end_color[0] as f32 * ratio) as u8,
-                (start_color[1] as f32 * (1.0 - ratio) + end_color[1] as f32 * ratio) as u8,
-                (start_color[2] as f32 * (1.0 - ratio) + end_color[2] as f32 * ratio) as u8,
-                (start_color[3] as f32 * (1.0 - ratio) + end_color[3] as f32 * ratio) as u8,
+                ((start_color[0] as u16 * (256 - ratio) + end_color[0] as u16 * ratio) / 256) as u8,
+                ((start_color[1] as u16 * (256 - ratio) + end_color[1] as u16 * ratio) / 256) as u8,
+                ((start_color[2] as u16 * (256 - ratio) + end_color[2] as u16 * ratio) / 256) as u8,
+                ((start_color[3] as u16 * (256 - ratio) + end_color[3] as u16 * ratio) / 256) as u8,
             ];
             
             let pixel_offset = x * bytes_per_pixel;
