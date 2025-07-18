@@ -237,9 +237,13 @@ impl Framebuffer {
     /// Fixed screen information or HandleError on failure
     pub fn get_fix_screen_info(&self) -> HandleResult<FbFixScreenInfo> {
         let mut fix_info = FbFixScreenInfo::default();
+        let ptr = &mut fix_info as *mut _ as usize;
+        if ptr.is_null() {
+            return Err(HandleError::InvalidPointer);
+        }
         self.file.as_handle().control(
             commands::FBIOGET_FSCREENINFO,
-            &mut fix_info as *mut _ as usize,
+            ptr,
         )?;
         Ok(fix_info)
     }
