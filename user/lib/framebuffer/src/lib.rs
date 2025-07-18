@@ -8,11 +8,11 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
-use alloc::{vec, vec::Vec};
+use alloc::vec;
 use std::{
     fs::File,
-    handle::{Handle, HandleError, HandleResult},
-    io::{Read, Write, Seek, SeekFrom},
+    handle::{HandleError, HandleResult},
+    io::SeekFrom,
 };
 
 /// Linux framebuffer ioctl command constants
