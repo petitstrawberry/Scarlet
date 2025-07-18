@@ -93,33 +93,21 @@ mod integration_tests {
         assert_eq!(char_device.device_type(), DeviceType::Char);
         assert_eq!(char_device.name(), "framebuffer");
         assert_eq!(char_device.get_framebuffer_name(), "fb0");
-        assert_eq!(char_device.get_position(), 0);
         
         // Test device capabilities
         assert!(char_device.can_read());
         assert!(char_device.can_write());
         
-        // Test write operation
+        // Test write_at operation
         let test_pattern = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF];
-        let written = char_device.write(&test_pattern).unwrap();
+        let written = char_device.write_at(0, &test_pattern).unwrap();
         assert_eq!(written, test_pattern.len());
-        assert_eq!(char_device.get_position(), test_pattern.len());
         
-        // Test read operation
-        char_device.reset_position();
+        // Test read_at operation
         let mut read_buffer = [0u8; 6];
-        let read_count = char_device.read(&mut read_buffer);
+        let read_count = char_device.read_at(0, &mut read_buffer).unwrap();
         assert_eq!(read_count, 6);
         assert_eq!(read_buffer, test_pattern);
-        
-        // Test byte operations
-        char_device.reset_position();
-        assert!(char_device.write_byte(0x12).is_ok());
-        assert_eq!(char_device.get_position(), 1);
-        
-        char_device.reset_position();
-        let byte = char_device.read_byte().unwrap();
-        assert_eq!(byte, 0x12);
         
     }
 
@@ -178,18 +166,15 @@ mod integration_tests {
         let pattern0 = [0x10, 0x20, 0x30, 0x40];
         let pattern1 = [0x50, 0x60, 0x70, 0x80];
         
-        assert!(char_device0.write(&pattern0).is_ok());
-        assert!(char_device1.write(&pattern1).is_ok());
+        assert!(char_device0.write_at(0, &pattern0).is_ok());
+        assert!(char_device1.write_at(0, &pattern1).is_ok());
         
         // Read back and verify
-        char_device0.reset_position();
-        char_device1.reset_position();
-        
         let mut read0 = [0u8; 4];
         let mut read1 = [0u8; 4];
         
-        assert_eq!(char_device0.read(&mut read0), 4);
-        assert_eq!(char_device1.read(&mut read1), 4);
+        assert_eq!(char_device0.read_at(0, &mut read0).unwrap(), 4);
+        assert_eq!(char_device1.read_at(0, &mut read1).unwrap(), 4);
         
         assert_eq!(read0, pattern0);
         assert_eq!(read1, pattern1);
@@ -301,20 +286,17 @@ mod integration_tests {
         let fb_resource = graphics_manager.get_framebuffer(&fb_name).expect("Framebuffer should exist");
         let char_device = FramebufferCharDevice::new(fb_resource);
         
-        // Fill the entire framebuffer
+        // Fill the entire framebuffer using write_at
         let data = [0xFF; 10]; // More than framebuffer size
-        let written = char_device.write(&data).unwrap();
+        let written = char_device.write_at(0, &data).unwrap();
         assert_eq!(written, 8); // Should only write 8 bytes (framebuffer size)
-        assert_eq!(char_device.get_position(), 8);
         
-        // Try to write more - should fail
-        assert!(char_device.write_byte(0x00).is_err());
-        assert!(!char_device.can_write());
+        // Try to write beyond framebuffer - should fail or write partial
+        assert!(char_device.write_at(8, &[0x00]).is_err() || char_device.write_at(8, &[0x00]).unwrap() == 0);
         
-        // Read back all data
-        char_device.reset_position();
+        // Read back all data from beginning
         let mut read_buffer = [0u8; 10];
-        let read_count = char_device.read(&mut read_buffer);
+        let read_count = char_device.read_at(0, &mut read_buffer).unwrap();
         assert_eq!(read_count, 8);
         
         // Verify all bytes are 0xFF
@@ -322,9 +304,10 @@ mod integration_tests {
             assert_eq!(read_buffer[i], 0xFF);
         }
         
-        // At end of framebuffer, can't read more
-        assert!(char_device.read_byte().is_none());
-        assert!(!char_device.can_read());
+        // Test that read beyond buffer size returns 0 bytes
+        let mut overflow_buffer = [0u8; 4];
+        let overflow_read = char_device.read_at(8, &mut overflow_buffer);
+        assert!(overflow_read.is_err() || overflow_read.unwrap() == 0);
         
     }
 
@@ -387,26 +370,22 @@ mod integration_tests {
         let mut read_buffer = [0u8; 6];
         
         // Note: For DevFS, we need to use the underlying character device for reading
-        // since DevFileObject uses read_byte which advances the device position
+        // since DevFileObject manages its own position
         let char_device = FramebufferCharDevice::new(fb_resource.clone());
-        char_device.reset_position(); // Reset to beginning
-        let bytes_read = char_device.read(&mut read_buffer);
+        let bytes_read = char_device.read_at(0, &mut read_buffer).unwrap();
         assert_eq!(bytes_read, 6);
         assert_eq!(read_buffer, test_pattern);
         
         // Test writing more data through DevFS
         let second_pattern = [0x11, 0x22, 0x33, 0x44];
-        char_device.set_position(10); // Set position to 10
         
-        // Write through DevFS again - note that DevFS uses write_byte which doesn't respect position
-        // So we write additional data that will be appended
+        // Write through DevFS - DevFileObject manages position internally
         let bytes_written2 = dev_file_object.write(&second_pattern).unwrap();
         assert_eq!(bytes_written2, second_pattern.len());
         
         // Verify the second write by reading from position 6 onwards
-        char_device.set_position(6);
         let mut read_buffer2 = [0u8; 4];
-        let bytes_read2 = char_device.read(&mut read_buffer2);
+        let bytes_read2 = char_device.read_at(6, &mut read_buffer2).unwrap();
         assert_eq!(bytes_read2, 4);
         assert_eq!(read_buffer2, second_pattern);
         
@@ -470,6 +449,7 @@ mod integration_tests {
                 char_device_id as u64,
             ));
             
+            // Create a new DevFileObject for each framebuffer to ensure independent position management
             let dev_file_object = DevFileObject::new(dev_node, char_device_id, DeviceType::Char).unwrap();
             
             // Write unique pattern to each framebuffer
@@ -477,11 +457,11 @@ mod integration_tests {
             let bytes_written = dev_file_object.write(&pattern).unwrap();
             assert_eq!(bytes_written, pattern.len());
             
-            // Verify the write using direct character device access
+            // Verify the write using direct character device access at position 0
+            // Since each DevFileObject starts writing from position 0
             let char_device = FramebufferCharDevice::new(fb_resource.clone());
-            char_device.reset_position();
             let mut read_buffer = [0u8; 3];
-            let bytes_read = char_device.read(&mut read_buffer);
+            let bytes_read = char_device.read_at(0, &mut read_buffer).unwrap();
             assert_eq!(bytes_read, 3);
             assert_eq!(read_buffer, pattern);
         }
@@ -539,6 +519,7 @@ mod integration_tests {
         let bytes_per_pixel = 4;
         
         // Write gradient data row by row (same pattern as VirtIO GPU test)
+        let mut current_pos = 0u64;
         for y in 0..height {
             for x in 0..width {
                 // Create a simple gradient: red increasing with x, blue with y
@@ -547,12 +528,13 @@ mod integration_tests {
                 let green = 0x80u8; // Fixed green component
                 let alpha = 0xFFu8; // Fully opaque
                 
-                // Write pixel in RGBA format for character device
-                let pixel = [red, green, blue, alpha];
+                // Write pixel in BGRA format for character device (format is BGRA8888)
+                let pixel = [blue, green, red, alpha];
                 
-                // Write pixel to framebuffer through character device
-                let written = fb_char_device.write(&pixel).unwrap();
+                // Write pixel to framebuffer through character device using write_at
+                let written = fb_char_device.write_at(current_pos, &pixel).unwrap();
                 assert_eq!(written, bytes_per_pixel);
+                current_pos += bytes_per_pixel as u64;
             }
         }
 
@@ -566,60 +548,50 @@ mod integration_tests {
         
         // Verify we've written the entire framebuffer
         let expected_total_bytes = (width * height * bytes_per_pixel as u32) as usize;
-        assert_eq!(fb_char_device.get_position(), expected_total_bytes);
         
         // Test reading back some pixels to verify the gradient
-        fb_char_device.reset_position();
-        
-        // Read top-left pixel (should be red=0, blue=0, green=0x80)
+        // Read top-left pixel (should be blue=0, green=0x80, red=0, alpha=0xFF in BGRA format)
         let mut top_left_pixel = [0u8; 4];
-        let read_count = fb_char_device.read(&mut top_left_pixel);
+        let read_count = fb_char_device.read_at(0, &mut top_left_pixel).unwrap();
         assert_eq!(read_count, 4);
-        assert_eq!(top_left_pixel[0], 0);    // Red should be 0 at x=0
+        assert_eq!(top_left_pixel[0], 0);    // Blue should be 0 at y=0
         assert_eq!(top_left_pixel[1], 0x80); // Fixed green component
-        assert_eq!(top_left_pixel[2], 0);    // Blue should be 0 at y=0
+        assert_eq!(top_left_pixel[2], 0);    // Red should be 0 at x=0
         assert_eq!(top_left_pixel[3], 0xFF); // Full alpha
         
-        // Skip to bottom-right pixel position
+        // Read bottom-right pixel (should be blue=255, green=0x80, red=255, alpha=0xFF in BGRA format)
         let bottom_right_pos = expected_total_bytes - bytes_per_pixel;
-        fb_char_device.set_position(bottom_right_pos);
-        
-        // Read bottom-right pixel (should be red=255, blue=255, green=0x80)
         let mut bottom_right_pixel = [0u8; 4];
-        let read_count = fb_char_device.read(&mut bottom_right_pixel);
+        let read_count = fb_char_device.read_at(bottom_right_pos as u64, &mut bottom_right_pixel).unwrap();
         assert_eq!(read_count, 4);
-        assert_eq!(bottom_right_pixel[0], 255); // Red should be max at x=width-1
+        assert_eq!(bottom_right_pixel[0], 255); // Blue should be max at y=height-1
         assert_eq!(bottom_right_pixel[1], 0x80); // Fixed green component
-        assert_eq!(bottom_right_pixel[2], 255);  // Blue should be max at y=height-1
+        assert_eq!(bottom_right_pixel[2], 255);  // Red should be max at x=width-1
         assert_eq!(bottom_right_pixel[3], 0xFF); // Full alpha
         
         // Test middle pixel (should have intermediate values)
         let middle_pos = (width / 2 * bytes_per_pixel as u32 + (height / 2) * width * bytes_per_pixel as u32) as usize;
-        fb_char_device.set_position(middle_pos);
         
         let mut middle_pixel = [0u8; 4];
-        let read_count = fb_char_device.read(&mut middle_pixel);
+        let read_count = fb_char_device.read_at(middle_pos as u64, &mut middle_pixel).unwrap();
         assert_eq!(read_count, 4);
         // Middle pixel should have intermediate values
         let expected_red = ((width / 2) * 255 / (width - 1)) as u8;
         let expected_blue = ((height / 2) * 255 / (height - 1)) as u8;
-        assert_eq!(middle_pixel[0], expected_red);  // Red based on x position
+        assert_eq!(middle_pixel[0], expected_blue); // Blue based on y position (BGRA format)
         assert_eq!(middle_pixel[1], 0x80);          // Fixed green component
-        assert_eq!(middle_pixel[2], expected_blue); // Blue based on y position
+        assert_eq!(middle_pixel[2], expected_red);  // Red based on x position (BGRA format)
         assert_eq!(middle_pixel[3], 0xFF);          // Full alpha
         
         // Verify we can't write beyond framebuffer boundary
-        fb_char_device.set_position(expected_total_bytes);
-        assert!(fb_char_device.write_byte(0xFF).is_err());
-        assert!(!fb_char_device.can_write());
+        assert!(fb_char_device.write_at(expected_total_bytes as u64, &[0xFF]).is_err());
         
-        // Reset position to within valid range and test read capability
-        fb_char_device.set_position(0);
+        // Test read/write capabilities at valid position
         assert!(fb_char_device.can_read());
         assert!(fb_char_device.can_write());
         
         // Gradient successfully drawn through /dev/fb0 character device
-        // Framebuffer: 256x256 pixels, gradient pattern matching test_virtio_gpu_framebuffer_operations
+        // Framebuffer: 1024x768 pixels, gradient pattern in BGRA8888 format
         // Red increases with x (left to right), blue increases with y (top to bottom), green fixed at 0x80
         // Verified gradient colors in top-left, bottom-right, and middle pixels
     }
