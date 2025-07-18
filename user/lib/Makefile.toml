@@ -12,23 +12,27 @@ dependencies = ["build-userlib-debug"]
 [tasks.build-userlib-debug]
 description = "Build all user libraries in debug mode"
 script = [
-    "cd std && cargo build"
+    "cd std && cargo build",
+    "cd ../framebuffer && cargo build"
 ]
 
 [tasks.build-userlib-release]
 description = "Build all user libraries in release mode"
 script = [
-    "cd std && cargo build --release"
+    "cd std && cargo build --release",
+    "cd ../framebuffer && cargo build --release"
 ]
 
 [tasks.clean-userlib]
 description = "Clean all user library build artifacts"
 script = [
-    "cd std && cargo clean"
+    "cd std && cargo clean",
+    "cd ../framebuffer && cargo clean"
 ]
 
 [tasks.test-userlib]
 description = "Test all user libraries"
 script = [
-    "cd std && cargo test"
+    "cd std && cargo test",
+    "cd ../framebuffer && cargo test"
 ]
