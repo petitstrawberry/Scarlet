@@ -360,6 +360,12 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
                 }
             }
             
+            // Read segment data in chunks to avoid stack overflow
+            let filesz = ph.p_filesz as usize;
+            let chunk_size = 4096; // 4KB chunks to prevent stack overflow
+            
+            // Memory barriers to prevent compiler optimizations
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             // Prepare segment data (file size)
             let mut segment_data = vec![0u8; ph.p_filesz as usize];
             
@@ -368,35 +374,57 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
                 message: format!("Failed to seek to segment data: {:?}", e),
             })?;
 
-            // Read segment data
-            file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
-                message: format!("Failed to read segment data: {:?}", e),
-            })?;
-            
-            // Copy data to task's memory space
+            // Get target physical address for direct writing
             let vaddr = ph.p_vaddr as usize;
-            match task.vm_manager.translate_vaddr(vaddr) {
-                Some(paddr) => {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            segment_data.as_ptr(),
-                            paddr as *mut u8,
-                            ph.p_filesz as usize
-                        );
-                    }
-                    
-                    // If memory size is larger than file size (e.g., BSS segment), fill the rest with zeros
-                    if ph.p_memsz > ph.p_filesz {
-                        let zero_start = paddr + ph.p_filesz as usize;
-                        let zero_size = ph.p_memsz as usize - ph.p_filesz as usize;
-                        unsafe {
-                            core::ptr::write_bytes(zero_start as *mut u8, 0, zero_size);
-                        }
-                    }
-                },
+            let target_paddr = match task.vm_manager.translate_vaddr(vaddr) {
+                Some(paddr) => paddr,
                 None => return Err(ElfLoaderError {
                     message: format!("Failed to translate virtual address: {:#x} for segment at offset {:#x}", vaddr, ph.p_offset),
                 }),
+            };
+
+            // Read and write segment data in chunks to avoid large stack allocations
+            let mut remaining = filesz;
+            let mut current_offset = 0;
+            
+            while remaining > 0 {
+                let read_size = if remaining > chunk_size { chunk_size } else { remaining };
+                let mut chunk_buffer = vec![0u8; read_size];
+                
+                // Read chunk from file
+                let bytes_read = file_obj.read(&mut chunk_buffer).map_err(|e| ElfLoaderError {
+                    message: format!("Failed to read segment data chunk: {:?}", e),
+                })?;
+                
+                if bytes_read != read_size {
+                    return Err(ElfLoaderError {
+                        message: format!("Incomplete read: expected {} bytes, got {}", read_size, bytes_read),
+                    });
+                }
+                
+                // Write chunk directly to target memory
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        chunk_buffer.as_ptr(),
+                        (target_paddr + current_offset) as *mut u8,
+                        read_size
+                    );
+                }
+                
+                current_offset += read_size;
+                remaining -= read_size;
+                
+                // Memory barrier between chunks
+                core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+            }
+            
+            // If memory size is larger than file size (e.g., BSS segment), fill the rest with zeros
+            if ph.p_memsz > ph.p_filesz {
+                let zero_start = target_paddr + ph.p_filesz as usize;
+                let zero_size = ph.p_memsz as usize - ph.p_filesz as usize;
+                unsafe {
+                    core::ptr::write_bytes(zero_start as *mut u8, 0, zero_size);
+                }
             }
         }
     }
