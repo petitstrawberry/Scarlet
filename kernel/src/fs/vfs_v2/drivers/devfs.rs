@@ -411,25 +411,29 @@ impl DevFileObject {
         }
     }
 
-    /// Read from the underlying device
+    /// Read from the underlying device at current position
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
+            let position = *self.position.read();
             
             match device_guard_ref.device_type() {
                 DeviceType::Char => {
                     if let Some(char_device) = device_guard_ref.as_char_device() {
-                        let mut bytes_read = 0;
-                        for byte in buffer.iter_mut() {
-                            match char_device.read_byte() {
-                                Some(b) => {
-                                    *byte = b;
-                                    bytes_read += 1;
-                                },
-                                None => break,
+                        // Use read_at for position-based read
+                        match char_device.read_at(position, buffer) {
+                            Ok(bytes_read) => {
+                                // Update position after successful read
+                                *self.position.write() += bytes_read as u64;
+                                Ok(bytes_read)
+                            },
+                            Err(e) => {
+                                Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    format!("Character device read failed: {}", e)
+                                ))
                             }
                         }
-                        return Ok(bytes_read);
                     } else {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
@@ -491,22 +495,29 @@ impl DevFileObject {
         }
     }
 
-    /// Write to the underlying device
+    /// Write to the underlying device at current position
     fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
+            let position = *self.position.read();
             
             match device_guard_ref.device_type() {
                 DeviceType::Char => {
                     if let Some(char_device) = device_guard_ref.as_char_device() {
-                        let mut bytes_written = 0;
-                        for &byte in buffer {
-                            match char_device.write_byte(byte) {
-                                Ok(_) => bytes_written += 1,
-                                Err(_) => break,
+                        // Use write_at for position-based write
+                        match char_device.write_at(position, buffer) {
+                            Ok(bytes_written) => {
+                                // Update position after successful write
+                                *self.position.write() += bytes_written as u64;
+                                Ok(bytes_written)
+                            },
+                            Err(e) => {
+                                Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    format!("Character device write failed: {}", e)
+                                ))
                             }
                         }
-                        return Ok(bytes_written);
                     } else {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
@@ -599,7 +610,7 @@ impl ControlOps for DevFileObject {
 impl FileObject for DevFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
-        
+
         let new_pos = match whence {
             SeekFrom::Start(offset) => offset,
             SeekFrom::Current(offset) => {
@@ -608,11 +619,15 @@ impl FileObject for DevFileObject {
                 } else {
                     position.saturating_sub((-offset) as u64)
                 }
-            },
-            SeekFrom::End(_) => {
-                // For device files, seeking from end is not well-defined
-                // Return current position
-                *position
+            }
+            SeekFrom::End(offset) => {
+                // For devices, we can't easily determine the "end" position
+                // Most devices don't have a fixed size, so seeking from end is not meaningful
+                // We'll treat this as an error for now
+                return Err(StreamError::from(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Seek from end not supported for device files"
+                )));
             }
         };
         

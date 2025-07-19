@@ -89,33 +89,40 @@ pub trait CharDevice: Device {
     /// Check if the device is ready for writing
     fn can_write(&self) -> bool;
     
-    /// Seek to a position in the device
+    /// Read data from a specific position in the device
     /// 
-    /// Default implementation returns "not supported" for stream devices.
-    /// Devices that support seeking (like framebuffer, memory devices) should override this.
+    /// Default implementation falls back to sequential read for stream devices.
+    /// Devices that support random access (like framebuffer, memory devices) should override this.
     /// 
     /// # Arguments
     /// 
-    /// * `whence` - Seek position and mode
+    /// * `position` - Byte offset to read from
+    /// * `buffer` - Buffer to read data into
     /// 
     /// # Returns
     /// 
-    /// Result containing the new absolute position or an error
-    fn seek(&self, whence: SeekFrom) -> Result<u64, &'static str> {
-        let _ = whence;
-        Err("Seek operation not supported")
+    /// Result containing the number of bytes read or an error
+    fn read_at(&self, _position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        // Default: use sequential read for stream devices
+        Ok(self.read(buffer))
     }
     
-    /// Get current position in the device
+    /// Write data to a specific position in the device
     /// 
-    /// Default implementation returns 0 for stream devices.
-    /// Devices that support positioning should override this.
+    /// Default implementation falls back to sequential write for stream devices.
+    /// Devices that support random access (like framebuffer, memory devices) should override this.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `position` - Byte offset to write to
+    /// * `buffer` - Buffer containing data to write
     /// 
     /// # Returns
     /// 
-    /// Current position in the device
-    fn get_position(&self) -> u64 {
-        0
+    /// Result containing the number of bytes written or an error
+    fn write_at(&self, _position: u64, buffer: &[u8]) -> Result<usize, &'static str> {
+        // Default: use sequential write for stream devices
+        self.write(buffer)
     }
     
     /// Check if this device supports seek operations
