@@ -89,7 +89,31 @@ impl VirtualMemoryManager {
         &self.memmap
     }
 
-    /// Adds a memory map to the virtual memory manager.
+    /// Checks if a virtual memory range overlaps with existing mappings.
+    /// 
+    /// # Arguments
+    /// * `start` - The start address of the range to check
+    /// * `end` - The end address of the range to check (inclusive)
+    /// 
+    /// # Returns
+    /// Some(VirtualMemoryMap) if there is an overlap, None otherwise
+    pub fn check_overlap(&self, start: usize, end: usize) -> Option<&VirtualMemoryMap> {
+        for map in self.memmap.iter() {
+            // Check if ranges overlap: [start, end] vs [map.start, map.end]
+            if start <= map.vmarea.end && end >= map.vmarea.start {
+                return Some(map);
+            }
+        }
+        None
+    }
+
+    /// Adds a memory map to the virtual memory manager with overlap checking.
+    /// 
+    /// This method performs overlap detection before adding the mapping.
+    /// Use this for:
+    /// - User-initiated memory allocation (mmap, malloc, etc.)
+    /// - Dynamic memory allocation where overlap is possible
+    /// - Any case where memory range conflicts are uncertain
     /// 
     /// # Arguments
     /// * `map` - The memory map to add
@@ -98,6 +122,41 @@ impl VirtualMemoryManager {
     /// A result indicating success or failure.
     /// 
     pub fn add_memory_map(&mut self, map: VirtualMemoryMap) -> Result<(), &'static str> {
+        // Check if the address and size is aligned
+        if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
+            map.vmarea.size() % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0 {
+            return Err("Address or size is not aligned to PAGE_SIZE");
+        }
+
+        // Check for overlaps
+        if let Some(existing_map) = self.check_overlap(map.vmarea.start, map.vmarea.end) {
+            crate::println!("Memory overlap detected: new range [{:#x}-{:#x}] overlaps with existing [{:#x}-{:#x}]", 
+                map.vmarea.start, map.vmarea.end, existing_map.vmarea.start, existing_map.vmarea.end);
+            return Err("Memory range overlaps with existing mapping");
+        }
+
+        self.memmap.push(map);
+        Ok(())
+    }
+
+    /// Adds a memory map to the virtual memory manager.
+    /// 
+    /// # Safety
+    /// This method does NOT check for overlaps. Use this only when you are certain
+    /// that the memory range does not overlap with existing mappings, such as:
+    /// - System initialization (kernel, device mappings)
+    /// - Internal memory management operations (splitting existing ranges)
+    /// - Operations on empty/new address spaces
+    /// 
+    /// For user-initiated memory allocation or uncertain cases, use `add_memory_map`.
+    /// 
+    /// # Arguments
+    /// * `map` - The memory map to add
+    /// 
+    /// # Returns
+    /// A result indicating success or failure.
+    /// 
+    pub fn add_memory_map_unchecked(&mut self, map: VirtualMemoryMap) -> Result<(), &'static str> {
         // Check if the address and size is aligned
         if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
             map.vmarea.size() % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0 {
@@ -156,7 +215,7 @@ impl VirtualMemoryManager {
     /// 
     pub fn restore_memory_maps(&mut self, maps: Vec<VirtualMemoryMap>) -> Result<(), &'static str> {
         for map in maps {
-            if let Err(e) = self.add_memory_map(map) {
+            if let Err(e) = self.add_memory_map_unchecked(map) {
                 return Err(e);
             }
         }
@@ -268,7 +327,7 @@ mod tests {
         let mut vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
-        vmm.add_memory_map(map).unwrap();
+        vmm.add_memory_map_unchecked(map).unwrap();
         assert_eq!(vmm.get_memory_map(0).unwrap().vmarea.start, 0x1000);
     }
 
@@ -277,7 +336,7 @@ mod tests {
         let mut vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
-        vmm.add_memory_map(map).unwrap();
+        vmm.add_memory_map_unchecked(map).unwrap();
         let removed_map = vmm.remove_memory_map(0).unwrap();
         assert_eq!(removed_map.vmarea.start, 0x1000);
         assert!(vmm.get_memory_map(0).is_none());
@@ -290,8 +349,8 @@ mod tests {
         let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0, is_shared: false };
         let vma2 = MemoryArea { start: 0x3000, end: 0x3fff };
         let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2, permissions: 0, is_shared: false };
-        vmm.add_memory_map(map1).unwrap();
-        vmm.add_memory_map(map2).unwrap();
+        vmm.add_memory_map_unchecked(map1).unwrap();
+        vmm.add_memory_map_unchecked(map2).unwrap();
         let found_map = vmm.search_memory_map(0x3500).unwrap();
         assert_eq!(found_map.vmarea.start, 0x3000);
     }
@@ -303,5 +362,29 @@ mod tests {
         vmm.set_asid(asid);
         let page_table = vmm.get_root_page_table();
         assert!(page_table.is_some());
+    }
+
+    #[test_case]
+    fn test_overlap_detection() {
+        let mut vmm = VirtualMemoryManager::new();
+        let vma1 = MemoryArea { start: 0x1000, end: 0x1fff };
+        let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0, is_shared: false };
+        vmm.add_memory_map_unchecked(map1).unwrap();
+
+        // Test exact overlap
+        let overlapping_vma = MemoryArea { start: 0x1500, end: 0x2fff };
+        assert!(vmm.check_overlap(overlapping_vma.start, overlapping_vma.end).is_some());
+
+        // Test no overlap
+        let non_overlapping_vma = MemoryArea { start: 0x3000, end: 0x3fff };
+        assert!(vmm.check_overlap(non_overlapping_vma.start, non_overlapping_vma.end).is_none());
+        
+        // Test add with overlap check - should fail
+        let overlapping_map = VirtualMemoryMap { vmarea: overlapping_vma, pmarea: overlapping_vma, permissions: 0, is_shared: false };
+        assert!(vmm.add_memory_map(overlapping_map).is_err());
+        
+        // Test add with no overlap - should succeed
+        let non_overlapping_map = VirtualMemoryMap { vmarea: non_overlapping_vma, pmarea: non_overlapping_vma, permissions: 0, is_shared: false };
+        assert!(vmm.add_memory_map(non_overlapping_map).is_ok());
     }
 }

@@ -467,7 +467,7 @@ impl Task {
             permissions,
             is_shared: false, // Default to not shared for task-allocated pages
         };
-        self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
+        self.vm_manager.add_memory_map(mmap)?;
 
         for i in 0..num_of_pages {
             let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
@@ -510,7 +510,7 @@ impl Task {
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
                         };
-                        self.vm_manager.add_memory_map(mmap1)
+                        self.vm_manager.add_memory_map_unchecked(mmap1)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
@@ -531,7 +531,7 @@ impl Task {
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
                         };
-                        self.vm_manager.add_memory_map(mmap2)
+                        self.vm_manager.add_memory_map_unchecked(mmap2)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
@@ -856,7 +856,7 @@ impl Task {
                             is_shared: true,
                         };
                         // Add the shared memory map directly to the child task
-                        child.vm_manager.add_memory_map(shared_mmap)
+                        child.vm_manager.add_memory_map_unchecked(shared_mmap)
                             .map_err(|_| "Failed to add shared memory map to child task")?;
 
                         // TODO: Add logic to determine if the memory map is a trampoline
@@ -904,7 +904,7 @@ impl Task {
                             });
                         }
                         // Add the new memory map to the child task
-                        child.vm_manager.add_memory_map(new_mmap)
+                        child.vm_manager.add_memory_map_unchecked(new_mmap)
                             .map_err(|_| "Failed to add memory map to child task")?;
                     }
                 }
@@ -1384,7 +1384,7 @@ mod tests {
         };
         
         // Add shared memory map to parent
-        parent_task.vm_manager.add_memory_map(shared_mmap).unwrap();
+        parent_task.vm_manager.add_memory_map_unchecked(shared_mmap).unwrap();
         
         // Write test data to shared memory
         let test_data: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
