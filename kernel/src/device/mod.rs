@@ -10,12 +10,15 @@ pub mod fdt;
 pub mod platform;
 pub mod block;
 pub mod char;
+pub mod graphics;
+pub mod network;
 pub mod events;
 
 extern crate alloc;
 use core::any::Any;
 
 use alloc::vec::Vec;
+use crate::object::capability::ControlOps;
 
 pub trait DeviceInfo {
     fn name(&self) -> &'static str;
@@ -47,6 +50,7 @@ pub enum DeviceType {
     Block,
     Char,
     Network,
+    Graphics,
     Generic,
     #[cfg(test)]
     NonExistent,
@@ -56,8 +60,9 @@ pub enum DeviceType {
 /// 
 /// This trait defines the interface for devices in the kernel.
 /// Device IDs are assigned by DeviceManager when devices are registered.
+/// All devices must support control operations through the ControlOps trait.
 /// 
-pub trait Device: Send + Sync {
+pub trait Device: Send + Sync + ControlOps {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;
@@ -70,6 +75,16 @@ pub trait Device: Send + Sync {
     
     /// Cast to BlockDevice if this device is a block device  
     fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
+        None
+    }
+    
+    /// Cast to GraphicsDevice if this device is a graphics device
+    fn as_graphics_device(&self) -> Option<&dyn graphics::GraphicsDevice> {
+        None
+    }
+    
+    /// Cast to NetworkDevice if this device is a network device
+    fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
         None
     }
 }
@@ -100,5 +115,12 @@ impl Device for GenericDevice {
     
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl ControlOps for GenericDevice {
+    // Generic devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }

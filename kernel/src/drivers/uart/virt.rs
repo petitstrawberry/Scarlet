@@ -10,7 +10,7 @@ use crate::{
         char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
             resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo
         }, Device, DeviceInfo, DeviceType
-    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial
+    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial, object::capability::ControlOps
 };
 
 pub struct Uart {
@@ -204,6 +204,13 @@ impl CharDevice for Uart {
         self.can_write()
     }
     
+}
+
+impl ControlOps for Uart {
+    // UART devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
+    }
 }
 
 impl Write for Uart {

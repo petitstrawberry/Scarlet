@@ -401,6 +401,22 @@ impl DeviceManager {
     pub fn register_driver_default(&mut self, driver: Box<dyn DeviceDriver>) {
         self.register_driver(driver, DriverPriority::Standard);
     }
+
+    /// Clear all devices and reset the manager state (for testing only)
+    ///
+    /// This method is only available in test builds and should only be used
+    /// for unit testing to ensure test isolation.
+    #[cfg(test)]
+    pub fn clear_for_test(&mut self) {
+        let mut devices = self.devices.lock();
+        let mut device_by_name = self.device_by_name.lock();
+        let mut name_to_id = self.name_to_id.lock();
+        
+        devices.clear();
+        device_by_name.clear();
+        name_to_id.clear();
+        self.next_device_id.store(1, Ordering::SeqCst); // Start from 1, reserve 0 for invalid
+    }
 }
 
 #[cfg(test)]

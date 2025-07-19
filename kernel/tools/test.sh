@@ -56,6 +56,14 @@ if [ "$DEBUG_MODE" = true ]; then
         -global virtio-mmio.force-legacy=false \
         -drive id=x0,file=test.txt,format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        -display vnc=:0 \
+        -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+        -netdev user,id=net0 \
+        -netdev hubport,id=net1,hubid=0 \
+        -netdev hubport,id=net2,hubid=0 \
+        -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
+        -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
+        -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
         -initrd "$INITRAMFS_PATH" \
         -gdb tcp::12345 -S \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
@@ -71,6 +79,14 @@ else
         -global virtio-mmio.force-legacy=false \
         -drive id=x0,file=test.txt,format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        -display vnc=:0 \
+        -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+        -netdev user,id=net0 \
+        -netdev hubport,id=net1,hubid=0 \
+        -netdev hubport,id=net2,hubid=0 \
+        -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
+        -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
+        -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
         -initrd "$INITRAMFS_PATH" \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
 fi

@@ -242,7 +242,9 @@ impl<'a> VirtQueue<'a> {
     /// 
     /// bool: True if the virtqueue is busy, false otherwise.
     pub fn is_busy(&self) -> bool {
-        self.last_used_idx != *self.used.idx as usize
+        // Volatile read to ensure we get the latest value
+        let used_idx = unsafe { core::ptr::read_volatile(self.used.idx) };
+        self.last_used_idx == used_idx as usize
     }
 
     /// Push a descriptor index to the available ring
@@ -261,9 +263,9 @@ impl<'a> VirtQueue<'a> {
         if desc_idx >= self.desc.len() {
             return Err("Invalid descriptor index");
         }
-        
-        self.avail.ring[*self.avail.idx as usize] = desc_idx as u16;
-        *self.avail.idx = (*self.avail.idx + 1) % self.avail.size as u16;
+
+        self.avail.ring[(*self.avail.idx as usize) % self.avail.size] = desc_idx as u16;
+        *self.avail.idx = (*self.avail.idx).wrapping_add(1);
         Ok(())
     }
 

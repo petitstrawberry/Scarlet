@@ -31,9 +31,10 @@ use core::{mem, ptr};
 
 use crate::defer;
 use crate::device::{Device, DeviceType};
+use crate::drivers::virtio::features::{VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
     device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, 
-    drivers::virtio::{device::{Register, VirtioDevice}, queue::{DescriptorFlag, VirtQueue}}
+    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
 };
 
 // VirtIO Block Request Type
@@ -56,9 +57,6 @@ const VIRTIO_BLK_F_SCSI: u32 = 7;
 // const VIRTIO_BLK_F_FLUSH: u32 = 9;
 const VIRTIO_BLK_F_CONFIG_WCE: u32 = 11;
 const VIRTIO_BLK_F_MQ: u32 = 12;
-const VIRTIO_F_ANY_LAYOUT: u32 = 27;
-const VIRTIO_RING_F_INDIRECT_DESC: u32 = 28;
-const VIRTIO_RING_F_EVENT_IDX: u32 = 29;
 
 // #define VIRTIO_BLK_F_RO              5	/* Disk is read-only */
 // #define VIRTIO_BLK_F_SCSI            7	/* Supports scsi command passthru */
@@ -124,24 +122,33 @@ impl VirtioBlockDevice {
         };
         
         // Initialize the device
-        if device.init().is_err() {
-            panic!("Failed to initialize Virtio Block Device");
-        }
+        let negotiated_features = match device.init() {
+            Ok(features) => features,
+            Err(_) => panic!("Failed to initialize Virtio Block Device"),
+        };
 
         // Read device configuration
         *device.capacity.write() = device.read_config::<u64>(0); // Capacity at offset 0
 
-        // Read device features
-        let features = device.read32_register(Register::DeviceFeatures);
-        *device.features.write() = features;
+        // Store negotiated features
+        *device.features.write() = negotiated_features;
+
+
+        // Debug: Check actual negotiated features after init
+        #[cfg(test)]
+        {
+            use crate::early_println;
+            early_println!("[virtio-blk] Final negotiated features (after init): 0x{:x}", 
+            negotiated_features);
+        }
         
         // Check if block size feature is supported
-        if features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
+        if negotiated_features & (1 << VIRTIO_BLK_F_BLK_SIZE) != 0 {
             *device.sector_size.write() = device.read_config::<u32>(20); // blk_size at offset 20
         }
         
         // Check if device is read-only
-        *device.read_only.write() = features & (1 << VIRTIO_BLK_F_RO) != 0;
+        *device.read_only.write() = negotiated_features & (1 << VIRTIO_BLK_F_RO) != 0;
 
         device
     }
@@ -190,8 +197,21 @@ impl VirtioBlockDevice {
         
         // Allocate descriptors for the request
         let header_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
-        let data_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
-        let status_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
+        let data_desc = match virtqueues[0].alloc_desc() {
+            Some(desc) => desc,
+            None => {
+                virtqueues[0].free_desc(header_desc);
+                return Err("Failed to allocate descriptor");
+            }
+        };
+        let status_desc = match virtqueues[0].alloc_desc() {
+            Some(desc) => desc,
+            None => {
+                virtqueues[0].free_desc(data_desc);
+                virtqueues[0].free_desc(header_desc);
+                return Err("Failed to allocate descriptor");
+            }
+        };
         
         // Set up header descriptor
         virtqueues[0].desc[header_desc].addr = (header_ptr as usize) as u64;
@@ -222,24 +242,43 @@ impl VirtioBlockDevice {
         virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
         
         // Submit the request to the queue
-        virtqueues[0].push(header_desc)?;
+        if let Err(e) = virtqueues[0].push(header_desc) {
+            // Free all descriptors if push fails
+            virtqueues[0].free_desc(status_desc);
+            virtqueues[0].free_desc(data_desc);
+            virtqueues[0].free_desc(header_desc);
+            return Err(e);
+        }
 
         // Notify the device
         self.notify(0);
         
         // Wait for the response (polling)
         while virtqueues[0].is_busy() {}
-        while *virtqueues[0].used.idx as usize == virtqueues[0].last_used_idx {}
 
         // Process completed request
-        let desc_idx = virtqueues[0].pop().ok_or("No response from device")?;
+        let desc_idx = match virtqueues[0].pop() {
+            Some(idx) => idx,
+            None => {
+                // Free descriptors even if pop fails
+                virtqueues[0].free_desc(status_desc);
+                virtqueues[0].free_desc(data_desc);
+                virtqueues[0].free_desc(header_desc);
+                return Err("No response from device");
+            }
+        };
+        
         if desc_idx != header_desc {
+            // Free descriptors before returning error
+            virtqueues[0].free_desc(status_desc);
+            virtqueues[0].free_desc(data_desc);
+            virtqueues[0].free_desc(header_desc);
             return Err("Invalid descriptor index");
         }
         
         // Check status
         let status_val = unsafe { *status_ptr };
-        match status_val {
+        let result = match status_val {
             VIRTIO_BLK_S_OK => {
                 // For read requests, copy data to the buffer
                 if let BlockIORequestType::Read = req.request_type {
@@ -256,7 +295,14 @@ impl VirtioBlockDevice {
             VIRTIO_BLK_S_IOERR => Err("I/O error"),
             VIRTIO_BLK_S_UNSUPP => Err("Unsupported request"),
             _ => Err("Unknown error"),
-        }
+        };
+        
+        // Free descriptors after processing (responsibility of driver)
+        virtqueues[0].free_desc(status_desc);
+        virtqueues[0].free_desc(data_desc);
+        virtqueues[0].free_desc(header_desc);
+        
+        result
     }
 }
 
@@ -357,6 +403,13 @@ impl BlockDevice for VirtioBlockDevice {
         }
         
         results
+    }
+}
+
+impl ControlOps for VirtioBlockDevice {
+    // VirtIO block devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }
 

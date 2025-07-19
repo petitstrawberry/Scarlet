@@ -149,6 +149,24 @@ impl Handle {
         // In the future, we might want to check capabilities
         Ok(FileObject::from_handle(self.raw))
     }
+
+    /// Perform a control operation on this handle (ioctl-equivalent)
+    /// 
+    /// # Arguments
+    /// * `command` - Control command
+    /// * `arg` - Argument for the control command
+    /// 
+    /// # Returns
+    /// Result of the control operation
+    pub fn control(&self, command: u32, arg: usize) -> HandleResult<i32> {
+        let result = syscall3(
+            Syscall::HandleControl,
+            self.raw as usize,
+            command as usize,
+            arg,
+        );
+        HandleError::from_syscall_result(result)
+    }
 }
 
 impl Drop for Handle {

@@ -22,6 +22,7 @@ pub enum Syscall {
     HandleSetRole = 101,
     HandleClose = 102,      // Close any handle (files, pipes, etc.)
     HandleDuplicate = 103,  // Duplicate any handle
+    HandleControl = 110,    // Control operations on handles (ioctl-equivalent)
     
     // === Core Capabilities (Object-oriented) ===
     // StreamOps Capability - read/write operations

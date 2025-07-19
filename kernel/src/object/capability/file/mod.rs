@@ -4,6 +4,7 @@
 //! which extends StreamOps with file-specific operations like seek and metadata.
 
 use crate::object::capability::stream::{StreamOps, StreamError};
+use crate::object::capability::control::ControlOps;
 
 pub mod syscall;
 
@@ -22,10 +23,11 @@ pub enum SeekFrom {
 
 /// Trait for file objects
 /// 
-/// This trait represents a file-like object that supports both stream operations
-/// and file-specific operations like seeking and metadata access.
+/// This trait represents a file-like object that supports stream operations,
+/// file-specific operations like seeking and metadata access, and control
+/// operations for device-specific functionality.
 /// Directory reading is handled through normal read() operations.
-pub trait FileObject: StreamOps {
+pub trait FileObject: StreamOps + ControlOps {
     /// Seek to a position in the file stream
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
     
