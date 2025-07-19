@@ -197,8 +197,21 @@ impl VirtioBlockDevice {
         
         // Allocate descriptors for the request
         let header_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
-        let data_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
-        let status_desc = virtqueues[0].alloc_desc().ok_or("Failed to allocate descriptor")?;
+        let data_desc = match virtqueues[0].alloc_desc() {
+            Some(desc) => desc,
+            None => {
+                virtqueues[0].free_desc(header_desc);
+                return Err("Failed to allocate descriptor");
+            }
+        };
+        let status_desc = match virtqueues[0].alloc_desc() {
+            Some(desc) => desc,
+            None => {
+                virtqueues[0].free_desc(data_desc);
+                virtqueues[0].free_desc(header_desc);
+                return Err("Failed to allocate descriptor");
+            }
+        };
         
         // Set up header descriptor
         virtqueues[0].desc[header_desc].addr = (header_ptr as usize) as u64;
@@ -229,7 +242,13 @@ impl VirtioBlockDevice {
         virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
         
         // Submit the request to the queue
-        virtqueues[0].push(header_desc)?;
+        if let Err(e) = virtqueues[0].push(header_desc) {
+            // Free all descriptors if push fails
+            virtqueues[0].free_desc(status_desc);
+            virtqueues[0].free_desc(data_desc);
+            virtqueues[0].free_desc(header_desc);
+            return Err(e);
+        }
 
         // Notify the device
         self.notify(0);
@@ -238,14 +257,28 @@ impl VirtioBlockDevice {
         while virtqueues[0].is_busy() {}
 
         // Process completed request
-        let desc_idx = virtqueues[0].pop().ok_or("No response from device")?;
+        let desc_idx = match virtqueues[0].pop() {
+            Some(idx) => idx,
+            None => {
+                // Free descriptors even if pop fails
+                virtqueues[0].free_desc(status_desc);
+                virtqueues[0].free_desc(data_desc);
+                virtqueues[0].free_desc(header_desc);
+                return Err("No response from device");
+            }
+        };
+        
         if desc_idx != header_desc {
+            // Free descriptors before returning error
+            virtqueues[0].free_desc(status_desc);
+            virtqueues[0].free_desc(data_desc);
+            virtqueues[0].free_desc(header_desc);
             return Err("Invalid descriptor index");
         }
         
         // Check status
         let status_val = unsafe { *status_ptr };
-        match status_val {
+        let result = match status_val {
             VIRTIO_BLK_S_OK => {
                 // For read requests, copy data to the buffer
                 if let BlockIORequestType::Read = req.request_type {
@@ -262,7 +295,14 @@ impl VirtioBlockDevice {
             VIRTIO_BLK_S_IOERR => Err("I/O error"),
             VIRTIO_BLK_S_UNSUPP => Err("Unsupported request"),
             _ => Err("Unknown error"),
-        }
+        };
+        
+        // Free descriptors after processing (responsibility of driver)
+        virtqueues[0].free_desc(status_desc);
+        virtqueues[0].free_desc(data_desc);
+        virtqueues[0].free_desc(header_desc);
+        
+        result
     }
 }
 
