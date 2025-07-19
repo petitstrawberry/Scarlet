@@ -263,9 +263,9 @@ impl<'a> VirtQueue<'a> {
         if desc_idx >= self.desc.len() {
             return Err("Invalid descriptor index");
         }
-        
-        self.avail.ring[*self.avail.idx as usize] = desc_idx as u16;
-        *self.avail.idx = (*self.avail.idx + 1) % self.avail.size as u16;
+
+        self.avail.ring[(*self.avail.idx as usize) % self.avail.size] = desc_idx as u16;
+        *self.avail.idx = (*self.avail.idx).wrapping_add(1);
         Ok(())
     }
 
