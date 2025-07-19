@@ -244,7 +244,11 @@ impl VirtioNetDevice {
             rx_queue.desc[desc_idx].next = 0; // No chaining
             
             // Add to available ring
-            rx_queue.push(desc_idx)?;
+            if let Err(e) = rx_queue.push(desc_idx) {
+                rx_queue.free_desc(desc_idx);
+                unsafe { drop(Box::from_raw(buffer_ptr)); }
+                return Err(e);
+            }
             
             // Store buffer pointer for cleanup
             self.rx_buffers.lock().push(unsafe { Box::from_raw(buffer_ptr) });
@@ -296,7 +300,10 @@ impl VirtioNetDevice {
             tx_queue.desc[desc_idx].next = 0; // No chaining
             
             // Submit the request to the queue
-            tx_queue.push(desc_idx)?;
+            if let Err(e) = tx_queue.push(desc_idx) {
+                tx_queue.free_desc(desc_idx);
+                return Err(e);
+            }
             
             // Notify the device
             self.notify(1); // Notify TX queue
@@ -305,9 +312,18 @@ impl VirtioNetDevice {
             while tx_queue.is_busy() {}
             
             // Get completion
-            let _completed_desc = tx_queue.pop().ok_or("No TX completion")?;
+            let result = match tx_queue.pop() {
+                Some(_completed_desc) => Ok(()),
+                None => {
+                    tx_queue.free_desc(desc_idx);
+                    Err("No TX completion")
+                }
+            };
             
-            Ok(())
+            // Free descriptor after processing (responsibility of driver)
+            tx_queue.free_desc(desc_idx);
+            
+            result
         };
         
         // Cleanup memory
@@ -354,7 +370,11 @@ impl VirtioNetDevice {
             
             // Recycle the buffer by putting it back in the RX queue
             rx_queue.desc[desc_idx].flags = DescriptorFlag::Write as u16;
-            rx_queue.push(desc_idx)?;
+            if let Err(_) = rx_queue.push(desc_idx) {
+                // If we can't recycle, free the descriptor
+                rx_queue.free_desc(desc_idx);
+                // Note: This may cause buffer leaks but prevents descriptor leaks
+            }
         }
         
         // Notify device about recycled buffers

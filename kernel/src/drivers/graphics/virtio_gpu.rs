@@ -220,7 +220,14 @@ impl VirtioGpuDevice {
         
         // Allocate descriptors
         let cmd_desc = control_queue.alloc_desc().ok_or("Failed to allocate command descriptor")?;
-        let resp_desc = control_queue.alloc_desc().ok_or("Failed to allocate response descriptor")?;
+        let resp_desc = match control_queue.alloc_desc() {
+            Some(desc) => desc,
+            None => {
+                // Free the already allocated cmd_desc before returning error
+                control_queue.free_desc(cmd_desc);
+                return Err("Failed to allocate response descriptor");
+            }
+        };
         
         // Set up command descriptor (device readable)
         control_queue.desc[cmd_desc].addr = cmd_ptr as u64;
@@ -237,7 +244,12 @@ impl VirtioGpuDevice {
         //     unsafe { *(cmd as *const T as *const u32) });
         
         // Submit the request to the queue
-        control_queue.push(cmd_desc)?;
+        if let Err(e) = control_queue.push(cmd_desc) {
+            // Free descriptors if push fails
+            control_queue.free_desc(resp_desc);
+            control_queue.free_desc(cmd_desc);
+            return Err(e);
+        }
         
         // Notify the device
         self.notify(0); // Notify control queue
@@ -248,7 +260,19 @@ impl VirtioGpuDevice {
         while *control_queue.used.idx as usize == control_queue.last_used_idx {}
         
         // Process response
-        let _resp_idx = control_queue.pop().ok_or("No response from device")?;
+        let _resp_idx = match control_queue.pop() {
+            Some(idx) => idx,
+            None => {
+                // Free descriptors even if pop fails (device may have processed them)
+                control_queue.free_desc(resp_desc);
+                control_queue.free_desc(cmd_desc);
+                return Err("No response from device");
+            }
+        };
+        
+        // Free descriptors (responsibility of driver, not VirtQueue)
+        control_queue.free_desc(resp_desc);
+        control_queue.free_desc(cmd_desc);
         
         // crate::early_println!("[Virtio GPU] Command completed successfully");
         
