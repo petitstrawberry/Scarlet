@@ -1,0 +1,929 @@
+use alloc::{string::{String, ToString}, sync::Arc, vec::Vec, vec};
+use crate::{
+    abi::{linux::riscv64::LinuxRiscv64Abi}, 
+    arch::Trapframe, 
+    device::manager::DeviceManager, 
+    executor::TransparentExecutor, 
+    fs::{
+        DeviceFileInfo, DirectoryEntry, FileType, SeekFrom
+    }, 
+    library::std::string::{
+        cstring_to_string, 
+        parse_c_string_from_userspace, 
+        parse_string_array_from_userspace, 
+    }, 
+    object::capability::StreamError, 
+    sched::scheduler::get_scheduler, 
+    task::mytask, 
+};
+
+/// Linux stat structure for RISC-V 64-bit
+/// This structure matches the Linux kernel's definition for newstat on RISC-V 64-bit
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct LinuxStat {
+    pub st_dev: u64,        // Device ID of device containing file
+    pub st_ino: u64,        // Inode number
+    pub st_mode: u32,       // File type and mode
+    pub st_nlink: u32,      // Number of hard links
+    pub st_uid: u32,        // User ID of owner
+    pub st_gid: u32,        // Group ID of owner
+    pub st_rdev: u64,       // Device ID (if special file)
+    pub st_size: i64,       // Total size, in bytes
+    pub st_blksize: i32,    // Block size for filesystem I/O
+    pub st_blocks: i64,     // Number of 512B blocks allocated
+    pub st_atime: i64,      // Time of last access (seconds)
+    pub st_atime_nsec: i64, // Time of last access (nanoseconds)
+    pub st_mtime: i64,      // Time of last modification (seconds)
+    pub st_mtime_nsec: i64, // Time of last modification (nanoseconds)  
+    pub st_ctime: i64,      // Time of last status change (seconds)
+    pub st_ctime_nsec: i64, // Time of last status change (nanoseconds)
+    pub __unused: [i32; 2], // Reserved for future use
+}
+
+// Linux file type constants for st_mode field
+pub const S_IFMT: u32 = 0o170000;   // Bit mask for the file type bit field
+pub const S_IFSOCK: u32 = 0o140000; // Socket
+pub const S_IFLNK: u32 = 0o120000;  // Symbolic link
+pub const S_IFREG: u32 = 0o100000;  // Regular file
+pub const S_IFBLK: u32 = 0o060000;  // Block device
+pub const S_IFDIR: u32 = 0o040000;  // Directory
+pub const S_IFCHR: u32 = 0o020000;  // Character device
+pub const S_IFIFO: u32 = 0o010000;  // FIFO
+
+// Linux permission constants
+pub const S_IRWXU: u32 = 0o0700;    // User (file owner) has read, write, and execute permission
+pub const S_IRUSR: u32 = 0o0400;    // User has read permission
+pub const S_IWUSR: u32 = 0o0200;    // User has write permission
+pub const S_IXUSR: u32 = 0o0100;    // User has execute permission
+pub const S_IRWXG: u32 = 0o0070;    // Group has read, write, and execute permission
+pub const S_IRGRP: u32 = 0o0040;    // Group has read permission
+pub const S_IWGRP: u32 = 0o0020;    // Group has write permission
+pub const S_IXGRP: u32 = 0o0010;    // Group has execute permission
+pub const S_IRWXO: u32 = 0o0007;    // Others have read, write, and execute permission
+pub const S_IROTH: u32 = 0o0004;    // Others have read permission
+pub const S_IWOTH: u32 = 0o0002;    // Others have write permission
+pub const S_IXOTH: u32 = 0o0001;    // Others have execute permission
+
+impl LinuxStat {
+    /// Create a new LinuxStat from Scarlet FileMetadata
+    pub fn from_metadata(metadata: &crate::fs::FileMetadata) -> Self {
+        let st_mode = match metadata.file_type {
+            FileType::RegularFile => S_IFREG,
+            FileType::Directory => S_IFDIR,
+            FileType::CharDevice(_) => S_IFCHR,
+            FileType::BlockDevice(_) => S_IFBLK,
+            FileType::SymbolicLink(_) => S_IFLNK,
+            FileType::Pipe => S_IFIFO,
+            FileType::Socket => S_IFSOCK,
+            FileType::Unknown => S_IFREG, // Default to regular file
+        } | if metadata.permissions.read { S_IRUSR | S_IRGRP | S_IXGRP | S_IROTH } else { 0 }
+          | if metadata.permissions.write { S_IWUSR } else { 0 }
+          | if metadata.permissions.execute { S_IXUSR | S_IXGRP | S_IXOTH } else { 0 };
+
+        Self {
+            st_dev: 0, // Virtual device ID
+            st_ino: metadata.file_id,
+            st_mode,
+            st_nlink: metadata.link_count as u32,
+            st_uid: 0, // Root user
+            st_gid: 0, // Root group
+            st_rdev: 0, // Not a special file by default
+            st_size: metadata.size as i64,
+            st_blksize: 4096, // Standard block size
+            st_blocks: ((metadata.size + 511) / 512) as i64, // Number of 512-byte blocks
+            st_atime: metadata.accessed_time as i64,
+            st_atime_nsec: 0,
+            st_mtime: metadata.modified_time as i64,
+            st_mtime_nsec: 0,
+            st_ctime: metadata.created_time as i64,
+            st_ctime_nsec: 0,
+            __unused: [0; 2],
+        }
+    }
+}
+
+// /// Convert Scarlet DirectoryEntry to Linux Dirent and write to buffer
+// fn read_directory_as_Linux_dirent(buf_ptr: *mut u8, count: usize, buffer_data: &[u8]) -> usize {
+//     if count < Dirent::DIRENT_SIZE {
+//         return 0; // Buffer too small for even one entry
+//     }
+
+//     // Parse DirectoryEntry from buffer data
+//     if let Some(dir_entry) = DirectoryEntry::parse(buffer_data) {
+//         // Convert Scarlet DirectoryEntry to Linux Dirent
+//         let inum = (dir_entry.file_id & 0xFFFF) as u16; // Use lower 16 bits as inode number
+//         let name = dir_entry.name_str().unwrap_or("");
+        
+//         let Linux_dirent = Dirent::new(inum, name);
+        
+//         // Check if we have enough space
+//         if count >= Dirent::DIRENT_SIZE {
+//             // Copy the dirent to the buffer
+//             let dirent_bytes = Linux_dirent.as_bytes();
+//             unsafe {
+//                 core::ptr::copy_nonoverlapping(
+//                     dirent_bytes.as_ptr(),
+//                     buf_ptr,
+//                     Dirent::DIRENT_SIZE
+//                 );
+//             }
+//             return Dirent::DIRENT_SIZE;
+//         }
+//     }
+    
+//     0 // No data or error
+// }
+
+const MAX_PATH_LENGTH: usize = 128;
+const MAX_ARG_COUNT: usize = 64;
+
+pub fn sys_exec(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    
+    // Increment PC to avoid infinite loop if execve fails
+    trapframe.increment_pc_next(task);
+    
+    // Get arguments from trapframe
+    let path_ptr = trapframe.get_arg(0);
+    let argv_ptr = trapframe.get_arg(1);
+    
+    // Parse path
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => match to_absolute_path_v2(&task, &path) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX, // Path error
+        },
+        Err(_) => return usize::MAX, // Path parsing error
+    };
+    
+    // Parse argv and envp
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        Ok(args) => args,
+        Err(_) => return usize::MAX, // argv parsing error
+    };
+    
+    // Convert Vec<String> to Vec<&str> for TransparentExecutor
+    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    
+    // Use TransparentExecutor for cross-ABI execution
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &[], task, trapframe, false) {
+        Ok(_) => {
+            // execve normally should not return on success - the process is replaced
+            // However, if ABI module sets trapframe return value and returns here,
+            // we should respect that value instead of hardcoding 0
+            trapframe.get_return_value()
+        },
+        Err(_) => {
+            // Execution failed - return error code
+            // The trap handler will automatically set trapframe return value from our return
+            usize::MAX // Error return value
+        }
+    }
+}
+
+#[repr(i32)]
+enum OpenMode {
+    ReadOnly  = 0x000,
+    WriteOnly = 0x001,
+    ReadWrite = 0x002,
+    Create    = 0x200,
+    Truncate  = 0x400,
+}
+
+pub fn sys_open(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let mode = trapframe.get_arg(1) as i32;
+
+    // Increment PC to avoid infinite loop if open fails
+    trapframe.increment_pc_next(task);
+
+    // Convert path bytes to string
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => match to_absolute_path_v2(&task, &path) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    // Use task's VFS manager
+    let vfs = task.vfs.as_ref().unwrap();
+
+    // Try to open the file
+    let file = vfs.open(&path_str, 0);
+
+    match file {
+        Ok(kernel_obj) => {
+            // Register the file with the task using HandleTable
+            let handle = task.handle_table.insert(kernel_obj);
+            match handle {
+                Ok(handle) => {
+                    match abi.allocate_fd(handle as u32) {
+                        Ok(fd) => fd,
+                        Err(_) => usize::MAX, // Too many open files
+                    }
+                },
+                Err(_) => usize::MAX, // Handle table full
+            }
+        }
+        Err(_) =>{
+            // If the file does not exist and we are trying to create it
+            if mode & OpenMode::Create as i32 != 0 {
+                let res = vfs.create_file(&path_str, FileType::RegularFile);
+                if res.is_err() {
+                    return usize::MAX; // File creation error
+                }
+                match vfs.open(&path_str, 0) {
+                    Ok(kernel_obj) => {
+                        // Register the file with the task using HandleTable
+                        let handle = task.handle_table.insert(kernel_obj);
+                        match handle {
+                            Ok(handle) => {
+                                match abi.allocate_fd(handle as u32) {
+                                    Ok(fd) => fd,
+                                    Err(_) => usize::MAX, // Too many open files
+                                }
+                            },
+                            Err(_) => usize::MAX, // Handle table full
+                        }
+                    }
+                    Err(_) => usize::MAX, // File open error
+                }
+            } else {
+                return usize::MAX; // VFS not initialized
+            }
+        }
+    }
+}
+
+pub fn sys_dup(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    trapframe.increment_pc_next(task);
+
+    // Get handle from Linux fd
+    if let Some(old_handle) = abi.get_handle(fd) {
+        if let Some(old_kernel_obj) = task.handle_table.get(old_handle) {
+            let kernel_obj = old_kernel_obj.clone();
+            let handle = task.handle_table.insert(kernel_obj);
+            match handle {
+                Ok(new_handle) => {
+                    match abi.allocate_fd(new_handle as u32) {
+                        Ok(fd) => fd,
+                        Err(_) => usize::MAX, // Too many open files
+                    }
+                },
+                Err(_) => usize::MAX, // Handle table full
+            }
+        } else {
+            usize::MAX // Handle not found in handle table
+        }
+    } else {
+        usize::MAX // Invalid file descriptor
+    }
+}
+
+pub fn sys_close(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    trapframe.increment_pc_next(task);
+    
+    // Get handle from Linux fd and remove mapping
+    if let Some(handle) = abi.remove_fd(fd) {
+        if task.handle_table.remove(handle).is_some() {
+            0 // Success
+        } else {
+            usize::MAX // Handle not found in handle table
+        }
+    } else {
+        usize::MAX // Invalid file descriptor
+    }
+}
+
+pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
+    let count = trapframe.get_arg(2) as usize;
+
+    // Get handle from Linux fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => {
+            trapframe.increment_pc_next(task);
+            return usize::MAX; // Invalid file descriptor
+        }
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => {
+            trapframe.increment_pc_next(task);
+            return usize::MAX; // Invalid file descriptor
+        }
+    };
+
+    // Check if this is a directory by getting file metadata
+    let is_directory = if let Some(file_obj) = kernel_obj.as_file() {
+        if let Ok(metadata) = file_obj.metadata() {
+            matches!(metadata.file_type, FileType::Directory)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let stream = match kernel_obj.as_stream() {
+        Some(stream) => stream,
+        None => {
+            trapframe.increment_pc_next(task);
+            return usize::MAX; // Not a stream object
+        }
+    };
+
+    if is_directory {
+        // // For directories, we need a larger buffer to read DirectoryEntry, then convert to Dirent
+        // let directory_entry_size = core::mem::size_of::<DirectoryEntry>();
+        // let mut temp_buffer = vec![0u8; directory_entry_size];
+        
+        // match stream.read(&mut temp_buffer) {
+        //     Ok(n) => {
+        //         trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+        //         if n > 0 && n >= directory_entry_size {
+        //             // Convert DirectoryEntry to Linux Dirent
+        //             let converted_bytes = read_directory_as_Linux_dirent(buf_ptr, count, &temp_buffer[..n]);
+        //             if converted_bytes > 0 {
+        //                 return converted_bytes; // Return converted Linux dirent size
+        //             }
+        //         }
+        //         0 // EOF or no valid directory entry
+        //     },
+        //     Err(e) => {
+        //         match e {
+        //             StreamError::EndOfStream => {
+        //                 trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+        //                 0 // EOF
+        //             },
+        //             StreamError::WouldBlock => {
+        //                 // If the stream would block, we need to set the trapframe's EPC
+        //                 // trapframe.epc = epc;
+        //                 // task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
+        //                 get_scheduler().schedule(trapframe); // Yield to the scheduler
+        //             },
+        //             _ => {
+        //                 trapframe.increment_pc_next(task);
+        //                 usize::MAX // Other errors
+        //             }
+        //         }
+        //     }
+        // }
+        trapframe.increment_pc_next(task);
+        return usize::MAX; // Directory reading not implemented yet
+    } else {
+        // For regular files, use the user-provided buffer directly
+        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+        
+        match stream.read(&mut buffer) {
+            Ok(n) => {
+                trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                n
+            }, // Return original read size for regular files
+            Err(e) => {
+                match e {
+                    StreamError::EndOfStream => {
+                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                        0 // EOF
+                    },
+                    StreamError::WouldBlock => get_scheduler().schedule(trapframe), // Yield to the scheduler
+                    _ => {
+                        // Other errors, return -1
+                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
+                        usize::MAX
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let count = trapframe.get_arg(2) as usize;
+
+    // Increment PC to avoid infinite loop if write fails
+    trapframe.increment_pc_next(task);
+
+    // Get handle from Linux fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let stream = match kernel_obj.as_stream() {
+        Some(stream) => stream,
+        None => return usize::MAX, // Not a stream object
+    };
+
+    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
+
+    match stream.write(buffer) {
+        Ok(n) => n,
+        Err(_) => usize::MAX, // Write error
+    }
+}
+
+/// Linux writev system call implementation
+/// 
+/// This system call writes data from multiple buffers (I/O vectors) to a file descriptor.
+/// It provides scatter-gather I/O functionality, allowing efficient writes from multiple
+/// non-contiguous memory regions in a single system call.
+/// 
+/// # Arguments
+/// - fd: File descriptor
+/// - iovec: Array of iovec structures describing the buffers
+/// - iovcnt: Number of iovec structures in the array
+/// 
+/// # Returns
+/// - Number of bytes written on success
+/// - usize::MAX on error (-1 in Linux)
+pub fn sys_writev(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let iovec_ptr = trapframe.get_arg(1);
+    let iovcnt = trapframe.get_arg(2) as usize;
+
+    // Increment PC to avoid infinite loop if writev fails
+    trapframe.increment_pc_next(task);
+
+    // Validate parameters
+    if iovcnt == 0 {
+        return 0; // Nothing to write
+    }
+
+    // Linux typically limits iovcnt to prevent resource exhaustion
+    const IOV_MAX: usize = 1024;
+    if iovcnt > IOV_MAX {
+        return usize::MAX; // Too many vectors
+    }
+
+    // Get handle from Linux fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let stream = match kernel_obj.as_stream() {
+        Some(stream) => stream,
+        None => return usize::MAX, // Not a stream object
+    };
+
+    // Translate and validate iovec array pointer
+    let iovec_vaddr = match task.vm_manager.translate_vaddr(iovec_ptr) {
+        Some(addr) => addr as *const IoVec,
+        None => return usize::MAX, // Invalid address
+    };
+
+    if iovec_vaddr.is_null() {
+        return usize::MAX; // NULL pointer
+    }
+
+    // Read iovec structures from user space
+    let iovecs = unsafe { core::slice::from_raw_parts(iovec_vaddr, iovcnt) };
+
+    let mut total_written = 0usize;
+
+    // Process each iovec
+    for iovec in iovecs {
+        if iovec.iov_len == 0 {
+            continue; // Skip empty buffers
+        }
+
+        // Translate buffer address
+        let buf_vaddr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+            Some(addr) => addr as *const u8,
+            None => return usize::MAX, // Invalid buffer address
+        };
+
+        if buf_vaddr.is_null() {
+            return usize::MAX; // NULL buffer pointer
+        }
+
+        // Create a slice from the user buffer
+        let buffer = unsafe { core::slice::from_raw_parts(buf_vaddr, iovec.iov_len) };
+
+        // Write data from this buffer
+        match stream.write(buffer) {
+            Ok(n) => {
+                total_written = total_written.saturating_add(n);
+                
+                // If partial write occurred, stop processing remaining vectors
+                // This matches Linux behavior for writev
+                if n < iovec.iov_len {
+                    break;
+                }
+            }
+            Err(_) => {
+                // If no bytes were written at all, return error
+                // If some bytes were written, return the count
+                if total_written == 0 {
+                    return usize::MAX;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    total_written
+}
+
+pub fn sys_lseek(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let offset = trapframe.get_arg(1) as i64;
+    let whence = trapframe.get_arg(2) as i32;
+
+    // Increment PC to avoid infinite loop if lseek fails
+    trapframe.increment_pc_next(task);
+
+    // Get handle from Linux fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => return usize::MAX, // Not a file object
+    };
+
+    let whence = match whence {
+        0 => SeekFrom::Start(offset as u64),
+        1 => SeekFrom::Current(offset),
+        2 => SeekFrom::End(offset),
+        _ => return usize::MAX, // Invalid whence
+    };
+
+    match file.seek(whence) {
+        Ok(pos) => pos as usize,
+        Err(_) => usize::MAX, // Lseek error
+    }
+}
+
+// // Create device file
+// pub fn sys_mknod(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+//     let task = mytask().unwrap();
+//     trapframe.increment_pc_next(task);
+//     let name_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+//     let name = get_path_str_v2(name_ptr).unwrap();
+//     let path = to_absolute_path_v2(&task, &name).unwrap();
+
+//     let major = trapframe.get_arg(1) as u32;
+//     let minor = trapframe.get_arg(2) as u32;
+
+//     match (major, minor) {
+//         (1, 0) => {
+//             // Create a console device
+//             let console_dev = Some(DeviceManager::get_mut_manager().register_device(Arc::new(
+//                 crate::abi::Linux::drivers::console::ConsoleDevice::new(0, "console")
+//             )));
+        
+//             let vfs = task.vfs.as_mut().unwrap();
+//             let _res = vfs.create_file(&path, FileType::CharDevice(
+//                 DeviceFileInfo {
+//                     device_id: console_dev.unwrap(),
+//                     device_type: crate::device::DeviceType::Char,
+//                 }
+//             ));
+//             // crate::println!("Created console device at {}", path);
+//         },
+//         _ => {},
+//     }
+//     0
+// }
+
+
+// pub fn sys_fstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+//     let fd = trapframe.get_arg(0) as usize;
+
+//     let task = mytask()
+//         .expect("sys_fstat: No current task found");
+//     trapframe.increment_pc_next(task); // Increment the program counter
+
+//     let stat_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1) as usize)
+//         .expect("sys_fstat: Failed to translate stat pointer") as *mut Stat;
+    
+//     // Get handle from Linux fd
+//     let handle = match abi.get_handle(fd) {
+//         Some(h) => h,
+//         None => return usize::MAX, // Invalid file descriptor
+//     };
+    
+//     let kernel_obj = match task.handle_table.get(handle) {
+//         Some(obj) => obj,
+//         None => return usize::MAX, // Return -1 on error
+//     };
+
+//     let file = match kernel_obj.as_file() {
+//         Some(file) => file,
+//         None => return usize::MAX, // Not a file object
+//     };
+
+//     let metadata = file.metadata()
+//         .expect("sys_fstat: Failed to get file metadata");
+
+//     if stat_ptr.is_null() {
+//         return usize::MAX; // Return -1 if stat pointer is null
+//     }
+    
+//     let stat = unsafe { &mut *stat_ptr };
+
+//     *stat = Stat {
+//         dev: 0,
+//         ino: metadata.file_id as u32,
+//         file_type: match metadata.file_type {
+//             FileType::Directory => 1, // T_DIR
+//             FileType::RegularFile => 2,      // T_FILE
+//             FileType::CharDevice(_) => 3, // T_DEVICE
+//             FileType::BlockDevice(_) => 3, // T_DEVICE
+//             _ => 0, // Unknown type
+//         },
+//         nlink: 1,
+//         size: metadata.size as u64,
+//     };
+
+//     0
+// }
+
+pub fn sys_newfstatat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let stat_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(2)).unwrap() as *mut u8;
+    let flags = trapframe.get_arg(3) as i32;
+
+    // Increment PC to avoid infinite loop if fstatat fails
+    trapframe.increment_pc_next(task);
+
+    // Handle AT_FDCWD (current working directory)
+    const AT_FDCWD: i32 = -100;
+    const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+    
+    // Parse path from user space
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => {
+            // Handle absolute vs relative paths
+            if path.starts_with('/') {
+                path // Absolute path
+            } else if dirfd == AT_FDCWD {
+                // Relative to current working directory
+                match to_absolute_path_v2(&task, &path) {
+                    Ok(abs_path) => abs_path,
+                    Err(_) => return usize::MAX, // Path error
+                }
+            } else {
+                // Relative to directory file descriptor (not implemented yet)
+                // For now, just treat as relative to current directory
+                match to_absolute_path_v2(&task, &path) {
+                    Ok(abs_path) => abs_path,
+                    Err(_) => return usize::MAX, // Path error
+                }
+            }
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    let vfs = task.vfs.as_ref().unwrap();
+    
+    // Get file metadata
+    // Note: flags parameter (AT_SYMLINK_NOFOLLOW) is currently ignored
+    // In a full implementation, this would control whether to follow symbolic links
+    let _follow_symlinks = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+    
+    match vfs.metadata(&path_str) {
+        Ok(metadata) => {
+            if stat_ptr.is_null() {
+                return usize::MAX; // Return -1 if stat pointer is null
+            }
+            
+            let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
+            *stat = LinuxStat::from_metadata(&metadata);
+            0 // Success
+        },
+        Err(_) => usize::MAX, // Error retrieving metadata
+    }
+}
+
+pub fn sys_mkdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let path = match get_path_str_v2(path_ptr) {
+        Ok(p) => to_absolute_path_v2(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    // Try to create the directory
+    let vfs = task.vfs.as_mut().unwrap();
+    match vfs.create_dir(&path) {
+        Ok(_) => 0, // Success
+        Err(_) => usize::MAX, // Error
+    }
+}
+
+pub fn sys_unlink(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    // Try to remove the file or directory
+    let vfs = task.vfs.as_mut().unwrap();
+    match vfs.remove(&path) {
+        Ok(_) => 0, // Success
+        Err(_) => usize::MAX, // Error
+    }
+}
+
+pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    
+    let src_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let dst_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+
+    let src_path = match cstring_to_string(src_path_ptr, MAX_PATH_LENGTH) {
+        Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    let dst_path = match cstring_to_string(dst_path_ptr, MAX_PATH_LENGTH) {
+        Ok((p, _)) => to_absolute_path_v2(&task, &p).unwrap(),
+        Err(_) => return usize::MAX, // Invalid path
+    };
+
+    let vfs = task.vfs.as_ref().unwrap();
+    match vfs.create_hardlink(&src_path, &dst_path) {
+        Ok(_) => 0, // Success
+        Err(err) => {
+            use crate::fs::FileSystemErrorKind;
+            
+            // Map VFS errors to appropriate errno values for Linux
+            match err.kind {
+                FileSystemErrorKind::NotFound => {
+                    // Source file doesn't exist
+                    2 // ENOENT
+                },
+                FileSystemErrorKind::FileExists => {
+                    // Destination already exists
+                    17 // EEXIST
+                },
+                FileSystemErrorKind::CrossDevice => {
+                    // Hard links across devices not supported
+                    18 // EXDEV
+                },
+                FileSystemErrorKind::InvalidOperation => {
+                    // Operation not supported (e.g., directory hardlink)
+                    1 // EPERM
+                },
+                FileSystemErrorKind::PermissionDenied => {
+                    13 // EACCES
+                },
+                _ => {
+                    // Other errors
+                    5 // EIO
+                }
+            }
+        }
+    }
+}
+
+/// VFS v2 helper function for path absolutization
+/// TODO: Move this to a shared helper module when VFS v2 provides public API
+fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
+    if path.starts_with('/') {
+        Ok(path.to_string())
+    } else {
+        let cwd = task.cwd.clone().ok_or(())?;
+        let mut absolute_path = cwd;
+        if !absolute_path.ends_with('/') {
+            absolute_path.push('/');
+        }
+        absolute_path.push_str(path);
+        // Simple normalization (removes "//", ".", etc.)
+        let mut components = Vec::new();
+        for comp in absolute_path.split('/') {
+            match comp {
+                "" | "." => {},
+                ".." => { components.pop(); },
+                _ => components.push(comp),
+            }
+        }
+        Ok("/".to_string() + &components.join("/"))
+    }
+}
+
+/// Helper function to replace the missing get_path_str function
+/// TODO: This should be moved to a shared helper when VFS v2 provides public API
+fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
+    const MAX_PATH_LENGTH: usize = 128;
+    cstring_to_string(ptr, MAX_PATH_LENGTH).map(|(s, _)| s).map_err(|_| ())
+}
+
+/// Linux ioctl system call implementation
+/// 
+/// This system call performs device-specific control operations on file descriptors,
+/// similar to the POSIX ioctl system call. It acts as a bridge between Linux ABI
+/// and Scarlet's native HandleControl functionality.
+/// 
+/// # Arguments
+/// - fd: File descriptor
+/// - request: Control operation command
+/// - arg: Argument for the control operation (often a pointer)
+/// 
+/// # Returns
+/// - 0 or positive value on success
+/// - usize::MAX on error (-1 in Linux)
+pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let request = trapframe.get_arg(1) as u32;
+    let arg = trapframe.get_arg(2);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Get handle from Linux fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    // Get the kernel object from the handle table
+    let kernel_object = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid handle
+    };
+
+    // Perform the control operation using the ControlOps capability
+    let result = match kernel_object.as_control() {
+        Some(control_ops) => {
+
+            control_ops.control(request, arg)
+        }
+        None => {
+            // Fallback: if object doesn't support control operations,
+            // return ENOTTY (inappropriate ioctl for device)
+            Err("Inappropriate ioctl for device") 
+        }
+    };
+
+    // Convert result to Linux ioctl semantics
+    match result {
+        Ok(value) => {
+            // Linux ioctl returns non-negative values on success
+            if value >= 0 {
+                value as usize
+            } else {
+                usize::MAX // Negative values are treated as errors
+            }
+        }
+        Err(_) => usize::MAX, // Return -1 on error
+    }
+}
+
+/// Linux iovec structure for vectored I/O operations
+/// This structure matches the Linux kernel's definition for struct iovec
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct IoVec {
+    /// Base address of the buffer
+    pub iov_base: *mut u8,
+    /// Length of the buffer
+    pub iov_len: usize,
+}

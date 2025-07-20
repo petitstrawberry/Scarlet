@@ -1,20 +1,20 @@
 #[macro_use]
 mod macros;
 mod proc;
-mod file;
-pub mod fs;
-mod pipe;
+mod mm;
+mod fs;
+// mod file;
+// pub mod fs;
+// mod pipe;
 
 // pub mod drivers;
 
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
-use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
-use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
+// use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
+// use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
-    abi::{
-        AbiModule
-    }, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    abi::AbiModule, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -160,7 +160,7 @@ impl AbiModule for LinuxRiscv64Abi {
                 match file_obj.read(&mut magic_buffer) {
                     Ok(bytes_read) if bytes_read >= 4 => {
                         if magic_buffer == [0x7F, b'E', b'L', b'F'] {
-                            25 // Basic ELF format compatibility (slightly lower than Scarlet)
+                            35 // Basic ELF format compatibility (slightly lower than Scarlet)
                         } else {
                             return None; // Not an ELF file, cannot execute
                         }
@@ -173,9 +173,23 @@ impl AbiModule for LinuxRiscv64Abi {
         
         let mut confidence = magic_score;
         
-        // Stage 2: Entry point validation (placeholder - could check ELF header)
-        // TODO: Add ELF header parsing to validate entry point for Linux compatibility
-        confidence += 10;
+        // Stage 2: ELF header checks
+        if let Some(file_obj) = file_object.as_file() {
+            // Check ELF header for System-V ABI (Linux uses System-V ABI)
+            let mut osabi_buffer = [0u8; 1];
+            file_obj.seek(SeekFrom::Start(7)).ok(); // OSABI is at
+            match file_obj.read(&mut osabi_buffer) {
+                Ok(bytes_read) if bytes_read == 1 => {
+                    if osabi_buffer[0] == 0 { // System-V ABI
+                        confidence += 50; // Strong indicator for System-V ABI
+                    }
+                }
+                _ => return None // Read failed, cannot determine
+            }
+        } else {
+            return None; // Not a file object
+        }
+
         // Stage 3: File path hints - Linux specific patterns
         if file_path.contains("linux") || file_path.ends_with(".linux") {
             confidence += 20; // Strong Linux indicator
@@ -412,9 +426,22 @@ impl AbiModule for LinuxRiscv64Abi {
 }
 
 syscall_table! {
-    Invalid = 0 => |_abi: &mut crate::abi::Linux::riscv64::LinuxRiscv64Abi, _trapframe: &mut crate::arch::Trapframe| {
+    Invalid = 0 => |_abi: &mut crate::abi::linux::riscv64::LinuxRiscv64Abi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
+    Ioctl = 29 => fs::sys_ioctl,
+    Write = 64 => fs::sys_write,
+    Writev = 66 => fs::sys_writev,
+    NewFstAtAt = 79 => fs::sys_newfstatat,
+    SetTidAddress = 96 => proc::sys_set_tid_address,
+    Exit = 93 => proc::sys_exit,
+    ExitGroup = 94 => proc::sys_exit_group,
+    SetRobustList = 99 => proc::sys_set_robust_list,
+    Uname = 160 => proc::sys_uname,
+    GetUid = 174 => proc::sys_getuid,
+    Brk = 214 => proc::sys_brk,
+    Mmap = 222 => mm::sys_mmap,
+    Mprotect = 226 => mm::sys_mprotect,
 }
 
 fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
