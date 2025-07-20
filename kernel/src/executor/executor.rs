@@ -222,7 +222,7 @@ impl TransparentExecutor {
         };
         
         // Step 2: Get ABI module instance
-        let abi = crate::abi::AbiRegistry::instantiate(&abi_name)
+        let mut abi = crate::abi::AbiRegistry::instantiate(&abi_name)
             .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
 
         // Step 3: Check if ABI switch or forced rebuild is required
@@ -232,7 +232,7 @@ impl TransparentExecutor {
         
         if rebuild_required {
             // Step 4: Setup complete task environment for new ABI (includes VFS, CWD)
-            Self::setup_task_environment(task, &abi)?;
+            Self::setup_task_environment(task, &mut abi)?;
         }
         
         // Step 5: Execute binary through ABI module (pass envp directly)
@@ -304,7 +304,7 @@ impl TransparentExecutor {
     /// prepared by the user/administrator beforehand as part of system setup.
     fn setup_task_environment(
         task: &mut Task, 
-        abi: &Box<dyn crate::abi::AbiModule>
+        abi: &mut Box<dyn crate::abi::AbiModule>
     ) -> ExecutorResult<()> {
         // TransparentExecutor provides clean VFS for ABI environment
         let clean_vfs = Self::create_clean_vfs()
