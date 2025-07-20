@@ -87,3 +87,21 @@ pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     crate::println!("sys_mmap: Failed to find suitable memory region");
     usize::MAX // -ENOMEM
 }
+
+pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let addr = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+    let prot = trapframe.get_arg(2);
+
+    trapframe.increment_pc_next(task);
+    // crate::println!("sys_mprotect: addr={:#x}, length={}, prot={:#x}", addr, length, prot);
+
+    let vaddr = task.vm_manager.translate_vaddr(addr as usize);
+    if vaddr.is_none() {
+        crate::println!("sys_mprotect: Invalid address {:#x}", addr);
+        return usize::MAX; // -EINVAL
+    }
+
+    0 // Not implemented yet, return success for now
+}
