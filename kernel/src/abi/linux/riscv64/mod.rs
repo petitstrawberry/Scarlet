@@ -196,10 +196,10 @@ impl AbiModule for LinuxRiscv64Abi {
     fn execute_binary(
         &self,
         file_object: &crate::object::KernelObject,
-        argv: &[&str], 
-        _envp: &[&str],
+        argv: &[&str],
+        envp: &[&str],
         task: &mut crate::task::Task,
-        trapframe: &mut crate::arch::Trapframe
+        trapframe: &mut crate::arch::Trapframe,
     ) -> Result<(), &'static str> {
         match file_object.as_file() {
             Some(file_obj) => {
@@ -208,7 +208,7 @@ impl AbiModule for LinuxRiscv64Abi {
                 task.data_size = 0;
                 task.stack_size = 0;
                 task.brk = None;
-                
+
                 // Load ELF using Linux-compatible method
                 match load_elf_into_task(file_obj, task) {
                     Ok(entry_point) => {
@@ -218,64 +218,99 @@ impl AbiModule for LinuxRiscv64Abi {
                         let idx = arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
                         let root_page_table = arch::vm::get_pagetable(idx).unwrap();
                         root_page_table.unmap_all();
-                        // Setup the trapframe
+                        // Setup the trampoline
                         setup_trampoline(&mut task.vm_manager);
                         // Setup the stack
-                        let stack_top = setup_user_stack(task);
-                        let mut stack_pointer = stack_top as usize;
+                        let (_, stack_top) = setup_user_stack(task);
+                        let mut sp = stack_top as usize;
 
-                        let mut arg_ptrs: Vec<u64> = Vec::new();
-                        for arg in argv.iter() {
-                            let arg_bytes = arg.as_bytes();
-                            stack_pointer -= arg_bytes.len() + 1; // +1 for null terminator
-                            stack_pointer -= stack_pointer % 16; // Align to 16 bytes
+                        // --- 1. Argument strings ---
+                        let mut arg_vaddrs: Vec<u64> = Vec::new();
+                        for &arg in argv.iter() {
+                            let len = arg.len() + 1; // +1 for null terminator
+                            sp -= len;
 
+                            let vaddr = sp;
                             unsafe {
-                                let translated_stack_pointer = task.vm_manager
-                                    .translate_vaddr(stack_pointer)
-                                    .unwrap();
-                                let stack_slice = core::slice::from_raw_parts_mut(translated_stack_pointer as *mut u8, arg_bytes.len() + 1);
-                                stack_slice[..arg_bytes.len()].copy_from_slice(arg_bytes);
-                                stack_slice[arg_bytes.len()] = 0; // Null terminator
+                                let paddr = task.vm_manager.translate_vaddr(vaddr).unwrap();
+                                let slice = core::slice::from_raw_parts_mut(paddr as *mut u8, len);
+                                slice[..len - 1].copy_from_slice(arg.as_bytes());
+                                slice[len - 1] = 0; // Null terminator
                             }
-
-                            arg_ptrs.push(stack_pointer as u64); // Store the address of the argument
+                            arg_vaddrs.push(vaddr as u64);
                         }
 
-                        let argc = arg_ptrs.len();
+                        let mut env_vaddrs: Vec<u64> = Vec::new();
+                        for &env in envp.iter() {
+                            let len = env.len() + 1;
+                            sp -= len;
+                            let vaddr = sp;
+                            unsafe {
+                                let paddr = task.vm_manager.translate_vaddr(vaddr).unwrap();
+                                let slice = core::slice::from_raw_parts_mut(paddr as *mut u8, len);
+                                slice[..len - 1].copy_from_slice(env.as_bytes());
+                                slice[len - 1] = 0; // Null terminator
+                            }
+                            env_vaddrs.push(vaddr as u64);
+                        }
 
-                        stack_pointer -= argc * 8;
-                        stack_pointer -= stack_pointer % 16; // Align to 16 bytes
+                        // --- 2. Stack alignment ---
+                        sp &= !0xF;
 
-                        // Push the addresses of the arguments onto the stack
+                        // --- 3. Auxiliary vector (auxv) ---
+                        // At minimum, terminate with AT_NULL
+                        sp -= 16; // auxv entry is 16 bytes (u64 type, u64 val)
                         unsafe {
-                            let translated_stack_pointer = task.vm_manager
-                                .translate_vaddr(stack_pointer)
-                                .unwrap() as *mut u64;
-                            for (i, &arg_ptr) in arg_ptrs.iter().enumerate() {
-                                *(translated_stack_pointer.add(i)) = arg_ptr;
+                            let paddr = task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64;
+                            *paddr = 0; // AT_NULL
+                            *(paddr.add(1)) = 0;
+                        }
+
+                        // --- 4. envp pointer array ---
+                        sp -= 8; // NULL terminator for envp
+                        unsafe {
+                            *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = 0;
+                        }
+                        for &env_vaddr in env_vaddrs.iter().rev() {
+                            sp -= 8;
+                            unsafe {
+                                *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = env_vaddr;
                             }
                         }
 
-                        // Set the new entry point for the task
+                        // --- 5. argv pointer array ---
+                        sp -= 8; // NULL terminator for argv
+                        unsafe {
+                            *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = 0;
+                        }
+                        for &arg_vaddr in arg_vaddrs.iter().rev() {
+                            sp -= 8;
+                            unsafe {
+                                *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = arg_vaddr;
+                            }
+                        }
+
+                        // --- 6. argc ---
+                        let argc = argv.len() as u64;
+                        sp -= 8;
+                        unsafe {
+                            *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = argc;
+                        }
+
                         task.set_entry_point(entry_point as usize);
-                        
-                        // Reset task's registers (except for those needed for arguments)
-                        task.vcpu.regs = Registers::new();
-                        // Set the stack pointer
-                        task.vcpu.set_sp(stack_pointer);
-                        task.vcpu.regs.reg[11] = stack_pointer as usize; // Set the return value (a0) to 0 in the new proc
-                        task.vcpu.regs.reg[10] = argc; // Set argc in a0
+                        task.vcpu.regs = Registers::new(); // Clear registers
+                        task.vcpu.set_sp(sp); // Set stack pointer
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);
                         Ok(())
-                    },
-                    Err(_e) => {
+                    }
+                    Err(e) => {
+                        crate::println!("Failed to load Linux ELF binary: {:?}", e);
                         Err("Failed to load Linux ELF binary")
                     }
                 }
-            },
+            }
             None => Err("Invalid file object type for Linux binary execution"),
         }
     }
@@ -365,8 +400,13 @@ impl AbiModule for LinuxRiscv64Abi {
         }
     }
 
-    fn initialize_from_existing_handles(&self, task: &mut crate::task::Task) -> Result<(), &'static str> {
-        task.handle_table.close_all();
+    fn initialize_from_existing_handles(&mut self, task: &mut crate::task::Task) -> Result<(), &'static str> {
+        // task.handle_table.close_all();
+        self.init_std_fds(
+            0, // stdin handle
+            1, // stdout handle
+            2, // stderr handle
+        );
         Ok(())
     }
 }
