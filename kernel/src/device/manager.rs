@@ -301,70 +301,122 @@ impl DeviceManager {
         
         let priority_list = priorities.unwrap_or(DriverPriority::all());
         
+        // Process each priority level separately to reduce stack depth
         for &priority in priority_list {
-            early_println!("Populating devices with {} drivers from FDT...", priority.description());
-            
-            let soc = fdt.find_node("/soc");
-            if soc.is_none() {
-                early_println!("No /soc node found");
-                continue;
+            self.process_priority_level(fdt, priority);
+        }
+    }
+    
+    /// Process devices for a single priority level - reduces stack nesting
+    fn process_priority_level(&mut self, fdt: &fdt::Fdt, priority: DriverPriority) {
+        early_println!("Populating devices with {} drivers from FDT...", priority.description());
+        
+        let soc = fdt.find_node("/soc");
+        if soc.is_none() {
+            early_println!("No /soc node found");
+            return;
+        }
+
+        let soc = soc.unwrap();
+        let mut idx = 0;
+        
+        // Process each child node separately to reduce stack usage
+        for child in soc.children() {
+            self.process_single_device_node(child, priority, &mut idx);
+        }
+    }
+    
+    /// Process a single device node with minimal stack usage
+    fn process_single_device_node(&mut self, child: fdt::node::FdtNode, priority: DriverPriority, idx: &mut usize) {
+        let compatible = child.compatible();
+        if compatible.is_none() {
+            return;
+        }
+        
+        // Minimize stack usage by not collecting all compatible strings at once
+        let compatible_iter = compatible.unwrap().all();
+        
+        // Check if we have any drivers for this priority level
+        let has_drivers = {
+            let drivers = self.drivers.lock();
+            drivers.get(&priority).map_or(false, |list| !list.is_empty())
+        };
+        
+        if !has_drivers {
+            return;
+        }
+        
+        // Build resources separately to reduce stack usage
+        let resources = self.build_minimal_resources(&child);
+        
+        // Try to match with drivers
+        let compatible_vec: alloc::vec::Vec<&str> = compatible_iter.collect();
+        self.try_match_and_probe_device(child, priority, idx, compatible_vec, resources);
+    }
+    
+    /// Build device resources with minimal stack allocation
+    fn build_minimal_resources(&self, child: &fdt::node::FdtNode) -> alloc::vec::Vec<PlatformDeviceResource> {
+        let mut resources = alloc::vec::Vec::new();
+        
+        // Add memory regions
+        if let Some(regions) = child.reg() {
+            for region in regions {
+                let res = PlatformDeviceResource {
+                    res_type: PlatformDeviceResourceType::MEM,
+                    start: region.starting_address as usize,
+                    end: region.starting_address as usize + region.size.unwrap() - 1,
+                };
+                resources.push(res);
             }
+        }
 
-            let soc = soc.unwrap();
-            let mut idx = 0;
-            for child in soc.children() {
-                let compatible = child.compatible();
-                if compatible.is_none() {
-                    continue;
-                }
-                let compatible = compatible.unwrap().all().collect::<Vec<_>>();
-                
-                // Get drivers for this priority level
-                let drivers = self.drivers.lock();
-                if let Some(driver_list) = drivers.get(&priority) {
-                    for driver in driver_list.iter() {
-                        if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
-                            let mut resources = Vec::new();
-                            
-                            // Memory regions
-                            if let Some(regions) = child.reg() {
-                                for region in regions {
-                                    let res = PlatformDeviceResource {
-                                        res_type: PlatformDeviceResourceType::MEM,
-                                        start: region.starting_address as usize,
-                                        end: region.starting_address as usize + region.size.unwrap() - 1,
-                                    };
-                                    resources.push(res);
-                                }
-                            }
-
-                            // IRQs
-                            if let Some(irqs) = child.interrupts() {
-                                for irq in irqs {
-                                    let res = PlatformDeviceResource {
-                                        res_type: PlatformDeviceResourceType::IRQ,
-                                        start: irq,
-                                        end: irq,
-                                    };
-                                    resources.push(res);
-                                }
-                            }
-
-                            let device: Box<dyn DeviceInfo> = Box::new(PlatformDeviceInfo::new(
-                                child.name,
-                                idx,
-                                compatible.clone(),
-                                resources,
-                            ));
-                            if let Err(e) = driver.probe(&*device) {
-                                early_println!("Failed to probe {} device {}: {}", priority.description(), device.name(), e);
-                            } else {
-                                early_println!("Successfully probed {} device: {}", priority.description(), device.name());
-                                idx += 1;
-                            }
-                            break; // Found matching driver, move to next device
+        // Add IRQs
+        if let Some(irqs) = child.interrupts() {
+            for irq in irqs {
+                let res = PlatformDeviceResource {
+                    res_type: PlatformDeviceResourceType::IRQ,
+                    start: irq,
+                    end: irq,
+                };
+                resources.push(res);
+            }
+        }
+        
+        resources
+    }
+    
+    /// Try to match device with drivers and probe if successful
+    fn try_match_and_probe_device(&mut self, child: fdt::node::FdtNode, priority: DriverPriority, idx: &mut usize, compatible: alloc::vec::Vec<&str>, resources: alloc::vec::Vec<PlatformDeviceResource>) {
+        let drivers = self.drivers.lock();
+        if let Some(driver_list) = drivers.get(&priority) {
+            for driver in driver_list.iter() {
+                if driver.match_table().iter().any(|&c| compatible.contains(&c)) {
+                    // Convert borrowed strings to static strings (FDT data is actually static)
+                    // This is safe because FDT is loaded at boot and remains in memory
+                    let static_name: &'static str = unsafe { 
+                        core::mem::transmute(child.name) 
+                    };
+                    let static_compatible: alloc::vec::Vec<&'static str> = compatible.into_iter().map(|s| unsafe {
+                        core::mem::transmute(s)
+                    }).collect();
+                    
+                    let device = alloc::boxed::Box::new(PlatformDeviceInfo::new(
+                        static_name,
+                        *idx,
+                        static_compatible,
+                        resources,
+                    ));
+                    
+                    match driver.probe(&*device) {
+                        Ok(_) => {
+                            early_println!("Successfully probed {} device: {}", priority.description(), device.name());
+                            *idx += 1;
+                        },
+                        Err(e) => {
+                            early_println!("Failed to probe {} device {}: {}", priority.description(), device.name(), e);
                         }
                     }
+                    break; // Found matching driver, move to next device
                 }
             }
         }
