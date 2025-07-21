@@ -295,7 +295,7 @@ impl VfsManager {
     /// 
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
         // Use MountTreeV2 to resolve filesystem and relative path, then open
-        let entry = self.mount_tree.resolve_path(path)?.0;
+        let (entry, mount_point) = self.mount_tree.resolve_path(path)?;
         let node = entry.node();
         let filesystem = node.filesystem()
             .and_then(|w| w.upgrade())
@@ -307,7 +307,8 @@ impl VfsManager {
         // Wrap with VFS-layer information
         let vfs_file_obj = super::core::VfsFileObject::new(
             inner_file_obj,
-            entry.clone(),
+            entry,
+            mount_point,
             path.to_string()
         );
         
@@ -581,6 +582,16 @@ impl VfsManager {
         // Use MountTreeV2 to resolve the path with options
         let (entry, _mount_point) = self.mount_tree.resolve_path_with_options(path, options)?;
         Ok(entry)
+    }
+    
+    /// Resolve a path relative to a given base VfsEntry (for *at system calls)
+    pub fn resolve_relative_path(&self, base_entry: &Arc<VfsEntry>, base_mount: &Arc<MountPoint>, path: &str) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
+        self.mount_tree.resolve_relative_path(
+            base_entry, 
+            base_mount, 
+            path, 
+            &PathResolutionOptions::default()
+        )
     }
     
     /// Create a hard link
