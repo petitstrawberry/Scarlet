@@ -387,40 +387,34 @@ impl MountTree {
         // For relative paths, we need to resolve from the base_entry
         let components = self.parse_path(relative_path);
         let mut current_entry = base_entry.clone();
-        let current_mount = base_mount.clone();
+        let mut current_mount = base_mount.clone();
         
         for component in components.iter() {
             if component == ".." {
-                // Handle parent directory traversal - simplified for now
-                return Err(crate::fs::FileSystemError::new(
-                    crate::fs::FileSystemErrorKind::NotSupported,
-                    "Parent directory traversal not implemented yet"
-                ));
-            } else {
-                // Handle regular component lookup using filesystem.lookup
-                let node = current_entry.node();
-                let filesystem = node.filesystem()
-                    .and_then(|w| w.upgrade())
-                    .ok_or_else(|| crate::fs::FileSystemError::new(
-                        crate::fs::FileSystemErrorKind::NotSupported,
-                        "No filesystem reference"
-                    ))?;
+                // Handle parent directory traversal using filesystem lookup
+                // Check if we're at a mount root - if so, we need special handling
+                let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
                 
-                // Use filesystem.lookup to find child
-                let child_node = filesystem.lookup(&node, &component.to_string())?;
-                
-                // Create or get cached VfsEntry for the child
-                if let Some(cached_entry) = current_entry.get_child(component) {
-                    current_entry = cached_entry;
+                if is_at_mount_root {
+                    // At mount root - need to check parent mount
+                    let parent_info = current_mount.get_parent().zip(current_mount.parent_entry.clone());
+                    if let Some((parent_mount, parent_entry)) = parent_info {
+                        current_mount = parent_mount;
+                        current_entry = self.resolve_component(parent_entry, "..")?;
+                    }
+                    // If no parent mount, stay at current location (like reaching filesystem root)
                 } else {
-                    // Create new VfsEntry
-                    let child_entry = VfsEntry::new(
-                        Some(Arc::downgrade(&current_entry)),
-                        component.clone(),
-                        child_node
-                    );
-                    current_entry.add_child(component.clone(), child_entry.clone());
-                    current_entry = child_entry;
+                    // Not at mount root - use regular filesystem lookup
+                    current_entry = self.resolve_component(current_entry, "..")?;
+                }
+            } else {
+                // Handle regular component lookup using cached resolution or filesystem lookup
+                current_entry = self.resolve_component(current_entry, component)?;
+                
+                // Check for mount points on this entry
+                if let Some(child_mount) = current_mount.get_child(&current_entry) {
+                    current_mount = child_mount;
+                    current_entry = current_mount.root.clone();
                 }
             }
         }
