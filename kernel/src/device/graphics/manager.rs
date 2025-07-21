@@ -137,6 +137,8 @@ impl GraphicsManager {
         let device_count = device_manager.get_devices_count();
 
         for device_id in 0..device_count {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
             let device = match device_manager.get_device(device_id) {
                 Some(device) => device,
                 None => {
