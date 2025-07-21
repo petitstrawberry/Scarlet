@@ -12,7 +12,8 @@ use spin::RwLock;
 use core::{any::Any, fmt::Debug};
 use core::fmt;
 
-use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType};
+use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, SeekFrom};
+use crate::object::capability::{StreamOps, ControlOps, StreamError};
 
 /// DirectoryEntry structure used by readdir
 #[derive(Debug, Clone)]
@@ -301,5 +302,77 @@ impl fmt::Debug for dyn FileSystemOperations {
             .field("name", &self.name())
             .field("root", &self.root_node())
             .finish()
+    }
+}
+
+/// VfsFileObject wraps a filesystem-specific FileObject with VFS-layer information
+///
+/// This wrapper provides the VFS layer with access to path hierarchy information
+/// while delegating actual file operations to the underlying FileSystem implementation.
+pub struct VfsFileObject {
+    /// The underlying FileObject from the filesystem implementation
+    inner: Arc<dyn FileObject>,
+    /// The VfsEntry this FileObject was created from (for *at syscalls)
+    vfs_entry: Arc<VfsEntry>,
+    /// The original path used to open this file (for debugging/logging)
+    original_path: String,
+}
+
+impl VfsFileObject {
+    /// Create a new VfsFileObject
+    pub fn new(
+        inner: Arc<dyn FileObject>,
+        vfs_entry: Arc<VfsEntry>,
+        original_path: String,
+    ) -> Self {
+        Self {
+            inner,
+            vfs_entry,
+            original_path,
+        }
+    }
+    
+    /// Get the VfsEntry this FileObject was created from
+    pub fn get_vfs_entry(&self) -> Arc<VfsEntry> {
+        self.vfs_entry.clone()
+    }
+    
+    /// Get the original path used to open this file
+    pub fn get_original_path(&self) -> &str {
+        &self.original_path
+    }
+}
+
+impl StreamOps for VfsFileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.inner.read(buffer)
+    }
+    
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.inner.write(buffer)
+    }
+}
+
+impl ControlOps for VfsFileObject {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        self.inner.control(command, arg)
+    }
+}
+
+impl FileObject for VfsFileObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        self.inner.seek(whence)
+    }
+    
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        self.inner.metadata()
+    }
+    
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        self.inner.truncate(size)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

@@ -107,6 +107,10 @@ impl crate::fs::FileObject for MockFileObject {
             link_count: 1,
         })
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 /// Mock FileObject for testing task integration
@@ -190,6 +194,10 @@ impl crate::fs::FileObject for MockTaskFileObject {
             file_id: 1,
             link_count: 1,
         })
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

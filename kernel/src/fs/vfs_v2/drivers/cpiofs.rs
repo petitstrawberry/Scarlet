@@ -486,6 +486,10 @@ impl FileObject for CpioFileObject {
     fn truncate(&self, _size: u64) -> Result<(), StreamError> {
         Err(StreamError::PermissionDenied)
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Directory object for CPIO directories
@@ -590,6 +594,10 @@ impl FileObject for CpioDirectoryObject {
             FileSystemErrorKind::ReadOnly,
             "CPIO filesystem is read-only"
         )))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

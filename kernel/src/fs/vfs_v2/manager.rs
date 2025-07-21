@@ -300,8 +300,18 @@ impl VfsManager {
         let filesystem = node.filesystem()
             .and_then(|w| w.upgrade())
             .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
-        let file_obj = filesystem.open(&node, flags)?;
-        Ok(KernelObject::File(file_obj))
+        
+        // Get the underlying FileSystem implementation
+        let inner_file_obj = filesystem.open(&node, flags)?;
+        
+        // Wrap with VFS-layer information
+        let vfs_file_obj = super::core::VfsFileObject::new(
+            inner_file_obj,
+            entry.clone(),
+            path.to_string()
+        );
+        
+        Ok(KernelObject::File(Arc::new(vfs_file_obj)))
     }
     
     /// Create a file at the specified path

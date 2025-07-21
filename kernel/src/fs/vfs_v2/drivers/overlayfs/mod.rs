@@ -1115,6 +1115,10 @@ impl FileObject for OverlayDirectoryObject {
             "Cannot truncate directory"
         )))
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// Driver for creating OverlayFS instances
