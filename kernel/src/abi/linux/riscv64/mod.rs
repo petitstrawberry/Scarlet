@@ -14,7 +14,7 @@ use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
-    abi::AbiModule, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    abi::AbiModule, arch::{self, Registers}, early_initcall, environment::PAGE_SIZE, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -272,12 +272,25 @@ impl AbiModule for LinuxRiscv64Abi {
                         sp &= !0xF;
 
                         // --- 3. Auxiliary vector (auxv) ---
-                        // At minimum, terminate with AT_NULL
+                        // Set up the auxiliary vector on the stack.
+                        // The C runtime (such as musl) reads important information like page size from here.
+                        const AT_NULL: u64 = 0;     // End of vector
+                        const AT_PAGESZ: u64 = 6;   // Key indicating page size
+
+                        // Push AT_NULL entry (type=0, value=0)
                         sp -= 16; // auxv entry is 16 bytes (u64 type, u64 val)
                         unsafe {
                             let paddr = task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64;
-                            *paddr = 0; // AT_NULL
+                            *paddr = AT_NULL;
                             *(paddr.add(1)) = 0;
+                        }
+
+                        // Push AT_PAGESZ entry (type=6, value=PAGE_SIZE)
+                        sp -= 16;
+                        unsafe {
+                            let paddr = task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64;
+                            *paddr = AT_PAGESZ;
+                            *(paddr.add(1)) = PAGE_SIZE as u64;
                         }
 
                         // --- 4. envp pointer array ---
