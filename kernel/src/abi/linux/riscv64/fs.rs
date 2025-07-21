@@ -964,8 +964,6 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     // Open the file using VfsManager::open_relative
     let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
 
-    crate::println!("sys_openat: dirfd={}, path='{}', flags={}", dirfd, path_str, flags);
-
     match file {
         Ok(kernel_obj) => {
             // Register the file with the task using HandleTable
