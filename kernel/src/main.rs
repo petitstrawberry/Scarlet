@@ -376,7 +376,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 
     task.init();
     task.vfs = Some(manager.clone());
-    task.cwd = Some("/".to_string());
+    task.vfs.as_ref().unwrap().set_cwd_by_path("/").expect("Failed to set initial working directory");
     let file_obj = match task.vfs.as_ref().unwrap().open("/system/scarlet/bin/init", 0) {
         Ok(kernel_obj) => kernel_obj,
         Err(e) => {
