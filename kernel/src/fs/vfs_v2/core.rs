@@ -14,6 +14,7 @@ use core::fmt;
 
 use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, SeekFrom};
 use crate::object::capability::{StreamOps, ControlOps, StreamError};
+use super::mount_tree::MountPoint;
 
 /// DirectoryEntry structure used by readdir
 #[derive(Debug, Clone)]
@@ -314,6 +315,8 @@ pub struct VfsFileObject {
     inner: Arc<dyn FileObject>,
     /// The VfsEntry this FileObject was created from (for *at syscalls)
     vfs_entry: Arc<VfsEntry>,
+    /// The mount point containing this VfsEntry
+    mount_point: Arc<MountPoint>,
     /// The original path used to open this file (for debugging/logging)
     original_path: String,
 }
@@ -323,23 +326,35 @@ impl VfsFileObject {
     pub fn new(
         inner: Arc<dyn FileObject>,
         vfs_entry: Arc<VfsEntry>,
+        mount_point: Arc<MountPoint>,
         original_path: String,
     ) -> Self {
         Self {
             inner,
             vfs_entry,
+            mount_point,
             original_path,
         }
     }
     
     /// Get the VfsEntry this FileObject was created from
-    pub fn get_vfs_entry(&self) -> Arc<VfsEntry> {
-        self.vfs_entry.clone()
+    pub fn get_vfs_entry(&self) -> &Arc<VfsEntry> {
+        &self.vfs_entry
+    }
+    
+    /// Get the mount point containing this VfsEntry
+    pub fn get_mount_point(&self) -> &Arc<MountPoint> {
+        &self.mount_point
     }
     
     /// Get the original path used to open this file
     pub fn get_original_path(&self) -> &str {
         &self.original_path
+    }
+    
+    /// Enable downcasting for VfsFileObject detection
+    pub fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

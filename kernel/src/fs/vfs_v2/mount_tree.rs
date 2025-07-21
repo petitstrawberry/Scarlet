@@ -357,6 +357,77 @@ impl MountTree {
         self.resolve_path_internal(path, true, options)
     }
 
+    /// Resolve a relative path from a given base VfsEntry
+    /// 
+    /// This method resolves a relative path starting from the specified base entry
+    /// instead of the root. This is essential for implementing *at system calls
+    /// like openat, fstatat, etc.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `base_entry` - The base VfsEntry to resolve the path from
+    /// * `base_mount` - The mount point containing the base entry
+    /// * `relative_path` - The relative path to resolve
+    /// * `options` - Path resolution options
+    /// 
+    /// # Returns
+    /// 
+    /// * `VfsResult<(VfsEntryRef, Arc<MountPoint>)>` - The resolved entry and its mount point
+    pub fn resolve_relative_path(&self, base_entry: &VfsEntryRef, base_mount: &Arc<MountPoint>, relative_path: &str, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        // If path is absolute, ignore base_entry and use normal resolution
+        if relative_path.starts_with('/') {
+            return self.resolve_path_with_options(relative_path, options);
+        }
+        
+        // If path is empty or ".", return the base_entry itself
+        if relative_path.is_empty() || relative_path == "." {
+            return Ok((base_entry.clone(), base_mount.clone()));
+        }
+        
+        // For relative paths, we need to resolve from the base_entry
+        let components = self.parse_path(relative_path);
+        let mut current_entry = base_entry.clone();
+        let current_mount = base_mount.clone();
+        
+        for component in components.iter() {
+            if component == ".." {
+                // Handle parent directory traversal - simplified for now
+                return Err(crate::fs::FileSystemError::new(
+                    crate::fs::FileSystemErrorKind::NotSupported,
+                    "Parent directory traversal not implemented yet"
+                ));
+            } else {
+                // Handle regular component lookup using filesystem.lookup
+                let node = current_entry.node();
+                let filesystem = node.filesystem()
+                    .and_then(|w| w.upgrade())
+                    .ok_or_else(|| crate::fs::FileSystemError::new(
+                        crate::fs::FileSystemErrorKind::NotSupported,
+                        "No filesystem reference"
+                    ))?;
+                
+                // Use filesystem.lookup to find child
+                let child_node = filesystem.lookup(&node, &component.to_string())?;
+                
+                // Create or get cached VfsEntry for the child
+                if let Some(cached_entry) = current_entry.get_child(component) {
+                    current_entry = cached_entry;
+                } else {
+                    // Create new VfsEntry
+                    let child_entry = VfsEntry::new(
+                        Some(Arc::downgrade(&current_entry)),
+                        component.clone(),
+                        child_node
+                    );
+                    current_entry.add_child(component.clone(), child_entry.clone());
+                    current_entry = child_entry;
+                }
+            }
+        }
+        
+        Ok((current_entry, current_mount))
+    }
+
     fn resolve_path_internal(&self, path: &str, resolve_mount: bool, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
         if path.is_empty() || path == "/" {
             return Ok((self.root_mount.read().root.clone(), self.root_mount.read().clone()));
