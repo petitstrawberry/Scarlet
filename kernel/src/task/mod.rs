@@ -204,9 +204,6 @@ pub struct Task {
     /// Dynamic ABI
     pub abi: Option<Box<dyn AbiModule>>,
 
-    // Current working directory
-    pub cwd: Option<String>,
-
     /// Virtual File System Manager
     /// 
     /// Each task can have its own isolated VfsManager instance for containerization
@@ -317,7 +314,6 @@ impl Task {
             children: Vec::new(),
             exit_status: None,
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
-            cwd: None,
             vfs: None,
             handle_table: HandleTable::new(),
         };
@@ -942,11 +938,9 @@ impl Task {
             // Clone the filesystem manager
             if let Some(vfs) = &self.vfs {
                 child.vfs = Some(vfs.clone());
-                // Copy the current working directory
-                child.cwd = self.cwd.clone();
+                // Current working directory is managed within VfsManager
             } else {
                 child.vfs = None;
-                child.cwd = None; // No filesystem manager, no current working directory
             }
         }
 
@@ -1039,15 +1033,6 @@ impl Task {
         self.vfs.as_ref()
     }
 
-    /// Set the current working directory
-    pub fn set_cwd(&mut self, cwd: String) {
-        self.cwd = Some(cwd);
-    }
-
-    /// Get the current working directory
-    pub fn get_cwd(&self) -> Option<&String> {
-        self.cwd.as_ref()
-    }
 }
 
 #[derive(Debug)]
@@ -1103,17 +1088,24 @@ pub fn mytask() -> Option<&'static mut Task> {
     get_scheduler().get_current_task(cpu.get_cpuid())
 }
 
-/// Set the current working directory for the current task
+/// Set the current working directory for the current task via VfsManager
+/// 
+/// This function sets the current working directory of the calling task
+/// using the VfsManager's path-based API.
 /// 
 /// # Arguments
-/// * `cwd` - New current working directory path
+/// * `path` - The new working directory path
 /// 
 /// # Returns
-/// * `true` if successful, `false` if no current task
-pub fn set_current_task_cwd(cwd: String) -> bool {
+/// * `true` if successful, `false` if no current task or VfsManager
+pub fn set_current_task_cwd(path: String) -> bool {
     if let Some(task) = mytask() {
-        task.set_cwd(cwd);
-        true
+        if let Some(vfs) = &task.vfs {
+            // Use VfsManager to set current working directory
+            vfs.set_cwd_by_path(&path).is_ok()
+        } else {
+            false // No VfsManager available
+        }
     } else {
         false
     }

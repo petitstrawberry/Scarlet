@@ -7,28 +7,13 @@ use crate::{
     task::{get_parent_waker, mytask, CloneFlags, WaitError}
 };
 
-/// VFS v2 helper function for path absolutization
-/// TODO: Move this to a shared helper module when VFS v2 provides public API
+/// VFS v2 helper function for path absolutization using VfsManager
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let cwd = task.cwd.clone().ok_or(())?;
-        let mut absolute_path = cwd;
-        if !absolute_path.ends_with('/') {
-            absolute_path.push('/');
-        }
-        absolute_path.push_str(path);
-        // Simple normalization (removes "//", ".", etc.)
-        let mut components = alloc::vec::Vec::new();
-        for comp in absolute_path.split('/') {
-            match comp {
-                "" | "." => {},
-                ".." => { components.pop(); },
-                _ => components.push(comp),
-            }
-        }
-        Ok("/".to_string() + &components.join("/"))
+        let vfs = task.vfs.as_ref().ok_or(())?;
+        Ok(vfs.resolve_path_to_absolute(path))
     }
 }
 
@@ -149,7 +134,10 @@ pub fn sys_chdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
         return usize::MAX; // -1
     }
 
-    task.cwd = Some(path); // Update the current working directory
+    // Update the current working directory via VfsManager
+    if let Some(vfs) = &task.vfs {
+        let _ = vfs.set_cwd_by_path(&path);
+    }
 
     0
 }

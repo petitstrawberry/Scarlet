@@ -638,9 +638,11 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     match vfs.resolve_path(&absolute_path) {
         Ok(entry) => {
             if entry.node().file_type().unwrap() == FileType::Directory {
-                // Update the task's current working directory
-                task.set_cwd(absolute_path);
-                0 // Success
+                // Update the current working directory via VfsManager
+                match vfs.set_cwd_by_path(&absolute_path) {
+                    Ok(()) => 0, // Success
+                    Err(_) => usize::MAX, // Failed to set cwd
+                }
             } else {
                 usize::MAX // Not a directory
             }
@@ -704,26 +706,12 @@ pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
 }
 
 
-// Use a local path normalization function
+// Use VfsManager-based path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let cwd = task.cwd.clone().ok_or(())?;
-        let mut absolute_path = cwd;
-        if !absolute_path.ends_with('/') {
-            absolute_path.push('/');
-        }
-        absolute_path.push_str(path);
-        // Simple normalization (removes "//", ".", etc.)
-        let mut components = Vec::new();
-        for comp in absolute_path.split('/') {
-            match comp {
-                "" | "." => {},
-                ".." => { components.pop(); },
-                _ => components.push(comp),
-            }
-        }
-        Ok("/".to_string() + &components.join("/"))
+        let vfs = task.vfs.as_ref().ok_or(())?;
+        Ok(vfs.resolve_path_to_absolute(path))
     }
 }
