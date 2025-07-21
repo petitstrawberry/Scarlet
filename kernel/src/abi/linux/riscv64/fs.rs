@@ -675,7 +675,21 @@ pub fn sys_lseek(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 //     0
 // }
 
-pub fn sys_newfstatat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+/// Linux sys_newfstatat implementation for Scarlet VFS v2
+///
+/// Gets file status relative to a directory file descriptor (dirfd) and path.
+/// If dirfd == AT_FDCWD, uses the current working directory as the base.
+/// Otherwise, resolves the base directory from the file descriptor.
+/// Uses VfsManager::resolve_path_from for safe and efficient path resolution.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
@@ -685,52 +699,67 @@ pub fn sys_newfstatat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     // Increment PC to avoid infinite loop if fstatat fails
     trapframe.increment_pc_next(task);
 
-    // Handle AT_FDCWD (current working directory)
-    const AT_FDCWD: i32 = -100;
-    const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
-    
     // Parse path from user space
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => {
-            // Handle absolute vs relative paths
-            if path.starts_with('/') {
-                path // Absolute path
-            } else if dirfd == AT_FDCWD {
-                // Relative to current working directory
-                match to_absolute_path_v2(&task, &path) {
-                    Ok(abs_path) => abs_path,
-                    Err(_) => return usize::MAX, // Path error
-                }
-            } else {
-                // Relative to directory file descriptor (not implemented yet)
-                // For now, just treat as relative to current directory
-                match to_absolute_path_v2(&task, &path) {
-                    Ok(abs_path) => abs_path,
-                    Err(_) => return usize::MAX, // Path error
-                }
-            }
-        },
+        Ok((path, _)) => path,
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
     let vfs = task.vfs.as_ref().unwrap();
+
+    // Determine base directory (entry and mount) for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+
+    const AT_FDCWD: i32 = -100;
+    const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
     
-    // Get file metadata
-    // Note: flags parameter (AT_SYMLINK_NOFOLLOW) is currently ignored
-    // In a full implementation, this would control whether to follow symbolic links
+    // TODO: Handle AT_SYMLINK_NOFOLLOW flag properly
+    // For now, we always follow symbolic links
     let _follow_symlinks = (flags & AT_SYMLINK_NOFOLLOW) == 0;
     
-    match vfs.metadata(&path_str) {
-        Ok(metadata) => {
-            if stat_ptr.is_null() {
-                return usize::MAX; // Return -1 if stat pointer is null
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+        // Use current working directory as base
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        // Use directory file descriptor as base
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return usize::MAX,
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return usize::MAX,
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return usize::MAX,
+        };
+        let vfs_file_obj = file_obj.as_any().downcast_ref::<VfsFileObject>().ok_or(()).unwrap();
+        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
+    };
+
+    // Resolve the path from the base directory
+    match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+        Ok((entry, _mount_point)) => {
+            // Get metadata from the resolved VfsEntry
+            let node = entry.node();
+            match node.metadata() {
+                Ok(metadata) => {
+                    if stat_ptr.is_null() {
+                        return usize::MAX; // Return -1 if stat pointer is null
+                    }
+                    
+                    let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
+                    *stat = LinuxStat::from_metadata(&metadata);
+                    0 // Success
+                },
+                Err(_) => usize::MAX, // Error getting metadata
             }
-            
-            let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
-            *stat = LinuxStat::from_metadata(&metadata);
-            0 // Success
         },
-        Err(_) => usize::MAX, // Error retrieving metadata
+        Err(_) => usize::MAX, // Error resolving path
     }
 }
 
