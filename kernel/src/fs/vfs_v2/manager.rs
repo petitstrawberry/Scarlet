@@ -20,7 +20,7 @@ use crate::object::KernelObject;
 
 use super::{
     core::{VfsEntry, FileSystemOperations, DirectoryEntryInternal},
-    mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId},
+    mount_tree::{MountTree, MountOptionsV2, MountPoint, VfsManagerId, VfsResult, VfsEntryRef},
 };
 
 /// Filesystem ID type
@@ -710,7 +710,65 @@ impl VfsManager {
             self.mount_tree.resolve_path_from_with_options(Some(base_entry), Some(base_mount), path, options)
         }
     }
-    
+
+    /// Resolve a path to mount point (returns VfsEntryRef instead of Arc<VfsEntry>)
+    /// 
+    /// This is useful for operations that need to work with mount point information
+    /// but don't necessarily need strong references to entries.
+    /// 
+    /// # Arguments
+    /// * `path` - The path to resolve
+    /// 
+    /// # Returns
+    /// Returns a tuple of (VfsEntryRef, Arc<MountPoint>) on success
+    pub fn resolve_mount_point(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_mount_point_with_options(path, &PathResolutionOptions::default())
+    }
+
+    /// Resolve a path to mount point with specified options
+    pub fn resolve_mount_point_with_options(&self, path: &str, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        // Check if the path is absolute
+        if path.starts_with('/') {
+            // Absolute path - resolve from root
+            self.mount_tree.resolve_mount_point_with_options(path, options)
+        } else {
+            // Relative path - resolve from current working directory
+            let cwd = self.get_cwd();
+            if let Some((base_entry, base_mount)) = cwd {
+                // Resolve relative to current working directory
+                self.resolve_mount_point_from_with_options(&base_entry, &base_mount, path, options)
+            } else {
+                Err(vfs_error(FileSystemErrorKind::InvalidPath, "Relative path resolution requires a current working directory"))
+            }
+        }
+    }
+
+    pub fn resolve_mount_point_from(
+        &self,
+        base_entry: &Arc<VfsEntry>,
+        base_mount: &Arc<MountPoint>,
+        path: &str,
+        options: &PathResolutionOptions
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_mount_point_from_with_options(base_entry, base_mount, path, options)
+    }
+
+    pub fn resolve_mount_point_from_with_options(
+        &self,
+        base_entry: &Arc<VfsEntry>,
+        base_mount: &Arc<MountPoint>,
+        path: &str,
+        options: &PathResolutionOptions
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        if path.starts_with('/') {
+            // Absolute path - resolve from root
+            self.mount_tree.resolve_mount_point_with_options(path, options)
+        } else {
+            // Relative path with explicit base (for *at syscalls)
+            self.mount_tree.resolve_mount_point_from_with_options(Some(base_entry), Some(base_mount), path, options)
+        }
+    }
+
     /// Create a hard link
     /// 
     /// This will create a hard link where the source file is linked to the target path.
