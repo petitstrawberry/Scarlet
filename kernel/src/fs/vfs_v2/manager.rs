@@ -648,35 +648,33 @@ impl VfsManager {
         self.create_file(path, file_type)
     }
 
-    /// Resolve a path to a VfsEntry
+    /// Resolve a path to both VfsEntry and MountPoint
     /// 
     /// Automatically handles both absolute paths (starting with '/') and relative paths
     /// (resolved from current working directory). This is the main path resolution API.
-    pub fn resolve_path(&self, path: &str) -> Result<Arc<VfsEntry>, FileSystemError> {
+    /// 
+    /// Returns both VfsEntry and MountPoint for consistency with other resolution APIs.
+    pub fn resolve_path(&self, path: &str) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
         self.resolve_path_with_options(path, &PathResolutionOptions::default())
     }
 
     /// Resolve a path with specified options
-    pub fn resolve_path_with_options(&self, path: &str, options: &PathResolutionOptions) -> Result<Arc<VfsEntry>, FileSystemError> {
-        // let (entry, _mount_point) = self.resolve_path_from_with_options(None, None, path, options)?;
-        
+    pub fn resolve_path_with_options(&self, path: &str, options: &PathResolutionOptions) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
         // Check if the path is absolute
         if path.starts_with('/') {
             // Absolute path - resolve from root
-            let (entry, _mount_point) = self.mount_tree.resolve_path_with_options(path, options)?;
-            return Ok(entry);
+            self.mount_tree.resolve_path_with_options(path, options)
         } else {
             // Relative path - resolve from current working directory
             let cwd = self.get_cwd();
             if let Some((base_entry, base_mount)) = cwd {
                 // Resolve relative to current working directory
-                let (entry, _mount_point) = self.resolve_path_from_with_options(&base_entry, &base_mount, path, options)?;
-                return Ok(entry);
+                self.resolve_path_from_with_options(&base_entry, &base_mount, path, options)
             } else {
-                return Err(FileSystemError::new(
+                Err(FileSystemError::new(
                     FileSystemErrorKind::InvalidPath,
                     "Relative path resolution requires a current working directory"
-                ));
+                ))
             }
         }
     }

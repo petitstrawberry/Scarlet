@@ -487,7 +487,7 @@ mod tests {
         let result = vfs.resolve_path("/linkdir/file.txt");
         assert!(result.is_ok(), "Should be able to resolve file through directory symlink");
         
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         let metadata = entry.node().metadata().unwrap();
         assert_eq!(metadata.file_type, FileType::RegularFile);
         
@@ -499,7 +499,7 @@ mod tests {
         let result = vfs.resolve_path("/linkdir");
         assert!(result.is_ok(), "Should be able to resolve directory symlink");
         
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // The resolved entry should point to the target directory, not the symlink itself
         assert_eq!(entry.node().file_type().unwrap(), FileType::Directory);
     }
@@ -556,14 +556,14 @@ mod tests {
         // Test normal resolution (follows symlinks)
         let result = vfs.resolve_path("/link.txt");
         assert!(result.is_ok(), "Should be able to resolve symlink normally");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should resolve to the target file
         assert_eq!(entry.node().file_type().unwrap(), FileType::RegularFile);
         
         // Test no-follow resolution (doesn't follow symlinks)
         let result = vfs.resolve_path_with_options("/link.txt", &PathResolutionOptions::no_follow());
         assert!(result.is_ok(), "Should be able to resolve symlink with no_follow");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should return the symlink itself, not the target
         assert!(matches!(entry.node().file_type().unwrap(), FileType::SymbolicLink(_)));
         
@@ -589,14 +589,14 @@ mod tests {
         // First test: linkdir itself (final component is a symlink)
         let result = vfs.resolve_path_with_options("/linkdir", &PathResolutionOptions::no_follow());
         assert!(result.is_ok(), "Should be able to resolve directory symlink with no_follow");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should return the symlink itself
         assert!(matches!(entry.node().file_type().unwrap(), FileType::SymbolicLink(_)));
         
         // Second test: normal resolution for comparison
         let result = vfs.resolve_path("/linkdir");
         assert!(result.is_ok(), "Should be able to resolve directory symlink normally");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should resolve to the target directory
         assert_eq!(entry.node().file_type().unwrap(), FileType::Directory);
     }

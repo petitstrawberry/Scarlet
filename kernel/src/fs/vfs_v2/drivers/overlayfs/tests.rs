@@ -355,7 +355,7 @@ fn test_overlayfs_lower_mount_visibility_and_whiteout() {
     lower_mgr.bind_mount_from(&Arc::new(mount_mgr), "/", "/dir1/mnt").unwrap();
 
     // Use /dir1/mnt in lower_mgr as the lower layer for OverlayFS
-    let mnt_entry = lower_mgr.resolve_path("/dir1/mnt").unwrap();
+    let (mnt_entry, _) = lower_mgr.resolve_path("/dir1/mnt").unwrap();
     let mnt_mp = make_mount(lower.clone() as Arc<dyn FileSystemOperations>);
     let (upper_mp, upper_entry) = make_mount_and_entry(upper.clone() as Arc<dyn FileSystemOperations>);
     let overlay = OverlayFS::new(
