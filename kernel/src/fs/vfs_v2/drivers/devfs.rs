@@ -646,6 +646,10 @@ impl FileObject for DevFileObject {
             "Cannot truncate device files"
         )))
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// A file object for directories in DevFS
@@ -768,6 +772,10 @@ impl FileObject for DevDirectoryObject {
             FileSystemErrorKind::ReadOnly,
             "Cannot truncate directory in devfs"
         )))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

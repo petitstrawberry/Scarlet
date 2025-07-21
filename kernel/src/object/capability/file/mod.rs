@@ -5,6 +5,8 @@
 
 use crate::object::capability::stream::{StreamOps, StreamError};
 use crate::object::capability::control::ControlOps;
+use alloc::sync::Arc;
+use core::any::Any;
 
 pub mod syscall;
 
@@ -55,4 +57,6 @@ pub trait FileObject: StreamOps + ControlOps {
         let _ = size;
         Err(StreamError::NotSupported)
     }
+    
+    fn as_any(&self) -> &dyn Any;
 }

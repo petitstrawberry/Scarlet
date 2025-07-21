@@ -1092,6 +1092,10 @@ impl FileObject for TmpFileObject {
         
         Ok(())
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 pub struct TmpFSDriver;
