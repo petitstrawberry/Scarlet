@@ -917,6 +917,139 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
+/// Linux sys_openat implementation for Scarlet VFS v2
+///
+/// Opens a file relative to a directory file descriptor (dirfd) and path.
+/// If dirfd == AT_FDCWD, uses the current working directory as the base.
+/// Otherwise, resolves the base directory from the file descriptor.
+/// Uses VfsManager::open_relative for safe and efficient path resolution.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///
+/// Returns:
+/// - File descriptor on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let flags = trapframe.get_arg(2) as i32;
+
+    // Increment PC to avoid infinite loop if openat fails
+    trapframe.increment_pc_next(task);
+
+    // Parse path from user space
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => path,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    let vfs = task.vfs.as_ref().unwrap();
+
+    // Determine base directory (entry and mount) for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+
+    const AT_FDCWD: i32 = -100;
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+        // Use current working directory as base
+        let entry = vfs.get_cwd().unwrap_or_else(|| vfs.mount_tree.root_mount.read().root.clone());
+        let mount = vfs.mount_tree.root_mount.read().clone();
+        (entry, mount)
+    } else {
+        // Use directory file descriptor as base
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return usize::MAX,
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return usize::MAX,
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return usize::MAX,
+        };
+        let vfs_file_obj = file_obj.as_any().downcast_ref::<VfsFileObject>().ok_or(()).unwrap();
+        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
+    };
+
+    // Open the file using VfsManager::open_relative
+    let file = vfs.open_relative(&base_entry, &base_mount, &path_str, flags as u32);
+
+    crate::println!("sys_openat: dirfd={}, path='{}', flags={}", dirfd, path_str, flags);
+
+    match file {
+        Ok(kernel_obj) => {
+            // Register the file with the task using HandleTable
+            let handle = task.handle_table.insert(kernel_obj);
+            match handle {
+                Ok(handle) => {
+                    match abi.allocate_fd(handle as u32) {
+                        Ok(fd) => fd,
+                        Err(_) => usize::MAX, // Too many open files
+                    }
+                },
+                Err(_) => usize::MAX, // Handle table full
+            }
+        }
+        Err(_) => usize::MAX, // open_relative error
+    }
+}
+
+pub fn sys_execve(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    
+    // Increment PC to avoid infinite loop if execve fails
+    trapframe.increment_pc_next(task);
+    
+    // Get arguments from trapframe
+    let path_ptr = trapframe.get_arg(0);
+    let argv_ptr = trapframe.get_arg(1);
+    let envp_ptr = trapframe.get_arg(2);
+    
+    // Parse path
+    let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => match to_absolute_path_v2(&task, &path) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX, // Path error
+        },
+        Err(_) => return usize::MAX, // Path parsing error
+    };
+    
+    // Parse argv
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        Ok(args) => args,
+        Err(_) => return usize::MAX, // argv parsing error
+    };
+    
+    // Parse envp (optional)
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+        Ok(envs) => envs,
+        Err(_) => return usize::MAX, // envp parsing error
+    };
+    
+    // Convert Vec<String> to Vec<&str> for TransparentExecutor
+    let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
+    let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
+    
+    // Use TransparentExecutor for cross-ABI execution
+    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe, false) {
+        Ok(_) => {
+            // execve normally should not return on success - the process is replaced
+            // However, if ABI module sets trapframe return value and returns here,
+            // we should respect that value instead of hardcoding 0
+            trapframe.get_return_value()
+        },
+        Err(_) => {
+            // Execution failed - return error code
+            // The trap handler will automatically set trapframe return value from our return
+            usize::MAX // Error return value
+        }
+    }
+}
+
 /// Linux iovec structure for vectored I/O operations
 /// This structure matches the Linux kernel's definition for struct iovec
 #[repr(C)]

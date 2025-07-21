@@ -443,6 +443,7 @@ syscall_table! {
         0
     },
     Ioctl = 29 => fs::sys_ioctl,
+    OpenAt = 56 => fs::sys_openat,
     Write = 64 => fs::sys_write,
     Writev = 66 => fs::sys_writev,
     NewFstAtAt = 79 => fs::sys_newfstatat,
