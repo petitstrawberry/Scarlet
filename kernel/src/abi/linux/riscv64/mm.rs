@@ -63,8 +63,8 @@ pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         // Check if this range would overlap with existing mappings
         let end_vaddr = vaddr + aligned_length - 1;
         if let Some(overlapping_map) = task.vm_manager.check_overlap(vaddr, end_vaddr) {
-            crate::println!("sys_mmap: Address range {:#x}-{:#x} overlaps with existing mapping {:#x}-{:#x}", 
-                vaddr, end_vaddr, overlapping_map.vmarea.start, overlapping_map.vmarea.end);
+            // crate::println!("sys_mmap: Address range {:#x}-{:#x} overlaps with existing mapping {:#x}-{:#x}", 
+            //     vaddr, end_vaddr, overlapping_map.vmarea.start, overlapping_map.vmarea.end);
             vaddr += 0x10000000; // Try 256MB higher
             attempts += 1;
             continue;
@@ -72,12 +72,12 @@ pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         
         match task.allocate_data_pages(vaddr, num_pages) {
             Ok(_mmap) => {
-                crate::println!("sys_mmap: Successfully allocated memory at {:#x}-{:#x}", 
-                    vaddr, vaddr + aligned_length - 1);
+                // crate::println!("sys_mmap: Successfully allocated memory at {:#x}-{:#x}", 
+                //     vaddr, vaddr + aligned_length - 1);
                 return vaddr;
             }
             Err(e) => {
-                crate::println!("sys_mmap: Failed to allocate at {:#x}: {}", vaddr, e);
+                // crate::println!("sys_mmap: Failed to allocate at {:#x}: {}", vaddr, e);
                 vaddr += 0x10000000; // Try 256MB higher
                 attempts += 1;
             }
@@ -113,7 +113,7 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     trapframe.increment_pc_next(task);
     
-    crate::println!("sys_munmap: addr={:#x}, length={}", addr, length);
+    // crate::println!("sys_munmap: addr={:#x}, length={}", addr, length);
 
     // Basic validation
     if length == 0 {
@@ -137,8 +137,8 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     let num_pages = aligned_length / PAGE_SIZE;
     let end_addr = addr + aligned_length - 1;
 
-    crate::println!("sys_munmap: Unmapping {} pages ({} bytes) from {:#x} to {:#x}", 
-        num_pages, aligned_length, addr, end_addr);
+    // crate::println!("sys_munmap: Unmapping {} pages ({} bytes) from {:#x} to {:#x}", 
+    //     num_pages, aligned_length, addr, end_addr);
 
     // Check if the memory region is actually mapped
     let start_paddr = task.vm_manager.translate_vaddr(addr);
@@ -149,6 +149,6 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     // Try to deallocate the memory region using free_data_pages
     task.free_data_pages(addr, num_pages);
-    crate::println!("sys_munmap: Successfully unmapped memory region {:#x}-{:#x}", addr, end_addr);
+    // crate::println!("sys_munmap: Successfully unmapped memory region {:#x}-{:#x}", addr, end_addr);
     0 // Success
 }
