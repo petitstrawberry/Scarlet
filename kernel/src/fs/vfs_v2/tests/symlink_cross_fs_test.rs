@@ -27,7 +27,7 @@ fn test_symlink_cross_filesystem_file_operations() {
     vfs.mount(tmpfs, "/tmp", 0).expect("Failed to mount tmpfs at /tmp");
     
     // Verify the symlink exists and points to the correct target
-    let symlink_entry = vfs.resolve_path_with_options("/symlink", &PathResolutionOptions::no_follow())
+    let (symlink_entry, _) = vfs.resolve_path_with_options("/symlink", &PathResolutionOptions::no_follow())
         .expect("Failed to resolve symlink");
     assert!(symlink_entry.node().is_symlink().expect("Failed to check if symlink"));
     

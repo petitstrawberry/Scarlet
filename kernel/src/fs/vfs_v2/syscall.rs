@@ -636,7 +636,7 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     
     // Check if the path exists and is a directory
     match vfs.resolve_path(&absolute_path) {
-        Ok(entry) => {
+        Ok((entry, _mount_point)) => {
             if entry.node().file_type().unwrap() == FileType::Directory {
                 // Update the current working directory via VfsManager
                 match vfs.set_cwd_by_path(&absolute_path) {
