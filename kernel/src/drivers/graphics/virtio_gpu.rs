@@ -200,7 +200,7 @@ impl VirtioGpuDevice {
         let mut virtqueues = self.virtqueues.lock();
         let control_queue = &mut virtqueues[0]; // Control queue is index 0
 
-        // The response buffer is now allocated on the stack. It's faster and
+        // The response buffer is allocated on the stack. It's faster and
         // its memory is automatically reclaimed when the function returns.
         let mut resp_buffer = [0u8; 64];
 
