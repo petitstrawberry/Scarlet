@@ -823,28 +823,13 @@ pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
-/// VFS v2 helper function for path absolutization
-/// TODO: Move this to a shared helper module when VFS v2 provides public API
+/// VFS v2 helper function for path absolutization using VfsManager
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let cwd = task.cwd.clone().ok_or(())?;
-        let mut absolute_path = cwd;
-        if !absolute_path.ends_with('/') {
-            absolute_path.push('/');
-        }
-        absolute_path.push_str(path);
-        // Simple normalization (removes "//", ".", etc.)
-        let mut components = Vec::new();
-        for comp in absolute_path.split('/') {
-            match comp {
-                "" | "." => {},
-                ".." => { components.pop(); },
-                _ => components.push(comp),
-            }
-        }
-        Ok("/".to_string() + &components.join("/"))
+        let vfs = task.vfs.as_ref().ok_or(())?;
+        Ok(vfs.resolve_path_to_absolute(path))
     }
 }
 
@@ -954,9 +939,10 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     const AT_FDCWD: i32 = -100;
     let (base_entry, base_mount) = if dirfd == AT_FDCWD {
         // Use current working directory as base
-        let entry = vfs.get_cwd().unwrap_or_else(|| vfs.mount_tree.root_mount.read().root.clone());
-        let mount = vfs.mount_tree.root_mount.read().clone();
-        (entry, mount)
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
     } else {
         // Use directory file descriptor as base
         let handle = match abi.get_handle(dirfd as usize) {
@@ -976,7 +962,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Open the file using VfsManager::open_relative
-    let file = vfs.open_relative(&base_entry, &base_mount, &path_str, flags as u32);
+    let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
 
     crate::println!("sys_openat: dirfd={}, path='{}', flags={}", dirfd, path_str, flags);
 
