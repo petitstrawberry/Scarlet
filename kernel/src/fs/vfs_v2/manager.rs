@@ -64,8 +64,8 @@ pub struct VfsManager {
     pub id: VfsManagerId,
     /// Mount tree for hierarchical mount point management
     pub mount_tree: MountTree,
-    /// Current working directory
-    pub cwd: RwLock<Option<Arc<VfsEntry>>>,
+    /// Current working directory: (VfsEntry, MountPoint) pair
+    pub cwd: RwLock<Option<(Arc<VfsEntry>, Arc<MountPoint>)>>,
     /// Strong references to all currently mounted filesystems
     pub mounted_filesystems: RwLock<Vec<Arc<dyn FileSystemOperations>>>,
 }
@@ -501,7 +501,7 @@ impl VfsManager {
         filesystem.readdir(&node)
     }
     
-    /// Set current working directory
+    /// Set current working directory by path
     /// 
     /// This will change the current working directory to the specified path.
     /// 
@@ -512,8 +512,8 @@ impl VfsManager {
     /// Returns an error if the path does not exist, is not a directory, or if
     /// the filesystem cannot be resolved.
     /// 
-    pub fn set_cwd(&self, path: &str) -> Result<(), FileSystemError> {
-        let entry = self.mount_tree.resolve_path(path)?.0;
+    pub fn set_cwd_by_path(&self, path: &str) -> Result<(), FileSystemError> {
+        let (entry, mount_point) = self.mount_tree.resolve_path(path)?;
         
         // Verify it's a directory
         let node = entry.node();
@@ -525,8 +525,21 @@ impl VfsManager {
             ));
         }
         
-        *self.cwd.write() = Some(entry);
+        self.set_cwd(entry, mount_point);
         Ok(())
+    }
+    
+    /// Set current working directory
+    /// 
+    /// This sets the current working directory to the specified VfsEntry and MountPoint.
+    /// The entry must be a directory.
+    /// 
+    /// # Arguments
+    /// * `entry` - The VfsEntry representing the directory
+    /// * `mount_point` - The MountPoint where the directory is mounted
+    /// 
+    pub fn set_cwd(&self, entry: Arc<VfsEntry>, mount_point: Arc<MountPoint>) {
+        *self.cwd.write() = Some((entry, mount_point));
     }
     
     /// Get current working directory
@@ -539,8 +552,70 @@ impl VfsManager {
     /// An `Option<Arc<VfsEntry>>` containing the current working directory entry,
     /// or `None` if the current working directory is not set.
     /// 
-    pub fn get_cwd(&self) -> Option<Arc<VfsEntry>> {
+    pub fn get_cwd(&self) -> Option<(Arc<VfsEntry>, Arc<MountPoint>)> {
         self.cwd.read().clone()
+    }
+    
+    /// Get current working directory as path string
+    /// 
+    /// This returns the current working directory as a path string.
+    /// If the current working directory is not set, it returns "/".
+    ///
+    /// # Returns
+    /// A `String` containing the current working directory path.
+    /// 
+    pub fn get_cwd_path(&self) -> String {
+        if let Some((entry, mount_point)) = self.get_cwd() {
+            self.build_absolute_path(&entry, &mount_point)
+        } else {
+            "/".to_string()
+        }
+    }
+
+    /// Build absolute path from VfsEntry and MountPoint
+    /// 
+    /// This safely constructs the absolute path for a given VfsEntry by using
+    /// MountPoint information, avoiding potential issues with Weak references.
+    /// 
+    /// # Arguments
+    /// * `entry` - The VfsEntry to build the path for
+    /// * `mount_point` - The MountPoint containing this entry
+    /// 
+    /// # Returns
+    /// A `String` containing the absolute path
+    pub fn build_absolute_path(&self, entry: &Arc<VfsEntry>, mount_point: &Arc<MountPoint>) -> String {
+        // Build relative path within the mount point
+        let mut path_components = Vec::new();
+        let mut current = Some(entry.clone());
+        let mount_root = &mount_point.root;
+        
+        // Traverse up to the mount root
+        while let Some(entry) = current {
+            // Stop if we've reached the mount root
+            if Arc::ptr_eq(&entry, mount_root) {
+                break;
+            }
+            
+            path_components.push(entry.name().clone());
+            current = entry.parent();
+        }
+        
+        // Get the mount path using MountTree's method
+        let mount_path = self.mount_tree.get_mount_absolute_path(mount_point);
+        
+        if path_components.is_empty() {
+            // This is the mount root itself
+            mount_path
+        } else {
+            path_components.reverse();
+            let relative_path = path_components.join("/");
+            
+            if mount_path == "/" {
+                alloc::format!("/{}", relative_path)
+            } else {
+                alloc::format!("{}/{}", mount_path, relative_path)
+            }
+        }
     }
     
     /// Create a device file
@@ -573,25 +648,69 @@ impl VfsManager {
         self.create_file(path, file_type)
     }
 
+    /// Resolve a path to a VfsEntry
+    /// 
+    /// Automatically handles both absolute paths (starting with '/') and relative paths
+    /// (resolved from current working directory). This is the main path resolution API.
     pub fn resolve_path(&self, path: &str) -> Result<Arc<VfsEntry>, FileSystemError> {
         self.resolve_path_with_options(path, &PathResolutionOptions::default())
     }
 
     /// Resolve a path with specified options
     pub fn resolve_path_with_options(&self, path: &str, options: &PathResolutionOptions) -> Result<Arc<VfsEntry>, FileSystemError> {
-        // Use MountTreeV2 to resolve the path with options
-        let (entry, _mount_point) = self.mount_tree.resolve_path_with_options(path, options)?;
-        Ok(entry)
+        // let (entry, _mount_point) = self.resolve_path_from_with_options(None, None, path, options)?;
+        
+        // Check if the path is absolute
+        if path.starts_with('/') {
+            // Absolute path - resolve from root
+            let (entry, _mount_point) = self.mount_tree.resolve_path_with_options(path, options)?;
+            return Ok(entry);
+        } else {
+            // Relative path - resolve from current working directory
+            let cwd = self.get_cwd();
+            if let Some((base_entry, base_mount)) = cwd {
+                // Resolve relative to current working directory
+                let (entry, _mount_point) = self.resolve_path_from_with_options(&base_entry, &base_mount, path, options)?;
+                return Ok(entry);
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidPath,
+                    "Relative path resolution requires a current working directory"
+                ));
+            }
+        }
     }
     
-    /// Resolve a path relative to a given base VfsEntry (for *at system calls)
-    pub fn resolve_relative_path(&self, base_entry: &Arc<VfsEntry>, base_mount: &Arc<MountPoint>, path: &str) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
-        self.mount_tree.resolve_relative_path(
-            base_entry, 
-            base_mount, 
-            path, 
-            &PathResolutionOptions::default()
-        )
+    /// Resolve a path from a specific base directory (for *at system calls)
+    /// 
+    /// This method resolves a path starting from the specified base directory.
+    /// It's specifically designed for *at system calls (openat, fstatat, etc.).
+    /// 
+    /// Returns both VfsEntry and MountPoint for efficient use.
+    pub fn resolve_path_from(
+        &self, 
+        base_entry: &Arc<VfsEntry>, 
+        base_mount: &Arc<MountPoint>, 
+        path: &str
+    ) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
+        self.resolve_path_from_with_options(base_entry, base_mount, path, &PathResolutionOptions::default())
+    }
+    
+    /// Resolve a path from an optional base directory with options
+    pub fn resolve_path_from_with_options(
+        &self,
+        base_entry: &Arc<VfsEntry>,
+        base_mount: &Arc<MountPoint>,
+        path: &str,
+        options: &PathResolutionOptions
+    ) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
+        if path.starts_with('/') {
+            // Absolute path - ignore base and resolve from root
+            self.mount_tree.resolve_path_with_options(path, options)
+        } else {
+            // Relative path with explicit base (for *at syscalls)
+            self.mount_tree.resolve_path_from_with_options(Some(base_entry), Some(base_mount), path, options)
+        }
     }
     
     /// Create a hard link
@@ -722,14 +841,18 @@ impl VfsManager {
     ///
     /// # Returns
     /// KernelObject::File(VfsFileObject)
-    pub fn open_relative(
+    /// Open a file with optional base directory (unified openat implementation)
+    /// 
+    /// If base_entry and base_mount are None, behaves like regular open().
+    /// If base is provided, resolves relative paths from that base (for *at syscalls).
+    pub fn open_from(
         &self,
         base_entry: &Arc<VfsEntry>,
         base_mount: &Arc<MountPoint>,
         path: &str,
         flags: u32
     ) -> Result<KernelObject, FileSystemError> {
-        let (entry, mount_point) = self.resolve_relative_path(base_entry, base_mount, path)?;
+        let (entry, mount_point) = self.resolve_path_from(base_entry, base_mount, path)?;
         let node = entry.node();
         let filesystem = node.filesystem()
             .and_then(|w| w.upgrade())
@@ -742,6 +865,70 @@ impl VfsManager {
             path.to_string()
         );
         Ok(KernelObject::File(Arc::new(vfs_file_obj)))
+    }
+
+    /// Resolve a relative path to an absolute path using the current working directory
+    /// 
+    /// If the path is already absolute, returns it as-is.
+    /// If the path is relative, combines it with the current working directory.
+    /// 
+    /// # Arguments
+    /// * `path` - The path to resolve (relative or absolute)
+    /// 
+    /// # Returns
+    /// An absolute path string
+    pub fn resolve_path_to_absolute(&self, path: &str) -> String {
+        if path.starts_with('/') {
+            // Already absolute path
+            path.to_string()
+        } else {
+            // Relative path - combine with current working directory
+            self.get_cwd_path() + "/" + path
+        }
+    }
+
+    /// Resolve a path and return both VfsEntry and MountPoint (internal use)
+    /// 
+    /// This method is for VfsManager internal use where we need both the entry
+    /// and mount point information for efficiency. It handles both absolute and
+    /// relative paths automatically.
+    fn resolve_path_full(&self, path: &str) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
+        if path.starts_with('/') {
+            // Absolute path - resolve from root
+            self.resolve_path_full(path)
+        } else {
+            // Relative path - resolve from current working directory
+            if let Some((base_entry, base_mount)) = self.get_cwd() {
+                self.resolve_path_from(&base_entry, &base_mount, path)
+            } else {
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidPath,
+                    "Relative path resolution requires a current working directory"
+                ))
+            }
+        }
+    }
+
+    /// Resolve a path and return both VfsEntry and MountPoint with options (internal use)
+    /// 
+    /// This method is for VfsManager internal use where we need both the entry
+    /// and mount point information for efficiency, with support for path resolution
+    /// options. It handles both absolute and relative paths automatically.
+    fn resolve_path_full_with_options(&self, path: &str, options: &PathResolutionOptions) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
+        if path.starts_with('/') {
+            // Absolute path - resolve from root
+            self.mount_tree.resolve_path_with_options(path, options)
+        } else {
+            // Relative path - resolve from current working directory
+            if let Some((base_entry, base_mount)) = self.get_cwd() {
+                self.resolve_path_from_with_options(&base_entry, &base_mount, path, options)
+            } else {
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidPath,
+                    "Relative path resolution requires a current working directory"
+                ))
+            }
+        }
     }
 }
 
