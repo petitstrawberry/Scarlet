@@ -202,7 +202,7 @@ impl VirtioGpuDevice {
 
         // The response buffer is allocated on the stack. It's faster and
         // its memory is automatically reclaimed when the function returns.
-        let mut resp_buffer = [0u8; 64];
+        let mut resp_buffer = [0u8; 128];
 
         // Allocate descriptors
         let cmd_desc = control_queue.alloc_desc().ok_or("Failed to allocate command descriptor")?;
