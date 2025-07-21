@@ -711,6 +711,38 @@ impl VfsManager {
             ))
         }
     }
+
+    /// Open a file relative to a given base entry and mount (for *at syscalls)
+    /// 
+    /// # Arguments
+    /// * `base_entry` - Base VfsEntry to resolve relative path from
+    /// * `base_mount` - Base MountPoint for the base entry
+    /// * `path` - Relative or absolute path
+    /// * `flags` - Open flags
+    ///
+    /// # Returns
+    /// KernelObject::File(VfsFileObject)
+    pub fn open_relative(
+        &self,
+        base_entry: &Arc<VfsEntry>,
+        base_mount: &Arc<MountPoint>,
+        path: &str,
+        flags: u32
+    ) -> Result<KernelObject, FileSystemError> {
+        let (entry, mount_point) = self.resolve_relative_path(base_entry, base_mount, path)?;
+        let node = entry.node();
+        let filesystem = node.filesystem()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))?;
+        let inner_file_obj = filesystem.open(&node, flags)?;
+        let vfs_file_obj = super::core::VfsFileObject::new(
+            inner_file_obj,
+            entry,
+            mount_point,
+            path.to_string()
+        );
+        Ok(KernelObject::File(Arc::new(vfs_file_obj)))
+    }
 }
 
 /// Initialize the global VFS manager (Arc) so it can be retrieved later
