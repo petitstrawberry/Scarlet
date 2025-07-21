@@ -43,9 +43,9 @@ pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let num_pages = aligned_length / PAGE_SIZE;
 
-    crate::println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}", 
-        addr, length, prot, flags);
-    crate::println!("sys_mmap: Allocating {} pages ({} bytes)", num_pages, aligned_length);
+    // crate::println!("sys_mmap: addr={:#x}, length={}, prot={:#x}, flags={:#x}", 
+    //     addr, length, prot, flags);
+    // crate::println!("sys_mmap: Allocating {} pages ({} bytes)", num_pages, aligned_length);
 
     // For now, ignore the requested address and let the kernel choose
     // TODO: Support MAP_FIXED and address hints
