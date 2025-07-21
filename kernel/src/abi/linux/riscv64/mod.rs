@@ -453,6 +453,7 @@ syscall_table! {
     Uname = 160 => proc::sys_uname,
     GetUid = 174 => proc::sys_getuid,
     Brk = 214 => proc::sys_brk,
+    Munmap = 215 => mm::sys_munmap,
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
 }

@@ -97,11 +97,58 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
     trapframe.increment_pc_next(task);
     // crate::println!("sys_mprotect: addr={:#x}, length={}, prot={:#x}", addr, length, prot);
 
-    let vaddr = task.vm_manager.translate_vaddr(addr as usize);
-    if vaddr.is_none() {
+    let paddr = task.vm_manager.translate_vaddr(addr as usize);
+    if paddr.is_none() {
         crate::println!("sys_mprotect: Invalid address {:#x}", addr);
         return usize::MAX; // -EINVAL
     }
 
     0 // Not implemented yet, return success for now
+}
+
+pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let addr = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+    
+    crate::println!("sys_munmap: addr={:#x}, length={}", addr, length);
+
+    // Basic validation
+    if length == 0 {
+        crate::println!("sys_munmap: Invalid length 0");
+        return usize::MAX; // -EINVAL
+    }
+
+    if addr == 0 {
+        crate::println!("sys_munmap: Cannot unmap null address");
+        return usize::MAX; // -EINVAL
+    }
+
+    // Check if address is page-aligned
+    if addr % PAGE_SIZE != 0 {
+        crate::println!("sys_munmap: Address {:#x} is not page-aligned", addr);
+        return usize::MAX; // -EINVAL
+    }
+
+    // Calculate aligned length and pages
+    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let num_pages = aligned_length / PAGE_SIZE;
+    let end_addr = addr + aligned_length - 1;
+
+    crate::println!("sys_munmap: Unmapping {} pages ({} bytes) from {:#x} to {:#x}", 
+        num_pages, aligned_length, addr, end_addr);
+
+    // Check if the memory region is actually mapped
+    let start_paddr = task.vm_manager.translate_vaddr(addr);
+    if start_paddr.is_none() {
+        crate::println!("sys_munmap: Address {:#x} is not mapped", addr);
+        return usize::MAX; // -EINVAL
+    }
+
+    // Try to deallocate the memory region using free_data_pages
+    task.free_data_pages(addr, num_pages);
+    crate::println!("sys_munmap: Successfully unmapped memory region {:#x}-{:#x}", addr, end_addr);
+    0 // Success
 }
