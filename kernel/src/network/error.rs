@@ -31,6 +31,22 @@ pub enum NetworkError {
     MissingHint(alloc::string::String),
     /// Operation not supported
     Unsupported(alloc::string::String),
+    /// Unsupported protocol encountered
+    UnsupportedProtocol { 
+        layer: alloc::string::String, 
+        protocol: alloc::string::String 
+    },
+    /// Invalid hint format
+    InvalidHintFormat { 
+        hint_key: alloc::string::String, 
+        value: alloc::string::String 
+    },
+    /// No receive handler available for stage
+    NoRxHandler(alloc::string::String),
+    /// No transmit handler available for stage
+    NoTxHandler(alloc::string::String),
+    /// Invalid operation
+    InvalidOperation(alloc::string::String),
 }
 
 impl NetworkError {
@@ -82,6 +98,37 @@ impl NetworkError {
         Self::Unsupported(alloc::string::String::from(operation))
     }
 
+    /// Create an unsupported protocol error
+    pub fn unsupported_protocol(layer: &str, protocol: &str) -> Self {
+        Self::UnsupportedProtocol {
+            layer: alloc::string::String::from(layer),
+            protocol: alloc::string::String::from(protocol),
+        }
+    }
+
+    /// Create an invalid hint format error
+    pub fn invalid_hint_format(hint_key: &str, value: &str) -> Self {
+        Self::InvalidHintFormat {
+            hint_key: alloc::string::String::from(hint_key),
+            value: alloc::string::String::from(value),
+        }
+    }
+
+    /// Create a no rx handler error
+    pub fn no_rx_handler(stage: &str) -> Self {
+        Self::NoRxHandler(alloc::string::String::from(stage))
+    }
+
+    /// Create a no tx handler error
+    pub fn no_tx_handler(stage: &str) -> Self {
+        Self::NoTxHandler(alloc::string::String::from(stage))
+    }
+
+    /// Create an invalid operation error
+    pub fn invalid_operation(reason: &str) -> Self {
+        Self::InvalidOperation(alloc::string::String::from(reason))
+    }
+
     /// Get a static string description of the error
     pub fn as_str(&self) -> &str {
         match self {
@@ -95,6 +142,11 @@ impl NetworkError {
             NetworkError::PipelineNotInitialized => "Pipeline not initialized",
             NetworkError::MissingHint(_) => "Missing required hint",
             NetworkError::Unsupported(_) => "Operation not supported",
+            NetworkError::UnsupportedProtocol { .. } => "Unsupported protocol",
+            NetworkError::InvalidHintFormat { .. } => "Invalid hint format",
+            NetworkError::NoRxHandler(_) => "No receive handler available",
+            NetworkError::NoTxHandler(_) => "No transmit handler available",
+            NetworkError::InvalidOperation(_) => "Invalid operation",
         }
     }
 }
@@ -131,6 +183,21 @@ impl core::fmt::Display for NetworkError {
             }
             NetworkError::Unsupported(operation) => {
                 write!(f, "Operation not supported: {}", operation)
+            }
+            NetworkError::UnsupportedProtocol { layer, protocol } => {
+                write!(f, "Unsupported protocol in {}: {}", layer, protocol)
+            }
+            NetworkError::InvalidHintFormat { hint_key, value } => {
+                write!(f, "Invalid format for hint '{}': {}", hint_key, value)
+            }
+            NetworkError::NoRxHandler(stage) => {
+                write!(f, "No receive handler available for stage '{}'", stage)
+            }
+            NetworkError::NoTxHandler(stage) => {
+                write!(f, "No transmit handler available for stage '{}'", stage)
+            }
+            NetworkError::InvalidOperation(reason) => {
+                write!(f, "Invalid operation: {}", reason)
             }
         }
     }

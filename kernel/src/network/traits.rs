@@ -230,6 +230,133 @@ impl core::fmt::Display for NextAction {
     }
 }
 
+// ===== Phase 1: Unified Handler Traits with Internal Routing =====
+
+/// Unified trait for receive path packet processing with internal next stage determination
+///
+/// This trait implements the "1ステージ1ハンドラー設計" (1 stage, 1 handler design) where
+/// each stage has exactly one receive handler that internally determines the next processing stage.
+///
+/// Key differences from RxStageHandler:
+/// - Returns NextAction (including next stage) instead of just Ok(())
+/// - Handler is responsible for routing decisions using NextStageMatcher
+/// - Enables O(1) routing performance through HashMap-based matchers
+pub trait ReceiveHandler: Send + Sync {
+    /// Process a received packet and determine the next action
+    ///
+    /// The handler should:
+    /// 1. Validate packet data (validate_payload_size, etc.)
+    /// 2. Parse protocol headers from payload
+    /// 3. Store headers using packet.add_header()
+    /// 4. Update payload for next stage
+    /// 5. Determine next stage using internal routing logic (NextStageMatcher)
+    /// 6. Return appropriate NextAction
+    ///
+    /// # Arguments
+    /// * `packet` - The packet to process (mutable for header extraction and payload updates)
+    ///
+    /// # Returns
+    /// * `Ok(NextAction)` - Action to take next (JumpTo, Complete, Drop, Terminate)
+    /// * `Err(NetworkError)` - Processing failed
+    ///
+    /// # Example
+    /// ```ignore
+    /// fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+    ///     packet.validate_payload_size(14)?;
+    ///     let payload = packet.payload();
+    ///     
+    ///     // Extract Ethernet header
+    ///     packet.add_header("ethernet", payload[0..14].to_vec());
+    ///     packet.set_payload(payload[14..].to_vec());
+    ///     
+    ///     // Internal routing using O(1) HashMap lookup
+    ///     let ether_type = u16::from_be_bytes([payload[12], payload[13]]);
+    ///     let next_stage = self.next_stage_matcher.get_next_stage(ether_type)?;
+    ///     Ok(NextAction::jump_to(next_stage))
+    /// }
+    /// ```
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError>;
+}
+
+/// Unified trait for transmit path packet building with internal next stage determination
+///
+/// This trait implements the "1ステージ1ハンドラー設計" (1 stage, 1 handler design) where
+/// each stage has exactly one transmit handler that internally determines the next processing stage.
+///
+/// Key differences from TxStageBuilder:
+/// - Returns NextAction (including next stage) instead of just Ok(())
+/// - Handler is responsible for routing decisions
+/// - Enables coordinated transmit path processing
+pub trait TransmitHandler: Send + Sync {
+    /// Build packet headers and determine the next action
+    ///
+    /// The builder should:
+    /// 1. Read required hints from packet.get_hint()
+    /// 2. Validate hints and payload for transmission
+    /// 3. Build appropriate protocol header
+    /// 4. Prepend header to payload (or modify packet accordingly)
+    /// 5. Set hints for lower layers using packet.set_hint()
+    /// 6. Determine next stage or completion
+    /// 7. Return appropriate NextAction
+    ///
+    /// # Arguments
+    /// * `packet` - The packet to build (mutable for header construction and hint updates)
+    ///
+    /// # Returns
+    /// * `Ok(NextAction)` - Action to take next (JumpTo for next layer, Complete for transmission)
+    /// * `Err(NetworkError)` - Building failed (missing hints, invalid configuration, etc.)
+    ///
+    /// # Example
+    /// ```ignore
+    /// fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+    ///     let dest_ip = packet.get_hint("destination_ip")
+    ///         .ok_or(NetworkError::missing_hint("destination_ip"))?;
+    ///     
+    ///     // Build IPv4 header based on hints
+    ///     let header = self.build_ipv4_header(dest_ip, packet.payload().len())?;
+    ///     let mut new_payload = header;
+    ///     new_payload.extend_from_slice(packet.payload());
+    ///     packet.set_payload(new_payload);
+    ///     
+    ///     // Set hints for ethernet layer
+    ///     packet.set_hint("ethertype", "0x0800");
+    ///     
+    ///     Ok(NextAction::jump_to("ethernet"))
+    /// }
+    /// ```
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError>;
+}
+
+/// Generic trait for O(1) next stage determination using HashMap routing
+///
+/// This trait enables type-safe, high-performance routing decisions within handlers
+/// by providing O(1) lookup of next stages based on protocol-specific values.
+///
+/// Different protocol layers use different types for routing:
+/// - Ethernet: u16 (EtherType)
+/// - IPv4: u8 (IP protocol number)
+/// - TCP/UDP: u16 (port numbers) or port ranges
+pub trait NextStageMatcher<T>: Send + Sync {
+    /// Get the next stage name for the given protocol value
+    ///
+    /// # Arguments
+    /// * `value` - Protocol-specific routing value (EtherType, IP protocol, port, etc.)
+    ///
+    /// # Returns
+    /// * `Ok(&str)` - Next stage name to jump to
+    /// * `Err(NetworkError)` - No route found for this value
+    ///
+    /// # Example
+    /// ```ignore
+    /// let matcher = EtherTypeToStage::new()
+    ///     .add_mapping(0x0800, "ipv4")
+    ///     .add_mapping(0x86DD, "ipv6");
+    ///     
+    /// let next_stage = matcher.get_next_stage(0x0800)?; // Returns "ipv4"
+    /// ```
+    fn get_next_stage(&self, value: T) -> Result<&str, NetworkError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
