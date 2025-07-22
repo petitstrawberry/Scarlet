@@ -9,6 +9,37 @@ use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
 use crate::network::pipeline::FlexibleStage;
 
+/// Tracing functionality for testing
+#[derive(Debug, Clone)]
+pub struct PipelineTrace {
+    pub stages: Vec<String>,
+    pub packet_states: Vec<String>, // Packet state after each stage
+}
+
+impl PipelineTrace {
+    pub fn new() -> Self {
+        Self {
+            stages: Vec::new(),
+            packet_states: Vec::new(),
+        }
+    }
+
+    pub fn add_stage(&mut self, stage_name: &str, packet: &NetworkPacket) {
+        self.stages.push(String::from(stage_name));
+        // Record packet state: payload_len, headers_count, hints_count
+        let state = format!("payload:{}, headers:{}, hints:{}", 
+            packet.payload().len(),
+            packet.headers().len(),
+            packet.hints().len()
+        );
+        self.packet_states.push(state);
+    }
+
+    pub fn get_path(&self) -> String {
+        self.stages.join(" -> ")
+    }
+}
+
 /// Test echo handler (receive)
 /// Just passes packets through
 #[derive(Debug)]
@@ -59,6 +90,7 @@ pub struct TestStageBuilder {
     enable_rx: bool,
     enable_tx: bool,
     routes: BTreeMap<u8, String>,
+    enable_tracing: bool,
 }
 
 impl TestStageBuilder {
@@ -68,6 +100,7 @@ impl TestStageBuilder {
             enable_rx: false,
             enable_tx: false,
             routes: BTreeMap::new(),
+            enable_tracing: false,
         }
     }
 
@@ -87,15 +120,29 @@ impl TestStageBuilder {
         self
     }
 
+    /// Enable tracing for this stage
+    pub fn enable_tracing(mut self) -> Self {
+        self.enable_tracing = true;
+        self
+    }
+
     pub fn build(self) -> FlexibleStage {
         let rx_handler = if self.enable_rx {
             if self.routes.is_empty() {
                 // No routing rules, use simple echo handler
-                Some(Box::new(EchoRxHandler::new(&self.stage_id)) as Box<dyn ReceiveHandler>)
+                if self.enable_tracing {
+                    Some(Box::new(TracingEchoRxHandler::new(&self.stage_id)) as Box<dyn ReceiveHandler>)
+                } else {
+                    Some(Box::new(EchoRxHandler::new(&self.stage_id)) as Box<dyn ReceiveHandler>)
+                }
             } else {
                 // Has routing rules, use routing handler
                 let matcher = TestProtocolMatcher::with_custom_routes(self.routes.clone());
-                Some(Box::new(TestProtocolRxHandler::with_matcher(&self.stage_id, matcher)) as Box<dyn ReceiveHandler>)
+                if self.enable_tracing {
+                    Some(Box::new(TracingTestProtocolRxHandler::with_matcher(&self.stage_id, matcher)) as Box<dyn ReceiveHandler>)
+                } else {
+                    Some(Box::new(TestProtocolRxHandler::with_matcher(&self.stage_id, matcher)) as Box<dyn ReceiveHandler>)
+                }
             }
         } else {
             None
@@ -395,5 +442,98 @@ impl TestProtocolStageBuilder {
             rx_handler: Some(rx_handler),
             tx_handler: Some(tx_handler),
         }
+    }
+}
+
+/// Tracing echo handler (receive) - records stage visits
+#[derive(Debug)]
+pub struct TracingEchoRxHandler {
+    stage_name: String,
+}
+
+impl TracingEchoRxHandler {
+    pub fn new(stage_name: &str) -> Self {
+        Self {
+            stage_name: String::from(stage_name),
+        }
+    }
+}
+
+impl ReceiveHandler for TracingEchoRxHandler {
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information to packet hints
+        let trace_key = "pipeline_trace";
+        let current_trace = packet.get_hint(trace_key).unwrap_or("");
+        let new_trace = if current_trace.is_empty() {
+            self.stage_name.clone()
+        } else {
+            format!("{} -> {}", current_trace, self.stage_name)
+        };
+        packet.set_hint(trace_key, &new_trace);
+        
+        // Add stage-specific processing marker
+        packet.set_hint(&format!("processed_by_{}", self.stage_name), "true");
+        
+        Ok(NextAction::Complete)
+    }
+}
+
+/// Tracing protocol receive handler that parses header and routes to next stage
+#[derive(Debug)]
+pub struct TracingTestProtocolRxHandler {
+    stage_name: String,
+    matcher: TestProtocolMatcher,
+}
+
+impl TracingTestProtocolRxHandler {
+    pub fn new(stage_name: &str) -> Self {
+        Self {
+            stage_name: String::from(stage_name),
+            matcher: TestProtocolMatcher::new(),
+        }
+    }
+
+    pub fn with_matcher(stage_name: &str, matcher: TestProtocolMatcher) -> Self {
+        Self {
+            stage_name: String::from(stage_name),
+            matcher,
+        }
+    }
+}
+
+impl ReceiveHandler for TracingTestProtocolRxHandler {
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information
+        let trace_key = "pipeline_trace";
+        let current_trace = packet.get_hint(trace_key).unwrap_or("");
+        let new_trace = if current_trace.is_empty() {
+            self.stage_name.clone()
+        } else {
+            format!("{} -> {}", current_trace, self.stage_name)
+        };
+        packet.set_hint(trace_key, &new_trace);
+
+        // Validate payload size
+        packet.validate_payload_size(1)?;
+        
+        // Parse header from payload
+        let header = TestProtocolHeader::from_bytes(packet.payload())?;
+        
+        // Extract header and update payload
+        let payload_data = packet.payload()[1..].to_vec();
+        packet.set_payload(payload_data);
+        
+        // Add parsed header to packet
+        packet.add_header("test_protocol", header.to_bytes());
+        
+        // Set hint for next stage routing
+        packet.set_hint("test_protocol_type", &format!("0x{:02x}", header.next_type));
+        
+        // Add processing marker with protocol type info
+        packet.set_hint(&format!("processed_by_{}", self.stage_name), &format!("protocol_type:0x{:02x}", header.next_type));
+        
+        // Route to next stage based on header type
+        let next_stage = self.matcher.get_next_stage(header.next_type)?;
+        Ok(NextAction::JumpTo(next_stage.to_string()))
     }
 }

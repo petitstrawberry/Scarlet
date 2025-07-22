@@ -343,3 +343,164 @@ fn test_multiple_route_additions() {
     assert!(stage.rx_handler.is_some());
     assert!(stage.tx_handler.is_none());
 }
+
+#[test_case]
+fn test_pipeline_routing_with_tracing() {
+    use crate::network::test_helpers::TEST_PROTOCOL_TYPE_A;
+    
+    // Create a pipeline with tracing-enabled stages
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestStageBuilder::new("router")
+                .add_route(TEST_PROTOCOL_TYPE_A, "type_a_handler")
+                .add_route(0x02, "type_b_handler")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .add_stage(
+            TestStageBuilder::new("type_a_handler")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .add_stage(
+            TestStageBuilder::new("type_b_handler")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .set_default_rx_entry("router")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    // Test routing with protocol type A (0x01)
+    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let processed_packet = result.unwrap();
+    
+    // Verify tracing information
+    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    assert_eq!(trace, "router -> type_a_handler");
+    
+    // Verify processing markers
+    assert_eq!(processed_packet.get_hint("processed_by_router"), Some("protocol_type:0x01"));
+    assert_eq!(processed_packet.get_hint("processed_by_type_a_handler"), Some("true"));
+    
+    // Verify packet transformation
+    assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB, 0xCC]); // Header removed
+    assert!(processed_packet.get_header("test_protocol").is_some()); // Header added
+    assert_eq!(processed_packet.get_hint("test_protocol_type"), Some("0x01"));
+
+    // Test routing with protocol type B (0x02)
+    let packet = NetworkPacket::new(vec![0x02, 0xDD, 0xEE, 0xFF]);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let processed_packet = result.unwrap();
+    
+    // Verify tracing information for type B
+    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    assert_eq!(trace, "router -> type_b_handler");
+    
+    // Verify processing markers
+    assert_eq!(processed_packet.get_hint("processed_by_router"), Some("protocol_type:0x02"));
+    assert_eq!(processed_packet.get_hint("processed_by_type_b_handler"), Some("true"));
+    
+    // Verify packet transformation
+    assert_eq!(processed_packet.payload(), &vec![0xDD, 0xEE, 0xFF]); // Header removed
+    assert!(processed_packet.get_header("test_protocol").is_some()); // Header added
+    assert_eq!(processed_packet.get_hint("test_protocol_type"), Some("0x02"));
+}
+
+#[test_case]
+fn test_packet_state_verification() {
+    // Test packet state at different stages
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestStageBuilder::new("preprocessor")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .set_default_rx_entry("preprocessor")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    let mut packet = NetworkPacket::new(vec![1, 2, 3, 4, 5]);
+    packet.add_header("original_header", vec![0xFF, 0xFE]);
+    packet.set_hint("original_hint", "test_value");
+    
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let processed_packet = result.unwrap();
+    
+    // Verify original data is preserved
+    assert_eq!(processed_packet.payload(), &vec![1, 2, 3, 4, 5]);
+    assert_eq!(processed_packet.get_header("original_header"), Some(&vec![0xFF, 0xFE]));
+    assert_eq!(processed_packet.get_hint("original_hint"), Some("test_value"));
+    
+    // Verify trace was added
+    assert_eq!(processed_packet.get_hint("pipeline_trace"), Some("preprocessor"));
+    assert_eq!(processed_packet.get_hint("processed_by_preprocessor"), Some("true"));
+}
+
+#[test_case]
+fn test_complex_routing_trace() {
+    use crate::network::test_helpers::{TEST_PROTOCOL_TYPE_A, TEST_PROTOCOL_TYPE_B};
+    
+    // Create a more complex pipeline with multiple routing stages
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestStageBuilder::new("initial_router")
+                .add_route(TEST_PROTOCOL_TYPE_A, "l2_processor")
+                .add_route(TEST_PROTOCOL_TYPE_B, "l3_processor")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .add_stage(
+            TestStageBuilder::new("l2_processor")
+                .add_route(0x03, "final_handler")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .add_stage(
+            TestStageBuilder::new("l3_processor")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .add_stage(
+            TestStageBuilder::new("final_handler")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .set_default_rx_entry("initial_router")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    // Test multi-stage routing: initial_router -> l2_processor -> final_handler
+    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0x03, 0x11, 0x22]);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let processed_packet = result.unwrap();
+    
+    // Verify complex trace path
+    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    assert_eq!(trace, "initial_router -> l2_processor -> final_handler");
+    
+    // Verify all processing markers exist
+    assert!(processed_packet.get_hint("processed_by_initial_router").is_some());
+    assert!(processed_packet.get_hint("processed_by_l2_processor").is_some());
+    assert!(processed_packet.get_hint("processed_by_final_handler").is_some());
+    
+    // Verify final packet state - payload should have both headers removed
+    assert_eq!(processed_packet.payload(), &vec![0x11, 0x22]);
+}
