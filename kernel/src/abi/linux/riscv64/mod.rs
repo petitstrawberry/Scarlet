@@ -25,6 +25,8 @@ pub struct LinuxRiscv64Abi {
     /// File descriptor to handle mapping table (fd -> handle)
     /// None means the fd is not allocated
     fd_to_handle: [Option<u32>; MAX_FDS],
+    /// File descriptor flags (e.g., FD_CLOEXEC)
+    fd_flags: [u32; MAX_FDS],
     /// Free file descriptor list for O(1) allocation/deallocation
     free_fds: Vec<usize>,
 }
@@ -37,6 +39,7 @@ impl Default for LinuxRiscv64Abi {
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
         Self {
             fd_to_handle: [None; MAX_FDS],
+            fd_flags: [0; MAX_FDS],
             free_fds,
         }
     }
@@ -66,10 +69,11 @@ impl LinuxRiscv64Abi {
         }
     }
     
-    /// Remove file descriptor mapping
+    /// Remove file descriptor mapping and clear its flags
     pub fn remove_fd(&mut self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
             if let Some(handle) = self.fd_to_handle[fd].take() {
+                self.fd_flags[fd] = 0; // Clear flags when removing fd
                 // Add the freed fd back to the free list for reuse (O(1))
                 self.free_fds.push(fd);
                 Some(handle)
@@ -93,17 +97,6 @@ impl LinuxRiscv64Abi {
         None
     }
     
-    /// Remove handle mapping (requires linear search)
-    pub fn remove_handle(&mut self, handle: u32) -> Option<usize> {
-        if let Some(fd) = self.find_fd_by_handle(handle) {
-            self.fd_to_handle[fd] = None;
-            self.free_fds.push(fd);
-            Some(fd)
-        } else {
-            None
-        }
-    }
-
     /// Initialize standard file descriptors (stdin, stdout, stderr)
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
         // Linux convention: fd 0 = stdin, fd 1 = stdout, fd 2 = stderr
@@ -113,6 +106,50 @@ impl LinuxRiscv64Abi {
         
         // Remove std fds from free list
         self.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
+    }
+    
+    /// Get file descriptor flags
+    pub fn get_fd_flags(&self, fd: usize) -> Option<u32> {
+        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
+            Some(self.fd_flags[fd])
+        } else {
+            None
+        }
+    }
+    
+    /// Set file descriptor flags
+    pub fn set_fd_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
+        use crate::{task::mytask, object::handle::SpecialSemantics};
+        use crate::abi::linux::riscv64::fs::FD_CLOEXEC;
+        
+        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
+            let handle = self.fd_to_handle[fd].unwrap();
+            self.fd_flags[fd] = flags;
+            
+            // Update handle metadata to sync FD_CLOEXEC with SpecialSemantics::CloseOnExec
+            if let Some(task) = mytask() {
+                if let Some(current_metadata) = task.handle_table.get_metadata(handle) {
+                    let mut new_metadata = current_metadata.clone();
+                    
+                    if flags & FD_CLOEXEC != 0 {
+                        // Set CloseOnExec if FD_CLOEXEC flag is present
+                        new_metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);
+                    } else {
+                        // Remove CloseOnExec if FD_CLOEXEC flag is not present
+                        if matches!(new_metadata.special_semantics, Some(SpecialSemantics::CloseOnExec)) {
+                            new_metadata.special_semantics = None;
+                        }
+                    }
+                    
+                    // Update the metadata
+                    let _ = task.handle_table.update_metadata(handle, new_metadata);
+                }
+            }
+            
+            Ok(())
+        } else {
+            Err("Invalid file descriptor")
+        }
     }
     
     /// Get total number of allocated file descriptors
@@ -443,6 +480,7 @@ syscall_table! {
     Invalid = 0 => |_abi: &mut crate::abi::linux::riscv64::LinuxRiscv64Abi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
+    Fcntl = 25 => fs::sys_fcntl,
     Ioctl = 29 => fs::sys_ioctl,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,

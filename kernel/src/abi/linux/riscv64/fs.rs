@@ -65,6 +65,27 @@ pub const S_IROTH: u32 = 0o0004;    // Others have read permission
 pub const S_IWOTH: u32 = 0o0002;    // Others have write permission
 pub const S_IXOTH: u32 = 0o0001;    // Others have execute permission
 
+// Linux fcntl command constants
+pub const F_DUPFD: u32 = 0;          // Duplicate file descriptor
+pub const F_GETFD: u32 = 1;          // Get file descriptor flags
+pub const F_SETFD: u32 = 2;          // Set file descriptor flags
+pub const F_GETFL: u32 = 3;          // Get file status flags
+pub const F_SETFL: u32 = 4;          // Set file status flags
+pub const F_GETLK: u32 = 5;          // Get record locking information
+pub const F_SETLK: u32 = 6;          // Set record lock (non-blocking)
+pub const F_SETLKW: u32 = 7;         // Set record lock (blocking)
+pub const F_SETOWN: u32 = 8;         // Set owner (process receiving SIGIO/SIGURG)
+pub const F_GETOWN: u32 = 9;         // Get owner (process receiving SIGIO/SIGURG)
+pub const F_SETSIG: u32 = 10;        // Set signal sent when I/O is possible
+pub const F_GETSIG: u32 = 11;        // Get signal sent when I/O is possible
+pub const F_SETLEASE: u32 = 1024;    // Set a lease
+pub const F_GETLEASE: u32 = 1025;    // Get current lease
+pub const F_NOTIFY: u32 = 1026;      // Request notifications on a directory
+pub const F_DUPFD_CLOEXEC: u32 = 1030; // Duplicate with close-on-exec
+
+// Linux file descriptor flags
+pub const FD_CLOEXEC: u32 = 1;          // Close-on-exec flag
+
 impl LinuxStat {
     /// Create a new LinuxStat from Scarlet FileMetadata
     pub fn from_metadata(metadata: &crate::fs::FileMetadata) -> Self {
@@ -1072,4 +1093,108 @@ pub struct IoVec {
     pub iov_base: *mut u8,
     /// Length of the buffer
     pub iov_len: usize,
+}
+
+/// Linux sys_fcntl implementation for Scarlet VFS v2
+/// Currently provides basic logging of commands to understand usage patterns
+/// 
+/// This is a minimal implementation that logs the fcntl commands being used
+/// to help understand what functionality needs to be implemented.
+pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let cmd = trapframe.get_arg(1) as u32;
+    let arg = trapframe.get_arg(2);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Log the fcntl command to understand usage patterns
+    match cmd {
+        F_DUPFD => {
+            crate::println!("[sys_fcntl] F_DUPFD: fd={}, arg={} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement F_DUPFD
+        },
+        F_GETFD => {
+            // Get file descriptor flags (IMPLEMENTED)
+            if let Some(_handle) = abi.get_handle(fd) {
+                if let Some(flags) = abi.get_fd_flags(fd) {
+                    return flags as usize; // Return the flags
+                } else {
+                    return usize::MAX; // Invalid file descriptor
+                }
+            } else {
+                return usize::MAX; // Invalid file descriptor
+            }
+        },
+        F_SETFD => {
+            // Set file descriptor flags (IMPLEMENTED)
+            if let Some(_handle) = abi.get_handle(fd) {
+                match abi.set_fd_flags(fd, arg as u32) {
+                    Ok(()) => return 0, // Success
+                    Err(_) => return usize::MAX, // Error
+                }
+            } else {
+                return usize::MAX; // Invalid file descriptor
+            }
+        },
+        F_GETFL => {
+            crate::println!("[sys_fcntl] F_GETFL: fd={} - NOT IMPLEMENTED", fd);
+            // TODO: Implement F_GETFL - return file status flags
+        },
+        F_SETFL => {
+            crate::println!("[sys_fcntl] F_SETFL: fd={}, flags={:#x} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement F_SETFL - set file status flags
+        },
+        F_GETLK => {
+            crate::println!("[sys_fcntl] F_GETLK: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement file locking
+        },
+        F_SETLK => {
+            crate::println!("[sys_fcntl] F_SETLK: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement file locking
+        },
+        F_SETLKW => {
+            crate::println!("[sys_fcntl] F_SETLKW: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement file locking
+        },
+        F_SETOWN => {
+            crate::println!("[sys_fcntl] F_SETOWN: fd={}, owner={} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement F_SETOWN
+        },
+        F_GETOWN => {
+            crate::println!("[sys_fcntl] F_GETOWN: fd={} - NOT IMPLEMENTED", fd);
+            // TODO: Implement F_GETOWN
+        },
+        F_SETSIG => {
+            crate::println!("[sys_fcntl] F_SETSIG: fd={}, sig={} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement F_SETSIG
+        },
+        F_GETSIG => {
+            crate::println!("[sys_fcntl] F_GETSIG: fd={} - NOT IMPLEMENTED", fd);
+            // TODO: Implement F_GETSIG
+        },
+        F_SETLEASE => {
+            crate::println!("[sys_fcntl] F_SETLEASE: fd={}, lease_type={} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement F_SETLEASE
+        },
+        F_GETLEASE => {
+            crate::println!("[sys_fcntl] F_GETLEASE: fd={} - NOT IMPLEMENTED", fd);
+            // TODO: Implement F_GETLEASE
+        },
+        F_NOTIFY => {
+            crate::println!("[sys_fcntl] F_NOTIFY: fd={}, events={:#x} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement F_NOTIFY
+        },
+        F_DUPFD_CLOEXEC => {
+            crate::println!("[sys_fcntl] F_DUPFD_CLOEXEC: fd={}, arg={} - NOT IMPLEMENTED", fd, arg);
+            // TODO: Implement F_DUPFD_CLOEXEC
+        },
+        _ => {
+            crate::println!("[sys_fcntl] UNKNOWN_CMD: fd={}, cmd={}, arg={:#x} - NOT IMPLEMENTED", fd, cmd, arg);
+        }
+    }
+
+    // All unimplemented commands return ENOSYS (already logged above)
+    usize::MAX // Return -1 (ENOSYS - Function not implemented)
 }
