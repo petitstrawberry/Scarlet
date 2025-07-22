@@ -3,124 +3,32 @@
 //! This module contains example handlers and conditions that demonstrate
 //! how to use the flexible network pipeline architecture.
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String};
 use super::{
     packet::NetworkPacket,
     error::NetworkError,
-    traits::{RxStageHandler, TxStageBuilder, ProcessorCondition, NextAction},
+    traits::{RxStageHandler, ProcessorCondition, NextAction},
     pipeline::{FlexibleStage, RxStageProcessor, FlexiblePipeline},
     network_manager::NetworkManager,
 };
 
-/// Example Ethernet frame handler for receive path
-///
-/// Processes Ethernet frames by extracting the 14-byte header
-/// and determining the next stage based on EtherType.
-pub struct EthernetRxHandler;
+/// Example condition that matches packets based on first byte value
+pub struct FirstByteCondition {
+    expected_value: u8,
+}
 
-impl RxStageHandler for EthernetRxHandler {
-    fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
-        // Validate minimum Ethernet frame size
-        packet.validate_payload_size(14)?;
-        
-        let payload = packet.payload().to_vec(); // Copy to avoid borrow conflicts
-        
-        // Extract Ethernet header (14 bytes: 6 dst + 6 src + 2 ethertype)
-        packet.add_header("ethernet", payload[0..14].to_vec());
-        
-        // Set remaining payload (IP header and beyond)
-        packet.set_payload(payload[14..].to_vec());
-        
-        Ok(())
+impl FirstByteCondition {
+    pub fn new(expected_value: u8) -> Self {
+        Self { expected_value }
     }
 }
 
-/// Example Ethernet frame builder for transmit path
-///
-/// Builds Ethernet frames by reading hints and prepending Ethernet header.
-pub struct EthernetTxBuilder;
-
-impl TxStageBuilder for EthernetTxBuilder {
-    fn build(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
-        // Get required hints from upper layers
-        let dest_mac = packet.get_hint("dest_mac")
-            .ok_or(NetworkError::missing_hint("dest_mac"))?;
-        let src_mac = packet.get_hint("src_mac")
-            .ok_or(NetworkError::missing_hint("src_mac"))?;
-        let ether_type = packet.get_hint("ether_type")
-            .ok_or(NetworkError::missing_hint("ether_type"))?;
-        
-        // Parse MAC addresses and EtherType
-        let dest_bytes = Self::parse_mac(dest_mac)?;
-        let src_bytes = Self::parse_mac(src_mac)?;
-        let ether_type_val = u16::from_str_radix(ether_type, 16)
-            .map_err(|_| NetworkError::invalid_packet("Invalid EtherType format"))?;
-        
-        // Build Ethernet header (14 bytes)
-        let mut eth_header = Vec::with_capacity(14);
-        eth_header.extend_from_slice(&dest_bytes);     // 6 bytes dest MAC
-        eth_header.extend_from_slice(&src_bytes);      // 6 bytes src MAC
-        eth_header.extend_from_slice(&ether_type_val.to_be_bytes()); // 2 bytes EtherType
-        
-        // Prepend header to payload
-        let mut new_payload = eth_header;
-        new_payload.extend_from_slice(packet.payload());
-        packet.set_payload(new_payload);
-        
-        Ok(())
-    }
-}
-
-impl EthernetTxBuilder {
-    fn parse_mac(mac_str: &str) -> Result<[u8; 6], NetworkError> {
-        let parts: Vec<&str> = mac_str.split(':').collect();
-        if parts.len() != 6 {
-            return Err(NetworkError::invalid_packet("Invalid MAC address format"));
-        }
-        
-        let mut mac_bytes = [0u8; 6];
-        for (i, part) in parts.iter().enumerate() {
-            mac_bytes[i] = u8::from_str_radix(part, 16)
-                .map_err(|_| NetworkError::invalid_packet("Invalid MAC address format"))?;
-        }
-        
-        Ok(mac_bytes)
-    }
-}
-
-/// Example condition for IPv4 packets (EtherType 0x0800)
-pub struct IPv4EtherTypeCondition;
-
-impl ProcessorCondition for IPv4EtherTypeCondition {
+impl ProcessorCondition for FirstByteCondition {
     fn matches(&self, packet: &NetworkPacket) -> bool {
         let payload = packet.payload();
-        if payload.len() >= 14 {
-            // Check EtherType field (bytes 12-13) for IPv4 (0x0800)
-            let ether_type = u16::from_be_bytes([payload[12], payload[13]]);
-            ether_type == 0x0800
-        } else {
-            false
-        }
+        !payload.is_empty() && payload[0] == self.expected_value
     }
 }
-
-/// Example condition for ARP packets (EtherType 0x0806)
-pub struct ARPEtherTypeCondition;
-
-impl ProcessorCondition for ARPEtherTypeCondition {
-    fn matches(&self, packet: &NetworkPacket) -> bool {
-        let payload = packet.payload();
-        if payload.len() >= 14 {
-            // Check EtherType field for ARP (0x0806)
-            let ether_type = u16::from_be_bytes([payload[12], payload[13]]);
-            ether_type == 0x0806
-        } else {
-            false
-        }
-    }
-}
-
-
 
 /// Simple condition that matches all packets (for examples)
 pub struct AlwaysMatchCondition;
@@ -165,33 +73,33 @@ impl RxStageHandler for LoggingRxHandler {
     }
 }
 
-/// Create a simple example pipeline for basic Ethernet processing (receive path)
+/// Create a simple example pipeline demonstrating the infrastructure (receive path)
 pub fn create_simple_rx_pipeline() -> FlexiblePipeline {
     let mut pipeline = FlexiblePipeline::new();
     
-    // Create Ethernet stage
-    let mut ethernet_stage = FlexibleStage::new("ethernet");
-    ethernet_stage.add_rx_processor(RxStageProcessor::new(
-        Box::new(IPv4EtherTypeCondition),
-        Box::new(EthernetRxHandler),
-        NextAction::Complete, // Complete processing after Ethernet
+    // Create a simple processing stage with generic examples
+    let mut processing_stage = FlexibleStage::new("processing");
+    processing_stage.add_rx_processor(RxStageProcessor::new(
+        Box::new(FirstByteCondition::new(0x42)), // Match packets starting with 0x42
+        Box::new(LoggingRxHandler::new("byte_42")),
+        NextAction::Complete,
     ));
-    ethernet_stage.add_rx_processor(RxStageProcessor::new(
-        Box::new(ARPEtherTypeCondition),
-        Box::new(DropRxHandler), // Drop ARP packets for this example
-        NextAction::drop_with_reason("ARP not supported in simple pipeline"),
+    processing_stage.add_rx_processor(RxStageProcessor::new(
+        Box::new(AlwaysMatchCondition), // Catch-all for other packets
+        Box::new(DropRxHandler), // Drop remaining packets in this example
+        NextAction::drop_with_reason("No specific handler for this packet type"),
     ));
     
     // Add stage to pipeline
-    pipeline.add_stage(ethernet_stage).unwrap();
+    pipeline.add_stage(processing_stage).unwrap();
     
-    // Set ethernet as rx entry point
-    pipeline.set_default_rx_entry_stage("ethernet").unwrap();
+    // Set processing as rx entry point
+    pipeline.set_default_rx_entry_stage("processing").unwrap();
     
     pipeline
 }
 
-/// Create a NetworkManager with the simple receive pipeline
+/// Create a NetworkManager with the simple example pipeline
 pub fn create_simple_network_manager() -> NetworkManager {
     let pipeline = create_simple_rx_pipeline();
     NetworkManager::with_pipeline(pipeline)
@@ -203,62 +111,45 @@ mod tests {
     use alloc::vec;
 
     #[test_case]
-    fn test_ethernet_handler() {
-        let mut packet = NetworkPacket::new(
-            vec![
-                // Ethernet header (14 bytes)
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // Destination MAC
-                0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, // Source MAC
-                0x08, 0x00,                         // EtherType (IPv4)
-                // Payload
-                0xCC, 0xDD, 0xEE, 0xFF,
-            ],
+    fn test_first_byte_condition() {
+        let matching_packet = NetworkPacket::new(
+            vec![0x42, 0x01, 0x02, 0x03],
             String::from("eth0"),
         );
         
-        let handler = EthernetRxHandler;
-        let result = handler.handle(&mut packet);
-        assert!(result.is_ok());
+        let non_matching_packet = NetworkPacket::new(
+            vec![0x41, 0x01, 0x02, 0x03],
+            String::from("eth0"),
+        );
         
-        // Check that header was extracted
-        let eth_header = packet.get_header("ethernet").unwrap();
-        assert_eq!(eth_header.len(), 14);
-        assert_eq!(eth_header[12..14], [0x08, 0x00]); // EtherType
+        let empty_packet = NetworkPacket::new(
+            vec![],
+            String::from("eth0"),
+        );
         
-        // Check that payload was updated
-        assert_eq!(packet.payload(), &[0xCC, 0xDD, 0xEE, 0xFF]);
+        let condition = FirstByteCondition::new(0x42);
+        
+        assert!(condition.matches(&matching_packet));
+        assert!(!condition.matches(&non_matching_packet));
+        assert!(!condition.matches(&empty_packet));
     }
 
     #[test_case]
-    fn test_ethernet_conditions() {
-        let ipv4_packet = NetworkPacket::new(
-            vec![
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-                0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
-                0x08, 0x00, // IPv4 EtherType
-                0xCC, 0xDD,
-            ],
+    fn test_always_match_condition() {
+        let packet = NetworkPacket::new(
+            vec![0xAA, 0xBB, 0xCC],
             String::from("eth0"),
         );
         
-        let arp_packet = NetworkPacket::new(
-            vec![
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-                0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
-                0x08, 0x06, // ARP EtherType
-                0xCC, 0xDD,
-            ],
+        let empty_packet = NetworkPacket::new(
+            vec![],
             String::from("eth0"),
         );
         
-        let ipv4_condition = IPv4EtherTypeCondition;
-        let arp_condition = ARPEtherTypeCondition;
+        let condition = AlwaysMatchCondition;
         
-        assert!(ipv4_condition.matches(&ipv4_packet));
-        assert!(!ipv4_condition.matches(&arp_packet));
-        
-        assert!(!arp_condition.matches(&ipv4_packet));
-        assert!(arp_condition.matches(&arp_packet));
+        assert!(condition.matches(&packet));
+        assert!(condition.matches(&empty_packet));
     }
 
     #[test_case]
@@ -285,24 +176,20 @@ mod tests {
     fn test_simple_pipeline_creation() {
         let pipeline = create_simple_rx_pipeline();
         assert_eq!(pipeline.stage_count(), 1);
-        assert!(pipeline.has_stage("ethernet"));
-        assert_eq!(pipeline.get_default_rx_entry_stage(), Some("ethernet"));
+        assert!(pipeline.has_stage("processing"));
+        assert_eq!(pipeline.get_default_rx_entry_stage(), Some("processing"));
     }
 
     #[test_case]
     fn test_simple_network_manager() {
         let manager = create_simple_network_manager();
         assert_eq!(manager.stage_count(), 1);
-        assert!(manager.has_stage("ethernet"));
+        assert!(manager.has_stage("processing"));
         
-        // Create a simple IPv4 Ethernet packet
+        // Create a packet that matches the FirstByteCondition (0x42)
         let packet = NetworkPacket::new(
             vec![
-                // Ethernet header
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-                0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
-                0x08, 0x00, // IPv4 EtherType
-                // Some payload
+                0x42, // First byte that triggers logging handler
                 b'T', b'e', b's', b't',
             ],
             String::from("eth0"),
@@ -317,18 +204,14 @@ mod tests {
     }
 
     #[test_case]
-    fn test_arp_packet_dropped() {
+    fn test_packet_drop_example() {
         let manager = create_simple_network_manager();
         
-        // Create an ARP packet
+        // Create a packet that doesn't match FirstByteCondition (not 0x42)
         let packet = NetworkPacket::new(
             vec![
-                // Ethernet header with ARP EtherType
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-                0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
-                0x08, 0x06, // ARP EtherType
-                // ARP data
-                0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01,
+                0x41, // First byte that doesn't match, will be dropped
+                b'T', b'e', b's', b't',
             ],
             String::from("eth0"),
         );
