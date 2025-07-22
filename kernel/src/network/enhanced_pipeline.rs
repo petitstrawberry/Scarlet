@@ -1,32 +1,31 @@
-//! Phase 1: 1ステージ1ハンドラー設計による高性能パイプライン実装
+//! Enhanced pipeline implementation with O(1) routing
 //!
-//! This module implements the new O(1) pipeline infrastructure with:
-//! - 1 stage = 1 handler design (no multiple processors per stage)
-//! - HashMap-based O(1) routing via NextStageMatcher
+//! This module implements enhanced pipeline infrastructure with:
+//! - Single handler per stage design
+//! - HashMap-based O(1) routing
 //! - Tx/Rx separated pipeline processing
 //! - Protocol-specific builder patterns
-//! - Unified ReceiveHandler/TransmitHandler traits
+//! - Unified handler traits
 
 use hashbrown::HashMap;
 use alloc::{
     boxed::Box,
-    string::String,
+    string::{String, ToString},
     vec::Vec,
 };
 use super::{
     packet::NetworkPacket,
     error::NetworkError,
-    traits::{ReceiveHandler, TransmitHandler, NextStageMatcher, NextAction},
+    traits::{ReceiveHandler, TransmitHandler, NextAction},
 };
 
-// ===== Phase 1 Pipeline Structures =====
+// ===== Enhanced Pipeline Structures =====
 
 /// A pipeline stage with exactly one handler per direction (1ステージ1ハンドラー設計)
 ///
 /// Unlike the original FlexibleStage which supports multiple processors per stage,
 /// this new design has exactly one receive handler and one transmit handler per stage.
 /// Each handler is responsible for its own routing decisions using NextStageMatcher.
-#[derive(Debug)]
 pub struct FlexibleStage {
     /// Unique identifier for this stage
     pub stage_id: String,
@@ -74,7 +73,6 @@ impl FlexibleStage {
 /// - Processing follows NextAction directives from handlers
 /// - O(1) stage lookup using HashMap
 /// - Complete Tx/Rx separation
-#[derive(Debug)]
 pub struct FlexiblePipeline {
     /// Map of stage ID to stage implementation (O(1) lookup)
     stages: HashMap<String, FlexibleStage>,

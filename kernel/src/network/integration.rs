@@ -3,15 +3,11 @@
 //! This module demonstrates how to use the new Phase 1 pipeline infrastructure
 //! with complete examples of building and using O(1) routing pipelines.
 
-use alloc::{
-    boxed::Box,
-    string::String,
-    vec,
-};
+use alloc::{vec, string::ToString};
 use super::{
     packet::NetworkPacket,
     error::NetworkError,
-    phase1::FlexiblePipeline,
+    enhanced_pipeline::FlexiblePipeline,
     protocols::{EthernetStage, IPv4Stage},
     matchers::{EtherType, IpProtocol},
 };
@@ -138,7 +134,6 @@ pub fn example_receive_processing() -> Result<(), NetworkError> {
     assert_eq!(processed_packet.payload().len(), 8);
     assert_eq!(processed_packet.payload()[0..4], [0x00, 0x50, 0x00, 0x80]);
     
-    println!("✓ Receive processing completed successfully");
     Ok(())
 }
 
@@ -181,32 +176,24 @@ pub fn example_transmit_processing() -> Result<(), NetworkError> {
     // Verify original payload is at the end
     assert_eq!(payload[34..39], [0x48, 0x65, 0x6C, 0x6C, 0x6F]); // "Hello"
     
-    println!("✓ Transmit processing completed successfully");
     Ok(())
 }
 
-/// Comprehensive test of the Phase 1 pipeline infrastructure
+/// Comprehensive test of the infrastructure
 pub fn run_integration_tests() -> Result<(), NetworkError> {
-    println!("Running Phase 1 Pipeline Integration Tests...");
-    
     // Test 1: O(1) performance characteristics
     demonstrate_o1_performance()?;
-    println!("✓ O(1) performance test passed");
     
     // Test 2: Complete receive pipeline
     example_receive_processing()?;
-    println!("✓ Receive pipeline test passed");
     
     // Test 3: Complete transmit pipeline
     example_transmit_processing()?;
-    println!("✓ Transmit pipeline test passed");
     
     // Test 4: Builder pattern fluency
     let _rx_pipeline = build_receive_pipeline()?;
     let _tx_pipeline = build_transmit_pipeline()?;
-    println!("✓ Builder pattern test passed");
     
-    println!("All Phase 1 integration tests passed! 🎉");
     Ok(())
 }
 

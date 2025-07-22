@@ -12,8 +12,8 @@ use alloc::{
 use super::{
     packet::NetworkPacket,
     error::NetworkError,
-    traits::{ReceiveHandler, TransmitHandler, NextAction},
-    phase1::FlexibleStage,
+    traits::{ReceiveHandler, TransmitHandler, NextAction, NextStageMatcher},
+    enhanced_pipeline::FlexibleStage,
     matchers::{EtherTypeToStage, IpProtocolToStage, EtherType, IpProtocol},
 };
 
@@ -43,7 +43,7 @@ impl ReceiveHandler for EthernetRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // Validate Ethernet header size (14 bytes)
         packet.validate_payload_size(14)?;
-        let payload = packet.payload();
+        let payload = packet.payload().to_vec(); // Clone the payload to avoid borrowing issues
         
         // Extract Ethernet header components
         // Bytes 0-5: Destination MAC address
@@ -178,7 +178,7 @@ impl ReceiveHandler for IPv4RxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // Validate minimum IPv4 header size (20 bytes)
         packet.validate_payload_size(20)?;
-        let payload = packet.payload();
+        let payload = packet.payload().to_vec(); // Clone the payload to avoid borrowing issues
         
         // Parse IPv4 header
         let version = (payload[0] >> 4) & 0x0F;
@@ -201,7 +201,11 @@ impl ReceiveHandler for IPv4RxHandler {
         }
         
         // Validate we have enough data for the full header
-        packet.validate_payload_size(header_length)?;
+        if payload.len() < header_length {
+            return Err(NetworkError::invalid_packet(
+                &alloc::format!("Payload too small for IPv4 header: {} < {}", payload.len(), header_length)
+            ));
+        }
         
         // Extract IPv4 header
         packet.add_header("ipv4", payload[0..header_length].to_vec());
