@@ -65,16 +65,16 @@ impl MacAddress {
     }
 }
 
-/// Network packet
+/// Device-level network packet for raw data transmission
 #[derive(Debug, Clone)]
-pub struct NetworkPacket {
+pub struct DevicePacket {
     /// Raw packet data
     pub data: Vec<u8>,
     /// Length of valid data in the packet
     pub len: usize,
 }
 
-impl NetworkPacket {
+impl DevicePacket {
     /// Create a new empty packet
     pub fn new() -> Self {
         Self {
@@ -158,7 +158,7 @@ pub enum NetworkRequest {
     /// Get interface configuration
     GetInterfaceConfig,
     /// Send a packet
-    SendPacket(NetworkPacket),
+    SendPacket(DevicePacket),
     /// Receive packets (non-blocking)
     ReceivePackets,
     /// Set promiscuous mode
@@ -180,7 +180,7 @@ pub enum NetworkResponse {
     /// Packet sent successfully
     PacketSent,
     /// Received packets
-    ReceivedPackets(Vec<NetworkPacket>),
+    ReceivedPackets(Vec<DevicePacket>),
     /// Operation completed successfully
     Success,
 }
@@ -203,11 +203,11 @@ pub trait NetworkDevice: Device {
     fn get_interface_config(&self) -> Result<NetworkInterfaceConfig, &'static str>;
     
     /// Send a packet
-    fn send_packet(&self, packet: NetworkPacket) -> Result<(), &'static str>;
+    fn send_packet(&self, packet: DevicePacket) -> Result<(), &'static str>;
     
     /// Receive packets (non-blocking)
     /// Returns all currently available packets
-    fn receive_packets(&self) -> Result<Vec<NetworkPacket>, &'static str>;
+    fn receive_packets(&self) -> Result<Vec<DevicePacket>, &'static str>;
     
     /// Set promiscuous mode (receive all packets on the network)
     fn set_promiscuous_mode(&self, enabled: bool) -> Result<(), &'static str>;
@@ -247,8 +247,8 @@ pub struct GenericNetworkDevice {
     config: Option<NetworkInterfaceConfig>,
     link_up: bool,
     promiscuous: bool,
-    tx_queue: Mutex<Vec<NetworkPacket>>,
-    rx_queue: Mutex<Vec<NetworkPacket>>,
+    tx_queue: Mutex<Vec<DevicePacket>>,
+    rx_queue: Mutex<Vec<DevicePacket>>,
     stats: Mutex<NetworkStats>,
 }
 
@@ -277,7 +277,7 @@ impl GenericNetworkDevice {
     }
     
     /// Add a packet to the receive queue (for testing)
-    pub fn add_received_packet(&self, packet: NetworkPacket) {
+    pub fn add_received_packet(&self, packet: DevicePacket) {
         self.rx_queue.lock().push(packet);
     }
 }
@@ -332,7 +332,7 @@ impl NetworkDevice for GenericNetworkDevice {
         self.config.clone().ok_or("Interface not configured")
     }
     
-    fn send_packet(&self, packet: NetworkPacket) -> Result<(), &'static str> {
+    fn send_packet(&self, packet: DevicePacket) -> Result<(), &'static str> {
         if !self.link_up {
             return Err("Link is down");
         }
@@ -350,7 +350,7 @@ impl NetworkDevice for GenericNetworkDevice {
         Ok(())
     }
     
-    fn receive_packets(&self) -> Result<Vec<NetworkPacket>, &'static str> {
+    fn receive_packets(&self) -> Result<Vec<DevicePacket>, &'static str> {
         if !self.link_up {
             return Ok(Vec::new());
         }
@@ -435,7 +435,7 @@ mod tests {
 
     #[test_case]
     fn test_network_packet() {
-        let mut packet = NetworkPacket::new();
+        let mut packet = DevicePacket::new();
         assert_eq!(packet.len, 0);
         assert_eq!(packet.as_slice().len(), 0);
         
@@ -444,11 +444,11 @@ mod tests {
         assert_eq!(packet.len, 4);
         assert_eq!(packet.as_slice(), &data);
         
-        let packet2 = NetworkPacket::with_data(data.clone());
+        let packet2 = DevicePacket::with_data(data.clone());
         assert_eq!(packet2.len, 4);
         assert_eq!(packet2.as_slice(), &data);
         
-        let mut packet3 = NetworkPacket::with_capacity(10);
+        let mut packet3 = DevicePacket::with_capacity(10);
         packet3.resize(6);
         assert_eq!(packet3.len, 6);
         assert_eq!(packet3.data.len(), 6);
@@ -483,7 +483,7 @@ mod tests {
         
         // Test packet operations
         let test_data = vec![0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
-        let packet = NetworkPacket::with_data(test_data);
+        let packet = DevicePacket::with_data(test_data);
         assert!(device.send_packet(packet).is_ok());
         
         // Check statistics
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(stats.tx_bytes, 6);
         
         // Test receive
-        let rx_packet = NetworkPacket::with_data(vec![0xAA, 0xBB, 0xCC]);
+        let rx_packet = DevicePacket::with_data(vec![0xAA, 0xBB, 0xCC]);
         device.add_received_packet(rx_packet);
         let received = device.receive_packets().unwrap();
         assert_eq!(received.len(), 1);
@@ -510,7 +510,7 @@ mod tests {
         device.init_network().unwrap();
         device.set_link_up(false);
         
-        let packet = NetworkPacket::with_data(vec![0x01, 0x02, 0x03]);
+        let packet = DevicePacket::with_data(vec![0x01, 0x02, 0x03]);
         assert!(device.send_packet(packet).is_err());
         
         let received = device.receive_packets().unwrap();
@@ -525,7 +525,7 @@ mod tests {
         // Send multiple packets
         for i in 0..5 {
             let data = vec![i; (i + 1) as usize];
-            let packet = NetworkPacket::with_data(data);
+            let packet = DevicePacket::with_data(data);
             device.send_packet(packet).unwrap();
         }
         

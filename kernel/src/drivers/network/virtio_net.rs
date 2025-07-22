@@ -30,7 +30,7 @@ use core::mem;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
 use crate::{
-    device::network::{NetworkDevice, NetworkPacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
+    device::network::{NetworkDevice, DevicePacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
 };
 
@@ -261,7 +261,7 @@ impl VirtioNetDevice {
     }
     
     /// Process a single packet transmission
-    fn transmit_packet(&self, packet: &NetworkPacket) -> Result<(), &'static str> {
+    fn transmit_packet(&self, packet: &DevicePacket) -> Result<(), &'static str> {
         // combine header and packet in single buffer like their send() function
         let hdr_size = mem::size_of::<VirtioNetHdrBasic>();
         let total_size = hdr_size + packet.len;
@@ -342,7 +342,7 @@ impl VirtioNetDevice {
     }
     
     /// Process received packets from RX queue
-    fn process_received_packets(&self) -> Result<Vec<NetworkPacket>, &'static str> {
+    fn process_received_packets(&self) -> Result<Vec<DevicePacket>, &'static str> {
         let mut packets = Vec::new();
         let mut virtqueues = self.virtqueues.lock();
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
@@ -363,7 +363,7 @@ impl VirtioNetDevice {
                     
                     // Create packet from received data
                     let packet_data = core::slice::from_raw_parts(packet_data_ptr, packet_len);
-                    let packet = NetworkPacket::with_data(packet_data.to_vec());
+                    let packet = DevicePacket::with_data(packet_data.to_vec());
                     packets.push(packet);
                 }
             }
@@ -530,7 +530,7 @@ impl NetworkDevice for VirtioNetDevice {
             .ok_or("Device not configured")
     }
     
-    fn send_packet(&self, packet: NetworkPacket) -> Result<(), &'static str> {
+    fn send_packet(&self, packet: DevicePacket) -> Result<(), &'static str> {
         if !self.is_link_up() {
             return Err("Link is down");
         }
@@ -538,7 +538,7 @@ impl NetworkDevice for VirtioNetDevice {
         self.transmit_packet(&packet)
     }
     
-    fn receive_packets(&self) -> Result<Vec<NetworkPacket>, &'static str> {
+    fn receive_packets(&self) -> Result<Vec<DevicePacket>, &'static str> {
         if !self.is_link_up() {
             return Ok(Vec::new());
         }
@@ -653,7 +653,7 @@ mod tests {
         if device.is_link_up() {
             for i in 0..3 {
                 let data = vec![i; (i + 1) as usize];
-                let packet = NetworkPacket::with_data(data);
+                let packet = DevicePacket::with_data(data);
                 device.send_packet(packet).unwrap();
             }
             
@@ -678,7 +678,7 @@ mod tests {
         
         // Create a test packet
         let test_data = vec![0x45, 0x00, 0x00, 0x3c]; // Simple IP header start
-        let packet = NetworkPacket::with_data(test_data);
+        let packet = DevicePacket::with_data(test_data);
         
         // Test packet transmission - should not panic
         let result = device.transmit_packet(&packet);
@@ -704,7 +704,7 @@ mod tests {
         for i in 0..3 {
             let mut test_data = vec![0x45, 0x00, 0x00, 0x3c];
             test_data.push(i as u8); // Make each packet unique
-            let packet = NetworkPacket::with_data(test_data);
+            let packet = DevicePacket::with_data(test_data);
             
             let result = device.transmit_packet(&packet);
             crate::early_println!("[virtio-net test] Packet {} TX result: {:?}", i, result.is_ok());
@@ -732,7 +732,7 @@ mod tests {
         
         // Test sending packet on each device
         let test_data = vec![0x45, 0x00, 0x00, 0x3c];
-        let packet = NetworkPacket::with_data(test_data);
+        let packet = DevicePacket::with_data(test_data);
         
         let _result1 = device1.transmit_packet(&packet);
         let _result2 = device2.transmit_packet(&packet); 
@@ -761,8 +761,8 @@ mod tests {
                             net2_initial_stats.tx_packets, net2_initial_stats.rx_packets);
         
         // Prepare test packets with unique identifiers
-        let packet_net1_to_net2 = NetworkPacket::with_data(vec![0x01, 0x02, 0x03, 0x04, 0xAA]); // net1->net2
-        let packet_net2_to_net1 = NetworkPacket::with_data(vec![0x05, 0x06, 0x07, 0x08, 0xBB]); // net2->net1
+        let packet_net1_to_net2 = DevicePacket::with_data(vec![0x01, 0x02, 0x03, 0x04, 0xAA]); // net1->net2
+        let packet_net2_to_net1 = DevicePacket::with_data(vec![0x05, 0x06, 0x07, 0x08, 0xBB]); // net2->net1
         
         // Test 1: Send packet from net1 to net2 
         crate::early_println!("[virtio-net test] Sending packet from net1 to net2...");
@@ -858,7 +858,7 @@ mod tests {
             // Simple payload for identification
             0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
         ];
-        let test_packet = NetworkPacket::with_data(test_packet_data);
+        let test_packet = DevicePacket::with_data(test_packet_data);
         
         crate::early_println!("[virtio-net test] Sending test packet from sender device...");
         let tx_result = sender_mut.transmit_packet(&test_packet);
