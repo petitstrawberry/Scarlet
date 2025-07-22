@@ -463,8 +463,8 @@ mod tests {
     use super::*;
     use alloc::{boxed::Box, vec, string::String};
     use crate::device::network::{
-        pipeline::{FlexibleStage, StageProcessor}, 
-        traits::{StageHandler, ProcessorCondition, NextAction}
+        pipeline::{FlexibleStage, RxStageProcessor}, 
+        traits::{RxStageHandler, ProcessorCondition, NextAction}
     };
 
     // Mock implementations for testing
@@ -479,7 +479,7 @@ mod tests {
         }
     }
 
-    impl StageHandler for MockHandler {
+    impl RxStageHandler for MockHandler {
         fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
             packet.add_header(&self.header_name, vec![0x01, 0x02]);
             // Simulate processing by reducing payload
@@ -501,7 +501,7 @@ mod tests {
 
     struct FailingHandler;
 
-    impl StageHandler for FailingHandler {
+    impl RxStageHandler for FailingHandler {
         fn handle(&self, _packet: &mut NetworkPacket) -> Result<(), NetworkError> {
             Err(NetworkError::invalid_packet("Mock failure"))
         }
@@ -512,7 +512,7 @@ mod tests {
 
         // Create ethernet stage
         let mut eth_stage = FlexibleStage::new("ethernet");
-        eth_stage.add_processor(StageProcessor::new(
+        eth_stage.add_rx_processor(RxStageProcessor::new(
             Box::new(MockCondition),
             Box::new(MockHandler::new("ethernet")),
             NextAction::jump_to("ipv4"),
@@ -520,7 +520,7 @@ mod tests {
 
         // Create IPv4 stage
         let mut ipv4_stage = FlexibleStage::new("ipv4");
-        ipv4_stage.add_processor(StageProcessor::new(
+        ipv4_stage.add_rx_processor(RxStageProcessor::new(
             Box::new(MockCondition),
             Box::new(MockHandler::new("ipv4")),
             NextAction::Complete,
@@ -528,7 +528,7 @@ mod tests {
 
         pipeline.add_stage(eth_stage).unwrap();
         pipeline.add_stage(ipv4_stage).unwrap();
-        pipeline.set_default_entry_stage("ethernet").unwrap();
+        pipeline.set_default_rx_entry_stage("ethernet").unwrap();
 
         pipeline
     }
@@ -603,14 +603,14 @@ mod tests {
         let mut pipeline = FlexiblePipeline::new();
         
         let mut stage = FlexibleStage::new("dropper");
-        stage.add_processor(StageProcessor::new(
+        stage.add_rx_processor(RxStageProcessor::new(
             Box::new(MockCondition),
             Box::new(MockHandler::new("dropper")),
             NextAction::drop_with_reason("test drop"),
         ));
         
         pipeline.add_stage(stage).unwrap();
-        pipeline.set_default_entry_stage("dropper").unwrap();
+        pipeline.set_default_rx_entry_stage("dropper").unwrap();
         
         let manager = NetworkManager::with_pipeline(pipeline);
         let packet = NetworkPacket::new(vec![0x01], String::from("test"));
@@ -628,14 +628,14 @@ mod tests {
         let mut pipeline = FlexiblePipeline::new();
         
         let mut stage = FlexibleStage::new("terminator");
-        stage.add_processor(StageProcessor::new(
+        stage.add_rx_processor(RxStageProcessor::new(
             Box::new(MockCondition),
             Box::new(MockHandler::new("terminator")),
             NextAction::Terminate,
         ));
         
         pipeline.add_stage(stage).unwrap();
-        pipeline.set_default_entry_stage("terminator").unwrap();
+        pipeline.set_default_rx_entry_stage("terminator").unwrap();
         
         let manager = NetworkManager::with_pipeline(pipeline);
         let packet = NetworkPacket::new(vec![0x01], String::from("test"));
@@ -653,7 +653,7 @@ mod tests {
         
         // Create stage A that jumps to B
         let mut stage_a = FlexibleStage::new("stage_a");
-        stage_a.add_processor(StageProcessor::new(
+        stage_a.add_rx_processor(RxStageProcessor::new(
             Box::new(MockCondition),
             Box::new(MockHandler::new("stage_a")),
             NextAction::jump_to("stage_b"),
@@ -661,7 +661,7 @@ mod tests {
         
         // Create stage B that jumps back to A (circular dependency)
         let mut stage_b = FlexibleStage::new("stage_b");
-        stage_b.add_processor(StageProcessor::new(
+        stage_b.add_rx_processor(RxStageProcessor::new(
             Box::new(MockCondition),
             Box::new(MockHandler::new("stage_b")),
             NextAction::jump_to("stage_a"),
@@ -669,7 +669,7 @@ mod tests {
         
         pipeline.add_stage(stage_a).unwrap();
         pipeline.add_stage(stage_b).unwrap();
-        pipeline.set_default_entry_stage("stage_a").unwrap();
+        pipeline.set_default_rx_entry_stage("stage_a").unwrap();
         
         let manager = NetworkManager::with_pipeline(pipeline);
         let packet = NetworkPacket::new(vec![0x01], String::from("test"));
@@ -693,7 +693,7 @@ mod tests {
         for i in 0..10 {
             let mut stage = FlexibleStage::new(&alloc::format!("stage_{}", i));
             let next_stage = alloc::format!("stage_{}", (i + 1) % 10);
-            stage.add_processor(StageProcessor::new(
+            stage.add_rx_processor(RxStageProcessor::new(
                 Box::new(MockCondition),
                 Box::new(MockHandler::new(&alloc::format!("handler_{}", i))),
                 NextAction::jump_to(&next_stage),
@@ -701,7 +701,7 @@ mod tests {
             pipeline.add_stage(stage).unwrap();
         }
         
-        pipeline.set_default_entry_stage("stage_0").unwrap();
+        pipeline.set_default_rx_entry_stage("stage_0").unwrap();
         
         let mut manager = NetworkManager::with_pipeline(pipeline);
         manager.set_max_pipeline_hops(5); // Set low limit
@@ -724,14 +724,14 @@ mod tests {
         let mut pipeline = FlexiblePipeline::new();
         
         let mut stage = FlexibleStage::new("failing");
-        stage.add_processor(StageProcessor::new(
+        stage.add_rx_processor(RxStageProcessor::new(
             Box::new(MockCondition),
             Box::new(FailingHandler),
             NextAction::Complete,
         ));
         
         pipeline.add_stage(stage).unwrap();
-        pipeline.set_default_entry_stage("failing").unwrap();
+        pipeline.set_default_rx_entry_stage("failing").unwrap();
         
         let manager = NetworkManager::with_pipeline(pipeline);
         let packet = NetworkPacket::new(vec![0x01], String::from("test"));
@@ -753,7 +753,7 @@ mod tests {
         assert!(manager.has_stage("test"));
         
         // Test setting default entry stage
-        let result = manager.set_default_entry_stage("test");
+        let result = manager.set_default_rx_entry_stage("test");
         assert!(result.is_err()); // Should fail because stage has no processors
         
         // Test removing stage
