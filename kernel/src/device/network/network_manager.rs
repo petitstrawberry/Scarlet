@@ -189,7 +189,7 @@ impl NetworkManager {
                 let mut stats = self.stats.lock();
                 stats.pipeline_loops += 1;
                 return Err(NetworkError::circular_dependency(
-                    &alloc::format!("Rx pipeline exceeded {} hops, possible loop", self.max_pipeline_hops)
+                    "Rx pipeline exceeded maximum hops, possible loop"
                 ));
             }
 
