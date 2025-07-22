@@ -1,8 +1,9 @@
+#![cfg(test)]
+
 use crate::network::*;
 use crate::network::test_helpers::*;
 use alloc::string::ToString;
-use alloc::vec;
-use alloc::boxed::Box;
+use alloc::{vec, format};
 
 #[test_case]
 fn test_network_packet_creation() {
@@ -129,145 +130,216 @@ fn test_pipeline_errors() {
 }
 
 #[test_case]
-fn test_payload_based_routing() {
-    // Create matcher that routes based on first byte
-    let matcher = PayloadByteMatcher::new("default")
-        .add_route(0x08, "ipv4")
-        .add_route(0x86, "ipv6");
-
-    let pipeline = FlexiblePipeline::builder()
-        .add_stage(
-            MatcherStageBuilder::new("ethernet")
-                .with_payload_matcher(Box::new(matcher))
-                .build()
-        )
-        .add_stage(
-            TestStageBuilder::new("ipv4")
-                .enable_rx()
-                .build()
-        )
-        .add_stage(
-            TestStageBuilder::new("ipv6")
-                .enable_rx()
-                .build()
-        )
-        .add_stage(
-            TestStageBuilder::new("default")
-                .enable_rx()
-                .build()
-        )
-        .set_default_rx_entry("ethernet")
-        .build()
-        .expect("Pipeline build should succeed");
-
-    // Test IPv4 routing (first byte = 0x08)
-    let packet_ipv4 = NetworkPacket::new(vec![0x08, 0x00, 0x01, 0x02]);
-    let result = pipeline.process_receive(packet_ipv4, None);
-    assert!(result.is_ok());
-
-    // Test IPv6 routing (first byte = 0x86)
-    let packet_ipv6 = NetworkPacket::new(vec![0x86, 0xDD, 0x03, 0x04]);
-    let result = pipeline.process_receive(packet_ipv6, None);
-    assert!(result.is_ok());
-
-    // Test default routing (first byte = 0xFF)
-    let packet_unknown = NetworkPacket::new(vec![0xFF, 0x00, 0x05, 0x06]);
-    let result = pipeline.process_receive(packet_unknown, None);
-    assert!(result.is_ok());
+fn test_protocol_header_parsing() {
+    // Test protocol header parsing
+    let header = TestProtocolHeader::new(0x01);
+    let bytes = header.to_bytes();
+    assert_eq!(bytes, vec![0x01]);
+    
+    let parsed = TestProtocolHeader::from_bytes(&bytes).unwrap();
+    assert_eq!(parsed.next_type, 0x01);
+    
+    // Test insufficient data
+    let result = TestProtocolHeader::from_bytes(&[]);
+    assert!(result.is_err());
 }
 
 #[test_case]
-fn test_hint_based_routing() {
-    // Create matcher that routes based on "protocol" hint
-    let matcher = HintMatcher::new("unknown")
-        .add_route("tcp", "tcp_handler")
-        .add_route("udp", "udp_handler");
-
+fn test_pipeline_routing_with_protocol() {
+    use alloc::collections::BTreeMap;
+    
+    // Create custom routing table
+    let mut routes = BTreeMap::new();
+    routes.insert(0x01, "stage_a".to_string());
+    routes.insert(0x02, "stage_b".to_string());
+    
+    // Build pipeline with protocol parser and target stages
     let pipeline = FlexiblePipeline::builder()
         .add_stage(
-            MatcherStageBuilder::new("transport")
-                .with_hint_matcher("protocol", Box::new(matcher))
-                .build()
+            TestProtocolStageBuilder::new("parser")
+                .as_protocol_parser()
+                .with_custom_routes(routes)
+                .build_rx_stage()
         )
         .add_stage(
-            TestStageBuilder::new("tcp_handler")
-                .enable_rx()
-                .build()
+            TestProtocolStageBuilder::new("stage_a")
+                .build_rx_stage()
         )
         .add_stage(
-            TestStageBuilder::new("udp_handler")
-                .enable_rx()
-                .build()
+            TestProtocolStageBuilder::new("stage_b")
+                .build_rx_stage()
         )
-        .add_stage(
-            TestStageBuilder::new("unknown")
-                .enable_rx()
-                .build()
-        )
-        .set_default_rx_entry("transport")
+        .set_default_rx_entry("parser")
         .build()
-        .expect("Pipeline build should succeed");
+        .unwrap();
 
-    // Test TCP routing
-    let mut packet_tcp = NetworkPacket::new(vec![1, 2, 3, 4]);
-    packet_tcp.set_hint("protocol", "tcp");
-    let result = pipeline.process_receive(packet_tcp, None);
-    assert!(result.is_ok());
+    // Test routing to stage_a
+    let payload = vec![0x01, 0xAA, 0xBB, 0xCC]; // Header: 0x01, Data: [0xAA, 0xBB, 0xCC]
+    let packet = NetworkPacket::new(payload);
+    let result = pipeline.process_receive(packet, None).unwrap();
+    
+    // Verify header was extracted and payload updated
+    assert_eq!(result.payload(), &vec![0xAA, 0xBB, 0xCC]);
+    assert_eq!(result.get_header("test_protocol"), Some(&vec![0x01]));
+    assert_eq!(result.get_hint("test_protocol_type"), Some("0x01"));
 
-    // Test UDP routing
-    let mut packet_udp = NetworkPacket::new(vec![5, 6, 7, 8]);
-    packet_udp.set_hint("protocol", "udp");
-    let result = pipeline.process_receive(packet_udp, None);
-    assert!(result.is_ok());
-
-    // Test unknown protocol routing
-    let mut packet_unknown = NetworkPacket::new(vec![9, 10, 11, 12]);
-    packet_unknown.set_hint("protocol", "icmp");
-    let result = pipeline.process_receive(packet_unknown, None);
-    assert!(result.is_ok());
+    // Test routing to stage_b
+    let payload = vec![0x02, 0xDD, 0xEE]; // Header: 0x02, Data: [0xDD, 0xEE]
+    let packet = NetworkPacket::new(payload);
+    let result = pipeline.process_receive(packet, None).unwrap();
+    
+    // Verify header was extracted and payload updated
+    assert_eq!(result.payload(), &vec![0xDD, 0xEE]);
+    assert_eq!(result.get_header("test_protocol"), Some(&vec![0x02]));
+    assert_eq!(result.get_hint("test_protocol_type"), Some("0x02"));
+    
+    // Test unknown protocol type
+    let payload = vec![0xFF, 0x11, 0x22]; // Unknown header type
+    let packet = NetworkPacket::new(payload);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_err()); // Should fail due to unknown protocol type
 }
 
 #[test_case]
-fn test_multi_stage_pipeline() {
-    // Create a 3-stage pipeline: ethernet -> ip -> transport
-    let ethernet_matcher = PayloadByteMatcher::new("drop")
-        .add_route(0x08, "ip_stage");
-
-    let ip_matcher = PayloadByteMatcher::new("drop")
-        .add_route(0x45, "transport_stage");
-
+fn test_protocol_transmission() {
+    // Build pipeline with protocol generator
     let pipeline = FlexiblePipeline::builder()
         .add_stage(
-            MatcherStageBuilder::new("ethernet_stage")
-                .with_payload_matcher(Box::new(ethernet_matcher))
-                .build()
+            TestProtocolStageBuilder::new("generator")
+                .as_protocol_generator(0x05)
+                .build_tx_stage()
+        )
+        .set_default_tx_entry("generator")
+        .build()
+        .unwrap();
+
+    // Test protocol header generation
+    let payload = vec![0x11, 0x22, 0x33];
+    let packet = NetworkPacket::new(payload);
+    let result = pipeline.process_transmit(packet, None).unwrap();
+    
+    // Verify header was prepended
+    assert_eq!(result.payload(), &vec![0x05, 0x11, 0x22, 0x33]);
+    assert_eq!(result.get_header("test_protocol"), Some(&vec![0x05]));
+    assert_eq!(result.get_hint("test_protocol_type"), Some("0x05"));
+}
+
+#[test_case]
+fn test_bidirectional_protocol_pipeline() {
+    use alloc::collections::BTreeMap;
+    
+    // Create routing for receive path
+    let mut rx_routes = BTreeMap::new();
+    rx_routes.insert(0x10, "rx_target".to_string());
+    
+    // Build bidirectional pipeline
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestProtocolStageBuilder::new("protocol_layer")
+                .as_protocol_parser()
+                .with_custom_routes(rx_routes)
+                .build_bidirectional_stage()
         )
         .add_stage(
-            MatcherStageBuilder::new("ip_stage")
-                .with_payload_matcher(Box::new(ip_matcher))
-                .build()
+            TestProtocolStageBuilder::new("rx_target")
+                .build_rx_stage()
         )
+        .set_default_rx_entry("protocol_layer")
+        .set_default_tx_entry("protocol_layer")
+        .build()
+        .unwrap();
+
+    // Test receive path
+    let rx_payload = vec![0x10, 0x01, 0x02, 0x03];
+    let rx_packet = NetworkPacket::new(rx_payload);
+    let rx_result = pipeline.process_receive(rx_packet, None).unwrap();
+    
+    assert_eq!(rx_result.payload(), &vec![0x01, 0x02, 0x03]);
+    assert_eq!(rx_result.get_hint("test_protocol_type"), Some("0x10"));
+
+    // Test transmit path (uses echo handler in this case)
+    let tx_payload = vec![0x04, 0x05, 0x06];
+    let tx_packet = NetworkPacket::new(tx_payload.clone());
+    let tx_result = pipeline.process_transmit(tx_packet, None).unwrap();
+    
+    assert_eq!(tx_result.payload(), &tx_payload); // Echo handler doesn't modify
+}
+
+#[test_case]
+fn test_pipeline_routing_with_add_route() {
+    use crate::network::test_helpers::TEST_PROTOCOL_TYPE_A;
+    
+    // Create a pipeline with routing-enabled stages
+    let pipeline = FlexiblePipeline::builder()
         .add_stage(
-            TestStageBuilder::new("transport_stage")
+            TestStageBuilder::new("router")
+                .add_route(TEST_PROTOCOL_TYPE_A, "type_a_handler")
+                .add_route(0x02, "type_b_handler")
                 .enable_rx()
                 .build()
         )
         .add_stage(
-            TestStageBuilder::new("drop")
+            TestStageBuilder::new("type_a_handler")
                 .enable_rx()
                 .build()
         )
-        .set_default_rx_entry("ethernet_stage")
+        .add_stage(
+            TestStageBuilder::new("type_b_handler")
+                .enable_rx()
+                .build()
+        )
+        .set_default_rx_entry("router")
         .build()
         .expect("Pipeline build should succeed");
 
-    // Test packet that should go through all stages
-    let packet = NetworkPacket::new(vec![0x08, 0x45, 0x00, 0x00, 0x28]);
+    // Test routing with protocol type A (0x01)
+    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
     let result = pipeline.process_receive(packet, None);
     assert!(result.is_ok());
 
-    // Test packet that should be dropped at ethernet stage
-    let packet_drop = NetworkPacket::new(vec![0xFF, 0x45, 0x00, 0x00, 0x28]);
-    let result = pipeline.process_receive(packet_drop, None);
+    // Test routing with protocol type B (0x02)
+    let packet = NetworkPacket::new(vec![0x02, 0xDD, 0xEE, 0xFF]);
+    let result = pipeline.process_receive(packet, None);
     assert!(result.is_ok());
+
+    // Test unsupported protocol type should fail
+    let packet = NetworkPacket::new(vec![0xFF, 0x11, 0x22, 0x33]);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_err());
+}
+
+#[test_case]
+fn test_empty_routing_fallback() {
+    // Test that stages without routing rules fall back to echo behavior
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestStageBuilder::new("simple_echo")
+                .enable_rx()
+                .build()
+        )
+        .set_default_rx_entry("simple_echo")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    let packet = NetworkPacket::new(vec![1, 2, 3, 4]);
+    let result = pipeline.process_receive(packet, None);
+    
+    assert!(result.is_ok());
+    let processed_packet = result.unwrap();
+    assert_eq!(processed_packet.payload(), &vec![1, 2, 3, 4]);
+}
+
+#[test_case]
+fn test_multiple_route_additions() {
+    // Test dynamic route addition
+    let stage = TestStageBuilder::new("multi_router")
+        .add_route(0x01, "stage1")
+        .add_route(0x02, "stage2")
+        .add_route(0x03, "stage3")
+        .enable_rx()
+        .build();
+    
+    assert_eq!(stage.stage_id, "multi_router");
+    assert!(stage.rx_handler.is_some());
+    assert!(stage.tx_handler.is_none());
 }

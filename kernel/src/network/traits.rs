@@ -26,6 +26,6 @@ pub trait TransmitHandler: Send + Sync + Debug {
 }
 
 /// Generic next stage matcher trait (type-safe)
-pub trait NextStageMatcher<T>: Send + Sync + Debug {
+pub trait NextStageMatcher<T>: Send + Sync {
     fn get_next_stage(&self, value: T) -> Result<&str, NetworkError>;
 }
