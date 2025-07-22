@@ -91,9 +91,14 @@ impl NetworkManager {
         // Start processing from the default entry stage
         let current_stage = {
             let pipeline = self.pipeline.lock();
-            pipeline.get_default_entry_stage()
-                .ok_or(NetworkError::PipelineNotInitialized)?
-                .to_string()
+            match pipeline.get_default_entry_stage() {
+                Some(stage) => stage.to_string(),
+                None => {
+                    let mut stats = self.stats.lock();
+                    stats.processing_errors += 1;
+                    return Err(NetworkError::PipelineNotInitialized);
+                }
+            }
         };
 
         match self.process_packet_from_stage(packet, &current_stage) {
@@ -163,7 +168,7 @@ impl NetworkManager {
                     stats.packets_completed += 1;
                     return Ok(());
                 }
-                NextAction::Drop(reason) => {
+                NextAction::Drop(_reason) => {
                     let mut stats = self.stats.lock();
                     stats.packets_dropped += 1;
                     // In a real implementation, might want to log the drop reason
@@ -184,7 +189,7 @@ impl NetworkManager {
     pub fn get_pipeline(&self) -> FlexiblePipeline {
         // Note: This is a simplified implementation. In practice, you might want
         // to implement a more efficient way to provide read-only access.
-        let pipeline = self.pipeline.lock();
+        let _pipeline = self.pipeline.lock();
         
         // Since FlexiblePipeline doesn't implement Clone, we need to create a new one
         // and manually copy the configuration. For now, we'll return a new empty pipeline

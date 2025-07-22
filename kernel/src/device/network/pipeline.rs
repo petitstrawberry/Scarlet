@@ -208,11 +208,20 @@ impl FlexiblePipeline {
     ///
     /// # Returns
     /// * `Ok(())` if successful
-    /// * `Err(NetworkError)` if the stage doesn't exist
+    /// * `Err(NetworkError)` if the stage doesn't exist or has no processors
     pub fn set_default_entry_stage(&mut self, stage_id: &str) -> Result<(), NetworkError> {
         if !self.stages.contains_key(stage_id) {
             return Err(NetworkError::stage_not_found(stage_id));
         }
+        
+        // Check if the stage has at least one processor
+        let stage = &self.stages[stage_id];
+        if stage.processor_count() == 0 {
+            return Err(NetworkError::invalid_stage_config(
+                &alloc::format!("Stage '{}' has no processors and cannot be used as default entry", stage_id)
+            ));
+        }
+        
         self.default_entry_stage = Some(String::from(stage_id));
         Ok(())
     }
@@ -484,8 +493,22 @@ mod tests {
         let result = pipeline.set_default_entry_stage("ethernet");
         assert!(result.is_err());
 
-        // Add stage and set as default
-        let stage = FlexibleStage::new("ethernet");
+        // Add empty stage and try to set as default - should fail
+        let empty_stage = FlexibleStage::new("ethernet");
+        pipeline.add_stage(empty_stage).unwrap();
+        let result = pipeline.set_default_entry_stage("ethernet");
+        assert!(result.is_err()); // Should fail because stage has no processors
+
+        // Remove empty stage
+        pipeline.remove_stage("ethernet");
+
+        // Add stage with processor and set as default
+        let mut stage = FlexibleStage::new("ethernet");
+        stage.add_processor(StageProcessor::new(
+            Box::new(MockCondition { should_match: true }),
+            Box::new(MockHandler::new("test")),
+            NextAction::Complete,
+        ));
         pipeline.add_stage(stage).unwrap();
         pipeline.set_default_entry_stage("ethernet").unwrap();
 

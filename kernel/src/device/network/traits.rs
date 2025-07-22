@@ -173,7 +173,7 @@ impl core::fmt::Display for NextAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{vec, string::String};
+    use alloc::{boxed::Box, vec, string::String, string::ToString};
 
     // Mock implementations for testing
 
