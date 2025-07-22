@@ -462,7 +462,7 @@ impl core::fmt::Debug for NetworkManager {
 mod tests {
     use super::*;
     use alloc::{boxed::Box, vec, string::String};
-    use crate::device::network::{
+    use crate::network::{
         pipeline::{FlexibleStage, RxStageProcessor}, 
         traits::{RxStageHandler, ProcessorCondition, NextAction}
     };
