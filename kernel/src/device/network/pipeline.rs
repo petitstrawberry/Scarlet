@@ -193,7 +193,7 @@ impl FlexibleStage {
             }
         }
         
-        Err(NetworkError::no_matching_processor(&alloc::format!("{} (rx)", self.stage_id)))
+        Err(NetworkError::no_matching_processor(&format!("Stage {} (rx): No matching processor", self.stage_id)))
     }
 
     /// Process a transmit packet through this stage
