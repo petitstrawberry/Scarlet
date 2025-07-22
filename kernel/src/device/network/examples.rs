@@ -3,7 +3,7 @@
 //! This module contains example handlers and conditions that demonstrate
 //! how to use the flexible network pipeline architecture.
 
-use alloc::{boxed::Box, string::String};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use super::{
     packet::NetworkPacket,
     error::NetworkError,
@@ -199,12 +199,12 @@ impl ProcessorCondition for ICMPProtocolCondition {
     }
 }
 
-/// Example TCP handler
+/// Example TCP handler for receive path
 ///
 /// Processes TCP segments by extracting the variable-length header.
-pub struct TCPHandler;
+pub struct TCPRxHandler;
 
-impl StageHandler for TCPHandler {
+impl RxStageHandler for TCPRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
         // Validate minimum TCP header size
         packet.validate_payload_size(20)?;
@@ -232,12 +232,12 @@ impl StageHandler for TCPHandler {
     }
 }
 
-/// Example UDP handler
+/// Example UDP handler for receive path
 ///
 /// Processes UDP datagrams by extracting the fixed 8-byte header.
-pub struct UDPHandler;
+pub struct UDPRxHandler;
 
-impl StageHandler for UDPHandler {
+impl RxStageHandler for UDPRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
         // Validate minimum UDP header size
         packet.validate_payload_size(8)?;
@@ -263,10 +263,10 @@ impl ProcessorCondition for AlwaysMatchCondition {
     }
 }
 
-/// Example "drop all" handler for testing
-pub struct DropHandler;
+/// Example "drop all" handler for testing (receive path)
+pub struct DropRxHandler;
 
-impl StageHandler for DropHandler {
+impl RxStageHandler for DropRxHandler {
     fn handle(&self, _packet: &mut NetworkPacket) -> Result<(), NetworkError> {
         // This handler doesn't modify the packet - it will be dropped by NextAction
         Ok(())
@@ -274,11 +274,11 @@ impl StageHandler for DropHandler {
 }
 
 /// Example logging handler that adds metadata without modifying packet
-pub struct LoggingHandler {
+pub struct LoggingRxHandler {
     stage_name: String,
 }
 
-impl LoggingHandler {
+impl LoggingRxHandler {
     pub fn new(stage_name: &str) -> Self {
         Self {
             stage_name: String::from(stage_name),
@@ -286,7 +286,7 @@ impl LoggingHandler {
     }
 }
 
-impl StageHandler for LoggingHandler {
+impl RxStageHandler for LoggingRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
         // Add a log entry as metadata (this could be extended to actual logging)
         packet.add_header(
@@ -297,54 +297,54 @@ impl StageHandler for LoggingHandler {
     }
 }
 
-/// Create a basic example pipeline for Ethernet -> IPv4 -> TCP/UDP processing
-pub fn create_basic_pipeline() -> FlexiblePipeline {
+/// Create a basic example pipeline for Ethernet -> IPv4 -> TCP/UDP processing (receive path)
+pub fn create_basic_rx_pipeline() -> FlexiblePipeline {
     let mut pipeline = FlexiblePipeline::new();
     
     // Create Ethernet stage
     let mut ethernet_stage = FlexibleStage::new("ethernet");
-    ethernet_stage.add_processor(StageProcessor::new(
+    ethernet_stage.add_rx_processor(RxStageProcessor::new(
         Box::new(IPv4EtherTypeCondition),
-        Box::new(EthernetHandler),
+        Box::new(EthernetRxHandler),
         NextAction::jump_to("ipv4"),
     ));
-    ethernet_stage.add_processor(StageProcessor::new(
+    ethernet_stage.add_rx_processor(RxStageProcessor::new(
         Box::new(ARPEtherTypeCondition),
-        Box::new(DropHandler), // Drop ARP packets for this example
+        Box::new(DropRxHandler), // Drop ARP packets for this example
         NextAction::drop_with_reason("ARP not supported in basic pipeline"),
     ));
     
     // Create IPv4 stage
     let mut ipv4_stage = FlexibleStage::new("ipv4");
-    ipv4_stage.add_processor(StageProcessor::new(
+    ipv4_stage.add_rx_processor(RxStageProcessor::new(
         Box::new(TCPProtocolCondition),
-        Box::new(IPv4Handler),
+        Box::new(IPv4RxHandler),
         NextAction::jump_to("tcp"),
     ));
-    ipv4_stage.add_processor(StageProcessor::new(
+    ipv4_stage.add_rx_processor(RxStageProcessor::new(
         Box::new(UDPProtocolCondition),
-        Box::new(IPv4Handler),
+        Box::new(IPv4RxHandler),
         NextAction::jump_to("udp"),
     ));
-    ipv4_stage.add_processor(StageProcessor::new(
+    ipv4_stage.add_rx_processor(RxStageProcessor::new(
         Box::new(ICMPProtocolCondition),
-        Box::new(IPv4Handler),
+        Box::new(IPv4RxHandler),
         NextAction::drop_with_reason("ICMP not supported in basic pipeline"),
     ));
     
     // Create TCP stage
     let mut tcp_stage = FlexibleStage::new("tcp");
-    tcp_stage.add_processor(StageProcessor::new(
+    tcp_stage.add_rx_processor(RxStageProcessor::new(
         Box::new(AlwaysMatchCondition), // Accept all TCP
-        Box::new(TCPHandler),
+        Box::new(TCPRxHandler),
         NextAction::Complete, // Deliver to application
     ));
     
     // Create UDP stage
     let mut udp_stage = FlexibleStage::new("udp");
-    udp_stage.add_processor(StageProcessor::new(
+    udp_stage.add_rx_processor(RxStageProcessor::new(
         Box::new(AlwaysMatchCondition), // Accept all UDP
-        Box::new(UDPHandler),
+        Box::new(UDPRxHandler),
         NextAction::Complete, // Deliver to application
     ));
     
@@ -354,15 +354,15 @@ pub fn create_basic_pipeline() -> FlexiblePipeline {
     pipeline.add_stage(tcp_stage).unwrap();
     pipeline.add_stage(udp_stage).unwrap();
     
-    // Set ethernet as entry point
-    pipeline.set_default_entry_stage("ethernet").unwrap();
+    // Set ethernet as rx entry point
+    pipeline.set_default_rx_entry_stage("ethernet").unwrap();
     
     pipeline
 }
 
-/// Create a NetworkManager with the basic pipeline
+/// Create a NetworkManager with the basic receive pipeline
 pub fn create_basic_network_manager() -> NetworkManager {
-    let pipeline = create_basic_pipeline();
+    let pipeline = create_basic_rx_pipeline();
     NetworkManager::with_pipeline(pipeline)
 }
 

@@ -69,10 +69,10 @@ impl NetworkManager {
         self.max_pipeline_hops = max_hops;
     }
 
-    /// Process a packet through the pipeline
+    /// Process a received packet through the pipeline
     ///
-    /// This is the main entry point for packet processing. It:
-    /// 1. Gets the default entry stage or uses the provided stage
+    /// This is the main entry point for receive packet processing. It:
+    /// 1. Gets the default rx entry stage
     /// 2. Processes the packet through stages following NextAction directives
     /// 3. Handles loops and termination conditions
     /// 4. Updates statistics
@@ -83,15 +83,15 @@ impl NetworkManager {
     /// # Returns
     /// * `Ok(())` - Packet was processed successfully (completed, dropped, or terminated)
     /// * `Err(NetworkError)` - Processing failed due to an error
-    pub fn process_packet(&self, mut packet: NetworkPacket) -> Result<(), NetworkError> {
+    pub fn process_rx_packet(&self, mut packet: NetworkPacket) -> Result<(), NetworkError> {
         let mut stats = self.stats.lock();
         stats.packets_processed += 1;
         drop(stats);
 
-        // Start processing from the default entry stage
+        // Start processing from the default rx entry stage
         let current_stage = {
             let pipeline = self.pipeline.lock();
-            match pipeline.get_default_entry_stage() {
+            match pipeline.get_default_rx_entry_stage() {
                 Some(stage) => stage.to_string(),
                 None => {
                     let mut stats = self.stats.lock();
@@ -101,7 +101,7 @@ impl NetworkManager {
             }
         };
 
-        match self.process_packet_from_stage(packet, &current_stage) {
+        match self.process_rx_packet_from_stage(packet, &current_stage) {
             Ok(_) => Ok(()),
             Err(e) => {
                 let mut stats = self.stats.lock();
@@ -111,7 +111,61 @@ impl NetworkManager {
         }
     }
 
-    /// Process a packet starting from a specific stage
+    /// Process a transmit packet through the pipeline
+    ///
+    /// This is the main entry point for transmit packet processing. It:
+    /// 1. Gets the default tx entry stage or uses the provided stage
+    /// 2. Processes the packet through stages following NextAction directives
+    /// 3. Handles loops and termination conditions
+    /// 4. Updates statistics
+    ///
+    /// # Arguments
+    /// * `packet` - The packet to process
+    /// * `start_stage` - Optional stage to start from; uses default tx entry if None
+    ///
+    /// # Returns
+    /// * `Ok(())` - Packet was processed successfully (completed, dropped, or terminated)
+    /// * `Err(NetworkError)` - Processing failed due to an error
+    pub fn process_tx_packet(&self, mut packet: NetworkPacket, start_stage: Option<&str>) -> Result<(), NetworkError> {
+        let mut stats = self.stats.lock();
+        stats.packets_processed += 1;
+        drop(stats);
+
+        // Determine starting stage
+        let current_stage = match start_stage {
+            Some(stage) => stage.to_string(),
+            None => {
+                let pipeline = self.pipeline.lock();
+                match pipeline.get_default_tx_entry_stage() {
+                    Some(stage) => stage.to_string(),
+                    None => {
+                        let mut stats = self.stats.lock();
+                        stats.processing_errors += 1;
+                        return Err(NetworkError::PipelineNotInitialized);
+                    }
+                }
+            }
+        };
+
+        match self.process_tx_packet_from_stage(packet, &current_stage) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let mut stats = self.stats.lock();
+                stats.processing_errors += 1;
+                Err(e)
+            }
+        }
+    }
+
+    /// Process a packet through the pipeline (for backward compatibility)
+    ///
+    /// This method treats the packet as a receive packet and uses the rx pipeline.
+    /// For new code, prefer process_rx_packet() or process_tx_packet().
+    pub fn process_packet(&self, packet: NetworkPacket) -> Result<(), NetworkError> {
+        self.process_rx_packet(packet)
+    }
+
+    /// Process a received packet starting from a specific stage
     ///
     /// # Arguments
     /// * `packet` - The packet to process
@@ -120,7 +174,7 @@ impl NetworkManager {
     /// # Returns
     /// * `Ok(())` - Processing completed
     /// * `Err(NetworkError)` - Processing failed
-    pub fn process_packet_from_stage(
+    pub fn process_rx_packet_from_stage(
         &self, 
         mut packet: NetworkPacket, 
         start_stage: &str
@@ -135,7 +189,7 @@ impl NetworkManager {
                 let mut stats = self.stats.lock();
                 stats.pipeline_loops += 1;
                 return Err(NetworkError::circular_dependency(
-                    &alloc::format!("Pipeline exceeded {} hops, possible loop", self.max_pipeline_hops)
+                    &alloc::format!("Rx pipeline exceeded {} hops, possible loop", self.max_pipeline_hops)
                 ));
             }
 
@@ -144,17 +198,17 @@ impl NetworkManager {
                 let mut stats = self.stats.lock();
                 stats.pipeline_loops += 1;
                 return Err(NetworkError::circular_dependency(
-                    &alloc::format!("Circular dependency detected: revisited stage '{}'", current_stage)
+                    &alloc::format!("Rx circular dependency detected: revisited stage '{}'", current_stage)
                 ));
             }
 
             visited_stages.insert(current_stage.clone());
             hop_count += 1;
 
-            // Process packet in current stage
+            // Process packet in current stage (rx path)
             let next_action = {
                 let pipeline = self.pipeline.lock();
-                pipeline.process_packet_in_stage(&current_stage, &mut packet)?
+                pipeline.process_rx_packet_in_stage(&current_stage, &mut packet)?
             };
 
             // Handle the next action
@@ -181,6 +235,90 @@ impl NetworkManager {
                 }
             }
         }
+    }
+
+    /// Process a transmit packet starting from a specific stage
+    ///
+    /// # Arguments
+    /// * `packet` - The packet to process
+    /// * `start_stage` - The stage to start processing from
+    ///
+    /// # Returns
+    /// * `Ok(())` - Processing completed
+    /// * `Err(NetworkError)` - Processing failed
+    pub fn process_tx_packet_from_stage(
+        &self, 
+        mut packet: NetworkPacket, 
+        start_stage: &str
+    ) -> Result<(), NetworkError> {
+        let mut current_stage = start_stage.to_string();
+        let mut visited_stages = HashSet::new();
+        let mut hop_count = 0;
+
+        loop {
+            // Check for infinite loops
+            if hop_count >= self.max_pipeline_hops {
+                let mut stats = self.stats.lock();
+                stats.pipeline_loops += 1;
+                return Err(NetworkError::circular_dependency(
+                    &alloc::format!("Tx pipeline exceeded {} hops, possible loop", self.max_pipeline_hops)
+                ));
+            }
+
+            // Check for circular dependency by tracking visited stages
+            if visited_stages.contains(&current_stage) {
+                let mut stats = self.stats.lock();
+                stats.pipeline_loops += 1;
+                return Err(NetworkError::circular_dependency(
+                    &alloc::format!("Tx circular dependency detected: revisited stage '{}'", current_stage)
+                ));
+            }
+
+            visited_stages.insert(current_stage.clone());
+            hop_count += 1;
+
+            // Process packet in current stage (tx path)
+            let next_action = {
+                let pipeline = self.pipeline.lock();
+                pipeline.process_tx_packet_in_stage(&current_stage, &mut packet)?
+            };
+
+            // Handle the next action
+            match next_action {
+                NextAction::Jump(next_stage) => {
+                    current_stage = next_stage;
+                    continue;
+                }
+                NextAction::Complete => {
+                    let mut stats = self.stats.lock();
+                    stats.packets_completed += 1;
+                    return Ok(());
+                }
+                NextAction::Drop(_reason) => {
+                    let mut stats = self.stats.lock();
+                    stats.packets_dropped += 1;
+                    // In a real implementation, might want to log the drop reason
+                    return Ok(()); // Dropping is successful completion
+                }
+                NextAction::Terminate => {
+                    let mut stats = self.stats.lock();
+                    stats.packets_terminated += 1;
+                    return Ok(()); // Termination is successful completion
+                }
+            }
+        }
+    }
+
+    /// Process a packet starting from a specific stage (for backward compatibility)
+    ///
+    /// This method treats the packet as a receive packet. For new code, prefer
+    /// process_rx_packet_from_stage() or process_tx_packet_from_stage().
+    pub fn process_packet_from_stage(
+        &self, 
+        packet: NetworkPacket, 
+        start_stage: &str
+    ) -> Result<(), NetworkError> {
+        self.process_rx_packet_from_stage(packet, start_stage)
     }
 
     /// Get a copy of the current pipeline
@@ -235,10 +373,36 @@ impl NetworkManager {
         pipeline.remove_stage(stage_id)
     }
 
-    /// Set the default entry stage
+    /// Set the default receive entry stage
+    pub fn set_default_rx_entry_stage(&self, stage_id: &str) -> Result<(), NetworkError> {
+        let mut pipeline = self.pipeline.lock();
+        pipeline.set_default_rx_entry_stage(stage_id)
+    }
+
+    /// Set the default transmit entry stage
+    pub fn set_default_tx_entry_stage(&self, stage_id: &str) -> Result<(), NetworkError> {
+        let mut pipeline = self.pipeline.lock();
+        pipeline.set_default_tx_entry_stage(stage_id)
+    }
+
+    /// Set the default entry stage (for backward compatibility)
+    ///
+    /// This method sets both rx and tx entry stages to the same stage if the stage
+    /// has processors for both directions.
     pub fn set_default_entry_stage(&self, stage_id: &str) -> Result<(), NetworkError> {
         let mut pipeline = self.pipeline.lock();
-        pipeline.set_default_entry_stage(stage_id)
+        
+        // Try to set as rx entry stage first
+        let rx_result = pipeline.set_default_rx_entry_stage(stage_id);
+        let tx_result = pipeline.set_default_tx_entry_stage(stage_id);
+        
+        // If at least one succeeded, consider it successful
+        // This allows stages that only have rx or tx processors
+        match (rx_result, tx_result) {
+            (Ok(_), _) => Ok(()), // At least rx worked
+            (_, Ok(_)) => Ok(()), // At least tx worked  
+            (Err(e), _) => Err(e), // Both failed, return the rx error
+        }
     }
 
     /// Get processing statistics
