@@ -504,3 +504,101 @@ fn test_complex_routing_trace() {
     // Verify final packet state - payload should have both headers removed
     assert_eq!(processed_packet.payload(), &vec![0x11, 0x22]);
 }
+
+#[test_case]
+fn test_protocol_stage_builder_tracing() {
+    // Test Echo handler with tracing
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestProtocolStageBuilder::new("echo_stage")
+                .enable_tracing()
+                .build_rx_stage()
+        )
+        .set_default_rx_entry("echo_stage")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    let packet = NetworkPacket::new(vec![1, 2, 3, 4]);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let processed_packet = result.unwrap();
+    
+    // Verify tracing was enabled
+    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    assert_eq!(trace, "echo_stage");
+}
+
+#[test_case]
+fn test_protocol_stage_builder_protocol_parser_tracing() {
+    // Create custom routing for test
+    let mut routes = alloc::collections::BTreeMap::new();
+    routes.insert(TEST_PROTOCOL_TYPE_A, "next_stage".to_string());
+    
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestProtocolStageBuilder::new("parser_stage")
+                .as_protocol_parser()
+                .with_custom_routes(routes)
+                .enable_tracing()
+                .build_rx_stage()
+        )
+        .add_stage(
+            TestProtocolStageBuilder::new("next_stage")
+                .enable_tracing()
+                .build_rx_stage()
+        )
+        .set_default_rx_entry("parser_stage")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    // Create packet with protocol header
+    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0x11, 0x22, 0x33]);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let processed_packet = result.unwrap();
+    
+    // Verify tracing through both stages
+    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    assert_eq!(trace, "parser_stage -> next_stage");
+    
+    // Verify protocol parsing occurred
+    assert!(processed_packet.get_hint("test_protocol_type").is_some());
+    assert_eq!(processed_packet.payload(), &vec![0x11, 0x22, 0x33]);
+}
+
+#[test_case]
+fn test_protocol_stage_builder_bidirectional_tracing() {
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            TestStageBuilder::new("target_stage")
+                .enable_rx()
+                .enable_tracing()
+                .build()
+        )
+        .add_stage(
+            TestProtocolStageBuilder::new("bidirectional_stage")
+                .as_protocol_parser()
+                .add_route(TEST_PROTOCOL_TYPE_B, "target_stage")
+                .enable_tracing()
+                .build_bidirectional_stage()
+        )
+        .set_default_rx_entry("bidirectional_stage")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_B, 0xAA, 0xBB]);
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let processed_packet = result.unwrap();
+    
+    // Verify tracing was enabled for both stages
+    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    assert_eq!(trace, "bidirectional_stage -> target_stage");
+    
+    // Verify protocol parsing occurred
+    assert!(processed_packet.get_hint("test_protocol_type").is_some());
+    assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB]);
+}

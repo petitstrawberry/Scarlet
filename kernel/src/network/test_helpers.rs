@@ -45,18 +45,42 @@ impl PipelineTrace {
 #[derive(Debug)]
 pub struct EchoRxHandler {
     stage_name: String,
+    enable_tracing: bool,
 }
 
 impl EchoRxHandler {
     pub fn new(stage_name: &str) -> Self {
         Self {
             stage_name: String::from(stage_name),
+            enable_tracing: false,
+        }
+    }
+
+    pub fn with_tracing(stage_name: &str) -> Self {
+        Self {
+            stage_name: String::from(stage_name),
+            enable_tracing: true,
         }
     }
 }
 
 impl ReceiveHandler for EchoRxHandler {
-    fn handle(&self, _packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information if enabled
+        if self.enable_tracing {
+            let trace_key = "pipeline_trace";
+            let current_trace = packet.get_hint(trace_key).unwrap_or("");
+            let new_trace = if current_trace.is_empty() {
+                self.stage_name.clone()
+            } else {
+                format!("{} -> {}", current_trace, self.stage_name)
+            };
+            packet.set_hint(trace_key, &new_trace);
+            
+            // Add stage-specific processing marker
+            packet.set_hint(&format!("processed_by_{}", self.stage_name), "true");
+        }
+        
         // For testing: just pass packet through and complete
         Ok(NextAction::Complete)
     }
@@ -67,18 +91,42 @@ impl ReceiveHandler for EchoRxHandler {
 #[derive(Debug)]
 pub struct EchoTxHandler {
     stage_name: String,
+    enable_tracing: bool,
 }
 
 impl EchoTxHandler {
     pub fn new(stage_name: &str) -> Self {
         Self {
             stage_name: String::from(stage_name),
+            enable_tracing: false,
+        }
+    }
+
+    pub fn with_tracing(stage_name: &str) -> Self {
+        Self {
+            stage_name: String::from(stage_name),
+            enable_tracing: true,
         }
     }
 }
 
 impl TransmitHandler for EchoTxHandler {
-    fn handle(&self, _packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information if enabled
+        if self.enable_tracing {
+            let trace_key = "pipeline_trace";
+            let current_trace = packet.get_hint(trace_key).unwrap_or("");
+            let new_trace = if current_trace.is_empty() {
+                self.stage_name.clone()
+            } else {
+                format!("{} -> {}", current_trace, self.stage_name)
+            };
+            packet.set_hint(trace_key, &new_trace);
+            
+            // Add stage-specific processing marker
+            packet.set_hint(&format!("processed_by_{}", self.stage_name), "true");
+        }
+        
         // For testing: just pass packet through and complete
         Ok(NextAction::Complete)
     }
@@ -131,7 +179,7 @@ impl TestStageBuilder {
             if self.routes.is_empty() {
                 // No routing rules, use simple echo handler
                 if self.enable_tracing {
-                    Some(Box::new(TracingEchoRxHandler::new(&self.stage_id)) as Box<dyn ReceiveHandler>)
+                    Some(Box::new(EchoRxHandler::with_tracing(&self.stage_id)) as Box<dyn ReceiveHandler>)
                 } else {
                     Some(Box::new(EchoRxHandler::new(&self.stage_id)) as Box<dyn ReceiveHandler>)
                 }
@@ -139,7 +187,7 @@ impl TestStageBuilder {
                 // Has routing rules, use routing handler
                 let matcher = TestProtocolMatcher::with_custom_routes(self.routes.clone());
                 if self.enable_tracing {
-                    Some(Box::new(TracingTestProtocolRxHandler::with_matcher(&self.stage_id, matcher)) as Box<dyn ReceiveHandler>)
+                    Some(Box::new(TestProtocolRxHandler::with_tracing(&self.stage_id, matcher)) as Box<dyn ReceiveHandler>)
                 } else {
                     Some(Box::new(TestProtocolRxHandler::with_matcher(&self.stage_id, matcher)) as Box<dyn ReceiveHandler>)
                 }
@@ -236,6 +284,7 @@ impl NextStageMatcher<u8> for TestProtocolMatcher {
 pub struct TestProtocolRxHandler {
     stage_name: String,
     matcher: TestProtocolMatcher,
+    enable_tracing: bool,
 }
 
 impl TestProtocolRxHandler {
@@ -243,6 +292,7 @@ impl TestProtocolRxHandler {
         Self {
             stage_name: String::from(stage_name),
             matcher: TestProtocolMatcher::new(),
+            enable_tracing: false,
         }
     }
 
@@ -250,6 +300,7 @@ impl TestProtocolRxHandler {
         Self {
             stage_name: String::from(stage_name),
             matcher,
+            enable_tracing: false,
         }
     }
 
@@ -257,12 +308,33 @@ impl TestProtocolRxHandler {
         Self {
             stage_name: String::from(stage_name),
             matcher,
+            enable_tracing: false,
+        }
+    }
+
+    pub fn with_tracing(stage_name: &str, matcher: TestProtocolMatcher) -> Self {
+        Self {
+            stage_name: String::from(stage_name),
+            matcher,
+            enable_tracing: true,
         }
     }
 }
 
 impl ReceiveHandler for TestProtocolRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information if enabled
+        if self.enable_tracing {
+            let trace_key = "pipeline_trace";
+            let current_trace = packet.get_hint(trace_key).unwrap_or("");
+            let new_trace = if current_trace.is_empty() {
+                self.stage_name.clone()
+            } else {
+                format!("{} -> {}", current_trace, self.stage_name)
+            };
+            packet.set_hint(trace_key, &new_trace);
+        }
+
         // Validate minimum payload size
         packet.validate_payload_size(1)?;
         
@@ -279,6 +351,11 @@ impl ReceiveHandler for TestProtocolRxHandler {
         // Set hint for next stage routing
         packet.set_hint("test_protocol_type", &format!("0x{:02x}", header.next_type));
         
+        // Add processing marker if tracing enabled
+        if self.enable_tracing {
+            packet.set_hint(&format!("processed_by_{}", self.stage_name), &format!("protocol_type:0x{:02x}", header.next_type));
+        }
+        
         // Route to next stage based on header type
         let next_stage = self.matcher.get_next_stage(header.next_type)?;
         Ok(NextAction::JumpTo(next_stage.to_string()))
@@ -291,6 +368,7 @@ pub struct TestProtocolTxHandler {
     stage_name: String,
     matcher: TestProtocolMatcher,
     default_protocol_type: u8,
+    enable_tracing: bool,
 }
 
 impl TestProtocolTxHandler {
@@ -299,6 +377,7 @@ impl TestProtocolTxHandler {
             stage_name: String::from(stage_name),
             matcher: TestProtocolMatcher::new(),
             default_protocol_type: protocol_type,
+            enable_tracing: false,
         }
     }
 
@@ -307,12 +386,37 @@ impl TestProtocolTxHandler {
             stage_name: String::from(stage_name),
             matcher,
             default_protocol_type,
+            enable_tracing: false,
+        }
+    }
+
+    pub fn with_tracing(stage_name: &str, matcher: TestProtocolMatcher, default_protocol_type: u8) -> Self {
+        Self {
+            stage_name: String::from(stage_name),
+            matcher,
+            default_protocol_type,
+            enable_tracing: true,
         }
     }
 }
 
 impl TransmitHandler for TestProtocolTxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information if enabled
+        if self.enable_tracing {
+            let trace_key = "pipeline_trace";
+            let current_trace = packet.get_hint(trace_key).unwrap_or("");
+            let new_trace = if current_trace.is_empty() {
+                self.stage_name.clone()
+            } else {
+                format!("{} -> {}", current_trace, self.stage_name)
+            };
+            packet.set_hint(trace_key, &new_trace);
+            
+            // Add stage-specific processing marker
+            packet.set_hint(&format!("processed_by_{}", self.stage_name), &format!("protocol_type:0x{:02x}", self.default_protocol_type));
+        }
+        
         // Create header
         let header = TestProtocolHeader::new(self.default_protocol_type);
         
@@ -334,6 +438,7 @@ pub struct TestProtocolStageBuilder {
     stage_id: String,
     handler_type: TestHandlerType,
     custom_routes: Option<BTreeMap<u8, String>>,
+    enable_tracing: bool,
 }
 
 #[derive(Debug)]
@@ -349,7 +454,13 @@ impl TestProtocolStageBuilder {
             stage_id: String::from(stage_id),
             handler_type: TestHandlerType::Echo,
             custom_routes: None,
+            enable_tracing: false,
         }
+    }
+
+    pub fn enable_tracing(mut self) -> Self {
+        self.enable_tracing = true;
+        self
     }
 
     pub fn as_protocol_parser(mut self) -> Self {
@@ -362,6 +473,17 @@ impl TestProtocolStageBuilder {
         self
     }
 
+    pub fn add_route(mut self, protocol_type: u8, next_stage: &str) -> Self {
+        if let Some(ref mut routes) = self.custom_routes {
+            routes.insert(protocol_type, String::from(next_stage));
+        } else {
+            let mut routes = BTreeMap::new();
+            routes.insert(protocol_type, String::from(next_stage));
+            self.custom_routes = Some(routes);
+        }
+        self
+    }
+
     pub fn with_custom_routes(mut self, routes: BTreeMap<u8, String>) -> Self {
         self.custom_routes = Some(routes);
         self
@@ -370,18 +492,35 @@ impl TestProtocolStageBuilder {
     pub fn build_rx_stage(self) -> FlexibleStage {
         let rx_handler: Box<dyn ReceiveHandler> = match self.handler_type {
             TestHandlerType::Echo => {
-                Box::new(EchoRxHandler::new(&self.stage_id))
+                if self.enable_tracing {
+                    Box::new(EchoRxHandler::with_tracing(&self.stage_id))
+                } else {
+                    Box::new(EchoRxHandler::new(&self.stage_id))
+                }
             }
             TestHandlerType::ProtocolParser => {
-                if let Some(routes) = self.custom_routes {
-                    let matcher = TestProtocolMatcher::with_custom_routes(routes);
-                    Box::new(TestProtocolRxHandler::with_custom_matcher(&self.stage_id, matcher))
+                if self.enable_tracing {
+                    if let Some(routes) = self.custom_routes {
+                        let matcher = TestProtocolMatcher::with_custom_routes(routes);
+                        Box::new(TestProtocolRxHandler::with_tracing(&self.stage_id, matcher))
+                    } else {
+                        Box::new(TestProtocolRxHandler::with_tracing(&self.stage_id, TestProtocolMatcher::new()))
+                    }
                 } else {
-                    Box::new(TestProtocolRxHandler::new(&self.stage_id))
+                    if let Some(routes) = self.custom_routes {
+                        let matcher = TestProtocolMatcher::with_custom_routes(routes);
+                        Box::new(TestProtocolRxHandler::with_custom_matcher(&self.stage_id, matcher))
+                    } else {
+                        Box::new(TestProtocolRxHandler::new(&self.stage_id))
+                    }
                 }
             }
             TestHandlerType::ProtocolGenerator(_) => {
-                Box::new(EchoRxHandler::new(&self.stage_id))
+                if self.enable_tracing {
+                    Box::new(EchoRxHandler::with_tracing(&self.stage_id))
+                } else {
+                    Box::new(EchoRxHandler::new(&self.stage_id))
+                }
             }
         };
 
@@ -415,25 +554,38 @@ impl TestProtocolStageBuilder {
     pub fn build_bidirectional_stage(self) -> FlexibleStage {
         let (rx_handler, tx_handler): (Box<dyn ReceiveHandler>, Box<dyn TransmitHandler>) = match self.handler_type {
             TestHandlerType::Echo => {
-                (
-                    Box::new(EchoRxHandler::new(&self.stage_id)),
-                    Box::new(EchoTxHandler::new(&self.stage_id))
-                )
+                let rx: Box<dyn ReceiveHandler> = if self.enable_tracing {
+                    Box::new(EchoRxHandler::with_tracing(&self.stage_id))
+                } else {
+                    Box::new(EchoRxHandler::new(&self.stage_id))
+                };
+                (rx, Box::new(EchoTxHandler::new(&self.stage_id)))
             }
             TestHandlerType::ProtocolParser => {
-                let rx = if let Some(routes) = self.custom_routes {
-                    let matcher = TestProtocolMatcher::with_custom_routes(routes);
-                    Box::new(TestProtocolRxHandler::with_custom_matcher(&self.stage_id, matcher))
+                let rx: Box<dyn ReceiveHandler> = if self.enable_tracing {
+                    if let Some(routes) = self.custom_routes {
+                        let matcher = TestProtocolMatcher::with_custom_routes(routes);
+                        Box::new(TestProtocolRxHandler::with_tracing(&self.stage_id, matcher))
+                    } else {
+                        Box::new(TestProtocolRxHandler::with_tracing(&self.stage_id, TestProtocolMatcher::new()))
+                    }
                 } else {
-                    Box::new(TestProtocolRxHandler::new(&self.stage_id))
+                    if let Some(routes) = self.custom_routes {
+                        let matcher = TestProtocolMatcher::with_custom_routes(routes);
+                        Box::new(TestProtocolRxHandler::with_custom_matcher(&self.stage_id, matcher))
+                    } else {
+                        Box::new(TestProtocolRxHandler::new(&self.stage_id))
+                    }
                 };
                 (rx, Box::new(EchoTxHandler::new(&self.stage_id)))
             }
             TestHandlerType::ProtocolGenerator(protocol_type) => {
-                (
-                    Box::new(EchoRxHandler::new(&self.stage_id)),
-                    Box::new(TestProtocolTxHandler::new(&self.stage_id, protocol_type))
-                )
+                let rx: Box<dyn ReceiveHandler> = if self.enable_tracing {
+                    Box::new(EchoRxHandler::with_tracing(&self.stage_id))
+                } else {
+                    Box::new(EchoRxHandler::new(&self.stage_id))
+                };
+                (rx, Box::new(TestProtocolTxHandler::new(&self.stage_id, protocol_type)))
             }
         };
 
@@ -445,95 +597,4 @@ impl TestProtocolStageBuilder {
     }
 }
 
-/// Tracing echo handler (receive) - records stage visits
-#[derive(Debug)]
-pub struct TracingEchoRxHandler {
-    stage_name: String,
-}
 
-impl TracingEchoRxHandler {
-    pub fn new(stage_name: &str) -> Self {
-        Self {
-            stage_name: String::from(stage_name),
-        }
-    }
-}
-
-impl ReceiveHandler for TracingEchoRxHandler {
-    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // Add tracing information to packet hints
-        let trace_key = "pipeline_trace";
-        let current_trace = packet.get_hint(trace_key).unwrap_or("");
-        let new_trace = if current_trace.is_empty() {
-            self.stage_name.clone()
-        } else {
-            format!("{} -> {}", current_trace, self.stage_name)
-        };
-        packet.set_hint(trace_key, &new_trace);
-        
-        // Add stage-specific processing marker
-        packet.set_hint(&format!("processed_by_{}", self.stage_name), "true");
-        
-        Ok(NextAction::Complete)
-    }
-}
-
-/// Tracing protocol receive handler that parses header and routes to next stage
-#[derive(Debug)]
-pub struct TracingTestProtocolRxHandler {
-    stage_name: String,
-    matcher: TestProtocolMatcher,
-}
-
-impl TracingTestProtocolRxHandler {
-    pub fn new(stage_name: &str) -> Self {
-        Self {
-            stage_name: String::from(stage_name),
-            matcher: TestProtocolMatcher::new(),
-        }
-    }
-
-    pub fn with_matcher(stage_name: &str, matcher: TestProtocolMatcher) -> Self {
-        Self {
-            stage_name: String::from(stage_name),
-            matcher,
-        }
-    }
-}
-
-impl ReceiveHandler for TracingTestProtocolRxHandler {
-    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // Add tracing information
-        let trace_key = "pipeline_trace";
-        let current_trace = packet.get_hint(trace_key).unwrap_or("");
-        let new_trace = if current_trace.is_empty() {
-            self.stage_name.clone()
-        } else {
-            format!("{} -> {}", current_trace, self.stage_name)
-        };
-        packet.set_hint(trace_key, &new_trace);
-
-        // Validate payload size
-        packet.validate_payload_size(1)?;
-        
-        // Parse header from payload
-        let header = TestProtocolHeader::from_bytes(packet.payload())?;
-        
-        // Extract header and update payload
-        let payload_data = packet.payload()[1..].to_vec();
-        packet.set_payload(payload_data);
-        
-        // Add parsed header to packet
-        packet.add_header("test_protocol", header.to_bytes());
-        
-        // Set hint for next stage routing
-        packet.set_hint("test_protocol_type", &format!("0x{:02x}", header.next_type));
-        
-        // Add processing marker with protocol type info
-        packet.set_hint(&format!("processed_by_{}", self.stage_name), &format!("protocol_type:0x{:02x}", header.next_type));
-        
-        // Route to next stage based on header type
-        let next_stage = self.matcher.get_next_stage(header.next_type)?;
-        Ok(NextAction::JumpTo(next_stage.to_string()))
-    }
-}
