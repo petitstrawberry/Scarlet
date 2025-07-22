@@ -1,29 +1,29 @@
 //! Traits for the network pipeline infrastructure
 //!
 //! This module defines the core traits that enable flexible packet processing
-//! in the network pipeline architecture.
+//! in the Tx/Rx separated network pipeline architecture.
 
 use super::{packet::NetworkPacket, error::NetworkError};
 
-/// Trait for packet processing logic within a pipeline stage
+/// Trait for receive path packet processing logic within a pipeline stage
 ///
-/// StageHandler implementations perform the actual packet processing work:
+/// RxStageHandler implementations perform packet processing for received packets:
 /// - Parse and validate packet data
 /// - Extract headers and store them in the packet
 /// - Modify the payload for the next stage
-/// - Perform protocol-specific operations
+/// - Perform protocol-specific receive operations
 ///
 /// Handlers should NOT determine which stage to process next - that is the
-/// responsibility of the NextAction associated with the StageProcessor.
-pub trait StageHandler: Send + Sync {
-    /// Process a packet within this stage
+/// responsibility of the NextAction associated with the RxStageProcessor.
+pub trait RxStageHandler: Send + Sync {
+    /// Process a received packet within this stage
     ///
     /// The handler should:
     /// 1. Validate that the packet has sufficient data
     /// 2. Parse the protocol header from the current payload
     /// 3. Store the header using packet.add_header()
     /// 4. Update the payload to contain remaining data
-    /// 5. Perform any protocol-specific processing
+    /// 5. Perform any protocol-specific receive processing
     ///
     /// # Arguments
     /// * `packet` - The packet to process (mutable to allow modifications)
@@ -52,31 +52,83 @@ pub trait StageHandler: Send + Sync {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError>;
 }
 
+/// Trait for transmit path packet building logic within a pipeline stage
+///
+/// TxStageBuilder implementations perform packet building for transmission:
+/// - Read hints from upper layers to determine configuration
+/// - Build protocol headers based on hints and payload
+/// - Prepend headers to payload data
+/// - Set hints for lower layers
+///
+/// Builders should NOT determine which stage to process next - that is the
+/// responsibility of the NextAction associated with the TxStageProcessor.
+pub trait TxStageBuilder: Send + Sync {
+    /// Build headers and modify packet for transmission
+    ///
+    /// The builder should:
+    /// 1. Read required hints from the packet
+    /// 2. Validate hints and payload for transmission
+    /// 3. Build appropriate protocol header
+    /// 4. Prepend header to payload data
+    /// 5. Set hints for lower layers
+    ///
+    /// # Arguments
+    /// * `packet` - The packet to build for (mutable to allow modifications)
+    ///
+    /// # Returns
+    /// * `Ok(())` if building succeeded
+    /// * `Err(NetworkError)` if building failed (e.g., missing hints)
+    ///
+    /// # Example
+    /// ```ignore
+    /// fn build(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
+    ///     // Read hints from upper layer
+    ///     let dest_ip = packet.get_hint("destination_ip")
+    ///         .ok_or(NetworkError::missing_hint("destination_ip"))?;
+    ///     
+    ///     // Build IPv4 header
+    ///     let header = self.build_ipv4_header(dest_ip, packet.payload().len())?;
+    ///     
+    ///     // Prepend header to payload
+    ///     let mut new_payload = header;
+    ///     new_payload.extend_from_slice(packet.payload());
+    ///     packet.set_payload(new_payload);
+    ///     
+    ///     // Set hints for lower layer
+    ///     packet.set_hint("link_layer", "ethernet");
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    fn build(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError>;
+}
+
 /// Trait for determining if a processor should handle a packet
 ///
 /// ProcessorCondition implementations check whether their associated
-/// StageHandler should process a given packet. This allows multiple
+/// RxStageHandler or TxStageBuilder should process a given packet. This allows multiple
 /// processors in a single stage to handle different packet types.
 ///
 /// Conditions should be fast and should NOT modify the packet.
+/// For receive path, conditions typically examine payload data.
+/// For transmit path, conditions typically examine hints.
 pub trait ProcessorCondition: Send + Sync {
-    /// Check if this processor's handler should process the packet
+    /// Check if this processor should handle the packet
     ///
-    /// This method should examine the packet data and return true if
-    /// the associated StageHandler should process it. Common checks include:
-    /// - Protocol type fields (EtherType, IP protocol, etc.)
-    /// - Port numbers
-    /// - Packet flags
-    /// - Header presence
+    /// This method should examine the packet data (payload for Rx, hints for Tx) and
+    /// return true if the associated handler/builder should process it. Common checks include:
+    /// - Protocol type fields (EtherType, IP protocol, etc.) for receive path
+    /// - Hints values (ip_version, protocol) for transmit path
+    /// - Port numbers, packet flags, header presence
     ///
     /// # Arguments
     /// * `packet` - The packet to examine (read-only)
     ///
     /// # Returns
-    /// * `true` if the associated handler should process this packet
+    /// * `true` if the associated handler/builder should process this packet
     /// * `false` if this processor should be skipped
     ///
-    /// # Example
+    /// # Example for Receive Path
     /// ```ignore
     /// fn matches(&self, packet: &NetworkPacket) -> bool {
     ///     let payload = packet.payload();
@@ -87,6 +139,14 @@ pub trait ProcessorCondition: Send + Sync {
     ///     } else {
     ///         false
     ///     }
+    /// }
+    /// ```
+    ///
+    /// # Example for Transmit Path
+    /// ```ignore
+    /// fn matches(&self, packet: &NetworkPacket) -> bool {
+    ///     // Check if hints indicate IPv4 should be used
+    ///     packet.get_hint("ip_version") == Some("ipv4")
     /// }
     /// ```
     fn matches(&self, packet: &NetworkPacket) -> bool;
@@ -177,12 +237,25 @@ mod tests {
 
     // Mock implementations for testing
 
-    struct MockHandler;
+    struct MockRxHandler;
 
-    impl StageHandler for MockHandler {
+    impl RxStageHandler for MockRxHandler {
         fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
             // Simple mock: just add a test header
             packet.add_header("test", vec![0x01, 0x02]);
+            Ok(())
+        }
+    }
+
+    struct MockTxBuilder;
+
+    impl TxStageBuilder for MockTxBuilder {
+        fn build(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
+            // Simple mock: prepend a test header to payload
+            let mut new_payload = vec![0xAA, 0xBB]; // Mock header
+            new_payload.extend_from_slice(packet.payload());
+            packet.set_payload(new_payload);
+            packet.set_hint("processed", "true");
             Ok(())
         }
     }
@@ -197,11 +270,19 @@ mod tests {
         }
     }
 
-    struct FailingHandler;
+    struct FailingRxHandler;
 
-    impl StageHandler for FailingHandler {
+    impl RxStageHandler for FailingRxHandler {
         fn handle(&self, _packet: &mut NetworkPacket) -> Result<(), NetworkError> {
             Err(NetworkError::invalid_packet("Mock failure"))
+        }
+    }
+
+    struct FailingTxBuilder;
+
+    impl TxStageBuilder for FailingTxBuilder {
+        fn build(&self, _packet: &mut NetworkPacket) -> Result<(), NetworkError> {
+            Err(NetworkError::missing_hint("required_hint"))
         }
     }
 
@@ -240,8 +321,8 @@ mod tests {
     }
 
     #[test_case]
-    fn test_stage_handler_trait() {
-        let handler = MockHandler;
+    fn test_rx_stage_handler_trait() {
+        let handler = MockRxHandler;
         let mut packet = NetworkPacket::new(vec![0xAA, 0xBB], String::from("test"));
 
         let result = handler.handle(&mut packet);
@@ -250,8 +331,19 @@ mod tests {
     }
 
     #[test_case]
-    fn test_stage_handler_failure() {
-        let handler = FailingHandler;
+    fn test_tx_stage_builder_trait() {
+        let builder = MockTxBuilder;
+        let mut packet = NetworkPacket::new(vec![0xCC, 0xDD], String::from("test"));
+
+        let result = builder.build(&mut packet);
+        assert!(result.is_ok());
+        assert_eq!(packet.payload(), &[0xAA, 0xBB, 0xCC, 0xDD]); // Header prepended
+        assert_eq!(packet.get_hint("processed"), Some("true"));
+    }
+
+    #[test_case]
+    fn test_rx_handler_failure() {
+        let handler = FailingRxHandler;
         let mut packet = NetworkPacket::new(vec![0xAA, 0xBB], String::from("test"));
 
         let result = handler.handle(&mut packet);
@@ -261,6 +353,21 @@ mod tests {
                 assert_eq!(msg, "Mock failure");
             }
             _ => panic!("Expected InvalidPacket error"),
+        }
+    }
+
+    #[test_case]
+    fn test_tx_builder_failure() {
+        let builder = FailingTxBuilder;
+        let mut packet = NetworkPacket::new(vec![0xAA, 0xBB], String::from("test"));
+
+        let result = builder.build(&mut packet);
+        assert!(result.is_err());
+        match result {
+            Err(NetworkError::MissingHint(hint)) => {
+                assert_eq!(hint, "required_hint");
+            }
+            _ => panic!("Expected MissingHint error"),
         }
     }
 
@@ -277,7 +384,8 @@ mod tests {
     #[test_case]
     fn test_trait_object_send_sync() {
         // Test that we can create trait objects and they are Send + Sync
-        let _handler: Box<dyn StageHandler> = Box::new(MockHandler);
+        let _rx_handler: Box<dyn RxStageHandler> = Box::new(MockRxHandler);
+        let _tx_builder: Box<dyn TxStageBuilder> = Box::new(MockTxBuilder);
         let _condition: Box<dyn ProcessorCondition> = Box::new(MockCondition { should_match: true });
 
         // This test mainly ensures the traits compile with Send + Sync bounds

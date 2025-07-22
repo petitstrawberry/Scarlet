@@ -7,18 +7,18 @@ use alloc::{boxed::Box, string::String};
 use super::{
     packet::NetworkPacket,
     error::NetworkError,
-    traits::{StageHandler, ProcessorCondition, NextAction},
-    pipeline::{FlexibleStage, StageProcessor, FlexiblePipeline},
+    traits::{RxStageHandler, TxStageBuilder, ProcessorCondition, NextAction},
+    pipeline::{FlexibleStage, RxStageProcessor, TxStageProcessor, FlexiblePipeline},
     network_manager::NetworkManager,
 };
 
-/// Example Ethernet frame handler
+/// Example Ethernet frame handler for receive path
 ///
 /// Processes Ethernet frames by extracting the 14-byte header
 /// and determining the next stage based on EtherType.
-pub struct EthernetHandler;
+pub struct EthernetRxHandler;
 
-impl StageHandler for EthernetHandler {
+impl RxStageHandler for EthernetRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
         // Validate minimum Ethernet frame size
         packet.validate_payload_size(14)?;
@@ -32,6 +32,59 @@ impl StageHandler for EthernetHandler {
         packet.set_payload(payload[14..].to_vec());
         
         Ok(())
+    }
+}
+
+/// Example Ethernet frame builder for transmit path
+///
+/// Builds Ethernet frames by reading hints and prepending Ethernet header.
+pub struct EthernetTxBuilder;
+
+impl TxStageBuilder for EthernetTxBuilder {
+    fn build(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
+        // Get required hints from upper layers
+        let dest_mac = packet.get_hint("dest_mac")
+            .ok_or(NetworkError::missing_hint("dest_mac"))?;
+        let src_mac = packet.get_hint("src_mac")
+            .ok_or(NetworkError::missing_hint("src_mac"))?;
+        let ether_type = packet.get_hint("ether_type")
+            .ok_or(NetworkError::missing_hint("ether_type"))?;
+        
+        // Parse MAC addresses and EtherType
+        let dest_bytes = Self::parse_mac(dest_mac)?;
+        let src_bytes = Self::parse_mac(src_mac)?;
+        let ether_type_val = u16::from_str_radix(ether_type, 16)
+            .map_err(|_| NetworkError::invalid_packet("Invalid EtherType format"))?;
+        
+        // Build Ethernet header (14 bytes)
+        let mut eth_header = Vec::with_capacity(14);
+        eth_header.extend_from_slice(&dest_bytes);     // 6 bytes dest MAC
+        eth_header.extend_from_slice(&src_bytes);      // 6 bytes src MAC
+        eth_header.extend_from_slice(&ether_type_val.to_be_bytes()); // 2 bytes EtherType
+        
+        // Prepend header to payload
+        let mut new_payload = eth_header;
+        new_payload.extend_from_slice(packet.payload());
+        packet.set_payload(new_payload);
+        
+        Ok(())
+    }
+}
+
+impl EthernetTxBuilder {
+    fn parse_mac(mac_str: &str) -> Result<[u8; 6], NetworkError> {
+        let parts: Vec<&str> = mac_str.split(':').collect();
+        if parts.len() != 6 {
+            return Err(NetworkError::invalid_packet("Invalid MAC address format"));
+        }
+        
+        let mut mac_bytes = [0u8; 6];
+        for (i, part) in parts.iter().enumerate() {
+            mac_bytes[i] = u8::from_str_radix(part, 16)
+                .map_err(|_| NetworkError::invalid_packet("Invalid MAC address format"))?;
+        }
+        
+        Ok(mac_bytes)
     }
 }
 
@@ -67,13 +120,13 @@ impl ProcessorCondition for ARPEtherTypeCondition {
     }
 }
 
-/// Example IPv4 header handler
+/// Example IPv4 header handler for receive path
 ///
 /// Processes IPv4 packets by extracting the variable-length header
 /// and determining next stage based on protocol field.
-pub struct IPv4Handler;
+pub struct IPv4RxHandler;
 
-impl StageHandler for IPv4Handler {
+impl RxStageHandler for IPv4RxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<(), NetworkError> {
         // Validate minimum IPv4 header size
         packet.validate_payload_size(20)?;

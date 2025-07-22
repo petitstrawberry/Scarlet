@@ -39,8 +39,8 @@ pub mod examples;
 // Re-export key types for convenience
 pub use error::NetworkError;
 pub use packet::{NetworkPacket as PipelinePacket, Instant}; // Renamed to avoid conflict
-pub use traits::{StageHandler, ProcessorCondition, NextAction};
-pub use pipeline::{FlexiblePipeline, FlexibleStage, StageProcessor};
+pub use traits::{RxStageHandler, TxStageBuilder, ProcessorCondition, NextAction};
+pub use pipeline::{FlexiblePipeline, FlexibleStage, RxStageProcessor, TxStageProcessor};
 pub use network_manager::{NetworkManager, NetworkProcessingStats};
 
 /// Get the first available network device

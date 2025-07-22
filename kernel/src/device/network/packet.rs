@@ -28,11 +28,12 @@ impl Instant {
     }
 }
 
-/// Network packet with flexible header/payload separation
+/// Network packet with flexible header/payload separation and hints for Tx/Rx processing
 ///
 /// This packet structure enables the flexible pipeline processing by:
 /// - Maintaining headers from each processing stage separately
 /// - Keeping the current payload for the next stage to process
+/// - Supporting hints for transmit path information passing between layers
 /// - Preserving metadata like receive time and device information
 #[derive(Debug, Clone)]
 pub struct NetworkPacket {
@@ -40,6 +41,8 @@ pub struct NetworkPacket {
     payload: Vec<u8>,
     /// Headers extracted by each stage, indexed by stage name
     headers: HashMap<String, Vec<u8>>,
+    /// Hints for transmit path information passing (upper layer → lower layer)
+    hints: HashMap<String, String>,
     /// Timestamp when packet was received
     received_at: Instant,
     /// Name of the device that received this packet
@@ -52,6 +55,7 @@ impl NetworkPacket {
         Self {
             payload: data,
             headers: HashMap::new(),
+            hints: HashMap::new(),
             received_at: Instant::now(),
             device_name,
         }
@@ -90,6 +94,40 @@ impl NetworkPacket {
     /// Get all header names that have been stored
     pub fn header_names(&self) -> Vec<&str> {
         self.headers.keys().map(|k| k.as_str()).collect()
+    }
+
+    /// Set hint information for transmit path processing
+    ///
+    /// Hints are used by upper layers to provide information to lower layers
+    /// during packet transmission, enabling dynamic protocol selection and
+    /// layer-specific configuration.
+    ///
+    /// # Arguments
+    /// * `key` - The hint key (e.g., "destination_ip", "ip_version", "protocol")
+    /// * `value` - The hint value as a string
+    pub fn set_hint(&mut self, key: &str, value: &str) {
+        self.hints.insert(String::from(key), String::from(value));
+    }
+
+    /// Get hint information for transmit path processing
+    ///
+    /// # Arguments
+    /// * `key` - The hint key to retrieve
+    ///
+    /// # Returns
+    /// The hint value as a string slice, or None if key not found
+    pub fn get_hint(&self, key: &str) -> Option<&str> {
+        self.hints.get(key).map(|s| s.as_str())
+    }
+
+    /// Get all hint keys that have been set
+    pub fn hint_keys(&self) -> Vec<&str> {
+        self.hints.keys().map(|k| k.as_str()).collect()
+    }
+
+    /// Clear all hints (useful for packet reuse)
+    pub fn clear_hints(&mut self) {
+        self.hints.clear();
     }
 
     /// Get the packet receive timestamp
@@ -294,11 +332,49 @@ mod tests {
         let data = vec![0xAA, 0xBB];
         let mut packet = NetworkPacket::new(data.clone(), String::from("test"));
         packet.add_header("eth", vec![0x01, 0x02]);
+        packet.set_hint("test_hint", "test_value");
 
         let cloned = packet.clone_packet();
         assert_eq!(cloned.payload(), packet.payload());
         assert_eq!(cloned.get_header("eth"), packet.get_header("eth"));
+        assert_eq!(cloned.get_hint("test_hint"), packet.get_hint("test_hint"));
         assert_eq!(cloned.device_name(), packet.device_name());
+    }
+
+    #[test_case]
+    fn test_hints_operations() {
+        let mut packet = NetworkPacket::new(vec![0xAA, 0xBB], String::from("test"));
+        
+        // Initially no hints
+        assert!(packet.get_hint("destination_ip").is_none());
+        assert_eq!(packet.hint_keys().len(), 0);
+        
+        // Set hints
+        packet.set_hint("destination_ip", "192.168.1.100");
+        packet.set_hint("ip_version", "ipv4");
+        packet.set_hint("protocol", "6"); // TCP
+        
+        // Check hints
+        assert_eq!(packet.get_hint("destination_ip"), Some("192.168.1.100"));
+        assert_eq!(packet.get_hint("ip_version"), Some("ipv4"));
+        assert_eq!(packet.get_hint("protocol"), Some("6"));
+        assert!(packet.get_hint("nonexistent").is_none());
+        
+        // Check hint keys
+        let keys = packet.hint_keys();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&"destination_ip"));
+        assert!(keys.contains(&"ip_version"));
+        assert!(keys.contains(&"protocol"));
+        
+        // Update existing hint
+        packet.set_hint("destination_ip", "10.0.0.1");
+        assert_eq!(packet.get_hint("destination_ip"), Some("10.0.0.1"));
+        
+        // Clear all hints
+        packet.clear_hints();
+        assert_eq!(packet.hint_keys().len(), 0);
+        assert!(packet.get_hint("destination_ip").is_none());
     }
 
     #[test_case]

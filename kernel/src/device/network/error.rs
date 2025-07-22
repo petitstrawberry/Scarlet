@@ -27,6 +27,8 @@ pub enum NetworkError {
     InvalidStageConfig(alloc::string::String),
     /// Pipeline not initialized
     PipelineNotInitialized,
+    /// Missing required hint for transmit path processing
+    MissingHint(alloc::string::String),
     /// Operation not supported
     Unsupported(alloc::string::String),
 }
@@ -70,6 +72,11 @@ impl NetworkError {
         Self::InvalidStageConfig(alloc::string::String::from(reason))
     }
 
+    /// Create a missing hint error
+    pub fn missing_hint(hint_key: &str) -> Self {
+        Self::MissingHint(alloc::string::String::from(hint_key))
+    }
+
     /// Create an unsupported operation error
     pub fn unsupported(operation: &str) -> Self {
         Self::Unsupported(alloc::string::String::from(operation))
@@ -86,6 +93,7 @@ impl NetworkError {
             NetworkError::CircularDependency(_) => "Circular dependency detected",
             NetworkError::InvalidStageConfig(_) => "Invalid stage configuration",
             NetworkError::PipelineNotInitialized => "Pipeline not initialized",
+            NetworkError::MissingHint(_) => "Missing required hint",
             NetworkError::Unsupported(_) => "Operation not supported",
         }
     }
@@ -117,6 +125,9 @@ impl core::fmt::Display for NetworkError {
             }
             NetworkError::PipelineNotInitialized => {
                 write!(f, "Pipeline not initialized")
+            }
+            NetworkError::MissingHint(hint_key) => {
+                write!(f, "Missing required hint: {}", hint_key)
             }
             NetworkError::Unsupported(operation) => {
                 write!(f, "Operation not supported: {}", operation)
