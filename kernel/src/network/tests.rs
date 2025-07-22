@@ -716,12 +716,15 @@ fn test_realistic_protocol_stack() {
         )
         .add_stage(
             ProtocolStageBuilder::with_stage_id("tcp")
+                .add_route(0, "drop") // End processing (any protocol to drop)
                 .build()
         )
         .add_stage(
             ProtocolStageBuilder::with_stage_id("udp")
+                .add_route(0, "drop") // End processing (any protocol to drop)
                 .build()
         )
+        .add_stage(DropStageBuilder::with_stage_id("drop").build())
         .set_default_rx_entry("ethernet")
         .set_default_tx_entry("tcp")
         .build()
@@ -735,7 +738,7 @@ fn test_realistic_protocol_stack() {
     
     // Test packet processing with proper protocol headers
     // Create a packet with test protocol header pointing to IP (0x08)
-    let mut packet = NetworkPacket::new(vec![0x08, 0x06, 0x02, 0x03]); // First byte is protocol type
+    let mut packet = NetworkPacket::new(vec![0x08, 0x06, 0x00, 0x03]); // First byte is protocol type
     packet.add_header("test_protocol", vec![0x08]); // Add test protocol header
     
     let result = pipeline.process_receive(packet, None);

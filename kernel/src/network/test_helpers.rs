@@ -791,4 +791,118 @@ impl ProtocolStageBuilder {
     }
 }
 
+/// Drop Stage Builder - Simply completes packet processing (packet termination)
+pub struct DropStageBuilder {
+    stage_id: String,
+    enable_tracing: bool,
+}
+
+impl DropStageBuilder {
+    pub fn new() -> Self {
+        Self {
+            stage_id: "drop".to_string(),
+            enable_tracing: false,
+        }
+    }
+    
+    pub fn with_stage_id(stage_id: &str) -> Self {
+        Self {
+            stage_id: stage_id.to_string(),
+            enable_tracing: false,
+        }
+    }
+    
+    pub fn enable_tracing(mut self) -> Self {
+        self.enable_tracing = true;
+        self
+    }
+    
+    pub fn build(self) -> FlexibleStage {
+        let stage_id = self.stage_id;
+        
+        let rx_handler = Some(Box::new(DropRxHandler::new(&stage_id, self.enable_tracing)) as Box<dyn ReceiveHandler>);
+        let tx_handler = Some(Box::new(DropTxHandler::new(&stage_id, self.enable_tracing)) as Box<dyn TransmitHandler>);
+
+        FlexibleStage {
+            stage_id,
+            rx_handler,
+            tx_handler,
+        }
+    }
+}
+
+/// Drop receive handler that simply completes processing
+#[derive(Debug)]
+pub struct DropRxHandler {
+    stage_name: String,
+    enable_tracing: bool,
+}
+
+impl DropRxHandler {
+    pub fn new(stage_name: &str, enable_tracing: bool) -> Self {
+        Self {
+            stage_name: stage_name.to_string(),
+            enable_tracing,
+        }
+    }
+}
+
+impl ReceiveHandler for DropRxHandler {
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information if enabled
+        if self.enable_tracing {
+            let trace_key = "pipeline_trace";
+            let current_trace = packet.get_hint(trace_key).unwrap_or("");
+            let new_trace = if current_trace.is_empty() {
+                self.stage_name.clone()
+            } else {
+                format!("{} -> {}", current_trace, self.stage_name)
+            };
+            packet.set_hint(trace_key, &new_trace);
+            
+            packet.set_hint(&format!("processed_by_{}", self.stage_name), "dropped");
+        }
+        
+        // Simply complete processing (drop the packet)
+        Ok(NextAction::Complete)
+    }
+}
+
+/// Drop transmit handler that simply completes processing
+#[derive(Debug)]
+pub struct DropTxHandler {
+    stage_name: String,
+    enable_tracing: bool,
+}
+
+impl DropTxHandler {
+    pub fn new(stage_name: &str, enable_tracing: bool) -> Self {
+        Self {
+            stage_name: stage_name.to_string(),
+            enable_tracing,
+        }
+    }
+}
+
+impl TransmitHandler for DropTxHandler {
+    fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
+        // Add tracing information if enabled
+        if self.enable_tracing {
+            let trace_key = "pipeline_trace";
+            let current_trace = packet.get_hint(trace_key).unwrap_or("");
+            let new_trace = if current_trace.is_empty() {
+                self.stage_name.clone()
+            } else {
+                format!("{} -> {}", current_trace, self.stage_name)
+            };
+            packet.set_hint(trace_key, &new_trace);
+            
+            packet.set_hint(&format!("processed_by_{}", self.stage_name), "dropped");
+        }
+        
+        // Simply complete processing (drop the packet)
+        Ok(NextAction::Complete)
+    }
+}
+
 
