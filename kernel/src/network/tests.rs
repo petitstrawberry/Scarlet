@@ -602,3 +602,142 @@ fn test_protocol_stage_builder_bidirectional_tracing() {
     assert!(processed_packet.get_hint("test_protocol_type").is_some());
     assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB]);
 }
+
+#[test_case]
+fn test_flexible_pipeline_builder_typed() {
+    // Test type-safe pipeline building
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            EchoStageBuilder::new()
+                .build()
+        )
+        .add_stage(
+            ProtocolStageBuilder::new()
+                .build()
+        )
+        .set_default_rx_entry_typed::<EchoProtocol>()
+        .set_default_tx_entry_typed::<EchoProtocol>()
+        .build()
+        .expect("Pipeline build should succeed");
+
+    assert!(pipeline.has_stage_typed::<EchoProtocol>());
+    
+    // Also test the string-based versions still work
+    assert!(pipeline.has_stage("echo"));
+    
+    let stage_ids = pipeline.stage_ids();
+    assert_eq!(stage_ids.len(), 2);
+    assert!(stage_ids.contains(&"echo".to_string()));
+}
+
+#[test_case]
+fn test_individual_stage_builders() {
+    // Test using individual stage builders instead of the generic TestStageBuilder
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(EchoStageBuilder::new().build())
+        .add_stage(
+            ProtocolStageBuilder::new()
+                .add_route_typed::<EchoProtocol>(TEST_PROTOCOL_TYPE_A)
+                .build()
+        )
+        .set_default_rx_entry_typed::<EchoProtocol>()
+        .set_default_tx_entry_typed::<EchoProtocol>()
+        .build()
+        .expect("Pipeline build should succeed");
+
+    assert!(pipeline.has_stage_typed::<EchoProtocol>());
+}
+
+#[test_case]
+fn test_echo_stage_with_tracing() {
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            EchoStageBuilder::new()
+                .enable_tracing()
+                .build()
+        )
+        .set_default_rx_entry_typed::<EchoProtocol>()
+        .build()
+        .expect("Pipeline build should succeed");
+
+    let packet = NetworkPacket::new(vec![1, 2, 3, 4]);
+    let result = pipeline.process_receive(packet, None);
+    
+    assert!(result.is_ok());
+    let processed_packet = result.unwrap();
+    
+    // Check if tracing was added
+    assert!(processed_packet.get_hint("pipeline_trace").is_some());
+}
+
+#[test_case]
+fn test_protocol_stage_routing() {
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            ProtocolStageBuilder::new()
+                .add_route_typed::<EchoProtocol>(TEST_PROTOCOL_TYPE_A)
+                .enable_tracing()
+                .build()
+        )
+        .add_stage(EchoStageBuilder::new().build())
+        .set_default_rx_entry("protocol")
+        .build()
+        .expect("Pipeline build should succeed");
+
+    // Create packet with protocol header
+    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
+    let result = pipeline.process_receive(packet, None);
+    
+    assert!(result.is_ok());
+    let processed_packet = result.unwrap();
+    
+    // Verify protocol was parsed and routed correctly
+    assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB, 0xCC]);
+    
+    // Check tracing shows the routing path
+    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    assert!(trace.contains("protocol"));
+}
+
+#[test_case]
+fn test_realistic_protocol_stack() {
+    // Test a more realistic protocol stack
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            ProtocolStageBuilder::with_stage_id("ethernet")
+                .add_route(0x08, "ip") // IPv4 packets to IP stage
+                .build()
+        )
+        .add_stage(
+            ProtocolStageBuilder::with_stage_id("ip")
+                .add_route(6, "tcp")  // TCP packets to TCP stage
+                .add_route(17, "udp") // UDP packets to UDP stage
+                .build()
+        )
+        .add_stage(
+            ProtocolStageBuilder::with_stage_id("tcp")
+                .build()
+        )
+        .add_stage(
+            ProtocolStageBuilder::with_stage_id("udp")
+                .build()
+        )
+        .set_default_rx_entry("ethernet")
+        .set_default_tx_entry("tcp")
+        .build()
+        .expect("Protocol stack build should succeed");
+
+    // Verify all stages exist
+    assert!(pipeline.has_stage("ethernet"));
+    assert!(pipeline.has_stage("ip"));
+    assert!(pipeline.has_stage("tcp"));
+    assert!(pipeline.has_stage("udp"));
+    
+    // Test packet processing with proper protocol headers
+    // Create a packet with test protocol header pointing to IP (0x08)
+    let mut packet = NetworkPacket::new(vec![0x08, 0x06, 0x02, 0x03]); // First byte is protocol type
+    packet.add_header("test_protocol", vec![0x08]); // Add test protocol header
+    
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+}

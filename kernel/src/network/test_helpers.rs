@@ -7,7 +7,45 @@ use alloc::{format, vec};
 use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction, NextStageMatcher};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
-use crate::network::pipeline::FlexibleStage;
+use crate::network::pipeline::{FlexibleStage, StageIdentifier};
+
+/// Test protocol stage identifiers for type-safe testing
+/// These represent different protocols that use the same underlying implementation
+pub struct EchoProtocol;
+pub struct EthernetProtocol;
+pub struct IpProtocol;
+pub struct TcpProtocol;
+pub struct UdpProtocol;
+pub struct CustomProtocolA;
+pub struct CustomProtocolB;
+
+impl StageIdentifier for EchoProtocol {
+    fn stage_id() -> &'static str { "echo" }
+}
+
+impl StageIdentifier for EthernetProtocol {
+    fn stage_id() -> &'static str { "ethernet" }
+}
+
+impl StageIdentifier for IpProtocol {
+    fn stage_id() -> &'static str { "ip" }
+}
+
+impl StageIdentifier for TcpProtocol {
+    fn stage_id() -> &'static str { "tcp" }
+}
+
+impl StageIdentifier for UdpProtocol {
+    fn stage_id() -> &'static str { "udp" }
+}
+
+impl StageIdentifier for CustomProtocolA {
+    fn stage_id() -> &'static str { "custom_a" }
+}
+
+impl StageIdentifier for CustomProtocolB {
+    fn stage_id() -> &'static str { "custom_b" }
+}
 
 /// Tracing functionality for testing
 #[derive(Debug, Clone)]
@@ -151,6 +189,17 @@ impl TestStageBuilder {
             enable_tracing: false,
         }
     }
+    
+    /// Create a new TestStageBuilder with type-safe identifier
+    pub fn new_typed<T: StageIdentifier>() -> Self {
+        Self {
+            stage_id: T::stage_id().to_string(),
+            enable_rx: false,
+            enable_tx: false,
+            routes: BTreeMap::new(),
+            enable_tracing: false,
+        }
+    }
 
     pub fn enable_rx(mut self) -> Self {
         self.enable_rx = true;
@@ -165,6 +214,12 @@ impl TestStageBuilder {
     /// Add routing rule for specific protocol type
     pub fn add_route(mut self, protocol_type: u8, next_stage: &str) -> Self {
         self.routes.insert(protocol_type, String::from(next_stage));
+        self
+    }
+    
+    /// Add routing rule with type-safe next stage
+    pub fn add_route_typed<T: StageIdentifier>(mut self, protocol_type: u8) -> Self {
+        self.routes.insert(protocol_type, T::stage_id().to_string());
         self
     }
 
@@ -248,18 +303,14 @@ impl TestProtocolHeader {
 }
 
 /// Test protocol matcher that routes based on header type
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TestProtocolMatcher {
     routes: BTreeMap<u8, String>,
 }
 
 impl TestProtocolMatcher {
     pub fn new() -> Self {
-        let mut routes = BTreeMap::new();
-        routes.insert(TEST_PROTOCOL_TYPE_A, "type_a_stage".to_string());
-        routes.insert(TEST_PROTOCOL_TYPE_B, "type_b_stage".to_string());
-        routes.insert(TEST_PROTOCOL_TYPE_C, "type_c_stage".to_string());
-        
+        let routes = BTreeMap::new();
         Self { routes }
     }
 
@@ -457,6 +508,16 @@ impl TestProtocolStageBuilder {
             enable_tracing: false,
         }
     }
+    
+    /// Create a new TestProtocolStageBuilder with type-safe identifier
+    pub fn new_typed<T: StageIdentifier>() -> Self {
+        Self {
+            stage_id: T::stage_id().to_string(),
+            handler_type: TestHandlerType::Echo,
+            custom_routes: None,
+            enable_tracing: false,
+        }
+    }
 
     pub fn enable_tracing(mut self) -> Self {
         self.enable_tracing = true;
@@ -479,6 +540,18 @@ impl TestProtocolStageBuilder {
         } else {
             let mut routes = BTreeMap::new();
             routes.insert(protocol_type, String::from(next_stage));
+            self.custom_routes = Some(routes);
+        }
+        self
+    }
+    
+    /// Add routing rule with type-safe next stage
+    pub fn add_route_typed<T: StageIdentifier>(mut self, protocol_type: u8) -> Self {
+        if let Some(ref mut routes) = self.custom_routes {
+            routes.insert(protocol_type, T::stage_id().to_string());
+        } else {
+            let mut routes = BTreeMap::new();
+            routes.insert(protocol_type, T::stage_id().to_string());
             self.custom_routes = Some(routes);
         }
         self
@@ -593,6 +666,127 @@ impl TestProtocolStageBuilder {
             stage_id: self.stage_id,
             rx_handler: Some(rx_handler),
             tx_handler: Some(tx_handler),
+        }
+    }
+}
+
+/// Echo Stage Builder - Simple echo functionality
+pub struct EchoStageBuilder {
+    enable_tracing: bool,
+}
+
+impl EchoStageBuilder {
+    pub fn new() -> Self {
+        Self {
+            enable_tracing: false,
+        }
+    }
+
+    pub fn enable_tracing(mut self) -> Self {
+        self.enable_tracing = true;
+        self
+    }
+
+    pub fn build(self) -> FlexibleStage {
+        let stage_id = EchoProtocol::stage_id().to_string();
+        
+        let rx_handler = if self.enable_tracing {
+            Some(Box::new(EchoRxHandler::with_tracing(&stage_id)) as Box<dyn ReceiveHandler>)
+        } else {
+            Some(Box::new(EchoRxHandler::new(&stage_id)) as Box<dyn ReceiveHandler>)
+        };
+
+        let tx_handler = Some(Box::new(EchoTxHandler::new(&stage_id)) as Box<dyn TransmitHandler>);
+
+        FlexibleStage {
+            stage_id,
+            rx_handler,
+            tx_handler,
+        }
+    }
+}
+
+/// Protocol Stage Builder - Protocol parsing and routing functionality
+pub struct ProtocolStageBuilder {
+    stage_id: String,
+    routes: Option<BTreeMap<u8, String>>,
+    enable_tracing: bool,
+    default_protocol_type: u8,
+}
+
+impl ProtocolStageBuilder {
+    pub fn new() -> Self {
+        Self {
+            stage_id: "protocol".to_string(), // Default to "protocol"
+            routes: None,
+            enable_tracing: false,
+            default_protocol_type: TEST_PROTOCOL_TYPE_A,
+        }
+    }
+    
+    /// Create with a custom stage identifier
+    pub fn with_stage_id(stage_id: &str) -> Self {
+        Self {
+            stage_id: stage_id.to_string(),
+            routes: None,
+            enable_tracing: false,
+            default_protocol_type: TEST_PROTOCOL_TYPE_A,
+        }
+    }
+
+    pub fn enable_tracing(mut self) -> Self {
+        self.enable_tracing = true;
+        self
+    }
+
+    pub fn add_route(mut self, protocol_type: u8, next_stage: &str) -> Self {
+        if let Some(ref mut routes) = self.routes {
+            routes.insert(protocol_type, String::from(next_stage));
+        } else {
+            let mut routes = BTreeMap::new();
+            routes.insert(protocol_type, String::from(next_stage));
+            self.routes = Some(routes);
+        }
+        self
+    }
+
+    pub fn add_route_typed<T: StageIdentifier>(mut self, protocol_type: u8) -> Self {
+        if let Some(ref mut routes) = self.routes {
+            routes.insert(protocol_type, T::stage_id().to_string());
+        } else {
+            let mut routes = BTreeMap::new();
+            routes.insert(protocol_type, T::stage_id().to_string());
+            self.routes = Some(routes);
+        }
+        self
+    }
+
+    pub fn with_default_protocol_type(mut self, protocol_type: u8) -> Self {
+        self.default_protocol_type = protocol_type;
+        self
+    }
+
+    pub fn build(self) -> FlexibleStage {
+        let stage_id = self.stage_id;
+        
+        let matcher = if let Some(routes) = self.routes {
+            TestProtocolMatcher::with_custom_routes(routes)
+        } else {
+            TestProtocolMatcher::new()
+        };
+
+        let rx_handler = if self.enable_tracing {
+            Some(Box::new(TestProtocolRxHandler::with_tracing(&stage_id, matcher.clone())) as Box<dyn ReceiveHandler>)
+        } else {
+            Some(Box::new(TestProtocolRxHandler::with_matcher(&stage_id, matcher.clone())) as Box<dyn ReceiveHandler>)
+        };
+
+        let tx_handler = Some(Box::new(TestProtocolTxHandler::with_matcher(&stage_id, matcher, self.default_protocol_type)) as Box<dyn TransmitHandler>);
+
+        FlexibleStage {
+            stage_id,
+            rx_handler,
+            tx_handler,
         }
     }
 }

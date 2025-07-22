@@ -1,11 +1,32 @@
 use alloc::collections::BTreeMap;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 
 use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
+
+/// Stage identifier trait for type-safe stage management
+/// 
+/// This trait allows modules to define their own stages while maintaining
+/// type safety and avoiding string-based errors.
+pub trait StageIdentifier {
+    /// Get the stage identifier
+    fn stage_id() -> &'static str;
+}
+
+/// Helper macro to implement StageIdentifier
+#[macro_export]
+macro_rules! define_stage {
+    ($stage_type:ident, $stage:literal) => {
+        impl $crate::network::pipeline::StageIdentifier for $stage_type {
+            fn stage_id() -> &'static str {
+                $stage
+            }
+        }
+    };
+}
 
 /// Flexible pipeline stage (Tx/Rx separated)
 #[derive(Debug)]
@@ -20,6 +41,15 @@ impl FlexibleStage {
     pub fn new(stage_id: String) -> Self {
         Self {
             stage_id,
+            rx_handler: None,
+            tx_handler: None,
+        }
+    }
+    
+    /// Create a new FlexibleStage with type-safe identifier
+    pub fn new_typed<T: StageIdentifier>() -> Self {
+        Self {
+            stage_id: T::stage_id().to_string(),
             rx_handler: None,
             tx_handler: None,
         }
@@ -90,6 +120,11 @@ impl FlexiblePipeline {
     pub fn has_stage(&self, stage_id: &str) -> bool {
         self.stages.contains_key(stage_id)
     }
+    
+    /// Check if stage exists (type-safe)
+    pub fn has_stage_typed<T: StageIdentifier>(&self) -> bool {
+        self.stages.contains_key(T::stage_id())
+    }
 
     /// Get all stage IDs
     pub fn stage_ids(&self) -> Vec<String> {
@@ -123,8 +158,20 @@ impl FlexiblePipelineBuilder {
         self
     }
     
+    /// Set default rx entry (type-safe)
+    pub fn set_default_rx_entry_typed<T: StageIdentifier>(mut self) -> Self {
+        self.default_rx_entry = Some(T::stage_id().to_string());
+        self
+    }
+    
     pub fn set_default_tx_entry(mut self, stage_name: &str) -> Self {
         self.default_tx_entry = Some(String::from(stage_name));
+        self
+    }
+    
+    /// Set default tx entry (type-safe)
+    pub fn set_default_tx_entry_typed<T: StageIdentifier>(mut self) -> Self {
+        self.default_tx_entry = Some(T::stage_id().to_string());
         self
     }
     
