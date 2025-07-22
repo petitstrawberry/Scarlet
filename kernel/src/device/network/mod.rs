@@ -34,6 +34,7 @@ pub mod packet;
 pub mod traits;
 pub mod pipeline;
 pub mod network_manager;
+pub mod examples;
 
 // Re-export key types for convenience
 pub use error::NetworkError;
