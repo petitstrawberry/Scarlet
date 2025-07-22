@@ -3,6 +3,7 @@ mod macros;
 mod proc;
 mod mm;
 mod fs;
+mod time;
 // mod file;
 // pub mod fs;
 // mod pipe;
@@ -382,16 +383,16 @@ impl AbiModule for LinuxRiscv64Abi {
         // Linux shared resource setup: bind mount common directories and Scarlet gateway
         match create_dir_if_not_exists(target_vfs, "/home") {
             Ok(()) => {}
-            Err(e) => {
-                // crate::println!("Failed to create /home directory for Linux: {}", e.message);
+            Err(_e) => {
+                // crate::println!("Failed to create /home directory for Linux: {}", _e.message);
                 return Err("Failed to create /home directory for Linux");
             }
         }
 
         match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
             Ok(()) => {}
-            Err(e) => {
-                // crate::println!("Failed to bind mount /home for Linux: {}", e.message);
+            Err(_e) => {
+                // crate::println!("Failed to bind mount /home for Linux: {}", _e.message);
             }
         }
 
@@ -405,30 +406,30 @@ impl AbiModule for LinuxRiscv64Abi {
 
         match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
             Ok(()) => {}
-            Err(e) => {
-                // crate::println!("Failed to bind mount /data/shared for Linux: {}", e.message);
+            Err(_e) => {
+                // crate::println!("Failed to bind mount /data/shared for Linux: {}", _e.message);
             }
         }
 
         // Setup gateway to native Scarlet environment (read-only for security)
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
-            Err(e) => {
-                crate::println!("Failed to create /scarlet directory for Linux: {}", e.message);
+            Err(_e) => {
+                crate::println!("Failed to create /scarlet directory for Linux: {}", _e.message);
                 return Err("Failed to create /scarlet directory for Linux");
             }
         }
         match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
             Ok(()) => Ok(()),
-            Err(e) => {
-                crate::println!("Failed to bind mount native Scarlet root to /scarlet for Linux: {}", e.message);
+            Err(_e) => {
+                crate::println!("Failed to bind mount native Scarlet root to /scarlet for Linux: {}", _e.message);
                 return Err("Failed to bind mount native Scarlet root to /scarlet for Linux");
             }
         }
     }
 
     fn initialize_from_existing_handles(&mut self, task: &mut crate::task::Task) -> Result<(), &'static str> {
-        // task.handle_table.close_all();
+        // _task.handle_table.close_all();
         self.init_std_fds(
             0, // stdin handle
             1, // stdout handle
@@ -451,6 +452,7 @@ syscall_table! {
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
     SetRobustList = 99 => proc::sys_set_robust_list,
+    ClockGettime = 113 => time::sys_clock_gettime,
     Uname = 160 => proc::sys_uname,
     GetUid = 174 => proc::sys_getuid,
     Brk = 214 => proc::sys_brk,
