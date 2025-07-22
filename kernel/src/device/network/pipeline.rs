@@ -5,9 +5,7 @@
 
 use hashbrown::HashMap;
 use alloc::{
-    string::String,
-    vec::Vec,
-    boxed::Box,
+    boxed::Box, format, string::String, vec::Vec
 };
 use super::{
     packet::NetworkPacket,
