@@ -2,6 +2,22 @@
 //! 
 //! This module defines the interface for network devices in the kernel.
 //! It provides abstractions for network packet operations and device management.
+//! 
+//! ## Flexible Pipeline Infrastructure
+//! 
+//! In addition to the basic network device interface, this module provides a
+//! flexible pipeline infrastructure for protocol-independent packet processing.
+//! The pipeline system enables modular, extensible packet processing through:
+//! 
+//! - **NetworkManager**: Orchestrates packet processing through the pipeline
+//! - **FlexiblePipeline**: Manages collections of processing stages
+//! - **FlexibleStage**: Groups processors for specific protocol layers
+//! - **StageProcessor**: Combines conditions, handlers, and actions
+//! - **StageHandler**: Performs actual packet processing
+//! - **ProcessorCondition**: Determines if a processor should handle a packet
+//! 
+//! This architecture allows for flexible protocol handling where each stage
+//! processes its protocol layer and passes remaining payload to the next stage.
 
 use core::any::Any;
 use alloc::{boxed::Box, vec::Vec};
@@ -11,6 +27,20 @@ use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::ControlOps;
+
+// Pipeline infrastructure modules
+pub mod error;
+pub mod packet;
+pub mod traits;
+pub mod pipeline;
+pub mod network_manager;
+
+// Re-export key types for convenience
+pub use error::NetworkError;
+pub use packet::{NetworkPacket as PipelinePacket, Instant}; // Renamed to avoid conflict
+pub use traits::{StageHandler, ProcessorCondition, NextAction};
+pub use pipeline::{FlexiblePipeline, FlexibleStage, StageProcessor};
+pub use network_manager::{NetworkManager, NetworkProcessingStats};
 
 /// Get the first available network device
 /// 
