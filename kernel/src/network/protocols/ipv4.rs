@@ -119,11 +119,11 @@ impl IPv4RxHandler {
 
 impl ReceiveHandler for IPv4RxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // 1. IPv4ヘッダー最小サイズ検証
+        // 1. Validate minimum IPv4 header size
         packet.validate_payload_size(20)?;
         let payload = packet.payload().clone();
         
-        // 2. IPv4ヘッダー解析
+        // 2. Parse IPv4 header
         let version_ihl = payload[0];
         let version = (version_ihl >> 4) & 0xF;
         let ihl = (version_ihl & 0xF) * 4; // IHL is in 4-byte units
@@ -133,7 +133,7 @@ impl ReceiveHandler for IPv4RxHandler {
             return Err(NetworkError::unsupported_protocol("ip", &format!("version {}", version)));
         }
         
-        // ヘッダー長の検証
+        // Validate header length
         if (ihl as usize) < 20 || payload.len() < (ihl as usize) {
             return Err(NetworkError::insufficient_payload_size(ihl as usize, payload.len()));
         }
@@ -152,7 +152,7 @@ impl ReceiveHandler for IPv4RxHandler {
         let flags = (flags_fragment >> 13) & 0x7;
         let fragment_offset = flags_fragment & 0x1FFF;
         
-        // 3. IPv4ヘッダー情報を保存
+        // 3. Save IPv4 header information
         packet.add_header("ipv4", payload[0..(ihl as usize)].to_vec());
         packet.set_hint("ip_version", &format!("{}", version));
         packet.set_hint("ip_header_length", &format!("{}", ihl));
@@ -167,10 +167,10 @@ impl ReceiveHandler for IPv4RxHandler {
         packet.set_hint("src_ip", &Self::format_ip(src_ip));
         packet.set_hint("dest_ip", &Self::format_ip(dest_ip));
         
-        // 4. ペイロード更新（IPヘッダーを除去）
+        // 4. Update payload (remove IP header)
         packet.set_payload(payload[(ihl as usize)..].to_vec());
         
-        // 5. プロトコルに基づいてルーティング決定（O(1) HashMap）
+        // 5. Routing decision based on protocol (O(1) HashMap)
         let next_stage = self.next_stage_matcher.get_next_stage(protocol)?;
         Ok(NextAction::JumpTo(String::from(next_stage)))
     }
@@ -201,7 +201,7 @@ impl IPv4TxHandler {
 
 impl TransmitHandler for IPv4TxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // 1. hintsから必要情報取得
+        // 1. Get required information from hints
         let src_ip_str = packet.get_hint("src_ip")
             .ok_or_else(|| NetworkError::missing_hint("src_ip"))?;
         let dest_ip_str = packet.get_hint("dest_ip")
@@ -209,7 +209,7 @@ impl TransmitHandler for IPv4TxHandler {
         let protocol_str = packet.get_hint("ip_protocol")
             .ok_or_else(|| NetworkError::missing_hint("ip_protocol"))?;
         
-        // 2. オプション値の取得
+        // 2. Get optional values
         let ttl = packet.get_hint("ip_ttl")
             .and_then(|s| s.parse::<u8>().ok())
             .unwrap_or(self.default_ttl);
@@ -223,9 +223,9 @@ impl TransmitHandler for IPv4TxHandler {
         let protocol = protocol_str.parse::<u8>()
             .map_err(|_| NetworkError::invalid_hint_format("ip_protocol", protocol_str))?;
         
-        // 4. IPv4ヘッダー構築
+        // 4. Build IPv4 header
         let payload_len = packet.payload().len();
-        let total_length = (20 + payload_len) as u16; // 固定20バイトヘッダー
+        let total_length = (20 + payload_len) as u16; // Fixed 20-byte header
         
         let mut ipv4_header = Vec::with_capacity(20);
         ipv4_header.push(0x45); // Version=4, IHL=5 (20 bytes)
@@ -239,12 +239,12 @@ impl TransmitHandler for IPv4TxHandler {
         ipv4_header.extend_from_slice(&src_ip);
         ipv4_header.extend_from_slice(&dest_ip);
         
-        // 5. チェックサム計算
+        // 5. Calculate checksum
         let checksum = Self::calculate_checksum(&ipv4_header);
         ipv4_header[10] = (checksum >> 8) as u8;
         ipv4_header[11] = (checksum & 0xFF) as u8;
         
-        // 6. ヘッダー追加してペイロード結合
+        // 6. Add header and combine with payload
         let payload = packet.payload().clone();
         packet.set_payload([ipv4_header, payload].concat());
         
@@ -273,10 +273,10 @@ impl IPv4TxHandler {
     fn calculate_checksum(header: &[u8]) -> u16 {
         let mut sum = 0u32;
         
-        // 16ビット単位でサム計算（チェックサムフィールドは0として計算）
+        // Calculate sum in 16-bit units (checksum field is calculated as 0)
         for i in (0..header.len()).step_by(2) {
             if i + 1 < header.len() {
-                let word = if i == 10 { // チェックサムフィールドは0として計算
+                let word = if i == 10 { // Checksum field is calculated as 0
                     0u16
                 } else {
                     u16::from_be_bytes([header[i], header[i + 1]])
@@ -383,7 +383,7 @@ impl IPv4StageBuilder {
     
     /// Build the stage
     pub fn build(self) -> FlexibleStage {
-        // IpProtocolToStage マッチャー構築
+        // Build IpProtocolToStage matcher
         let mut matcher = IpProtocolToStage::new();
         for (protocol, stage) in self.protocol_routes {
             matcher = matcher.add_mapping(protocol, &stage);
@@ -415,5 +415,103 @@ pub struct IPv4Stage;
 impl IPv4Stage {
     pub fn builder() -> IPv4StageBuilder {
         IPv4StageBuilder::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::{NetworkPacket, NextAction};
+    use alloc::vec;
+
+    #[test_case]
+    fn test_ipv4_stage_builder() {
+        let stage = IPv4Stage::builder()
+            .route_to(IpProtocol::TCP, "tcp")
+            .route_to(IpProtocol::UDP, "udp")
+            .add_protocol_route(1, "icmp")
+            .enable_both()
+            .with_default_ttl(128)
+            .build();
+        
+        assert_eq!(stage.stage_id, "ipv4");
+        assert!(stage.rx_handler.is_some());
+        assert!(stage.tx_handler.is_some());
+    }
+
+    #[test_case]
+    fn test_ipv4_receive_processing() {
+        // Create IPv4 packet with TCP payload
+        let ipv4_packet = vec![
+            0x45,       // Version=4, IHL=5
+            0x00,       // TOS
+            0x00, 0x28, // Total length = 40
+            0x12, 0x34, // Identification
+            0x40, 0x00, // Flags + Fragment offset (Don't Fragment)
+            0x40,       // TTL = 64
+            0x06,       // Protocol = TCP
+            0x00, 0x00, // Checksum (will be ignored)
+            // Source IP: 192.168.1.1
+            192, 168, 1, 1,
+            // Destination IP: 192.168.1.2
+            192, 168, 1, 2,
+            // TCP payload
+            0x50, 0x00, 0x50, 0x50, // TCP header start
+        ];
+        
+        let mut packet = NetworkPacket::new(ipv4_packet);
+        
+        let matcher = IpProtocolToStage::new()
+            .add_mapping(6, "tcp")
+            .add_mapping(17, "udp");
+        
+        let handler = IPv4RxHandler::new(matcher);
+        let result = handler.handle(&mut packet).unwrap();
+        
+        // Should route to TCP
+        assert_eq!(result, NextAction::JumpTo("tcp".to_string()));
+        
+        // Check hints
+        assert_eq!(packet.get_hint("src_ip"), Some("192.168.1.1"));
+        assert_eq!(packet.get_hint("dest_ip"), Some("192.168.1.2"));
+        assert_eq!(packet.get_hint("ip_protocol"), Some("6"));
+        assert_eq!(packet.get_hint("ip_ttl"), Some("64"));
+        assert_eq!(packet.get_hint("ip_version"), Some("4"));
+        
+        // Check header saved
+        assert!(packet.get_header("ipv4").is_some());
+        assert_eq!(packet.get_header("ipv4").unwrap().len(), 20);
+        
+        // Check payload updated (should be TCP packet without IPv4 header)
+        assert_eq!(packet.payload().len(), 4);
+        assert_eq!(packet.payload()[0], 0x50); // TCP header start
+    }
+
+    #[test_case]
+    fn test_ip_protocol_enum_constants() {
+        assert_eq!(IpProtocol::TCP.as_u8(), 6);
+        assert_eq!(IpProtocol::UDP.as_u8(), 17);
+        assert_eq!(IpProtocol::ICMP.as_u8(), 1);
+        
+        assert_eq!(IpProtocol::from_u8(6), Some(IpProtocol::TCP));
+        assert_eq!(IpProtocol::from_u8(17), Some(IpProtocol::UDP));
+        assert_eq!(IpProtocol::from_u8(99), None);
+        
+        assert_eq!(IpProtocol::TCP.name(), "TCP");
+        assert_eq!(IpProtocol::UDP.name(), "UDP");
+    }
+
+    #[test_case]
+    fn test_o1_ip_protocol_routing() {
+        // Test O(1) IP Protocol routing
+        let ip_matcher = IpProtocolToStage::new()
+            .add_mapping(6, "tcp")
+            .add_mapping(17, "udp")
+            .add_mapping(1, "icmp");
+        
+        assert_eq!(ip_matcher.get_next_stage(6).unwrap(), "tcp");
+        assert_eq!(ip_matcher.get_next_stage(17).unwrap(), "udp");
+        assert_eq!(ip_matcher.get_next_stage(1).unwrap(), "icmp");
+        assert!(ip_matcher.get_next_stage(99).is_err());
     }
 }

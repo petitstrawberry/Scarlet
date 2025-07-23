@@ -4,7 +4,6 @@ pub mod packet;
 pub mod pipeline;
 pub mod protocols;
 pub mod test_helpers;
-pub mod demo;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

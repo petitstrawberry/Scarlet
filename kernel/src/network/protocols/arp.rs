@@ -51,18 +51,18 @@ impl ArpRxHandler {
 
 impl ReceiveHandler for ArpRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // 1. ARPパケット最小サイズ検証
+        // 1. Validate minimum ARP packet size
         packet.validate_payload_size(28)?;
         let payload = packet.payload().clone();
         
-        // 2. ARPヘッダー解析
+        // 2. Parse ARP header
         let hardware_type = u16::from_be_bytes([payload[0], payload[1]]);
         let protocol_type = u16::from_be_bytes([payload[2], payload[3]]);
         let hardware_length = payload[4];
         let protocol_length = payload[5];
         let operation = u16::from_be_bytes([payload[6], payload[7]]);
         
-        // 3. 基本検証（Ethernet/IPv4のみサポート）
+        // 3. Basic validation (only support Ethernet/IPv4)
         if hardware_type != 1 {
             return Err(NetworkError::unsupported_protocol("arp", &format!("hardware_type {}", hardware_type)));
         }
@@ -79,7 +79,7 @@ impl ReceiveHandler for ArpRxHandler {
         let target_mac = &payload[18..24];
         let target_ip = &payload[24..28];
         
-        // 5. ARP情報をhintとして保存
+        // 5. Save ARP information as hints
         packet.add_header("arp", payload[0..28].to_vec());
         packet.set_hint("arp_hardware_type", &format!("{}", hardware_type));
         packet.set_hint("arp_protocol_type", &format!("0x{:04x}", protocol_type));
@@ -93,10 +93,10 @@ impl ReceiveHandler for ArpRxHandler {
             packet.set_hint("arp_operation_name", op.name());
         }
         
-        // 6. ペイロード更新（ARPヘッダーを除去）
+        // 6. Update payload (remove ARP header)
         packet.set_payload(payload[28..].to_vec());
         
-        // 7. ARP処理完了（通常はここで終了）
+        // 7. ARP processing complete (normally ends here)
         Ok(NextAction::Complete)
     }
 }
@@ -124,7 +124,7 @@ impl ArpTxHandler {
 
 impl TransmitHandler for ArpTxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // 1. hintsから必要情報取得
+        // 1. Get required information from hints
         let operation_str = packet.get_hint("arp_operation")
             .ok_or_else(|| NetworkError::missing_hint("arp_operation"))?;
         let sender_mac_str = packet.get_hint("arp_sender_mac")
@@ -145,7 +145,7 @@ impl TransmitHandler for ArpTxHandler {
         let target_mac = Self::parse_mac(&target_mac_str)?;
         let target_ip = Self::parse_ip(target_ip_str)?;
         
-        // 3. ARPパケット構築
+        // 3. Build ARP packet
         let mut arp_packet = Vec::with_capacity(28);
         arp_packet.extend_from_slice(&1u16.to_be_bytes());      // Hardware type (Ethernet)
         arp_packet.extend_from_slice(&0x0800u16.to_be_bytes()); // Protocol type (IPv4)
@@ -267,5 +267,68 @@ pub struct ArpStage;
 impl ArpStage {
     pub fn builder() -> ArpStageBuilder {
         ArpStageBuilder::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::{NetworkPacket, NextAction};
+    use alloc::vec;
+
+    #[test_case]
+    fn test_arp_stage_builder() {
+        let stage = ArpStage::builder()
+            .enable_both()
+            .build();
+        
+        assert_eq!(stage.stage_id, "arp");
+        assert!(stage.rx_handler.is_some());
+        assert!(stage.tx_handler.is_some());
+    }
+
+    #[test_case]
+    fn test_arp_receive_processing() {
+        // Create ARP request packet
+        let arp_packet = vec![
+            // Hardware type: Ethernet (1)
+            0x00, 0x01,
+            // Protocol type: IPv4 (0x0800)
+            0x08, 0x00,
+            // Hardware length: 6
+            0x06,
+            // Protocol length: 4
+            0x04,
+            // Operation: Request (1)
+            0x00, 0x01,
+            // Sender MAC: 02:00:00:00:00:01
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+            // Sender IP: 192.168.1.1
+            192, 168, 1, 1,
+            // Target MAC: 00:00:00:00:00:00
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // Target IP: 192.168.1.2
+            192, 168, 1, 2,
+        ];
+        
+        let mut packet = NetworkPacket::new(arp_packet);
+        
+        let handler = ArpRxHandler::new();
+        let result = handler.handle(&mut packet).unwrap();
+        
+        // ARP processing should complete
+        assert_eq!(result, NextAction::Complete);
+        
+        // Check hints
+        assert_eq!(packet.get_hint("arp_operation"), Some("1"));
+        assert_eq!(packet.get_hint("arp_operation_name"), Some("Request"));
+        assert_eq!(packet.get_hint("arp_sender_mac"), Some("02:00:00:00:00:01"));
+        assert_eq!(packet.get_hint("arp_sender_ip"), Some("192.168.1.1"));
+        assert_eq!(packet.get_hint("arp_target_mac"), Some("00:00:00:00:00:00"));
+        assert_eq!(packet.get_hint("arp_target_ip"), Some("192.168.1.2"));
+        
+        // Check header saved
+        assert!(packet.get_header("arp").is_some());
+        assert_eq!(packet.get_header("arp").unwrap().len(), 28);
     }
 }

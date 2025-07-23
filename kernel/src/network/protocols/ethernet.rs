@@ -119,23 +119,23 @@ impl EthernetRxHandler {
 
 impl ReceiveHandler for EthernetRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // 1. Ethernetヘッダー最小サイズ検証
+        // 1. Validate minimum Ethernet header size
         packet.validate_payload_size(14)?;
         let payload = packet.payload().clone();
         
-        // 2. Ethernetヘッダー解析
+        // 2. Parse Ethernet header
         let dest_mac = &payload[0..6];
         let src_mac = &payload[6..12];
         let ether_type = u16::from_be_bytes([payload[12], payload[13]]);
         
-        // 3. VLANタグ処理（オプション）
+        // 3. VLAN tag processing (optional)
         let (actual_ether_type, header_length) = if ether_type == 0x8100 {
             // VLAN tagged frame
             packet.validate_payload_size(18)?;
             let vlan_tag = u16::from_be_bytes([payload[14], payload[15]]);
             let actual_ether_type = u16::from_be_bytes([payload[16], payload[17]]);
             
-            // VLAN情報をhintとして保存
+            // Save VLAN information as hints
             packet.set_hint("vlan_tag", &format!("{}", vlan_tag));
             packet.set_hint("vlan_priority", &format!("{}", (vlan_tag >> 13) & 0x7));
             packet.set_hint("vlan_id", &format!("{}", vlan_tag & 0xFFF));
@@ -145,16 +145,16 @@ impl ReceiveHandler for EthernetRxHandler {
             (ether_type, 14)
         };
         
-        // 4. Ethernetヘッダー情報を保存
+        // 4. Save Ethernet header information
         packet.add_header("ethernet", payload[0..header_length].to_vec());
         packet.set_hint("src_mac", &Self::format_mac(src_mac));
         packet.set_hint("dest_mac", &Self::format_mac(dest_mac));
         packet.set_hint("ether_type", &format!("0x{:04x}", actual_ether_type));
         
-        // 5. ペイロード更新
+        // 5. Update payload
         packet.set_payload(payload[header_length..].to_vec());
         
-        // 6. 内部でのルーティング決定（O(1) HashMap）
+        // 6. Routing decision using internal O(1) HashMap
         let next_stage = self.next_stage_matcher.get_next_stage(actual_ether_type)?;
         Ok(NextAction::JumpTo(String::from(next_stage)))
     }
@@ -185,7 +185,7 @@ impl EthernetTxHandler {
 
 impl TransmitHandler for EthernetTxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
-        // 1. hintsから必要情報取得
+        // 1. Get required information from hints
         let ethertype_str = packet.get_hint("ether_type")
             .or_else(|| packet.get_hint("ethertype"))
             .ok_or_else(|| NetworkError::missing_hint("ether_type"))?;
@@ -204,13 +204,13 @@ impl TransmitHandler for EthernetTxHandler {
             self.default_src_mac
         };
         
-        // 3. VLANタグ処理（オプション）
+        // 3. VLAN tag processing (optional)
         let mut ethernet_header = Vec::with_capacity(18);
         ethernet_header.extend_from_slice(&dest_mac);
         ethernet_header.extend_from_slice(&src_mac);
         
         if let Some(vlan_tag_str) = packet.get_hint("vlan_tag") {
-            // VLANタグ付きフレーム
+            // VLAN tagged frame
             let vlan_tag = vlan_tag_str.parse::<u16>()
                 .map_err(|_| NetworkError::invalid_hint_format("vlan_tag", vlan_tag_str))?;
             
@@ -220,11 +220,11 @@ impl TransmitHandler for EthernetTxHandler {
         
         ethernet_header.extend_from_slice(&ether_type.to_be_bytes());
         
-        // 4. ヘッダー追加してペイロード結合
+        // 4. Add header and combine with payload
         let payload = packet.payload().clone();
         packet.set_payload([ethernet_header, payload].concat());
         
-        // 5. 送信完了
+        // 5. Transmission complete
         Ok(NextAction::Complete)
     }
 }
@@ -339,7 +339,7 @@ impl EthernetStageBuilder {
     
     /// Build the stage
     pub fn build(self) -> FlexibleStage {
-        // EtherTypeToStage マッチャー構築
+        // Build EtherTypeToStage matcher
         let mut matcher = EtherTypeToStage::new();
         for (ethertype, stage) in self.ethertype_routes {
             matcher = matcher.add_mapping(ethertype, &stage);
@@ -371,5 +371,135 @@ pub struct EthernetStage;
 impl EthernetStage {
     pub fn builder() -> EthernetStageBuilder {
         EthernetStageBuilder::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::{NetworkPacket, NextAction};
+    use alloc::vec;
+
+    #[test_case]
+    fn test_ethernet_stage_builder() {
+        let stage = EthernetStage::builder()
+            .route_to(EtherType::IPv4, "ipv4")
+            .route_to(EtherType::ARP, "arp")
+            .add_ethertype_route(0x86DD, "ipv6")
+            .enable_both()
+            .with_src_mac([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
+            .build();
+        
+        assert_eq!(stage.stage_id, "ethernet");
+        assert!(stage.rx_handler.is_some());
+        assert!(stage.tx_handler.is_some());
+    }
+
+    #[test_case]
+    fn test_ethernet_receive_processing() {
+        // Create Ethernet frame with IPv4 payload
+        let mut ethernet_frame = vec![
+            // Destination MAC: 02:00:00:00:00:02
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+            // Source MAC: 02:00:00:00:00:01
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+            // EtherType: IPv4 (0x0800)
+            0x08, 0x00,
+            // Payload
+            0x45, 0x00, 0x00, 0x20, // IPv4 header start
+        ];
+        ethernet_frame.extend_from_slice(&[0; 16]); // Padding
+        
+        let mut packet = NetworkPacket::new(ethernet_frame);
+        
+        let matcher = EtherTypeToStage::new()
+            .add_mapping(0x0800, "ipv4")
+            .add_mapping(0x0806, "arp");
+        
+        let handler = EthernetRxHandler::new(matcher);
+        let result = handler.handle(&mut packet).unwrap();
+        
+        // Should route to IPv4
+        assert_eq!(result, NextAction::JumpTo("ipv4".to_string()));
+        
+        // Check hints
+        assert_eq!(packet.get_hint("src_mac"), Some("02:00:00:00:00:01"));
+        assert_eq!(packet.get_hint("dest_mac"), Some("02:00:00:00:00:02"));
+        assert_eq!(packet.get_hint("ether_type"), Some("0x0800"));
+        
+        // Check header saved
+        assert!(packet.get_header("ethernet").is_some());
+        assert_eq!(packet.get_header("ethernet").unwrap().len(), 14);
+        
+        // Check payload updated (should be IPv4 packet without ethernet header)
+        assert_eq!(packet.payload().len(), 20);
+        assert_eq!(packet.payload()[0], 0x45); // IPv4 version + IHL
+    }
+
+    #[test_case]
+    fn test_ethernet_vlan_processing() {
+        // Create VLAN-tagged Ethernet frame
+        let vlan_frame = vec![
+            // Destination MAC
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+            // Source MAC
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+            // VLAN EtherType (0x8100)
+            0x81, 0x00,
+            // VLAN Tag (Priority=1, VLAN ID=100)
+            0x20, 0x64,
+            // Actual EtherType: IPv4 (0x0800)
+            0x08, 0x00,
+            // Payload
+            0x45, 0x00,
+        ];
+        
+        let mut packet = NetworkPacket::new(vlan_frame);
+        
+        let matcher = EtherTypeToStage::new()
+            .add_mapping(0x0800, "ipv4");
+        
+        let handler = EthernetRxHandler::new(matcher);
+        let result = handler.handle(&mut packet).unwrap();
+        
+        // Should route to IPv4
+        assert_eq!(result, NextAction::JumpTo("ipv4".to_string()));
+        
+        // Check VLAN hints
+        assert_eq!(packet.get_hint("vlan_tag"), Some("8292")); // 0x2064 = 8292
+        assert_eq!(packet.get_hint("vlan_priority"), Some("1"));
+        assert_eq!(packet.get_hint("vlan_id"), Some("100"));
+        assert_eq!(packet.get_hint("ether_type"), Some("0x0800"));
+        
+        // Check header includes VLAN tag
+        assert_eq!(packet.get_header("ethernet").unwrap().len(), 18);
+    }
+
+    #[test_case]
+    fn test_ethernet_enum_constants() {
+        assert_eq!(EtherType::IPv4.as_u16(), 0x0800);
+        assert_eq!(EtherType::ARP.as_u16(), 0x0806);
+        assert_eq!(EtherType::IPv6.as_u16(), 0x86DD);
+        
+        assert_eq!(EtherType::from_u16(0x0800), Some(EtherType::IPv4));
+        assert_eq!(EtherType::from_u16(0x0806), Some(EtherType::ARP));
+        assert_eq!(EtherType::from_u16(0x9999), None);
+        
+        assert_eq!(EtherType::IPv4.name(), "IPv4");
+        assert_eq!(EtherType::ARP.name(), "ARP");
+    }
+
+    #[test_case]
+    fn test_o1_hashmap_routing() {
+        // Test O(1) EtherType routing
+        let ethernet_matcher = EtherTypeToStage::new()
+            .add_mapping(0x0800, "ipv4")
+            .add_mapping(0x0806, "arp")
+            .add_mapping(0x86DD, "ipv6");
+        
+        assert_eq!(ethernet_matcher.get_next_stage(0x0800).unwrap(), "ipv4");
+        assert_eq!(ethernet_matcher.get_next_stage(0x0806).unwrap(), "arp");
+        assert_eq!(ethernet_matcher.get_next_stage(0x86DD).unwrap(), "ipv6");
+        assert!(ethernet_matcher.get_next_stage(0x9999).is_err());
     }
 }
