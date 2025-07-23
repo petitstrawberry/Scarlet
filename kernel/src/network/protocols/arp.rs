@@ -73,7 +73,7 @@ impl ReceiveHandler for ArpRxHandler {
             return Err(NetworkError::unsupported_protocol("arp", "invalid address lengths"));
         }
         
-        // 4. アドレス解析
+        // 4. Parse addresses
         let sender_mac = &payload[8..14];
         let sender_ip = &payload[14..18];
         let target_mac = &payload[18..24];
@@ -137,7 +137,7 @@ impl TransmitHandler for ArpTxHandler {
         let target_ip_str = packet.get_hint("arp_target_ip")
             .ok_or_else(|| NetworkError::missing_hint("arp_target_ip"))?;
         
-        // 2. 値をパース
+        // 2. Parse values
         let operation = operation_str.parse::<u16>()
             .map_err(|_| NetworkError::invalid_hint_format("arp_operation", operation_str))?;
         let sender_mac = Self::parse_mac(sender_mac_str)?;
@@ -157,10 +157,10 @@ impl TransmitHandler for ArpTxHandler {
         arp_packet.extend_from_slice(&target_mac);              // Target MAC
         arp_packet.extend_from_slice(&target_ip);               // Target IP
         
-        // 4. ペイロード設定
+        // 4. Set payload
         packet.set_payload(arp_packet);
         
-        // 5. 上位層（Ethernet）用のヒント設定
+        // 5. Set hints for upper layer (Ethernet)
         packet.set_hint("ether_type", "0x0806");
         packet.set_hint("dest_mac", &target_mac_str);
         
