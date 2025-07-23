@@ -77,3 +77,68 @@ fn test_stage_identifier_implementation() {
     // Test ARP stage identifier
     assert_eq!(ArpStage::stage_id(), "arp");
 }
+
+#[test_case]
+fn test_complete_receive_pipeline_with_typed_routing() {
+    use crate::network::test_helpers::{TcpProtocol, UdpProtocol};
+    
+    // Build a complete receive pipeline using typed routing methods
+    let pipeline = FlexiblePipeline::builder()
+        .add_stage(
+            EthernetStage::builder()
+                .route_to_typed::<IPv4Stage>(EtherType::IPv4)
+                .route_to_typed::<ArpStage>(EtherType::ARP)
+                .enable_rx()
+                .build()
+        )
+        .add_stage(
+            IPv4Stage::builder()
+                .route_to_typed::<TcpProtocol>(IpProtocol::TCP)
+                .route_to_typed::<UdpProtocol>(IpProtocol::UDP)
+                .enable_rx()
+                .build()
+        )
+        .add_stage(ArpStage::builder().enable_rx().build())
+        .add_stage(DropStageBuilder::with_stage_id("tcp").build())
+        .add_stage(DropStageBuilder::with_stage_id("udp").build())
+        .set_default_rx_entry_typed::<EthernetStage>()
+        .build()
+        .unwrap();
+    
+    // Verify that the pipeline has all the required stages
+    assert!(pipeline.has_stage_typed::<EthernetStage>());
+    assert!(pipeline.has_stage_typed::<IPv4Stage>());
+    assert!(pipeline.has_stage_typed::<ArpStage>());
+    assert!(pipeline.has_stage("tcp"));
+    assert!(pipeline.has_stage("udp"));
+    
+    // Create complete Ethernet + IPv4 + TCP packet
+    let complete_packet = vec![
+        // Ethernet header
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x02, // Dest MAC
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01, // Src MAC
+        0x08, 0x00,                         // EtherType: IPv4
+        // IPv4 header
+        0x45, 0x00, 0x00, 0x28,             // Version/IHL, ToS, Total Length
+        0x12, 0x34, 0x40, 0x00,             // ID, Flags/Fragment
+        0x40, 0x06, 0x00, 0x00,             // TTL, Protocol (TCP), Checksum
+        0xC0, 0xA8, 0x01, 0x01,             // Source IP (192.168.1.1)
+        0xC0, 0xA8, 0x01, 0x02,             // Dest IP (192.168.1.2)
+        // TCP payload
+        0x00, 0x50, 0x1F, 0x90,             // Source Port, Dest Port
+    ];
+    
+    let packet = NetworkPacket::new(complete_packet);
+    
+    // Process the packet through the typed pipeline
+    let result = pipeline.process_receive(packet, None);
+    assert!(result.is_ok());
+    
+    let final_packet = result.unwrap();
+    
+    // Verify that all layers processed the packet correctly
+    assert!(final_packet.get_header("ethernet").is_some());
+    assert!(final_packet.get_header("ipv4").is_some());
+    assert_eq!(final_packet.get_hint("ether_type"), Some("0x0800"));
+    assert_eq!(final_packet.get_hint("ip_protocol"), Some("6"));
+}

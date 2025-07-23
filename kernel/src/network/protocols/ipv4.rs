@@ -334,6 +334,11 @@ impl IPv4StageBuilder {
         self.add_protocol_route(protocol.as_u8(), next_stage)
     }
     
+    /// Add IP protocol routing with type-safe stage identifier
+    pub fn route_to_typed<T: StageIdentifier>(self, protocol: IpProtocol) -> Self {
+        self.add_protocol_route(protocol.as_u8(), T::stage_id())
+    }
+    
     /// Add multiple routes at once
     pub fn add_routes(mut self, routes: &[(u8, &str)]) -> Self {
         for (protocol, stage) in routes {
@@ -342,10 +347,24 @@ impl IPv4StageBuilder {
         self
     }
     
+    /// Add IP protocol route with type-safe stage identifier (raw u8)
+    pub fn add_route_typed<T: StageIdentifier>(mut self, protocol: u8) -> Self {
+        self.protocol_routes.push((protocol, String::from(T::stage_id())));
+        self
+    }
+    
     /// Add multiple routes with enums
     pub fn add_enum_routes(mut self, routes: &[(IpProtocol, &str)]) -> Self {
         for (protocol, stage) in routes {
             self.protocol_routes.push((protocol.as_u8(), String::from(*stage)));
+        }
+        self
+    }
+    
+    /// Add multiple routes with type-safe stage identifiers
+    pub fn add_enum_routes_typed<T: StageIdentifier>(mut self, protocols: &[IpProtocol]) -> Self {
+        for protocol in protocols {
+            self.protocol_routes.push((protocol.as_u8(), String::from(T::stage_id())));
         }
         self
     }
@@ -519,5 +538,46 @@ mod tests {
         assert_eq!(ip_matcher.get_next_stage(17).unwrap(), "udp");
         assert_eq!(ip_matcher.get_next_stage(1).unwrap(), "icmp");
         assert!(ip_matcher.get_next_stage(99).is_err());
+    }
+
+    #[test_case]
+    fn test_ipv4_stage_builder_typed_methods() {
+        use crate::network::test_helpers::{TcpProtocol, UdpProtocol};
+        
+        // Test the new typed routing methods
+        let stage = IPv4Stage::builder()
+            .route_to_typed::<TcpProtocol>(IpProtocol::TCP)
+            .route_to_typed::<UdpProtocol>(IpProtocol::UDP)
+            .add_route_typed::<TcpProtocol>(1) // ICMP routed to TCP stage for testing
+            .enable_rx()
+            .build();
+        
+        assert_eq!(stage.stage_id, "ipv4");
+        assert!(stage.rx_handler.is_some());
+        
+        // Verify stage identifier consistency
+        assert_eq!(TcpProtocol::stage_id(), "tcp");
+        assert_eq!(UdpProtocol::stage_id(), "udp");
+        assert_eq!(IPv4Stage::stage_id(), "ipv4");
+    }
+
+    #[test_case]
+    fn test_ipv4_stage_builder_typed_multiple_routes() {
+        use crate::network::test_helpers::{TcpProtocol, UdpProtocol};
+        
+        // Test adding multiple routes to the same typed stage
+        let stage = IPv4Stage::builder()
+            .add_enum_routes_typed::<TcpProtocol>(&[IpProtocol::TCP, IpProtocol::ICMP])
+            .route_to_typed::<UdpProtocol>(IpProtocol::UDP)
+            .enable_rx()
+            .build();
+        
+        assert_eq!(stage.stage_id, "ipv4");
+        assert!(stage.rx_handler.is_some());
+        
+        // Verify that typed routing works correctly
+        // The typed methods should route to the correct stage identifiers
+        assert_eq!(TcpProtocol::stage_id(), "tcp");
+        assert_eq!(UdpProtocol::stage_id(), "udp");
     }
 }

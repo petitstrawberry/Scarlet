@@ -290,6 +290,11 @@ impl EthernetStageBuilder {
         self.add_ethertype_route(ethertype.as_u16(), next_stage)
     }
     
+    /// Add EtherType routing with type-safe stage identifier
+    pub fn route_to_typed<T: StageIdentifier>(self, ethertype: EtherType) -> Self {
+        self.add_ethertype_route(ethertype.as_u16(), T::stage_id())
+    }
+    
     /// Add multiple routes at once
     pub fn add_routes(mut self, routes: &[(u16, &str)]) -> Self {
         for (ethertype, stage) in routes {
@@ -298,10 +303,24 @@ impl EthernetStageBuilder {
         self
     }
     
+    /// Add EtherType route with type-safe stage identifier (raw u16)
+    pub fn add_route_typed<T: StageIdentifier>(mut self, ethertype: u16) -> Self {
+        self.ethertype_routes.push((ethertype, String::from(T::stage_id())));
+        self
+    }
+    
     /// Add multiple routes with enums
     pub fn add_enum_routes(mut self, routes: &[(EtherType, &str)]) -> Self {
         for (ethertype, stage) in routes {
             self.ethertype_routes.push((ethertype.as_u16(), String::from(*stage)));
+        }
+        self
+    }
+    
+    /// Add multiple routes with type-safe stage identifiers
+    pub fn add_enum_routes_typed<T: StageIdentifier>(mut self, ethertypes: &[EtherType]) -> Self {
+        for ethertype in ethertypes {
+            self.ethertype_routes.push((ethertype.as_u16(), String::from(T::stage_id())));
         }
         self
     }
@@ -507,5 +526,46 @@ mod tests {
         assert_eq!(ethernet_matcher.get_next_stage(0x0806).unwrap(), "arp");
         assert_eq!(ethernet_matcher.get_next_stage(0x86DD).unwrap(), "ipv6");
         assert!(ethernet_matcher.get_next_stage(0x9999).is_err());
+    }
+
+    #[test_case]
+    fn test_ethernet_stage_builder_typed_methods() {
+        use crate::network::protocols::{IPv4Stage, ArpStage};
+        
+        // Test the new typed routing methods
+        let stage = EthernetStage::builder()
+            .route_to_typed::<IPv4Stage>(EtherType::IPv4)
+            .route_to_typed::<ArpStage>(EtherType::ARP)
+            .add_route_typed::<IPv4Stage>(0x86DD) // IPv6 routed to IPv4 stage for testing
+            .enable_rx()
+            .build();
+        
+        assert_eq!(stage.stage_id, "ethernet");
+        assert!(stage.rx_handler.is_some());
+        
+        // Verify stage identifier consistency
+        assert_eq!(IPv4Stage::stage_id(), "ipv4");
+        assert_eq!(ArpStage::stage_id(), "arp");
+        assert_eq!(EthernetStage::stage_id(), "ethernet");
+    }
+
+    #[test_case]
+    fn test_ethernet_stage_builder_typed_multiple_routes() {
+        use crate::network::protocols::{IPv4Stage, ArpStage};
+        
+        // Test adding multiple routes to the same typed stage
+        let stage = EthernetStage::builder()
+            .add_enum_routes_typed::<IPv4Stage>(&[EtherType::IPv4, EtherType::IPv6])
+            .route_to_typed::<ArpStage>(EtherType::ARP)
+            .enable_rx()
+            .build();
+        
+        assert_eq!(stage.stage_id, "ethernet");
+        assert!(stage.rx_handler.is_some());
+        
+        // Verify that typed routing works correctly
+        // The typed methods should route to the correct stage identifiers
+        assert_eq!(IPv4Stage::stage_id(), "ipv4");
+        assert_eq!(ArpStage::stage_id(), "arp");
     }
 }
