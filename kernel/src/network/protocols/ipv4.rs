@@ -248,7 +248,7 @@ impl TransmitHandler for IPv4TxHandler {
         let payload = packet.payload().clone();
         packet.set_payload([ipv4_header, payload].concat());
         
-        // 7. EtherTypeヒント設定（上位層用）
+        // 7. Set EtherType hint (for upper layer)
         packet.set_hint("ether_type", "0x0800");
         
         Ok(NextAction::Complete)
