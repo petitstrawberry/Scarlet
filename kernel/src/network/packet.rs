@@ -25,7 +25,7 @@ impl PacketDirection {
 
 /// Network packet structure
 /// Manages payload (actual data), headers (each layer's headers), and hints (transmission instruction info)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NetworkPacket {
     /// Packet payload part
     payload: Vec<u8>,

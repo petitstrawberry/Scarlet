@@ -251,7 +251,8 @@ impl PacketHandler for IPv4TxHandler {
         // 7. Set EtherType hint (for upper layer)
         packet.set_hint("ether_type", "0x0800");
         
-        Ok(NextAction::Complete)
+        // 8. Complete processing - send to device via ethernet
+        Ok(NextAction::CompleteToDevice(String::from("default")))
     }
 }
 
@@ -484,7 +485,7 @@ mod tests {
             0x50, 0x00, 0x50, 0x50, // TCP header start
         ];
         
-        let mut packet = NetworkPacket::new(ipv4_packet);
+        let mut packet = NetworkPacket::new(ipv4_packet, crate::network::packet::PacketDirection::Incoming);
         
         let matcher = IpProtocolToStage::new()
             .add_mapping(6, "tcp")

@@ -96,8 +96,8 @@ impl PacketHandler for ArpRxHandler {
         // 6. Update payload (remove ARP header)
         packet.set_payload(payload[28..].to_vec());
         
-        // 7. ARP processing complete (normally ends here)
-        Ok(NextAction::Complete)
+        // 7. ARP processing complete - usually consumed by ARP handler
+        Ok(NextAction::Drop)
     }
 }
 
@@ -164,7 +164,7 @@ impl PacketHandler for ArpTxHandler {
         packet.set_hint("ether_type", "0x0806");
         packet.set_hint("dest_mac", &target_mac_str);
         
-        Ok(NextAction::Complete)
+        Ok(NextAction::CompleteToDevice(String::from("default")))
     }
 }
 
@@ -317,13 +317,13 @@ mod tests {
             192, 168, 1, 2,
         ];
         
-        let mut packet = NetworkPacket::new(arp_packet);
+        let mut packet = NetworkPacket::new(arp_packet, crate::network::packet::PacketDirection::Incoming);
         
         let handler = ArpRxHandler::new();
         let result = handler.handle(&mut packet).unwrap();
         
-        // ARP processing should complete
-        assert_eq!(result, NextAction::Complete);
+        // ARP processing should drop the packet (handled by ARP)
+        assert_eq!(result, NextAction::Drop);
         
         // Check hints
         assert_eq!(packet.get_hint("arp_operation"), Some("1"));

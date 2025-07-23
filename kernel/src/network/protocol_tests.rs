@@ -48,9 +48,9 @@ fn test_complete_receive_pipeline() {
         0x50, 0x50, 0x51, 0x51,
     ];
     
-    let packet = NetworkPacket::new(complete_packet);
-    let result = pipeline.process_receive(packet, None).unwrap();
-    
+    let packet = NetworkPacket::new(complete_packet, PacketDirection::Incoming);
+    let result = pipeline.process(packet, None).unwrap().0;
+
     // Should have processed through ethernet -> ipv4 -> tcp pipeline
     // Check that ethernet and ipv4 headers were saved
     assert!(result.get_header("ethernet").is_some());
@@ -128,14 +128,14 @@ fn test_complete_receive_pipeline_with_typed_routing() {
         0x00, 0x50, 0x1F, 0x90,             // Source Port, Dest Port
     ];
     
-    let packet = NetworkPacket::new(complete_packet);
+    let packet = NetworkPacket::new(complete_packet, PacketDirection::Incoming);
     
     // Process the packet through the typed pipeline
-    let result = pipeline.process_receive(packet, None);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
-    
-    let final_packet = result.unwrap();
-    
+
+    let (final_packet, _) = result.unwrap();
+
     // Verify that all layers processed the packet correctly
     assert!(final_packet.get_header("ethernet").is_some());
     assert!(final_packet.get_header("ipv4").is_some());

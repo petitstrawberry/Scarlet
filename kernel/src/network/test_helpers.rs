@@ -119,8 +119,8 @@ impl PacketHandler for EchoRxHandler {
             packet.set_hint(&format!("processed_by_{}", self.stage_name), "true");
         }
         
-        // For testing: just pass packet through and complete
-        Ok(NextAction::Complete)
+        // For testing: just pass packet through and complete to application
+        Ok(NextAction::CompleteToApplication)
     }
 }
 
@@ -165,8 +165,8 @@ impl PacketHandler for EchoTxHandler {
             packet.set_hint(&format!("processed_by_{}", self.stage_name), "true");
         }
         
-        // For testing: just pass packet through and complete
-        Ok(NextAction::Complete)
+        // For testing: Tx handlers typically send to device
+        Ok(NextAction::CompleteToDevice(String::from("default")))
     }
 }
 
@@ -480,7 +480,7 @@ impl PacketHandler for TestProtocolTxHandler {
         packet.add_header("test_protocol", header.to_bytes());
         packet.set_hint("test_protocol_type", &format!("0x{:02x}", self.default_protocol_type));
         
-        Ok(NextAction::Complete)
+        Ok(NextAction::CompleteToDevice(String::from("default")))
     }
 }
 
@@ -863,8 +863,8 @@ impl PacketHandler for DropRxHandler {
             packet.set_hint(&format!("processed_by_{}", self.stage_name), "dropped");
         }
         
-        // Simply complete processing (drop the packet)
-        Ok(NextAction::Complete)
+        // Simply drop the packet
+        Ok(NextAction::Drop)
     }
 }
 
@@ -900,8 +900,8 @@ impl PacketHandler for DropTxHandler {
             packet.set_hint(&format!("processed_by_{}", self.stage_name), "dropped");
         }
         
-        // Simply complete processing (drop the packet)
-        Ok(NextAction::Complete)
+        // Simply drop the packet
+        Ok(NextAction::Drop)
     }
 }
 

@@ -224,8 +224,8 @@ impl PacketHandler for EthernetTxHandler {
         let payload = packet.payload().clone();
         packet.set_payload([ethernet_header, payload].concat());
         
-        // 5. Transmission complete
-        Ok(NextAction::Complete)
+        // 5. Transmission complete - send to device
+        Ok(NextAction::CompleteToDevice(String::from("default")))
     }
 }
 
@@ -402,7 +402,7 @@ impl EthernetStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::{NetworkPacket, NextAction};
+    use crate::network::{NetworkPacket, NextAction, PacketDirection};
     use alloc::{vec, string::String};
 
     #[test_case]
@@ -435,7 +435,7 @@ mod tests {
         ];
         ethernet_frame.extend_from_slice(&[0; 16]); // Padding
         
-        let mut packet = NetworkPacket::new(ethernet_frame);
+        let mut packet = NetworkPacket::new(ethernet_frame, PacketDirection::Incoming);
         
         let matcher = EtherTypeToStage::new()
             .add_mapping(0x0800, "ipv4")
@@ -479,7 +479,7 @@ mod tests {
             0x45, 0x00,
         ];
         
-        let mut packet = NetworkPacket::new(vlan_frame);
+        let mut packet = NetworkPacket::new(vlan_frame, PacketDirection::Incoming);
         
         let matcher = EtherTypeToStage::new()
             .add_mapping(0x0800, "ipv4");

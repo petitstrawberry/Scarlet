@@ -7,7 +7,7 @@ use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
 
 /// Next action instruction for pipeline processing
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NextAction {
     /// Jump to the specified stage (same direction)
     JumpTo(String),
