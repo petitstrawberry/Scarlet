@@ -8,7 +8,7 @@ use alloc::format;
 use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
-use crate::network::pipeline::FlexibleStage;
+use crate::network::pipeline::{FlexibleStage, StageIdentifier};
 
 /// ARP operation codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +263,12 @@ impl ArpStageBuilder {
 
 /// ARP stage convenience struct
 pub struct ArpStage;
+
+impl StageIdentifier for ArpStage {
+    fn stage_id() -> &'static str {
+        "arp"
+    }
+}
 
 impl ArpStage {
     pub fn builder() -> ArpStageBuilder {

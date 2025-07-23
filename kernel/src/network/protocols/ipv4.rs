@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction, NextStageMatcher};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
-use crate::network::pipeline::FlexibleStage;
+use crate::network::pipeline::{FlexibleStage, StageIdentifier};
 
 /// IP Protocol constants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,6 +411,12 @@ impl IPv4StageBuilder {
 
 /// IPv4 stage convenience struct
 pub struct IPv4Stage;
+
+impl StageIdentifier for IPv4Stage {
+    fn stage_id() -> &'static str {
+        "ipv4"
+    }
+}
 
 impl IPv4Stage {
     pub fn builder() -> IPv4StageBuilder {

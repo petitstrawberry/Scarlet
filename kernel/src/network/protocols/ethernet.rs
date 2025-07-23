@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction, NextStageMatcher};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
-use crate::network::pipeline::FlexibleStage;
+use crate::network::pipeline::{FlexibleStage, StageIdentifier};
 
 /// EtherType constants for type-safe routing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +367,12 @@ impl EthernetStageBuilder {
 
 /// Ethernet stage convenience struct
 pub struct EthernetStage;
+
+impl StageIdentifier for EthernetStage {
+    fn stage_id() -> &'static str {
+        "ethernet"
+    }
+}
 
 impl EthernetStage {
     pub fn builder() -> EthernetStageBuilder {

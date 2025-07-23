@@ -62,3 +62,18 @@ fn test_complete_receive_pipeline() {
     assert_eq!(result.get_hint("src_ip"), Some("192.168.1.1"));
     assert_eq!(result.get_hint("ip_protocol"), Some("6"));
 }
+
+#[test_case]
+fn test_stage_identifier_implementation() {
+    // Test that protocol stages implement StageIdentifier correctly
+    use crate::network::pipeline::StageIdentifier;
+    
+    // Test Ethernet stage identifier
+    assert_eq!(EthernetStage::stage_id(), "ethernet");
+    
+    // Test IPv4 stage identifier
+    assert_eq!(IPv4Stage::stage_id(), "ipv4");
+    
+    // Test ARP stage identifier
+    assert_eq!(ArpStage::stage_id(), "arp");
+}
