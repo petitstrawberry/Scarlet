@@ -4,7 +4,8 @@
 
 use crate::network::*;
 use crate::network::protocols::*;
-use alloc::vec;
+use crate::network::test_helpers::DropStageBuilder;
+use alloc::{vec, string::String};
 
 #[test_case]
 fn test_complete_receive_pipeline() {
@@ -25,6 +26,8 @@ fn test_complete_receive_pipeline() {
                 .build()
         )
         .add_stage(ArpStage::builder().enable_rx().build())
+        .add_stage(DropStageBuilder::with_stage_id("tcp").build())
+        .add_stage(DropStageBuilder::with_stage_id("udp").build())
         .set_default_rx_entry("ethernet")
         .build()
         .unwrap();

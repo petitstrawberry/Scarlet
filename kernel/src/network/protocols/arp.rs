@@ -274,7 +274,7 @@ impl ArpStage {
 mod tests {
     use super::*;
     use crate::network::{NetworkPacket, NextAction};
-    use alloc::vec;
+    use alloc::{vec, string::String};
 
     #[test_case]
     fn test_arp_stage_builder() {

@@ -378,7 +378,7 @@ impl EthernetStage {
 mod tests {
     use super::*;
     use crate::network::{NetworkPacket, NextAction};
-    use alloc::vec;
+    use alloc::{vec, string::String};
 
     #[test_case]
     fn test_ethernet_stage_builder() {
@@ -420,7 +420,7 @@ mod tests {
         let result = handler.handle(&mut packet).unwrap();
         
         // Should route to IPv4
-        assert_eq!(result, NextAction::JumpTo("ipv4".to_string()));
+        assert_eq!(result, NextAction::JumpTo(String::from("ipv4")));
         
         // Check hints
         assert_eq!(packet.get_hint("src_mac"), Some("02:00:00:00:00:01"));
@@ -463,7 +463,7 @@ mod tests {
         let result = handler.handle(&mut packet).unwrap();
         
         // Should route to IPv4
-        assert_eq!(result, NextAction::JumpTo("ipv4".to_string()));
+        assert_eq!(result, NextAction::JumpTo(String::from("ipv4")));
         
         // Check VLAN hints
         assert_eq!(packet.get_hint("vlan_tag"), Some("8292")); // 0x2064 = 8292

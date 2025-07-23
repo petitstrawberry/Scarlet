@@ -422,7 +422,7 @@ impl IPv4Stage {
 mod tests {
     use super::*;
     use crate::network::{NetworkPacket, NextAction};
-    use alloc::vec;
+    use alloc::{vec, string::String};
 
     #[test_case]
     fn test_ipv4_stage_builder() {
@@ -469,7 +469,7 @@ mod tests {
         let result = handler.handle(&mut packet).unwrap();
         
         // Should route to TCP
-        assert_eq!(result, NextAction::JumpTo("tcp".to_string()));
+        assert_eq!(result, NextAction::JumpTo(String::from("tcp")));
         
         // Check hints
         assert_eq!(packet.get_hint("src_ip"), Some("192.168.1.1"));
