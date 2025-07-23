@@ -39,18 +39,18 @@ pub struct NetworkPacket {
 
 impl NetworkPacket {
     /// Create a new NetworkPacket
-    pub fn new(payload: Vec<u8>) -> Self {
+    pub fn new(payload: Vec<u8>, direction: PacketDirection) -> Self {
         Self {
             payload,
             headers: BTreeMap::new(),
             hints: BTreeMap::new(),
-            direction: PacketDirection::Outgoing, // Default direction
+            direction,
         }
     }
 
     /// Create an empty NetworkPacket
-    pub fn empty() -> Self {
-        Self::new(Vec::new())
+    pub fn empty(direction: PacketDirection) -> Self {
+        Self::new(Vec::new(), direction)
     }
 
     /// Get payload
