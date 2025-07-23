@@ -61,7 +61,7 @@ impl IpProtocol {
     }
 }
 
-/// IP Protocol → 次ステージのマッピング（O(1) HashMap）
+/// IP Protocol → Next stage mapping (O(1) HashMap)
 #[derive(Debug, Clone)]
 pub struct IpProtocolToStage {
     mapping: HashMap<u8, String>,
