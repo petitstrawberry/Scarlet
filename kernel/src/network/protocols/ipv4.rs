@@ -290,7 +290,7 @@ impl IPv4TxHandler {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
         
-        // 1の補数
+        // One's complement
         !(sum as u16)
     }
 }
