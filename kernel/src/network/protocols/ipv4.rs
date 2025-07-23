@@ -128,7 +128,7 @@ impl ReceiveHandler for IPv4RxHandler {
         let version = (version_ihl >> 4) & 0xF;
         let ihl = (version_ihl & 0xF) * 4; // IHL is in 4-byte units
         
-        // バージョン確認
+        // Version validation
         if version != 4 {
             return Err(NetworkError::unsupported_protocol("ip", &format!("version {}", version)));
         }
