@@ -195,7 +195,7 @@ impl TransmitHandler for EthernetTxHandler {
             
         let src_mac_str = packet.get_hint("src_mac");
         
-        // 2. 値をパース
+        // 2. Parse values
         let ether_type = Self::parse_ether_type(ethertype_str)?;
         let dest_mac = Self::parse_mac(dest_mac_str)?;
         let src_mac = if let Some(mac_str) = src_mac_str {
