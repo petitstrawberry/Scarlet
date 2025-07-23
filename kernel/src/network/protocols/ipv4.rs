@@ -217,7 +217,7 @@ impl TransmitHandler for IPv4TxHandler {
             .and_then(|s| s.parse::<u8>().ok())
             .unwrap_or(self.default_tos);
         
-        // 3. 値をパース
+        // 3. Parse values
         let src_ip = Self::parse_ip(src_ip_str)?;
         let dest_ip = Self::parse_ip(dest_ip_str)?;
         let protocol = protocol_str.parse::<u8>()
