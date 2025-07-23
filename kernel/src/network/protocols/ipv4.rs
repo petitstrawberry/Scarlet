@@ -285,7 +285,7 @@ impl IPv4TxHandler {
             }
         }
         
-        // キャリー加算
+        // Carry addition
         while (sum >> 16) != 0 {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
