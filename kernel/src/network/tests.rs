@@ -4,11 +4,21 @@ use crate::network::*;
 use crate::network::test_helpers::*;
 use alloc::string::ToString;
 use alloc::{vec, format};
+use alloc::vec::Vec;
+
+// Test helper functions
+fn create_incoming_packet(payload: Vec<u8>) -> NetworkPacket {
+    NetworkPacket::new(payload, crate::network::packet::PacketDirection::Incoming)
+}
+
+fn create_outgoing_packet(payload: Vec<u8>) -> NetworkPacket {
+    NetworkPacket::new(payload, crate::network::packet::PacketDirection::Outgoing)
+}
 
 #[test_case]
 fn test_network_packet_creation() {
     let payload = vec![1, 2, 3, 4, 5];
-    let packet = NetworkPacket::new(payload.clone());
+    let packet = create_incoming_packet(payload.clone());
     
     assert_eq!(packet.payload(), &payload);
     assert_eq!(packet.total_size(), 5);
@@ -16,7 +26,7 @@ fn test_network_packet_creation() {
 
 #[test_case]
 fn test_network_packet_headers() {
-    let mut packet = NetworkPacket::new(vec![1, 2, 3]);
+    let mut packet = create_incoming_packet(vec![1, 2, 3]);
     
     // Add headers
     packet.add_header("ethernet", vec![0x00, 0x11, 0x22]);
@@ -32,7 +42,7 @@ fn test_network_packet_headers() {
 
 #[test_case]
 fn test_network_packet_hints() {
-    let mut packet = NetworkPacket::new(vec![1, 2, 3]);
+    let mut packet = create_incoming_packet(vec![1, 2, 3]);
     
     // Set hints
     packet.set_hint("ethertype", "0x0800");
@@ -84,11 +94,11 @@ fn test_flexible_pipeline_receive() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let packet = NetworkPacket::new(vec![1, 2, 3, 4]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = NetworkPacket::new(vec![1, 2, 3, 4], PacketDirection::Incoming);
+    let result = pipeline.process(packet, None);
     
     assert!(result.is_ok());
-    let processed_packet = result.unwrap();
+    let (processed_packet, _) = result.unwrap();
     assert_eq!(processed_packet.payload(), &vec![1, 2, 3, 4]);
 }
 
@@ -104,12 +114,13 @@ fn test_flexible_pipeline_transmit() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let packet = NetworkPacket::new(vec![5, 6, 7, 8]);
-    let result = pipeline.process_transmit(packet, None);
+    let packet = create_outgoing_packet(vec![5, 6, 7, 8]);
+    let result = pipeline.process(packet, None);
     
     assert!(result.is_ok());
-    let processed_packet = result.unwrap();
+    let (processed_packet, _pipeline_result) = result.unwrap();
     assert_eq!(processed_packet.payload(), &vec![5, 6, 7, 8]);
+    // Note: pipeline_result indicates what should happen to the packet
 }
 
 #[test_case]
@@ -118,14 +129,14 @@ fn test_pipeline_errors() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let packet = NetworkPacket::new(vec![1, 2, 3]);
+    let packet = create_incoming_packet(vec![1, 2, 3]);
     
     // No stages defined, should return error
-    let result = pipeline.process_receive(packet.clone(), None);
+    let result = pipeline.process(packet.clone(), None);
     assert!(result.is_err());
 
     // Nonexistent stage specified
-    let result = pipeline.process_receive(packet, Some("nonexistent"));
+    let result = pipeline.process(packet, Some("nonexistent"));
     assert!(result.is_err());
 }
 
@@ -175,28 +186,28 @@ fn test_pipeline_routing_with_protocol() {
 
     // Test routing to stage_a
     let payload = vec![0x01, 0xAA, 0xBB, 0xCC]; // Header: 0x01, Data: [0xAA, 0xBB, 0xCC]
-    let packet = NetworkPacket::new(payload);
-    let result = pipeline.process_receive(packet, None).unwrap();
+    let packet = create_incoming_packet(payload);
+    let (processed_packet, _result) = pipeline.process(packet, None).unwrap();
     
     // Verify header was extracted and payload updated
-    assert_eq!(result.payload(), &vec![0xAA, 0xBB, 0xCC]);
-    assert_eq!(result.get_header("test_protocol"), Some(&vec![0x01]));
-    assert_eq!(result.get_hint("test_protocol_type"), Some("0x01"));
+    assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB, 0xCC]);
+    assert_eq!(processed_packet.get_header("test_protocol"), Some(&vec![0x01]));
+    assert_eq!(processed_packet.get_hint("test_protocol_type"), Some("0x01"));
 
     // Test routing to stage_b
     let payload = vec![0x02, 0xDD, 0xEE]; // Header: 0x02, Data: [0xDD, 0xEE]
-    let packet = NetworkPacket::new(payload);
-    let result = pipeline.process_receive(packet, None).unwrap();
+    let packet = create_incoming_packet(payload);
+    let (processed_packet, _result) = pipeline.process(packet, None).unwrap();
     
     // Verify header was extracted and payload updated
-    assert_eq!(result.payload(), &vec![0xDD, 0xEE]);
-    assert_eq!(result.get_header("test_protocol"), Some(&vec![0x02]));
-    assert_eq!(result.get_hint("test_protocol_type"), Some("0x02"));
+    assert_eq!(processed_packet.payload(), &vec![0xDD, 0xEE]);
+    assert_eq!(processed_packet.get_header("test_protocol"), Some(&vec![0x02]));
+    assert_eq!(processed_packet.get_hint("test_protocol_type"), Some("0x02"));
     
     // Test unknown protocol type
     let payload = vec![0xFF, 0x11, 0x22]; // Unknown header type
-    let packet = NetworkPacket::new(payload);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(payload);
+    let result = pipeline.process(packet, None);
     assert!(result.is_err()); // Should fail due to unknown protocol type
 }
 
@@ -215,13 +226,13 @@ fn test_protocol_transmission() {
 
     // Test protocol header generation
     let payload = vec![0x11, 0x22, 0x33];
-    let packet = NetworkPacket::new(payload);
-    let result = pipeline.process_transmit(packet, None).unwrap();
+    let packet = create_incoming_packet(payload);
+    let (processed_packet, _result) = pipeline.process(packet, None).unwrap();
     
     // Verify header was prepended
-    assert_eq!(result.payload(), &vec![0x05, 0x11, 0x22, 0x33]);
-    assert_eq!(result.get_header("test_protocol"), Some(&vec![0x05]));
-    assert_eq!(result.get_hint("test_protocol_type"), Some("0x05"));
+    assert_eq!(processed_packet.payload(), &vec![0x05, 0x11, 0x22, 0x33]);
+    assert_eq!(processed_packet.get_header("test_protocol"), Some(&vec![0x05]));
+    assert_eq!(processed_packet.get_hint("test_protocol_type"), Some("0x05"));
 }
 
 #[test_case]
@@ -251,17 +262,17 @@ fn test_bidirectional_protocol_pipeline() {
 
     // Test receive path
     let rx_payload = vec![0x10, 0x01, 0x02, 0x03];
-    let rx_packet = NetworkPacket::new(rx_payload);
-    let rx_result = pipeline.process_receive(rx_packet, None).unwrap();
-    
+    let rx_packet = create_incoming_packet(rx_payload);
+    let (rx_result, _result) = pipeline.process(rx_packet, None).unwrap();
+
     assert_eq!(rx_result.payload(), &vec![0x01, 0x02, 0x03]);
     assert_eq!(rx_result.get_hint("test_protocol_type"), Some("0x10"));
 
     // Test transmit path (uses echo handler in this case)
     let tx_payload = vec![0x04, 0x05, 0x06];
-    let tx_packet = NetworkPacket::new(tx_payload.clone());
-    let tx_result = pipeline.process_transmit(tx_packet, None).unwrap();
-    
+    let tx_packet = create_outgoing_packet(tx_payload.clone());
+    let (tx_result, _result) = pipeline.process(tx_packet, None).unwrap();
+
     assert_eq!(tx_result.payload(), &tx_payload); // Echo handler doesn't modify
 }
 
@@ -293,18 +304,18 @@ fn test_pipeline_routing_with_add_route() {
         .expect("Pipeline build should succeed");
 
     // Test routing with protocol type A (0x01)
-    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
 
     // Test routing with protocol type B (0x02)
-    let packet = NetworkPacket::new(vec![0x02, 0xDD, 0xEE, 0xFF]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![0x02, 0xDD, 0xEE, 0xFF]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
 
     // Test unsupported protocol type should fail
-    let packet = NetworkPacket::new(vec![0xFF, 0x11, 0x22, 0x33]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![0xFF, 0x11, 0x22, 0x33]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_err());
 }
 
@@ -321,12 +332,12 @@ fn test_empty_routing_fallback() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let packet = NetworkPacket::new(vec![1, 2, 3, 4]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![1, 2, 3, 4]);
+    let result = pipeline.process(packet, None);
     
     assert!(result.is_ok());
     let processed_packet = result.unwrap();
-    assert_eq!(processed_packet.payload(), &vec![1, 2, 3, 4]);
+    assert_eq!(processed_packet.0.payload(), &vec![1, 2, 3, 4]);
 }
 
 #[test_case]
@@ -375,44 +386,44 @@ fn test_pipeline_routing_with_tracing() {
         .expect("Pipeline build should succeed");
 
     // Test routing with protocol type A (0x01)
-    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
     
     let processed_packet = result.unwrap();
     
     // Verify tracing information
-    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    let trace = processed_packet.0.get_hint("pipeline_trace").unwrap_or("");
     assert_eq!(trace, "router -> type_a_handler");
     
     // Verify processing markers
-    assert_eq!(processed_packet.get_hint("processed_by_router"), Some("protocol_type:0x01"));
-    assert_eq!(processed_packet.get_hint("processed_by_type_a_handler"), Some("true"));
+    assert_eq!(processed_packet.0.get_hint("processed_by_router"), Some("protocol_type:0x01"));
+    assert_eq!(processed_packet.0.get_hint("processed_by_type_a_handler"), Some("true"));
     
     // Verify packet transformation
-    assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB, 0xCC]); // Header removed
-    assert!(processed_packet.get_header("test_protocol").is_some()); // Header added
-    assert_eq!(processed_packet.get_hint("test_protocol_type"), Some("0x01"));
+    assert_eq!(processed_packet.0.payload(), &vec![0xAA, 0xBB, 0xCC]); // Header removed
+    assert!(processed_packet.0.get_header("test_protocol").is_some()); // Header added
+    assert_eq!(processed_packet.0.get_hint("test_protocol_type"), Some("0x01"));
 
     // Test routing with protocol type B (0x02)
-    let packet = NetworkPacket::new(vec![0x02, 0xDD, 0xEE, 0xFF]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![0x02, 0xDD, 0xEE, 0xFF]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
     
     let processed_packet = result.unwrap();
     
     // Verify tracing information for type B
-    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    let trace = processed_packet.0.get_hint("pipeline_trace").unwrap_or("");
     assert_eq!(trace, "router -> type_b_handler");
     
     // Verify processing markers
-    assert_eq!(processed_packet.get_hint("processed_by_router"), Some("protocol_type:0x02"));
-    assert_eq!(processed_packet.get_hint("processed_by_type_b_handler"), Some("true"));
+    assert_eq!(processed_packet.0.get_hint("processed_by_router"), Some("protocol_type:0x02"));
+    assert_eq!(processed_packet.0.get_hint("processed_by_type_b_handler"), Some("true"));
     
     // Verify packet transformation
-    assert_eq!(processed_packet.payload(), &vec![0xDD, 0xEE, 0xFF]); // Header removed
-    assert!(processed_packet.get_header("test_protocol").is_some()); // Header added
-    assert_eq!(processed_packet.get_hint("test_protocol_type"), Some("0x02"));
+    assert_eq!(processed_packet.0.payload(), &vec![0xDD, 0xEE, 0xFF]); // Header removed
+    assert!(processed_packet.0.get_header("test_protocol").is_some()); // Header added
+    assert_eq!(processed_packet.0.get_hint("test_protocol_type"), Some("0x02"));
 }
 
 #[test_case]
@@ -429,23 +440,23 @@ fn test_packet_state_verification() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let mut packet = NetworkPacket::new(vec![1, 2, 3, 4, 5]);
+    let mut packet = create_incoming_packet(vec![1, 2, 3, 4, 5]);
     packet.add_header("original_header", vec![0xFF, 0xFE]);
     packet.set_hint("original_hint", "test_value");
     
-    let result = pipeline.process_receive(packet, None);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
     
     let processed_packet = result.unwrap();
     
     // Verify original data is preserved
-    assert_eq!(processed_packet.payload(), &vec![1, 2, 3, 4, 5]);
-    assert_eq!(processed_packet.get_header("original_header"), Some(&vec![0xFF, 0xFE]));
-    assert_eq!(processed_packet.get_hint("original_hint"), Some("test_value"));
+    assert_eq!(processed_packet.0.payload(), &vec![1, 2, 3, 4, 5]);
+    assert_eq!(processed_packet.0.get_header("original_header"), Some(&vec![0xFF, 0xFE]));
+    assert_eq!(processed_packet.0.get_hint("original_hint"), Some("test_value"));
     
     // Verify trace was added
-    assert_eq!(processed_packet.get_hint("pipeline_trace"), Some("preprocessor"));
-    assert_eq!(processed_packet.get_hint("processed_by_preprocessor"), Some("true"));
+    assert_eq!(processed_packet.0.get_hint("pipeline_trace"), Some("preprocessor"));
+    assert_eq!(processed_packet.0.get_hint("processed_by_preprocessor"), Some("true"));
 }
 
 #[test_case]
@@ -486,23 +497,23 @@ fn test_complex_routing_trace() {
         .expect("Pipeline build should succeed");
 
     // Test multi-stage routing: initial_router -> l2_processor -> final_handler
-    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0x03, 0x11, 0x22]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![TEST_PROTOCOL_TYPE_A, 0x03, 0x11, 0x22]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
     
     let processed_packet = result.unwrap();
     
     // Verify complex trace path
-    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    let trace = processed_packet.0.get_hint("pipeline_trace").unwrap_or("");
     assert_eq!(trace, "initial_router -> l2_processor -> final_handler");
     
     // Verify all processing markers exist
-    assert!(processed_packet.get_hint("processed_by_initial_router").is_some());
-    assert!(processed_packet.get_hint("processed_by_l2_processor").is_some());
-    assert!(processed_packet.get_hint("processed_by_final_handler").is_some());
+    assert!(processed_packet.0.get_hint("processed_by_initial_router").is_some());
+    assert!(processed_packet.0.get_hint("processed_by_l2_processor").is_some());
+    assert!(processed_packet.0.get_hint("processed_by_final_handler").is_some());
     
     // Verify final packet state - payload should have both headers removed
-    assert_eq!(processed_packet.payload(), &vec![0x11, 0x22]);
+    assert_eq!(processed_packet.0.payload(), &vec![0x11, 0x22]);
 }
 
 #[test_case]
@@ -518,14 +529,14 @@ fn test_protocol_stage_builder_tracing() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let packet = NetworkPacket::new(vec![1, 2, 3, 4]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![1, 2, 3, 4]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
     
     let processed_packet = result.unwrap();
     
     // Verify tracing was enabled
-    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    let trace = processed_packet.0.get_hint("pipeline_trace").unwrap_or("");
     assert_eq!(trace, "echo_stage");
 }
 
@@ -553,19 +564,19 @@ fn test_protocol_stage_builder_protocol_parser_tracing() {
         .expect("Pipeline build should succeed");
 
     // Create packet with protocol header
-    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0x11, 0x22, 0x33]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![TEST_PROTOCOL_TYPE_A, 0x11, 0x22, 0x33]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
     
     let processed_packet = result.unwrap();
     
     // Verify tracing through both stages
-    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    let trace = processed_packet.0.get_hint("pipeline_trace").unwrap_or("");
     assert_eq!(trace, "parser_stage -> next_stage");
     
     // Verify protocol parsing occurred
-    assert!(processed_packet.get_hint("test_protocol_type").is_some());
-    assert_eq!(processed_packet.payload(), &vec![0x11, 0x22, 0x33]);
+    assert!(processed_packet.0.get_hint("test_protocol_type").is_some());
+    assert_eq!(processed_packet.0.payload(), &vec![0x11, 0x22, 0x33]);
 }
 
 #[test_case]
@@ -588,19 +599,19 @@ fn test_protocol_stage_builder_bidirectional_tracing() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_B, 0xAA, 0xBB]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![TEST_PROTOCOL_TYPE_B, 0xAA, 0xBB]);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
     
     let processed_packet = result.unwrap();
     
     // Verify tracing was enabled for both stages
-    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    let trace = processed_packet.0.get_hint("pipeline_trace").unwrap_or("");
     assert_eq!(trace, "bidirectional_stage -> target_stage");
     
     // Verify protocol parsing occurred
-    assert!(processed_packet.get_hint("test_protocol_type").is_some());
-    assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB]);
+    assert!(processed_packet.0.get_hint("test_protocol_type").is_some());
+    assert_eq!(processed_packet.0.payload(), &vec![0xAA, 0xBB]);
 }
 
 #[test_case]
@@ -660,14 +671,14 @@ fn test_echo_stage_with_tracing() {
         .build()
         .expect("Pipeline build should succeed");
 
-    let packet = NetworkPacket::new(vec![1, 2, 3, 4]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![1, 2, 3, 4]);
+    let result = pipeline.process(packet, None);
     
     assert!(result.is_ok());
     let processed_packet = result.unwrap();
     
     // Check if tracing was added
-    assert!(processed_packet.get_hint("pipeline_trace").is_some());
+    assert!(processed_packet.0.get_hint("pipeline_trace").is_some());
 }
 
 #[test_case]
@@ -685,17 +696,17 @@ fn test_protocol_stage_routing() {
         .expect("Pipeline build should succeed");
 
     // Create packet with protocol header
-    let packet = NetworkPacket::new(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
-    let result = pipeline.process_receive(packet, None);
+    let packet = create_incoming_packet(vec![TEST_PROTOCOL_TYPE_A, 0xAA, 0xBB, 0xCC]);
+    let result = pipeline.process(packet, None);
     
     assert!(result.is_ok());
     let processed_packet = result.unwrap();
     
     // Verify protocol was parsed and routed correctly
-    assert_eq!(processed_packet.payload(), &vec![0xAA, 0xBB, 0xCC]);
+    assert_eq!(processed_packet.0.payload(), &vec![0xAA, 0xBB, 0xCC]);
     
     // Check tracing shows the routing path
-    let trace = processed_packet.get_hint("pipeline_trace").unwrap_or("");
+    let trace = processed_packet.0.get_hint("pipeline_trace").unwrap_or("");
     assert!(trace.contains("protocol"));
 }
 
@@ -738,9 +749,9 @@ fn test_realistic_protocol_stack() {
     
     // Test packet processing with proper protocol headers
     // Create a packet with test protocol header pointing to IP (0x08)
-    let mut packet = NetworkPacket::new(vec![0x08, 0x06, 0x00, 0x03]); // First byte is protocol type
+    let mut packet = create_incoming_packet(vec![0x08, 0x06, 0x00, 0x03]); // First byte is protocol type
     packet.add_header("test_protocol", vec![0x08]); // Add test protocol header
     
-    let result = pipeline.process_receive(packet, None);
+    let result = pipeline.process(packet, None);
     assert!(result.is_ok());
 }
