@@ -61,7 +61,7 @@ impl EtherType {
     }
 }
 
-/// EtherType → 次ステージのマッピング（O(1) HashMap）
+/// EtherType → Next stage mapping (O(1) HashMap)
 #[derive(Debug, Clone)]
 pub struct EtherTypeToStage {
     mapping: HashMap<u16, String>,
