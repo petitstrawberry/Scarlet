@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use hashbrown::HashMap;
 
-use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction, NextStageMatcher};
+use crate::network::traits::{PacketHandler, NextAction, NextStageMatcher};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
 use crate::network::pipeline::{FlexibleStage, StageIdentifier};
@@ -117,7 +117,7 @@ impl EthernetRxHandler {
     }
 }
 
-impl ReceiveHandler for EthernetRxHandler {
+impl PacketHandler for EthernetRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // 1. Validate minimum Ethernet header size
         packet.validate_payload_size(14)?;
@@ -183,7 +183,7 @@ impl EthernetTxHandler {
     }
 }
 
-impl TransmitHandler for EthernetTxHandler {
+impl PacketHandler for EthernetTxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // 1. Get required information from hints
         let ethertype_str = packet.get_hint("ether_type")
@@ -365,13 +365,13 @@ impl EthernetStageBuilder {
         }
         
         let rx_handler = if self.rx_enabled {
-            Some(Box::new(EthernetRxHandler::new(matcher)) as Box<dyn ReceiveHandler>)
+            Some(Box::new(EthernetRxHandler::new(matcher)) as Box<dyn PacketHandler>)
         } else {
             None
         };
         
         let tx_handler = if self.tx_enabled {
-            Some(Box::new(EthernetTxHandler::new(self.default_src_mac)) as Box<dyn TransmitHandler>)
+            Some(Box::new(EthernetTxHandler::new(self.default_src_mac)) as Box<dyn PacketHandler>)
         } else {
             None
         };

@@ -4,6 +4,25 @@ use alloc::string::String;
 
 use crate::network::error::NetworkError;
 
+/// Packet direction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketDirection {
+    /// Incoming packet (from network device to application)
+    Incoming,
+    /// Outgoing packet (from application to network device)
+    Outgoing,
+}
+
+impl PacketDirection {
+    /// Get the opposite direction
+    pub fn opposite(self) -> Self {
+        match self {
+            PacketDirection::Incoming => PacketDirection::Outgoing,
+            PacketDirection::Outgoing => PacketDirection::Incoming,
+        }
+    }
+}
+
 /// Network packet structure
 /// Manages payload (actual data), headers (each layer's headers), and hints (transmission instruction info)
 #[derive(Debug, Clone)]
@@ -14,6 +33,8 @@ pub struct NetworkPacket {
     headers: BTreeMap<String, Vec<u8>>,
     /// Hints for inter-layer information passing during transmission (key -> value)
     hints: BTreeMap<String, String>,
+    /// Packet direction
+    direction: PacketDirection,
 }
 
 impl NetworkPacket {
@@ -23,6 +44,7 @@ impl NetworkPacket {
             payload,
             headers: BTreeMap::new(),
             hints: BTreeMap::new(),
+            direction: PacketDirection::Outgoing, // Default direction
         }
     }
 
@@ -83,5 +105,15 @@ impl NetworkPacket {
     pub fn total_size(&self) -> usize {
         let headers_size: usize = self.headers.values().map(|h| h.len()).sum();
         self.payload.len() + headers_size
+    }
+
+    /// Get packet direction
+    pub fn direction(&self) -> PacketDirection {
+        self.direction
+    }
+
+    /// Set packet direction
+    pub fn set_direction(&mut self, direction: PacketDirection) {
+        self.direction = direction;
     }
 }

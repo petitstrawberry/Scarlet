@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use hashbrown::HashMap;
 
-use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction, NextStageMatcher};
+use crate::network::traits::{PacketHandler, NextAction, NextStageMatcher};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
 use crate::network::pipeline::{FlexibleStage, StageIdentifier};
@@ -117,7 +117,7 @@ impl IPv4RxHandler {
     }
 }
 
-impl ReceiveHandler for IPv4RxHandler {
+impl PacketHandler for IPv4RxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // 1. Validate minimum IPv4 header size
         packet.validate_payload_size(20)?;
@@ -199,7 +199,7 @@ impl IPv4TxHandler {
     }
 }
 
-impl TransmitHandler for IPv4TxHandler {
+impl PacketHandler for IPv4TxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // 1. Get required information from hints
         let src_ip_str = packet.get_hint("src_ip")
@@ -409,13 +409,13 @@ impl IPv4StageBuilder {
         }
         
         let rx_handler = if self.rx_enabled {
-            Some(Box::new(IPv4RxHandler::new(matcher)) as Box<dyn ReceiveHandler>)
+            Some(Box::new(IPv4RxHandler::new(matcher)) as Box<dyn PacketHandler>)
         } else {
             None
         };
         
         let tx_handler = if self.tx_enabled {
-            Some(Box::new(IPv4TxHandler::new(self.default_ttl, self.default_tos)) as Box<dyn TransmitHandler>)
+            Some(Box::new(IPv4TxHandler::new(self.default_ttl, self.default_tos)) as Box<dyn PacketHandler>)
         } else {
             None
         };

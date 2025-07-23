@@ -2,8 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-
-use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction};
+use crate::network::traits::{PacketHandler, NextAction};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
 
@@ -28,12 +27,17 @@ macro_rules! define_stage {
     };
 }
 
-/// Flexible pipeline stage (Tx/Rx separated)
+/// Flexible pipeline stage
+/// 
+/// Each stage maintains separate handlers for receive (rx) and transmit (tx) directions.
+/// The pipeline itself is unified, but handlers are direction-specific.
 #[derive(Debug)]
 pub struct FlexibleStage {
     pub stage_id: String,
-    pub rx_handler: Option<Box<dyn ReceiveHandler>>,
-    pub tx_handler: Option<Box<dyn TransmitHandler>>,
+    /// Handler for incoming packets (device -> application)
+    pub rx_handler: Option<Box<dyn PacketHandler>>,
+    /// Handler for outgoing packets (application -> device)  
+    pub tx_handler: Option<Box<dyn PacketHandler>>,
 }
 
 impl FlexibleStage {
@@ -56,7 +60,18 @@ impl FlexibleStage {
     }
 }
 
-/// Flexible pipeline (Tx/Rx completely separated)
+/// Pipeline processing result
+#[derive(Debug, Clone)]
+pub enum PipelineResult {
+    /// Packet should be sent to specified device
+    ToDevice(String),
+    /// Packet should be delivered to application layer
+    ToApplication,
+    /// Packet was dropped during processing
+    Dropped,
+}
+
+/// Flexible pipeline (unified)
 #[derive(Debug)]
 pub struct FlexiblePipeline {
     stages: BTreeMap<String, FlexibleStage>,
@@ -70,47 +85,67 @@ impl FlexiblePipeline {
         FlexiblePipelineBuilder::new()
     }
 
-    /// Receive processing: start from specified entry
-    pub fn process_receive(&self, mut packet: NetworkPacket, entry_stage: Option<&str>) -> Result<NetworkPacket, NetworkError> {
-        let mut current_stage = String::from(entry_stage.or(self.default_rx_entry.as_deref())
-            .ok_or_else(|| NetworkError::invalid_operation("no rx entry stage specified"))?);
+    /// Process packet through pipeline (unified processing)
+    pub fn process(&self, mut packet: NetworkPacket, entry_stage: Option<&str>) -> Result<(NetworkPacket, PipelineResult), NetworkError> {
+        // Determine default entry stage based on packet direction
+        let default_entry = match packet.direction() {
+            crate::network::packet::PacketDirection::Incoming => self.default_rx_entry.as_deref(),
+            crate::network::packet::PacketDirection::Outgoing => self.default_tx_entry.as_deref(),
+        };
+        
+        let mut current_stage = String::from(entry_stage.or(default_entry)
+            .ok_or_else(|| NetworkError::invalid_operation("no entry stage specified"))?);
         
         loop {
             let stage = self.stages.get(&current_stage)
                 .ok_or_else(|| NetworkError::stage_not_found(&current_stage))?;
             
-            let handler = stage.rx_handler.as_ref()
-                .ok_or_else(|| NetworkError::no_rx_handler(&current_stage))?;
+            let action = match packet.direction() {
+                crate::network::packet::PacketDirection::Incoming => {
+                    let handler = stage.rx_handler.as_ref()
+                        .ok_or_else(|| NetworkError::no_rx_handler(&current_stage))?;
+                    handler.handle(&mut packet)?
+                }
+                crate::network::packet::PacketDirection::Outgoing => {
+                    let handler = stage.tx_handler.as_ref()
+                        .ok_or_else(|| NetworkError::no_tx_handler(&current_stage))?;
+                    handler.handle(&mut packet)?
+                }
+            };
             
-            match handler.handle(&mut packet)? {
+            match action {
                 NextAction::JumpTo(next_stage) => {
                     current_stage = next_stage;
                 }
-                NextAction::Complete => {
-                    return Ok(packet);
+                NextAction::CompleteToDevice(device_name) => {
+                    return Ok((packet, PipelineResult::ToDevice(device_name)));
                 }
-            }
-        }
-    }
-    
-    /// Transmit processing: start from specified entry
-    pub fn process_transmit(&self, mut packet: NetworkPacket, entry_stage: Option<&str>) -> Result<NetworkPacket, NetworkError> {
-        let mut current_stage = String::from(entry_stage.or(self.default_tx_entry.as_deref())
-            .ok_or_else(|| NetworkError::invalid_operation("no tx entry stage specified"))?);
-        
-        loop {
-            let stage = self.stages.get(&current_stage)
-                .ok_or_else(|| NetworkError::stage_not_found(&current_stage))?;
-            
-            let handler = stage.tx_handler.as_ref()
-                .ok_or_else(|| NetworkError::no_tx_handler(&current_stage))?;
-            
-            match handler.handle(&mut packet)? {
-                NextAction::JumpTo(next_stage) => {
-                    current_stage = next_stage;
+                NextAction::CompleteToApplication => {
+                    return Ok((packet, PipelineResult::ToApplication));
                 }
-                NextAction::Complete => {
-                    return Ok(packet);
+                NextAction::Drop => {
+                    return Ok((packet, PipelineResult::Dropped));
+                }
+                NextAction::ChangeDirection { stage, new_packet } => {
+                    // Change packet direction and continue processing
+                    if let Some(new_pkt) = new_packet {
+                        packet = new_pkt;
+                    }
+                    // Toggle packet direction
+                    packet.set_direction(packet.direction().opposite());
+                    current_stage = stage;
+                }
+                NextAction::SpawnInOppositeDirection { stage, new_packet, continue_to: _ } => {
+                    // Spawn new packet in opposite direction (would need async processing)
+                    // For now, just process the new packet and ignore the original
+                    // TODO: Implement proper async spawning
+                    packet = new_packet;
+                    packet.set_direction(packet.direction().opposite());
+                    current_stage = stage;
+                    
+                    // Note: This is a simplified implementation
+                    // In a full implementation, we'd need to spawn a separate task
+                    // to process the original packet according to continue_to
                 }
             }
         }

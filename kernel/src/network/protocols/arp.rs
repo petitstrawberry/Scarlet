@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::format;
 
-use crate::network::traits::{ReceiveHandler, TransmitHandler, NextAction};
+use crate::network::traits::{PacketHandler, NextAction};
 use crate::network::packet::NetworkPacket;
 use crate::network::error::NetworkError;
 use crate::network::pipeline::{FlexibleStage, StageIdentifier};
@@ -49,7 +49,7 @@ impl ArpRxHandler {
     }
 }
 
-impl ReceiveHandler for ArpRxHandler {
+impl PacketHandler for ArpRxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // 1. Validate minimum ARP packet size
         packet.validate_payload_size(28)?;
@@ -122,7 +122,7 @@ impl ArpTxHandler {
     }
 }
 
-impl TransmitHandler for ArpTxHandler {
+impl PacketHandler for ArpTxHandler {
     fn handle(&self, packet: &mut NetworkPacket) -> Result<NextAction, NetworkError> {
         // 1. Get required information from hints
         let operation_str = packet.get_hint("arp_operation")
@@ -242,13 +242,13 @@ impl ArpStageBuilder {
     /// Build the stage
     pub fn build(self) -> FlexibleStage {
         let rx_handler = if self.rx_enabled {
-            Some(Box::new(ArpRxHandler::new()) as Box<dyn ReceiveHandler>)
+            Some(Box::new(ArpRxHandler::new()) as Box<dyn PacketHandler>)
         } else {
             None
         };
         
         let tx_handler = if self.tx_enabled {
-            Some(Box::new(ArpTxHandler::new()) as Box<dyn TransmitHandler>)
+            Some(Box::new(ArpTxHandler::new()) as Box<dyn PacketHandler>)
         } else {
             None
         };
