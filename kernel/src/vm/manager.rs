@@ -200,43 +200,6 @@ impl VirtualMemoryManager {
         Ok(())
     }
 
-    /// Returns the memory map at the given index.
-    /// 
-    /// # Arguments
-    /// * `idx` - The index of the memory map to retrieve
-    /// 
-    /// # Returns
-    /// The memory map at the given index, if it exists.
-    /// 
-    /// # Note
-    /// This method is deprecated and inefficient for BTreeMap. 
-    /// Use `memmap_iter()` for iteration or `search_memory_map()` for address-based lookup.
-    #[deprecated(note = "Use memmap_iter() or search_memory_map() instead")]
-    pub fn get_memory_map(&self, idx: usize) -> Option<&VirtualMemoryMap> {
-        self.memmap.values().nth(idx)
-    }
-
-    /// Removes the memory map at the given index.
-    /// 
-    /// # Arguments
-    /// * `idx` - The index of the memory map to remove
-    /// 
-    /// # Returns
-    /// The removed memory map, if it exists.
-    /// 
-    /// # Note
-    /// This method is deprecated and inefficient for BTreeMap.
-    /// Use `remove_memory_map_by_addr()` for address-based removal.
-    #[deprecated(note = "Use remove_memory_map_by_addr() instead")]
-    pub fn remove_memory_map(&mut self, idx: usize) -> Option<VirtualMemoryMap> {
-        if let Some((start_addr, _)) = self.memmap.iter().nth(idx) {
-            let start_addr = *start_addr;
-            self.memmap.remove(&start_addr)
-        } else {
-            None
-        }
-    }
-
     /// Removes the memory map containing the given virtual address.
     /// 
     /// This method uses efficient search with caching to locate the target mapping.
@@ -383,27 +346,6 @@ impl VirtualMemoryManager {
             }
         }
         
-        None
-    }
-
-    /// Searches for the index of a memory map containing the given virtual address.
-    /// 
-    /// # Arguments
-    /// * `vaddr` - The virtual address to search for
-    /// 
-    /// # Returns
-    /// The index of the memory map containing the given virtual address, if it exists.
-    /// 
-    /// # Note
-    /// This method is deprecated for BTreeMap as indices are not meaningful.
-    /// Use `search_memory_map()` for direct address-based lookup.
-    #[deprecated(note = "Use search_memory_map() instead - indices are not meaningful for BTreeMap")]
-    pub fn search_memory_map_idx(&self, vaddr: usize) -> Option<usize> {
-        for (i, (_, map)) in self.memmap.iter().enumerate() {
-            if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
-                return Some(i);
-            }
-        }
         None
     }
 
