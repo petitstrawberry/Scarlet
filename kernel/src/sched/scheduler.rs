@@ -187,7 +187,7 @@ impl Scheduler {
     /// 
     /// # Arguments
     /// * `cpu` - The CPU architecture state
-    pub fn schedule(&mut self, cpu: &mut Arch) -> ! {
+    pub fn schedule(&mut self, cpu: &mut Arch) {
         let cpu_id = cpu.get_cpuid();
 
         let timer = get_kernel_timer();

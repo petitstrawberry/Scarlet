@@ -53,6 +53,7 @@ pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(get_cpu());
+    usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
 pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -87,6 +88,7 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     // xv6's wait() is equivalent to waitpid(-1), so we use the parent waker
     let parent_waker = get_parent_waker(task.get_id());
     parent_waker.wait(task, trapframe);
+    usize::MAX // -1 (In current implementation, this will not be reached)
 }
 
 pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut Trapframe) -> usize {
