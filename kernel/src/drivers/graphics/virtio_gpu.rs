@@ -503,17 +503,7 @@ impl ControlOps for VirtioGpuDevice {
     }
 }
 
-impl MemoryMappingOps for VirtioGpuDevice {
-    // VirtIO GPU devices generally don't support memory mapping by default
-    fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
-           -> Result<usize, &'static str> {
-        Err("Memory mapping not supported by this device")
-    }
-    
-    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
-        Err("Memory mapping not supported by this device")
-    }
-}
+impl MemoryMappingOps for VirtioGpuDevice {}
 
 impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {
