@@ -487,7 +487,7 @@ impl VirtualMemoryManager {
                         },
                         pmarea: super::vmem::MemoryArea {
                             start: prev_memory_map.pmarea.start,
-                            end: prev_memory_map.pmarea.start + (memory_map.vmarea.end - prev_memory_map.vmarea.start),
+                            end: memory_map.pmarea.end,
                         },
                         permissions: prev_memory_map.permissions, // Use permissions from first map
                         is_shared: prev_memory_map.is_shared,
