@@ -29,6 +29,7 @@ use spin::{Mutex, RwLock};
 use core::mem;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
+use crate::object::capability::MemoryMappingOps;
 use crate::{
     device::network::{NetworkDevice, DevicePacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
@@ -401,6 +402,17 @@ impl VirtioNetDevice {
             // Assume link is up if status feature is not supported
             true
         }
+    }
+}
+
+impl MemoryMappingOps for VirtioNetDevice {
+    fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
+           -> Result<usize, &'static str> {
+        Err("Memory mapping not supported by VirtIO network device")
+    }
+
+    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
+        Err("Memory unmapping not supported by VirtIO network device")
     }
 }
 

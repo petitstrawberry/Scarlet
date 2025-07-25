@@ -10,9 +10,9 @@
 use spin::{Mutex, RwLock};
 
 use crate::{
-    device::{Device, DeviceType, graphics::{GraphicsDevice, FramebufferConfig, PixelFormat}},
+    device::{graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}, Device, DeviceType},
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}},
-    mem::page::allocate_raw_pages, object::capability::ControlOps,
+    mem::page::allocate_raw_pages, object::capability::{ControlOps, MemoryMappingOps},
 };
 
 // VirtIO GPU Constants
@@ -500,6 +500,18 @@ impl ControlOps for VirtioGpuDevice {
     // VirtIO GPU devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for VirtioGpuDevice {
+    // VirtIO GPU devices generally don't support memory mapping by default
+    fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
+           -> Result<usize, &'static str> {
+        Err("Memory mapping not supported by this device")
+    }
+    
+    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
+        Err("Memory mapping not supported by this device")
     }
 }
 
