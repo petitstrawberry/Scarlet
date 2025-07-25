@@ -3,6 +3,8 @@
 //! This module provides system calls and traits for FileObject capability,
 //! which extends StreamOps with file-specific operations like seek and metadata.
 
+use core::any::Any;
+
 use crate::object::capability::stream::{StreamOps, StreamError};
 use crate::object::capability::control::ControlOps;
 use crate::object::capability::memory_mapping::MemoryMappingOps;
