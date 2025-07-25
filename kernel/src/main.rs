@@ -391,7 +391,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 
     match load_elf_into_task(file_ref, &mut task) {
         Ok(_) => {
-            for map in task.vm_manager.get_memmap() {
+            for map in task.vm_manager.memmap_iter() {
                 early_println!("[Scarlet Kernel] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);
             }
             early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
