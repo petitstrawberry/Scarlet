@@ -12,6 +12,8 @@
 //! - Bind mount operations enable controlled sharing between isolated namespaces
 //! - All filesystem operations are thread-safe and handle concurrent access properly
 
+use core::usize;
+
 use alloc::vec::Vec;
 
 use crate::abi::MAX_ABI_LENGTH;
@@ -98,6 +100,7 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     task.exit(exit_code);
     // The scheduler will handle saving the current task state internally
     get_scheduler().schedule(get_cpu());
+    usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
@@ -309,6 +312,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     // If the child task is not exited, we need to wait for it
                     let child_waker = get_task_waker(pid as usize);
                     child_waker.wait(task, trapframe);
+                    return 0; // Unreachable code, but needed for type consistency
                 },
             }
         }

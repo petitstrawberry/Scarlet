@@ -104,8 +104,7 @@ impl Waker {
     /// 
     /// This function never returns normally. The task will be blocked and only
     /// resume execution when the entire syscall is restarted after being woken up.
-    /// The `!` return type indicates this function diverges (never returns).
-    pub fn wait(&self, task: &mut Task, cpu: &mut Arch) -> ! {
+    pub fn wait(&self, task: &mut Task, cpu: &mut Arch) {
         let task_id = task.get_id();
                 
         // Add task to wait queue first

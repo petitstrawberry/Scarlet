@@ -242,7 +242,6 @@ pub mod initcall;
 pub mod syscall;
 pub mod device;
 pub mod fs;
-pub mod network;
 pub mod object;
 pub mod ipc;
 pub mod executor;
