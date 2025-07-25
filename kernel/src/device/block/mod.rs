@@ -5,7 +5,7 @@ use spin::Mutex;
 use request::{BlockIORequest, BlockIOResult};
 
 use super::Device;
-use crate::object::capability::ControlOps;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 pub mod request;
 
@@ -73,6 +73,20 @@ impl ControlOps for GenericBlockDevice {
     // Generic block devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for GenericBlockDevice {
+    // Block devices generally don't support memory mapping by default
+    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) 
+           -> Result<usize, &'static str> {
+        let _ = (vaddr, length, prot, flags, offset);
+        Err("Memory mapping not supported by this block device")
+    }
+    
+    fn munmap(&self, vaddr: usize, length: usize) -> Result<(), &'static str> {
+        let _ = (vaddr, length);
+        Err("Memory mapping not supported by this block device")
     }
 }
 

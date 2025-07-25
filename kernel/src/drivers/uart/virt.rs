@@ -10,7 +10,7 @@ use crate::{
         char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
             resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo
         }, Device, DeviceInfo, DeviceType
-    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial, object::capability::ControlOps
+    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial, object::capability::{ControlOps, MemoryMappingOps}
 };
 
 pub struct Uart {
@@ -159,6 +159,17 @@ impl Serial for Uart {
     /// Get a mutable reference to Any for downcasting
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl MemoryMappingOps for Uart {
+     fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
+           -> Result<usize, &'static str> {
+            Err("Memory mapping not supported for UART")
+    }
+
+    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
+        Err("Memory unmapping not supported for UART")
     }
 }
 

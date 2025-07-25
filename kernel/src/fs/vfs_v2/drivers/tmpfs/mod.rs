@@ -12,7 +12,7 @@ use core::{any::Any, fmt::Debug};
 
 use crate::{device::{Device, DeviceType}, driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
-}};
+}, object::capability::MemoryMappingOps};
 use crate::object::capability::{StreamOps, StreamError, ControlOps};
 use crate::device::manager::DeviceManager;
 
@@ -1022,6 +1022,10 @@ impl ControlOps for TmpFileObject {
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported on temporary files")
     }
+}
+
+impl MemoryMappingOps for TmpFileObject {
+    // TODO: Implement memory mapping for temporary files
 }
 
 impl FileObject for TmpFileObject {

@@ -10,7 +10,7 @@ pub mod handle;
 use alloc::{sync::Arc, vec::Vec};
 use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
-use capability::{StreamOps, CloneOps, ControlOps};
+use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps};
 
 /// Unified representation of all kernel-managed resources
 pub enum KernelObject {
@@ -101,6 +101,21 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide control operations
+                None
+            }
+        }
+    }
+    
+    /// Try to get MemoryMappingOps capability
+    pub fn as_memory_mappable(&self) -> Option<&dyn MemoryMappingOps> {
+        match self {
+            KernelObject::File(file_object) => {
+                // FileObject automatically implements MemoryMappingOps
+                let memory_mapping_ops: &dyn MemoryMappingOps = file_object.as_ref();
+                Some(memory_mapping_ops)
+            }
+            KernelObject::Pipe(_) => {
+                // Pipes don't provide memory mapping operations
                 None
             }
         }

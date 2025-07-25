@@ -33,7 +33,7 @@ use core::any::Any;
 use crate::{driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, 
     FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom
-}};
+}, object::capability::MemoryMappingOps};
 use crate::device::{manager::DeviceManager, DeviceType, Device};
 use crate::object::capability::{StreamOps, StreamError, ControlOps};
 
@@ -607,6 +607,30 @@ impl ControlOps for DevFileObject {
     }
 }
 
+impl MemoryMappingOps for DevFileObject {
+    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) -> Result<usize, &'static str> {
+        // For device files, delegate to the underlying device if it supports memory mapping
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            // Device trait already extends MemoryMappingOps, so we can call mmap directly
+            device_guard_ref.mmap(vaddr, length, prot, flags, offset)
+        } else {
+            Err("No device associated with this DevFileObject")
+        }
+    }
+    
+    fn munmap(&self, addr: usize, length: usize) -> Result<(), &'static str> {
+        // For device files, delegate to the underlying device if it supports memory mapping
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            // Device trait already extends MemoryMappingOps, so we can call munmap directly
+            device_guard_ref.munmap(addr, length)
+        } else {
+            Err("No device associated with this DevFileObject")
+        }
+    }
+}
+
 impl FileObject for DevFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
@@ -732,6 +756,8 @@ impl ControlOps for DevDirectoryObject {
         Err("Control operations not supported on directories")
     }
 }
+
+impl MemoryMappingOps for DevDirectoryObject {}
 
 impl FileObject for DevDirectoryObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {

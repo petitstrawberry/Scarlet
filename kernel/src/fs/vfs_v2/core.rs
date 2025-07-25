@@ -13,7 +13,7 @@ use core::{any::Any, fmt::Debug};
 use core::fmt;
 
 use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, SeekFrom};
-use crate::object::capability::{StreamOps, ControlOps, StreamError};
+use crate::object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError};
 use super::mount_tree::MountPoint;
 
 /// DirectoryEntry structure used by readdir
@@ -371,6 +371,16 @@ impl StreamOps for VfsFileObject {
 impl ControlOps for VfsFileObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         self.inner.control(command, arg)
+    }
+}
+
+impl MemoryMappingOps for VfsFileObject {
+    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) -> Result<usize, &'static str> {
+        self.inner.mmap(vaddr, length, prot, flags, offset)
+    }
+    
+    fn munmap(&self, addr: usize, length: usize) -> Result<(), &'static str> {
+        self.inner.munmap(addr, length)
     }
 }
 

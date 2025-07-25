@@ -1,7 +1,7 @@
 use core::any::Any;
 
 use super::Device;
-use crate::object::capability::ControlOps;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 extern crate alloc;
 
@@ -209,6 +209,20 @@ impl ControlOps for GenericCharDevice {
     // Generic character devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for GenericCharDevice {
+    // Generic character devices don't support memory mapping by default
+    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) 
+           -> Result<usize, &'static str> {
+        let _ = (vaddr, length, prot, flags, offset);
+        Err("Memory mapping not supported by this character device")
+    }
+    
+    fn munmap(&self, vaddr: usize, length: usize) -> Result<(), &'static str> {
+        let _ = (vaddr, length);
+        Err("Memory mapping not supported by this character device")
     }
 }
 

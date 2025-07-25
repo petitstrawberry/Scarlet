@@ -10,7 +10,7 @@ use spin::Mutex;
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
-use crate::object::capability::ControlOps;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 /// Get the first available network device
 /// 
@@ -308,6 +308,18 @@ impl ControlOps for GenericNetworkDevice {
     // Generic network devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for GenericNetworkDevice {
+    // Network devices generally don't support memory mapping by default
+    fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
+           -> Result<usize, &'static str> {
+        Err("Memory mapping not supported by this network device")
+    }
+    
+    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
+        Err("Memory mapping not supported by this network device")
     }
 }
 

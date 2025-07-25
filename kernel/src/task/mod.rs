@@ -1078,11 +1078,53 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
     Task::new(name, priority, TaskType::User)
 }
 
+#[cfg(test)]
+static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
+
+#[cfg(test)]
+/// Set a mock current task for testing purposes
+/// 
+/// This function allows tests to override the return value of mytask()
+/// for controlled testing scenarios.
+/// 
+/// # Arguments
+/// * `task` - The task to return from mytask()
+/// 
+/// # Safety
+/// The caller must ensure the task pointer remains valid for the duration
+/// of the test and that clear_mock_current_task() is called when done.
+/// This function is only safe to call in single-threaded test environments.
+pub unsafe fn set_mock_current_task(task: &'static mut Task) {
+    unsafe {
+        MOCK_CURRENT_TASK = Some(task as *mut Task);
+    }
+}
+
+#[cfg(test)]
+/// Clear the mock current task, reverting to normal scheduler behavior
+/// 
+/// # Safety
+/// This function is only safe to call in single-threaded test environments.
+pub unsafe fn clear_mock_current_task() {
+    unsafe {
+        MOCK_CURRENT_TASK = None;
+    }
+}
+
 /// Get the current task.
 /// 
 /// # Returns
 /// The current task if it exists.
 pub fn mytask() -> Option<&'static mut Task> {
+    #[cfg(test)]
+    {
+        unsafe {
+            if let Some(task_ptr) = MOCK_CURRENT_TASK {
+                return Some(&mut *task_ptr);
+            }
+        }
+    }
+    
     let cpu = get_cpu();
     get_scheduler().get_current_task(cpu.get_cpuid())
 }

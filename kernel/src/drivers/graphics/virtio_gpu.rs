@@ -10,9 +10,9 @@
 use spin::{Mutex, RwLock};
 
 use crate::{
-    device::{Device, DeviceType, graphics::{GraphicsDevice, FramebufferConfig, PixelFormat}},
+    device::{graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}, Device, DeviceType},
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}},
-    mem::page::allocate_raw_pages, object::capability::ControlOps,
+    mem::page::allocate_raw_pages, object::capability::{ControlOps, MemoryMappingOps},
 };
 
 // VirtIO GPU Constants
@@ -502,6 +502,8 @@ impl ControlOps for VirtioGpuDevice {
         Err("Control operations not supported")
     }
 }
+
+impl MemoryMappingOps for VirtioGpuDevice {}
 
 impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {

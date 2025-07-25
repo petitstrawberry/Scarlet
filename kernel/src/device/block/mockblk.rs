@@ -9,7 +9,7 @@ use super::request::BlockIORequestType;
 use super::*;
 use crate::device::block::request::BlockIOResult;
 use crate::device::{Device, DeviceType};
-use crate::object::capability::ControlOps;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 // Mock block device
 pub struct MockBlockDevice {
@@ -142,5 +142,21 @@ impl ControlOps for MockBlockDevice {
     // Mock block devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for MockBlockDevice {
+    // Mock block devices don't support memory mapping by default
+    fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
+           -> Result<usize, &'static str> {
+        Err("Memory mapping not supported")
+    }
+
+    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
+        Err("Memory mapping not supported")
+    }
+
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
