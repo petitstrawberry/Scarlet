@@ -592,7 +592,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
                 }
                 
                 // Additional check: Verify physical mapping starts within framebuffer range
-                // Note: The mapping might extend beyond framebuffer due to page alignment,
+                // Note: The mapping might extend beyond the framebuffer due to page alignment,
                 // but it should start at the framebuffer's physical address
                 let fb_start = self.fb_resource.physical_addr;
                 
