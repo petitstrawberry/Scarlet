@@ -608,7 +608,27 @@ impl ControlOps for DevFileObject {
 }
 
 impl MemoryMappingOps for DevFileObject {
-    // TODO: Implement memory mapping for device files
+    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) -> Result<usize, &'static str> {
+        // For device files, delegate to the underlying device if it supports memory mapping
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            // Device trait already extends MemoryMappingOps, so we can call mmap directly
+            device_guard_ref.mmap(vaddr, length, prot, flags, offset)
+        } else {
+            Err("No device associated with this DevFileObject")
+        }
+    }
+    
+    fn munmap(&self, addr: usize, length: usize) -> Result<(), &'static str> {
+        // For device files, delegate to the underlying device if it supports memory mapping
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            // Device trait already extends MemoryMappingOps, so we can call munmap directly
+            device_guard_ref.munmap(addr, length)
+        } else {
+            Err("No device associated with this DevFileObject")
+        }
+    }
 }
 
 impl FileObject for DevFileObject {
