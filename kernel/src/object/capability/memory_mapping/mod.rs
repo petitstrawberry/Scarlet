@@ -3,8 +3,9 @@
 //! This module provides the MemoryMappingOps trait for objects that support
 //! memory mapping operations like mmap and munmap.
 
-use crate::arch::Trapframe;
-use crate::task::mytask;
+pub mod syscall;
+
+pub use syscall::{sys_memory_map, sys_memory_unmap};
 
 /// Memory mapping operations capability
 /// 
@@ -57,90 +58,6 @@ pub trait MemoryMappingOps: Send + Sync {
     /// * `bool` - true if this object supports memory mapping
     fn supports_mmap(&self) -> bool {
         false
-    }
-}
-
-/// System call for memory mapping a KernelObject with MemoryMappingOps capability
-/// 
-/// # Arguments
-/// - handle: Handle to the KernelObject (must support MemoryMappingOps)
-/// - vaddr: Virtual address where to map (0 means kernel chooses)
-/// - length: Length of the mapping in bytes
-/// - prot: Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
-/// - flags: Mapping flags (MAP_SHARED, MAP_PRIVATE, etc.)
-/// - offset: Offset within the object to start mapping from
-/// 
-/// # Returns
-/// - On success: virtual address of the mapping
-/// - On error: usize::MAX
-pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return usize::MAX,
-    };
-    
-    let handle = trapframe.get_arg(0) as u32;
-    let vaddr = trapframe.get_arg(1) as usize;
-    let length = trapframe.get_arg(2) as usize;
-    let prot = trapframe.get_arg(3) as usize;
-    let flags = trapframe.get_arg(4) as usize;
-    let offset = trapframe.get_arg(5) as usize;
-
-    // Increment PC to avoid infinite loop if mmap fails
-    trapframe.increment_pc_next(task);
-
-    // Get KernelObject from handle table
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid handle
-    };
-
-    // Check if object supports MemoryMappingOps
-    let memory_mappable = match kernel_obj.as_memory_mappable() {
-        Some(mappable) => mappable,
-        None => return usize::MAX, // Object doesn't support memory mapping operations
-    };
-
-    // Perform mmap operation
-    match memory_mappable.mmap(vaddr, length, prot, flags, offset) {
-        Ok(mapped_addr) => mapped_addr,
-        Err(_) => usize::MAX, // Mmap error
-    }
-}
-
-/// System call for unmapping memory from a KernelObject
-/// 
-/// # Arguments
-/// - vaddr: Virtual address of the mapping to unmap
-/// - length: Length of the mapping to unmap
-/// 
-/// # Returns
-/// - On success: 0
-/// - On error: usize::MAX
-pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return usize::MAX,
-    };
-    
-    let vaddr = trapframe.get_arg(0) as usize;
-    let length = trapframe.get_arg(1) as usize;
-
-    // Increment PC to avoid infinite loop if munmap fails
-    trapframe.increment_pc_next(task);
-
-    // For now, we'll implement a simple munmap that works with any object
-    // In a more sophisticated implementation, we might track which object
-    // was responsible for each mapping and call munmap on the specific object
-    
-    // Find the memory mapping that contains this address
-    if let Some(_memory_map) = task.vm_manager.search_memory_map(vaddr) {
-        // For now, return success - the actual unmapping would need to be
-        // implemented in the VM manager with proper object tracking
-        // TODO: Track which handle/object created each mapping for proper cleanup
-        0
-    } else {
-        usize::MAX // No mapping found at this address
     }
 }
 
