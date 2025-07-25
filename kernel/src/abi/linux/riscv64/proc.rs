@@ -78,6 +78,8 @@ pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(get_cpu());
+    
+    usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
 pub fn sys_exit_group(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -89,6 +91,7 @@ pub fn sys_exit_group(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     task.exit(exit_code);
 
     get_scheduler().schedule(get_cpu());
+    usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
 pub fn sys_set_robust_list(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
