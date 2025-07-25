@@ -525,17 +525,13 @@ impl MemoryMappingOps for FramebufferCharDevice {
                 (flags & 0x01) != 0, // MAP_SHARED
             );
             
-            // Add mapping to VM manager
+            // Add mapping to VM manager (lazy mapping - actual page table setup on page fault)
             vm_manager.add_memory_map(map)
                 .map_err(|_| "Failed to add memory mapping")?;
             
-            // Map physical pages to virtual pages through page table
-            if let Some(page_table) = vm_manager.get_root_page_table() {
-                page_table.map_memory_area(vm_manager.get_asid(), map)
-                    .map_err(|_| "Failed to map physical pages")?;
-            } else {
-                return Err("No page table available");
-            }
+            // Note: Physical pages are not immediately mapped to virtual pages
+            // The page fault handler will establish the actual mapping when accessed
+            // This provides better memory efficiency and faster mmap performance
             
             // Record this mapping for munmap validation
             {
