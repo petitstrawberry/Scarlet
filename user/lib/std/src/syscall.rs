@@ -49,6 +49,10 @@ pub enum Syscall {
     
     // === IPC Operations ===
     Pipe = 600,             // Create pipe handles
+    
+    // === Memory Mapping Operations ===
+    MemoryMap = 700,        // Memory map operation (mmap)
+    MemoryUnmap = 701,      // Memory unmap operation (munmap)
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
@@ -73,4 +77,8 @@ pub fn syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: u
 
 pub fn syscall5(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> usize {
     arch_syscall5(syscall, arg1, arg2, arg3, arg4, arg5)
+}
+
+pub fn syscall6(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) -> usize {
+    arch_syscall6(syscall, arg1, arg2, arg3, arg4, arg5, arg6)
 }
