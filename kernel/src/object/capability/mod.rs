@@ -6,6 +6,7 @@
 pub mod stream;
 pub mod file;
 pub mod control;
+pub mod memory_mapping;
 
 #[cfg(test)]
 mod control_tests;
@@ -20,6 +21,9 @@ pub use file::{FileObject, SeekFrom};
 
 // Re-export control types
 pub use control::ControlOps;
+
+// Re-export memory mapping types
+pub use memory_mapping::MemoryMappingOps;
 
 /// Clone operations capability
 /// 
