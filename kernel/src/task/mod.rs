@@ -487,9 +487,8 @@ impl Task {
         let page = vaddr / PAGE_SIZE;
         for p in 0..num_of_pages {
             let vaddr = (page + p) * PAGE_SIZE;
-            match self.vm_manager.search_memory_map_idx(vaddr) {
-                Some(idx) => {
-                    let mmap = self.vm_manager.remove_memory_map(idx).unwrap();
+            match self.vm_manager.remove_memory_map_by_addr(vaddr) {
+                Some(mmap) => {
                     if p == 0 && mmap.vmarea.start < vaddr {
                         /* Re add the first part of the memory map */
                         let size = vaddr - mmap.vmarea.start;
@@ -838,7 +837,7 @@ impl Task {
         
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child
-            for mmap in self.vm_manager.get_memmap() {
+            for mmap in self.vm_manager.memmap_iter() {
                 let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
                 let vaddr = mmap.vmarea.start;
                 
@@ -1187,14 +1186,14 @@ mod tests {
         }
 
         // Get parent memory map count before cloning
-        let parent_memmap_count = parent_task.vm_manager.get_memmap().len();
+        let parent_memmap_count = parent_task.vm_manager.memmap_len();
         let parent_id = parent_task.get_id();
 
         // Clone the parent task
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Get child memory map count after cloning
-        let child_memmap_count = child_task.vm_manager.get_memmap().len();
+        let child_memmap_count = child_task.vm_manager.memmap_len();
 
         // Verify that the number of memory maps are identical
         assert_eq!(child_memmap_count, parent_memmap_count, 
@@ -1211,14 +1210,12 @@ mod tests {
         assert_eq!(child_task.text_size, parent_task.text_size);
 
         // Find the corresponding memory map in child that matches our test allocation
-        let child_memmaps = child_task.vm_manager.get_memmap();
-        let child_mmap = child_memmaps.iter()
+        let child_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
             .expect("Test memory map not found in child task");
 
         // Verify that our specific memory region exists in both parent and child
-        let parent_memmaps = parent_task.vm_manager.get_memmap();
-        let parent_test_mmap = parent_memmaps.iter()
+        let parent_test_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
             .expect("Test memory map not found in parent task");
 
@@ -1276,7 +1273,7 @@ mod tests {
         parent_task.init();
 
         // Find the stack memory map in parent
-        let stack_mmap = parent_task.vm_manager.get_memmap().iter()
+        let stack_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| {
                 // Stack should be near USER_STACK_TOP and have stack permissions
                 use crate::vm::vmem::VirtualMemoryRegion;
@@ -1300,7 +1297,7 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the corresponding stack memory map in child
-        let child_stack_mmap = child_task.vm_manager.get_memmap().iter()
+        let child_stack_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| {
                 use crate::vm::vmem::VirtualMemoryRegion;
                 mmap.vmarea.start == stack_mmap.vmarea.start &&
@@ -1389,7 +1386,7 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the shared memory map in child
-        let child_shared_mmap = child_task.vm_manager.get_memmap().iter()
+        let child_shared_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == shared_vaddr && mmap.is_shared)
             .expect("Shared memory map not found in child task");
 

@@ -36,7 +36,7 @@
 //!
 
 extern crate alloc;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec, collections::BTreeMap};
 
 use crate::{arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable}, environment::PAGE_SIZE};
 
@@ -44,8 +44,9 @@ use super::vmem::VirtualMemoryMap;
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
-    memmap: Vec<VirtualMemoryMap>,
+    memmap: BTreeMap<usize, VirtualMemoryMap>, // start_addr -> VirtualMemoryMap
     asid: u16,
+    mmap_base: usize,           // mmap領域のベースアドレス
     page_tables: Vec<Arc<PageTable>>,
 }
 
@@ -56,8 +57,9 @@ impl VirtualMemoryManager {
     /// A new virtual memory manager with default values.
     pub fn new() -> Self {
         VirtualMemoryManager {
-            memmap: Vec::new(),
+            memmap: BTreeMap::new(),
             asid: 0,
+            mmap_base: 0x40000000, // 1GB位置から開始（デフォルト）
             page_tables: Vec::new(),
         }
     }
@@ -85,8 +87,59 @@ impl VirtualMemoryManager {
         self.asid
     }
 
-    pub fn get_memmap(&self) -> &Vec<VirtualMemoryMap> {
-        &self.memmap
+    /// Returns an iterator over all memory maps.
+    /// This is the preferred way to iterate over memory maps.
+    /// 
+    /// # Returns
+    /// An iterator over references to all memory maps.
+    pub fn memmap_iter(&self) -> impl Iterator<Item = &VirtualMemoryMap> {
+        self.memmap.values()
+    }
+
+    /// Returns a mutable iterator over all memory maps.
+    /// 
+    /// # Returns
+    /// A mutable iterator over references to all memory maps.
+    pub fn memmap_iter_mut(&mut self) -> impl Iterator<Item = &mut VirtualMemoryMap> {
+        self.memmap.values_mut()
+    }
+
+    /// Returns the number of memory maps.
+    /// 
+    /// # Returns
+    /// The number of memory maps.
+    pub fn memmap_len(&self) -> usize {
+        self.memmap.len()
+    }
+
+    /// Returns true if there are no memory maps.
+    /// 
+    /// # Returns
+    /// True if there are no memory maps.
+    pub fn memmap_is_empty(&self) -> bool {
+        self.memmap.is_empty()
+    }
+
+    /// Gets a memory map by its start address.
+    /// 
+    /// # Arguments
+    /// * `start_addr` - The start address of the memory map
+    /// 
+    /// # Returns
+    /// The memory map with the given start address, if it exists.
+    pub fn get_memory_map_by_addr(&self, start_addr: usize) -> Option<&VirtualMemoryMap> {
+        self.memmap.get(&start_addr)
+    }
+
+    /// Gets a mutable memory map by its start address.
+    /// 
+    /// # Arguments
+    /// * `start_addr` - The start address of the memory map
+    /// 
+    /// # Returns
+    /// The mutable memory map with the given start address, if it exists.
+    pub fn get_memory_map_by_addr_mut(&mut self, start_addr: usize) -> Option<&mut VirtualMemoryMap> {
+        self.memmap.get_mut(&start_addr)
     }
 
     /// Adds a memory map to the virtual memory manager.
@@ -104,7 +157,14 @@ impl VirtualMemoryManager {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
 
-        self.memmap.push(map);
+        // Check for overlapping mappings
+        for existing_map in self.memmap.values() {
+            if !(map.vmarea.end < existing_map.vmarea.start || map.vmarea.start > existing_map.vmarea.end) {
+                return Err("Memory mapping overlaps with existing mapping");
+            }
+        }
+
+        self.memmap.insert(map.vmarea.start, map);
         Ok(())
     }
 
@@ -115,8 +175,13 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The memory map at the given index, if it exists.
+    /// 
+    /// # Note
+    /// This method is deprecated and inefficient for BTreeMap. 
+    /// Use `memmap_iter()` for iteration or `search_memory_map()` for address-based lookup.
+    #[deprecated(note = "Use memmap_iter() or search_memory_map() instead")]
     pub fn get_memory_map(&self, idx: usize) -> Option<&VirtualMemoryMap> {
-        self.memmap.get(idx)
+        self.memmap.values().nth(idx)
     }
 
     /// Removes the memory map at the given index.
@@ -126,35 +191,61 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The removed memory map, if it exists.
+    /// 
+    /// # Note
+    /// This method is deprecated and inefficient for BTreeMap.
+    /// Use `remove_memory_map_by_addr()` for address-based removal.
+    #[deprecated(note = "Use remove_memory_map_by_addr() instead")]
     pub fn remove_memory_map(&mut self, idx: usize) -> Option<VirtualMemoryMap> {
-        if idx < self.memmap.len() {
-            Some(self.memmap.remove(idx))
+        if let Some((start_addr, _)) = self.memmap.iter().nth(idx) {
+            let start_addr = *start_addr;
+            self.memmap.remove(&start_addr)
         } else {
             None
         }
+    }
+
+    /// Removes the memory map containing the given virtual address.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address contained in the memory map to remove
+    /// 
+    /// # Returns
+    /// The removed memory map, if it exists.
+    pub fn remove_memory_map_by_addr(&mut self, vaddr: usize) -> Option<VirtualMemoryMap> {
+        // Find the start address of the memory map containing vaddr
+        for (&start_addr, map) in self.memmap.iter() {
+            if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
+                return self.memmap.remove(&start_addr);
+            }
+        }
+        None
     }
 
     /// Removes all memory maps.
     /// 
     /// # Returns
     /// The removed memory maps.
-    pub fn remove_all_memory_maps(&mut self) -> Vec<VirtualMemoryMap> {
-        let mut removed_maps = Vec::new();
-        while !self.memmap.is_empty() {
-            removed_maps.push(self.memmap.remove(0));
-        }
-        removed_maps
+    /// 
+    /// # Note
+    /// This method returns an iterator instead of a cloned Vec for efficiency.
+    pub fn remove_all_memory_maps(&mut self) -> impl Iterator<Item = VirtualMemoryMap> {
+        let memmap = core::mem::take(&mut self.memmap);
+        memmap.into_values()
     }
 
-    /// Restores the memory maps from a given vector.
+    /// Restores the memory maps from a given iterator.
     ///
     /// # Arguments
-    /// * `maps` - The vector of memory maps to restore
+    /// * `maps` - The iterator of memory maps to restore
     /// 
     /// # Returns
     /// A result indicating success or failure.
     /// 
-    pub fn restore_memory_maps(&mut self, maps: Vec<VirtualMemoryMap>) -> Result<(), &'static str> {
+    pub fn restore_memory_maps<I>(&mut self, maps: I) -> Result<(), &'static str> 
+    where 
+        I: IntoIterator<Item = VirtualMemoryMap>
+    {
         for map in maps {
             if let Err(e) = self.add_memory_map(map) {
                 return Err(e);
@@ -171,13 +262,12 @@ impl VirtualMemoryManager {
     /// # Returns
     /// The memory map containing the given virtual address, if it exists.
     pub fn search_memory_map(&self, vaddr: usize) -> Option<&VirtualMemoryMap> {
-        let mut ret = None;
-        for map in self.memmap.iter() {
+        for (_, map) in self.memmap.iter() {
             if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
-                ret = Some(map);
+                return Some(map);
             }
         }
-        ret
+        None
     }
 
     /// Searches for the index of a memory map containing the given virtual address.
@@ -187,14 +277,18 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The index of the memory map containing the given virtual address, if it exists.
+    /// 
+    /// # Note
+    /// This method is deprecated for BTreeMap as indices are not meaningful.
+    /// Use `search_memory_map()` for direct address-based lookup.
+    #[deprecated(note = "Use search_memory_map() instead - indices are not meaningful for BTreeMap")]
     pub fn search_memory_map_idx(&self, vaddr: usize) -> Option<usize> {
-        let mut ret = None;
-        for (i, map) in self.memmap.iter().enumerate() {
+        for (i, (_, map)) in self.memmap.iter().enumerate() {
             if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
-                ret = Some(i);
+                return Some(i);
             }
         }
-        ret
+        None
     }
 
     /// Adds a page table to the virtual memory manager.
@@ -221,7 +315,7 @@ impl VirtualMemoryManager {
     /// The translated physical address. Returns None if no mapping exists for the address
     pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
         // Search memory mapping
-        for map in self.memmap.iter() {
+        for (_, map) in self.memmap.iter() {
             if vaddr >= map.vmarea.start && vaddr <= map.vmarea.end {
                 // Calculate offset
                 let offset = vaddr - map.vmarea.start;
@@ -269,7 +363,15 @@ mod tests {
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
         vmm.add_memory_map(map).unwrap();
-        assert_eq!(vmm.get_memory_map(0).unwrap().vmarea.start, 0x1000);
+        
+        // Use new efficient API instead of deprecated get_memory_map(0)
+        assert_eq!(vmm.memmap_len(), 1);
+        let first_map = vmm.memmap_iter().next().unwrap();
+        assert_eq!(first_map.vmarea.start, 0x1000);
+        
+        // Test direct address-based access
+        assert!(vmm.get_memory_map_by_addr(0x1000).is_some());
+        assert_eq!(vmm.get_memory_map_by_addr(0x1000).unwrap().vmarea.start, 0x1000);
     }
 
     #[test_case]
@@ -278,9 +380,15 @@ mod tests {
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
         vmm.add_memory_map(map).unwrap();
-        let removed_map = vmm.remove_memory_map(0).unwrap();
+        
+        // Use address-based removal instead of index-based
+        let removed_map = vmm.remove_memory_map_by_addr(0x1000).unwrap();
         assert_eq!(removed_map.vmarea.start, 0x1000);
-        assert!(vmm.get_memory_map(0).is_none());
+        
+        // Verify removal using efficient API
+        assert!(vmm.memmap_is_empty());
+        assert_eq!(vmm.memmap_len(), 0);
+        assert!(vmm.get_memory_map_by_addr(0x1000).is_none());
     }
 
     #[test_case]
