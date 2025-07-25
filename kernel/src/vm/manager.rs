@@ -164,31 +164,22 @@ impl VirtualMemoryManager {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
 
-        // Efficient overlap detection using BTreeMap's ordered nature
-        // Instead of linear scan, we only check nearby memory maps using range queries
+        // Optimal overlap detection using BTreeMap's ordered nature
+        // Check only the directly adjacent maps (at most 2 maps) for O(log n) performance
         
-        // Check for overlapping mappings in the relevant range
-        let range_end = map.vmarea.end;
-        
-        // Find any memory map that might overlap by checking:
-        // 1. Maps that start before or at our range_end
-        // 2. Maps whose range extends past our range_start
-        for (_, existing_map) in self.memmap.range(..range_end) {
-            // Check if there's an actual overlap
-            if !(map.vmarea.end < existing_map.vmarea.start || map.vmarea.start > existing_map.vmarea.end) {
-                return Err("Memory mapping overlaps with existing mapping");
+        // 1. Check the map that starts immediately before the new map
+        if let Some((_, prev_map)) = self.memmap.range(..map.vmarea.start).next_back() {
+            // If the previous map extends into our range, there's an overlap
+            if prev_map.vmarea.end > map.vmarea.start {
+                return Err("Memory mapping overlaps with a preceding map");
             }
         }
         
-        // Also check maps that start at or after our range_end (they might extend backwards)
-        for (_, existing_map) in self.memmap.range(range_end..) {
-            // Early termination: if this map starts after our range ends, no more overlaps possible
-            if existing_map.vmarea.start > range_end {
-                break;
-            }
-            // Check overlap
-            if !(map.vmarea.end < existing_map.vmarea.start || map.vmarea.start > existing_map.vmarea.end) {
-                return Err("Memory mapping overlaps with existing mapping");
+        // 2. Check the map that starts at or after the new map's start position
+        if let Some((_, next_map)) = self.memmap.range(map.vmarea.start..).next() {
+            // If the next map starts before our range ends, there's an overlap
+            if next_map.vmarea.start < map.vmarea.end {
+                return Err("Memory mapping overlaps with a succeeding map");
             }
         }
 
@@ -291,13 +282,14 @@ impl VirtualMemoryManager {
     /// # Returns
     /// The memory map containing the address, if found
     fn find_memory_map_optimized(&self, vaddr: usize) -> Option<&VirtualMemoryMap> {
-        // Strategy: Use BTreeMap's range() to find the rightmost memory map that could contain vaddr
-        // This avoids scanning all maps by leveraging the sorted nature of BTreeMap
+        // Strategy: Use BTreeMap's range() to find the memory map that could contain vaddr
+        // Since the key is vmarea.start, we need to find the map where:
+        // vmarea.start <= vaddr <= vmarea.end
         
-        // Find all maps with start_addr <= vaddr, then check the last one
-        // This is O(log n) to find the position + O(log n) to verify
-        if let Some((_start_addr, map)) = self.memmap.range(..=vaddr).next_back() {
-            if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
+        // Find the map with the largest start address <= vaddr
+        if let Some((_, map)) = self.memmap.range(..=vaddr).next_back() {
+            // Check if vaddr is within this map's range
+            if vaddr <= map.vmarea.end {
                 return Some(map);
             }
         }
