@@ -556,7 +556,7 @@ impl Drop for VirtualMemoryManager {
 }
 
 #[cfg(test)]
-mod tests {    
+mod tests {
     use crate::arch::vm::alloc_virtual_address_space;
     use crate::vm::VirtualMemoryMap;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
@@ -653,8 +653,8 @@ mod tests {
         
         // Add some memory maps to test collision avoidance
         let map1 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea { start: 0x80000000, end: 0x80000fff },
-            crate::vm::vmem::MemoryArea { start: 0x50000000, end: 0x50000fff },
+            crate::vm::vmem::MemoryArea { start: 0x80000000, end: 0x80000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x50000000, end: 0x50000fff }, // vmarea
             0o644,
             false
         );
@@ -666,15 +666,15 @@ mod tests {
         assert!(addr2.unwrap() > 0x50000fff);
         
         // Test memory statistics
-        let (total_vmas, total_size, gaps) = manager.get_memory_stats();
-        assert_eq!(total_vmas, 1);
+        let (total_maps, total_size, gaps) = manager.get_memory_stats();
+        assert_eq!(total_maps, 1);
         assert_eq!(total_size, PAGE_SIZE);
-        assert_eq!(gaps, 0); // No gaps with single VMA
+        assert_eq!(gaps, 0); // No gaps with single map
         
-        // Add another non-adjacent VMA to create a gap
+        // Add another non-adjacent map to create a gap
         let map2 = VirtualMemoryMap::new(
-            crate::vm::vmem::MemoryArea { start: 0x80002000, end: 0x80002fff },
-            crate::vm::vmem::MemoryArea { start: 0x50002000, end: 0x50002fff },
+            crate::vm::vmem::MemoryArea { start: 0x80002000, end: 0x80002fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x50002000, end: 0x50002fff }, // vmarea
             0o644,
             false
         );
@@ -733,5 +733,212 @@ mod tests {
         assert!(merged_map.is_some());
         assert_eq!(merged_map.unwrap().vmarea.start, 0x10000000);
         assert_eq!(merged_map.unwrap().vmarea.end, 0x10001fff);
+    }
+
+    #[test_case]
+    fn test_complex_overlap_detection() {
+        let mut manager = VirtualMemoryManager::new();
+        
+        // Set up existing memory maps for comprehensive overlap testing
+        // Map 1: [0x1000, 0x2000)
+        let map1 = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
+            0o644, false
+        );
+        manager.add_memory_map(map1).unwrap();
+        
+        // Map 2: [0x4000, 0x5000)
+        let map2 = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x4000, end: 0x4fff },        // vmarea
+            0o644, false
+        );
+        manager.add_memory_map(map2).unwrap();
+        
+        // Map 3: [0x7000, 0x8000)
+        let map3 = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x30000000, end: 0x30000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x7000, end: 0x7fff },        // vmarea
+            0o644, false
+        );
+        manager.add_memory_map(map3).unwrap();
+        
+        // Test Case 1: Overlap with previous map (end boundary)
+        // Try to add [0x1800, 0x2800) - overlaps with map1's end
+        let overlap_with_prev = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x40000000, end: 0x40000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1800, end: 0x27ff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(overlap_with_prev).is_err());
+        
+        // Test Case 2: Overlap with next map (start boundary)
+        // Try to add [0x3800, 0x4800) - overlaps with map2's start
+        let overlap_with_next = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x50000000, end: 0x50000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x3800, end: 0x47ff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(overlap_with_next).is_err());
+        
+        // Test Case 3: Complete containment by existing map
+        // Try to add [0x1200, 0x1800) - completely inside map1
+        let contained_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x60000000, end: 0x600005ff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1200, end: 0x17ff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(contained_map).is_err());
+        
+        // Test Case 4: Containing an existing map
+        // Try to add [0x800, 0x2800) - contains map1 completely
+        let containing_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x70000000, end: 0x70001fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x800, end: 0x27ff },         // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(containing_map).is_err());
+        
+        // Test Case 5: Exact boundary collision (touching exactly)
+        // Try to add [0x2000, 0x3000) - starts exactly where map1 ends
+        let exact_boundary = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x80000000, end: 0x80000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x2000, end: 0x2fff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(exact_boundary).is_ok()); // Should succeed (touching but not overlapping)
+        
+        // Test Case 6: Valid gap insertion
+        // Add [0x5000, 0x6000) - fits perfectly between map2 and map3
+        let gap_insertion = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x90000000, end: 0x90000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x5000, end: 0x5fff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(gap_insertion).is_ok());
+        
+        // Test Case 7: Edge case - inserting at the very beginning
+        // Add [0x0, 0x1000) - before all existing maps
+        let beginning_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0xa0000000, end: 0xa0000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x0, end: 0xfff },            // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(beginning_map).is_ok());
+        
+        // Test Case 8: Edge case - inserting at the very end
+        // Add [0x8000, 0x9000) - after all existing maps
+        let end_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0xb0000000, end: 0xb0000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x8000, end: 0x8fff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(end_map).is_ok());
+        
+        // Verify final state: should have 7 maps total
+        assert_eq!(manager.memmap_len(), 7);
+        
+        // Verify all maps are accessible and correctly ordered
+        let starts: [usize; 7] = [0x0, 0x1000, 0x2000, 0x4000, 0x5000, 0x7000, 0x8000];
+        let mut i = 0;
+        for map in manager.memmap_iter() {
+            assert_eq!(map.vmarea.start, starts[i]);
+            i += 1;
+        }
+        assert_eq!(i, 7);
+    }
+    
+    #[test_case]
+    fn test_alignment_and_edge_cases() {
+        let mut manager = VirtualMemoryManager::new();
+        
+        // Test Case 1: Non-aligned virtual address (should fail)
+        let misaligned_virtual = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1001, end: 0x2000 },        // vmarea - Not PAGE_SIZE aligned
+            0o644, false
+        );
+        assert!(manager.add_memory_map(misaligned_virtual).is_err());
+        
+        // Test Case 2: Non-aligned physical address (should fail)
+        let misaligned_physical = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000001, end: 0x10001000 }, // pmarea - Not PAGE_SIZE aligned
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(misaligned_physical).is_err());
+        
+        // Test Case 3: Non-aligned size (should fail)
+        let misaligned_size = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000800 }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1800 },        // vmarea - Size is not PAGE_SIZE multiple
+            0o644, false
+        );
+        assert!(manager.add_memory_map(misaligned_size).is_err());
+        
+        // Test Case 4: Zero-size mapping (should fail)
+        let zero_size = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000000 }, // pmarea - Start == End
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1000 },        // vmarea - Start == End
+            0o644, false
+        );
+        assert!(manager.add_memory_map(zero_size).is_err());
+        
+        // Test Case 5: Single page mapping (should succeed)
+        let single_page = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
+            0o644, false
+        );
+        assert!(manager.add_memory_map(single_page).is_ok());
+        
+        // Test Case 6: Large mapping (multiple pages)
+        let large_mapping = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x2000ffff }, // pmarea - 64KB
+            crate::vm::vmem::MemoryArea { start: 0x10000, end: 0x1ffff },      // vmarea - 64KB
+            0o644, false
+        );
+        assert!(manager.add_memory_map(large_mapping).is_ok());
+        
+        assert_eq!(manager.memmap_len(), 2);
+    }
+    
+    #[test_case]
+    fn test_cache_invalidation_on_add() {
+        let mut manager = VirtualMemoryManager::new();
+        
+        // Add initial mapping
+        let map1 = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
+            0o644, false
+        );
+        manager.add_memory_map(map1).unwrap();
+        
+        // Search to populate cache
+        let found = manager.search_memory_map(0x1500);
+        assert!(found.is_some());
+        
+        // Verify cache is populated (indirect test through repeated search performance)
+        let found_again = manager.search_memory_map(0x1500);
+        assert!(found_again.is_some());
+        
+        // Add another mapping, which should invalidate cache
+        let map2 = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x3000, end: 0x3fff },        // vmarea
+            0o644, false
+        );
+        manager.add_memory_map(map2).unwrap();
+        
+        // Search should still work correctly after cache invalidation
+        let found_after_invalidation = manager.search_memory_map(0x1500);
+        assert!(found_after_invalidation.is_some());
+        assert_eq!(found_after_invalidation.unwrap().vmarea.start, 0x1000);
+        
+        let found_new = manager.search_memory_map(0x3500);
+        assert!(found_new.is_some());
+        assert_eq!(found_new.unwrap().vmarea.start, 0x3000);
     }
 }
