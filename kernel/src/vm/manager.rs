@@ -46,7 +46,7 @@ use super::vmem::VirtualMemoryMap;
 pub struct VirtualMemoryManager {
     memmap: BTreeMap<usize, VirtualMemoryMap>, // start_addr -> VirtualMemoryMap
     asid: u16,
-    mmap_base: usize,           // mmap領域のベースアドレス
+    mmap_base: usize,        // Mmap from this base address
     page_tables: Vec<Arc<PageTable>>,
     
     /// Cache for the last searched memory map to accelerate repeated accesses
@@ -63,7 +63,7 @@ impl VirtualMemoryManager {
         VirtualMemoryManager {
             memmap: BTreeMap::new(),
             asid: 0,
-            mmap_base: 0x40000000, // 1GB位置から開始（デフォルト）
+            mmap_base: 0x40000000, // 1 GB base address for mmap (Default)
             page_tables: Vec::new(),
             last_search_cache: None,
         }
