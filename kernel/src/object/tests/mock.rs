@@ -156,6 +156,8 @@ impl ControlOps for MockTaskFileObject {
     }
 }
 
+impl MemoryMappingOps for MockTaskFileObject {}
+
 impl crate::fs::FileObject for MockTaskFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut pos = self.position.lock();
