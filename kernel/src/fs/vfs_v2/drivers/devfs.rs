@@ -33,7 +33,7 @@ use core::any::Any;
 use crate::{driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, 
     FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom
-}};
+}, object::capability::MemoryMappingOps};
 use crate::device::{manager::DeviceManager, DeviceType, Device};
 use crate::object::capability::{StreamOps, StreamError, ControlOps};
 
@@ -607,6 +607,10 @@ impl ControlOps for DevFileObject {
     }
 }
 
+impl MemoryMappingOps for DevFileObject {
+    // TODO: Implement memory mapping for device files
+}
+
 impl FileObject for DevFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
@@ -732,6 +736,8 @@ impl ControlOps for DevDirectoryObject {
         Err("Control operations not supported on directories")
     }
 }
+
+impl MemoryMappingOps for DevDirectoryObject {}
 
 impl FileObject for DevDirectoryObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {

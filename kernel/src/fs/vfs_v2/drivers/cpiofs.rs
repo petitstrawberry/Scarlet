@@ -12,7 +12,7 @@ use alloc::sync::Weak;
 
 use crate::{driver_initcall, fs::{core::DirectoryEntryInternal, get_fs_driver_manager, vfs_v2::core::{
     FileSystemOperations, VfsNode
-}, FileSystemDriver, FileSystemType}, vm::vmem::MemoryArea};
+}, FileSystemDriver, FileSystemType}, object::capability::MemoryMappingOps, vm::vmem::MemoryArea};
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, FilePermission
 };
@@ -448,6 +448,8 @@ impl ControlOps for CpioFileObject {
     }
 }
 
+impl MemoryMappingOps for CpioFileObject {}
+
 impl FileObject for CpioFileObject {
     fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         let cpio_node = self.node.as_any()
@@ -578,6 +580,8 @@ impl ControlOps for CpioDirectoryObject {
         Err("Control operations not supported on CPIO directories")
     }
 }
+
+impl MemoryMappingOps for CpioDirectoryObject {}
 
 impl FileObject for CpioDirectoryObject {
     fn seek(&self, _whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {

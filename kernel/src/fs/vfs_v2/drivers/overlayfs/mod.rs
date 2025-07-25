@@ -47,7 +47,7 @@ use core::any::Any;
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal, VfsEntry};
 use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager};
-use crate::object::capability::{StreamOps, StreamError, ControlOps};
+use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::vm::vmem::MemoryArea;
 
@@ -1097,6 +1097,8 @@ impl ControlOps for OverlayDirectoryObject {
         Err("Control operations not supported on overlay directories")
     }
 }
+
+impl MemoryMappingOps for OverlayDirectoryObject {}
 
 impl FileObject for OverlayDirectoryObject {
     fn seek(&self, _whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {

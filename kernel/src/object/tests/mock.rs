@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use spin::Mutex;
-use crate::object::capability::{StreamOps, StreamError, CloneOps, ControlOps};
+use crate::object::capability::{CloneOps, ControlOps, MemoryMappingOps, StreamError, StreamOps};
 use crate::fs::{FileType, FileMetadata, SeekFrom};
 
 /// Mock FileObject for testing purposes
@@ -65,6 +65,8 @@ impl ControlOps for MockFileObject {
         Err("Control operations not supported on mock file objects")
     }
 }
+
+impl MemoryMappingOps for MockFileObject {}
 
 impl crate::fs::FileObject for MockFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
