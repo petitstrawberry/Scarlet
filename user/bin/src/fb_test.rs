@@ -63,6 +63,18 @@ fn main() -> i32 {
         }
     };
 
+    // Check memory mapping status
+    if framebuffer.is_using_mmap() {
+        if let Some((addr, size)) = framebuffer.get_mapping_info() {
+            println!("Memory mapping active:");
+            println!("  Mapped address: 0x{:x}", addr);
+            println!("  Mapped size: {} bytes", size);
+            println!("  Using direct memory access for better performance!");
+        }
+    } else {
+        println!("Memory mapping not available, using file I/O fallback");
+    }
+
     // Test 1: Fill screen with red
     println!("Test 1: Filling screen with red...");
     if let Err(e) = framebuffer.fill_screen([0, 0, 255, 255]) {

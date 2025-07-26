@@ -44,7 +44,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    
+
     let handle = trapframe.get_arg(0) as u32;
     let vaddr = trapframe.get_arg(1) as usize;
     let length = trapframe.get_arg(2) as usize;
@@ -116,7 +116,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         if (prot & PROT_WRITE) != 0 { perm |= 0x2; }
         if (prot & PROT_EXEC) != 0 { perm |= 0x4; }
         perm
-    };
+    } | 0x08; // Access from user space
 
     // Create virtual memory map with weak reference to the object
     let owner = kernel_obj.as_memory_mappable_weak();
