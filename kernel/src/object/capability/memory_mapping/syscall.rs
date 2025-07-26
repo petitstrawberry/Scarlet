@@ -1,15 +1,16 @@
 //! System calls for MemoryMappingOps capability
 //! 
-//! This module implements system calls that operate on KernelObjects
-//! with MemoryMappingOps capability, as well as direct memory mapping
-//! operations for ANONYMOUS and FIXED mappings.
+//! This module implements system calls for memory mapping operations.
+//! ANONYMOUS mappings are handled directly in the syscall for efficiency,
+//! while all other mappings (including FIXED) are delegated to KernelObjects
+//! with MemoryMappingOps capability.
 
 use crate::arch::Trapframe;
 use crate::task::mytask;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
 use crate::environment::PAGE_SIZE;
 use crate::mem::page::allocate_raw_pages;
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::collections::BTreeSet;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 // Memory mapping flags (MAP_*)
@@ -31,11 +32,11 @@ static ANONYMOUS_MAPPINGS: spin::Mutex<BTreeSet<usize>> = spin::Mutex::new(BTree
 static NEXT_ANONYMOUS_VADDR: AtomicUsize = AtomicUsize::new(0x40000000); // Start at 1GB
 
 /// System call for memory mapping a KernelObject with MemoryMappingOps capability
-/// or creating anonymous/fixed mappings
+/// or creating anonymous mappings
 /// 
 /// # Arguments
 /// - handle: Handle to the KernelObject (must support MemoryMappingOps) - ignored for ANONYMOUS
-/// - vaddr: Virtual address where to map (0 means kernel chooses, except for FIXED)
+/// - vaddr: Virtual address where to map (0 means kernel chooses)
 /// - length: Length of the mapping in bytes
 /// - prot: Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
 /// - flags: Mapping flags (MAP_SHARED, MAP_PRIVATE, MAP_FIXED, MAP_ANONYMOUS, etc.)
@@ -44,6 +45,10 @@ static NEXT_ANONYMOUS_VADDR: AtomicUsize = AtomicUsize::new(0x40000000); // Star
 /// # Returns
 /// - On success: virtual address of the mapping
 /// - On error: usize::MAX
+/// 
+/// # Design
+/// - ANONYMOUS mappings are handled entirely within this syscall
+/// - All other mappings (including FIXED) are delegated to the KernelObject's MemoryMappingOps
 pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
@@ -69,26 +74,12 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let num_pages = aligned_length / PAGE_SIZE;
 
-    // Handle ANONYMOUS mappings specially
+    // Handle ANONYMOUS mappings specially - these are handled entirely in the syscall
     if (flags & MAP_ANONYMOUS) != 0 {
         return handle_anonymous_mapping(task, vaddr, aligned_length, num_pages, prot, flags);
     }
 
-    // Handle FIXED mappings for non-anonymous objects
-    if (flags & MAP_FIXED) != 0 {
-        if vaddr == 0 {
-            return usize::MAX; // FIXED requires a specific address
-        }
-        
-        // Align vaddr to page boundary
-        if vaddr % PAGE_SIZE != 0 {
-            return usize::MAX; // Address must be page-aligned for FIXED
-        }
-        
-        return handle_fixed_mapping(task, handle, vaddr, aligned_length, num_pages, prot, flags, offset);
-    }
-
-    // Regular object-based mapping - delegate to KernelObject
+    // All other mappings (including FIXED) are delegated to KernelObject
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Invalid handle
@@ -100,7 +91,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support memory mapping operations
     };
 
-    // Perform mmap operation
+    // Perform mmap operation - let the object handle all aspects including FIXED mappings
     match memory_mappable.mmap(vaddr, length, prot, flags, offset) {
         Ok(mapped_addr) => mapped_addr,
         Err(_) => usize::MAX, // Mmap error
@@ -169,60 +160,6 @@ fn handle_anonymous_mapping(
     }
 }
 
-/// Handle fixed memory mapping for objects
-fn handle_fixed_mapping(
-    task: &mut crate::task::Task,
-    handle: u32,
-    vaddr: usize,
-    aligned_length: usize,
-    _num_pages: usize,
-    prot: usize,
-    flags: usize,
-    offset: usize,
-) -> usize {
-    // Get KernelObject from handle table
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid handle
-    };
-
-    // Check if object supports MemoryMappingOps
-    let memory_mappable = match kernel_obj.as_memory_mappable() {
-        Some(mappable) => mappable,
-        None => return usize::MAX, // Object doesn't support memory mapping operations
-    };
-
-    // Check for overlapping mappings and handle them
-    let end_addr = vaddr + aligned_length - 1;
-    
-    // Find overlapping mappings in the range [vaddr, end_addr]
-    let mut overlapping_addrs = Vec::new();
-    for addr in vaddr..(end_addr + 1) {
-        if let Some(_) = task.vm_manager.search_memory_map(addr) {
-            overlapping_addrs.push(addr);
-        }
-    }
-    
-    // For FIXED mappings, we need to unmap overlapping regions
-    // This is a simplified implementation - a more robust version would
-    // split partial overlaps and only remove the overlapping portions
-    for overlapping_addr in overlapping_addrs {
-        if let Some(existing_map) = task.vm_manager.search_memory_map(overlapping_addr) {
-            let existing_start = existing_map.vmarea.start;
-            let existing_length = existing_map.vmarea.size();
-            
-            // Remove the overlapping mapping
-            // Note: This is simplified - we should really split the mapping if it partially overlaps
-            task.vm_manager.remove_memory_map_by_addr(existing_start);
-        }
-    }
-
-    // Now perform the object-based mmap operation with the fixed address
-    match memory_mappable.mmap(vaddr, aligned_length, prot, flags, offset) {
-        Ok(mapped_addr) => mapped_addr,
-        Err(_) => usize::MAX, // Mmap error
-    }
-}
 
 /// System call for unmapping memory from a KernelObject or anonymous mapping
 /// 
