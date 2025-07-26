@@ -14,6 +14,7 @@ use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, enviro
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
+use hashbrown::HashSet;
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -197,6 +198,11 @@ pub struct Task {
     /// 
     /// Managed pages are freed automatically when the task is terminated.
     pub managed_pages: Vec<ManagedPage>,
+    /// Anonymous mappings tracking
+    /// 
+    /// Tracks virtual addresses of anonymous mappings (MAP_ANONYMOUS) created by this task.
+    /// Used to differentiate between anonymous mappings and device/file mappings during munmap.
+    pub anonymous_mappings: HashSet<usize>,
     parent_id: Option<usize>,      /* Parent task ID */
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
@@ -310,6 +316,7 @@ impl Task {
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
             vm_manager: VirtualMemoryManager::new(),
             managed_pages: Vec::new(),
+            anonymous_mappings: HashSet::new(),
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
@@ -724,6 +731,36 @@ impl Task {
         None
     }
 
+    /// Add an anonymous mapping tracking
+    /// 
+    /// # Arguments
+    /// * `vaddr` - Virtual address of the anonymous mapping
+    pub fn add_anonymous_mapping(&mut self, vaddr: usize) {
+        self.anonymous_mappings.insert(vaddr);
+    }
+
+    /// Remove an anonymous mapping tracking
+    /// 
+    /// # Arguments
+    /// * `vaddr` - Virtual address of the anonymous mapping to remove
+    /// 
+    /// # Returns
+    /// true if the mapping was found and removed, false otherwise
+    pub fn remove_anonymous_mapping(&mut self, vaddr: usize) -> bool {
+        self.anonymous_mappings.remove(&vaddr)
+    }
+
+    /// Check if a virtual address is an anonymous mapping
+    /// 
+    /// # Arguments
+    /// * `vaddr` - Virtual address to check
+    /// 
+    /// # Returns
+    /// true if the address is an anonymous mapping, false otherwise
+    pub fn is_anonymous_mapping(&self, vaddr: usize) -> bool {
+        self.anonymous_mappings.contains(&vaddr)
+    }
+
 
     // Set the entry point
     pub fn set_entry_point(&mut self, entry: usize) {
@@ -949,6 +986,9 @@ impl Task {
         } else {
             child.abi = None; // No ABI set
         }
+
+        // Copy anonymous mappings tracking
+        child.anonymous_mappings = self.anonymous_mappings.clone();
 
         // Set the state to Ready
         child.state = self.state;
