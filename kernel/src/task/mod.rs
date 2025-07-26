@@ -514,7 +514,7 @@ impl Task {
                             is_shared: mmap.is_shared,
                             owner: mmap.owner.clone(),
                         };
-                        self.vm_manager.add_memory_map_unchecked(mmap1)
+                        self.vm_manager.add_memory_map(mmap1)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
@@ -536,7 +536,7 @@ impl Task {
                             is_shared: mmap.is_shared,
                             owner: mmap.owner.clone(),
                         };
-                        self.vm_manager.add_memory_map_unchecked(mmap2)
+                        self.vm_manager.add_memory_map(mmap2)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
                         // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
                         // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
@@ -942,7 +942,7 @@ impl Task {
                             });
                         }
                         // Add the new memory map to the child task
-                        child.vm_manager.add_memory_map_unchecked(new_mmap)
+                        child.vm_manager.add_memory_map(new_mmap)
                             .map_err(|_| "Failed to add memory map to child task")?;
                     }
                 }

@@ -181,7 +181,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         is_shared: true, // Device memory should be shared
         owner: None,
     };
-    task.vm_manager.add_memory_map_unchecked(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
+    task.vm_manager.add_memory_map(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
     setup_trampoline(&mut task.vm_manager);
 }

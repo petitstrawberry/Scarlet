@@ -495,7 +495,7 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     };
 
     // Add to VM manager
-     if let Err(e) = task.vm_manager.add_memory_map_unchecked(map) {
+     if let Err(e) = task.vm_manager.add_memory_map(map) {
         free_raw_pages(pages, num_of_pages);
         return Err(e);
     }

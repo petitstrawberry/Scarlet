@@ -267,7 +267,7 @@ impl VirtualMemoryManager {
         I: IntoIterator<Item = VirtualMemoryMap>
     {
         for map in maps {
-            if let Err(e) = self.add_memory_map_unchecked(map) {
+            if let Err(e) = self.add_memory_map(map) {
                 return Err(e);
             }
         }
