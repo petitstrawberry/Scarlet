@@ -8,7 +8,7 @@ use crate::{
 };
 use alloc::boxed::Box;
 
-pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // Linux mmap constants
     const MAP_ANONYMOUS: usize = 0x20;
     #[allow(dead_code)]
@@ -17,11 +17,8 @@ pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     const MAP_SHARED: usize = 0x01;
     
     // Linux protection flags
-    #[allow(dead_code)]
     const PROT_READ: usize = 0x1;
-    #[allow(dead_code)]
     const PROT_WRITE: usize = 0x2;
-    #[allow(dead_code)]
     const PROT_EXEC: usize = 0x4;
 
     let task = match mytask() {
@@ -34,7 +31,7 @@ pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let prot = trapframe.get_arg(2);
     let flags = trapframe.get_arg(3);
     let fd = trapframe.get_arg(4) as isize;
-    let _offset = trapframe.get_arg(5);  // Unused for anonymous mapping
+    let offset = trapframe.get_arg(5);
     
     trapframe.increment_pc_next(task);
 
@@ -43,23 +40,113 @@ pub fn sys_mmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         return usize::MAX; // -EINVAL
     }
 
-    // Only support anonymous mapping for now
-    if flags & MAP_ANONYMOUS == 0 {
-        crate::println!("sys_mmap: Only anonymous mapping is supported");
-        return usize::MAX; // -ENOTSUP
-    }
-
-    if fd != -1 {
-        crate::println!("sys_mmap: File descriptor mapping not supported");
-        return usize::MAX; // -ENOTSUP
-    }
-
     // Round up length to page boundary
     let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let num_pages = aligned_length / PAGE_SIZE;
 
-    // Handle anonymous mapping using the same approach as scarlet's sys_memory_map
-    handle_anonymous_mapping(task, addr, aligned_length, num_pages, prot, flags)
+    // Handle ANONYMOUS mappings specially
+    if (flags & MAP_ANONYMOUS) != 0 {
+        if fd != -1 {
+            crate::println!("sys_mmap: Anonymous mapping should not have file descriptor");
+            return usize::MAX; // -EINVAL
+        }
+        return handle_anonymous_mapping(task, addr, aligned_length, num_pages, prot, flags);
+    }
+
+    // Handle file-backed mappings
+    if fd == -1 {
+        crate::println!("sys_mmap: File-backed mapping requires valid file descriptor");
+        return usize::MAX; // -EINVAL
+    }
+
+    // Get handle from Linux fd
+    let handle = match abi.get_handle(fd as usize) {
+        Some(h) => h,
+        None => {
+            crate::println!("sys_mmap: Invalid file descriptor {}", fd);
+            return usize::MAX; // -EBADF
+        }
+    };
+
+    // Get kernel object from handle
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => {
+            crate::println!("sys_mmap: Invalid handle {}", handle);
+            return usize::MAX; // -EBADF
+        }
+    };
+
+    // Check if object supports MemoryMappingOps
+    let memory_mappable = match kernel_obj.as_memory_mappable() {
+        Some(mappable) => mappable,
+        None => {
+            crate::println!("sys_mmap: Object doesn't support memory mapping");
+            return usize::MAX; // -ENODEV
+        }
+    };
+
+    // Check if the object supports mmap
+    if !memory_mappable.supports_mmap() {
+        crate::println!("sys_mmap: Object doesn't support mmap operation");
+        return usize::MAX; // -ENODEV
+    }
+
+    // Get mapping information from the object
+    let (paddr, obj_permissions, is_shared) = match memory_mappable.get_mapping_info(offset, length) {
+        Ok(info) => info,
+        Err(_) => {
+            crate::println!("sys_mmap: Failed to get mapping info");
+            return usize::MAX; // -EINVAL
+        }
+    };
+
+    // Determine final address
+    let final_vaddr = if addr == 0 {
+        match task.vm_manager.find_unmapped_area(aligned_length, PAGE_SIZE) {
+            Some(vaddr) => vaddr,
+            None => {
+                crate::println!("sys_mmap: No suitable address found");
+                return usize::MAX; // -ENOMEM
+            }
+        }
+    } else {
+        if addr % PAGE_SIZE != 0 {
+            crate::println!("sys_mmap: Address not page-aligned");
+            return usize::MAX; // -EINVAL
+        }
+        addr
+    };
+
+    // Create memory areas
+    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
+    let pmarea = MemoryArea::new(paddr, paddr + aligned_length - 1);
+
+    // Combine object permissions with requested permissions
+    let final_permissions = obj_permissions & {
+        let mut perm = 0;
+        if (prot & PROT_READ) != 0 { perm |= 0x1; }
+        if (prot & PROT_WRITE) != 0 { perm |= 0x2; }
+        if (prot & PROT_EXEC) != 0 { perm |= 0x4; }
+        perm
+    } | 0x08; // Access from user space
+
+    // Create virtual memory map with weak reference to the object
+    let owner = kernel_obj.as_memory_mappable_weak();
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
+
+    // Add the mapping to VM manager
+    match task.vm_manager.add_memory_map_fixed(vm_map) {
+        Ok(_removed_mappings) => {
+            // Notify the object that mapping was created
+            memory_mappable.on_mapped(final_vaddr, paddr, aligned_length, offset);
+            final_vaddr
+        }
+        Err(_) => {
+            crate::println!("sys_mmap: Failed to add memory mapping");
+            usize::MAX // -ENOMEM
+        }
+    }
 }
 
 /// Handle anonymous memory mapping based on scarlet's implementation
@@ -242,7 +329,7 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             usize::MAX
         }
     } else {
-        // Handle object-based mapping unmapping (not currently used in Linux ABI)
+        // Handle object-based mapping unmapping (file-backed mappings)
         if let Some(removed_map) = task.vm_manager.remove_memory_map_by_addr(addr) {
             // Notify the object owner if available
             if let Some(owner_weak) = &removed_map.owner {
