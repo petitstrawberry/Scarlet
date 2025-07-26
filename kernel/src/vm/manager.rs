@@ -186,8 +186,9 @@ impl VirtualMemoryManager {
         // Clear cache as the memory layout has changed
         self.last_search_cache = None;
         
-        // Insert the new mapping
+        // Insert the new mapping (MMU mapping will be done lazily on page fault)
         self.memmap.insert(map.vmarea.start, map);
+        
         Ok(())
     }
 
@@ -211,8 +212,13 @@ impl VirtualMemoryManager {
             }
         }
         
-        // Remove and return the memory map
-        self.memmap.remove(&start_addr)
+        // Remove the memory map
+        let removed_map = self.memmap.remove(&start_addr)?;
+        
+        // Remove the mapping from MMU (page table) to prevent stale TLB entries
+        self.unmap_range_from_mmu(removed_map.vmarea.start, removed_map.vmarea.end);
+        
+        Some(removed_map)
     }
 
     /// Removes all memory maps.
@@ -352,6 +358,59 @@ impl VirtualMemoryManager {
     /// The root page table for the current address space, if it exists.
     pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
         get_root_pagetable(self.asid)
+    }
+
+    /// Lazy map a virtual address to MMU on demand (called from page fault handler)
+    /// 
+    /// This method finds the memory mapping for the given virtual address and
+    /// maps only the specific page to the MMU on demand.
+    /// 
+    /// # Arguments
+    /// * `vaddr` - The virtual address that caused the page fault
+    /// 
+    /// # Returns
+    /// * `Ok(())` - Successfully mapped the page
+    /// * `Err(&'static str)` - Failed to map (no mapping found or MMU error)
+    pub fn lazy_map_page(&mut self, vaddr: usize) -> Result<(), &'static str> {
+        // Find the memory mapping for this virtual address
+        let memory_map = match self.search_memory_map(vaddr) {
+            Some(map) => map,
+            None => return Err("No memory mapping found for virtual address"),
+        };
+        
+        // Calculate the page-aligned virtual and physical addresses
+        let page_vaddr = vaddr & !(PAGE_SIZE - 1);
+        let offset_in_mapping = page_vaddr - memory_map.vmarea.start;
+        let page_paddr = memory_map.pmarea.start + offset_in_mapping;
+        
+        // Map this single page to the MMU
+        if let Some(root_pagetable) = self.get_root_page_table() {
+            root_pagetable.map(self.asid, page_vaddr, page_paddr, memory_map.permissions);
+            Ok(())
+        } else {
+            Err("No root page table available")
+        }
+    }
+
+    /// Unmap a virtual address range from MMU
+    /// 
+    /// This method unmaps the specified virtual address range from the MMU.
+    /// Used when memory mappings are removed.
+    /// 
+    /// # Arguments
+    /// * `vaddr_start` - Start of virtual address range
+    /// * `vaddr_end` - End of virtual address range (inclusive)
+    pub fn unmap_range_from_mmu(&mut self, vaddr_start: usize, vaddr_end: usize) {
+        if let Some(root_pagetable) = self.get_root_page_table() {
+            let num_pages = (vaddr_end - vaddr_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+            
+            for i in 0..num_pages {
+                let page_vaddr = (vaddr_start & !(PAGE_SIZE - 1)) + i * PAGE_SIZE;
+                if page_vaddr <= vaddr_end {
+                    root_pagetable.unmap(page_vaddr);
+                }
+            }
+        }
     }
 
     /// Translate a virtual address to physical address
@@ -541,12 +600,17 @@ impl VirtualMemoryManager {
         // Clear cache since we've modified the memory layout
         self.last_search_cache = None;
 
-        // Add the split mappings back
+        // Remove overlapping mappings from MMU (page table) to prevent stale TLB entries
+        for removed_map in &removed_mappings {
+            self.unmap_range_from_mmu(removed_map.vmarea.start, removed_map.vmarea.end);
+        }
+
+        // Add the split mappings back (MMU mapping will be done lazily on page fault)
         for split_map in mappings_to_add {
             self.memmap.insert(split_map.vmarea.start, split_map);
         }
 
-        // Add the new mapping
+        // Add the new mapping (MMU mapping will be done lazily on page fault)
         self.memmap.insert(map.vmarea.start, map);
 
         Ok(removed_mappings)
@@ -679,6 +743,7 @@ impl Drop for VirtualMemoryManager {
 #[cfg(test)]
 mod tests {
     use crate::arch::vm::alloc_virtual_address_space;
+    use crate::environment::PAGE_SIZE;
     use crate::vm::VirtualMemoryMap;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
 
@@ -1291,5 +1356,29 @@ mod tests {
         let second_map = manager.search_memory_map(0x3500);
         assert!(second_map.is_some());
         assert_eq!(second_map.unwrap().vmarea.start, 0x3000);
+    }
+
+    #[test_case]
+    fn test_lazy_mapping_and_unmapping() {
+        let mut manager = VirtualMemoryManager::new();
+        let vma = MemoryArea { start: 0x1000, end: 0x1fff };
+        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0o644, is_shared: false, owner: None };
+        manager.add_memory_map(map).unwrap();
+        
+        // Trigger lazy mapping by simulating a page fault at virtual address 0x1500
+        assert!(manager.lazy_map_page(0x1500).is_ok());
+        
+        // The page should now be mapped in the MMU
+        // For testing, we can't directly check MMU state, so we verify by translating the address
+        let translated_addr = manager.translate_vaddr(0x1500);
+        assert!(translated_addr.is_some());
+        assert_eq!(translated_addr.unwrap() & !(PAGE_SIZE - 1), 0x1000); // Should be page-aligned
+        
+        // Unmap the range to test unmapping functionality
+        manager.unmap_range_from_mmu(0x1000, 0x1fff);
+        
+        // Translation should now fail as the range is unmapped
+        let translated_addr_after_unmap = manager.translate_vaddr(0x1500);
+        assert!(translated_addr_after_unmap.is_none());
     }
 }
