@@ -324,6 +324,20 @@ impl Framebuffer {
     pub fn file(&mut self) -> &mut File {
         &mut self.file
     }
+    
+    /// Check if memory mapping is being used
+    /// 
+    /// Returns true if framebuffer operations use mmap, false if using file I/O
+    pub fn is_using_mmap(&self) -> bool {
+        self.mapped_buffer.is_some()
+    }
+    
+    /// Get memory mapping information if available
+    /// 
+    /// Returns (address, size) if memory mapping is active, None otherwise
+    pub fn get_mapping_info(&self) -> Option<(usize, usize)> {
+        self.mapped_buffer
+    }
 
     /// Write a single pixel to the framebuffer
     /// 
