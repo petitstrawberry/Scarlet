@@ -119,9 +119,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     };
 
     // Create virtual memory map with weak reference to the object
-    // TODO: We need to extract the Arc from KernelObject for proper weak reference
-    // For now, we'll use None and handle cleanup differently
-    let owner: Option<alloc::sync::Weak<dyn crate::object::capability::memory_mapping::MemoryMappingOps>> = None;
+    let owner = kernel_obj.as_memory_mappable_weak();
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
 
     // Add the mapping to VM manager

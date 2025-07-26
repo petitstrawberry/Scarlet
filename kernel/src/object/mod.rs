@@ -120,6 +120,22 @@ impl KernelObject {
             }
         }
     }
+    
+    /// Try to get weak reference to MemoryMappingOps capability
+    pub fn as_memory_mappable_weak(&self) -> Option<alloc::sync::Weak<dyn MemoryMappingOps>> {
+        match self {
+            KernelObject::File(file_object) => {
+                // Create weak reference from the Arc<dyn FileObject>
+                // FileObject automatically implements MemoryMappingOps
+                let weak_file = Arc::downgrade(file_object);
+                Some(weak_file)
+            }
+            KernelObject::Pipe(_) => {
+                // Pipes don't provide memory mapping operations
+                None
+            }
+        }
+    }
 }
 
 impl Clone for KernelObject {
