@@ -147,24 +147,6 @@ impl VirtualMemoryManager {
         self.memmap.get_mut(&start_addr)
     }
 
-    /// Checks if a virtual memory range overlaps with existing mappings.
-    /// 
-    /// # Arguments
-    /// * `start` - The start address of the range to check
-    /// * `end` - The end address of the range to check (inclusive)
-    /// 
-    /// # Returns
-    /// Some(VirtualMemoryMap) if there is an overlap, None otherwise
-    pub fn check_overlap(&self, start: usize, end: usize) -> Option<&VirtualMemoryMap> {
-        for map in self.memmap.iter() {
-            // Check if ranges overlap: [start, end] vs [map.start, map.end]
-            if start <= map.vmarea.end && end >= map.vmarea.start {
-                return Some(map);
-            }
-        }
-        None
-    }
-
     /// Adds a memory map to the virtual memory manager with overlap checking.
     /// 
     /// This method performs overlap detection before adding the mapping.
