@@ -29,25 +29,13 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         12 => {
             let mut vaddr = trapframe.epc as usize;
             let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
-            let manager = &task.vm_manager;
-            
+            let manager = &mut task.vm_manager;
             loop {
-                match manager.search_memory_map(vaddr) {
-                    Some(mmap) => {
-                        match manager.get_root_page_table() {
-                            Some(root_page_table) => {
-                                let paddr = mmap.get_paddr(vaddr).unwrap();
-                                root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
-                            }
-                            None => {
-                                print_traplog(trapframe);
-                                panic!("Root page table is not found");
-                            }
-                        }
-                    }
-                    None => {
+                match manager.lazy_map_page(vaddr) {
+                    Ok(_) => (),
+                    Err(_) => {
                         print_traplog(trapframe);
-                        panic!("Not found memory map matched with vaddr: {:#x}", vaddr);
+                        panic!("Failed to map page for instruction page fault at vaddr: {:#x}", vaddr);
                     }
                 }
 
@@ -57,7 +45,6 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 }
                 vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
             }
-            
         }
         /* Load/Store page fault */
         13 | 15 => {
@@ -66,24 +53,13 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
             let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
-            let manager = &task.vm_manager;
+            let manager = &mut task.vm_manager;
             loop {
-                match manager.search_memory_map(vaddr) {
-                    Some(mmap) => {
-                        match manager.get_root_page_table() {
-                            Some(root_page_table) => {
-                                let paddr = mmap.get_paddr(vaddr).unwrap();
-                                root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
-                            }
-                            None => {
-                                print_traplog(trapframe);
-                                panic!("Root page table is not found");
-                            }
-                        }
-                    }
-                    None => {
+                match manager.lazy_map_page(vaddr) {
+                    Ok(_) => (),
+                    Err(_) => {
                         print_traplog(trapframe);
-                        panic!("Not found memory map matched with vaddr: {:#x}", vaddr);
+                        panic!("Failed to map page for load/store page fault at vaddr: {:#x}", vaddr);
                     }
                 }
 
