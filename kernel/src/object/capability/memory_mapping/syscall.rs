@@ -56,7 +56,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     };
     
     let handle = trapframe.get_arg(0) as u32;
-    let mut vaddr = trapframe.get_arg(1) as usize;
+    let vaddr = trapframe.get_arg(1) as usize;
     let length = trapframe.get_arg(2) as usize;
     let prot = trapframe.get_arg(3) as usize;
     let flags = trapframe.get_arg(4) as usize;
@@ -121,6 +121,34 @@ fn handle_anonymous_mapping(
         // Validate the requested address is page-aligned
         if vaddr % PAGE_SIZE != 0 {
             return usize::MAX;
+        }
+        
+        // Handle FIXED flag for ANONYMOUS mappings
+        if (flags & MAP_FIXED) != 0 {
+            // For FIXED mappings, we need to remove any existing mappings in the requested range
+            let end_addr = vaddr + aligned_length;
+            
+            // Find and remove all overlapping mappings in the range [vaddr, end_addr)
+            let mut overlapping_addrs = alloc::vec::Vec::new();
+            
+            // Collect addresses of overlapping mappings
+            for mapping in task.vm_manager.memmap_iter() {
+                let mapping_start = mapping.vmarea.start;
+                let mapping_end = mapping.vmarea.end + 1; // end is inclusive in MemoryArea
+                
+                // Check if this mapping overlaps with our target range
+                if mapping_start < end_addr && mapping_end > vaddr {
+                    overlapping_addrs.push(mapping_start);
+                }
+            }
+            
+            // Remove all overlapping mappings
+            for addr in overlapping_addrs {
+                if let Some(_removed_map) = task.vm_manager.remove_memory_map_by_addr(addr) {
+                    // Also remove from anonymous mappings tracking if it was anonymous
+                    ANONYMOUS_MAPPINGS.lock().remove(&addr);
+                }
+            }
         }
     }
 
