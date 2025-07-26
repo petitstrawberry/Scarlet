@@ -245,7 +245,7 @@ impl Framebuffer {
         }
         
         // Try to map the framebuffer memory
-        let handle = self.file.as_handle() as *const _ as u32;
+        let handle = self.file.as_handle().as_raw() as u32;
         match mmap(
             handle,
             0,                                    // Let kernel choose address
@@ -258,7 +258,12 @@ impl Framebuffer {
                 self.mapped_buffer = Some((mapped_addr, fix_info.smem_len as usize));
                 Ok(())
             }
-            Err(_) => Err(HandleError::SystemError(-1))
+            Err(e) => {
+                // Debug output to understand why mmap failed
+                std::println!("mmap failed: handle={}, size={}, error={:?}", 
+                    handle, fix_info.smem_len, e);
+                Err(HandleError::SystemError(-1))
+            }
         }
     }
 
@@ -616,13 +621,13 @@ impl Framebuffer {
         let mut line_buffer = vec![0u8; line_bytes];
         
         for y in 0..height {
-            let scale_factor: u16 = 1000; // Scale factor for integer arithmetic
-            let ratio: u16 = ((y as u32 * scale_factor as u32) / height as u32) as u16;
+            let scale_factor: u32 = 1000; // Scale factor for integer arithmetic
+            let ratio: u32 = (y as u32 * scale_factor) / height as u32;
             let color = [
-                ((start_color[0] as u16 * (scale_factor - ratio) + end_color[0] as u16 * ratio) / scale_factor) as u8,
-                ((start_color[1] as u16 * (scale_factor - ratio) + end_color[1] as u16 * ratio) / scale_factor) as u8,
-                ((start_color[2] as u16 * (scale_factor - ratio) + end_color[2] as u16 * ratio) / scale_factor) as u8,
-                ((start_color[3] as u16 * (scale_factor - ratio) + end_color[3] as u16 * ratio) / scale_factor) as u8,
+                ((start_color[0] as u32 * (scale_factor - ratio) + end_color[0] as u32 * ratio) / scale_factor) as u8,
+                ((start_color[1] as u32 * (scale_factor - ratio) + end_color[1] as u32 * ratio) / scale_factor) as u8,
+                ((start_color[2] as u32 * (scale_factor - ratio) + end_color[2] as u32 * ratio) / scale_factor) as u8,
+                ((start_color[3] as u32 * (scale_factor - ratio) + end_color[3] as u32 * ratio) / scale_factor) as u8,
             ];
             
             for x in 0..width {
