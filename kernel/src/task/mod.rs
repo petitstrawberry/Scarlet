@@ -535,7 +535,7 @@ impl Task {
                     // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
 
                     if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        free_boxed_page(free_page);
+                        free_boxed_page(free_page.page);
                     }
                     
                     // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
@@ -714,11 +714,11 @@ impl Task {
     /// # Returns
     /// The removed managed page if found, otherwise None
     /// 
-    fn remove_managed_page(&mut self, vaddr: usize) -> Option<Box<Page>> {
+    pub fn remove_managed_page(&mut self, vaddr: usize) -> Option<crate::task::ManagedPage> {
         for i in 0..self.managed_pages.len() {
             if self.managed_pages[i].vaddr == vaddr {
                 let page = self.managed_pages.remove(i);
-                return Some(page.page);
+                return Some(page);
             }
         }
         None

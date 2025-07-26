@@ -122,34 +122,6 @@ fn handle_anonymous_mapping(
         if vaddr % PAGE_SIZE != 0 {
             return usize::MAX;
         }
-        
-        // Handle FIXED flag for ANONYMOUS mappings
-        if (flags & MAP_FIXED) != 0 {
-            // For FIXED mappings, we need to remove any existing mappings in the requested range
-            let end_addr = vaddr + aligned_length;
-            
-            // Find and remove all overlapping mappings in the range [vaddr, end_addr)
-            let mut overlapping_addrs = alloc::vec::Vec::new();
-            
-            // Collect addresses of overlapping mappings
-            for mapping in task.vm_manager.memmap_iter() {
-                let mapping_start = mapping.vmarea.start;
-                let mapping_end = mapping.vmarea.end + 1; // end is inclusive in MemoryArea
-                
-                // Check if this mapping overlaps with our target range
-                if mapping_start < end_addr && mapping_end > vaddr {
-                    overlapping_addrs.push(mapping_start);
-                }
-            }
-            
-            // Remove all overlapping mappings
-            for addr in overlapping_addrs {
-                if let Some(_removed_map) = task.vm_manager.remove_memory_map_by_addr(addr) {
-                    // Also remove from anonymous mappings tracking if it was anonymous
-                    ANONYMOUS_MAPPINGS.lock().remove(&addr);
-                }
-            }
-        }
     }
 
     // Convert protection flags to kernel permissions
@@ -162,6 +134,50 @@ fn handle_anonymous_mapping(
     }
     if (prot & PROT_EXEC) != 0 {
         permissions |= 0x4; // Executable
+    }
+
+    // Handle FIXED flag for ANONYMOUS mappings
+    if vaddr != 0 && (flags & MAP_FIXED) != 0 {
+        // Use the new add_memory_map_fixed API for proper overlap handling
+        let vmarea = MemoryArea::new(vaddr, vaddr + aligned_length - 1);
+        let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
+        let is_shared = (flags & MAP_SHARED) != 0;
+        let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared);
+
+        // We need to handle this differently to avoid borrow checker issues
+        // First, collect the addresses that need managed page removal
+        let mut managed_page_addrs = alloc::vec::Vec::new();
+        for mapping in task.vm_manager.memmap_iter() {
+            let mapping_start = mapping.vmarea.start;
+            let mapping_end = mapping.vmarea.end;
+            
+            // Check if this mapping overlaps with our target range
+            if vaddr <= mapping_end && (vaddr + aligned_length - 1) >= mapping_start {
+                managed_page_addrs.push(mapping_start);
+            }
+        }
+
+        // Remove managed pages for overlapping mappings
+        for addr in &managed_page_addrs {
+            if let Some(_managed_page) = task.remove_managed_page(*addr) {
+                // The managed page is automatically freed when dropped
+            }
+        }
+
+        // Now call add_memory_map_fixed without the closure
+        match task.vm_manager.add_memory_map_fixed(vm_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>) {
+            Ok(removed_mappings) => {
+                // Remove from anonymous mappings tracking for any removed mappings
+                for removed_map in removed_mappings {
+                    ANONYMOUS_MAPPINGS.lock().remove(&removed_map.vmarea.start);
+                }
+                
+                // Track this new anonymous mapping
+                ANONYMOUS_MAPPINGS.lock().insert(vaddr);
+                return vaddr;
+            }
+            Err(_) => return usize::MAX,
+        }
     }
 
     // Create memory areas
