@@ -11,7 +11,7 @@ extern crate scarlet_std as std;
 use alloc::vec;
 use std::{
     fs::File,
-    handle::{HandleError, HandleResult},
+    handle::{HandleError, HandleResult, capability::memory_mapping::{mmap, munmap, prot, flags}},
     io::SeekFrom,
 };
 
@@ -201,8 +201,11 @@ impl Default for FbFixScreenInfo {
 /// Framebuffer device wrapper
 /// 
 /// Wraps a File handle to provide framebuffer-specific control operations.
+/// Uses memory mapping for efficient framebuffer access when available.
 pub struct Framebuffer {
     file: File,
+    /// Memory-mapped framebuffer buffer (address, size)
+    mapped_buffer: Option<(usize, usize)>,
 }
 
 impl Framebuffer {
@@ -215,7 +218,48 @@ impl Framebuffer {
     /// Framebuffer instance or HandleError on failure
     pub fn open(path: &str) -> HandleResult<Self> {
         let file = File::open(path).map_err(|_| HandleError::NotFound)?;
-        Ok(Self { file })
+        
+        // Try to get framebuffer info for memory mapping
+        let mut framebuffer = Self { 
+            file, 
+            mapped_buffer: None 
+        };
+        
+        // Attempt to set up memory mapping
+        if let Err(_) = framebuffer.setup_mmap() {
+            // If mmap fails, continue with traditional file I/O
+            // This provides backward compatibility
+        }
+        
+        Ok(framebuffer)
+    }
+    
+    /// Attempt to set up memory mapping for the framebuffer
+    fn setup_mmap(&mut self) -> HandleResult<()> {
+        // Get framebuffer information
+        let fix_info = self.get_fix_screen_info()?;
+        
+        // Ensure we have valid framebuffer size
+        if fix_info.smem_len == 0 {
+            return Err(HandleError::InvalidParameter);
+        }
+        
+        // Try to map the framebuffer memory
+        let handle = self.file.as_handle() as *const _ as u32;
+        match mmap(
+            handle,
+            0,                                    // Let kernel choose address
+            fix_info.smem_len as usize,          // Map entire framebuffer
+            prot::READ | prot::WRITE,            // Read/write permissions
+            flags::SHARED,                       // Shared mapping
+            0,                                   // Offset 0
+        ) {
+            Ok(mapped_addr) => {
+                self.mapped_buffer = Some((mapped_addr, fix_info.smem_len as usize));
+                Ok(())
+            }
+            Err(_) => Err(HandleError::SystemError(-1))
+        }
     }
 
     /// Get variable screen information from the framebuffer device
@@ -300,14 +344,26 @@ impl Framebuffer {
         // Calculate pixel offset
         let offset = y as usize * line_length + x as usize * bytes_per_pixel;
         
-        // Seek to pixel position
-        self.file.seek(SeekFrom::Start(offset as u64))
-            .map_err(|_| HandleError::SystemError(-1))?;
-        
-        // Write pixel data
-        let write_len = bytes_per_pixel.min(4);
-        self.file.write(&color[..write_len])
-            .map_err(|_| HandleError::SystemError(-1))?;
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+            // Use memory-mapped access for better performance
+            if offset + bytes_per_pixel > mapped_size {
+                return Err(HandleError::InvalidParameter);
+            }
+            
+            unsafe {
+                let pixel_ptr = (mapped_addr + offset) as *mut u8;
+                let write_len = bytes_per_pixel.min(4);
+                core::ptr::copy_nonoverlapping(color.as_ptr(), pixel_ptr, write_len);
+            }
+        } else {
+            // Fallback to file I/O if mmap is not available
+            self.file.seek(SeekFrom::Start(offset as u64))
+                .map_err(|_| HandleError::SystemError(-1))?;
+            
+            let write_len = bytes_per_pixel.min(4);
+            self.file.write(&color[..write_len])
+                .map_err(|_| HandleError::SystemError(-1))?;
+        }
         
         Ok(())
     }
@@ -325,14 +381,26 @@ impl Framebuffer {
         let line_length = fix_info.line_length as usize;
         let offset = y as usize * line_length;
         
-        // Seek to line start
-        self.file.seek(SeekFrom::Start(offset as u64))
-            .map_err(|_| HandleError::SystemError(-1))?;
-        
-        // Write entire line at once
-        let write_len = data.len().min(line_length);
-        self.file.write(&data[..write_len])
-            .map_err(|_| HandleError::SystemError(-1))?;
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+            // Use memory-mapped access for better performance
+            let write_len = data.len().min(line_length);
+            if offset + write_len > mapped_size {
+                return Err(HandleError::InvalidParameter);
+            }
+            
+            unsafe {
+                let line_ptr = (mapped_addr + offset) as *mut u8;
+                core::ptr::copy_nonoverlapping(data.as_ptr(), line_ptr, write_len);
+            }
+        } else {
+            // Fallback to file I/O if mmap is not available
+            self.file.seek(SeekFrom::Start(offset as u64))
+                .map_err(|_| HandleError::SystemError(-1))?;
+            
+            let write_len = data.len().min(line_length);
+            self.file.write(&data[..write_len])
+                .map_err(|_| HandleError::SystemError(-1))?;
+        }
         
         Ok(())
     }
@@ -358,21 +426,45 @@ impl Framebuffer {
         let line_length = fix_info.line_length as usize;
         let block_line_bytes = width as usize * bytes_per_pixel;
         
-        // Write line by line
-        for row in 0..height {
-            let line_y = y + row;
-            let line_offset = line_y as usize * line_length + x as usize * bytes_per_pixel;
-            let data_offset = row as usize * block_line_bytes;
-            
-            // Seek to start of this line in the block
-            self.file.seek(SeekFrom::Start(line_offset as u64))
-                .map_err(|_| HandleError::SystemError(-1))?;
-            
-            // Write one line of the block
-            let data_end = data_offset + block_line_bytes;
-            if data_end <= data.len() {
-                self.file.write(&data[data_offset..data_end])
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+            // Use memory-mapped access for better performance
+            // Write line by line
+            for row in 0..height {
+                let line_y = y + row;
+                let line_offset = line_y as usize * line_length + x as usize * bytes_per_pixel;
+                let data_offset = row as usize * block_line_bytes;
+                let data_end = data_offset + block_line_bytes;
+                
+                if line_offset + block_line_bytes > mapped_size || data_end > data.len() {
+                    continue; // Skip invalid lines
+                }
+                
+                unsafe {
+                    let line_ptr = (mapped_addr + line_offset) as *mut u8;
+                    core::ptr::copy_nonoverlapping(
+                        data[data_offset..data_end].as_ptr(),
+                        line_ptr,
+                        block_line_bytes
+                    );
+                }
+            }
+        } else {
+            // Fallback to file I/O if mmap is not available
+            for row in 0..height {
+                let line_y = y + row;
+                let line_offset = line_y as usize * line_length + x as usize * bytes_per_pixel;
+                let data_offset = row as usize * block_line_bytes;
+                
+                // Seek to start of this line in the block
+                self.file.seek(SeekFrom::Start(line_offset as u64))
                     .map_err(|_| HandleError::SystemError(-1))?;
+                
+                // Write one line of the block
+                let data_end = data_offset + block_line_bytes;
+                if data_end <= data.len() {
+                    self.file.write(&data[data_offset..data_end])
+                        .map_err(|_| HandleError::SystemError(-1))?;
+                }
             }
         }
         
@@ -590,6 +682,15 @@ impl Framebuffer {
             }
             
             Ok(())
+        }
+    }
+}
+
+impl Drop for Framebuffer {
+    fn drop(&mut self) {
+        // Clean up memory mapping if it exists
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+            let _ = munmap(mapped_addr, mapped_size);
         }
     }
 }
