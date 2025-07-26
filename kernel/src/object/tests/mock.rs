@@ -66,7 +66,20 @@ impl ControlOps for MockFileObject {
     }
 }
 
-impl MemoryMappingOps for MockFileObject {}
+impl MemoryMappingOps for MockFileObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported")
+    }
+
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
+
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
 
 impl crate::fs::FileObject for MockFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
@@ -156,7 +169,20 @@ impl ControlOps for MockTaskFileObject {
     }
 }
 
-impl MemoryMappingOps for MockTaskFileObject {}
+impl MemoryMappingOps for MockTaskFileObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported")
+    }
+
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
+
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
 
 impl crate::fs::FileObject for MockTaskFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {

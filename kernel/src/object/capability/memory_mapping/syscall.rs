@@ -69,7 +69,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         return handle_anonymous_mapping(task, vaddr, aligned_length, num_pages, prot, flags);
     }
 
-    // All other mappings (including FIXED) are delegated to KernelObject
+    // All other mappings are handled through the new MemoryMappingOps design
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Invalid handle
@@ -81,10 +81,57 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support memory mapping operations
     };
 
-    // Perform mmap operation - let the object handle all aspects including FIXED mappings
-    match memory_mappable.mmap(vaddr, length, prot, flags, offset) {
-        Ok(mapped_addr) => mapped_addr,
-        Err(_) => usize::MAX, // Mmap error
+    // Check if the object supports mmap
+    if !memory_mappable.supports_mmap() {
+        return usize::MAX;
+    }
+
+    // Get mapping information from the object
+    let (paddr, obj_permissions, is_shared) = match memory_mappable.get_mapping_info(offset, length) {
+        Ok(info) => info,
+        Err(_) => return usize::MAX,
+    };
+
+    // Determine final address
+    let final_vaddr = if vaddr == 0 {
+        match task.vm_manager.find_unmapped_area(aligned_length, PAGE_SIZE) {
+            Some(addr) => addr,
+            None => return usize::MAX,
+        }
+    } else {
+        if vaddr % PAGE_SIZE != 0 {
+            return usize::MAX;
+        }
+        vaddr
+    };
+
+    // Create memory areas
+    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
+    let pmarea = MemoryArea::new(paddr, paddr + aligned_length - 1);
+
+    // Combine object permissions with requested permissions
+    let final_permissions = obj_permissions & {
+        let mut perm = 0;
+        if (prot & PROT_READ) != 0 { perm |= 0x1; }
+        if (prot & PROT_WRITE) != 0 { perm |= 0x2; }
+        if (prot & PROT_EXEC) != 0 { perm |= 0x4; }
+        perm
+    };
+
+    // Create virtual memory map with weak reference to the object
+    // TODO: We need to extract the Arc from KernelObject for proper weak reference
+    // For now, we'll use None and handle cleanup differently
+    let owner: Option<alloc::sync::Weak<dyn crate::object::capability::memory_mapping::MemoryMappingOps>> = None;
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
+
+    // Add the mapping to VM manager
+    match task.vm_manager.add_memory_map_fixed(vm_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>) {
+        Ok(_removed_mappings) => {
+            // Notify the object that mapping was created
+            memory_mappable.on_mapped(final_vaddr, paddr, aligned_length, offset);
+            final_vaddr
+        }
+        Err(_) => usize::MAX,
     }
 }
 
@@ -133,7 +180,7 @@ fn handle_anonymous_mapping(
     
     // Create virtual memory map  
     let is_shared = (flags & MAP_SHARED) != 0;
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared);
+    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
     match task.vm_manager.add_memory_map_fixed(vm_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>) {
@@ -235,10 +282,13 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
     } else {
         // Handle object-based mapping unmapping
         if let Some(removed_map) = task.vm_manager.remove_memory_map_by_addr(vaddr) {
-            // For object-based mappings, we should ideally call munmap on the object
-            // to allow it to perform cleanup. However, since we don't track which
-            // object created each mapping, we handle the unmapping here.
-            // TODO: Track object handle in VirtualMemoryMap for proper cleanup
+            // Notify the object owner if available
+            if let Some(owner_weak) = &removed_map.owner {
+                if let Some(owner) = owner_weak.upgrade() {
+                    owner.on_unmapped(vaddr, length);
+                }
+                // If the object is no longer available, we just proceed with VM cleanup
+            }
             
             // Remove managed pages only for private mappings
             if !removed_map.is_shared {

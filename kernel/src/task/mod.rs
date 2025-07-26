@@ -469,8 +469,9 @@ impl Task {
             },
             permissions,
             is_shared: false, // Default to not shared for task-allocated pages
+            owner: None,
         };
-        self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
+        self.vm_manager.add_memory_map(mmap.clone()).map_err(|e| panic!("Failed to add memory map: {}", e))?;
 
         for i in 0..num_of_pages {
             let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
@@ -511,6 +512,7 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            owner: mmap.owner.clone(),
                         };
                         self.vm_manager.add_memory_map(mmap1)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
@@ -532,6 +534,7 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            owner: mmap.owner.clone(),
                         };
                         self.vm_manager.add_memory_map(mmap2)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
@@ -679,6 +682,7 @@ impl Task {
             },
             permissions,
             is_shared: VirtualMemoryRegion::Guard.is_shareable(), // Guard pages can be shared
+            owner: None,
         };
         Ok(mmap)
     }
@@ -886,9 +890,10 @@ impl Task {
                             vmarea: mmap.vmarea, // Same virtual addresses
                             permissions: mmap.permissions,
                             is_shared: true,
+                            owner: mmap.owner.clone(),
                         };
                         // Add the shared memory map directly to the child task
-                        child.vm_manager.add_memory_map(shared_mmap)
+                        child.vm_manager.add_memory_map(shared_mmap.clone())
                             .map_err(|_| "Failed to add shared memory map to child task")?;
 
                         // TODO: Add logic to determine if the memory map is a trampoline
@@ -916,6 +921,7 @@ impl Task {
                             },
                             permissions,
                             is_shared: false,
+                            owner: mmap.owner.clone(),
                         };
                         
                         // Copy the contents of the original memory (including stack contents)
@@ -1452,10 +1458,11 @@ mod tests {
             },
             permissions: VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             is_shared: true, // This should be shared between parent and child
+            owner: None,
         };
         
         // Add shared memory map to parent
-        parent_task.vm_manager.add_memory_map(shared_mmap).unwrap();
+        parent_task.vm_manager.add_memory_map(shared_mmap.clone()).unwrap();
         
         // Write test data to shared memory
         let test_data: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];

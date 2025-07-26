@@ -308,15 +308,17 @@ impl VirtioBlockDevice {
 }
 
 impl MemoryMappingOps for VirtioBlockDevice {
-    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) 
-           -> Result<usize, &'static str> {
-        let _ = (vaddr, length, prot, flags, offset);
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by VirtIO block device")
     }
     
-    fn munmap(&self, vaddr: usize, length: usize) -> Result<(), &'static str> {
-        let _ = (vaddr, length);
-        Err("Memory unmapping not supported by VirtIO block device")
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // VirtIO block devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // VirtIO block devices don't support memory mapping
     }
     
     fn supports_mmap(&self) -> bool {

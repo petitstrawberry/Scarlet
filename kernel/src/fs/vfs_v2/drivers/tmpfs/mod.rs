@@ -1025,7 +1025,22 @@ impl ControlOps for TmpFileObject {
 }
 
 impl MemoryMappingOps for TmpFileObject {
-    // TODO: Implement memory mapping for temporary files
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for temporary files")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Temporary files don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Temporary files don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
 }
 
 impl FileObject for TmpFileObject {

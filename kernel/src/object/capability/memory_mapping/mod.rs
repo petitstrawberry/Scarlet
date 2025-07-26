@@ -1,4 +1,4 @@
-//! Memory mapping operations capability module
+//! Memory mapping capability module
 //! 
 //! This module provides the MemoryMappingOps trait for objects that support
 //! memory mapping operations like mmap and munmap.
@@ -9,150 +9,150 @@ pub use syscall::{sys_memory_map, sys_memory_unmap};
 
 /// Memory mapping operations capability
 /// 
-/// This trait represents the ability to map object contents into virtual memory.
+/// This trait represents the ability to provide memory mapping information
+/// and receive notifications about mapping lifecycle events.
 /// Objects that support memory mapping (like files and devices) should implement
 /// this trait to provide mmap/munmap functionality.
 pub trait MemoryMappingOps: Send + Sync {
-    /// Memory mapping operation
+    /// Get mapping information for a region of the object
     /// 
-    /// Maps the object's content into virtual memory at the specified address.
+    /// Returns the physical address, permissions, and sharing information
+    /// for mapping a region of this object into virtual memory.
     /// 
     /// # Arguments
-    /// 
-    /// * `vaddr` - Virtual address where to map (0 means kernel chooses)
-    /// * `length` - Length of the mapping in bytes
-    /// * `prot` - Protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
-    /// * `flags` - Mapping flags (MAP_SHARED, MAP_PRIVATE, etc.)
     /// * `offset` - Offset within the object to start mapping from
+    /// * `length` - Length of the mapping in bytes
     /// 
     /// # Returns
-    /// 
-    /// * `Result<usize, &'static str>` - Virtual address of the mapping on success
-    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) 
-           -> Result<usize, &'static str> {
-        let _ = (vaddr, length, prot, flags, offset);
-        Err("mmap not supported for this object")
-    }
+    /// * `Result<(usize, usize, bool), &'static str>` - (paddr, permissions, is_shared) on success
+    fn get_mapping_info(&self, offset: usize, length: usize) 
+                       -> Result<(usize, usize, bool), &'static str>;
     
-    /// Memory unmapping operation
+    /// Notification that a mapping has been created
     /// 
-    /// Unmaps a previously mapped memory region.
+    /// Called when a mapping of this object has been successfully created
+    /// in the virtual memory manager. The object can use this to track
+    /// its active mappings.
     /// 
     /// # Arguments
+    /// * `vaddr` - Virtual address where the mapping was created
+    /// * `paddr` - Physical address that was mapped
+    /// * `length` - Length of the mapping in bytes
+    /// * `offset` - Offset within the object that was mapped
+    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {}
+    
+    /// Notification that a mapping has been removed
     /// 
-    /// * `vaddr` - Virtual address of the mapping to unmap
-    /// * `length` - Length of the mapping to unmap
+    /// Called when a mapping of this object has been removed from
+    /// the virtual memory manager. The object should clean up any
+    /// tracking of this mapping.
     /// 
-    /// # Returns
-    /// 
-    /// * `Result<(), &'static str>` - Success or error message
-    fn munmap(&self, vaddr: usize, length: usize) -> Result<(), &'static str> {
-        let _ = (vaddr, length);
-        Err("munmap not supported for this object")
-    }
+    /// # Arguments
+    /// * `vaddr` - Virtual address where the mapping was removed
+    /// * `length` - Length of the mapping that was removed
+    fn on_unmapped(&self, vaddr: usize, length: usize) {}
     
     /// Check if memory mapping is supported
     /// 
     /// # Returns
-    /// 
     /// * `bool` - true if this object supports memory mapping
     fn supports_mmap(&self) -> bool {
-        false
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::sync::Arc;
 
     // Mock object that implements MemoryMappingOps for testing
     struct MockMappableObject {
         should_fail: bool,
+        mapped_regions: spin::RwLock<alloc::vec::Vec<(usize, usize)>>, // (vaddr, length)
+    }
+
+    impl MockMappableObject {
+        fn new(should_fail: bool) -> Self {
+            MockMappableObject {
+                should_fail,
+                mapped_regions: spin::RwLock::new(alloc::vec::Vec::new()),
+            }
+        }
     }
 
     impl MemoryMappingOps for MockMappableObject {
-        fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) 
-               -> Result<usize, &'static str> {
-            let _ = (length, prot, flags); // Suppress unused warnings
+        fn get_mapping_info(&self, offset: usize, _length: usize) 
+                           -> Result<(usize, usize, bool), &'static str> {
             if self.should_fail {
-                Err("Mock mmap failure")
+                Err("Mock get_mapping_info failure")
             } else {
-                // Return a mock virtual address
-                Ok(if vaddr == 0 { 0x10000000 + offset } else { vaddr })
+                // Return mock physical address, read/write permissions, not shared
+                Ok((0x80000000 + offset, 0x3, false))
             }
         }
 
-        fn munmap(&self, vaddr: usize, length: usize) -> Result<(), &'static str> {
-            let _ = (vaddr, length); // Suppress unused warnings
-            if self.should_fail {
-                Err("Mock munmap failure")
-            } else {
-                Ok(())
+        fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
+            if !self.should_fail {
+                self.mapped_regions.write().push((vaddr, length));
+            }
+        }
+
+        fn on_unmapped(&self, vaddr: usize, length: usize) {
+            if !self.should_fail {
+                let mut regions = self.mapped_regions.write();
+                if let Some(pos) = regions.iter().position(|(v, l)| *v == vaddr && *l == length) {
+                    regions.remove(pos);
+                }
             }
         }
 
         fn supports_mmap(&self) -> bool {
-            true
+            !self.should_fail
         }
     }
 
     #[test_case]
     fn test_memory_mapping_ops_trait() {
         // Test the MemoryMappingOps trait implementation
-        let mock_obj = MockMappableObject { should_fail: false };
+        let mock_obj = MockMappableObject::new(false);
         
         // Test supports_mmap
         assert!(mock_obj.supports_mmap());
         
-        // Test successful mmap with different parameters
-        let result = mock_obj.mmap(0, 8192, 0x3, 0x2, 1024);
+        // Test successful get_mapping_info
+        let result = mock_obj.get_mapping_info(1024, 8192);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0x10000400); // 0x10000000 + 1024
+        let (paddr, permissions, is_shared) = result.unwrap();
+        assert_eq!(paddr, 0x80000400); // 0x80000000 + 1024
+        assert_eq!(permissions, 0x3);
+        assert!(!is_shared);
         
-        // Test successful mmap with specified address
-        let result = mock_obj.mmap(0x20000000, 8192, 0x3, 0x2, 0);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0x20000000);
+        // Test on_mapped notification
+        mock_obj.on_mapped(0x10000000, 0x80000400, 8192, 1024);
+        assert_eq!(mock_obj.mapped_regions.read().len(), 1);
+        assert_eq!(mock_obj.mapped_regions.read()[0], (0x10000000, 8192));
         
-        // Test successful munmap
-        let result = mock_obj.munmap(0x20000000, 8192);
-        assert!(result.is_ok());
-        
-        // Test failed mmap
-        let mock_fail_obj = MockMappableObject { should_fail: true };
-        let result = mock_fail_obj.mmap(0, 4096, 0x1, 0x1, 0);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Mock mmap failure");
-        
-        // Test failed munmap
-        let result = mock_fail_obj.munmap(0x20000000, 8192);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Mock munmap failure");
+        // Test on_unmapped notification
+        mock_obj.on_unmapped(0x10000000, 8192);
+        assert_eq!(mock_obj.mapped_regions.read().len(), 0);
     }
 
     #[test_case]
-    fn test_memory_mapping_default_implementation() {
-        // Test the default implementation that returns errors
-        struct DefaultMappableObject;
+    fn test_memory_mapping_failure_cases() {
+        // Test failure cases
+        let mock_fail_obj = MockMappableObject::new(true);
         
-        impl MemoryMappingOps for DefaultMappableObject {
-            // Uses default implementations
-        }
+        // Test supports_mmap returns false for failing object
+        assert!(!mock_fail_obj.supports_mmap());
         
-        let obj = DefaultMappableObject;
-        
-        // Test default mmap behavior
-        let result = obj.mmap(0, 4096, 0x1, 0x1, 0);
+        // Test failed get_mapping_info
+        let result = mock_fail_obj.get_mapping_info(0, 4096);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "mmap not supported for this object");
+        assert_eq!(result.unwrap_err(), "Mock get_mapping_info failure");
         
-        // Test default munmap behavior  
-        let result = obj.munmap(0, 4096);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "munmap not supported for this object");
-        
-        // Test default supports_mmap behavior
-        assert!(!obj.supports_mmap());
+        // Test that on_mapped/on_unmapped don't panic for failing object
+        mock_fail_obj.on_mapped(0x10000000, 0x80000000, 4096, 0);
+        mock_fail_obj.on_unmapped(0x10000000, 4096);
+        // Should not crash
     }
 }

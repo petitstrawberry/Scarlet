@@ -16,18 +16,13 @@
 extern crate alloc;
 
 use core::{any::Any};
-use alloc::{sync::Arc, vec::Vec, vec, collections::BTreeMap, boxed::Box};
+use alloc::{sync::Arc, vec::Vec, vec, collections::BTreeMap};
 use spin::RwLock;
 
 use crate::device::{
     char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device, DeviceType
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps};
-use crate::vm::vmem::{VirtualMemoryMap, MemoryArea, VirtualMemoryPermission};
-use crate::task::mytask;
-
-#[cfg(test)]
-use crate::task::{set_mock_current_task, clear_mock_current_task, new_user_task};
 
 /// Linux framebuffer ioctl command constants
 /// These provide compatibility with Linux framebuffer applications
@@ -222,6 +217,13 @@ impl Default for FbBitfield {
     }
 }
 
+/// Mock mapping for testing purposes
+#[derive(Debug, Clone)]
+struct MockMapping {
+    vaddr: usize,
+    length: usize,
+}
+
 /// Framebuffer character device implementation
 /// 
 /// This device provides character-based access to framebuffer memory.
@@ -233,8 +235,8 @@ impl Default for FbBitfield {
 pub struct FramebufferCharDevice {
     /// The framebuffer resource this device represents
     fb_resource: Arc<FramebufferResource>,
-    /// Track virtual address ranges that this device has mapped for munmap validation
-    mapped_ranges: RwLock<BTreeMap<usize, usize>>, // virtual_start -> virtual_end
+    /// Track mappings for testing purposes  
+    mappings: RwLock<BTreeMap<usize, MockMapping>>, // virtual_start -> MockMapping
 }
 
 impl FramebufferCharDevice {
@@ -250,7 +252,7 @@ impl FramebufferCharDevice {
     pub fn new(fb_resource: Arc<FramebufferResource>) -> Self {
         Self {
             fb_resource,
-            mapped_ranges: RwLock::new(BTreeMap::new()),
+            mappings: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -443,205 +445,49 @@ impl ControlOps for FramebufferCharDevice {
 }
 
 impl MemoryMappingOps for FramebufferCharDevice {
-    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) 
-           -> Result<usize, &'static str> {
+    fn get_mapping_info(&self, offset: usize, length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
         let fb_resource = &self.fb_resource;
         
-        // Validate framebuffer resource
-        if fb_resource.physical_addr == 0 {
-            return Err("Invalid framebuffer address");
+        // Check if framebuffer supports memory mapping
+        if fb_resource.physical_addr == 0 || fb_resource.size == 0 {
+            return Err("Invalid framebuffer configuration");
         }
         
-        if fb_resource.size == 0 {
-            return Err("Invalid framebuffer size");
-        }
-        
-        // Check if offset and length are within framebuffer bounds
+        // Basic validation
         if offset >= fb_resource.size {
-            return Err("Offset beyond framebuffer size");
+            return Err("Offset exceeds framebuffer size");
         }
         
-        let available = fb_resource.size - offset;
-        if length > available {
-            return Err("Mapping length exceeds framebuffer bounds");
+        let available_size = fb_resource.size - offset;
+        if length > available_size {
+            return Err("Requested length exceeds available framebuffer size");
         }
         
-        // Calculate physical address with offset
-        let physical_addr = fb_resource.physical_addr + offset;
+        // Return physical address, permissions (read/write), and shared flag
+        let paddr = fb_resource.physical_addr + offset;
+        let permissions = 0x3; // Read and Write
+        let is_shared = true; // Framebuffer mappings are shared
         
-        // Additional safety check: ensure calculated physical address is still within bounds
-        if physical_addr + length > fb_resource.physical_addr + fb_resource.size {
-            return Err("Calculated physical address range exceeds framebuffer bounds");
-        }
-        
-        // Get current task's VM manager for user space mappings
-        if let Some(current_task) = mytask() {
-            // User space mapping - use VM manager
-            let vm_manager = &mut current_task.vm_manager;
-            
-            // Determine virtual address
-            let target_vaddr = if vaddr == 0 {
-                // Use the new VirtualMemoryManager's find_unmapped_area method
-                let page_size = crate::environment::PAGE_SIZE;
-                vm_manager.find_unmapped_area(length, page_size)
-                    .ok_or("No available virtual address space")?
-            } else {
-                vaddr
-            };
-            
-            // Align addresses and length to page boundaries
-            let page_size = crate::environment::PAGE_SIZE;
-            let aligned_vaddr = target_vaddr & !(page_size - 1);
-            let aligned_paddr = physical_addr & !(page_size - 1);
-            let aligned_length = ((length + page_size - 1) / page_size) * page_size;
-            
-            // Convert protection flags to VM permissions
-            let mut permissions = 0;
-            if prot & 0x1 != 0 { // PROT_READ
-                permissions |= VirtualMemoryPermission::Read as usize;
-            }
-            if prot & 0x2 != 0 { // PROT_WRITE
-                permissions |= VirtualMemoryPermission::Write as usize;
-            }
-            if prot & 0x4 != 0 { // PROT_EXEC
-                permissions |= VirtualMemoryPermission::Execute as usize;
-            }
-            permissions |= VirtualMemoryPermission::User as usize;
-            
-            // Create memory mapping using the new constructor
-            let pmarea = MemoryArea {
-                start: aligned_paddr,
-                end: aligned_paddr + aligned_length - 1,
-            };
-            let vmarea = MemoryArea {
-                start: aligned_vaddr,
-                end: aligned_vaddr + aligned_length - 1,
-            };
-            
-            let map = VirtualMemoryMap::new(
-                pmarea,    // physical area first
-                vmarea,    // virtual area second  
-                permissions,
-                true // The page is shared with kernel space (Not a private mapping)
-            );
-            
-            // Add mapping to VM manager (lazy mapping - actual page table setup on page fault)
-            vm_manager.add_memory_map(map)
-                .map_err(|_| "Failed to add memory mapping")?;
-            
-            // Note: Physical pages are not immediately mapped to virtual pages
-            // The page fault handler will establish the actual mapping when accessed
-            // This provides better memory efficiency and faster mmap performance
-            
-            // Record this mapping for munmap validation
-            {
-                let mut mapped_ranges = self.mapped_ranges.write();
-                mapped_ranges.insert(aligned_vaddr, aligned_vaddr + aligned_length - 1);
-            }
-            
-            Ok(aligned_vaddr + (physical_addr - aligned_paddr))
-        } else {
-            // Kernel space - return physical address directly
-            // In kernel space, physical addresses are typically directly accessible
-            Ok(physical_addr)
-        }
+        Ok((paddr, permissions, is_shared))
     }
     
-    fn munmap(&self, vaddr: usize, length: usize) -> Result<(), &'static str> {
-        if vaddr == 0 {
-            return Err("Invalid virtual address for munmap");
-        }
-        
-        if length == 0 {
-            return Err("Invalid length for munmap");
-        }
-        
-        // Get current task's VM manager for user space unmapping
-        if let Some(current_task) = mytask() {
-            let vm_manager = &mut current_task.vm_manager;
-            
-            // Align addresses to page boundaries
-            let page_size = crate::environment::PAGE_SIZE;
-            let aligned_vaddr = vaddr & !(page_size - 1);
-            let aligned_length = ((length + page_size - 1) / page_size) * page_size;
-            let aligned_end = aligned_vaddr + aligned_length - 1;
-            
-            // CRITICAL: Check if this virtual address range was mapped by this device
-            {
-                let mapped_ranges = self.mapped_ranges.read();
-                let mut found_mapping = false;
-                
-                for (&range_start, &range_end) in mapped_ranges.iter() {
-                    if aligned_vaddr >= range_start && aligned_end <= range_end {
-                        found_mapping = true;
-                        break;
-                    }
-                }
-                
-                if !found_mapping {
-                    return Err("Cannot unmap memory not managed by this framebuffer device");
-                }
-            }
-            
-            // Find and verify the memory mapping
-            if let Some(map) = vm_manager.search_memory_map(aligned_vaddr) {
-                // Verify the unmap request is within the mapped region
-                if map.vmarea.start > aligned_vaddr || 
-                   aligned_end > map.vmarea.end {
-                    return Err("Unmap range exceeds mapped region");
-                }
-                
-                // Additional check: Verify physical mapping starts within framebuffer range
-                // Note: The mapping might extend beyond the framebuffer due to page alignment,
-                // but it should start at the framebuffer's physical address
-                let fb_start = self.fb_resource.physical_addr;
-                
-                if map.pmarea.start != fb_start {
-                    return Err("Physical mapping does not start at framebuffer device");
-                }
-                
-                // Unmap pages from page table
-                if let Some(page_table) = vm_manager.get_root_page_table() {
-                    let mut addr = aligned_vaddr;
-                    while addr < aligned_vaddr + aligned_length {
-                        page_table.unmap(addr);
-                        addr += page_size;
-                    }
-                }
-                
-                // Remove the memory mapping using new API (address-based removal)
-                vm_manager.remove_memory_map_by_addr(aligned_vaddr);
-                
-                // Remove the mapping record
-                {
-                    let mut mapped_ranges = self.mapped_ranges.write();
-                    mapped_ranges.remove(&aligned_vaddr);
-                }
-            } else {
-                return Err("No mapping found for given address");
-            }
-        } else {
-            // No task context - this is an error in user space mapping scenarios
-            return Err("No task context available for munmap");
-        }
-        
-        Ok(())
+    fn on_mapped(&self, vaddr: usize, _paddr: usize, length: usize, _offset: usize) {
+        // Record this mapping in our tracking structure
+        let mapping = MockMapping { vaddr, length };
+        self.mappings.write().insert(vaddr, mapping);
+    }
+    
+    fn on_unmapped(&self, vaddr: usize, _length: usize) {
+        // Remove the mapping from our tracking
+        self.mappings.write().remove(&vaddr);
     }
     
     fn supports_mmap(&self) -> bool {
-        // Framebuffer devices support memory mapping if:
-        // 1. Physical address is valid
-        // 2. Size is non-zero
-        // 3. Format is supported (all current formats support memory mapping)
-        self.fb_resource.physical_addr != 0 && 
-        self.fb_resource.size > 0 &&
-        matches!(self.fb_resource.config.format, 
-                crate::device::graphics::PixelFormat::RGBA8888 | 
-                crate::device::graphics::PixelFormat::BGRA8888 |
-                crate::device::graphics::PixelFormat::RGB888 |
-                crate::device::graphics::PixelFormat::RGB565)
+        self.fb_resource.physical_addr != 0 && self.fb_resource.size > 0
     }
 }
+
 impl FramebufferCharDevice {
     /// Handle FBIOGET_VSCREENINFO control command
     fn handle_get_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
@@ -1248,11 +1094,11 @@ mod tests {
     }
     
     #[test_case]
-    fn test_framebuffer_mmap_munmap_safety() {
+    fn test_framebuffer_memory_mapping_ops() {
         use crate::object::capability::MemoryMappingOps;
         
         let graphics_manager = setup_clean_graphics_manager();
-        let mut test_device = GenericGraphicsDevice::new("test-mmap-safety");
+        let mut test_device = GenericGraphicsDevice::new("test-mmap-ops");
         let config = FramebufferConfig::new(4, 4, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
         
@@ -1263,7 +1109,7 @@ mod tests {
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-mmap-safety-device".to_string(), shared_device.clone());
+        let device_id = device_manager.register_device_with_name("test-mmap-ops-device".to_string(), shared_device.clone());
         graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
 
         let fb_resource = {
@@ -1280,57 +1126,47 @@ mod tests {
             graphics_manager.get_framebuffer(fb_name).expect("Framebuffer should exist")
         };
         
-        let char_device1 = FramebufferCharDevice::new(fb_resource.clone());
-        let char_device2 = FramebufferCharDevice::new(fb_resource.clone());
+        let fb_device = FramebufferCharDevice::new(fb_resource.clone());
         
-        // Create test task for mocking (leaked to make it 'static for testing)
-        let test_task = Box::leak(Box::new(new_user_task("test_mmap_task".to_string(), 0)));
-        test_task.init(); // Initialize the task and its VM manager
+        // Test supports_mmap
+        assert!(fb_device.supports_mmap());
         
-        // Set mock current task for testing
-        unsafe {
-            set_mock_current_task(test_task);
-        }
+        // Test get_mapping_info
+        let result = fb_device.get_mapping_info(0, 32);
+        assert!(result.is_ok());
+        let (paddr, permissions, is_shared) = result.unwrap();
+        assert_eq!(paddr, fb_addr);
+        assert_eq!(permissions, 0x3); // Read and Write
+        assert!(is_shared);
         
-        // Test invalid munmap parameters
-        assert!(char_device1.munmap(0, 4096).is_err()); // Invalid vaddr
-        assert!(char_device1.munmap(0x1000, 0).is_err()); // Invalid length
-        
-        // Test munmap of non-existent mapping (should fail gracefully)
-        let result = char_device1.munmap(0x1000, 64);
+        // Test invalid offset
+        let result = fb_device.get_mapping_info(fb_size + 1, 32);
         assert!(result.is_err());
         
-        // Test actual mmap/munmap flow (use framebuffer size: 8*8*1 = 64 bytes)
-        let mmap_result = char_device1.mmap(0, 64, 0x3, 0x1, 0);
-        assert!(mmap_result.is_ok());
-        let mapped_addr = mmap_result.unwrap();
+        // Test invalid length  
+        let result = fb_device.get_mapping_info(0, fb_size + 1);
+        assert!(result.is_err());
         
-        // Test successful munmap of own mapping
-        let munmap_result = char_device1.munmap(mapped_addr, 64);
-        assert!(munmap_result.is_ok());
+        // Test on_mapped callback
+        fb_device.on_mapped(0x1000, paddr, 32, 0);
+        {
+            let mappings = fb_device.mappings.read();
+            assert_eq!(mappings.len(), 1);
+            assert!(mappings.contains_key(&0x1000));
+        }
         
-        // Test that device2 cannot unmap device1's mapping
-        let mmap_result2 = char_device1.mmap(0, 64, 0x3, 0x1, 0);
-        assert!(mmap_result2.is_ok());
-        let mapped_addr2 = mmap_result2.unwrap();
-        
-        // device2 tries to unmap device1's mapping - should fail
-        let invalid_munmap = char_device2.munmap(mapped_addr2, 64);
-        assert!(invalid_munmap.is_err());
-        
-        // device1 can successfully unmap its own mapping
-        assert!(char_device1.munmap(mapped_addr2, 64).is_ok());
-        
-        // Clear mock task context
-        unsafe {
-            clear_mock_current_task();
+        // Test on_unmapped callback
+        fb_device.on_unmapped(0x1000, 32);
+        {
+            let mappings = fb_device.mappings.read();
+            assert_eq!(mappings.len(), 0);
         }
     }
     
     #[test_case] 
-    fn test_framebuffer_mapping_record_validation() {
+    fn test_framebuffer_mapping_basic_ops() {
         let graphics_manager = setup_clean_graphics_manager();
-        let mut test_device = GenericGraphicsDevice::new("test-mapping-record");
+        let mut test_device = GenericGraphicsDevice::new("test-mapping-basic");
         let config = FramebufferConfig::new(4, 4, PixelFormat::RGBA8888);
         test_device.set_framebuffer_config(config.clone());
         
@@ -1341,7 +1177,7 @@ mod tests {
         
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
         let device_manager = DeviceManager::get_manager();
-        let device_id = device_manager.register_device_with_name("test-mapping-record-device".to_string(), shared_device.clone());
+        let device_id = device_manager.register_device_with_name("test-mapping-basic-device".to_string(), shared_device.clone());
         graphics_manager.register_framebuffer_from_device(device_id, shared_device).unwrap();
 
         let fb_resource = {
@@ -1360,47 +1196,21 @@ mod tests {
         
         let char_device = FramebufferCharDevice::new(fb_resource);
         
-        // Test that mapped_ranges is initially empty
+        // Test that mappings are initially empty
         {
-            let mapped_ranges = char_device.mapped_ranges.read();
-            assert_eq!(mapped_ranges.len(), 0);
+            let mappings = char_device.mappings.read();
+            assert_eq!(mappings.len(), 0);
         }
         
         // Test supports_mmap
         assert!(char_device.supports_mmap());
         
-        // Create test task for mocking (leaked to make it 'static for testing)
-        let test_task = Box::leak(Box::new(new_user_task("test_mapping_task".to_string(), 0)));
-        test_task.init(); // Initialize the task and its VM manager
-        
-        // Set mock current task for testing
-        unsafe {
-            set_mock_current_task(test_task);
-        }
-        
-        // Test mmap adds to mapped_ranges (use framebuffer size: 8*8*1 = 64 bytes)
-        {
-            use crate::object::capability::MemoryMappingOps;
-            let mmap_result = char_device.mmap(0, 64, 0x3, 0x1, 0);
-            if mmap_result.is_err() {
-                // Print debug information about the error
-                crate::early_println!("mmap failed with error: {:?}", mmap_result.err());
-                // Also check if we have a valid task
-                if let Some(task) = mytask() {
-                    crate::early_println!("Task found: id={}, state={:?}", task.get_id(), task.get_state());
-                } else {
-                    crate::early_println!("No current task found");
-                }
-            }
-            assert!(mmap_result.is_ok());
-            
-            let mapped_ranges = char_device.mapped_ranges.read();
-            assert_eq!(mapped_ranges.len(), 1);
-        }
-        
-        // Clear mock task context
-        unsafe {
-            clear_mock_current_task();
-        }
+        // Test get_mapping_info with valid parameters
+        let result = char_device.get_mapping_info(0, fb_size);
+        assert!(result.is_ok());
+        let (paddr, permissions, is_shared) = result.unwrap();
+        assert_eq!(paddr, fb_addr);
+        assert_eq!(permissions, 0x3);
+        assert!(is_shared);
     }
 }
