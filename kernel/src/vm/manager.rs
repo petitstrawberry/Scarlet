@@ -742,7 +742,7 @@ impl Drop for VirtualMemoryManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::arch::vm::alloc_virtual_address_space;
+    use crate::arch::vm::{alloc_virtual_address_space, get_root_pagetable};
     use crate::environment::PAGE_SIZE;
     use crate::vm::VirtualMemoryMap;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
@@ -1363,6 +1363,8 @@ mod tests {
         let mut manager = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0o644, is_shared: false, owner: None };
+        let asid = alloc_virtual_address_space();
+        manager.set_asid(asid);
         manager.add_memory_map(map).unwrap();
         
         // Trigger lazy mapping by simulating a page fault at virtual address 0x1500
@@ -1374,10 +1376,11 @@ mod tests {
         assert!(translated_addr.is_some());
         assert_eq!(translated_addr.unwrap() & !(PAGE_SIZE - 1), 0x1000); // Should be page-aligned
         
-        // Unmap the range to test unmapping functionality
-        manager.unmap_range_from_mmu(0x1000, 0x1fff);
+        // Test unmapping functionality by removing the memory map
+        // This also unmaps from MMU due to our implementation
+        manager.remove_memory_map_by_addr(0x1500);
         
-        // Translation should now fail as the range is unmapped
+        // Translation should now fail as the memory map is removed
         let translated_addr_after_unmap = manager.translate_vaddr(0x1500);
         assert!(translated_addr_after_unmap.is_none());
     }
