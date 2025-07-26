@@ -204,7 +204,8 @@ fn handle_anonymous_mapping(
     let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
     
     // Create virtual memory map  
-    let is_shared = (flags & MAP_SHARED) != 0;
+    // let is_shared = (flags & MAP_SHARED) != 0;
+    let is_shared = false; // Anonymous mappings are always private
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
