@@ -522,7 +522,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
                 pmarea,    // physical area first
                 vmarea,    // virtual area second  
                 permissions,
-                (flags & 0x01) != 0, // MAP_SHARED
+                true // The page is shared with kernel space (Not a private mapping)
             );
             
             // Add mapping to VM manager (lazy mapping - actual page table setup on page fault)
