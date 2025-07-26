@@ -475,7 +475,7 @@ impl VirtualMemoryManager {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
                 
-                // Check if mappings overlap: new_start < existing_end && new_end > existing_start  
+                // Check if mappings overlap: new_start <= existing_end && new_end >= existing_start  
                 if new_start <= existing_end && new_end >= existing_start {
                     Some(*start_addr)
                 } else {
