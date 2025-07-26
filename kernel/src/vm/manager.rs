@@ -40,7 +40,7 @@ use alloc::{sync::Arc, vec::Vec, collections::BTreeMap};
 
 use crate::{arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable}, environment::PAGE_SIZE};
 
-use super::vmem::VirtualMemoryMap;
+use super::vmem::{VirtualMemoryMap, MemoryArea};
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
@@ -431,6 +431,126 @@ impl VirtualMemoryManager {
             None
         }
     }
+
+    /// Add a memory map at a fixed address, handling overlapping mappings by splitting them
+    /// 
+    /// This method is designed for FIXED memory mappings where the caller wants to map
+    /// at a specific virtual address, potentially overwriting existing mappings.
+    /// Any existing mappings that overlap with the new mapping will be properly split
+    /// or removed to make room for the new mapping.
+    /// 
+    /// # Arguments
+    /// * `map` - The memory map to add at a fixed location
+    /// 
+    /// # Returns
+    /// * `Ok(Vec<VirtualMemoryMap>)` - Successfully added the mapping, returns any removed mappings
+    /// * `Err(&'static str)` - Error message if the operation failed
+    /// 
+    /// # Design
+    /// For each existing mapping that overlaps with the new mapping:
+    /// - If completely contained within new mapping: remove entirely
+    /// - If partially overlaps: split into non-overlapping parts and keep them
+    /// 
+    /// The caller is responsible for handling any managed pages associated with removed mappings.
+    pub fn add_memory_map_fixed(&mut self, map: VirtualMemoryMap) -> Result<Vec<VirtualMemoryMap>, &'static str>
+    {
+        // Validate alignment like the regular add_memory_map
+        if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
+            map.vmarea.size() % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0 {
+            return Err("Address or size is not aligned to PAGE_SIZE");
+        }
+
+        let new_start = map.vmarea.start;
+        let new_end = map.vmarea.end;
+        let mut removed_mappings = Vec::new();
+        let mut mappings_to_add = Vec::new();
+
+        // Find all overlapping mappings and process them
+        let overlapping_keys: alloc::vec::Vec<usize> = self.memmap
+            .range(..)
+            .filter_map(|(start_addr, existing_map)| {
+                let existing_start = existing_map.vmarea.start;
+                let existing_end = existing_map.vmarea.end;
+                
+                // Check if mappings overlap: new_start <= existing_end && new_end >= existing_start  
+                if new_start <= existing_end && new_end >= existing_start {
+                    Some(*start_addr)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Process each overlapping mapping
+        for key in overlapping_keys {
+            if let Some(existing_map) = self.memmap.remove(&key) {
+                let existing_start = existing_map.vmarea.start;
+                let existing_end = existing_map.vmarea.end;
+
+                // Case 1: New mapping completely contains the existing mapping
+                if new_start <= existing_start && new_end >= existing_end {
+                    // Remove entire existing mapping
+                    removed_mappings.push(existing_map);
+                    continue;
+                }
+
+                // Case 2: Partial overlap - need to split
+                
+                // Keep the part before the new mapping (if any)
+                if existing_start < new_start {
+                    let before_map = VirtualMemoryMap {
+                        vmarea: MemoryArea {
+                            start: existing_start,
+                            end: new_start - 1,
+                        },
+                        pmarea: MemoryArea {
+                            start: existing_map.pmarea.start,
+                            end: existing_map.pmarea.start + (new_start - existing_start) - 1,
+                        },
+                        permissions: existing_map.permissions,
+                        is_shared: existing_map.is_shared,
+                        owner: existing_map.owner.clone(),
+                    };
+                    mappings_to_add.push(before_map);
+                }
+
+                // Keep the part after the new mapping (if any)
+                if existing_end > new_end {
+                    let after_offset = (new_end + 1) - existing_start;
+                    let after_map = VirtualMemoryMap {
+                        vmarea: MemoryArea {
+                            start: new_end + 1,
+                            end: existing_end,
+                        },
+                        pmarea: MemoryArea {
+                            start: existing_map.pmarea.start + after_offset,
+                            end: existing_map.pmarea.end,
+                        },
+                        permissions: existing_map.permissions,
+                        is_shared: existing_map.is_shared,
+                        owner: existing_map.owner.clone(),
+                    };
+                    mappings_to_add.push(after_map);
+                }
+
+                // The overlapping part is implicitly removed
+                removed_mappings.push(existing_map);
+            }
+        }
+
+        // Clear cache since we've modified the memory layout
+        self.last_search_cache = None;
+
+        // Add the split mappings back
+        for split_map in mappings_to_add {
+            self.memmap.insert(split_map.vmarea.start, split_map);
+        }
+
+        // Add the new mapping
+        self.memmap.insert(map.vmarea.start, map);
+
+        Ok(removed_mappings)
+    }
     
     /// Get memory statistics and usage information
     /// This provides detailed information about memory usage patterns
@@ -491,6 +611,7 @@ impl VirtualMemoryManager {
                         },
                         permissions: prev_memory_map.permissions, // Use permissions from first map
                         is_shared: prev_memory_map.is_shared,
+                        owner: prev_memory_map.owner.clone(),
                     };
                     
                     // Mark old memory maps for removal and add merged map
@@ -578,7 +699,7 @@ mod tests {
     fn test_add_and_get_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
-        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
+        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false, owner: None };
         vmm.add_memory_map(map).unwrap();
         
         // Use new efficient API instead of deprecated get_memory_map(0)
@@ -595,7 +716,7 @@ mod tests {
     fn test_remove_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
-        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false };
+        let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false, owner: None };
         vmm.add_memory_map(map).unwrap();
         
         // Use address-based removal instead of index-based
@@ -612,9 +733,9 @@ mod tests {
     fn test_search_memory_map() {
         let mut vmm = VirtualMemoryManager::new();
         let vma1 = MemoryArea { start: 0x1000, end: 0x1fff };
-        let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0, is_shared: false };
+        let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0, is_shared: false, owner: None };
         let vma2 = MemoryArea { start: 0x3000, end: 0x3fff };
-        let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2, permissions: 0, is_shared: false };
+        let map2 = VirtualMemoryMap { vmarea: vma2, pmarea: vma2, permissions: 0, is_shared: false, owner: None };
         vmm.add_memory_map(map1).unwrap();
         vmm.add_memory_map(map2).unwrap();
         let found_map = vmm.search_memory_map(0x3500).unwrap();
@@ -656,7 +777,8 @@ mod tests {
             crate::vm::vmem::MemoryArea { start: 0x80000000, end: 0x80000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x50000000, end: 0x50000fff }, // vmarea
             0o644,
-            false
+            false,
+            None
         );
         manager.add_memory_map(map1).unwrap();
         
@@ -676,7 +798,8 @@ mod tests {
             crate::vm::vmem::MemoryArea { start: 0x80002000, end: 0x80002fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x50002000, end: 0x50002fff }, // vmarea
             0o644,
-            false
+            false,
+            None
         );
         manager.add_memory_map(map2).unwrap();
         
@@ -702,13 +825,15 @@ mod tests {
             crate::vm::vmem::MemoryArea { start: 0x80000000, end: 0x80000fff },
             crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff },
             0o644,
-            false
+            false,
+            None
         );
         let map2 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x80001000, end: 0x80001fff },
             crate::vm::vmem::MemoryArea { start: 0x10001000, end: 0x10001fff },
             0o644, // Same permissions
-            false  // Same sharing status
+            false,  // Same sharing status
+            None
         );
         
         manager.add_memory_map(map1).unwrap();
@@ -744,7 +869,9 @@ mod tests {
         let map1 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         manager.add_memory_map(map1).unwrap();
         
@@ -752,7 +879,9 @@ mod tests {
         let map2 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x4000, end: 0x4fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         manager.add_memory_map(map2).unwrap();
         
@@ -760,7 +889,9 @@ mod tests {
         let map3 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x30000000, end: 0x30000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x7000, end: 0x7fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         manager.add_memory_map(map3).unwrap();
         
@@ -769,7 +900,9 @@ mod tests {
         let overlap_with_prev = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x40000000, end: 0x40000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x1800, end: 0x27ff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(overlap_with_prev).is_err());
         
@@ -778,7 +911,9 @@ mod tests {
         let overlap_with_next = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x50000000, end: 0x50000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x3800, end: 0x47ff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(overlap_with_next).is_err());
         
@@ -787,7 +922,9 @@ mod tests {
         let contained_map = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x60000000, end: 0x600005ff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x1200, end: 0x17ff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(contained_map).is_err());
         
@@ -796,7 +933,9 @@ mod tests {
         let containing_map = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x70000000, end: 0x70001fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x800, end: 0x27ff },         // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(containing_map).is_err());
         
@@ -805,7 +944,9 @@ mod tests {
         let exact_boundary = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x80000000, end: 0x80000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x2000, end: 0x2fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(exact_boundary).is_ok()); // Should succeed (touching but not overlapping)
         
@@ -814,7 +955,9 @@ mod tests {
         let gap_insertion = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x90000000, end: 0x90000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x5000, end: 0x5fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(gap_insertion).is_ok());
         
@@ -823,7 +966,9 @@ mod tests {
         let beginning_map = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0xa0000000, end: 0xa0000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x0, end: 0xfff },            // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(beginning_map).is_ok());
         
@@ -832,7 +977,9 @@ mod tests {
         let end_map = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0xb0000000, end: 0xb0000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x8000, end: 0x8fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(end_map).is_ok());
         
@@ -857,7 +1004,9 @@ mod tests {
         let misaligned_virtual = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x1001, end: 0x2000 },        // vmarea - Not PAGE_SIZE aligned
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(misaligned_virtual).is_err());
         
@@ -865,7 +1014,9 @@ mod tests {
         let misaligned_physical = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x10000001, end: 0x10001000 }, // pmarea - Not PAGE_SIZE aligned
             crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(misaligned_physical).is_err());
         
@@ -873,7 +1024,9 @@ mod tests {
         let misaligned_size = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000800 }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1800 },        // vmarea - Size is not PAGE_SIZE multiple
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(misaligned_size).is_err());
         
@@ -881,7 +1034,9 @@ mod tests {
         let zero_size = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000000 }, // pmarea - Start == End
             crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1000 },        // vmarea - Start == End
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(zero_size).is_err());
         
@@ -889,7 +1044,9 @@ mod tests {
         let single_page = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(single_page).is_ok());
         
@@ -897,7 +1054,9 @@ mod tests {
         let large_mapping = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x2000ffff }, // pmarea - 64KB
             crate::vm::vmem::MemoryArea { start: 0x10000, end: 0x1ffff },      // vmarea - 64KB
-            0o644, false
+            0o644,
+            false,
+            None
         );
         assert!(manager.add_memory_map(large_mapping).is_ok());
         
@@ -912,7 +1071,9 @@ mod tests {
         let map1 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         manager.add_memory_map(map1).unwrap();
         
@@ -928,7 +1089,9 @@ mod tests {
         let map2 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20000fff }, // pmarea
             crate::vm::vmem::MemoryArea { start: 0x3000, end: 0x3fff },        // vmarea
-            0o644, false
+            0o644,
+            false,
+            None
         );
         manager.add_memory_map(map2).unwrap();
         
@@ -940,5 +1103,193 @@ mod tests {
         let found_new = manager.search_memory_map(0x3500);
         assert!(found_new.is_some());
         assert_eq!(found_new.unwrap().vmarea.start, 0x3000);
+    }
+
+    #[test_case]
+    fn test_add_memory_map_fixed_complete_overlap() {        
+        let mut manager = VirtualMemoryManager::new();
+        
+        // Add initial mapping at [0x2000, 0x3000)
+        let initial_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x2000, end: 0x2fff },        // vmarea
+            0o644,
+            false,
+            None
+        );
+        manager.add_memory_map(initial_map).unwrap();
+        assert_eq!(manager.memmap_len(), 1);
+        
+        // Add fixed mapping that completely contains the existing mapping [0x1000, 0x4000)
+        let fixed_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20002fff }, // pmarea - 3 pages
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x3fff },        // vmarea - 3 pages
+            0o755,
+            true,
+            None
+        );
+        
+        let result = manager.add_memory_map_fixed(fixed_map);
+        assert!(result.is_ok());
+        
+        let removed_mappings = result.unwrap();
+        assert_eq!(removed_mappings.len(), 1); // Should have removed one mapping
+        assert_eq!(removed_mappings[0].vmarea.start, 0x2000);
+        
+        // Should now have only the new fixed mapping
+        assert_eq!(manager.memmap_len(), 1);
+        let remaining_map = manager.search_memory_map(0x2000);
+        assert!(remaining_map.is_some());
+        assert_eq!(remaining_map.unwrap().vmarea.start, 0x1000);
+        assert_eq!(remaining_map.unwrap().vmarea.end, 0x3fff);
+        assert_eq!(remaining_map.unwrap().permissions, 0o755);
+        assert_eq!(remaining_map.unwrap().is_shared, true);
+    }
+
+    #[test_case]
+    fn test_add_memory_map_fixed_partial_overlap() {        
+        let mut manager = VirtualMemoryManager::new();
+        
+        // Add initial mapping at [0x1000, 0x3000) - 2 pages
+        let initial_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10001fff }, // pmarea - 2 pages
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x2fff },        // vmarea - 2 pages  
+            0o644,
+            false,
+            None
+        );
+        manager.add_memory_map(initial_map).unwrap();
+        assert_eq!(manager.memmap_len(), 1);
+        
+        // Add fixed mapping that overlaps from middle: [0x2000, 0x4000) - 2 pages
+        let fixed_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20001fff }, // pmarea - 2 pages
+            crate::vm::vmem::MemoryArea { start: 0x2000, end: 0x3fff },        // vmarea - 2 pages
+            0o755,
+            true,
+            None
+        );
+        
+        let result = manager.add_memory_map_fixed(fixed_map);
+        assert!(result.is_ok());
+        
+        let removed_mappings = result.unwrap();
+        assert_eq!(removed_mappings.len(), 1); // Should have removed the original mapping
+        
+        // Should now have 2 mappings: the split part [0x1000, 0x2000) and the new fixed [0x2000, 0x4000)
+        assert_eq!(manager.memmap_len(), 2);
+        
+        // Check the remaining part of the original mapping
+        let remaining_original = manager.search_memory_map(0x1500);
+        assert!(remaining_original.is_some());
+        assert_eq!(remaining_original.unwrap().vmarea.start, 0x1000);
+        assert_eq!(remaining_original.unwrap().vmarea.end, 0x1fff);
+        assert_eq!(remaining_original.unwrap().permissions, 0o644);
+        
+        // Check the new fixed mapping
+        let new_fixed = manager.search_memory_map(0x3000);
+        assert!(new_fixed.is_some());
+        assert_eq!(new_fixed.unwrap().vmarea.start, 0x2000);
+        assert_eq!(new_fixed.unwrap().vmarea.end, 0x3fff);
+        assert_eq!(new_fixed.unwrap().permissions, 0o755);
+        assert_eq!(new_fixed.unwrap().is_shared, true);
+    }
+
+    #[test_case]
+    fn test_add_memory_map_fixed_split_both_ends() {
+        let mut manager = VirtualMemoryManager::new();
+        
+        // Add initial mapping at [0x1000, 0x5000) - 4 pages
+        let initial_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10003fff }, // pmarea - 4 pages
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x4fff },        // vmarea - 4 pages
+            0o644,
+            false,
+            None
+        );
+        manager.add_memory_map(initial_map).unwrap();
+        assert_eq!(manager.memmap_len(), 1);
+        
+        // Add fixed mapping in the middle: [0x2000, 0x4000) - 2 pages
+        let fixed_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20001fff }, // pmarea - 2 pages
+            crate::vm::vmem::MemoryArea { start: 0x2000, end: 0x3fff },        // vmarea - 2 pages
+            0o755,
+            true,
+            None
+        );
+        
+        let result = manager.add_memory_map_fixed(fixed_map);
+        assert!(result.is_ok());
+        
+        let removed_mappings = result.unwrap();
+        assert_eq!(removed_mappings.len(), 1); // Should have removed the original mapping
+        
+        // Should now have 3 mappings: before [0x1000, 0x2000), fixed [0x2000, 0x4000), after [0x4000, 0x5000)
+        assert_eq!(manager.memmap_len(), 3);
+        
+        // Check the part before the fixed mapping
+        let before_part = manager.search_memory_map(0x1500);
+        assert!(before_part.is_some());
+        assert_eq!(before_part.unwrap().vmarea.start, 0x1000);
+        assert_eq!(before_part.unwrap().vmarea.end, 0x1fff);
+        assert_eq!(before_part.unwrap().permissions, 0o644);
+        
+        // Check the new fixed mapping
+        let fixed_part = manager.search_memory_map(0x3000);
+        assert!(fixed_part.is_some());
+        assert_eq!(fixed_part.unwrap().vmarea.start, 0x2000);
+        assert_eq!(fixed_part.unwrap().vmarea.end, 0x3fff);
+        assert_eq!(fixed_part.unwrap().permissions, 0o755);
+        assert_eq!(fixed_part.unwrap().is_shared, true);
+        
+        // Check the part after the fixed mapping
+        let after_part = manager.search_memory_map(0x4500);
+        assert!(after_part.is_some());
+        assert_eq!(after_part.unwrap().vmarea.start, 0x4000);
+        assert_eq!(after_part.unwrap().vmarea.end, 0x4fff);
+        assert_eq!(after_part.unwrap().permissions, 0o644);
+    }
+
+    #[test_case]
+    fn test_add_memory_map_fixed_no_overlap() {
+        let mut manager = VirtualMemoryManager::new();
+        
+        // Add initial mapping at [0x1000, 0x2000)
+        let initial_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x10000000, end: 0x10000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x1000, end: 0x1fff },        // vmarea
+            0o644,
+            false,
+            None
+        );
+        manager.add_memory_map(initial_map).unwrap();
+        
+        // Add fixed mapping with no overlap at [0x3000, 0x4000)
+        let fixed_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea { start: 0x20000000, end: 0x20000fff }, // pmarea
+            crate::vm::vmem::MemoryArea { start: 0x3000, end: 0x3fff },        // vmarea
+            0o755,
+            true,
+            None
+        );
+        
+        let result = manager.add_memory_map_fixed(fixed_map);
+        assert!(result.is_ok());
+        
+        let removed_mappings = result.unwrap();
+        assert_eq!(removed_mappings.len(), 0); // No mappings should be removed
+        
+        // Should now have 2 mappings
+        assert_eq!(manager.memmap_len(), 2);
+        
+        // Both mappings should be intact
+        let first_map = manager.search_memory_map(0x1500);
+        assert!(first_map.is_some());
+        assert_eq!(first_map.unwrap().vmarea.start, 0x1000);
+        
+        let second_map = manager.search_memory_map(0x3500);
+        assert!(second_map.is_some());
+        assert_eq!(second_map.unwrap().vmarea.start, 0x3000);
     }
 }

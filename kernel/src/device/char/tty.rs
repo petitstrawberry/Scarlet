@@ -202,14 +202,21 @@ impl DeviceEventListener for TtyDevice {
 }
 
 impl MemoryMappingOps for TtyDevice {
-    // TTY devices generally don't support memory mapping
-    fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
-           -> Result<usize, &'static str> {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by TTY device")
     }
     
-    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
-        Err("Memory mapping not supported by TTY device")
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // TTY devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // TTY devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

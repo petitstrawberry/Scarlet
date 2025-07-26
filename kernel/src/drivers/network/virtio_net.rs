@@ -406,13 +406,21 @@ impl VirtioNetDevice {
 }
 
 impl MemoryMappingOps for VirtioNetDevice {
-    fn mmap(&self, _vaddr: usize, _length: usize, _prot: usize, _flags: usize, _offset: usize) 
-           -> Result<usize, &'static str> {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by VirtIO network device")
     }
-
-    fn munmap(&self, _vaddr: usize, _length: usize) -> Result<(), &'static str> {
-        Err("Memory unmapping not supported by VirtIO network device")
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // VirtIO network devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // VirtIO network devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

@@ -142,3 +142,22 @@ pub fn arch_syscall5(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, ar
     }
     ret
 }
+
+pub fn arch_syscall6(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) -> usize {
+    let mut ret;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") syscall as usize,
+            inlateout("a0") arg1 => ret,
+            in("a1") arg2,
+            in("a2") arg3,
+            in("a3") arg4,
+            in("a4") arg5,
+            in("a5") arg6,
+            clobber_abi("C"),
+            options(nostack)
+        );
+    }
+    ret
+}

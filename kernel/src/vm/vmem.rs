@@ -1,3 +1,6 @@
+use alloc::sync::Weak;
+use crate::object::capability::memory_mapping::MemoryMappingOps;
+
 /// Represents a mapping between physical and virtual memory areas.
 ///
 /// This structure defines the relationship between a physical memory area
@@ -7,12 +10,16 @@
 ///
 /// * `pmarea` - The physical memory area that is being mapped
 /// * `vmarea` - The virtual memory area where the physical memory is mapped to
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// * `permissions` - The access permissions for this mapping
+/// * `is_shared` - Whether this mapping is shared between processes
+/// * `owner` - Optional weak reference to the object that created this mapping (None for anonymous mappings)
+#[derive(Debug, Clone)]
 pub struct VirtualMemoryMap {
     pub pmarea: MemoryArea,
     pub vmarea: MemoryArea,
     pub permissions: usize,
     pub is_shared: bool,
+    pub owner: Option<Weak<dyn MemoryMappingOps>>,
 }
 
 impl VirtualMemoryMap {
@@ -23,15 +30,17 @@ impl VirtualMemoryMap {
     /// * `vmarea` - The virtual memory area to map to
     /// * `permissions` - The permissions to set for the virtual memory area
     /// * `is_shared` - Whether this memory map should be shared between tasks
+    /// * `owner` - Optional weak reference to the object that created this mapping (None for anonymous mappings)
     /// 
     /// # Returns
     /// A new virtual memory map with the given physical and virtual memory areas.
-    pub fn new(pmarea: MemoryArea, vmarea: MemoryArea, permissions: usize, is_shared: bool) -> Self {
+    pub fn new(pmarea: MemoryArea, vmarea: MemoryArea, permissions: usize, is_shared: bool, owner: Option<Weak<dyn MemoryMappingOps>>) -> Self {
         VirtualMemoryMap {
             pmarea,
             vmarea,
             permissions,
             is_shared,
+            owner,
         }
     }
 

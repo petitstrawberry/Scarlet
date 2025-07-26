@@ -1098,7 +1098,24 @@ impl ControlOps for OverlayDirectoryObject {
     }
 }
 
-impl MemoryMappingOps for OverlayDirectoryObject {}
+impl MemoryMappingOps for OverlayDirectoryObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for directories")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
 
 impl FileObject for OverlayDirectoryObject {
     fn seek(&self, _whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {

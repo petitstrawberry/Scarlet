@@ -375,12 +375,21 @@ impl ControlOps for VfsFileObject {
 }
 
 impl MemoryMappingOps for VfsFileObject {
-    fn mmap(&self, vaddr: usize, length: usize, prot: usize, flags: usize, offset: usize) -> Result<usize, &'static str> {
-        self.inner.mmap(vaddr, length, prot, flags, offset)
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by VFS file objects")
     }
     
-    fn munmap(&self, addr: usize, length: usize) -> Result<(), &'static str> {
-        self.inner.munmap(addr, length)
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // VFS file objects don't support memory mapping by default
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // VFS file objects don't support memory mapping by default
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 
