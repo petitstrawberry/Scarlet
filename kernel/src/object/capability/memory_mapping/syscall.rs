@@ -124,9 +124,36 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
 
     // Add the mapping to VM manager
     match task.vm_manager.add_memory_map_fixed(vm_map) {
-        Ok(_removed_mappings) => {
+        Ok(removed_mappings) => {
             // Notify the object that mapping was created
             memory_mappable.on_mapped(final_vaddr, paddr, aligned_length, offset);
+
+            // First, notify object owners about removed mappings
+            for removed_map in &removed_mappings {
+                if let Some(owner_weak) = &removed_map.owner {
+                    if let Some(owner) = owner_weak.upgrade() {
+                        owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+                    }
+                }
+            }
+
+            // Then, handle managed page cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
+            for removed_map in removed_mappings {
+                // Remove managed pages only for private mappings
+                if !removed_map.is_shared {
+                    let mapping_start = removed_map.vmarea.start;
+                    let mapping_end = removed_map.vmarea.end;
+                    let num_removed_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                    
+                    for i in 0..num_removed_pages {
+                        let page_vaddr = mapping_start + i * PAGE_SIZE;
+                        if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
+                            // The managed page is automatically freed when dropped
+                        }
+                    }
+                }
+            }
+
             final_vaddr
         }
         Err(_) => usize::MAX,
@@ -177,17 +204,24 @@ fn handle_anonymous_mapping(
     let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
     
     // Create virtual memory map  
-    let is_shared = (flags & MAP_SHARED) != 0;
+    // let is_shared = (flags & MAP_SHARED) != 0;
+    let is_shared = false; // Anonymous mappings are always private
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
     match task.vm_manager.add_memory_map_fixed(vm_map) {
         Ok(removed_mappings) => {
-            // Process removed mappings and free their managed pages
+            // First, process notifications for object owners
+            for removed_map in &removed_mappings {
+                if let Some(owner_weak) = &removed_map.owner {
+                    if let Some(owner) = owner_weak.upgrade() {
+                        owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+                    }
+                }
+            }
+            
+            // Then, handle managed page cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
             for removed_map in removed_mappings {
-                // Remove from anonymous mappings tracking
-                task.remove_anonymous_mapping(removed_map.vmarea.start);
-                
                 // Remove managed pages only for private mappings
                 if !removed_map.is_shared {
                     let mapping_start = removed_map.vmarea.start;
@@ -212,9 +246,6 @@ fn handle_anonymous_mapping(
                     page: unsafe { Box::from_raw(page_ptr) },
                 });
             }
-            
-            // Track this new anonymous mapping
-            task.add_anonymous_mapping(vaddr);
             
             vaddr
         }
@@ -249,62 +280,35 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     }
 
-    // Check if this is an anonymous mapping
-    let is_anonymous = task.is_anonymous_mapping(vaddr);
-
-    if is_anonymous {
-        // Handle anonymous mapping unmapping
-        if let Some(removed_map) = task.vm_manager.remove_memory_map_by_addr(vaddr) {
-            // Remove managed pages only for private mappings
-            // Shared mappings should not have their physical pages freed here
-            // as they might be used by other processes
-            if !removed_map.is_shared {
-                let mapping_start = removed_map.vmarea.start;
-                let mapping_end = removed_map.vmarea.end;
-                let num_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                
-                for i in 0..num_pages {
-                    let page_vaddr = mapping_start + i * PAGE_SIZE;
-                    if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                        // The managed page is automatically freed when dropped
-                    }
+    // Remove the mapping regardless of whether it's anonymous or object-based
+    if let Some(removed_map) = task.vm_manager.remove_memory_map_by_addr(vaddr) {
+        // Notify the object owner if available (for object-based mappings)
+        if let Some(owner_weak) = &removed_map.owner {
+            if let Some(owner) = owner_weak.upgrade() {
+                owner.on_unmapped(vaddr, length);
+            }
+            // If the object is no longer available, we just proceed with VM cleanup
+        }
+        
+        // Remove managed pages only for private mappings
+        // Shared mappings should not have their physical pages freed here
+        // as they might be used by other processes
+        // (MMU cleanup is already handled by VmManager.remove_memory_map_by_addr)
+        if !removed_map.is_shared {
+            let mapping_start = removed_map.vmarea.start;
+            let mapping_end = removed_map.vmarea.end;
+            let num_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+            
+            for i in 0..num_pages {
+                let page_vaddr = mapping_start + i * PAGE_SIZE;
+                if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
+                    // The managed page is automatically freed when dropped
                 }
             }
-            
-            // Remove from our tracking
-            task.remove_anonymous_mapping(vaddr);
-            0
-        } else {
-            usize::MAX
         }
+        
+        0
     } else {
-        // Handle object-based mapping unmapping
-        if let Some(removed_map) = task.vm_manager.remove_memory_map_by_addr(vaddr) {
-            // Notify the object owner if available
-            if let Some(owner_weak) = &removed_map.owner {
-                if let Some(owner) = owner_weak.upgrade() {
-                    owner.on_unmapped(vaddr, length);
-                }
-                // If the object is no longer available, we just proceed with VM cleanup
-            }
-            
-            // Remove managed pages only for private mappings
-            if !removed_map.is_shared {
-                let mapping_start = removed_map.vmarea.start;
-                let mapping_end = removed_map.vmarea.end;
-                let num_pages = (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                
-                for i in 0..num_pages {
-                    let page_vaddr = mapping_start + i * PAGE_SIZE;
-                    if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                        // The managed page is automatically freed when dropped
-                    }
-                }
-            }
-            
-            0
-        } else {
-            usize::MAX // No mapping found at this address
-        }
+        usize::MAX // No mapping found at this address
     }
 }
