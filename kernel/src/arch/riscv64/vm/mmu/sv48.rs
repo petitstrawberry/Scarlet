@@ -21,7 +21,8 @@ impl PageTableEntry {
     }
 
     pub fn get_ppn(&self) -> usize {
-        (self.entry >> 10) as usize
+        ((self.entry >> 10) & 0x3ffffffffff) as usize
+        // (self.entry >> 10) as usize
     }
 
     pub fn get_flags(&self) -> u64 {
@@ -46,9 +47,11 @@ impl PageTableEntry {
     }
 
     pub fn set_ppn(&mut self, ppn: usize) -> &mut Self {
-        let mask = 0xFFFFFFFFFFF;
-        self.entry &= !(mask << 10);
-        self.entry |= (ppn as u64) << 10;
+        let ppn_mask = 0x3ffffffffff; // Mask for the PPN bits
+        let masked_ppn = (ppn as u64) & ppn_mask;  // Mask the PPN to fit in the entry
+
+        self.entry &= !(ppn_mask << 10);  // Clear the PPN bits in the entry
+        self.entry |= masked_ppn << 10;   // Set the new PPN bits
         self
     }
 
