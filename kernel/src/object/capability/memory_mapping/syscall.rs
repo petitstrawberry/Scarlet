@@ -123,7 +123,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner);
 
     // Add the mapping to VM manager
-    match task.vm_manager.add_memory_map_fixed(vm_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>) {
+    match task.vm_manager.add_memory_map_fixed(vm_map) {
         Ok(_removed_mappings) => {
             // Notify the object that mapping was created
             memory_mappable.on_mapped(final_vaddr, paddr, aligned_length, offset);
@@ -181,7 +181,7 @@ fn handle_anonymous_mapping(
     let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
 
     // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
-    match task.vm_manager.add_memory_map_fixed(vm_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>) {
+    match task.vm_manager.add_memory_map_fixed(vm_map) {
         Ok(removed_mappings) => {
             // Process removed mappings and free their managed pages
             for removed_map in removed_mappings {

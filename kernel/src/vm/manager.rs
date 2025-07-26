@@ -441,7 +441,6 @@ impl VirtualMemoryManager {
     /// 
     /// # Arguments
     /// * `map` - The memory map to add at a fixed location
-    /// * `managed_pages_handler` - Optional callback to handle managed pages when removing/splitting mappings
     /// 
     /// # Returns
     /// * `Ok(Vec<VirtualMemoryMap>)` - Successfully added the mapping, returns any removed mappings
@@ -453,9 +452,7 @@ impl VirtualMemoryManager {
     /// - If partially overlaps: split into non-overlapping parts and keep them
     /// 
     /// The caller is responsible for handling any managed pages associated with removed mappings.
-    pub fn add_memory_map_fixed<F>(&mut self, map: VirtualMemoryMap, mut managed_pages_handler: Option<F>) -> Result<Vec<VirtualMemoryMap>, &'static str>
-    where
-        F: FnMut(usize) -> Option<crate::task::ManagedPage>,
+    pub fn add_memory_map_fixed(&mut self, map: VirtualMemoryMap) -> Result<Vec<VirtualMemoryMap>, &'static str>
     {
         // Validate alignment like the regular add_memory_map
         if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
@@ -489,13 +486,6 @@ impl VirtualMemoryManager {
             if let Some(existing_map) = self.memmap.remove(&key) {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
-
-                // Handle managed pages if this mapping had any
-                if let Some(ref mut handler) = managed_pages_handler {
-                    if let Some(_managed_page) = handler(existing_start) {
-                        // The handler has taken care of the managed page
-                    }
-                }
 
                 // Case 1: New mapping completely contains the existing mapping
                 if new_start <= existing_start && new_end >= existing_end {
@@ -1139,7 +1129,7 @@ mod tests {
             None
         );
         
-        let result = manager.add_memory_map_fixed(fixed_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>);
+        let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
         let removed_mappings = result.unwrap();
@@ -1180,7 +1170,7 @@ mod tests {
             None
         );
         
-        let result = manager.add_memory_map_fixed(fixed_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>);
+        let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
         let removed_mappings = result.unwrap();
@@ -1229,7 +1219,7 @@ mod tests {
             None
         );
         
-        let result = manager.add_memory_map_fixed(fixed_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>);
+        let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
         let removed_mappings = result.unwrap();
@@ -1284,7 +1274,7 @@ mod tests {
             None
         );
         
-        let result = manager.add_memory_map_fixed(fixed_map, None::<fn(usize) -> Option<crate::task::ManagedPage>>);
+        let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
         let removed_mappings = result.unwrap();
