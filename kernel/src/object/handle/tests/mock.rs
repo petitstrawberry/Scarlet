@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use spin::Mutex;
-use crate::object::capability::{StreamOps, StreamError, CloneOps, ControlOps};
+use crate::object::capability::{CloneOps, ControlOps, MemoryMappingOps, StreamError, StreamOps};
 use crate::fs::{FileType, FileMetadata, SeekFrom};
 
 /// Mock FileObject for testing purposes
@@ -63,6 +63,21 @@ impl ControlOps for MockFileObject {
     // Mock file objects don't support control operations
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported on mock file objects")
+    }
+}
+
+impl MemoryMappingOps for MockFileObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported")
+    }
+
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
+
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 
@@ -151,6 +166,21 @@ impl ControlOps for MockTaskFileObject {
     // Mock task file objects don't support control operations
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported on mock task file objects")
+    }
+}
+
+impl MemoryMappingOps for MockTaskFileObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported")
+    }
+
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {}
+
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {}
+
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

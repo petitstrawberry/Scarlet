@@ -35,8 +35,8 @@ impl TaskStateBackup {
         let mut backup_pages = Vec::new();
         backup_pages.append(&mut task.managed_pages);
         
-        // Backup VM mapping
-        let backup_vm_mapping = task.vm_manager.remove_all_memory_maps();
+        // Backup VM mapping - collect iterator into Vec for storage
+        let backup_vm_mapping = task.vm_manager.remove_all_memory_maps().collect();
         
         Self {
             managed_pages: backup_pages,

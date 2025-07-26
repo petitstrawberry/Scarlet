@@ -17,7 +17,7 @@ use crate::drivers::uart;
 use crate::sync::waker::Waker;
 use crate::late_initcall;
 use crate::task::mytask;
-use crate::object::capability::ControlOps;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -198,6 +198,25 @@ impl DeviceEventListener for TtyDevice {
     
     fn interested_in(&self, event_type: &str) -> bool {
         event_type == "input"
+    }
+}
+
+impl MemoryMappingOps for TtyDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by TTY device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // TTY devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // TTY devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

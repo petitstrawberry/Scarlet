@@ -10,7 +10,7 @@ use spin::Mutex;
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
-use crate::object::capability::ControlOps;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 pub mod manager;
 pub mod framebuffer_device;
@@ -186,6 +186,25 @@ impl ControlOps for GenericGraphicsDevice {
     // Generic graphics devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for GenericGraphicsDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by this graphics device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Generic graphics devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Generic graphics devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

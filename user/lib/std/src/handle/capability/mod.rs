@@ -7,6 +7,7 @@
 //!
 //! - **StreamOps**: Read/write operations for streaming data
 //! - **FileObject**: File-specific operations (seek, truncate, metadata)
+//! - **MemoryMappingOps**: Memory mapping operations (mmap, munmap)
 //!
 //! ## Design Philosophy
 //!
@@ -17,6 +18,7 @@
 
 pub mod stream;
 pub mod file;
+pub mod memory_mapping;
 
 // Re-export capability types for convenience
 pub use stream::{StreamOps, StreamError, StreamResult};

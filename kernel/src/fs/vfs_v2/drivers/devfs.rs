@@ -33,7 +33,7 @@ use core::any::Any;
 use crate::{driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, 
     FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom
-}};
+}, object::capability::MemoryMappingOps};
 use crate::device::{manager::DeviceManager, DeviceType, Device};
 use crate::object::capability::{StreamOps, StreamError, ControlOps};
 
@@ -607,6 +607,42 @@ impl ControlOps for DevFileObject {
     }
 }
 
+impl MemoryMappingOps for DevFileObject {
+    fn get_mapping_info(&self, offset: usize, length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        // For device files, delegate to the underlying device if it supports memory mapping
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.get_mapping_info(offset, length)
+        } else {
+            Err("No device associated with this DevFileObject")
+        }
+    }
+    
+    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.on_mapped(vaddr, paddr, length, offset);
+        }
+    }
+    
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.on_unmapped(vaddr, length);
+        }
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.supports_mmap()
+        } else {
+            false
+        }
+    }
+}
+
 impl FileObject for DevFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
@@ -730,6 +766,25 @@ impl ControlOps for DevDirectoryObject {
     // Directory objects don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported on directories")
+    }
+}
+
+impl MemoryMappingOps for DevDirectoryObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for directories")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

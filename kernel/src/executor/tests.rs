@@ -23,7 +23,7 @@ fn test_exec_backup_restore() {
     let original_data_size = task.data_size;
     let original_stack_size = task.stack_size;
     let original_managed_pages_count = task.managed_pages.len();
-    let original_vm_mappings_count = task.vm_manager.get_memmap().len();
+    let original_vm_mappings_count = task.vm_manager.memmap_len();
     let original_pc = trapframe.epc;
     let original_sp = trapframe.regs.reg[2];
     let original_a0 = trapframe.regs.reg[10];
@@ -47,7 +47,7 @@ fn test_exec_backup_restore() {
     assert_eq!(task.data_size, original_data_size, "Data size should be restored");
     assert_eq!(task.stack_size, original_stack_size, "Stack size should be restored");
     assert_eq!(task.managed_pages.len(), original_managed_pages_count, "Managed pages count should be restored");
-    assert_eq!(task.vm_manager.get_memmap().len(), original_vm_mappings_count, "VM mappings count should be restored");
+    assert_eq!(task.vm_manager.memmap_len(), original_vm_mappings_count, "VM mappings count should be restored");
     assert_eq!(trapframe.epc, original_pc, "PC should be restored");
     assert_eq!(trapframe.regs.reg[2], original_sp, "SP should be restored");
     assert_eq!(trapframe.regs.reg[10], original_a0, "A0 should be restored");

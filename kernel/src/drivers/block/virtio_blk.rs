@@ -32,6 +32,7 @@ use core::{mem, ptr};
 use crate::defer;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
+use crate::object::capability::MemoryMappingOps;
 use crate::{
     device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, 
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
@@ -303,6 +304,25 @@ impl VirtioBlockDevice {
         virtqueues[0].free_desc(header_desc);
         
         result
+    }
+}
+
+impl MemoryMappingOps for VirtioBlockDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by VirtIO block device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // VirtIO block devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // VirtIO block devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

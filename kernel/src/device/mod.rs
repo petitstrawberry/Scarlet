@@ -18,7 +18,7 @@ extern crate alloc;
 use core::any::Any;
 
 use alloc::vec::Vec;
-use crate::object::capability::ControlOps;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 pub trait DeviceInfo {
     fn name(&self) -> &'static str;
@@ -60,9 +60,10 @@ pub enum DeviceType {
 /// 
 /// This trait defines the interface for devices in the kernel.
 /// Device IDs are assigned by DeviceManager when devices are registered.
-/// All devices must support control operations through the ControlOps trait.
+/// All devices must support control operations through the ControlOps trait
+/// and memory mapping operations through the MemoryMappingOps trait.
 /// 
-pub trait Device: Send + Sync + ControlOps {
+pub trait Device: Send + Sync + ControlOps + MemoryMappingOps {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;
@@ -122,5 +123,24 @@ impl ControlOps for GenericDevice {
     // Generic devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for GenericDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by this generic device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Generic devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Generic devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }

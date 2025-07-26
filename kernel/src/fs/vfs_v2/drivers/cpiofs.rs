@@ -12,7 +12,7 @@ use alloc::sync::Weak;
 
 use crate::{driver_initcall, fs::{core::DirectoryEntryInternal, get_fs_driver_manager, vfs_v2::core::{
     FileSystemOperations, VfsNode
-}, FileSystemDriver, FileSystemType}, vm::vmem::MemoryArea};
+}, FileSystemDriver, FileSystemType}, object::capability::MemoryMappingOps, vm::vmem::MemoryArea};
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, FilePermission
 };
@@ -448,6 +448,25 @@ impl ControlOps for CpioFileObject {
     }
 }
 
+impl MemoryMappingOps for CpioFileObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for CPIO files")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // CPIO files don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // CPIO files don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
 impl FileObject for CpioFileObject {
     fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         let cpio_node = self.node.as_any()
@@ -576,6 +595,25 @@ impl ControlOps for CpioDirectoryObject {
     // CPIO directories don't support control operations
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
         Err("Control operations not supported on CPIO directories")
+    }
+}
+
+impl MemoryMappingOps for CpioDirectoryObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for directories")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 

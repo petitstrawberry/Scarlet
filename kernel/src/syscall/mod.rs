@@ -15,6 +15,7 @@
 //! - **400-499**: VFS operations (vfs_open, vfs_remove, vfs_create_directory, vfs_change_directory, vfs_truncate)
 //! - **500-599**: Filesystem operations (fs_mount, fs_umount, fs_pivot_root)
 //! - **600-699**: IPC operations (pipe, shared memory, message queues)
+//! - **700-799**: Memory mapping operations (memory_map, memory_unmap)
 //! 
 //! Legacy POSIX-like system calls (20-35) are maintained for backward compatibility
 //! and redirect to the appropriate capability-based implementations.
@@ -44,6 +45,9 @@
 //! ### IPC Operations (600-699)
 //! - Pipe (600)
 //! 
+//! ### Memory Mapping Operations (700-799)
+//! - MemoryMap (700), MemoryUnmap (701)
+//! 
 //! ## Design Principles
 //! 
 //! - **Capability-based security**: Objects expose specific capabilities
@@ -64,6 +68,7 @@ use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate, sys_handle_control};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
+use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
 
 #[macro_use]
 mod macros;
@@ -118,4 +123,8 @@ syscall_table! {
     
     // === IPC Operations ===
     Pipe = 600 => sys_pipe,                // Create pipe handles
+    
+    // === Memory Mapping Operations ===
+    MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
+    MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
 }

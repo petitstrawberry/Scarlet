@@ -91,8 +91,9 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
         is_shared: true, // Kernel memory should be shared across all processes
+        owner: None,
     };
-    manager.add_memory_map_unchecked(kernel_map).map_err(|e| panic!("Failed to add kernel memory map: {}", e)).unwrap();
+    manager.add_memory_map(kernel_map.clone()).map_err(|e| panic!("Failed to add kernel memory map: {}", e)).unwrap();
     /* Pre-map the kernel space */
     root_page_table.map_memory_area(asid, kernel_map).map_err(|e| panic!("Failed to map kernel memory area: {}", e)).unwrap();
 
@@ -109,8 +110,9 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
         is_shared: true, // Device memory should be shared
+        owner: None,
     };
-    manager.add_memory_map_unchecked(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
+    manager.add_memory_map(dev_map.clone()).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
     early_println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
     early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
@@ -150,8 +152,9 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
         is_shared: true, // Kernel memory should be shared across all processes
+        owner: None,
     };
-    task.vm_manager.add_memory_map_unchecked(kernel_map).map_err(|e| {
+    task.vm_manager.add_memory_map(kernel_map.clone()).map_err(|e| {
         panic!("Failed to add kernel memory map: {}", e);
     }).unwrap();
     /* Pre-map the kernel space */
@@ -176,6 +179,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             VirtualMemoryPermission::Read as usize |
             VirtualMemoryPermission::Write as usize,
         is_shared: true, // Device memory should be shared
+        owner: None,
     };
     task.vm_manager.add_memory_map_unchecked(dev_map).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
@@ -235,9 +239,10 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
             VirtualMemoryPermission::Write as usize |
             VirtualMemoryPermission::Execute as usize,
         is_shared: true, // Trampoline should be shared across all processes
+        owner: None,
     };
 
-    manager.add_memory_map_unchecked(trampoline_map)
+    manager.add_memory_map(trampoline_map.clone())
         .map_err(|e| panic!("Failed to add trampoline memory map: {}", e)).unwrap();
     /* Pre-map the trampoline space */
     manager.get_root_page_table().unwrap().map_memory_area(manager.get_asid(), trampoline_map)

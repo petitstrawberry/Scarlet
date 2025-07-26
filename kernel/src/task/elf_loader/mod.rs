@@ -491,6 +491,7 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
         pmarea,
         permissions,
         is_shared: false, // User program memory should not be shared
+        owner: None,
     };
 
     // Add to VM manager

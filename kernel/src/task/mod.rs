@@ -14,6 +14,7 @@ use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, enviro
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
+use hashbrown::HashSet;
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -197,6 +198,11 @@ pub struct Task {
     /// 
     /// Managed pages are freed automatically when the task is terminated.
     pub managed_pages: Vec<ManagedPage>,
+    /// Anonymous mappings tracking
+    /// 
+    /// Tracks virtual addresses of anonymous mappings (MAP_ANONYMOUS) created by this task.
+    /// Used to differentiate between anonymous mappings and device/file mappings during munmap.
+    pub anonymous_mappings: HashSet<usize>,
     parent_id: Option<usize>,      /* Parent task ID */
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
@@ -310,6 +316,7 @@ impl Task {
             max_text_size: DEAFAULT_MAX_TASK_TEXT_SIZE,
             vm_manager: VirtualMemoryManager::new(),
             managed_pages: Vec::new(),
+            anonymous_mappings: HashSet::new(),
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
@@ -462,8 +469,9 @@ impl Task {
             },
             permissions,
             is_shared: false, // Default to not shared for task-allocated pages
+            owner: None,
         };
-        self.vm_manager.add_memory_map(mmap)?;
+        self.vm_manager.add_memory_map(mmap.clone()).map_err(|e| panic!("Failed to add memory map: {}", e))?;
 
         for i in 0..num_of_pages {
             let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
@@ -487,9 +495,8 @@ impl Task {
         let page = vaddr / PAGE_SIZE;
         for p in 0..num_of_pages {
             let vaddr = (page + p) * PAGE_SIZE;
-            match self.vm_manager.search_memory_map_idx(vaddr) {
-                Some(idx) => {
-                    let mmap = self.vm_manager.remove_memory_map(idx).unwrap();
+            match self.vm_manager.remove_memory_map_by_addr(vaddr) {
+                Some(mmap) => {
                     if p == 0 && mmap.vmarea.start < vaddr {
                         /* Re add the first part of the memory map */
                         let size = vaddr - mmap.vmarea.start;
@@ -505,6 +512,7 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            owner: mmap.owner.clone(),
                         };
                         self.vm_manager.add_memory_map_unchecked(mmap1)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
@@ -526,6 +534,7 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            owner: mmap.owner.clone(),
                         };
                         self.vm_manager.add_memory_map_unchecked(mmap2)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
@@ -536,7 +545,7 @@ impl Task {
                     // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
 
                     if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        free_boxed_page(free_page);
+                        free_boxed_page(free_page.page);
                     }
                     
                     // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
@@ -673,6 +682,7 @@ impl Task {
             },
             permissions,
             is_shared: VirtualMemoryRegion::Guard.is_shareable(), // Guard pages can be shared
+            owner: None,
         };
         Ok(mmap)
     }
@@ -715,14 +725,44 @@ impl Task {
     /// # Returns
     /// The removed managed page if found, otherwise None
     /// 
-    fn remove_managed_page(&mut self, vaddr: usize) -> Option<Box<Page>> {
+    pub fn remove_managed_page(&mut self, vaddr: usize) -> Option<crate::task::ManagedPage> {
         for i in 0..self.managed_pages.len() {
             if self.managed_pages[i].vaddr == vaddr {
                 let page = self.managed_pages.remove(i);
-                return Some(page.page);
+                return Some(page);
             }
         }
         None
+    }
+
+    /// Add an anonymous mapping tracking
+    /// 
+    /// # Arguments
+    /// * `vaddr` - Virtual address of the anonymous mapping
+    pub fn add_anonymous_mapping(&mut self, vaddr: usize) {
+        self.anonymous_mappings.insert(vaddr);
+    }
+
+    /// Remove an anonymous mapping tracking
+    /// 
+    /// # Arguments
+    /// * `vaddr` - Virtual address of the anonymous mapping to remove
+    /// 
+    /// # Returns
+    /// true if the mapping was found and removed, false otherwise
+    pub fn remove_anonymous_mapping(&mut self, vaddr: usize) -> bool {
+        self.anonymous_mappings.remove(&vaddr)
+    }
+
+    /// Check if a virtual address is an anonymous mapping
+    /// 
+    /// # Arguments
+    /// * `vaddr` - Virtual address to check
+    /// 
+    /// # Returns
+    /// true if the address is an anonymous mapping, false otherwise
+    pub fn is_anonymous_mapping(&self, vaddr: usize) -> bool {
+        self.anonymous_mappings.contains(&vaddr)
     }
 
 
@@ -838,7 +878,7 @@ impl Task {
         
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child
-            for mmap in self.vm_manager.get_memmap() {
+            for mmap in self.vm_manager.memmap_iter() {
                 let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
                 let vaddr = mmap.vmarea.start;
                 
@@ -850,9 +890,10 @@ impl Task {
                             vmarea: mmap.vmarea, // Same virtual addresses
                             permissions: mmap.permissions,
                             is_shared: true,
+                            owner: mmap.owner.clone(),
                         };
                         // Add the shared memory map directly to the child task
-                        child.vm_manager.add_memory_map_unchecked(shared_mmap)
+                        child.vm_manager.add_memory_map(shared_mmap.clone())
                             .map_err(|_| "Failed to add shared memory map to child task")?;
 
                         // TODO: Add logic to determine if the memory map is a trampoline
@@ -880,6 +921,7 @@ impl Task {
                             },
                             permissions,
                             is_shared: false,
+                            owner: mmap.owner.clone(),
                         };
                         
                         // Copy the contents of the original memory (including stack contents)
@@ -950,6 +992,9 @@ impl Task {
         } else {
             child.abi = None; // No ABI set
         }
+
+        // Copy anonymous mappings tracking
+        child.anonymous_mappings = self.anonymous_mappings.clone();
 
         // Set the state to Ready
         child.state = self.state;
@@ -1079,11 +1124,53 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
     Task::new(name, priority, TaskType::User)
 }
 
+#[cfg(test)]
+static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
+
+#[cfg(test)]
+/// Set a mock current task for testing purposes
+/// 
+/// This function allows tests to override the return value of mytask()
+/// for controlled testing scenarios.
+/// 
+/// # Arguments
+/// * `task` - The task to return from mytask()
+/// 
+/// # Safety
+/// The caller must ensure the task pointer remains valid for the duration
+/// of the test and that clear_mock_current_task() is called when done.
+/// This function is only safe to call in single-threaded test environments.
+pub unsafe fn set_mock_current_task(task: &'static mut Task) {
+    unsafe {
+        MOCK_CURRENT_TASK = Some(task as *mut Task);
+    }
+}
+
+#[cfg(test)]
+/// Clear the mock current task, reverting to normal scheduler behavior
+/// 
+/// # Safety
+/// This function is only safe to call in single-threaded test environments.
+pub unsafe fn clear_mock_current_task() {
+    unsafe {
+        MOCK_CURRENT_TASK = None;
+    }
+}
+
 /// Get the current task.
 /// 
 /// # Returns
 /// The current task if it exists.
 pub fn mytask() -> Option<&'static mut Task> {
+    #[cfg(test)]
+    {
+        unsafe {
+            if let Some(task_ptr) = MOCK_CURRENT_TASK {
+                return Some(&mut *task_ptr);
+            }
+        }
+    }
+    
     let cpu = get_cpu();
     get_scheduler().get_current_task(cpu.get_cpuid())
 }
@@ -1187,14 +1274,14 @@ mod tests {
         }
 
         // Get parent memory map count before cloning
-        let parent_memmap_count = parent_task.vm_manager.get_memmap().len();
+        let parent_memmap_count = parent_task.vm_manager.memmap_len();
         let parent_id = parent_task.get_id();
 
         // Clone the parent task
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Get child memory map count after cloning
-        let child_memmap_count = child_task.vm_manager.get_memmap().len();
+        let child_memmap_count = child_task.vm_manager.memmap_len();
 
         // Verify that the number of memory maps are identical
         assert_eq!(child_memmap_count, parent_memmap_count, 
@@ -1211,14 +1298,12 @@ mod tests {
         assert_eq!(child_task.text_size, parent_task.text_size);
 
         // Find the corresponding memory map in child that matches our test allocation
-        let child_memmaps = child_task.vm_manager.get_memmap();
-        let child_mmap = child_memmaps.iter()
+        let child_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
             .expect("Test memory map not found in child task");
 
         // Verify that our specific memory region exists in both parent and child
-        let parent_memmaps = parent_task.vm_manager.get_memmap();
-        let parent_test_mmap = parent_memmaps.iter()
+        let parent_test_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
             .expect("Test memory map not found in parent task");
 
@@ -1276,7 +1361,7 @@ mod tests {
         parent_task.init();
 
         // Find the stack memory map in parent
-        let stack_mmap = parent_task.vm_manager.get_memmap().iter()
+        let stack_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| {
                 // Stack should be near USER_STACK_TOP and have stack permissions
                 use crate::vm::vmem::VirtualMemoryRegion;
@@ -1300,7 +1385,7 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the corresponding stack memory map in child
-        let child_stack_mmap = child_task.vm_manager.get_memmap().iter()
+        let child_stack_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| {
                 use crate::vm::vmem::VirtualMemoryRegion;
                 mmap.vmarea.start == stack_mmap.vmarea.start &&
@@ -1373,10 +1458,11 @@ mod tests {
             },
             permissions: VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             is_shared: true, // This should be shared between parent and child
+            owner: None,
         };
         
         // Add shared memory map to parent
-        parent_task.vm_manager.add_memory_map_unchecked(shared_mmap).unwrap();
+        parent_task.vm_manager.add_memory_map(shared_mmap.clone()).unwrap();
         
         // Write test data to shared memory
         let test_data: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
@@ -1389,7 +1475,7 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the shared memory map in child
-        let child_shared_mmap = child_task.vm_manager.get_memmap().iter()
+        let child_shared_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == shared_vaddr && mmap.is_shared)
             .expect("Shared memory map not found in child task");
 
