@@ -502,15 +502,18 @@ impl VirtualMemoryManager {
     /// * `map` - The memory map to add at a fixed location
     /// 
     /// # Returns
-    /// * `Ok(Vec<VirtualMemoryMap>)` - Successfully added the mapping, returns any removed mappings
+    /// * `Ok(Vec<VirtualMemoryMap>)` - Returns a vector of overwritten (intersected) memory regions that were replaced by the new mapping.
     /// * `Err(&'static str)` - Error message if the operation failed
-    /// 
+    ///
     /// # Design
     /// For each existing mapping that overlaps with the new mapping:
-    /// - If completely contained within new mapping: remove entirely
-    /// - If partially overlaps: split into non-overlapping parts and keep them
-    /// 
-    /// The caller is responsible for handling any managed pages associated with removed mappings.
+    /// - The function calculates the intersection (overwritten region) between the new mapping and each overlapping existing mapping.
+    /// - Only the intersection (overwritten part) is returned for each overlap.
+    /// - If the new mapping completely contains the existing mapping, the entire existing mapping is returned as the intersection.
+    /// - If the new mapping partially overlaps, only the overlapped region is returned.
+    /// - Non-overlapping parts of existing mappings are preserved (split and kept).
+    ///
+    /// The caller is responsible for handling any managed pages associated with the overwritten mappings.
     pub fn add_memory_map_fixed(&mut self, map: VirtualMemoryMap) -> Result<Vec<VirtualMemoryMap>, &'static str>
     {
         // Validate alignment like the regular add_memory_map
@@ -521,7 +524,7 @@ impl VirtualMemoryManager {
 
         let new_start = map.vmarea.start;
         let new_end = map.vmarea.end;
-        let mut removed_mappings = Vec::new();
+        let mut overwritten_mappings = Vec::new();
         let mut mappings_to_add = Vec::new();
 
         // Find all overlapping mappings and process them
@@ -530,8 +533,6 @@ impl VirtualMemoryManager {
             .filter_map(|(start_addr, existing_map)| {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
-                
-                // Check if mappings overlap: new_start <= existing_end && new_end >= existing_start  
                 if new_start <= existing_end && new_end >= existing_start {
                     Some(*start_addr)
                 } else {
@@ -546,15 +547,35 @@ impl VirtualMemoryManager {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
 
+                // Calculate the overwritten (intersection) part
+                let overlap_start = core::cmp::max(new_start, existing_start);
+                let overlap_end = core::cmp::min(new_end, existing_end);
+                if overlap_start <= overlap_end {
+                    // Cut out the pmarea at the same offset as the intersection
+                    let pm_offset = overlap_start - existing_start;
+                    let overwritten_map = VirtualMemoryMap {
+                        vmarea: MemoryArea {
+                            start: overlap_start,
+                            end: overlap_end,
+                        },
+                        pmarea: MemoryArea {
+                            start: existing_map.pmarea.start + pm_offset,
+                            end: existing_map.pmarea.start + pm_offset + (overlap_end - overlap_start),
+                        },
+                        permissions: existing_map.permissions,
+                        is_shared: existing_map.is_shared,
+                        owner: existing_map.owner.clone(),
+                    };
+                    overwritten_mappings.push(overwritten_map);
+                }
+
                 // Case 1: New mapping completely contains the existing mapping
                 if new_start <= existing_start && new_end >= existing_end {
                     // Remove entire existing mapping
-                    removed_mappings.push(existing_map);
                     continue;
                 }
 
                 // Case 2: Partial overlap - need to split
-                
                 // Keep the part before the new mapping (if any)
                 if existing_start < new_start {
                     let before_map = VirtualMemoryMap {
@@ -591,9 +612,6 @@ impl VirtualMemoryManager {
                     };
                     mappings_to_add.push(after_map);
                 }
-
-                // The overlapping part is implicitly removed
-                removed_mappings.push(existing_map);
             }
         }
 
@@ -601,19 +619,22 @@ impl VirtualMemoryManager {
         self.last_search_cache = None;
 
         // Remove overlapping mappings from MMU (page table) to prevent stale TLB entries
-        for removed_map in &removed_mappings {
-            self.unmap_range_from_mmu(removed_map.vmarea.start, removed_map.vmarea.end);
+        for overwritten_map in &overwritten_mappings {
+            // crate::println!("Unmapping overwritten mapping: {:x?}", overwritten_map);
+            self.unmap_range_from_mmu(overwritten_map.vmarea.start, overwritten_map.vmarea.end);
         }
 
         // Add the split mappings back (MMU mapping will be done lazily on page fault)
         for split_map in mappings_to_add {
+            // crate::println!("Adding split mapping: {:x?}", split_map);
             self.memmap.insert(split_map.vmarea.start, split_map);
         }
 
+        // crate::println!("Adding new mapping: {:x?}", map);
         // Add the new mapping (MMU mapping will be done lazily on page fault)
         self.memmap.insert(map.vmarea.start, map);
 
-        Ok(removed_mappings)
+        Ok(overwritten_mappings)
     }
     
     /// Get memory statistics and usage information
@@ -1197,9 +1218,9 @@ mod tests {
         let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
-        let removed_mappings = result.unwrap();
-        assert_eq!(removed_mappings.len(), 1); // Should have removed one mapping
-        assert_eq!(removed_mappings[0].vmarea.start, 0x2000);
+        let overwritten_mappings = result.unwrap();
+        assert_eq!(overwritten_mappings.len(), 1); // Should have removed one mapping
+        assert_eq!(overwritten_mappings[0].vmarea.start, 0x2000);
         
         // Should now have only the new fixed mapping
         assert_eq!(manager.memmap_len(), 1);
@@ -1238,8 +1259,8 @@ mod tests {
         let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
-        let removed_mappings = result.unwrap();
-        assert_eq!(removed_mappings.len(), 1); // Should have removed the original mapping
+        let overwritten_mappings = result.unwrap();
+        assert_eq!(overwritten_mappings.len(), 1); // Should have removed the original mapping
         
         // Should now have 2 mappings: the split part [0x1000, 0x2000) and the new fixed [0x2000, 0x4000)
         assert_eq!(manager.memmap_len(), 2);
@@ -1287,8 +1308,8 @@ mod tests {
         let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
-        let removed_mappings = result.unwrap();
-        assert_eq!(removed_mappings.len(), 1); // Should have removed the original mapping
+        let overwritten_mappings = result.unwrap();
+        assert_eq!(overwritten_mappings.len(), 1); // Should have removed the original mapping
         
         // Should now have 3 mappings: before [0x1000, 0x2000), fixed [0x2000, 0x4000), after [0x4000, 0x5000)
         assert_eq!(manager.memmap_len(), 3);
@@ -1342,8 +1363,8 @@ mod tests {
         let result = manager.add_memory_map_fixed(fixed_map);
         assert!(result.is_ok());
         
-        let removed_mappings = result.unwrap();
-        assert_eq!(removed_mappings.len(), 0); // No mappings should be removed
+        let overwritten_mappings = result.unwrap();
+        assert_eq!(overwritten_mappings.len(), 0); // No mappings should be removed
         
         // Should now have 2 mappings
         assert_eq!(manager.memmap_len(), 2);
