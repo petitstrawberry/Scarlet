@@ -274,6 +274,12 @@ fn panic(info: &PanicInfo) -> ! {
     use arch::instruction::idle;
 
     crate::early_println!("[Scarlet Kernel] panic: {}", info);
+
+    // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+    //     task.exit(1); // Exit the task with error code 1
+    //     get_scheduler().schedule(get_cpu());
+    // }
+
     loop {
         idle();
     }
@@ -285,11 +291,17 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Initializing .bss section...");
     init_bss();
+    fence(Ordering::SeqCst); // Ensure .bss is initialized before proceeding
+
     early_println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
+    fence(Ordering::SeqCst); // Ensure architecture initialization is complete before proceeding
+
     /* Initializing FDT subsystem */
     early_println!("[Scarlet Kernel] Initializing FDT...");
     init_fdt();
+    fence(Ordering::SeqCst); // Ensure FDT is initialized before proceeding
+
     /* Get DRAM area from FDT */
     let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
     early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
@@ -298,6 +310,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
     let dest_ptr = fdt_reloc_start as *mut u8;
     relocate_fdt(dest_ptr);
+    fence(Ordering::SeqCst); // Ensure FDT relocation is complete before proceeding
+    
     /* Calculate usable memory area */
     let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
     let mut usable_area = MemoryArea::new(kernel_end, dram_area.end);
@@ -343,33 +357,59 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* Initialize (populate) devices */
     early_println!("[Scarlet Kernel] Initializing devices...");
     DeviceManager::get_mut_manager().populate_devices();
+    fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
     /* After this point, we can use the device manager */
     /* Serial console also works */
     
     /* Initialize Graphics Manager and discover graphics devices */
     early_println!("[Scarlet Kernel] Initializing graphics subsystem...");
-    GraphicsManager::get_mut_manager().discover_graphics_devices();
+    
+    // Add extra safety measures for optimized builds
+    fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
+    
+    // Verify that devices are actually registered before attempting graphics initialization
+    let device_count = DeviceManager::get_manager().get_devices_count();
+    early_println!("[Scarlet Kernel] Found {} devices before graphics initialization", device_count);
+    
+    if device_count > 0 {
+        GraphicsManager::get_mut_manager().discover_graphics_devices();
+    } else {
+        early_println!("[Scarlet Kernel] Warning: No devices found, skipping graphics initialization");
+    }
+    
+    fence(Ordering::SeqCst); // Ensure graphics devices are discovered before proceeding
     
     /* Initcalls */
     call_initcalls();
+
+    fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
     /* Initialize interrupt management system */
     println!("[Scarlet Kernel] Initializing interrupt system...");
     InterruptManager::get_manager().init();
 
+    fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
+
     /* Initialize timer */
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
 
+    fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
+
     /* Initialize scheduler */
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
+    fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
+
     /* Initialize global VFS */
     println!("[Scarlet Kernel] Initializing global VFS...");
     let manager = init_global_vfs_manager();
     /* Initialize initramfs */
     println!("[Scarlet Kernel] Initializing initramfs...");
     init_initramfs(&manager);
+
+    fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
+
     /* Make init task */
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
@@ -399,6 +439,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
         }
         Err(e) => early_println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
     }
+
+    fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
 
     println!("[Scarlet Kernel] Scheduler will start...");
     scheduler.start_scheduler();
