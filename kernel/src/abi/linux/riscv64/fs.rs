@@ -1134,3 +1134,93 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     // All unimplemented commands return ENOSYS (already logged above)
     usize::MAX // Return -1 (ENOSYS - Function not implemented)
 }
+
+/// Linux struct linux_dirent64 (for getdents64 syscall)
+#[repr(C)]
+pub struct LinuxDirent64 {
+    pub d_ino: u64,
+    pub d_off: i64,
+    pub d_reclen: u16,
+    pub d_type: u8,
+    pub d_name: [u8; 256], // Linux allows up to 255 + null
+}
+
+impl LinuxDirent64 {
+    pub fn new(entry: &DirectoryEntry, d_off: i64) -> Self {
+        let mut d_name = [0u8; 256];
+        let name_len = entry.name_len as usize;
+        d_name[..name_len].copy_from_slice(&entry.name[..name_len]);
+        d_name[name_len] = 0; // null-terminated
+        Self {
+            d_ino: entry.file_id,
+            d_off,
+            d_reclen: (core::mem::size_of::<u64>() + core::mem::size_of::<i64>() + core::mem::size_of::<u16>() + core::mem::size_of::<u8>() + name_len + 1) as u16,
+            d_type: entry.file_type,
+            d_name,
+        }
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        let len = self.d_reclen as usize;
+        unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, len) }
+    }
+}
+
+/// getdents64 syscall implementation
+pub fn sys_getdents64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let buf_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
+    let buf_size = trapframe.get_arg(2) as usize;
+    trapframe.increment_pc_next(task);
+
+    // Get handle from Linux fd
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX,
+    };
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX,
+    };
+    let stream = match kernel_obj.as_stream() {
+        Some(s) => s,
+        None => return usize::MAX,
+    };
+    
+    let mut dir_buffer = vec![0u8; core::mem::size_of::<DirectoryEntry>()];
+    let mut written = 0usize;
+    let mut d_off = 0i64;
+    while written + core::mem::size_of::<LinuxDirent64>() <= buf_size {
+        match stream.read(&mut dir_buffer) {
+            Ok(n) if n == dir_buffer.len() => {
+                if let Some(entry) = DirectoryEntry::parse(&dir_buffer) {
+                    let dirent = LinuxDirent64::new(&entry, d_off);
+                    let dirent_bytes = dirent.as_bytes();
+                    if written + dirent_bytes.len() > buf_size {
+                        break;
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            dirent_bytes.as_ptr(),
+                            buf_ptr.add(written),
+                            dirent_bytes.len(),
+                        );
+                    }
+                    written += dirent_bytes.len();
+                    d_off += 1;
+                } else {
+                    break;
+                }
+            }
+            Ok(0) => break, // EOF
+            Ok(_) => break, // partial read, treat as error/EOF
+            Err(StreamError::EndOfStream) => break,
+            Err(StreamError::WouldBlock) => {
+                get_scheduler().schedule(trapframe);
+                return usize::MAX;
+            }
+            Err(_) => break,
+        }
+    }
+    written
+}
