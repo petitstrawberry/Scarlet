@@ -448,6 +448,22 @@ impl AbiModule for LinuxRiscv64Abi {
             }
         }
 
+        // Setup devices directory
+        match create_dir_if_not_exists(target_vfs, "/dev") {
+            Ok(()) => {}
+            Err(_e) => {
+                crate::println!("Failed to create /dev directory for Linux: {}", _e.message);
+                return Err("Failed to create /dev directory for Linux");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/dev", "/dev") {
+            Ok(()) => {}
+            Err(_e) => {
+                crate::println!("Failed to bind mount /dev for Linux: {}", _e.message);
+                return Err("Failed to bind mount /dev for Linux");
+            }
+        }
+
         // Setup gateway to native Scarlet environment (read-only for security)
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
