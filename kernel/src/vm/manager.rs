@@ -413,7 +413,7 @@ impl VirtualMemoryManager {
             for i in 0..num_pages {
                 let page_vaddr = (vaddr_start & !(PAGE_SIZE - 1)) + i * PAGE_SIZE;
                 if page_vaddr <= vaddr_end {
-                    root_pagetable.unmap(page_vaddr);
+                    root_pagetable.unmap(self.get_asid(), page_vaddr);
                 }
             }
         }
