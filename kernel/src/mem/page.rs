@@ -35,7 +35,7 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
 /// * `num_of_pages` - The number of pages to free
 pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
     unsafe {
-        let boxed_pages = Box::from_raw(core::slice::from_raw_parts_mut(pages, num_of_pages));
+        let boxed_pages = Box::from_raw(core::ptr::slice_from_raw_parts_mut(pages, num_of_pages));
         free_boxed_pages(boxed_pages);
     }
 }
