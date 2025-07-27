@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_TOP}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -333,7 +333,7 @@ impl Task {
             TaskType::User => { 
                 user_vm_init(self);
                 /* Set sp to the top of the user stack */
-                self.vcpu.set_sp(0xffff_ffff_ffff_f000);
+                self.vcpu.set_sp(USER_STACK_TOP);
             }
         }
         
@@ -547,10 +547,11 @@ impl Task {
             }
         }
         /* Unmap pages */
+        let asid = self.vm_manager.get_asid();
         let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
         for p in 0..num_of_pages {
             let vaddr = (page + p) * PAGE_SIZE;
-            root_pagetable.unmap(vaddr);
+            root_pagetable.unmap(asid, vaddr);
         }
     }
 
