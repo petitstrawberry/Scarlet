@@ -5,7 +5,7 @@ use core::{arch::asm, mem::transmute};
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
-use crate::arch::{trap, Trapframe};
+use crate::arch::{get_kernel_trapvector_paddr, set_trapvector, trap, Trapframe};
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
@@ -151,6 +151,7 @@ pub extern "C" fn _user_trap_exit() -> ! {
 #[unsafe(export_name = "arch_user_trap_handler")]
 pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     let trapframe: &mut Trapframe = unsafe { transmute(addr) };
+    set_trapvector(get_kernel_trapvector_paddr());
 
     let cause: usize;
     unsafe {
@@ -164,7 +165,9 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     if interrupt {
         arch_interrupt_handler(trapframe, cause & !0x8000000000000000);
     } else {
+        // crate::println!("Entering exception handler for cause: {}", cause);
         arch_exception_handler(trapframe, cause);
+        // crate::println!("Exiting exception handler for cause: {}", cause);
     }
     // Jump directly to user trap exit via trampoline
     arch_switch_to_user_space(trapframe);
@@ -188,7 +191,8 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base + trap_exit_offset;
-    
+    set_trapvector(trampoline_base);
+
     unsafe {
         asm!(
             "mv t0, {trap_exit_addr}",    // Load jump target into t0 first
