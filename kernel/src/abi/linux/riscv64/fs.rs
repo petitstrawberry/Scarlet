@@ -212,28 +212,67 @@ enum OpenMode {
     Truncate  = 0x400,
 }
 
-pub fn sys_open(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+/// Linux sys_openat implementation for Scarlet VFS v2
+///
+/// Opens a file relative to a directory file descriptor (dirfd) and path.
+/// If dirfd == AT_FDCWD, uses the current working directory as the base.
+/// Otherwise, resolves the base directory from the file descriptor.
+/// Uses VfsManager::open_relative for safe and efficient path resolution.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///
+/// Returns:
+/// - File descriptor on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
-    let mode = trapframe.get_arg(1) as i32;
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    let flags = trapframe.get_arg(2) as i32;
 
-    // Increment PC to avoid infinite loop if open fails
+    // Increment PC to avoid infinite loop if openat fails
     trapframe.increment_pc_next(task);
 
-    // Convert path bytes to string
+    // Parse path from user space
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => match to_absolute_path_v2(&task, &path) {
-            Ok(abs_path) => abs_path,
-            Err(_) => return usize::MAX,
-        },
+        Ok((path, _)) => path,
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
-    // Use task's VFS manager
     let vfs = task.vfs.as_ref().unwrap();
 
-    // Try to open the file
-    let file = vfs.open(&path_str, 0);
+    // Determine base directory (entry and mount) for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+
+    const AT_FDCWD: i32 = -100;
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+        // Use current working directory as base
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        // Use directory file descriptor as base
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return usize::MAX,
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return usize::MAX,
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return usize::MAX,
+        };
+        let vfs_file_obj = file_obj.as_any().downcast_ref::<VfsFileObject>().ok_or(()).unwrap();
+        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
+    };
+
+    // Open the file using VfsManager::open_relative
+    let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
 
     match file {
         Ok(kernel_obj) => {
@@ -249,33 +288,7 @@ pub fn sys_open(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 Err(_) => usize::MAX, // Handle table full
             }
         }
-        Err(_) =>{
-            // If the file does not exist and we are trying to create it
-            if mode & OpenMode::Create as i32 != 0 {
-                let res = vfs.create_file(&path_str, FileType::RegularFile);
-                if res.is_err() {
-                    return usize::MAX; // File creation error
-                }
-                match vfs.open(&path_str, 0) {
-                    Ok(kernel_obj) => {
-                        // Register the file with the task using HandleTable
-                        let handle = task.handle_table.insert(kernel_obj);
-                        match handle {
-                            Ok(handle) => {
-                                match abi.allocate_fd(handle as u32) {
-                                    Ok(fd) => fd,
-                                    Err(_) => usize::MAX, // Too many open files
-                                }
-                            },
-                            Err(_) => usize::MAX, // Handle table full
-                        }
-                    }
-                    Err(_) => usize::MAX, // File open error
-                }
-            } else {
-                return usize::MAX; // VFS not initialized
-            }
-        }
+        Err(_) => usize::MAX, // open_relative error
     }
 }
 
@@ -952,86 +965,6 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             }
         }
         Err(_) => usize::MAX, // Return -1 on error
-    }
-}
-
-/// Linux sys_openat implementation for Scarlet VFS v2
-///
-/// Opens a file relative to a directory file descriptor (dirfd) and path.
-/// If dirfd == AT_FDCWD, uses the current working directory as the base.
-/// Otherwise, resolves the base directory from the file descriptor.
-/// Uses VfsManager::open_relative for safe and efficient path resolution.
-///
-/// Arguments:
-/// - abi: LinuxRiscv64Abi context
-/// - trapframe: Trapframe containing syscall arguments
-///
-/// Returns:
-/// - File descriptor on success
-/// - usize::MAX (Linux -1) on error
-pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
-    let flags = trapframe.get_arg(2) as i32;
-
-    // Increment PC to avoid infinite loop if openat fails
-    trapframe.increment_pc_next(task);
-
-    // Parse path from user space
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8
-    };
-
-    let vfs = task.vfs.as_ref().unwrap();
-
-    // Determine base directory (entry and mount) for path resolution
-    use crate::fs::vfs_v2::core::VfsFileObject;
-
-    const AT_FDCWD: i32 = -100;
-    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
-        // Use current working directory as base
-        vfs.get_cwd().unwrap_or_else(|| {
-            let root_mount = vfs.mount_tree.root_mount.read().clone();
-            (root_mount.root.clone(), root_mount)
-        })
-    } else {
-        // Use directory file descriptor as base
-        let handle = match abi.get_handle(dirfd as usize) {
-            Some(h) => h,
-            None => return usize::MAX,
-        };
-        let kernel_obj = match task.handle_table.get(handle) {
-            Some(obj) => obj,
-            None => return usize::MAX,
-        };
-        let file_obj = match kernel_obj.as_file() {
-            Some(f) => f,
-            None => return usize::MAX,
-        };
-        let vfs_file_obj = file_obj.as_any().downcast_ref::<VfsFileObject>().ok_or(()).unwrap();
-        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
-    };
-
-    // Open the file using VfsManager::open_relative
-    let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
-
-    match file {
-        Ok(kernel_obj) => {
-            // Register the file with the task using HandleTable
-            let handle = task.handle_table.insert(kernel_obj);
-            match handle {
-                Ok(handle) => {
-                    match abi.allocate_fd(handle as u32) {
-                        Ok(fd) => fd,
-                        Err(_) => usize::MAX, // Too many open files
-                    }
-                },
-                Err(_) => usize::MAX, // Handle table full
-            }
-        }
-        Err(_) => usize::MAX, // open_relative error
     }
 }
 
