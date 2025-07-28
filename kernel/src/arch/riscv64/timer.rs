@@ -7,6 +7,7 @@ pub type ArchTimer = Stimer;
 pub struct Stimer {
     pub next_event: u64,
     pub running: bool,
+    frequency: Option<u64>,
 }
 
 impl Stimer {
@@ -14,12 +15,35 @@ impl Stimer {
         Stimer {
             next_event: 0,
             running: false,
+            frequency: None,
+        }
+    }
+
+    fn set_frequency(&mut self, frequency: u64) {
+        self.frequency = Some(frequency);
+    }
+
+    #[inline]
+    fn get_frequency(&self) -> u64 {
+        match self.frequency {
+            Some(freq) => freq,
+            None => {
+                InterruptManager::with_manager(|manager| {
+                    let cpu_id = get_cpu().get_cpuid() as u32;
+                    match manager.get_timer_frequency_hz(cpu_id) {
+                        Ok(freq) => freq,
+                        Err(e) => {
+                            panic!("Failed to get timer frequency: {}", e);
+                        }
+                    }
+                })
+            }
         }
     }
 
     pub fn set_interval_us(&mut self, interval: u64) {
         let current = self.get_time();
-        self.set_next_event(current + (interval * RISCV_STIMER_FREQ) / 1000000);
+        self.set_next_event(current + (interval * self.get_frequency()) / 1000000);
     }
 
     pub fn start(&mut self) {

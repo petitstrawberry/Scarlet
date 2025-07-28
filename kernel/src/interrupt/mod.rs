@@ -303,6 +303,23 @@ impl InterruptManager {
         }
     }
 
+    pub fn get_time(&self, cpu_id: CpuId) -> InterruptResult<u64> {
+        if let Some(ref controller) = self.controllers.local_controller_for_cpu(cpu_id) {
+            Ok(controller.get_time())
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
+
+    /// Get timer frequency (Hz) for a specific CPU
+    pub fn get_timer_frequency_hz(&self, cpu_id: CpuId) -> InterruptResult<u64> {
+        if let Some(controller) = self.controllers.local_controller_for_cpu(cpu_id) {
+            Ok(controller.get_timer_frequency_hz())
+        } else {
+            Err(InterruptError::ControllerNotFound)
+        }
+    }
+
     /// Register a local interrupt controller (e.g., CLINT) for specific CPUs
     pub fn register_local_controller(&mut self, controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>, cpu_ids: &[CpuId]) -> InterruptResult<usize> {
         Ok(self.controllers.register_local_controller(controller, cpu_ids))
