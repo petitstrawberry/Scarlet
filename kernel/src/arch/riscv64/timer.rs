@@ -7,46 +7,31 @@ pub type ArchTimer = Stimer;
 pub struct Stimer {
     pub next_event: u64,
     pub running: bool,
-    frequency: Option<u64>,
+    frequency: u64
 }
 
 impl Stimer {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        let freq = InterruptManager::with_manager(|manager| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            match manager.get_timer_frequency_hz(cpu_id) {
+                Ok(freq) => freq,
+                Err(e) => {
+                    panic!("Failed to get timer frequency: {}", e);
+                }
+            }
+        });
+
         Stimer {
             next_event: 0,
             running: false,
-            frequency: None,
-        }
-    }
-
-    fn set_frequency(&mut self, frequency: u64) {
-        self.frequency = Some(frequency);
-    }
-
-    #[inline]
-    fn get_frequency(&mut self) -> u64 {
-        match self.frequency {
-            Some(freq) => freq,
-            None => {
-                let freq = InterruptManager::with_manager(|manager| {
-                    let cpu_id = get_cpu().get_cpuid() as u32;
-                    match manager.get_timer_frequency_hz(cpu_id) {
-                        Ok(freq) => freq,
-                        Err(e) => {
-                            panic!("Failed to get timer frequency: {}", e);
-                        }
-                    }
-                });
-                self.set_frequency(freq);
-                freq
-            }
+            frequency: freq
         }
     }
 
     pub fn set_interval_us(&mut self, interval: u64) {
         let current = self.get_time();
-        let freq = self.get_frequency();
-        self.set_next_event(current + (interval * freq / 1000000));
+        self.set_next_event(current + (interval * self.frequency / 1000000));
     }
 
     pub fn start(&mut self) {
@@ -106,7 +91,7 @@ impl Stimer {
     }
 
     pub fn get_time_us(&self) -> u64 {
-        self.get_time() / RISCV_STIMER_FREQ
+        self.get_time() / self.frequency
     }
 
     fn get_time(&self) -> u64 {

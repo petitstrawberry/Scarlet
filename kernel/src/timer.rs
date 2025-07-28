@@ -34,9 +34,9 @@ pub fn get_kernel_timer() -> &'static mut KernelTimer {
 }
 
 impl KernelTimer {
-    const fn new() -> Self {
+    fn new() -> Self {
         KernelTimer {
-            core_local_timer: [const { ArchTimer::new() }; NUM_OF_CPUS],
+            core_local_timer: core::array::from_fn(|_| ArchTimer::new()),
             interval: 0xffffffff_ffffffff,
         }
     }
