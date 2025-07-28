@@ -174,6 +174,33 @@ fn check_software_timers(now: u64) {
     }
 }
 
+/// Tick interval in microseconds (e.g., 10_000 for 10ms tick)
+pub const TICK_INTERVAL_US: u64 = 10_000;
+
+/// Convert milliseconds to ticks
+#[inline]
+pub fn ms_to_ticks(ms: u64) -> u64 {
+    (ms * 1_000) / TICK_INTERVAL_US
+}
+
+/// Convert microseconds to ticks
+#[inline]
+pub fn us_to_ticks(us: u64) -> u64 {
+    us / TICK_INTERVAL_US
+}
+
+/// Convert ticks to milliseconds
+#[inline]
+pub fn ticks_to_ms(ticks: u64) -> u64 {
+    (ticks * TICK_INTERVAL_US) / 1_000
+}
+
+/// Convert ticks to microseconds
+#[inline]
+pub fn ticks_to_us(ticks: u64) -> u64 {
+    ticks * TICK_INTERVAL_US
+}
+
 // static mut TEST_HANDLER: Option<Arc<dyn TimerHandler>> = None;
 
 // // TEST
