@@ -24,11 +24,11 @@ impl Stimer {
     }
 
     #[inline]
-    fn get_frequency(&self) -> u64 {
+    fn get_frequency(&mut self) -> u64 {
         match self.frequency {
             Some(freq) => freq,
             None => {
-                InterruptManager::with_manager(|manager| {
+                let freq = InterruptManager::with_manager(|manager| {
                     let cpu_id = get_cpu().get_cpuid() as u32;
                     match manager.get_timer_frequency_hz(cpu_id) {
                         Ok(freq) => freq,
@@ -36,14 +36,17 @@ impl Stimer {
                             panic!("Failed to get timer frequency: {}", e);
                         }
                     }
-                })
+                });
+                self.set_frequency(freq);
+                freq
             }
         }
     }
 
     pub fn set_interval_us(&mut self, interval: u64) {
         let current = self.get_time();
-        self.set_next_event(current + (interval * self.get_frequency()) / 1000000);
+        let freq = self.get_frequency();
+        self.set_next_event(current + (interval * freq / 1000000));
     }
 
     pub fn start(&mut self) {
