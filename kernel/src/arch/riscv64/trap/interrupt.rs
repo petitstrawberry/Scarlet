@@ -28,12 +28,6 @@ fn handle_software_interrupt() {
 fn handle_timer_interrupt(_trapframe: &mut Trapframe) {
     // Increment the global tick counter
     crate::timer::tick();
-    // Call the existing scheduler
-    let scheduler = get_scheduler();
-    let cpu = crate::arch::get_cpu();
-
-    // Use the new scheduler design that saves the current task internally
-    scheduler.schedule(cpu);
 }
 
 /// Handle external interrupt from PLIC

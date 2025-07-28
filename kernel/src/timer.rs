@@ -6,6 +6,7 @@
 
 use crate::arch::timer::ArchTimer;
 use crate::environment::NUM_OF_CPUS;
+use crate::sched::scheduler::get_scheduler;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
 use alloc::sync::{Arc, Weak};
@@ -74,8 +75,16 @@ static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Increment the global tick counter. Call this from the timer interrupt handler.
 pub fn tick() {
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    let timer = get_kernel_timer();
+    timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
+    timer.start(cpu_id);
     let now = TICK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     check_software_timers(now);
+    // Call scheduler tick handler to manage time slices
+    let scheduler = get_scheduler();
+    // crate::println!("[timer] Tick: {}, CPU: {}", now, cpu_id);
+    scheduler.on_tick(cpu_id);
 }
 
 /// Get the current tick count (monotonic, since boot)
@@ -174,8 +183,8 @@ fn check_software_timers(now: u64) {
     }
 }
 
-/// Tick interval in microseconds (e.g., 10_000 for 10ms tick)
-pub const TICK_INTERVAL_US: u64 = 10_000;
+// Tick interval in microseconds (e.g., 1_000 for 1ms tick)
+pub const TICK_INTERVAL_US: u64 = 1_000; // 1ms tick
 
 /// Convert milliseconds to ticks
 #[inline]

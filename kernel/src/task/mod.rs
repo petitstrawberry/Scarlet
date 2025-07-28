@@ -233,6 +233,8 @@ pub struct Task {
 
     // KernelObject table
     pub handle_table: HandleTable,
+    /// Time slice (in ticks) for round-robin scheduling. Decremented every tick; when it reaches 0, the scheduler is invoked.
+    pub time_slice: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +318,7 @@ impl Task {
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             vfs: None,
             handle_table: HandleTable::new(),
+            time_slice: 10, // Assign 10 ticks by default
         };
 
         *taskid += 1;
@@ -339,6 +342,7 @@ impl Task {
         
         /* Set the task state to Ready */
         self.state = TaskState::Ready;
+        self.time_slice = 10; // 初期化時も10tick
     }
 
     pub fn get_id(&self) -> usize {
