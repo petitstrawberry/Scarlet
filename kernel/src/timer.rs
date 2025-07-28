@@ -154,16 +154,54 @@ pub fn cancel_timer(id: u64) {
 
 /// Call this from tick() to check and fire expired timers
 fn check_software_timers(now: u64) {
-    let mut heap = SOFTWARE_TIMER_HEAP.lock();
-    while let Some(timer) = heap.peek() {
-        if timer.active && timer.expires <= now {
-            let timer = heap.pop().unwrap();
-            if let Some(handler) = timer.handler.upgrade() {
-                handler.on_timer_expired(timer.context);
+    use alloc::vec::Vec;
+    let mut expired = Vec::new();
+    {
+        let mut heap = SOFTWARE_TIMER_HEAP.lock();
+        while let Some(timer) = heap.peek() {
+            if timer.active && timer.expires <= now {
+                let timer = heap.pop().unwrap();
+                expired.push(timer);
+            } else {
+                break;
             }
-        } else {
-            break;
+        }
+    } // Unlock the heap to allow other operations
+    for timer in expired {
+        if let Some(handler) = timer.handler.upgrade() {
+            handler.on_timer_expired(timer.context);
         }
     }
 }
 
+// static mut TEST_HANDLER: Option<Arc<dyn TimerHandler>> = None;
+
+// // TEST
+// fn register_test_timer() {
+//     use alloc::sync::Arc;
+
+//     struct TestHandler;
+//     impl TimerHandler for TestHandler {
+//         #[allow(static_mut_refs)]
+//         fn on_timer_expired(&self, context: usize) {
+//             crate::early_println!("[Software Timer] Test timer expired with context: {}", context);
+//             if let Some(handler) = unsafe { TEST_HANDLER.clone() } {
+//                 crate::early_println!("[Software Timer] Test handler is still available.");
+//                 let handler = handler.clone();
+//                 add_timer(get_tick() + 100, &handler, context);
+//             } else {
+//                 crate::early_println!("[Software Timer] Test handler is no longer available.");
+//             }
+//         }
+//     }
+
+//     let handler: Arc<dyn TimerHandler>  = Arc::new(TestHandler);
+//     let target_tick = get_tick() + 100; // 100 ticks from now
+//     let id = add_timer(target_tick, &handler, 42);
+//     crate::early_println!("Test timer registered with ID: {}, tick: {}", id, target_tick);
+//     unsafe {
+//         TEST_HANDLER = Some(handler);
+//     }
+// }
+
+// late_initcall!(register_test_timer);
