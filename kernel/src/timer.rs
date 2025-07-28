@@ -94,7 +94,7 @@ pub fn get_tick() -> u64 {
 
 /// Trait for timer expiration callback
 pub trait TimerHandler: Send + Sync {
-    fn on_timer_expired(&self, context: usize);
+    fn on_timer_expired(self: Arc<Self>, context: usize);
 }
 
 /// Software timer structure
