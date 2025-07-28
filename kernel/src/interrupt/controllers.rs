@@ -38,6 +38,9 @@ pub trait LocalInterruptController: Send + Sync {
 
     /// Get current timer value
     fn get_time(&self) -> u64;
+
+    /// Returns the timer clock frequency in Hz
+    fn get_timer_frequency_hz(&self) -> u64;
 }
 
 /// Trait for external interrupt controllers (like PLIC)
