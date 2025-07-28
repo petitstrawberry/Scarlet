@@ -38,6 +38,9 @@ pub trait LocalInterruptController: Send + Sync {
 
     /// Get current timer value
     fn get_time(&self) -> u64;
+
+    /// Returns the timer clock frequency in Hz
+    fn get_timer_frequency_hz(&self) -> u64;
 }
 
 /// Trait for external interrupt controllers (like PLIC)
@@ -147,6 +150,17 @@ impl InterruptControllers {
     /// Register an external interrupt controller
     pub fn register_external_controller(&mut self, controller: Box<dyn ExternalInterruptController>) {
         self.external_controller = Some(controller);
+    }
+
+    /// Get a reference to the local interrupt controller for a specific CPU
+    pub fn local_controller_for_cpu(&self, cpu_id: CpuId) -> Option<&Box<dyn LocalInterruptController>> {
+        let controller_index = self.cpu_to_local_controller.get(&cpu_id)?;
+        self.local_controllers.get(*controller_index)
+    }
+
+    /// Get a reference to a specific local interrupt controller by index
+    pub fn local_controller(&self, index: usize) -> Option<&Box<dyn LocalInterruptController>> {
+        self.local_controllers.get(index)
     }
 
     /// Get a mutable reference to the local interrupt controller for a specific CPU

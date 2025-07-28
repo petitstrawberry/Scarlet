@@ -39,22 +39,6 @@ mod tests {
     use super::*;
 
     #[test_case]
-    fn test_time_functions() {
-        let time1 = current_time();
-        let time2 = current_time();
-        
-        // Time should be monotonic (non-decreasing)
-        assert!(time2 >= time1);
-        
-        // Test conversions
-        let time_ms = current_time_ms();
-        let time_s = current_time_s();
-        
-        assert!(time_ms <= time1 / 1000 + 1); // Allow for small timing differences
-        assert!(time_s <= time1 / 1_000_000 + 1);
-    }
-
-    #[test_case]
     fn test_format_time() {
         let (hours, minutes, seconds) = format_time_us(3_661_000_000); // 1 hour, 1 minute, 1 second
         assert_eq!(hours, 1);

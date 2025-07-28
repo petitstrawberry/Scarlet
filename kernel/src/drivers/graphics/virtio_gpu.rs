@@ -7,13 +7,15 @@
 //! according to the VirtIO GPU specification.
 
 
+use alloc::{boxed::Box, sync::Arc};
 use spin::{Mutex, RwLock};
 
 use crate::{
     device::{graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}, Device, DeviceType},
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}},
-    mem::page::allocate_raw_pages, object::capability::{ControlOps, MemoryMappingOps},
+    mem::page::{allocate_raw_pages, Page}, object::capability::{ControlOps, MemoryMappingOps}, timer::{add_timer, get_tick, ms_to_ticks, SoftwareTimer, TimerHandler},
 };
+use core::{ptr, sync::atomic::fence};
 
 // VirtIO GPU Constants
 const VIRTIO_GPU_F_VIRGL: u32 = 0;
@@ -136,19 +138,22 @@ struct VirtioGpuMemEntry {
     padding: u32,
 }
 
-/// VirtIO GPU Device
-pub struct VirtioGpuDevice {
+/// VirtIO GPU Device Core
+pub struct VirtioGpuDeviceCore {
     base_addr: usize,
     virtqueues: Mutex<[VirtQueue<'static>; 2]>, // Control queue (0) and Cursor queue (1)
     display_info: RwLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: RwLock<Option<usize>>,
+    shadow_framebuffer_addr: RwLock<Option<usize>>,
+    boxed_framebuffer: RwLock<Option<Box<[Page]>>>, // Boxed framebuffer for easier management
+    boxed_shadow_framebuffer: RwLock<Option<Box<[Page]>>>, // Boxed shadow framebuffer
     resource_id: Mutex<u32>,
     initialized: Mutex<bool>,
     // Track resources and their associated memory
     resources: Mutex<alloc::collections::BTreeMap<u32, (usize, usize)>>, // resource_id -> (addr, size)
 }
 
-impl VirtioGpuDevice {
+impl VirtioGpuDeviceCore {
     /// Create a new VirtIO GPU device
     ///
     /// # Arguments
@@ -164,6 +169,9 @@ impl VirtioGpuDevice {
             virtqueues: Mutex::new([VirtQueue::new(64), VirtQueue::new(64)]), // Control and Cursor queues with 64 descriptors each
             display_info: RwLock::new(None),
             framebuffer_addr: RwLock::new(None),
+            shadow_framebuffer_addr: RwLock::new(None),
+            boxed_framebuffer: RwLock::new(None),
+            boxed_shadow_framebuffer: RwLock::new(None), 
             resource_id: Mutex::new(1),
             initialized: Mutex::new(false),
             resources: Mutex::new(alloc::collections::BTreeMap::new()),
@@ -172,9 +180,8 @@ impl VirtioGpuDevice {
         // Initialize virtqueues first
         {
             let mut virtqueues = device.virtqueues.lock();
-            for (i, queue) in virtqueues.iter_mut().enumerate() {
+            for queue in virtqueues.iter_mut() {
                 queue.init();
-                // crate::early_println!("[Virtio GPU] Initialized virtqueue {}", i);
             }
         }
         
@@ -369,34 +376,24 @@ impl VirtioGpuDevice {
     fn setup_framebuffer(&self) -> Result<(), &'static str> {
         let display_info = self.display_info.read();
         let display_info = display_info.as_ref().ok_or("No display info available")?;
-        
         let primary_display = &display_info.pmodes[0];
         if primary_display.enabled == 0 {
             return Err("Primary display not enabled");
         }
-
         let width = primary_display.r.width;
         let height = primary_display.r.height;
-        
-        // Create a 2D resource for the framebuffer
         let resource_id = self.create_2d_resource(width, height, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM)?;
-
-        // Allocate framebuffer memory
-        let fb_size = (width * height * 4) as usize; // 4 bytes per pixel
-        let fb_pages = (fb_size + 4095) / 4096; // Round up to page size
+        let fb_size = (width * height * 4) as usize;
+        let fb_pages = (fb_size + 4095) / 4096;
         let fb_pages_ptr = allocate_raw_pages(fb_pages);
         if fb_pages_ptr.is_null() {
             return Err("Failed to allocate framebuffer memory");
         }
         let fb_addr = fb_pages_ptr as usize;
-
-        // Attach backing to the resource
-        // This command tells the GPU device that our framebuffer memory 
-        // should be used as backing storage for the 2D resource
-        self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?;
-
-        // Set scanout - connects the 2D resource to the display output
-        // This makes the resource visible on the display
+        // Store the framebuffer in boxed memory for easier management
+        self.boxed_framebuffer.write().replace(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(fb_pages_ptr, fb_pages)) });
+        self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
+        // Set scanout to use this framebuffer
         let scanout_cmd = VirtioGpuSetScanout {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_SET_SCANOUT,
@@ -405,124 +402,33 @@ impl VirtioGpuDevice {
                 ctx_id: 0,
                 padding: 0,
             },
-            r: VirtioGpuRect {
-                x: 0,
-                y: 0,
-                width,
-                height,
-            },
+            r: VirtioGpuRect { x: 0, y: 0, width, height },
             scanout_id: 0,
             resource_id,
         };
-
-        // crate::early_println!("[Virtio GPU] Setting scanout for resource {} ({}x{})", 
-        //     resource_id, width, height);
         self.send_control_command(&scanout_cmd)?;
-
-        // Track the resource and its associated memory
         {
             let mut resources = self.resources.lock();
             resources.insert(resource_id, (fb_addr, fb_size));
         }
-
         *self.framebuffer_addr.write() = Some(fb_addr);
-        // crate::early_println!("[Virtio GPU] Framebuffer setup completed: addr={:#x}, size={}", 
-        //     fb_addr, fb_size);
+        // Allocate shadow framebuffer
+        let shadow_pages_ptr = allocate_raw_pages(fb_pages);
+        if shadow_pages_ptr.is_null() {
+            return Err("Failed to allocate shadow framebuffer memory");
+        }
+        let shadow_addr = shadow_pages_ptr as usize;
+        // Store the shadow framebuffer in boxed memory for easier management
+        self.boxed_shadow_framebuffer.write().replace(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(shadow_pages_ptr, fb_pages)) });
+        // Initialize shadow framebuffer with the contents of the framebuffer
+        let fb_size = fb_size as usize;
+        unsafe {
+            ptr::copy_nonoverlapping(fb_addr as *const u8, shadow_addr as *mut u8, fb_size);
+        }
+        *self.shadow_framebuffer_addr.write() = Some(shadow_addr);
         Ok(())
     }
-}
 
-impl VirtioDevice for VirtioGpuDevice {
-    fn get_base_addr(&self) -> usize {
-        self.base_addr
-    }
-
-    fn get_virtqueue_count(&self) -> usize {
-        2 // Control queue and cursor queue
-    }
-
-    fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
-        if queue_idx >= self.get_virtqueue_count() {
-            return None;
-        }
-        
-        let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].desc.as_ptr() as u64)
-    }
-
-    fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
-        if queue_idx >= self.get_virtqueue_count() {
-            return None;
-        }
-        
-        let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].avail.flags as *const u16 as u64)
-    }
-
-    fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
-        if queue_idx >= self.get_virtqueue_count() {
-            return None;
-        }
-        
-        let virtqueues = self.virtqueues.lock();
-        Some(virtqueues[queue_idx].used.flags as *const u16 as u64)
-    }
-
-    fn get_supported_features(&self, _device_features: u32) -> u32 {
-        // For now, don't enable any advanced features
-        0
-    }
-}
-
-impl Device for VirtioGpuDevice {
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Graphics
-    }
-
-    fn name(&self) -> &'static str {
-        "virtio-gpu"
-    }
-
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
-        self
-    }
-
-    fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
-        Some(self)
-    }
-}
-
-impl ControlOps for VirtioGpuDevice {
-    // VirtIO GPU devices don't support control operations by default
-    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
-        Err("Control operations not supported")
-    }
-}
-
-impl MemoryMappingOps for VirtioGpuDevice {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
-        Err("Memory mapping not supported by VirtIO GPU device")
-    }
-    
-    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
-        // VirtIO GPU devices don't support memory mapping
-    }
-    
-    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
-        // VirtIO GPU devices don't support memory mapping
-    }
-    
-    fn supports_mmap(&self) -> bool {
-        false
-    }
-}
-
-impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {
         "virtio-gpu"
     }
@@ -603,10 +509,142 @@ impl GraphicsDevice for VirtioGpuDevice {
         // crate::early_println!("[Virtio GPU] Framebuffer flush completed");
         Ok(())
     }
+}
+
+impl VirtioDevice for VirtioGpuDeviceCore {
+    fn get_base_addr(&self) -> usize {
+        self.base_addr
+    }
+
+    fn get_virtqueue_count(&self) -> usize {
+        2 // Control queue and cursor queue
+    }
+
+    fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
+        if queue_idx >= self.get_virtqueue_count() {
+            return None;
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].desc.as_ptr() as u64)
+    }
+
+    fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64> {
+        if queue_idx >= self.get_virtqueue_count() {
+            return None;
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].avail.flags as *const u16 as u64)
+    }
+
+    fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64> {
+        if queue_idx >= self.get_virtqueue_count() {
+            return None;
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        Some(virtqueues[queue_idx].used.flags as *const u16 as u64)
+    }
+
+    fn get_supported_features(&self, _device_features: u32) -> u32 {
+        // For now, don't enable any advanced features
+        0
+    }
+}
+
+pub struct VirtioGpuDevice {
+    core: Arc<Mutex<VirtioGpuDeviceCore>>,
+    handler: Option<Arc<dyn TimerHandler>>,
+}
+
+impl VirtioGpuDevice {
+    /// Create a new VirtIO GPU device
+    ///
+    /// # Arguments
+    ///
+    /// * `base_addr` - The base address of the device
+    ///
+    /// # Returns
+    ///
+    /// A new instance of `VirtioGpuDevice`
+    pub fn new(base_addr: usize) -> Self {
+        Self {
+            core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new(base_addr))),
+            handler: None,
+        }
+    }
+}
+
+impl Device for VirtioGpuDevice {
+    fn device_type(&self) -> DeviceType {
+        DeviceType::Graphics
+    }
+
+    fn name(&self) -> &'static str {
+        "virtio-gpu"
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
+    fn as_graphics_device(&self) -> Option<&dyn GraphicsDevice> {
+        Some(self)
+    }
+}
+
+impl ControlOps for VirtioGpuDevice {
+    // VirtIO GPU devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for VirtioGpuDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by VirtIO GPU device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // VirtIO GPU devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // VirtIO GPU devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
+impl GraphicsDevice for VirtioGpuDevice {
+    fn get_display_name(&self) -> &'static str {
+        "virtio-gpu"
+    }
+
+    fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
+        self.core.lock().get_framebuffer_config()
+    }
+
+    fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+        self.core.lock().get_framebuffer_address()
+    }
+
+    fn flush_framebuffer(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str> {
+        self.core.lock().flush_framebuffer(x, y, width, height)
+    }
 
     fn init_graphics(&mut self) -> Result<(), &'static str> {
         {
-            let mut initialized = self.initialized.lock();
+            let core = self.core.lock();
+            let mut initialized = core.initialized.lock();
             if *initialized {
                 return Ok(());
             }
@@ -616,13 +654,72 @@ impl GraphicsDevice for VirtioGpuDevice {
         // crate::early_println!("[Virtio GPU] Initializing graphics subsystem for device at {:#x}", self.base_addr);
 
         // Get display information
-        self.get_display_info_internal()?;
+        self.core.lock().get_display_info_internal()?;
 
         // Set up framebuffer
-        self.setup_framebuffer()?;
+        self.core.lock().setup_framebuffer()?;
+
+        let handler: Arc<dyn TimerHandler> = Arc::new(FramebufferUpdateHandler {
+            device: self.core.clone(),
+        });
+
+        add_timer(get_tick() + ms_to_ticks(16), &handler, 0);
+
+        self.handler = Some(handler);
 
         // crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
         Ok(())
+    }
+}
+
+struct FramebufferUpdateHandler {
+    device: Arc<Mutex<VirtioGpuDeviceCore>>,
+}
+
+impl FramebufferUpdateHandler {
+    fn compare_and_flush(&self) {
+        let (fb_addr, shadow_addr, width, height, fb_size) = {
+            let core = self.device.lock();
+            let fb_addr = match *core.framebuffer_addr.read() {
+                Some(addr) => addr,
+                None => return,
+            };
+            let shadow_addr = match *core.shadow_framebuffer_addr.read() {
+                Some(addr) => addr,
+                None => return,
+            };
+            let display_info_guard = core.display_info.read();
+            let display_info = match display_info_guard.as_ref() {
+                Some(info) => info,
+                None => return,
+            };
+            let width = display_info.pmodes[0].r.width;
+            let height = display_info.pmodes[0].r.height;
+            let fb_size = (width * height * 4) as usize;
+            (fb_addr, shadow_addr, width, height, fb_size)
+        };
+        // Determine if the framebuffer has changed
+        let fb_ptr = fb_addr as *const u8;
+        let shadow_ptr = shadow_addr as *const u8;
+        let fb_slice = unsafe { core::slice::from_raw_parts(fb_ptr, fb_size) };
+        let shadow_slice = unsafe { core::slice::from_raw_parts(shadow_ptr, fb_size) };
+        let changed = fb_slice != shadow_slice;
+        
+        if changed {
+            let _ = self.device.lock().flush_framebuffer(0, 0, width, height);
+            fence(core::sync::atomic::Ordering::SeqCst);
+            unsafe {
+                ptr::copy_nonoverlapping(fb_addr as *const u8, shadow_addr as *mut u8, fb_size);
+            }
+        }
+    }
+}
+
+impl TimerHandler for FramebufferUpdateHandler {
+    fn on_timer_expired(self: Arc<Self>, context: usize) {
+        self.compare_and_flush();
+        let handler = self as Arc<dyn TimerHandler>;
+        add_timer(get_tick() + ms_to_ticks(16), &handler, context);
     }
 }
 
@@ -633,19 +730,19 @@ mod tests {
     #[test_case]
     fn test_virtio_gpu_device_creation() {
         let device = VirtioGpuDevice::new(0x10002000);
-        assert_eq!(device.get_base_addr(), 0x10002000);
-        assert_eq!(device.get_virtqueue_count(), 2);
+        assert_eq!(device.core.lock().get_base_addr(), 0x10002000);
+        assert_eq!(device.core.lock().get_virtqueue_count(), 2);
         assert_eq!(device.device_type(), DeviceType::Graphics);
         assert_eq!(device.name(), "virtio-gpu");
-        assert_eq!(device.get_display_name(), "virtio-gpu");
+        assert_eq!(device.core.lock().get_display_name(), "virtio-gpu");
     }
 
     #[test_case]
     fn test_virtio_gpu_resource_id_generation() {
         let device = VirtioGpuDevice::new(0x10002000);
-        assert_eq!(device.next_resource_id(), 1);
-        assert_eq!(device.next_resource_id(), 2);
-        assert_eq!(device.next_resource_id(), 3);
+        assert_eq!(device.core.lock().next_resource_id(), 1);
+        assert_eq!(device.core.lock().next_resource_id(), 2);
+        assert_eq!(device.core.lock().next_resource_id(), 3);
     }
 
     #[test_case]
