@@ -213,6 +213,10 @@ impl LocalInterruptController for Clint {
             read_volatile(self.mtime_addr() as *const u64)
         }
     }
+
+    fn get_timer_frequency_hz(&self) -> u64 {
+        10_000_000 // Fixed frequency for QEMU virt platform... It may get from FDT.
+    }
 }
 
 unsafe impl Send for Clint {}

@@ -108,6 +108,7 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
+                                t.time_slice = 10; // Reset time slice on dispatch
                                 if self.current_task_id[cpu_id] != Some(t.get_id()) {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 }
@@ -166,6 +167,7 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
+                                t.time_slice = 10; // Reset time slice on dispatch
                                 // Simply dispatch the task without prev_task logic
                                 self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 self.current_task_id[cpu_id] = Some(t.get_id());
@@ -180,6 +182,26 @@ impl Scheduler {
         }
     }
 
+    /// Called every timer tick. Decrements the current task's time_slice.
+    /// If time_slice reaches 0, triggers a reschedule.
+    pub fn on_tick(&mut self, cpu_id: usize) {
+        if let Some(task_id) = self.current_task_id[cpu_id] {
+            if let Some(task) = self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id) {
+                if task.time_slice > 0 {
+                    task.time_slice -= 1;
+                }
+                if task.time_slice == 0 {
+                    // Time slice expired, trigger reschedule
+                    let cpu = get_cpu();
+                    self.schedule(cpu);
+                }
+            }
+        } else {
+            let cpu = get_cpu();
+            self.schedule(cpu);
+        }
+    }
+
     /// Schedule tasks on the CPU, saving the currently running task's state
     /// 
     /// This function is called by the timer interrupt handler. It saves the current
@@ -190,10 +212,6 @@ impl Scheduler {
     pub fn schedule(&mut self, cpu: &mut Arch) {
         let cpu_id = cpu.get_cpuid();
 
-        let timer = get_kernel_timer();
-        timer.stop(cpu_id);
-        timer.set_interval_us(cpu_id, self.interval);
-
         // Save current task state if there is one
         if let Some(current_task_id) = self.current_task_id[cpu_id] {
             if let Some(current_task) = self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == current_task_id) {
@@ -203,11 +221,8 @@ impl Scheduler {
 
         if !self.ready_queue[cpu_id].is_empty() {
             self.run(cpu);
-            timer.start(cpu_id);
             arch_switch_to_user_space(cpu);
         }
-        // If the task queue is empty, go to idle
-        timer.start(cpu_id);
         idle();
     }
 
