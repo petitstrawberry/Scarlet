@@ -184,7 +184,7 @@ fn check_software_timers(now: u64) {
 }
 
 // Tick interval in microseconds (e.g., 1_000 for 1ms tick)
-pub const TICK_INTERVAL_US: u64 = 1_000; // 1ms tick
+pub const TICK_INTERVAL_US: u64 = 10_000; // 1ms tick
 
 /// Convert milliseconds to ticks
 #[inline]
@@ -198,6 +198,12 @@ pub fn us_to_ticks(us: u64) -> u64 {
     us / TICK_INTERVAL_US
 }
 
+/// Convert nanoseconds to ticks
+#[inline]
+pub fn ns_to_ticks(ns: u64) -> u64 {
+    (ns / 1_000) / TICK_INTERVAL_US
+}
+
 /// Convert ticks to milliseconds
 #[inline]
 pub fn ticks_to_ms(ticks: u64) -> u64 {
@@ -208,6 +214,12 @@ pub fn ticks_to_ms(ticks: u64) -> u64 {
 #[inline]
 pub fn ticks_to_us(ticks: u64) -> u64 {
     ticks * TICK_INTERVAL_US
+}
+
+/// Convert ticks to nanoseconds
+#[inline]
+pub fn ticks_to_ns(ticks: u64) -> u64 {
+    (ticks * TICK_INTERVAL_US) * 1_000
 }
 
 // static mut TEST_HANDLER: Option<Arc<dyn TimerHandler>> = None;

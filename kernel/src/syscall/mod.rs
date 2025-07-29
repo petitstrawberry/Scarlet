@@ -63,7 +63,7 @@
 
 use crate::arch::Trapframe;
 use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
-use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_waitpid};
+use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_sleep, sys_waitpid};
 use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate, sys_handle_control};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
@@ -82,6 +82,10 @@ syscall_table! {
     Execve = 3 => sys_execve,
     ExecveABI = 4 => sys_execve_abi,
     Waitpid = 5 => sys_waitpid,
+    Kill = 6 => |_: &mut Trapframe| {
+        // Kill syscall is not implemented yet
+        usize::MAX // -1
+    },
     Getpid = 7 => sys_getpid,
     Getppid = 8 => sys_getppid,
     Brk = 12 => sys_brk,
@@ -89,6 +93,8 @@ syscall_table! {
     // BASIC I/O
     Putchar = 16 => sys_putchar,
     Getchar = 17 => sys_getchar,
+
+    Sleep = 20 => sys_sleep,
     
     // === Handle Management ===
     HandleQuery = 100 => sys_handle_query,     // Query handle metadata/capabilities

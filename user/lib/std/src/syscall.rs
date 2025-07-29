@@ -16,6 +16,8 @@ pub enum Syscall {
     // BASIC I/O
     Putchar = 16,
     Getchar = 17,
+
+    Sleep = 20,
     
     // === Handle Management ===
     HandleQuery = 100,

@@ -88,6 +88,9 @@ fn main() -> i32 {
         return 1;
     }
     println!("Red fill completed and flushed");
+
+    println!("Waiting for 2 seconds before next test...");
+    std::thread::sleep(std::time::Duration::from_secs(2));
     
     // Test 2: Fill screen with green
     println!("Test 2: Filling screen with green...");

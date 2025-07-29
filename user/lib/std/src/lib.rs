@@ -45,6 +45,7 @@ mod core_exports {
     pub use core::ptr;
     pub use core::range;
     pub use core::result;
+    pub use core::time;
     pub use core::u8;
     pub use core::u16;
     pub use core::u32;
@@ -74,6 +75,7 @@ pub mod syscall;
 pub mod io;
 pub mod fs;
 pub mod task;
+pub mod thread;
 pub mod ffi;
 pub mod env;
 pub mod handle;

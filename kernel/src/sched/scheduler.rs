@@ -108,7 +108,7 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
-                                t.time_slice = 10; // Reset time slice on dispatch
+                                t.time_slice = 1; // Reset time slice on dispatch
                                 if self.current_task_id[cpu_id] != Some(t.get_id()) {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 }
@@ -167,7 +167,7 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
-                                t.time_slice = 10; // Reset time slice on dispatch
+                                t.time_slice = 1; // Reset time slice on dispatch
                                 // Simply dispatch the task without prev_task logic
                                 self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 self.current_task_id[cpu_id] = Some(t.get_id());
