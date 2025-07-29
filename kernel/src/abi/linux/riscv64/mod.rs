@@ -4,6 +4,7 @@ mod proc;
 mod mm;
 mod fs;
 mod time;
+mod signal;
 // mod file;
 // pub mod fs;
 // mod pipe;
@@ -513,6 +514,8 @@ syscall_table! {
     SetRobustList = 99 => proc::sys_set_robust_list,
     Nanosleep = 101 => time::sys_nanosleep,
     ClockGettime = 113 => time::sys_clock_gettime,
+    RtSigaction = 134 => signal::sys_rt_sigaction,
+    RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
     Uname = 160 => proc::sys_uname,
     GetUid = 174 => proc::sys_getuid,
     Brk = 214 => proc::sys_brk,
