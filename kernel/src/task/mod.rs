@@ -343,7 +343,7 @@ impl Task {
         
         /* Set the task state to Ready */
         self.state = TaskState::Ready;
-        self.time_slice = 10; // 初期化時も10tick
+        self.time_slice = 1;
     }
 
     pub fn get_id(&self) -> usize {
@@ -1033,25 +1033,32 @@ impl Task {
     /// This blocks the task and registers a timer to wake it up.
     /// 
     /// # Arguments
-    /// * `cpu` - The CPU context to store 
+    /// * `cpu` - The CPU context to store current task state
     /// * `ticks` - The number of ticks to sleep
     /// 
     pub fn sleep(&mut self, cpu: &mut Arch, ticks: u64) {
 
         struct SleepWakerHandler {
             task_id: usize,
+            start_tick: u64,
         }
 
         impl TimerHandler for SleepWakerHandler {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
-                let waker = get_task_waker(self.task_id);
-                waker.wake_all();
+                if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
+                    let handler: Arc<dyn TimerHandler> = self.clone();
+                    task.remove_software_timer_handler(&handler);
+                    crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
+                    let waker = get_task_waker(self.task_id);
+                    waker.wake_all();
+                }
             }
         }
 
         let wake_tick = get_tick() + ticks;
         let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(SleepWakerHandler {
             task_id: self.id,
+            start_tick: get_tick(),
         });
         add_timer(wake_tick, &handler, 0);
 
@@ -1077,6 +1084,12 @@ impl Task {
 
     pub fn add_software_timer_handler(&mut self, timer: Arc<dyn TimerHandler>) {
         self.software_timers_handlers.push(timer);
+    }
+
+    pub fn remove_software_timer_handler(&mut self, timer: &Arc<dyn TimerHandler>) {
+        if let Some(pos) = self.software_timers_handlers.iter().position(|x| Arc::ptr_eq(x, timer)) {
+            self.software_timers_handlers.remove(pos);
+        }
     }
 }
 

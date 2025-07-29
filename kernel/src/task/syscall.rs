@@ -25,6 +25,7 @@ use crate::library::std::string::{parse_c_string_from_userspace, parse_string_ar
 use crate::arch::{get_cpu, Trapframe};
 use crate::sched::scheduler::get_scheduler;
 use crate::task::{get_parent_waker, get_task_waker, CloneFlags, WaitError};
+use crate::timer::{get_tick, ms_to_ticks, ns_to_ticks};
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 
@@ -329,5 +330,20 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     task.get_parent_id().unwrap_or(task.get_id()) as usize
+}
+
+pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
+    let nanosecs = trapframe.get_arg(0) as u64;
+    let task = mytask().unwrap();
+
+    let ticks = ns_to_ticks(nanosecs);
+    crate::early_println!("[syscall] Sleeping for {} ticks ({} ns)", ticks, nanosecs);
+
+    // Set return value to 0 for successful sleep
+    trapframe.set_return_value(0);
+    // Increment PC to avoid infinite loop if sleep fails
+    trapframe.increment_pc_next(task);
+    task.sleep(trapframe, ticks);
+    usize::MAX // -1 Error (If sleep is successful, this will not be reached)
 }
 
