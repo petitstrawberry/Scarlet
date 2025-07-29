@@ -7,7 +7,8 @@ use crate::{
     abi::linux::riscv64::LinuxRiscv64Abi, 
     arch::Trapframe, 
     time::{current_time, current_time_s},
-    task::mytask
+    task::mytask,
+    timer::ns_to_ticks,
 };
 
 /// Linux timespec structure (matches Linux userspace)
@@ -101,10 +102,52 @@ pub fn sys_clock_gettime(
     0 // Success
 }
 
+/// sys_nanosleep - Sleep for the specified time (Linux ABI)
+///
+/// Arguments:
+/// - a0 (x10): rqtp - pointer to requested sleep time (struct __kernel_timespec __user *)
+/// - a1 (x11): rmtp - pointer to remaining time (struct __kernel_timespec __user *)
+///
+/// Returns:
+/// - 0 on success
+/// - -EFAULT (-14) for invalid pointer
+/// - -EINTR (-4) if interrupted by signal (not implemented, always 0)
+pub fn sys_nanosleep(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    // Get current task
+    let task = match mytask() {
+        Some(task) => task,
+        None => return (-14_isize) as usize, // -EFAULT
+    };
+    trapframe.increment_pc_next(&task);
+
+    // Get user pointer to requested timespec
+    let rqtp_ptr = trapframe.get_arg(0);
+    let rmtp_ptr = trapframe.get_arg(1);
+    let rqtp = match task.vm_manager.translate_vaddr(rqtp_ptr) {
+        Some(ptr) => unsafe { &*(ptr as *const TimeSpec) },
+        None => return (-14_isize) as usize, // -EFAULT
+    };
+    // Convert timespec to nanoseconds
+    let ns = rqtp.tv_sec.saturating_mul(1_000_000_000).saturating_add(rqtp.tv_nsec);
+    if ns <= 0 {
+        return 0;
+    }
+    // Convert nanoseconds to kernel ticks
+    let ticks = ns_to_ticks(ns as u64);
+    trapframe.set_return_value(0); // Set return value to 0 (success)
+    // Sleep the current task for the specified ticks
+    task.sleep(trapframe, ticks);
+    // If sleep is successful, this will not be reached. If interrupted, return -EINTR (not implemented)
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use crate::arch::Trapframe;
+    use crate::abi::linux::riscv64::LinuxRiscv64Abi;
+    use crate::task::mytask;
+
     #[test_case]
     fn test_timespec_size() {
         // Ensure TimeSpec matches Linux ABI

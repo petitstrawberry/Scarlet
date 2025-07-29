@@ -510,6 +510,7 @@ syscall_table! {
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
     SetRobustList = 99 => proc::sys_set_robust_list,
+    Nanosleep = 101 => time::sys_nanosleep,
     ClockGettime = 113 => time::sys_clock_gettime,
     Uname = 160 => proc::sys_uname,
     GetUid = 174 => proc::sys_getuid,
