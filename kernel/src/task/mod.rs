@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_TOP}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_TOP}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::{self, HandleTable}, sched::scheduler::get_scheduler, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -229,12 +229,12 @@ pub struct Task {
     /// All internal operations use RwLock for concurrent access protection.
     pub vfs: Option<Arc<VfsManager>>,
 
-
-
     // KernelObject table
     pub handle_table: HandleTable,
     /// Time slice (in ticks) for round-robin scheduling. Decremented every tick; when it reaches 0, the scheduler is invoked.
     pub time_slice: u32,
+    /// Software timer handlers
+    pub software_timers_handlers: Vec<Arc<dyn TimerHandler>>,
 }
 
 #[derive(Debug, Clone)]
@@ -319,6 +319,7 @@ impl Task {
             vfs: None,
             handle_table: HandleTable::new(),
             time_slice: 10, // Assign 10 ticks by default
+            software_timers_handlers: Vec::new(),
         };
 
         *taskid += 1;
@@ -342,7 +343,7 @@ impl Task {
         
         /* Set the task state to Ready */
         self.state = TaskState::Ready;
-        self.time_slice = 10; // 初期化時も10tick
+        self.time_slice = 1;
     }
 
     pub fn get_id(&self) -> usize {
@@ -1028,6 +1029,44 @@ impl Task {
         }
     }
 
+    /// Sleep the current task for the specified number of ticks.
+    /// This blocks the task and registers a timer to wake it up.
+    /// 
+    /// # Arguments
+    /// * `cpu` - The CPU context to store current task state
+    /// * `ticks` - The number of ticks to sleep
+    /// 
+    pub fn sleep(&mut self, cpu: &mut Arch, ticks: u64) {
+
+        struct SleepWakerHandler {
+            task_id: usize,
+            start_tick: u64,
+        }
+
+        impl TimerHandler for SleepWakerHandler {
+            fn on_timer_expired(self: Arc<Self>, _context: usize) {
+                if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
+                    let handler: Arc<dyn TimerHandler> = self.clone();
+                    task.remove_software_timer_handler(&handler);
+                    crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
+                    let waker = get_task_waker(self.task_id);
+                    waker.wake_all();
+                }
+            }
+        }
+
+        let wake_tick = get_tick() + ticks;
+        let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(SleepWakerHandler {
+            task_id: self.id,
+            start_tick: get_tick(),
+        });
+        add_timer(wake_tick, &handler, 0);
+
+        self.add_software_timer_handler(handler);
+        let waker = get_task_waker(self.id);
+        waker.wait(self, cpu);
+    }
+
     // VFS Helper Methods
     
     /// Set the VFS manager
@@ -1043,6 +1082,15 @@ impl Task {
         self.vfs.as_ref()
     }
 
+    pub fn add_software_timer_handler(&mut self, timer: Arc<dyn TimerHandler>) {
+        self.software_timers_handlers.push(timer);
+    }
+
+    pub fn remove_software_timer_handler(&mut self, timer: &Arc<dyn TimerHandler>) {
+        if let Some(pos) = self.software_timers_handlers.iter().position(|x| Arc::ptr_eq(x, timer)) {
+            self.software_timers_handlers.remove(pos);
+        }
+    }
 }
 
 #[derive(Debug)]
