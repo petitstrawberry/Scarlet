@@ -461,6 +461,15 @@ impl VirtioDevice for VirtioNetDevice {
     fn get_virtqueue_count(&self) -> usize {
         2 // TX and RX queues
     }
+
+    fn get_virtqueue_size(&self, queue_idx: usize) -> usize {
+        if queue_idx >= 2 {
+            panic!("Invalid queue index for VirtIO network device: {}", queue_idx);
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        virtqueues[queue_idx].get_queue_size()
+    }
     
     fn get_supported_features(&self, device_features: u32) -> u32 {
         // Debug: Print detailed feature analysis

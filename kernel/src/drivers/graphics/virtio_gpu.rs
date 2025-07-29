@@ -223,15 +223,21 @@ impl VirtioGpuDeviceCore {
         };
 
         // Set up command descriptor (device readable)
-        control_queue.desc[cmd_desc].addr = (cmd as *const T) as u64;
-        control_queue.desc[cmd_desc].len = core::mem::size_of::<T>() as u32;
-        control_queue.desc[cmd_desc].flags = DescriptorFlag::Next as u16;
-        control_queue.desc[cmd_desc].next = resp_desc as u16;
+        let cmd_desc_ptr = &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        unsafe {
+            core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, (cmd as *const T) as u64);
+            core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, core::mem::size_of::<T>() as u32);
+            core::ptr::write_volatile(&mut (*cmd_desc_ptr).flags, DescriptorFlag::Next as u16);
+            core::ptr::write_volatile(&mut (*cmd_desc_ptr).next, resp_desc as u16);
+        }
 
         // Set up response descriptor (device writable)
-        control_queue.desc[resp_desc].addr = resp_buffer.as_mut_ptr() as u64;
-        control_queue.desc[resp_desc].len = resp_buffer.len() as u32; // Use .len() for safety
-        control_queue.desc[resp_desc].flags = DescriptorFlag::Write as u16;
+        let resp_desc_ptr = &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        unsafe {
+            core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_buffer.as_mut_ptr() as u64);
+            core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32); // Use .len() for safety
+            core::ptr::write_volatile(&mut (*resp_desc_ptr).flags, DescriptorFlag::Write as u16);
+        }
 
         // crate::early_println!("[Virtio GPU] Sending command to control queue: type={}",
         //     unsafe { *(cmd as *const T as *const u32) });
@@ -250,7 +256,7 @@ impl VirtioGpuDeviceCore {
         // Wait for response (simplified polling)
         // crate::early_println!("[Virtio GPU] Waiting for command response...");
         while control_queue.is_busy() {}
-        while *control_queue.used.idx as usize == control_queue.last_used_idx {}
+        while *control_queue.used.idx == control_queue.last_used_idx {}
 
         // Process response
         let _resp_idx = match control_queue.pop() {
@@ -518,6 +524,15 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 
     fn get_virtqueue_count(&self) -> usize {
         2 // Control queue and cursor queue
+    }
+
+    fn get_virtqueue_size(&self, queue_idx: usize) -> usize {
+        if queue_idx >= self.get_virtqueue_count() {
+            panic!("Invalid queue index: {}", queue_idx);
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        virtqueues[queue_idx].get_queue_size()
     }
 
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
