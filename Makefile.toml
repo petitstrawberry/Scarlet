@@ -83,7 +83,7 @@ args = ["clean"]
 description = "Clean user library build artifacts"
 cwd = "user/lib"
 command = "cargo"
-args = ["clean", "--workspace"]
+args = ["make", "clean-userlib"]
 
 [tasks.clean-userbin]
 description = "Clean user program build artifacts"
