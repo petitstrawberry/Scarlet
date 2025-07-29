@@ -5,9 +5,7 @@ mod mm;
 mod fs;
 mod time;
 mod signal;
-// mod file;
-// pub mod fs;
-// mod pipe;
+mod pipe;
 
 // pub mod drivers;
 
@@ -502,6 +500,7 @@ syscall_table! {
     FaccessAt = 48 => fs::sys_faccessat,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
+    Pipe2 = 59 => pipe::sys_pipe2,
     GetDents64 = 61 => fs::sys_getdents64,
     Read = 63 => fs::sys_read,
     Write = 64 => fs::sys_write,
