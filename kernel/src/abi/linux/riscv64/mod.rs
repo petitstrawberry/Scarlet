@@ -502,6 +502,7 @@ syscall_table! {
     Close = 57 => fs::sys_close,
     Pipe2 = 59 => pipe::sys_pipe2,
     GetDents64 = 61 => fs::sys_getdents64,
+    Lseek = 62 => fs::sys_lseek,
     Read = 63 => fs::sys_read,
     Write = 64 => fs::sys_write,
     Readv = 65 => fs::sys_readv,
