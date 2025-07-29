@@ -1309,3 +1309,17 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
     total_read
 }
+
+/// Linux sys_faccessat implementation (dummy: always returns 0)
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///
+/// Returns:
+/// - 0 (success)
+pub fn sys_faccessat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    0
+}

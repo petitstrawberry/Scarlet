@@ -498,6 +498,7 @@ syscall_table! {
     },
     Fcntl = 25 => fs::sys_fcntl,
     Ioctl = 29 => fs::sys_ioctl,
+    FaccessAt = 48 => fs::sys_faccessat,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
     GetDents64 = 61 => fs::sys_getdents64,
