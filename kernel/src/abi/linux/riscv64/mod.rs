@@ -503,6 +503,7 @@ syscall_table! {
     GetDents64 = 61 => fs::sys_getdents64,
     Read = 63 => fs::sys_read,
     Write = 64 => fs::sys_write,
+    Readv = 65 => fs::sys_readv,
     Writev = 66 => fs::sys_writev,
     NewFstAtAt = 79 => fs::sys_newfstatat,
     SetTidAddress = 96 => proc::sys_set_tid_address,

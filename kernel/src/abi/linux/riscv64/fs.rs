@@ -1224,3 +1224,88 @@ pub fn sys_getdents64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     }
     written
 }
+
+/// Linux readv system call implementation
+///
+/// This system call reads data into multiple buffers (iovec) in a single call.
+///
+/// # Arguments
+/// - fd: File descriptor
+/// - iovec: Array of iovec structures
+/// - iovcnt: Number of elements in the array
+///
+/// # Returns
+/// - On success: number of bytes read
+/// - On error: usize::MAX
+pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let iovec_ptr = trapframe.get_arg(1);
+    let iovcnt = trapframe.get_arg(2) as usize;
+    trapframe.increment_pc_next(task);
+
+    if iovcnt == 0 {
+        return 0;
+    }
+    const IOV_MAX: usize = 1024;
+    if iovcnt > IOV_MAX {
+        return usize::MAX;
+    }
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => return usize::MAX,
+    };
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX,
+    };
+    let stream = match kernel_obj.as_stream() {
+        Some(s) => s,
+        None => return usize::MAX,
+    };
+    let iovec_vaddr = match task.vm_manager.translate_vaddr(iovec_ptr) {
+        Some(addr) => addr as *mut IoVec,
+        None => return usize::MAX,
+    };
+    if iovec_vaddr.is_null() {
+        return usize::MAX;
+    }
+    let iovecs = unsafe { core::slice::from_raw_parts_mut(iovec_vaddr, iovcnt) };
+    let mut total_read = 0usize;
+    for iovec in iovecs.iter_mut() {
+        if iovec.iov_len == 0 {
+            continue;
+        }
+        let buf_vaddr = match task.vm_manager.translate_vaddr(iovec.iov_base as usize) {
+            Some(addr) => addr as *mut u8,
+            None => return usize::MAX,
+        };
+        if buf_vaddr.is_null() {
+            return usize::MAX;
+        }
+        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_vaddr, iovec.iov_len) };
+        match stream.read(buffer) {
+            Ok(n) => {
+                total_read = total_read.saturating_add(n);
+                // If partial read occurred, stop processing remaining vectors
+                // This matches Linux behavior for readv
+                if n < iovec.iov_len {
+                    break;
+                }
+            }
+            Err(StreamError::EndOfStream) => break,
+            Err(StreamError::WouldBlock) => {
+                get_scheduler().schedule(trapframe);
+                return usize::MAX;
+            }
+            Err(_) => {
+                if total_read == 0 {
+                    return usize::MAX;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    total_read
+}
