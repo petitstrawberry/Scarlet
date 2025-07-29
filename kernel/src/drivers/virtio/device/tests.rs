@@ -29,6 +29,14 @@ impl VirtioDevice for TestVirtioDevice {
         self.virtqueues.len()
     }
 
+    fn get_virtqueue_size(&self, queue_idx: usize) -> usize {
+        if queue_idx < self.virtqueues.len() {
+            unsafe { (*self.virtqueues[queue_idx].get()).get_queue_size() }
+        } else {
+            0
+        }
+    }
+
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64> {
         if queue_idx < self.virtqueues.len() {
             Some(self.base_addr as u64 + (queue_idx * 0x1000) as u64) // Example offset
@@ -137,7 +145,7 @@ fn test_queue_setup() {
     device.write32_register(Register::QueueNumMax, 16);
     
     // Set up the queue
-    assert!(device.setup_queue(0));
+    assert!(device.setup_queue(0, 16));
     
     // Verify that the queue is correctly configured
     let queue_num = device.read32_register(Register::QueueNum);
