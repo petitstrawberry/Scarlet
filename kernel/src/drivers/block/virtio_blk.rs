@@ -356,6 +356,15 @@ impl VirtioDevice for VirtioBlockDevice {
     fn get_virtqueue_count(&self) -> usize {
         1 // We have one virtqueue
     }
+
+    fn get_virtqueue_size(&self, queue_idx: usize) -> usize {
+        if queue_idx >= 1 {
+            panic!("Invalid queue index for VirtIO block device: {}", queue_idx);
+        }
+        
+        let virtqueues = self.virtqueues.lock();
+        virtqueues[queue_idx].get_queue_size()
+    }
     
     fn get_supported_features(&self, device_features: u32) -> u32 {
         // Accept most features but we might want to be selective

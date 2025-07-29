@@ -5,7 +5,7 @@ use core::result::Result;
 
 use alloc::{boxed::Box, sync::Arc, vec};
 
-use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::{block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice, network::virtio_net::VirtioNetDevice}};
+use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::{block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice, network::virtio_net::VirtioNetDevice, virtio::queue}};
 
 /// Register enum for Virtio devices
 /// 
@@ -240,7 +240,7 @@ pub trait VirtioDevice {
 
         // Set up virtqueues
         for i in 0..self.get_virtqueue_count() {
-            if !self.setup_queue(i) {
+            if !self.setup_queue(i, self.get_virtqueue_size(i)) {
                 self.set_failed();
                 return Err("Failed to set up virtqueue");
             }
@@ -360,7 +360,7 @@ pub trait VirtioDevice {
     /// # Returns
     ///
     /// Returns true if queue setup was successful, false otherwise
-    fn setup_queue(&mut self, queue_idx: usize) -> bool {
+    fn setup_queue(&mut self, queue_idx: usize, queue_size: usize) -> bool {
         if queue_idx >= self.get_virtqueue_count() {
             return false;
         }
@@ -374,13 +374,13 @@ pub trait VirtioDevice {
         }
         
         // Get maximum queue size
-        let queue_size = self.read32_register(Register::QueueNumMax);
-        if queue_size == 0 {
-            return false; // Queue not available
+        let queue_size_max = self.read32_register(Register::QueueNumMax);
+        if queue_size > queue_size_max as usize {
+            return false; // Requested size exceeds maximum
         }
         
         // Set queue size
-        self.write32_register(Register::QueueNum, queue_size);
+        self.write32_register(Register::QueueNum, queue_size as u32);
         
         // Get queue addresses directly - safer than closures
         let desc_addr = self.get_queue_desc_addr(queue_idx);
@@ -575,6 +575,7 @@ pub trait VirtioDevice {
 
     fn get_base_addr(&self) -> usize;
     fn get_virtqueue_count(&self) -> usize;
+    fn get_virtqueue_size(&self, queue_idx: usize) -> usize;
     
     /// Get the descriptor address for a virtqueue
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64>;
@@ -661,6 +662,11 @@ impl VirtioDevice for VirtioDeviceCommon {
     }
 
     fn get_virtqueue_count(&self) -> usize {
+        // This should be overridden by specific device implementations
+        0
+    }
+
+    fn get_virtqueue_size(&self, _queue_idx: usize) -> usize {
         // This should be overridden by specific device implementations
         0
     }

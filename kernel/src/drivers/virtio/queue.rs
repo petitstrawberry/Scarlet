@@ -4,7 +4,7 @@
 //! It includes the data structures and methods to manage the Virtio Queue.
 //! 
 
-use core::{alloc::Layout, mem};
+use core::{alloc::Layout, mem::{self, swap}, sync::atomic::compiler_fence};
 use alloc::{alloc::alloc_zeroed, vec::Vec};
 
 // struct RawVirtQueue {
@@ -32,7 +32,7 @@ pub struct VirtQueue<'a> {
     pub avail: AvailableRing<'a>,
     pub used: UsedRing<'a>,
     pub free_descriptors: Vec<usize>,
-    pub last_used_idx: usize,
+    pub last_used_idx: u16,
 }
 
 impl<'a> VirtQueue<'a> {
@@ -136,6 +136,10 @@ impl<'a> VirtQueue<'a> {
         desc_size + avail_size + used_size + padding_size
     }
 
+    pub fn get_queue_size(&self) -> usize {
+        self.desc.len()
+    }
+
     /// Allocate a descriptor
     ///
     /// This function allocates a descriptor from the free list.
@@ -225,9 +229,13 @@ impl<'a> VirtQueue<'a> {
                 break;
             }
             let next = self.desc[idx].next;
+            let flags = self.desc[idx].flags;
+
+            compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
             self.free_desc(idx);
 
-            if !DescriptorFlag::Next.is_set(self.desc[idx].flags) {
+            if !DescriptorFlag::Next.is_set(flags) {
                 break;
             }
             idx = next as usize;
@@ -244,7 +252,7 @@ impl<'a> VirtQueue<'a> {
     pub fn is_busy(&self) -> bool {
         // Volatile read to ensure we get the latest value
         let used_idx = unsafe { core::ptr::read_volatile(self.used.idx) };
-        self.last_used_idx == used_idx as usize
+        self.last_used_idx == used_idx
     }
 
     /// Push a descriptor index to the available ring
@@ -264,7 +272,10 @@ impl<'a> VirtQueue<'a> {
             return Err("Invalid descriptor index");
         }
 
-        self.avail.ring[(*self.avail.idx as usize) % self.avail.size] = desc_idx as u16;
+        let ring_ptr = &mut self.avail.ring[(*self.avail.idx as usize) % self.avail.size] as *mut u16;
+        unsafe {
+            core::ptr::write_volatile(ring_ptr, desc_idx as u16);
+        }
         *self.avail.idx = (*self.avail.idx).wrapping_add(1);
         Ok(())
     }
@@ -280,17 +291,18 @@ impl<'a> VirtQueue<'a> {
     ///
     pub fn pop(&mut self) -> Option<usize> {
         // Check if there are any used buffers available
-        if self.last_used_idx == *self.used.idx as usize {
+        if self.last_used_idx == *self.used.idx {
             return None;
         }
         
         // Calculate the index in the used ring
-        let used_idx = self.last_used_idx % self.desc.len();
+        let used_idx = self.last_used_idx as usize % self.desc.len();
         
         // Retrieve the descriptor index from the used ring
         let desc_idx = self.used.ring[used_idx].id as usize;
         // Update the last used index
-        self.last_used_idx = (self.last_used_idx + 1) % self.used.ring.len();
+        // self.last_used_idx = (self.last_used_idx + 1) % self.used.ring.len();
+        self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
         Some(desc_idx)
     }
