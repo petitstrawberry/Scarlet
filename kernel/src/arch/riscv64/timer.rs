@@ -91,9 +91,10 @@ impl Stimer {
     }
 
     pub fn get_time_us(&self) -> u64 {
-        self.get_time() / self.frequency
+        (self.get_time() * 1_000_000) / self.frequency
     }
 
+    /// Get the current clock time
     fn get_time(&self) -> u64 {
         let time: u64;
         unsafe {
