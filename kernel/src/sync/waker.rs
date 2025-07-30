@@ -88,22 +88,15 @@ impl Waker {
     }
 
     /// Block the current task and add it to the wait queue
-    /// 
-    /// This method puts the current task into a blocked state and adds its ID
-    /// to the wait queue. The task will remain blocked until another part of
-    /// the system calls `wake_one()` or `wake_all()` on this waker.
-    /// 
-    /// # Behavior
-    /// 
-    /// 1. Gets the current task ID
-    /// 2. Sets the task state to `Blocked(self.block_type)`
-    /// 3. Adds the task ID to the wait queue
-    /// 4. Calls the scheduler to yield CPU to other tasks
-    /// 
-    /// # Note
-    /// 
-    /// This function never returns normally. The task will be blocked and only
-    /// resume execution when the entire syscall is restarted after being woken up.
+    ///
+    /// This method is intended for the current (running) task only.
+    /// It sets the task state to Blocked, adds it to the wait queue,
+    /// and yields the CPU to the scheduler. CPU state saving is handled
+    /// by the scheduler internally.
+    ///
+    /// # Arguments
+    /// * `current_task` - The current running task (must be the one on CPU)
+    /// * `cpu` - The current CPU context
     pub fn wait(&self, current_task: &mut Task, cpu: &mut Arch) {
         let task_id = current_task.get_id();
                 
@@ -116,13 +109,27 @@ impl Waker {
         // Set task state to blocked
         current_task.set_state(TaskState::Blocked(self.block_type));
 
-        // Store current CPU state to task before yielding
-
-        current_task.vcpu.store(cpu);
-
         // Yield CPU to scheduler - this never returns
         // The scheduler will handle saving the current task state internally
         get_scheduler().schedule(cpu);
+    }
+
+    /// Block any task (not limited to the current task) and add it to the wait queue
+    ///
+    /// This method is intended for blocking tasks other than the current one.
+    /// It sets the specified task's state to Blocked and adds it to the wait queue.
+    /// No scheduler switch or CPU state saving is performed.
+    ///
+    /// # Arguments
+    /// * `task` - A mutable reference to the task to be blocked
+    pub fn block(&self, task: &mut Task) {
+        let task_id = task.get_id();
+        {
+            let mut queue = self.wait_queue.lock();
+            queue.push_back(task_id);
+        }
+        task.set_state(TaskState::Blocked(self.block_type));
+        // No scheduler switch or CPU state save here
     }
 
     /// Wake up one waiting task
