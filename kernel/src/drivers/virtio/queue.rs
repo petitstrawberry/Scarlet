@@ -27,13 +27,20 @@ use alloc::{alloc::alloc_zeroed, vec::Vec};
 /// * `used`: The used ring.
 /// * `free_head`: The index of the next free descriptor.
 /// * `last_used_idx`: The index of the last used descriptor.
+/// * `ptr`: A raw pointer to the start of the virtqueue memory.
+/// * `layout`: The layout of the virtqueue memory.
 pub struct VirtQueue<'a> {
     pub desc: &'a mut [Descriptor],
     pub avail: AvailableRing<'a>,
     pub used: UsedRing<'a>,
     pub free_descriptors: Vec<usize>,
     pub last_used_idx: u16,
+    ptr: *mut u8,
+    layout: Layout,
 }
+
+unsafe impl<'a> Send for VirtQueue<'a> {}
+unsafe impl<'a> Sync for VirtQueue<'a> {}
 
 impl<'a> VirtQueue<'a> {
     pub fn new(queue_size: usize) -> Self {
@@ -81,8 +88,7 @@ impl<'a> VirtQueue<'a> {
             free_descriptors.push(i);
         }
         let last_used_idx = 0;
-        
-        Self { desc, avail, used, free_descriptors, last_used_idx }
+        Self { desc, avail, used, free_descriptors, last_used_idx, ptr, layout }
     }
 
     /// Initialize the virtqueue
@@ -305,6 +311,14 @@ impl<'a> VirtQueue<'a> {
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
         Some(desc_idx)
+    }
+}
+
+impl<'a> Drop for VirtQueue<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            alloc::alloc::dealloc(self.ptr, self.layout);
+        }
     }
 }
 
