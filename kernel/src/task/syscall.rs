@@ -282,7 +282,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
         // We wait on the parent's waker since we're waiting for any child (-1)
         // This is different from waiting for a specific child
         let parent_waker = get_parent_waitpid_waker(task.get_id());
-        parent_waker.wait(task, trapframe);
+        parent_waker.wait(task.get_id(), trapframe);
     }
     
     // Wait for specific child process
@@ -312,7 +312,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 WaitError::ChildNotExited(_) => {
                     // If the child task is not exited, we need to wait for it
                     let child_waker = get_waitpid_waker(pid as usize);
-                    child_waker.wait(task, trapframe);
+                    child_waker.wait(task.get_id(), trapframe);
                     return 0; // Unreachable code, but needed for type consistency
                 },
             }

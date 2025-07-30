@@ -251,11 +251,11 @@ impl CharDevice for TtyDevice {
         drop(input_buffer);
         
         // No data available, block the current task
-        if let Some(mut task) = mytask() {
+        if let Some(task) = mytask() {
             let mut cpu = get_cpu();
 
             // This never returns - the syscall will be restarted when the task is woken up
-            self.input_waker.wait(&mut task, &mut cpu);
+            self.input_waker.wait(task.get_id(), &mut cpu);
         }
 
         None

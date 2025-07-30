@@ -95,15 +95,14 @@ impl Waker {
     /// by the scheduler internally.
     ///
     /// # Arguments
-    /// * `current_task` - The current running task (must be the one on CPU)
+    /// * `current_task_id` - The ID of the current task
     /// * `cpu` - The current CPU context
-    pub fn wait(&self, current_task: &mut Task, cpu: &mut Arch) {
-        let task_id = current_task.get_id();
-                
+    pub fn wait(&self, current_task_id: usize, cpu: &mut Arch) {
+        let current_task = get_scheduler().get_task_by_id(current_task_id).expect("Current task not found");
         // Add task to wait queue first
         {
             let mut queue = self.wait_queue.lock();
-            queue.push_back(task_id);
+            queue.push_back(current_task_id);
         }
         
         // Set task state to blocked
@@ -121,13 +120,13 @@ impl Waker {
     /// No scheduler switch or CPU state saving is performed.
     ///
     /// # Arguments
-    /// * `task` - A mutable reference to the task to be blocked
-    pub fn block(&self, task: &mut Task) {
-        let task_id = task.get_id();
+    /// * `task_id` - The ID of the task to be blocked
+    pub fn block(&self, task_id: usize) {
         {
             let mut queue = self.wait_queue.lock();
             queue.push_back(task_id);
         }
+        let task = get_scheduler().get_task_by_id(task_id).expect("Task not found");
         task.set_state(TaskState::Blocked(self.block_type));
         // No scheduler switch or CPU state save here
     }

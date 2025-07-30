@@ -87,7 +87,7 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     // No child has exited yet, block until one does
     // xv6's wait() is equivalent to waitpid(-1), so we use the parent waker
     let parent_waker = get_parent_waitpid_waker(task.get_id());
-    parent_waker.wait(task, trapframe);
+    parent_waker.wait(task.get_id(), trapframe);
     usize::MAX // -1 (In current implementation, this will not be reached)
 }
 
