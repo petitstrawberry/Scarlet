@@ -183,8 +183,8 @@ fn check_software_timers(now: u64) {
     }
 }
 
-// Tick interval in microseconds (e.g., 1_000 for 1ms tick)
-pub const TICK_INTERVAL_US: u64 = 10_000; // 1ms tick
+// Tick interval in microseconds (e.g., 10_000 for 10ms tick)
+pub const TICK_INTERVAL_US: u64 = 10_000; // 10ms tick
 
 /// Convert milliseconds to ticks
 #[inline]

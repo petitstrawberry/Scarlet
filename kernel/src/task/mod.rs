@@ -1057,10 +1057,7 @@ impl Task {
                 if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
                     let handler: Arc<dyn TimerHandler> = self.clone();
                     task.remove_software_timer_handler(&handler);
-                    crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
-                    // let waker = get_task_waker(self.task_id);
-                    // waker.wake_all();
-                    task.set_state(TaskState::Running);
+                    task.sleep_waker.wake_all();
                 }
             }
         }

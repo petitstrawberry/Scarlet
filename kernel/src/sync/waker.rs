@@ -98,19 +98,21 @@ impl Waker {
     /// * `current_task_id` - The ID of the current task
     /// * `cpu` - The current CPU context
     pub fn wait(&self, current_task_id: usize, cpu: &mut Arch) {
-        let current_task = get_scheduler().get_task_by_id(current_task_id).expect("Current task not found");
         // Add task to wait queue first
         {
             let mut queue = self.wait_queue.lock();
             queue.push_back(current_task_id);
         }
-        
-        // Set task state to blocked
-        current_task.set_state(TaskState::Blocked(self.block_type));
+
+        let sched = get_scheduler();
+
+        // Set the task state to Blocked
+        sched.block_task(current_task_id, self.block_type)
+                .expect("Failed to block task");
 
         // Yield CPU to scheduler - this never returns
         // The scheduler will handle saving the current task state internally
-        get_scheduler().schedule(cpu);
+        sched.schedule(cpu);
     }
 
     /// Block any task (not limited to the current task) and add it to the wait queue
@@ -126,8 +128,8 @@ impl Waker {
             let mut queue = self.wait_queue.lock();
             queue.push_back(task_id);
         }
-        let task = get_scheduler().get_task_by_id(task_id).expect("Task not found");
-        task.set_state(TaskState::Blocked(self.block_type));
+        get_scheduler().block_task(task_id, self.block_type)
+            .expect("Failed to block task"); // Ensure the task was found and blocked     
         // No scheduler switch or CPU state save here
     }
 

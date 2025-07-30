@@ -17,7 +17,7 @@ use core::panic;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, BlockedType, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -342,7 +342,31 @@ impl Scheduler {
                 }
             }
         }
+        for cpu_id in 0..self.ready_queue.len() {
+            if let Some(pos) = self.ready_queue[cpu_id].iter().position(|t| t.get_id() == task_id) {
+                if let Some(mut task) = self.ready_queue[cpu_id].remove(pos) {
+                    // Set task state to Running
+                    task.state = TaskState::Running;
+                    // crate::println!("Scheduler: Task {} waking up with PC: 0x{:x}", task_id, task.vcpu.get_pc());
+                    // Move to ready queue
+                    self.ready_queue[cpu_id].push_back(task);
+                    // crate::println!("Scheduler: Woke up task {} and moved it to ready queue", task_id);
+                    return true;
+                }
+            }
+        }
+        // If the task was not found in blocked or ready queues, return false
         false
+    }
+
+    pub fn block_task(&mut self, task_id: usize, blocked_type: BlockedType) -> Result<(), &'static str> {
+        let task = self.get_task_by_id(task_id);
+        if let Some(task) = task {
+            task.state = TaskState::Blocked(blocked_type);
+            Ok(())
+        } else {
+            Err("Task not found")
+        }
     }
 }
 
