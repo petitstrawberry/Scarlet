@@ -17,36 +17,37 @@ use alloc::collections::BTreeMap;
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
-static TASK_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
-static PARENT_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
-/// Initialize the task wakers registry
-fn init_task_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+/// Initialize the waitpid wakers registry
+fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
-/// Initialize the parent waker registry
-fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+/// Initialize the parent waitpid waker registry
+fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
-/// Get or create a waker for a specific task
+/// Get or create a waker for waitpid/wait operations for a specific task
 /// 
-/// This function returns a reference to the waker associated with the given task ID.
+/// This function returns a reference to the waker associated with the given task ID,
+/// used exclusively for waitpid/wait (child termination wait) synchronization.
 /// If no waker exists for the task, a new one is created.
 /// 
 /// # Arguments
 /// 
-/// * `task_id` - The ID of the task to get a waker for
+/// * `task_id` - The ID of the task to get a waitpid/wait waker for
 /// 
 /// # Returns
 /// 
-/// A reference to the waker for the specified task
-pub fn get_task_waker(task_id: usize) -> &'static Waker {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+/// A reference to the waitpid/wait waker for the specified task
+pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     if !wakers.contains_key(&task_id) {
         let waker_name = alloc::format!("task_{}", task_id);
@@ -64,8 +65,9 @@ pub fn get_task_waker(task_id: usize) -> &'static Waker {
 
 /// Get or create a parent waker for waitpid(-1) operations
 /// 
-/// This waker is used when a parent process calls waitpid(-1) to wait for any child.
-/// It's separate from the task-specific wakers to avoid conflicts.
+/// This waker is used when a parent process calls waitpid(-1) to wait for any child to exit.
+/// It is separate from the task-specific waitpid wakers to avoid conflicts, and is used
+/// exclusively for waitpid(-1) (any child termination wait) synchronization.
 /// 
 /// # Arguments
 /// 
@@ -73,9 +75,9 @@ pub fn get_task_waker(task_id: usize) -> &'static Waker {
 /// 
 /// # Returns
 /// 
-/// A reference to the parent waker
-pub fn get_parent_waker(parent_id: usize) -> &'static Waker {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+/// A reference to the parent waitpid(-1) waker
+pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     
     // Create a new waker if it doesn't exist
@@ -103,7 +105,7 @@ pub fn get_parent_waker(parent_id: usize) -> &'static Waker {
 /// 
 /// * `task_id` - The ID of the task that has exited
 pub fn wake_task_waiters(task_id: usize) {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let wakers = wakers_mutex.lock();
     if let Some(waker) = wakers.get(&task_id) {
         waker.wake_all();
@@ -118,7 +120,7 @@ pub fn wake_task_waiters(task_id: usize) {
 /// 
 /// * `parent_id` - The ID of the parent task
 pub fn wake_parent_waiters(parent_id: usize) {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let wakers = wakers_mutex.lock();
     if let Some(waker) = wakers.get(&parent_id) {
         waker.wake_all();
@@ -134,7 +136,7 @@ pub fn wake_parent_waiters(parent_id: usize) {
 /// 
 /// * `task_id` - The ID of the task to clean up
 pub fn cleanup_task_waker(task_id: usize) {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&task_id);
 }
@@ -147,7 +149,7 @@ pub fn cleanup_task_waker(task_id: usize) {
 /// 
 /// * `parent_id` - The ID of the parent task to clean up
 pub fn cleanup_parent_waker(parent_id: usize) {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&parent_id);
 }
@@ -235,6 +237,11 @@ pub struct Task {
     pub time_slice: u32,
     /// Software timer handlers
     pub software_timers_handlers: Vec<Arc<dyn TimerHandler>>,
+
+    // Wakers for task-specific operations
+    
+    /// Waker for sleep operations
+    pub sleep_waker: Waker,
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +327,8 @@ impl Task {
             handle_table: HandleTable::new(),
             time_slice: 10, // Assign 10 ticks by default
             software_timers_handlers: Vec::new(),
+            // Wakers for task-specific operations
+            sleep_waker: Waker::new_interruptible("task_sleep_waker"),
         };
 
         *taskid += 1;
@@ -1048,9 +1057,10 @@ impl Task {
                 if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
                     let handler: Arc<dyn TimerHandler> = self.clone();
                     task.remove_software_timer_handler(&handler);
-                    // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
-                    let waker = get_task_waker(self.task_id);
-                    waker.wake_all();
+                    crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
+                    // let waker = get_task_waker(self.task_id);
+                    // waker.wake_all();
+                    task.set_state(TaskState::Running);
                 }
             }
         }
@@ -1063,8 +1073,8 @@ impl Task {
         add_timer(wake_tick, &handler, 0);
 
         self.add_software_timer_handler(handler);
-        let waker = get_task_waker(self.id);
-        waker.wait(self, cpu);
+        // let waker = get_waitpid_waker(self.id);
+        // waker.wait(self, cpu);
     }
 
     // VFS Helper Methods

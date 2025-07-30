@@ -104,8 +104,8 @@ impl Waker {
     /// 
     /// This function never returns normally. The task will be blocked and only
     /// resume execution when the entire syscall is restarted after being woken up.
-    pub fn wait(&self, task: &mut Task, cpu: &mut Arch) {
-        let task_id = task.get_id();
+    pub fn wait(&self, current_task: &mut Task, cpu: &mut Arch) {
+        let task_id = current_task.get_id();
                 
         // Add task to wait queue first
         {
@@ -114,10 +114,11 @@ impl Waker {
         }
         
         // Set task state to blocked
-        task.set_state(TaskState::Blocked(self.block_type));
+        current_task.set_state(TaskState::Blocked(self.block_type));
 
         // Store current CPU state to task before yielding
-        task.vcpu.store(cpu);
+
+        current_task.vcpu.store(cpu);
 
         // Yield CPU to scheduler - this never returns
         // The scheduler will handle saving the current task state internally

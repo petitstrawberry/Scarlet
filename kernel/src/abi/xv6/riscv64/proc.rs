@@ -4,7 +4,7 @@ use crate::{
     fs::FileType, 
     library::std::string::cstring_to_string,
     sched::scheduler::get_scheduler, 
-    task::{get_parent_waker, mytask, CloneFlags, WaitError}
+    task::{get_parent_waitpid_waker, mytask, CloneFlags, WaitError}
 };
 
 /// VFS v2 helper function for path absolutization using VfsManager
@@ -86,7 +86,7 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     
     // No child has exited yet, block until one does
     // xv6's wait() is equivalent to waitpid(-1), so we use the parent waker
-    let parent_waker = get_parent_waker(task.get_id());
+    let parent_waker = get_parent_waitpid_waker(task.get_id());
     parent_waker.wait(task, trapframe);
     usize::MAX // -1 (In current implementation, this will not be reached)
 }
