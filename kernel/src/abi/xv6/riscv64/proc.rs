@@ -4,7 +4,7 @@ use crate::{
     fs::FileType, 
     library::std::string::cstring_to_string,
     sched::scheduler::get_scheduler, 
-    task::{get_parent_waker, mytask, CloneFlags, WaitError}
+    task::{get_parent_waker, mytask, CloneFlags, WaitError, events::{send_kill_event}}
 };
 
 /// VFS v2 helper function for path absolutization using VfsManager
@@ -91,10 +91,30 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     usize::MAX // -1 (In current implementation, this will not be reached)
 }
 
-pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut Trapframe) -> usize {
-    // Implement the kill syscall
-    // This syscall is not yet implemented. Returning ENOSYS error code (-1).
-    usize::MAX
+pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let pid = trapframe.get_arg(0) as usize;
+    let signal = trapframe.get_arg(1) as i32;
+
+    trapframe.increment_pc_next(task);
+
+    // For xv6 compatibility, only signal 9 (SIGKILL) is implemented for now
+    if signal != 9 {
+        return usize::MAX; // -1 (unsupported signal)
+    }
+
+    // Find the target task via scheduler
+    let scheduler = get_scheduler();
+    if let Some(_target_task) = scheduler.get_task_by_id(pid) {
+        // Send kill event to target task
+        let current_task_id = task.get_id();
+        match send_kill_event(pid, Some(current_task_id)) {
+            Ok(_) => 0, // Success
+            Err(_) => usize::MAX, // -1 on error
+        }
+    } else {
+        usize::MAX // -1 (no such process)
+    }
 }
 
 pub fn sys_sbrk(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {

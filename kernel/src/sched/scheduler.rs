@@ -17,7 +17,7 @@ use core::panic;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{events::{get_task_event_handler, EventAction}, new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -108,6 +108,9 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
+                                // Process pending events before dispatching the task
+                                self.process_task_events(&mut t);
+                                
                                 t.time_slice = 1; // Reset time slice on dispatch
                                 if self.current_task_id[cpu_id] != Some(t.get_id()) {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t);
@@ -343,6 +346,38 @@ impl Scheduler {
             }
         }
         false
+    }
+
+    /// Process pending events for a task
+    /// 
+    /// This method processes any pending events for a task and applies the
+    /// appropriate actions. It should be called before dispatching a task.
+    /// 
+    /// # Arguments
+    /// * `task` - The task to process events for
+    fn process_task_events(&mut self, task: &mut Task) {
+        let task_id = task.get_id();
+        let handler = get_task_event_handler(task_id);
+        let actions = handler.process_pending_events();
+        
+        for action in actions {
+            match action {
+                EventAction::Terminate => {
+                    task.state = TaskState::Zombie;
+                },
+                EventAction::Suspend => {
+                    task.state = TaskState::Blocked(crate::task::BlockedType::Interruptible);
+                },
+                EventAction::Resume => {
+                    if let TaskState::Blocked(_) = task.state {
+                        task.state = TaskState::Running;
+                    }
+                },
+                EventAction::Ignore | EventAction::Default | EventAction::Handler(_) => {
+                    // These are either handled by the handler itself or should be ignored
+                },
+            }
+        }
     }
 }
 

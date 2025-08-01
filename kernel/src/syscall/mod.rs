@@ -44,9 +44,16 @@
 //! 
 //! ### IPC Operations (600-699)
 //! - Pipe (600)
+//! - Event Channels: Subscribe (610), Unsubscribe (611), Publish (612)
+//! - Process Groups: Join (620), Leave (621), Send (622)
 //! 
 //! ### Memory Mapping Operations (700-799)
 //! - MemoryMap (700), MemoryUnmap (701)
+//! 
+//! ### Task Event Operations (800-899)  
+//! - Basic Events: Send (800), SetAction (801), Block (802)
+//! - Event Status: GetPending (803), HasPending (804)
+//! - Signal-like Operations: Terminate, Kill, Interrupt, etc.
 //! 
 //! ## Design Principles
 //! 
@@ -64,6 +71,7 @@
 use crate::arch::Trapframe;
 use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_sleep, sys_waitpid};
+use crate::task::event_syscall::{sys_task_send_event, sys_task_set_event_action, sys_task_block_events, sys_task_get_pending_events, sys_task_has_pending_events, sys_task_send_event_generic, sys_task_subscribe_channel, sys_task_unsubscribe_channel, sys_task_join_process_group, sys_task_leave_process_group, sys_task_broadcast_event};
 use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate, sys_handle_control};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
@@ -130,7 +138,37 @@ syscall_table! {
     // === IPC Operations ===
     Pipe = 600 => sys_pipe,                // Create pipe handles
     
+    // Event Channels (Pub/Sub pattern)
+    IpcSubscribeChannel = 610 => sys_task_subscribe_channel,     // Subscribe to event channel
+    IpcUnsubscribeChannel = 611 => sys_task_unsubscribe_channel, // Unsubscribe from channel  
+    IpcPublishToChannel = 612 => |trapframe: &mut Trapframe| {
+        // Publish event to channel - maps to generic send with Channel target
+        // Arguments: channel_id, event_type
+        sys_task_send_event_generic(trapframe)
+    },
+    
+    // Process Group Communication
+    IpcJoinProcessGroup = 620 => sys_task_join_process_group,    // Join process group
+    IpcLeaveProcessGroup = 621 => sys_task_leave_process_group,  // Leave process group
+    IpcSendToProcessGroup = 622 => |trapframe: &mut Trapframe| {
+        // Send to process group - maps to generic send with ProcessGroup target
+        sys_task_send_event_generic(trapframe)
+    },
+    
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
+    
+    // === Task Event Operations ===
+    TaskSendEvent = 800 => sys_task_send_event,            // Send signal/event to specific task
+    TaskSetEventAction = 801 => sys_task_set_event_action, // Set event action for current task
+    TaskBlockEvents = 802 => sys_task_block_events,        // Block/unblock event delivery
+    TaskGetPendingEvents = 803 => sys_task_get_pending_events, // Get pending event count
+    TaskHasPendingEvents = 804 => sys_task_has_pending_events, // Check if has pending events
+    TaskSendEventGeneric = 805 => sys_task_send_event_generic, // Send event with generic payload
+    TaskSubscribeChannel = 806 => sys_task_subscribe_channel, // Subscribe to a channel
+    TaskUnsubscribeChannel = 807 => sys_task_unsubscribe_channel, // Unsubscribe from a channel
+    TaskJoinProcessGroup = 808 => sys_task_join_process_group, // Join a process group
+    TaskLeaveProcessGroup = 809 => sys_task_leave_process_group, // Leave a process group
+    TaskBroadcastEvent = 810 => sys_task_broadcast_event,        // Broadcast event to all tasks in group
 }

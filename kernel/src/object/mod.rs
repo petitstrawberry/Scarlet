@@ -10,15 +10,19 @@ pub mod handle;
 use alloc::{sync::Arc, vec::Vec};
 use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
-use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps};
+use crate::ipc::StreamIpcOps;
+use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, EventIpcOps};
 
 /// Unified representation of all kernel-managed resources
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
     // Future variants will be added here:
-    // CharDevice(Arc<dyn CharDevice>),
+    // EventChannel(Arc<dyn EventIpcChannelObject>),
+    // MessageQueue(Arc<dyn MessageQueueObject>),
+    // SharedMemory(Arc<dyn SharedMemoryObject>),
     // Socket(Arc<dyn SocketObject>),
+    // CharDevice(Arc<dyn CharDevice>),
 }
 
 impl KernelObject {
@@ -44,6 +48,21 @@ impl KernelObject {
                 // PipeObject automatically implements StreamOps
                 let stream_ops: &dyn StreamOps = pipe_object.as_ref();
                 Some(stream_ops)
+            }
+        }
+    }
+    
+    /// Try to get StreamIpcOps capability for IPC stream operations
+    pub fn as_stream_ipc(&self) -> Option<&dyn StreamIpcOps> {
+        match self {
+            KernelObject::File(_) => {
+                // Files don't provide IPC stream operations
+                None
+            }
+            KernelObject::Pipe(pipe_object) => {
+                // PipeObject implements StreamIpcOps
+                let stream_ipc_ops: &dyn StreamIpcOps = pipe_object.as_ref();
+                Some(stream_ipc_ops)
             }
         }
     }
@@ -120,7 +139,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get weak reference to MemoryMappingOps capability
     pub fn as_memory_mappable_weak(&self) -> Option<alloc::sync::Weak<dyn MemoryMappingOps>> {
         match self {
@@ -134,6 +153,22 @@ impl KernelObject {
                 // Pipes don't provide memory mapping operations
                 None
             }
+        }
+    }
+    
+    /// Try to get EventIpcOps capability
+    pub fn as_event_ipc(&self) -> Option<&dyn EventIpcOps> {
+        match self {
+            KernelObject::File(_) => {
+                // Regular files don't provide event-based IPC operations
+                None
+            }
+            KernelObject::Pipe(_) => {
+                // Stream-based pipes don't implement EventIpcOps directly
+                // EventIpc channels would be separate objects that implement EventIpcOps
+                None
+            }
+            // Future: EventIpcChannel(Arc<dyn EventIpcChannelObject>) would implement EventIpcOps
         }
     }
 }

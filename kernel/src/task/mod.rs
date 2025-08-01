@@ -4,6 +4,8 @@
 
 pub mod syscall;
 pub mod elf_loader;
+pub mod events;
+pub mod event_syscall;
 
 extern crate alloc;
 
@@ -993,6 +995,17 @@ impl Task {
                 /* Set the exit status */
                 self.set_exit_status(status);
                 self.state = TaskState::Zombie;
+                
+                // Send child state change event to parent
+                let event = crate::task::events::TaskEvent::new_with_source(
+                    crate::task::events::TaskEventType::ChildStateChange,
+                    self.id,
+                    parent_id
+                ).with_data(status);
+                if let Err(e) = crate::task::events::send_task_event(event) {
+                    crate::println!("Failed to send child state change event: {}", e);
+                }
+                
                 // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
             },
             None => {
@@ -1001,6 +1014,9 @@ impl Task {
                 self.state = TaskState::Terminated;
             }
         }
+        
+        // Clean up event handler for this task
+        crate::task::events::cleanup_task_events(self.id);
     }
 
     /// Wait for a child task to exit and collect its status
