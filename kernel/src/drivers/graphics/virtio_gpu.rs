@@ -6,7 +6,6 @@
 //! The driver supports basic framebuffer operations and display management
 //! according to the VirtIO GPU specification.
 
-
 use alloc::{boxed::Box, sync::Arc};
 use spin::{Mutex, RwLock};
 
@@ -693,7 +692,7 @@ struct FramebufferUpdateHandler {
 
 impl FramebufferUpdateHandler {
     fn compare_and_flush(&self) {
-        let (fb_addr, shadow_addr, width, height, fb_size) = {
+        let (_fb_addr, _shadow_addr, width, height, fb_size) = {
             let core = self.device.lock();
             let fb_addr = match *core.framebuffer_addr.read() {
                 Some(addr) => addr,
@@ -713,20 +712,21 @@ impl FramebufferUpdateHandler {
             let fb_size = (width * height * 4) as usize;
             (fb_addr, shadow_addr, width, height, fb_size)
         };
-        // Determine if the framebuffer has changed
-        let fb_ptr = fb_addr as *const u8;
-        let shadow_ptr = shadow_addr as *const u8;
-        let fb_slice = unsafe { core::slice::from_raw_parts(fb_ptr, fb_size) };
-        let shadow_slice = unsafe { core::slice::from_raw_parts(shadow_ptr, fb_size) };
-        let changed = fb_slice != shadow_slice;
-        
-        if changed {
-            let _ = self.device.lock().flush_framebuffer(0, 0, width, height);
-            fence(core::sync::atomic::Ordering::SeqCst);
-            unsafe {
-                ptr::copy_nonoverlapping(fb_addr as *const u8, shadow_addr as *mut u8, fb_size);
-            }
-        }
+        let _ = self.device.lock().flush_framebuffer(0, 0, width, height);
+
+        // // Determine if the framebuffer has changed
+        // let fb_ptr = fb_addr as *const u8;
+        // let shadow_ptr = shadow_addr as *const u8;
+        // let fb_slice = unsafe { core::slice::from_raw_parts(fb_ptr, fb_size) };
+        // let shadow_slice = unsafe { core::slice::from_raw_parts(shadow_ptr, fb_size) };
+        // let changed = fb_slice != shadow_slice;
+
+        // if changed {
+        //     let _ = self.device.lock().flush_framebuffer(0, 0, width, height);
+        //     unsafe {
+        //         ptr::copy_nonoverlapping(fb_addr as *const u8, shadow_addr as *mut u8, fb_size);
+        //     }
+        // }
     }
 }
 
