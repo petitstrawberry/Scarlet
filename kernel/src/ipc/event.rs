@@ -548,43 +548,83 @@ impl EventManager {
 
 /// Convenience functions for creating events
 impl Event {
-    /// Create a new immediate event
-    pub fn new_immediate(target: u32, event_id: u32) -> Self {
+    /// Create a new event with flexible targeting
+    pub fn new(event_type: EventType, target: EventTarget, payload: EventPayload) -> Self {
         Self {
-            event_type: EventType::Immediate {
-                event_id,
-                priority: EventPriority::High,
-            },
-            target: EventTarget::Task(target),
-            payload: EventPayload::Empty,
+            event_type,
+            target,
+            payload,
             metadata: EventMetadata::new(),
         }
     }
     
-    /// Create a new notification event
-    pub fn new_notification(target: u32, notification_id: u32) -> Self {
-        Self {
-            event_type: EventType::Notification {
-                notification_id,
-                priority: EventPriority::Normal,
-            },
-            target: EventTarget::Task(target),
-            payload: EventPayload::Empty,
-            metadata: EventMetadata::new(),
-        }
+    /// Create a new immediate event for any target
+    pub fn new_immediate(target: EventTarget, event_id: u32, priority: EventPriority) -> Self {
+        Self::new(
+            EventType::Immediate { event_id, priority },
+            target,
+            EventPayload::Empty,
+        )
+    }
+    
+    /// Create a new notification event for any target
+    pub fn new_notification(target: EventTarget, notification_id: u32, priority: EventPriority) -> Self {
+        Self::new(
+            EventType::Notification { notification_id, priority },
+            target,
+            EventPayload::Empty,
+        )
     }
     
     /// Create a new channel event
     pub fn new_channel_event(channel: &str, payload: EventPayload) -> Self {
-        Self {
-            event_type: EventType::Subscription {
+        Self::new(
+            EventType::Subscription {
                 channel_id: format!("{}", channel),
                 create_channel_if_missing: false,
             },
-            target: EventTarget::Channel(format!("{}", channel)),
+            EventTarget::Channel(format!("{}", channel)),
             payload,
-            metadata: EventMetadata::new(),
-        }
+        )
+    }
+    
+    /// Create a new group broadcast event
+    pub fn new_group_event(group_type: GroupType, payload: EventPayload, reliable: bool) -> Self {
+        Self::new(
+            EventType::Group {
+                group_type: group_type.clone(),
+                reliable_delivery: reliable,
+            },
+            match group_type {
+                GroupType::TaskGroup(id) => EventTarget::Group(id),
+                GroupType::AllTasks => EventTarget::Broadcast,
+                GroupType::Session(_) => EventTarget::Broadcast, // TODO: Add Session target
+                GroupType::Custom(_) => EventTarget::Broadcast,
+            },
+            payload,
+        )
+    }
+    
+    // Convenience methods for common use cases
+    
+    /// Create immediate event for a specific task
+    pub fn immediate_to_task(task_id: u32, event_id: u32) -> Self {
+        Self::new_immediate(EventTarget::Task(task_id), event_id, EventPriority::High)
+    }
+    
+    /// Create notification event for a specific task
+    pub fn notification_to_task(task_id: u32, notification_id: u32) -> Self {
+        Self::new_notification(EventTarget::Task(task_id), notification_id, EventPriority::Normal)
+    }
+    
+    /// Create immediate event for all tasks
+    pub fn immediate_broadcast(event_id: u32) -> Self {
+        Self::new_immediate(EventTarget::Broadcast, event_id, EventPriority::High)
+    }
+    
+    /// Create notification for a group
+    pub fn notification_to_group(group_id: GroupId, notification_id: u32) -> Self {
+        Self::new_notification(EventTarget::Group(group_id), notification_id, EventPriority::Normal)
     }
     
     /// Create a new group broadcast event
@@ -621,6 +661,7 @@ pub mod event_ids {
     pub const EVENT_STOP: u32 = 3;
     pub const EVENT_CONTINUE: u32 = 4;
     pub const EVENT_CHILD_EXIT: u32 = 5;
+    pub const SYSTEM_SHUTDOWN: u32 = 6;
     
     /// Notification events
     pub const NOTIFICATION_TASK_COMPLETED: u32 = 100;
@@ -647,13 +688,13 @@ mod tests {
     #[test_case]
     fn test_event_creation() {
         // Test immediate event creation
-        let immediate_event = Event::new_immediate(1, event_ids::EVENT_TERMINATE);
+        let immediate_event = Event::immediate_to_task(1, event_ids::EVENT_TERMINATE);
         assert!(matches!(immediate_event.event_type, EventType::Immediate { .. }));
         assert!(matches!(immediate_event.target, EventTarget::Task(1)));
         assert!(matches!(immediate_event.payload, EventPayload::Empty));
 
         // Test notification event creation
-        let notification_event = Event::new_notification(2, event_ids::NOTIFICATION_TASK_COMPLETED);
+        let notification_event = Event::notification_to_task(2, event_ids::NOTIFICATION_TASK_COMPLETED);
         assert!(matches!(notification_event.event_type, EventType::Notification { .. }));
         assert!(matches!(notification_event.target, EventTarget::Task(2)));
 
@@ -726,12 +767,12 @@ mod tests {
         let manager = EventManager::get();
         
         // Test immediate event sending
-        let immediate_event = Event::new_immediate(1, event_ids::EVENT_TERMINATE);
+        let immediate_event = Event::immediate_to_task(1, event_ids::EVENT_TERMINATE);
         let result = manager.send_event(immediate_event);
         assert!(result.is_ok());
         
         // Test notification event sending
-        let notification_event = Event::new_notification(2, event_ids::NOTIFICATION_TASK_COMPLETED);
+        let notification_event = Event::notification_to_task(2, event_ids::NOTIFICATION_TASK_COMPLETED);
         let result = manager.send_event(notification_event);
         assert!(result.is_ok());
         
@@ -818,7 +859,7 @@ mod tests {
         });
         
         // Create test event
-        let test_event = Event::new_immediate(1, event_ids::EVENT_TERMINATE);
+        let test_event = Event::immediate_to_task(1, event_ids::EVENT_TERMINATE);
         
         // Test custom filter (note: this is a simplified test since we can't easily test the function)
         if let EventFilter::Custom(filter_fn) = custom_filter {
@@ -945,5 +986,38 @@ mod tests {
         let result = manager.send_event(all_tasks_event);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), EventError::Other(_)));
+    }
+
+    /// Test flexible event creation API
+    #[test_case]
+    fn test_flexible_event_creation() {
+        // Test broadcast immediate event
+        let broadcast_event = Event::immediate_broadcast(event_ids::SYSTEM_SHUTDOWN);
+        assert!(matches!(broadcast_event.event_type, EventType::Immediate { .. }));
+        assert!(matches!(broadcast_event.target, EventTarget::Broadcast));
+        
+        // Test group notification
+        let group_event = Event::notification_to_group(1, event_ids::NOTIFICATION_TASK_COMPLETED);
+        assert!(matches!(group_event.event_type, EventType::Notification { .. }));
+        assert!(matches!(group_event.target, EventTarget::Group(1)));
+        
+        // Test group broadcast event creation
+        let group_broadcast = Event::new_group_event(
+            GroupType::AllTasks, 
+            EventPayload::String("System message".into()), 
+            true
+        );
+        assert!(matches!(group_broadcast.event_type, EventType::Group { .. }));
+        assert!(matches!(group_broadcast.target, EventTarget::Broadcast));
+        
+        // Test flexible constructor
+        let custom_event = Event::new(
+            EventType::Immediate { event_id: 999, priority: EventPriority::Critical },
+            EventTarget::Task(42),
+            EventPayload::Bytes(vec![1, 2, 3, 4])
+        );
+        assert!(matches!(custom_event.event_type, EventType::Immediate { .. }));
+        assert!(matches!(custom_event.target, EventTarget::Task(42)));
+        assert!(matches!(custom_event.payload, EventPayload::Bytes(_)));
     }
 }
