@@ -337,7 +337,6 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     let ticks = ns_to_ticks(nanosecs);
-    crate::early_println!("[syscall] Sleeping for {} ticks ({} ns)", ticks, nanosecs);
 
     // Set return value to 0 for successful sleep
     trapframe.set_return_value(0);
