@@ -93,4 +93,4 @@ pub trait SocketObject: StreamIpcOps {
 
 // Re-export commonly used types
 pub use pipe::{PipeEndpoint, UnidirectionalPipe, PipeError, PipeObject};
-pub use event::{EventManager, EventOps, Event, EventType, EventError, EventTarget, EventPayload};
+pub use event::{EventManager, EventOps, Event, EventType, EventError, EventPayload, GroupTarget};
