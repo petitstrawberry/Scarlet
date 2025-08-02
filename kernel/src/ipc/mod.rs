@@ -16,6 +16,7 @@ use alloc::string::String;
 
 pub mod pipe;
 pub mod event;
+pub mod event_objects;
 pub mod syscall;
 
 /// Represents errors specific to IPC operations

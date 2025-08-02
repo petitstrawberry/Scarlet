@@ -10,6 +10,7 @@ pub mod handle;
 use alloc::{sync::Arc, vec::Vec};
 use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
+use crate::ipc::event_objects::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::StreamIpcOps;
 use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, EventIpcOps};
 
@@ -17,8 +18,9 @@ use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, EventIpcOps}
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
+    EventChannel(Arc<dyn EventChannelObject>),
+    EventSubscription(Arc<dyn EventSubscriptionObject>),
     // Future variants will be added here:
-    // EventChannel(Arc<dyn EventIpcChannelObject>),
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // SharedMemory(Arc<dyn SharedMemoryObject>),
     // Socket(Arc<dyn SocketObject>),
@@ -36,6 +38,16 @@ impl KernelObject {
         KernelObject::Pipe(pipe_object)
     }
     
+    /// Create a KernelObject from an EventChannelObject
+    pub fn from_event_channel_object(event_channel_object: Arc<dyn EventChannelObject>) -> Self {
+        KernelObject::EventChannel(event_channel_object)
+    }
+    
+    /// Create a KernelObject from an EventSubscriptionObject
+    pub fn from_event_subscription_object(event_subscription_object: Arc<dyn EventSubscriptionObject>) -> Self {
+        KernelObject::EventSubscription(event_subscription_object)
+    }
+    
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -48,6 +60,14 @@ impl KernelObject {
                 // PipeObject automatically implements StreamOps
                 let stream_ops: &dyn StreamOps = pipe_object.as_ref();
                 Some(stream_ops)
+            }
+            KernelObject::EventChannel(_) => {
+                // Event channels don't provide stream operations
+                None
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions don't provide stream operations
+                None
             }
         }
     }
@@ -64,6 +84,14 @@ impl KernelObject {
                 let stream_ipc_ops: &dyn StreamIpcOps = pipe_object.as_ref();
                 Some(stream_ipc_ops)
             }
+            KernelObject::EventChannel(_) => {
+                // Event channels don't provide stream IPC operations
+                None
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions don't provide stream IPC operations
+                None
+            }
         }
     }
     
@@ -77,6 +105,14 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide file operations
+                None
+            }
+            KernelObject::EventChannel(_) => {
+                // Event channels don't provide file operations
+                None
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions don't provide file operations
                 None
             }
         }
@@ -93,6 +129,14 @@ impl KernelObject {
                 let pipe_ops: &dyn PipeObject = pipe_object.as_ref();
                 Some(pipe_ops)
             }
+            KernelObject::EventChannel(_) => {
+                // Event channels don't provide pipe operations
+                None
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions don't provide pipe operations
+                None
+            }
         }
     }
     
@@ -105,6 +149,16 @@ impl KernelObject {
             KernelObject::Pipe(pipe_object) => {
                 // Check if PipeObject implements CloneOps
                 let cloneable: &dyn CloneOps = pipe_object.as_ref();
+                Some(cloneable)
+            }
+            KernelObject::EventChannel(event_channel) => {
+                // EventChannel implements CloneOps
+                let cloneable: &dyn CloneOps = event_channel.as_ref();
+                Some(cloneable)
+            }
+            KernelObject::EventSubscription(event_subscription) => {
+                // EventSubscription implements CloneOps
+                let cloneable: &dyn CloneOps = event_subscription.as_ref();
                 Some(cloneable)
             }
         }
@@ -122,6 +176,14 @@ impl KernelObject {
                 // Pipes don't provide control operations
                 None
             }
+            KernelObject::EventChannel(_) => {
+                // Event channels don't provide control operations
+                None
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions don't provide control operations
+                None
+            }
         }
     }
     
@@ -135,6 +197,14 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide memory mapping operations
+                None
+            }
+            KernelObject::EventChannel(_) => {
+                // Event channels don't provide memory mapping operations
+                None
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions don't provide memory mapping operations
                 None
             }
         }
@@ -153,6 +223,14 @@ impl KernelObject {
                 // Pipes don't provide memory mapping operations
                 None
             }
+            KernelObject::EventChannel(_) => {
+                // Event channels don't provide memory mapping operations
+                None
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions don't provide memory mapping operations
+                None
+            }
         }
     }
     
@@ -165,10 +243,40 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Stream-based pipes don't implement EventIpcOps directly
-                // EventIpc channels would be separate objects that implement EventIpcOps
                 None
             }
-            // Future: EventIpcChannel(Arc<dyn EventIpcChannelObject>) would implement EventIpcOps
+            KernelObject::EventChannel(event_channel) => {
+                // EventChannel implements EventIpcOps
+                let event_ipc_ops: &dyn EventIpcOps = event_channel.as_ref();
+                Some(event_ipc_ops)
+            }
+            KernelObject::EventSubscription(event_subscription) => {
+                // EventSubscription implements EventIpcOps
+                let event_ipc_ops: &dyn EventIpcOps = event_subscription.as_ref();
+                Some(event_ipc_ops)
+            }
+        }
+    }
+
+    /// Try to get EventChannelObject
+    pub fn as_event_channel(&self) -> Option<&dyn EventChannelObject> {
+        match self {
+            KernelObject::EventChannel(event_channel) => {
+                let event_channel_obj: &dyn EventChannelObject = event_channel.as_ref();
+                Some(event_channel_obj)
+            }
+            _ => None
+        }
+    }
+    
+    /// Try to get EventSubscriptionObject
+    pub fn as_event_subscription(&self) -> Option<&dyn EventSubscriptionObject> {
+        match self {
+            KernelObject::EventSubscription(event_subscription) => {
+                let event_subscription_obj: &dyn EventSubscriptionObject = event_subscription.as_ref();
+                Some(event_subscription_obj)
+            }
+            _ => None
         }
     }
 }
@@ -186,6 +294,12 @@ impl Clone for KernelObject {
                 }
                 KernelObject::Pipe(pipe_object) => {
                     KernelObject::Pipe(Arc::clone(pipe_object))
+                }
+                KernelObject::EventChannel(event_channel) => {
+                    KernelObject::EventChannel(Arc::clone(event_channel))
+                }
+                KernelObject::EventSubscription(event_subscription) => {
+                    KernelObject::EventSubscription(Arc::clone(event_subscription))
                 }
             }
         }

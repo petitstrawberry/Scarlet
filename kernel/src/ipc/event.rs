@@ -7,7 +7,7 @@
 //! - Subscription: Channel-based pub/sub delivery
 //! - Group: Broadcast delivery to multiple targets
 
-use alloc::{string::String, vec::Vec, format};
+use alloc::{string::String, vec::Vec, format, sync::Arc};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -643,6 +643,121 @@ pub mod event_ids {
 /// Global function to get the event manager
 pub fn get_event_manager() -> &'static EventManager {
     EventManager::get()
+}
+
+/// Handle-based Event Manager that integrates with KernelObject pattern
+/// 
+/// This manager provides event IPC using the consistent handle-based approach,
+/// making event channels and subscriptions first-class kernel objects.
+pub struct HandleBasedEventManager {
+    /// Channel registry by name
+    channels: Mutex<HashMap<String, Arc<crate::ipc::event_objects::EventChannel>>>,
+}
+
+impl HandleBasedEventManager {
+    /// Create a new handle-based event manager
+    pub fn new() -> Self {
+        Self {
+            channels: Mutex::new(HashMap::new()),
+        }
+    }
+    
+    /// Create or get an event channel as a KernelObject handle
+    /// 
+    /// This method creates an EventChannel that can be inserted into a HandleTable,
+    /// providing consistent resource management with other kernel objects.
+    pub fn create_channel(&self, name: String) -> crate::object::KernelObject {
+        let mut channels = self.channels.lock();
+        
+        let channel = channels
+            .entry(name.clone())
+            .or_insert_with(|| {
+                Arc::new(crate::ipc::event_objects::EventChannel::new(name.clone()))
+            })
+            .clone();
+        
+        crate::object::KernelObject::from_event_channel_object(channel)
+    }
+    
+    /// Create a subscription to a channel as a KernelObject handle
+    /// 
+    /// This method creates an EventSubscription that can be inserted into a HandleTable,
+    /// allowing tasks to receive events through the standard handle interface.
+    pub fn create_subscription(&self, channel_name: String) -> Result<crate::object::KernelObject, EventError> {
+        let channels = self.channels.lock();
+        
+        let channel = channels.get(&channel_name)
+            .ok_or(EventError::ChannelNotFound)?;
+        
+        let subscription = channel.create_subscription(Some(1024)); // Default queue size
+        
+        Ok(crate::object::KernelObject::from_event_subscription_object(Arc::new(subscription)))
+    }
+    
+    /// Get the global handle-based event manager
+    pub fn get_handle_based() -> &'static HandleBasedEventManager {
+        static INSTANCE: spin::once::Once<HandleBasedEventManager> = spin::once::Once::new();
+        INSTANCE.call_once(|| HandleBasedEventManager::new())
+    }
+}
+
+/// Example usage functions demonstrating KernelObject integration
+pub mod handle_based_examples {
+    use super::*;
+    use crate::object::handle::{HandleTable, HandleMetadata, HandleType, AccessMode};
+    
+    /// Create an event channel and add it to a task's handle table
+    pub fn create_channel_handle(handle_table: &mut HandleTable, channel_name: String) -> Result<crate::object::handle::Handle, &'static str> {
+        let manager = HandleBasedEventManager::get_handle_based();
+        let channel_obj = manager.create_channel(channel_name);
+        
+        let metadata = HandleMetadata {
+            handle_type: HandleType::EventChannel,
+            access_mode: AccessMode::ReadWrite,
+            special_semantics: None,
+        };
+        
+        handle_table.insert_with_metadata(channel_obj, metadata)
+    }
+    
+    /// Create an event subscription and add it to a task's handle table
+    pub fn create_subscription_handle(handle_table: &mut HandleTable, channel_name: String) -> Result<crate::object::handle::Handle, EventError> {
+        let manager = HandleBasedEventManager::get_handle_based();
+        let subscription_obj = manager.create_subscription(channel_name)?;
+        
+        let metadata = HandleMetadata {
+            handle_type: HandleType::EventSubscription,
+            access_mode: AccessMode::ReadOnly, // Subscriptions are read-only
+            special_semantics: None,
+        };
+        
+        handle_table.insert_with_metadata(subscription_obj, metadata)
+            .map_err(|_| EventError::Other("Failed to insert subscription handle".into()))
+    }
+    
+    /// Publish an event using a channel handle
+    pub fn publish_via_handle(handle_table: &HandleTable, channel_handle: crate::object::handle::Handle, event: Event) -> Result<(), EventError> {
+        let kernel_obj = handle_table.get(channel_handle)
+            .ok_or(EventError::Other("Invalid handle".into()))?;
+        
+        let channel = kernel_obj.as_event_channel()
+            .ok_or(EventError::Other("Handle is not an event channel".into()))?;
+        
+        // Convert our EventError to the event_objects::EventError
+        channel.publish(event).map_err(|_| EventError::Other("Failed to publish event".into()))
+    }
+    
+    /// Receive an event using a subscription handle
+    pub fn receive_via_handle(handle_table: &HandleTable, subscription_handle: crate::object::handle::Handle, blocking: bool) -> Result<Event, EventError> {
+        let kernel_obj = handle_table.get(subscription_handle)
+            .ok_or(EventError::Other("Invalid handle".into()))?;
+        
+        let subscription = kernel_obj.as_event_subscription()
+            .ok_or(EventError::Other("Handle is not an event subscription".into()))?;
+        
+        // Convert event_objects::EventError to our EventError
+        subscription.receive_event(blocking).map_err(|_| EventError::Other("Failed to receive event".into()))
+    }
 }
 
 #[cfg(test)]
