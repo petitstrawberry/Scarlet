@@ -7,7 +7,7 @@
 //! - Subscription: Channel-based pub/sub delivery
 //! - Group: Broadcast delivery to multiple targets
 
-use alloc::{string::String, vec::Vec, format, sync::Arc};
+use alloc::{string::String, vec::Vec, sync::Arc, format};
 use hashbrown::HashMap;
 use spin::Mutex;
 
@@ -17,30 +17,6 @@ pub type TaskId = u32;
 pub type GroupId = u32;
 /// Type alias for session identifiers
 pub type SessionId = u32;
-
-/// Event delivery operations trait
-pub trait EventOps {
-    /// Send an event
-    fn send_event(&self, event: Event) -> Result<(), EventError>;
-    
-    /// Register an event handler
-    fn register_handler(&self, filter: EventFilter, handler: EventHandler) -> Result<(), EventError>;
-    
-    /// Subscribe to a channel
-    fn subscribe_channel(&self, channel: &str) -> Result<(), EventError>;
-    
-    /// Unsubscribe from a channel
-    fn unsubscribe_channel(&self, channel: &str) -> Result<(), EventError>;
-    
-    /// Join a task group
-    fn join_group(&self, group_id: GroupId) -> Result<(), EventError>;
-    
-    /// Leave a task group
-    fn leave_group(&self, group_id: GroupId) -> Result<(), EventError>;
-    
-    /// Configure delivery settings
-    fn configure_delivery(&self, config: DeliveryConfig) -> Result<(), EventError>;
-}
 
 /// Event structure containing all event information
 #[derive(Debug, Clone)]
@@ -416,10 +392,11 @@ impl EventManager {
         
         Ok(crate::object::KernelObject::from_event_subscription_object(Arc::new(subscription)))
     }
-}
-
-impl EventOps for EventManager {
-    fn send_event(&self, event: Event) -> Result<(), EventError> {
+    
+    // === Core Event Operations ===
+    
+    /// Send an event
+    pub fn send_event(&self, event: Event) -> Result<(), EventError> {
         match event.event_type.clone() {
             EventType::Direct { target, event_id, priority, reliable } => {
                 self.deliver_direct(event, target, event_id, priority, reliable)
@@ -439,12 +416,14 @@ impl EventOps for EventManager {
         }
     }
     
-    fn register_handler(&self, _filter: EventFilter, _handler: EventHandler) -> Result<(), EventError> {
+    /// Register an event handler
+    pub fn register_handler(&self, _filter: EventFilter, _handler: EventHandler) -> Result<(), EventError> {
         // TODO: Implement handler registration
         Ok(())
     }
     
-    fn subscribe_channel(&self, channel: &str) -> Result<(), EventError> {
+    /// Subscribe to a channel
+    pub fn subscribe_channel(&self, channel: &str) -> Result<(), EventError> {
         // TODO: Get current task ID from task system
         let current_task_id = 1; // Placeholder
         
@@ -458,7 +437,8 @@ impl EventOps for EventManager {
         Ok(())
     }
     
-    fn unsubscribe_channel(&self, channel: &str) -> Result<(), EventError> {
+    /// Unsubscribe from a channel
+    pub fn unsubscribe_channel(&self, channel: &str) -> Result<(), EventError> {
         let current_task_id = 1; // TODO: Get from task system
         
         let mut subscriptions = self.subscriptions.lock();
@@ -469,7 +449,8 @@ impl EventOps for EventManager {
         Ok(())
     }
     
-    fn join_group(&self, group_id: GroupId) -> Result<(), EventError> {
+    /// Join a task group
+    pub fn join_group(&self, group_id: GroupId) -> Result<(), EventError> {
         let current_task_id = 1; // TODO: Get from task system
         
         let mut groups = self.groups.lock();
@@ -482,7 +463,8 @@ impl EventOps for EventManager {
         Ok(())
     }
     
-    fn leave_group(&self, group_id: GroupId) -> Result<(), EventError> {
+    /// Leave a task group
+    pub fn leave_group(&self, group_id: GroupId) -> Result<(), EventError> {
         let current_task_id = 1; // TODO: Get from task system
         
         let mut groups = self.groups.lock();
@@ -493,7 +475,8 @@ impl EventOps for EventManager {
         Ok(())
     }
     
-    fn configure_delivery(&self, config: DeliveryConfig) -> Result<(), EventError> {
+    /// Configure delivery settings
+    pub fn configure_delivery(&self, config: DeliveryConfig) -> Result<(), EventError> {
         let current_task_id = 1; // TODO: Get from task system
         
         let mut configs = self.configs.lock();
@@ -501,9 +484,9 @@ impl EventOps for EventManager {
         
         Ok(())
     }
-}
-
-impl EventManager {
+    
+    // === Internal Event Delivery Methods ===
+    
     /// Deliver direct event to specific task
     fn deliver_direct(&self, event: Event, target: TaskId, _event_id: u32, _priority: EventPriority, _reliable: bool) -> Result<(), EventError> {
         self.deliver_to_task(target, event)
