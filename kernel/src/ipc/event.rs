@@ -360,6 +360,9 @@ pub struct EventManager {
     
     /// Next event ID
     next_event_id: Mutex<u64>,
+    
+    /// Handle-based channel registry for KernelObject integration
+    handle_channels: Mutex<HashMap<String, Arc<crate::ipc::event_objects::EventChannel>>>,
 }
 
 impl EventManager {
@@ -372,13 +375,46 @@ impl EventManager {
             configs: Mutex::new(HashMap::new()),
             event_queue: Mutex::new(Vec::new()),
             next_event_id: Mutex::new(1),
+            handle_channels: Mutex::new(HashMap::new()),
         }
     }
     
     /// Get the global EventManager instance
-    pub fn get() -> &'static EventManager {
+    pub fn get_manager() -> &'static EventManager {
         static INSTANCE: spin::once::Once<EventManager> = spin::once::Once::new();
         INSTANCE.call_once(|| EventManager::new())
+    }
+    
+    /// Create or get an event channel as a KernelObject handle
+    /// 
+    /// This method creates an EventChannel that can be inserted into a HandleTable,
+    /// providing consistent resource management with other kernel objects.
+    pub fn create_channel(&self, name: String) -> crate::object::KernelObject {
+        let mut channels = self.handle_channels.lock();
+        
+        let channel = channels
+            .entry(name.clone())
+            .or_insert_with(|| {
+                Arc::new(crate::ipc::event_objects::EventChannel::new(name.clone()))
+            })
+            .clone();
+        
+        crate::object::KernelObject::from_event_channel_object(channel)
+    }
+    
+    /// Create a subscription to a channel as a KernelObject handle
+    /// 
+    /// This method creates an EventSubscription that can be inserted into a HandleTable,
+    /// allowing tasks to receive events through the standard handle interface.
+    pub fn create_subscription(&self, channel_name: String) -> Result<crate::object::KernelObject, EventError> {
+        let channels = self.handle_channels.lock();
+        
+        let channel = channels.get(&channel_name)
+            .ok_or(EventError::ChannelNotFound)?;
+        
+        let subscription = channel.create_subscription(Some(1024)); // Default queue size
+        
+        Ok(crate::object::KernelObject::from_event_subscription_object(Arc::new(subscription)))
     }
 }
 
@@ -642,63 +678,7 @@ pub mod event_ids {
 
 /// Global function to get the event manager
 pub fn get_event_manager() -> &'static EventManager {
-    EventManager::get()
-}
-
-/// Handle-based Event Manager that integrates with KernelObject pattern
-/// 
-/// This manager provides event IPC using the consistent handle-based approach,
-/// making event channels and subscriptions first-class kernel objects.
-pub struct HandleBasedEventManager {
-    /// Channel registry by name
-    channels: Mutex<HashMap<String, Arc<crate::ipc::event_objects::EventChannel>>>,
-}
-
-impl HandleBasedEventManager {
-    /// Create a new handle-based event manager
-    pub fn new() -> Self {
-        Self {
-            channels: Mutex::new(HashMap::new()),
-        }
-    }
-    
-    /// Create or get an event channel as a KernelObject handle
-    /// 
-    /// This method creates an EventChannel that can be inserted into a HandleTable,
-    /// providing consistent resource management with other kernel objects.
-    pub fn create_channel(&self, name: String) -> crate::object::KernelObject {
-        let mut channels = self.channels.lock();
-        
-        let channel = channels
-            .entry(name.clone())
-            .or_insert_with(|| {
-                Arc::new(crate::ipc::event_objects::EventChannel::new(name.clone()))
-            })
-            .clone();
-        
-        crate::object::KernelObject::from_event_channel_object(channel)
-    }
-    
-    /// Create a subscription to a channel as a KernelObject handle
-    /// 
-    /// This method creates an EventSubscription that can be inserted into a HandleTable,
-    /// allowing tasks to receive events through the standard handle interface.
-    pub fn create_subscription(&self, channel_name: String) -> Result<crate::object::KernelObject, EventError> {
-        let channels = self.channels.lock();
-        
-        let channel = channels.get(&channel_name)
-            .ok_or(EventError::ChannelNotFound)?;
-        
-        let subscription = channel.create_subscription(Some(1024)); // Default queue size
-        
-        Ok(crate::object::KernelObject::from_event_subscription_object(Arc::new(subscription)))
-    }
-    
-    /// Get the global handle-based event manager
-    pub fn get_handle_based() -> &'static HandleBasedEventManager {
-        static INSTANCE: spin::once::Once<HandleBasedEventManager> = spin::once::Once::new();
-        INSTANCE.call_once(|| HandleBasedEventManager::new())
-    }
+    EventManager::get_manager()
 }
 
 /// Example usage functions demonstrating KernelObject integration
@@ -708,7 +688,7 @@ pub mod handle_based_examples {
     
     /// Create an event channel and add it to a task's handle table
     pub fn create_channel_handle(handle_table: &mut HandleTable, channel_name: String) -> Result<crate::object::handle::Handle, &'static str> {
-        let manager = HandleBasedEventManager::get_handle_based();
+        let manager = EventManager::get_manager();
         let channel_obj = manager.create_channel(channel_name);
         
         let metadata = HandleMetadata {
@@ -722,7 +702,7 @@ pub mod handle_based_examples {
     
     /// Create an event subscription and add it to a task's handle table
     pub fn create_subscription_handle(handle_table: &mut HandleTable, channel_name: String) -> Result<crate::object::handle::Handle, EventError> {
-        let manager = HandleBasedEventManager::get_handle_based();
+        let manager = EventManager::get_manager();
         let subscription_obj = manager.create_subscription(channel_name)?;
         
         let metadata = HandleMetadata {
@@ -757,6 +737,23 @@ pub mod handle_based_examples {
         
         // Convert event_objects::EventError to our EventError
         subscription.receive_event(blocking).map_err(|_| EventError::Other("Failed to receive event".into()))
+    }
+    
+    /// Receive an event using a subscription handle (with blocking support)
+    pub fn receive_blocking_via_handle(handle_table: &HandleTable, subscription_handle: crate::object::handle::Handle) -> Result<Event, EventError> {
+        // This will block the current task until an event is available
+        receive_via_handle(handle_table, subscription_handle, true)
+    }
+    
+    /// Check if a subscription has pending events (non-blocking)
+    pub fn has_pending_events_via_handle(handle_table: &HandleTable, subscription_handle: crate::object::handle::Handle) -> Result<bool, EventError> {
+        let kernel_obj = handle_table.get(subscription_handle)
+            .ok_or(EventError::Other("Invalid handle".into()))?;
+        
+        let subscription = kernel_obj.as_event_subscription()
+            .ok_or(EventError::Other("Handle is not an event subscription".into()))?;
+        
+        Ok(subscription.has_pending_events())
     }
 }
 
@@ -797,8 +794,8 @@ mod tests {
     /// Test event manager singleton
     #[test_case]
     fn test_event_manager_singleton() {
-        let manager1 = EventManager::get();
-        let manager2 = EventManager::get();
+        let manager1 = EventManager::get_manager();
+        let manager2 = EventManager::get_manager();
         
         // Should return the same instance
         assert!(core::ptr::eq(manager1, manager2));
@@ -807,7 +804,7 @@ mod tests {
     /// Test event subscription operations
     #[test_case]
     fn test_event_subscription() {
-        let manager = EventManager::get();
+        let manager = EventManager::get_manager();
         
         // Test channel subscription
         let result = manager.subscribe_channel("test_channel");
@@ -828,7 +825,7 @@ mod tests {
     /// Test delivery configuration
     #[test_case]
     fn test_delivery_configuration() {
-        let manager = EventManager::get();
+        let manager = EventManager::get_manager();
         
         let config = DeliveryConfig {
             buffer_size: 2048,
@@ -844,7 +841,7 @@ mod tests {
     /// Test event sending with different types
     #[test_case]
     fn test_event_sending() {
-        let manager = EventManager::get();
+        let manager = EventManager::get_manager();
         
         // Test direct event sending
         let direct_event = Event::direct(1, 1001, EventPriority::High, true, EventPayload::Empty);
@@ -1041,7 +1038,7 @@ mod tests {
     /// Test event error conditions
     #[test_case]
     fn test_event_error_conditions() {
-        let manager = EventManager::get();
+        let manager = EventManager::get_manager();
         
         // Test sending to non-existent channel without create_if_missing
         let channel_event = Event::new_channel_event("nonexistent_channel", EventPayload::Empty);
