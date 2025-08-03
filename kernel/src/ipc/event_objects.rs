@@ -3,7 +3,7 @@
 //! This module provides handle-based event IPC objects that integrate
 //! with the KernelObject/HandleTable pattern.
 
-use alloc::{string::String, vec::Vec, sync::Arc, collections::VecDeque};
+use alloc::{string::String, vec::Vec, sync::Arc, collections::VecDeque, format};
 use spin::Mutex;
 
 use crate::object::capability::{CloneOps, EventIpcOps};
@@ -378,8 +378,60 @@ impl Drop for EventSubscription {
             state.active = false;
         }
         
-        // Remove from channel's subscription list
-        // (This will be cleaned up on next publish or channel cleanup)
+        // Remove from channel's subscription list immediately
+        {
+            let mut channel_state = self.channel_state.lock();
+            let subscription_ptr = Arc::as_ptr(&self.state);
+            
+            // Remove this subscription from the channel's list
+            channel_state.subscriptions.retain(|sub| {
+                Arc::as_ptr(sub) != subscription_ptr
+            });
+            
+            // Update subscriber count immediately
+            channel_state.stats.subscriber_count = channel_state.subscriptions.len();
+        }
+    }
+}
+
+impl Drop for EventChannel {
+    fn drop(&mut self) {
+        // Mark channel as closed and notify all subscribers
+        let mut state = self.state.lock();
+        state.closed = true;
+        
+        // Notify all active subscriptions that the channel is closed
+        for subscription in &state.subscriptions {
+            let mut sub_state = subscription.lock();
+            if sub_state.active {
+                // Add a special "channel closed" event
+                let close_event = Event::new(
+                    crate::ipc::EventType::Direct {
+                        target: 0, // Special marker for channel close
+                        event_id: 0xFFFFFFFF, // Special event ID for channel close
+                        priority: crate::ipc::event::EventPriority::High,
+                        reliable: true,
+                    },
+                    crate::ipc::EventPayload::String(String::from("CHANNEL_CLOSED"))
+                );
+                
+                // Force add to queue even if full (important system event)
+                if sub_state.event_queue.len() >= sub_state.max_queue_size {
+                    sub_state.event_queue.pop_front(); // Make space
+                }
+                sub_state.event_queue.push_back(close_event);
+                
+                // Wake up waiting tasks
+                sub_state.waker.wake_all();
+                
+                // Mark subscription as inactive
+                sub_state.active = false;
+            }
+        }
+        
+        // Clear subscriptions
+        state.subscriptions.clear();
+        state.stats.subscriber_count = 0;
     }
 }
 
