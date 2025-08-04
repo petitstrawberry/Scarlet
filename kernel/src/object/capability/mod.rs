@@ -27,7 +27,7 @@ pub use control::ControlOps;
 pub use memory_mapping::MemoryMappingOps;
 
 // Re-export IPC types
-pub use ipc::{EventIpcOps, EventIpcError};
+pub use ipc::EventIpcOps;
 
 /// Clone operations capability
 /// 

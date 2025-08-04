@@ -425,32 +425,8 @@ impl EventIpcOps for EventChannel {
         Err("Not applicable to EventChannel")
     }
     
-    fn publish_to_channel(&self, _channel_name: String, _event_type: crate::task::events::TaskEventType, _source_task: Option<usize>) -> Result<usize, &'static str> {
-        Err("Use publish() method instead")
-    }
-    
-    fn join_process_group(&self, _group_id: usize) -> Result<(), &'static str> {
-        Err("Not applicable to EventChannel")
-    }
-    
-    fn leave_process_group(&self, _group_id: usize) -> Result<(), &'static str> {
-        Err("Not applicable to EventChannel")
-    }
-    
-    fn send_to_process_group(&self, _group_id: usize, _event_type: crate::task::events::TaskEventType, _source_task: Option<usize>) -> Result<usize, &'static str> {
-        Err("Not applicable to EventChannel")
-    }
-    
-    fn send_event(&self, _target: crate::task::events::EventTarget, _event_type: crate::task::events::TaskEventType, _source_task: Option<usize>) -> Result<usize, &'static str> {
-        Err("Use publish() method instead")
-    }
-    
     fn get_subscribed_channels(&self) -> Vec<String> {
         alloc::vec![self.name.clone()]
-    }
-    
-    fn get_joined_process_groups(&self) -> Vec<usize> {
-        alloc::vec![]
     }
     
     fn get_task_id(&self) -> Option<usize> {
@@ -470,32 +446,8 @@ impl EventIpcOps for EventSubscription {
         Ok(())
     }
     
-    fn publish_to_channel(&self, _channel_name: String, _event_type: crate::task::events::TaskEventType, _source_task: Option<usize>) -> Result<usize, &'static str> {
-        Err("Use EventChannel for publishing")
-    }
-    
-    fn join_process_group(&self, _group_id: usize) -> Result<(), &'static str> {
-        Err("Not applicable to EventSubscription")
-    }
-    
-    fn leave_process_group(&self, _group_id: usize) -> Result<(), &'static str> {
-        Err("Not applicable to EventSubscription")
-    }
-    
-    fn send_to_process_group(&self, _group_id: usize, _event_type: crate::task::events::TaskEventType, _source_task: Option<usize>) -> Result<usize, &'static str> {
-        Err("Not applicable to EventSubscription")
-    }
-    
-    fn send_event(&self, _target: crate::task::events::EventTarget, _event_type: crate::task::events::TaskEventType, _source_task: Option<usize>) -> Result<usize, &'static str> {
-        Err("Not applicable to EventSubscription")
-    }
-    
     fn get_subscribed_channels(&self) -> Vec<String> {
         alloc::vec![self.channel_name.clone()]
-    }
-    
-    fn get_joined_process_groups(&self) -> Vec<usize> {
-        alloc::vec![]
     }
     
     fn get_task_id(&self) -> Option<usize> {
