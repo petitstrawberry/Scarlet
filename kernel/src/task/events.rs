@@ -164,23 +164,25 @@ impl TaskEventHandler {
     /// Get action for an event type
     pub fn get_action(&self, event_type: TaskEventType) -> EventAction {
         let actions = self.actions.lock();
-        actions.get(&event_type).cloned().unwrap_or_else(|| {
-            // Default actions for standard events when not explicitly set
-            match event_type {
-                TaskEventType::Terminate => EventAction::Terminate,
-                TaskEventType::Kill => EventAction::Terminate,
-                TaskEventType::Interrupt => EventAction::Terminate,
-                TaskEventType::Suspend => EventAction::Suspend,
-                TaskEventType::Resume => EventAction::Resume,
-                TaskEventType::ChildStateChange => EventAction::Ignore,
-                TaskEventType::Timer => EventAction::Default,
-                TaskEventType::User(_) => EventAction::Ignore,
-                TaskEventType::IoReady => EventAction::Default,
-                TaskEventType::PipeBroken => EventAction::Terminate,
-                TaskEventType::WindowChange => EventAction::Ignore,
-                TaskEventType::Custom(_) => EventAction::Default,
-            }
-        })
+        actions.get(&event_type).cloned().unwrap_or_else(|| Self::get_default_action(event_type))
+    }
+
+    /// Get the default action for an event type
+    fn get_default_action(event_type: TaskEventType) -> EventAction {
+        match event_type {
+            TaskEventType::Terminate => EventAction::Terminate,
+            TaskEventType::Kill => EventAction::Terminate,
+            TaskEventType::Interrupt => EventAction::Terminate,
+            TaskEventType::Suspend => EventAction::Suspend,
+            TaskEventType::Resume => EventAction::Resume,
+            TaskEventType::ChildStateChange => EventAction::Ignore,
+            TaskEventType::Timer => EventAction::Default,
+            TaskEventType::User(_) => EventAction::Ignore,
+            TaskEventType::IoReady => EventAction::Default,
+            TaskEventType::PipeBroken => EventAction::Terminate,
+            TaskEventType::WindowChange => EventAction::Ignore,
+            TaskEventType::Custom(_) => EventAction::Default,
+        }
     }
     
     /// Register a new custom event type
