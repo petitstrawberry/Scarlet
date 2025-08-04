@@ -18,7 +18,18 @@ use crate::task::events::{TaskEventType, EventTarget};
 /// - Process group membership and communication  
 /// - Broadcast event distribution
 /// 
-/// This is distinct from stream-based IPC mechanisms (pipes, sockets) which use StreamOps.
+/// # Relationship to StreamIpcOps
+/// `EventIpcOps` is intended for event-driven, message-based IPC, where communication is
+/// based on discrete events (such as notifications, signals, or broadcasts) delivered to
+/// channels, groups, or specific targets. This is distinct from stream-based IPC mechanisms,
+/// such as pipes or sockets, which provide continuous byte streams and are represented by
+/// the `StreamIpcOps` trait.
+///
+/// Use `EventIpcOps` when you need to send or receive discrete events, notifications, or
+/// participate in publish/subscribe or group-based communication. Use `StreamIpcOps` for
+/// scenarios requiring ordered, reliable, stream-oriented data transfer (e.g., file-like
+/// or socket-like communication). Some kernel objects may implement both traits if they
+/// support both event and stream semantics.
 pub trait EventIpcOps: Send + Sync {
     /// Subscribe to an event channel
     /// 
