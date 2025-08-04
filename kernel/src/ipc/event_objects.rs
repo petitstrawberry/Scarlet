@@ -528,20 +528,8 @@ impl CloneOps for EventSubscription {
 
 /// Helper function to get the task ID that owns a subscription
 /// 
-/// This function looks through all tasks' handle tables to find which task
-/// owns the given subscription object.
-fn get_subscription_owner_task_id(_subscription: &Arc<Mutex<SubscriptionState>>) -> Option<u32> {
-    // TODO: Implement proper task handle table lookup
-    // For now, we'll use a placeholder that assumes task ID 1
-    // In a real implementation, we'd need to:
-    // 1. Iterate through all tasks
-    // 2. Check their handle tables for this subscription object
-    // 3. Return the matching task ID
-    
-    // Placeholder: assume current task
-    if let Some(task) = crate::task::mytask() {
-        Some(task.get_id() as u32)
-    } else {
-        None
-    }
+/// This function simply returns the owner_task_id stored in the SubscriptionState.
+fn get_subscription_owner_task_id(subscription: &Arc<Mutex<SubscriptionState>>) -> Option<u32> {
+    let state = subscription.lock();
+    state.owner_task_id
 }
