@@ -120,6 +120,8 @@ struct SubscriptionState {
     active: bool,
     /// Waker for blocking receive operations
     waker: crate::sync::waker::Waker,
+    /// Owner task ID (set when subscription is created)
+    owner_task_id: Option<u32>,
 }
 
 /// Concrete implementation of EventChannelObject
@@ -168,6 +170,13 @@ impl EventChannel {
         
         let channel_name = self.name.clone();
         
+        // Get current task ID as owner
+        let owner_task_id = if let Some(task) = crate::task::mytask() {
+            Some(task.get_id() as u32)
+        } else {
+            None
+        };
+        
         let subscription_state = SubscriptionState {
             channel_name: channel_name.clone(),
             event_queue: VecDeque::with_capacity(max_queue_size),
@@ -175,6 +184,7 @@ impl EventChannel {
             filter: None,
             active: true,
             waker: crate::sync::waker::Waker::new_interruptible("event_subscription"),
+            owner_task_id,
         };
         
         let subscription_state = Arc::new(Mutex::new(subscription_state));
@@ -228,16 +238,22 @@ impl EventChannelObject for EventChannel {
                 }
             }
             
-            // Add to queue if there's space
-            if sub_state.event_queue.len() < sub_state.max_queue_size {
-                sub_state.event_queue.push_back(event.clone());
-                delivered += 1;
-                
-                // Wake up all tasks waiting on this subscription
-                // Multiple tasks might be waiting on the same subscription
-                sub_state.waker.wake_all();
+            // Deliver via EventManager to ABI module
+            if let Some(task_id) = get_subscription_owner_task_id(&subscription) {
+                let event_manager = crate::ipc::event::EventManager::get_manager();
+                match event_manager.deliver_to_task(task_id, event.clone()) {
+                    Ok(()) => delivered += 1,
+                    Err(_) => dropped += 1,
+                }
             } else {
-                dropped += 1;
+                // Fallback: queue locally if no task owner found
+                if sub_state.event_queue.len() < sub_state.max_queue_size {
+                    sub_state.event_queue.push_back(event.clone());
+                    delivered += 1;
+                    sub_state.waker.wake_all();
+                } else {
+                    dropped += 1;
+                }
             }
         }
         
@@ -561,5 +577,25 @@ impl EventChannel {
             }
         }
         // If queue wasn't empty, waiting tasks will eventually get events without waking
+    }
+}
+
+/// Helper function to get the task ID that owns a subscription
+/// 
+/// This function looks through all tasks' handle tables to find which task
+/// owns the given subscription object.
+fn get_subscription_owner_task_id(_subscription: &Arc<Mutex<SubscriptionState>>) -> Option<u32> {
+    // TODO: Implement proper task handle table lookup
+    // For now, we'll use a placeholder that assumes task ID 1
+    // In a real implementation, we'd need to:
+    // 1. Iterate through all tasks
+    // 2. Check their handle tables for this subscription object
+    // 3. Return the matching task ID
+    
+    // Placeholder: assume current task
+    if let Some(task) = crate::task::mytask() {
+        Some(task.get_id() as u32)
+    } else {
+        None
     }
 }

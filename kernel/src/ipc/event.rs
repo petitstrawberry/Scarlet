@@ -544,12 +544,19 @@ impl EventManager {
     }
     
     /// Deliver event to a specific task
-    fn deliver_to_task(&self, _task_id: u32, event: Event) -> Result<(), EventError> {
-        // TODO: This needs integration with the task system
-        // For now, just add to event queue
-        let mut queue = self.event_queue.lock();
-        queue.push(event);
-        Ok(())
+    pub fn deliver_to_task(&self, task_id: u32, event: Event) -> Result<(), EventError> {
+        if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize) {
+            // Delegate to ABI module
+            if let Some(abi) = &task.abi {
+                abi.handle_event(event, task_id)
+                    .map_err(|_| EventError::DeliveryFailed)
+            } else {
+                // Ignore if ABI module is not set
+                Ok(())
+            }
+        } else {
+            Err(EventError::TargetNotFound)
+        }
     }
 }
 
