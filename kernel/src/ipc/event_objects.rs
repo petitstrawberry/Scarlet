@@ -9,9 +9,6 @@ use spin::Mutex;
 use crate::object::capability::{CloneOps, EventIpcOps};
 use crate::object::KernelObject;
 use crate::ipc::{Event, EventType, event::EventPriority};
-use crate::sync::Waker;
-use crate::task::mytask;
-use crate::arch::get_cpu;
 
 /// Event errors for KernelObject integration
 #[derive(Debug, Clone)]
@@ -118,8 +115,6 @@ struct SubscriptionState {
     filter: Option<EventFilter>,
     /// Whether this subscription is active
     active: bool,
-    /// Waker for blocking receive operations
-    waker: crate::sync::waker::Waker,
     /// Owner task ID (set when subscription is created)
     owner_task_id: Option<u32>,
 }
@@ -183,7 +178,6 @@ impl EventChannel {
             max_queue_size,
             filter: None,
             active: true,
-            waker: crate::sync::waker::Waker::new_interruptible("event_subscription"),
             owner_task_id,
         };
         
@@ -229,7 +223,7 @@ impl EventChannelObject for EventChannel {
         
         // Deliver to all active subscriptions
         for subscription in &state.subscriptions {
-            let mut sub_state = subscription.lock();
+            let sub_state = subscription.lock();
             
             // Check filter
             if let Some(filter) = &sub_state.filter {
@@ -242,18 +236,18 @@ impl EventChannelObject for EventChannel {
             if let Some(task_id) = get_subscription_owner_task_id(&subscription) {
                 let event_manager = crate::ipc::event::EventManager::get_manager();
                 match event_manager.deliver_to_task(task_id, event.clone()) {
-                    Ok(()) => delivered += 1,
-                    Err(_) => dropped += 1,
+                    Ok(()) => {
+                        delivered += 1;
+                        // ABI module handles notification, no local queue needed
+                    }
+                    Err(_) => {
+                        dropped += 1;
+                        // No fallback - ABI module is responsible for all event handling
+                    }
                 }
             } else {
-                // Fallback: queue locally if no task owner found
-                if sub_state.event_queue.len() < sub_state.max_queue_size {
-                    sub_state.event_queue.push_back(event.clone());
-                    delivered += 1;
-                    sub_state.waker.wake_all();
-                } else {
-                    dropped += 1;
-                }
+                // No task owner found, drop the event
+                dropped += 1;
             }
         }
         
@@ -323,41 +317,10 @@ impl EventChannel {
 }
 
 impl EventSubscriptionObject for EventSubscription {
-    fn receive_event(&self, blocking: bool) -> Result<Event, EventError> {
-        loop {
-            let mut state = self.state.lock();
-            
-            if !state.active {
-                return Err(EventError::SubscriptionClosed);
-            }
-            
-            // Check if there's an event available
-            if let Some(event) = state.event_queue.pop_front() {
-                return Ok(event);
-            }
-            
-            // No events available
-            if blocking {
-                // Block the current task using the same pattern as TTY
-                if let Some(mut task) = mytask() {
-                    let mut cpu = get_cpu();
-                    
-                    // This will block until an event is available
-                    // The task will be woken up when an event is published
-                    // Note: state.waker.wait() never returns, but when the task
-                    // is woken up, the syscall will be restarted from the beginning
-                    state.waker.wait(&mut task, &mut cpu);
-                    
-                    // This should not be reached as wait() doesn't return
-                    // But if we somehow get here, loop back to check for events
-                } else {
-                    // No current task (kernel context)
-                    return Err(EventError::Other("Cannot block in kernel context".into()));
-                }
-            } else {
-                return Err(EventError::NoEventsAvailable);
-            }
-        }
+    fn receive_event(&self, _blocking: bool) -> Result<Event, EventError> {
+        // This method is deprecated - events should be handled by ABI modules
+        // ABI modules are responsible for event notification and delivery
+        Err(EventError::Other("Events are handled by ABI modules, not through receive_event()".into()))
     }
     
     fn has_pending_events(&self) -> bool {
@@ -437,8 +400,7 @@ impl Drop for EventChannel {
                 }
                 sub_state.event_queue.push_back(close_event);
                 
-                // Wake up waiting tasks
-                sub_state.waker.wake_all();
+                // ABI modules are responsible for notification, not wakers
                 
                 // Mark subscription as inactive
                 sub_state.active = false;
@@ -561,22 +523,6 @@ impl CloneOps for EventSubscription {
             channel_name: self.channel_name.clone(),
         };
         KernelObject::EventSubscription(Arc::new(cloned))
-    }
-}
-
-impl EventChannel {
-    /// Optimized version: Wake up exactly one task if queue was empty
-    /// This prevents unnecessary context switches when multiple tasks are waiting
-    fn wake_subscribers_optimized(&self, subscription: &Arc<Mutex<SubscriptionState>>, was_empty: bool) {
-        if was_empty {
-            // Queue was empty, so waiting tasks need to be woken up
-            let sub_state = subscription.lock();
-            if sub_state.waker.waiting_count() > 0 {
-                // Only wake one task since they will all get the same event anyway
-                sub_state.waker.wake_one();
-            }
-        }
-        // If queue wasn't empty, waiting tasks will eventually get events without waking
     }
 }
 
