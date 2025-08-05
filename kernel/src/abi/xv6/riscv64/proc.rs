@@ -4,7 +4,7 @@ use crate::{
     fs::FileType, 
     library::std::string::cstring_to_string,
     sched::scheduler::get_scheduler, 
-    task::{get_parent_waker, mytask, CloneFlags, WaitError, events::{send_kill_event}}
+    task::{get_parent_waker, mytask, CloneFlags, WaitError}
 };
 
 /// VFS v2 helper function for path absolutization using VfsManager
@@ -105,13 +105,10 @@ pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
 
     // Find the target task via scheduler
     let scheduler = get_scheduler();
-    if let Some(_target_task) = scheduler.get_task_by_id(pid) {
-        // Send kill event to target task
-        let current_task_id = task.get_id();
-        match send_kill_event(pid, Some(current_task_id)) {
-            Ok(_) => 0, // Success
-            Err(_) => usize::MAX, // -1 on error
-        }
+    if let Some(target_task) = scheduler.get_task_by_id(pid) {
+        // For xv6 compatibility, immediately terminate the target task
+        target_task.exit(9); // SIGKILL equivalent - exit with signal 9
+        0 // Success
     } else {
         usize::MAX // -1 (no such process)
     }

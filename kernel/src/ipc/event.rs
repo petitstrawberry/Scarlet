@@ -544,6 +544,7 @@ impl EventManager {
     }
     
     /// Deliver event to a specific task
+    #[cfg(not(test))]
     pub fn deliver_to_task(&self, task_id: u32, event: Event) -> Result<(), EventError> {
         if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize) {
             // Delegate to ABI module
@@ -557,6 +558,11 @@ impl EventManager {
         } else {
             Err(EventError::TargetNotFound)
         }
+    }
+    #[cfg(test)]
+    pub fn deliver_to_task(&self, _task_id: u32, _event: Event) -> Result<(), EventError> {
+        // In tests, we can ignore delivery since we're not interacting with real tasks
+        Ok(())
     }
 }
 
