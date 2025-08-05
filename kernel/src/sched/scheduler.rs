@@ -110,6 +110,12 @@ impl Scheduler {
                             _ => {
                                 // Task is ready to run
                                 t.time_slice = 1; // Reset time slice on dispatch
+                                
+                                // Process pending events before dispatching task
+                                if let Err(e) = t.process_pending_events() {
+                                    crate::early_println!("Warning: Event processing failed for task {}: {}", t.get_id(), e);
+                                }
+                                
                                 if self.current_task_id[cpu_id] != Some(t.get_id()) {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 }
@@ -169,6 +175,12 @@ impl Scheduler {
                             },
                             _ => {
                                 t.time_slice = 1; // Reset time slice on dispatch
+                                
+                                // Process pending events before dispatching task
+                                if let Err(e) = t.process_pending_events() {
+                                    crate::early_println!("Warning: Event processing failed for task {}: {}", t.get_id(), e);
+                                }
+                                
                                 // Simply dispatch the task without prev_task logic
                                 self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 self.current_task_id[cpu_id] = Some(t.get_id());

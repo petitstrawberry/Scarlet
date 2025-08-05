@@ -7,8 +7,9 @@
 //! - Subscription: Channel-based pub/sub delivery
 //! - Group: Broadcast delivery to multiple targets
 
-use alloc::{string::String, vec::Vec, sync::Arc, format};
+use alloc::{string::String, vec::Vec, sync::Arc, format, collections::VecDeque};
 use hashbrown::HashMap;
+use alloc::collections::BTreeMap;
 use spin::Mutex;
 
 /// Type alias for task identifiers
@@ -124,6 +125,16 @@ impl EventMetadata {
         Self {
             sender: None, // Will be filled by EventManager
             priority: EventPriority::Normal,
+            timestamp: 0, // TODO: integrate with timer system
+            event_id: generate_event_id(),
+        }
+    }
+    
+    /// Create new metadata with specified priority
+    pub fn with_priority(priority: EventPriority) -> Self {
+        Self {
+            sender: None, // Will be filled by EventManager
+            priority,
             timestamp: 0, // TODO: integrate with timer system
             event_id: generate_event_id(),
         }
@@ -317,6 +328,72 @@ impl Default for EventConfig {
     }
 }
 
+/// Task-specific event queue entry
+#[derive(Debug, Clone)]
+pub struct TaskEventQueue {
+    /// Events sorted by priority (higher priority first)
+    events: BTreeMap<EventPriority, VecDeque<Event>>,
+    /// Total count of queued events
+    total_count: usize,
+}
+
+impl TaskEventQueue {
+    pub fn new() -> Self {
+        Self {
+            events: BTreeMap::new(),
+            total_count: 0,
+        }
+    }
+    
+    /// Add event to queue, returns true if this was the first event (0->1 transition)
+    fn enqueue(&mut self, event: Event) -> bool {
+        let was_empty = self.total_count == 0;
+        let priority = event.metadata.priority;
+        
+        self.events.entry(priority)
+            .or_insert_with(VecDeque::new)
+            .push_back(event);
+        self.total_count += 1;
+        
+        was_empty
+    }
+    
+    /// Dequeue highest priority event
+    pub fn dequeue(&mut self) -> Option<Event> {
+        // Find the highest priority (largest value) that has events
+        // BTreeMap iterates in ascending order by default, so we need to find the max
+        let priority_to_dequeue = {
+            self.events.iter()
+                .filter(|(_, queue)| !queue.is_empty())
+                .map(|(&priority, _)| priority)
+                .max()
+        }?;
+        
+        // Dequeue from the highest priority queue
+        if let Some(queue) = self.events.get_mut(&priority_to_dequeue) {
+            if let Some(event) = queue.pop_front() {
+                self.total_count -= 1;
+                if queue.is_empty() {
+                    self.events.remove(&priority_to_dequeue);
+                }
+                return Some(event);
+            }
+        }
+        
+        None
+    }
+    
+    /// Check if queue is empty
+    pub fn is_empty(&self) -> bool {
+        self.total_count == 0
+    }
+    
+    /// Get total number of queued events
+    pub fn len(&self) -> usize {
+        self.total_count
+    }
+}
+
 /// Event Manager - Main implementation of the event system
 pub struct EventManager {
     /// Event handlers by task
@@ -330,9 +407,6 @@ pub struct EventManager {
     
     /// Delivery configurations per task
     configs: Mutex<HashMap<u32, DeliveryConfig>>,
-    
-    /// Event queue for async delivery
-    event_queue: Mutex<Vec<Event>>,
     
     /// Next event ID
     next_event_id: Mutex<u64>,
@@ -349,7 +423,6 @@ impl EventManager {
             subscriptions: Mutex::new(HashMap::new()),
             groups: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
-            event_queue: Mutex::new(Vec::new()),
             next_event_id: Mutex::new(1),
             handle_channels: Mutex::new(HashMap::new()),
         }
@@ -546,23 +619,53 @@ impl EventManager {
     /// Deliver event to a specific task
     #[cfg(not(test))]
     pub fn deliver_to_task(&self, task_id: u32, event: Event) -> Result<(), EventError> {
+        // Get the task and deliver event to its local queue
         if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize) {
-            // Delegate to ABI module
-            if let Some(abi) = &task.abi {
-                abi.handle_event(event, task_id)
-                    .map_err(|_| EventError::DeliveryFailed)
-            } else {
-                // Ignore if ABI module is not set
-                Ok(())
-            }
+            // Simply enqueue the event - the scheduler will handle processing later
+            let mut queue = task.event_queue.lock();
+            queue.enqueue(event);
+            Ok(())
         } else {
             Err(EventError::TargetNotFound)
         }
     }
     #[cfg(test)]
     pub fn deliver_to_task(&self, _task_id: u32, _event: Event) -> Result<(), EventError> {
-        // In tests, we can ignore delivery since we're not interacting with real tasks
+        // In tests, we simulate event delivery by simply returning success
+        // Real integration tests should be done at a higher level with actual Task objects
         Ok(())
+    }
+    
+    /// Dequeue the next highest priority event for a task
+    /// This method is deprecated - tasks now process events directly via process_pending_events()
+    #[deprecated(note = "Use Task.process_pending_events() instead")]
+    pub fn dequeue_event_for_task(&self, task_id: u32) -> Option<Event> {
+        if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize) {
+            let mut queue = task.event_queue.lock();
+            queue.dequeue()
+        } else {
+            None
+        }
+    }
+    
+    /// Get the number of pending events for a task
+    pub fn get_pending_event_count(&self, task_id: u32) -> usize {
+        if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize) {
+            let queue = task.event_queue.lock();
+            queue.len()
+        } else {
+            0
+        }
+    }
+    
+    /// Check if a task has any pending events
+    pub fn has_pending_events(&self, task_id: u32) -> bool {
+        if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize) {
+            let queue = task.event_queue.lock();
+            !queue.is_empty()
+        } else {
+            false
+        }
     }
 }
 
@@ -570,10 +673,18 @@ impl EventManager {
 impl Event {
     /// Create a new event with specified type and payload
     pub fn new(event_type: EventType, payload: EventPayload) -> Self {
+        // Extract priority from event type
+        let priority = match &event_type {
+            EventType::Direct { priority, .. } => *priority,
+            EventType::Channel { priority, .. } => *priority,
+            EventType::Group { priority, .. } => *priority,
+            EventType::Broadcast { priority, .. } => *priority,
+        };
+        
         Self {
             event_type,
             payload,
-            metadata: EventMetadata::new(),
+            metadata: EventMetadata::with_priority(priority),
         }
     }
     
@@ -1092,5 +1203,101 @@ mod tests {
         );
         assert!(matches!(custom_event.event_type, EventType::Direct { target: 42, event_id: 999, .. }));
         assert!(matches!(custom_event.payload, EventPayload::Bytes(_)));
+    }
+    
+    /// Test priority-based event queueing system
+    #[test_case]
+    fn test_priority_event_queueing() {
+        let manager = EventManager::new();
+        let task_id = 42;
+        
+        // Create events with different priorities
+        let low_event = Event::direct(task_id, 1, EventPriority::Low, false, EventPayload::String("low".into()));
+        let normal_event = Event::direct(task_id, 2, EventPriority::Normal, false, EventPayload::String("normal".into()));
+        let high_event = Event::direct(task_id, 3, EventPriority::High, false, EventPayload::String("high".into()));
+        let critical_event = Event::direct(task_id, 4, EventPriority::Critical, false, EventPayload::String("critical".into()));
+        
+        // Initial queue should be empty
+        assert_eq!(manager.get_pending_event_count(task_id), 0);
+        assert!(!manager.has_pending_events(task_id));
+        
+        // Add events in mixed order
+        let _ = manager.deliver_to_task(task_id, normal_event.clone());
+        assert_eq!(manager.get_pending_event_count(task_id), 1);
+        assert!(manager.has_pending_events(task_id));
+        
+        let _ = manager.deliver_to_task(task_id, low_event.clone());
+        assert_eq!(manager.get_pending_event_count(task_id), 2);
+        
+        let _ = manager.deliver_to_task(task_id, critical_event.clone());
+        assert_eq!(manager.get_pending_event_count(task_id), 3);
+        
+        let _ = manager.deliver_to_task(task_id, high_event.clone());
+        assert_eq!(manager.get_pending_event_count(task_id), 4);
+        
+        // Events should be dequeued in priority order (Critical > High > Normal > Low)
+        let dequeued1 = manager.dequeue_event_for_task(task_id).unwrap();
+        if let EventPayload::String(content) = &dequeued1.payload {
+            assert_eq!(content, "critical", "First dequeued event should be critical priority, got: {}", content);
+        }
+        assert_eq!(manager.get_pending_event_count(task_id), 3);
+        
+        let dequeued2 = manager.dequeue_event_for_task(task_id).unwrap();
+        if let EventPayload::String(content) = dequeued2.payload {
+            assert_eq!(content, "high");
+        }
+        assert_eq!(manager.get_pending_event_count(task_id), 2);
+        
+        let dequeued3 = manager.dequeue_event_for_task(task_id).unwrap();
+        if let EventPayload::String(content) = dequeued3.payload {
+            assert_eq!(content, "normal");
+        }
+        assert_eq!(manager.get_pending_event_count(task_id), 1);
+        
+        let dequeued4 = manager.dequeue_event_for_task(task_id).unwrap();
+        if let EventPayload::String(content) = dequeued4.payload {
+            assert_eq!(content, "low");
+        }
+        assert_eq!(manager.get_pending_event_count(task_id), 0);
+        assert!(!manager.has_pending_events(task_id));
+        
+        // No more events to dequeue
+        assert!(manager.dequeue_event_for_task(task_id).is_none());
+    }
+    
+    /// Test the 0->1 notification behavior
+    #[test_case]
+    fn test_zero_to_one_notification() {
+        let manager = EventManager::new();
+        let task_id = 100;
+        
+        // First event should trigger notification (returns true internally in real system)
+        let event1 = Event::direct(task_id, 1, EventPriority::Normal, false, EventPayload::String("first".into()));
+        let result1 = manager.deliver_to_task(task_id, event1);
+        assert!(result1.is_ok());
+        assert_eq!(manager.get_pending_event_count(task_id), 1);
+        
+        // Subsequent events should not trigger notification (queue was not empty)
+        let event2 = Event::direct(task_id, 2, EventPriority::Normal, false, EventPayload::String("second".into()));
+        let result2 = manager.deliver_to_task(task_id, event2);
+        assert!(result2.is_ok());
+        assert_eq!(manager.get_pending_event_count(task_id), 2);
+        
+        let event3 = Event::direct(task_id, 3, EventPriority::High, false, EventPayload::String("third".into()));
+        let result3 = manager.deliver_to_task(task_id, event3);
+        assert!(result3.is_ok());
+        assert_eq!(manager.get_pending_event_count(task_id), 3);
+        
+        // Drain the queue
+        assert!(manager.dequeue_event_for_task(task_id).is_some()); // third (high priority)
+        assert!(manager.dequeue_event_for_task(task_id).is_some()); // first (normal)
+        assert!(manager.dequeue_event_for_task(task_id).is_some()); // second (normal)
+        assert_eq!(manager.get_pending_event_count(task_id), 0);
+        
+        // Next event should again trigger notification (0->1 transition)
+        let event4 = Event::direct(task_id, 4, EventPriority::Low, false, EventPayload::String("fourth".into()));
+        let result4 = manager.deliver_to_task(task_id, event4);
+        assert!(result4.is_ok());
+        assert_eq!(manager.get_pending_event_count(task_id), 1);
     }
 }

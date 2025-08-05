@@ -236,6 +236,10 @@ pub struct Task {
     pub time_slice: u32,
     /// Software timer handlers
     pub software_timers_handlers: Vec<Arc<dyn TimerHandler>>,
+    /// Task-local event queue with priority ordering
+    pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
+    /// Event processing enabled flag (similar to interrupt enable/disable)
+    pub events_enabled: Mutex<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +325,8 @@ impl Task {
             handle_table: HandleTable::new(),
             time_slice: 10, // Assign 10 ticks by default
             software_timers_handlers: Vec::new(),
+            event_queue: spin::Mutex::new(crate::ipc::event::TaskEventQueue::new()),
+            events_enabled: spin::Mutex::new(true), // Events enabled by default
         };
 
         *taskid += 1;
@@ -1095,6 +1101,61 @@ impl Task {
         if let Some(pos) = self.software_timers_handlers.iter().position(|x| Arc::ptr_eq(x, timer)) {
             self.software_timers_handlers.remove(pos);
         }
+    }
+
+    /// Enable event processing for this task (similar to enabling interrupts)
+    pub fn enable_events(&self) {
+        let mut enabled = self.events_enabled.lock();
+        *enabled = true;
+    }
+    
+    /// Disable event processing for this task (similar to disabling interrupts) 
+    pub fn disable_events(&self) {
+        let mut enabled = self.events_enabled.lock();
+        *enabled = false;
+    }
+    
+    /// Check if events are enabled for this task
+    pub fn events_enabled(&self) -> bool {
+        *self.events_enabled.lock()
+    }
+    
+    /// Process pending events if events are enabled
+    /// This should be called by the scheduler before resuming the task
+    pub fn process_pending_events(&self) -> Result<(), &'static str> {
+        // Check if events are enabled
+        if !self.events_enabled() {
+            return Ok(()); // Events disabled, skip processing
+        }
+        
+        // Check if there are pending events
+        let has_events = {
+            let queue = self.event_queue.lock();
+            !queue.is_empty()
+        };
+        
+        if has_events {
+            // Delegate to ABI module for event processing
+            if let Some(abi) = &self.abi {
+                // Process events one by one until queue is empty or events are disabled
+                while self.events_enabled() {
+                    let event = {
+                        let mut queue = self.event_queue.lock();
+                        queue.dequeue()
+                    };
+                    
+                    match event {
+                        Some(event) => {
+                            // Let ABI handle the event
+                            abi.handle_event(event, self.id as u32)?;
+                        }
+                        None => break, // No more events
+                    }
+                }
+            }
+        }
+        
+        Ok(())
     }
 }
 
