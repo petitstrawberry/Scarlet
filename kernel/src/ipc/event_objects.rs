@@ -3,12 +3,12 @@
 //! This module provides handle-based event IPC objects that integrate
 //! with the KernelObject/HandleTable pattern.
 
-use alloc::{string::String, vec::Vec, sync::Arc, collections::VecDeque, format};
+use alloc::{string::{String, ToString}, vec::Vec, sync::Arc, collections::VecDeque};
 use spin::Mutex;
 
 use crate::object::capability::{CloneOps, EventIpcOps};
 use crate::object::KernelObject;
-use crate::ipc::{Event, EventType, event::EventPriority};
+use crate::ipc::event::{Event, EventDelivery, EventContent, EventPayload, EventPriority};
 
 /// Event errors for KernelObject integration
 #[derive(Debug, Clone)]
@@ -279,11 +279,11 @@ impl EventChannel {
     fn event_matches_filter(&self, event: &Event, filter: &EventFilter) -> bool {
         // Check priority threshold
         if let Some(threshold) = &filter.priority_threshold {
-            let event_priority = match &event.event_type {
-                EventType::Direct { priority, .. } => priority,
-                EventType::Channel { priority, .. } => priority,
-                EventType::Group { priority, .. } => priority,
-                EventType::Broadcast { priority, .. } => priority,
+            let event_priority = match &event.delivery {
+                EventDelivery::Direct { priority, .. } => priority,
+                EventDelivery::Channel { priority, .. } => priority,
+                EventDelivery::Group { priority, .. } => priority,
+                EventDelivery::Broadcast { priority, .. } => priority,
             };
             
             if event_priority < threshold {
@@ -300,11 +300,11 @@ impl EventChannel {
         
         // Check event types (simplified for now)
         if let Some(event_types) = &filter.event_types {
-            let event_type_name = match &event.event_type {
-                EventType::Direct { .. } => "direct",
-                EventType::Channel { .. } => "channel",
-                EventType::Group { .. } => "group",
-                EventType::Broadcast { .. } => "broadcast",
+            let event_type_name = match &event.delivery {
+                EventDelivery::Direct { .. } => "direct",
+                EventDelivery::Channel { .. } => "channel",
+                EventDelivery::Group { .. } => "group",
+                EventDelivery::Broadcast { .. } => "broadcast",
             };
             
             if !event_types.iter().any(|t| t == event_type_name) {
@@ -385,13 +385,16 @@ impl Drop for EventChannel {
             if sub_state.active {
                 // Add a special "channel closed" event
                 let close_event = Event::new(
-                    crate::ipc::EventType::Direct {
+                    EventDelivery::Direct {
                         target: 0, // Special marker for channel close
-                        event_id: 0xFFFFFFFF, // Special event ID for channel close
-                        priority: crate::ipc::event::EventPriority::High,
+                        priority: EventPriority::High,
                         reliable: true,
                     },
-                    crate::ipc::EventPayload::String(String::from("CHANNEL_CLOSED"))
+                    EventContent::Custom {
+                        namespace: "system".to_string(),
+                        event_id: 0xFFFFFFFF, // Special event ID for channel close
+                    },
+                    EventPayload::String(String::from("CHANNEL_CLOSED"))
                 );
                 
                 // Force add to queue even if full (important system event)

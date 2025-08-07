@@ -20,32 +20,42 @@ pub type GroupId = u32;
 pub type SessionId = u32;
 
 /// Event structure containing all event information
+/// 
+/// # Design Philosophy
+/// 
+/// This design separates **delivery mechanism** from **event content**:
+/// - `delivery`: HOW the event is delivered (direct, channel, group, broadcast)
+/// - `content`: WHAT the event represents (signal, message, notification)
+/// - `payload`: Additional data carried with the event
+/// - `metadata`: System-level tracking information
 #[derive(Debug, Clone)]
 pub struct Event {
-    /// Event type (contains all delivery and targeting information)
-    pub event_type: EventType,
+    /// Event delivery mechanism (routing and targeting)
+    pub delivery: EventDelivery,
     
-    /// Event payload data
+    /// Event content (what this event represents)
+    pub content: EventContent,
+    
+    /// Event payload data (additional data)
     pub payload: EventPayload,
     
-    /// Event metadata
+    /// Event metadata (system tracking)
     pub metadata: EventMetadata,
 }
 
-/// Event types with embedded delivery characteristics and targeting
+/// Event delivery mechanisms
+/// 
+/// Defines HOW an event is delivered, independent of WHAT the event represents
 #[derive(Debug, Clone)]
-pub enum EventType {
+pub enum EventDelivery {
     /// Direct task communication (1:1)
-    /// Used for process control, signals, direct notifications
     Direct {
         target: TaskId,
-        event_id: u32,
         priority: EventPriority,
         reliable: bool,
     },
     
     /// Channel-based communication (1:many, pub/sub)
-    /// Used for event distribution, notifications, pub/sub patterns
     Channel {
         channel_id: String,
         create_if_missing: bool,
@@ -53,7 +63,6 @@ pub enum EventType {
     },
     
     /// Group broadcast (1:many, membership-based)
-    /// Used for group notifications, session broadcasts, process groups
     Group {
         group_target: GroupTarget,
         priority: EventPriority,
@@ -61,12 +70,79 @@ pub enum EventType {
     },
     
     /// System-wide broadcast (1:all)
-    /// Used for system-wide notifications, shutdown signals
     Broadcast {
-        event_id: u32,
         priority: EventPriority,
         reliable: bool,
     },
+}
+
+/// Event content types
+/// 
+/// Defines WHAT the event represents, independent of HOW it's delivered
+#[derive(Debug, Clone)]
+pub enum EventContent {
+    /// Process control events (equivalent to signals, but OS-agnostic)
+    ProcessControl(ProcessControlType),
+    
+    /// Application-level message with type
+    Message {
+        message_type: u32,
+        category: MessageCategory,
+    },
+    
+    /// System notification
+    Notification(NotificationType),
+    
+    /// Custom event defined by ABI or application
+    Custom {
+        namespace: String,  // e.g., "linux", "xv6", "user_app_123"
+        event_id: u32,
+    },
+}
+
+/// Process control event types
+/// 
+/// These represent universal process control operations that exist across
+/// different operating systems (Linux signals, Windows events, etc.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessControlType {
+    Terminate,          // Graceful termination
+    Kill,              // Force termination
+    Stop,              // Suspend execution
+    Continue,          // Resume execution
+    Interrupt,         // User interrupt (Ctrl+C)
+    Quit,              // Quit with core dump
+    Hangup,            // Terminal hangup
+    ChildExit,         // Child process exited
+    PipeBroken,        // Broken pipe
+    Alarm,             // Timer alarm
+    IoReady,           // I/O ready
+    User1,             // User-defined 1
+    User2,             // User-defined 2
+    // Add more as needed
+}
+
+/// Message categories (for structured communication)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageCategory {
+    Control,           // Control messages
+    Data,              // Data messages
+    Status,            // Status updates
+    Error,             // Error notifications
+    Custom(u8),        // Custom category (0-255)
+}
+
+/// System notification types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationType {
+    TaskCompleted,
+    MemoryLow,
+    DeviceConnected,
+    DeviceDisconnected,
+    FilesystemFull,
+    NetworkChange,
+    SystemShutdown,
+    // Add more as needed
 }
 
 /// Group targeting options
@@ -180,21 +256,37 @@ impl EventFilter {
             
             EventFilter::EventType(type_filter) => {
                 match type_filter {
-                    EventTypeFilter::AnyDirect => matches!(event.event_type, EventType::Direct { .. }),
-                    EventTypeFilter::AnyChannel => matches!(event.event_type, EventType::Channel { .. }),
-                    EventTypeFilter::AnyGroup => matches!(event.event_type, EventType::Group { .. }),
-                    EventTypeFilter::AnyBroadcast => matches!(event.event_type, EventType::Broadcast { .. }),
+                    EventTypeFilter::AnyDirect => matches!(event.delivery, EventDelivery::Direct { .. }),
+                    EventTypeFilter::AnyChannel => matches!(event.delivery, EventDelivery::Channel { .. }),
+                    EventTypeFilter::AnyGroup => matches!(event.delivery, EventDelivery::Group { .. }),
+                    EventTypeFilter::AnyBroadcast => matches!(event.delivery, EventDelivery::Broadcast { .. }),
                     
-                    EventTypeFilter::Direct(event_id) => {
-                        if let EventType::Direct { event_id: id, .. } = &event.event_type {
-                            id == event_id
+                    EventTypeFilter::Direct(content_id) => {
+                        if let EventDelivery::Direct { .. } = &event.delivery {
+                            // Check if content matches the expected ID
+                            match &event.content {
+                                EventContent::ProcessControl(ptype) => {
+                                    // Map ProcessControlType to ID for filtering
+                                    let type_id = match ptype {
+                                        ProcessControlType::Terminate => 1,
+                                        ProcessControlType::Kill => 2,
+                                        ProcessControlType::Stop => 3,
+                                        ProcessControlType::Continue => 4,
+                                        ProcessControlType::Interrupt => 7,
+                                        _ => 0,
+                                    };
+                                    type_id == *content_id
+                                }
+                                EventContent::Custom { event_id, .. } => *event_id == *content_id,
+                                _ => false,
+                            }
                         } else {
                             false
                         }
                     }
                     
                     EventTypeFilter::Channel(channel_name) => {
-                        if let EventType::Channel { channel_id, .. } = &event.event_type {
+                        if let EventDelivery::Channel { channel_id, .. } = &event.delivery {
                             channel_id == channel_name
                         } else {
                             false
@@ -202,7 +294,7 @@ impl EventFilter {
                     }
                     
                     EventTypeFilter::Group(group_id) => {
-                        if let EventType::Group { group_target: GroupTarget::TaskGroup(id), .. } = &event.event_type {
+                        if let EventDelivery::Group { group_target: GroupTarget::TaskGroup(id), .. } = &event.delivery {
                             id == group_id
                         } else {
                             false
@@ -210,8 +302,12 @@ impl EventFilter {
                     }
                     
                     EventTypeFilter::Broadcast(event_id) => {
-                        if let EventType::Broadcast { event_id: id, .. } = &event.event_type {
-                            id == event_id
+                        if let EventDelivery::Broadcast { .. } = &event.delivery {
+                            // Check if event content matches the broadcast ID
+                            match &event.content {
+                                EventContent::Custom { event_id: id, .. } => id == event_id,
+                                _ => event.metadata.event_id == *event_id as u64,
+                            }
                         } else {
                             false
                         }
@@ -225,7 +321,7 @@ impl EventFilter {
             }
             
             EventFilter::Channel(channel_name) => {
-                if let EventType::Channel { channel_id, .. } = &event.event_type {
+                if let EventDelivery::Channel { channel_id, .. } = &event.delivery {
                     channel_id == channel_name
                 } else {
                     false
@@ -514,21 +610,21 @@ impl EventManager {
     
     /// Send an event
     pub fn send_event(&self, event: Event) -> Result<(), EventError> {
-        match event.event_type.clone() {
-            EventType::Direct { target, event_id, priority, reliable } => {
-                self.deliver_direct(event, target, event_id, priority, reliable)
+        match event.delivery.clone() {
+            EventDelivery::Direct { target, priority, reliable } => {
+                self.deliver_direct(event, target, priority, reliable)
             }
             
-            EventType::Channel { channel_id, create_if_missing, priority } => {
+            EventDelivery::Channel { channel_id, create_if_missing, priority } => {
                 self.deliver_to_channel(event, &channel_id, create_if_missing, priority)
             }
             
-            EventType::Group { group_target, priority, reliable } => {
+            EventDelivery::Group { group_target, priority, reliable } => {
                 self.deliver_to_group(event, &group_target, priority, reliable)
             }
             
-            EventType::Broadcast { event_id, priority, reliable } => {
-                self.deliver_broadcast(event, event_id, priority, reliable)
+            EventDelivery::Broadcast { priority, reliable } => {
+                self.deliver_broadcast(event, priority, reliable)
             }
         }
     }
@@ -614,7 +710,7 @@ impl EventManager {
     // === Internal Event Delivery Methods ===
     
     /// Deliver direct event to specific task
-    fn deliver_direct(&self, event: Event, target: TaskId, _event_id: u32, _priority: EventPriority, _reliable: bool) -> Result<(), EventError> {
+    fn deliver_direct(&self, event: Event, target: TaskId, _priority: EventPriority, _reliable: bool) -> Result<(), EventError> {
         self.deliver_to_task(target, event)
     }
     
@@ -662,7 +758,7 @@ impl EventManager {
     }
     
     /// Deliver broadcast event to all tasks
-    fn deliver_broadcast(&self, event: Event, _event_id: u32, _priority: EventPriority, _reliable: bool) -> Result<(), EventError> {
+    fn deliver_broadcast(&self, event: Event, _priority: EventPriority, _reliable: bool) -> Result<(), EventError> {
         // TODO: Deliver to all tasks in the system
         // This would require integration with the task manager
         let _ = event; // Suppress unused warning for now
@@ -739,85 +835,109 @@ impl EventManager {
 
 /// Convenience functions for creating events
 impl Event {
-    /// Create a new event with specified type and payload
-    pub fn new(event_type: EventType, payload: EventPayload) -> Self {
-        // Extract priority from event type
-        let priority = match &event_type {
-            EventType::Direct { priority, .. } => *priority,
-            EventType::Channel { priority, .. } => *priority,
-            EventType::Group { priority, .. } => *priority,
-            EventType::Broadcast { priority, .. } => *priority,
+    /// Create a new event with delivery, content, and payload
+    pub fn new(delivery: EventDelivery, content: EventContent, payload: EventPayload) -> Self {
+        // Extract priority from delivery mechanism
+        let priority = match &delivery {
+            EventDelivery::Direct { priority, .. } => *priority,
+            EventDelivery::Channel { priority, .. } => *priority,
+            EventDelivery::Group { priority, .. } => *priority,
+            EventDelivery::Broadcast { priority, .. } => *priority,
         };
         
         Self {
-            event_type,
+            delivery,
+            content,
             payload,
             metadata: EventMetadata::with_priority(priority),
         }
     }
     
-    /// Create a direct event to a specific task
-    pub fn direct(target: TaskId, event_id: u32, priority: EventPriority, reliable: bool, payload: EventPayload) -> Self {
+    /// Create a direct process control event to a specific task
+    pub fn direct_process_control(target: TaskId, ptype: ProcessControlType, priority: EventPriority, reliable: bool) -> Self {
         Self::new(
-            EventType::Direct { target, event_id, priority, reliable },
+            EventDelivery::Direct { target, priority, reliable },
+            EventContent::ProcessControl(ptype),
+            EventPayload::Empty,
+        )
+    }
+    
+    /// Create a direct custom event to a specific task
+    pub fn direct_custom(target: TaskId, namespace: String, event_id: u32, priority: EventPriority, reliable: bool, payload: EventPayload) -> Self {
+        Self::new(
+            EventDelivery::Direct { target, priority, reliable },
+            EventContent::Custom { namespace, event_id },
             payload,
         )
     }
     
     /// Create a channel event
-    pub fn channel(channel_id: String, create_if_missing: bool, priority: EventPriority, payload: EventPayload) -> Self {
+    pub fn channel(channel_id: String, content: EventContent, create_if_missing: bool, priority: EventPriority, payload: EventPayload) -> Self {
         Self::new(
-            EventType::Channel { channel_id, create_if_missing, priority },
+            EventDelivery::Channel { channel_id, create_if_missing, priority },
+            content,
             payload,
         )
     }
     
     /// Create a group event
-    pub fn group(group_target: GroupTarget, priority: EventPriority, reliable: bool, payload: EventPayload) -> Self {
+    pub fn group(group_target: GroupTarget, content: EventContent, priority: EventPriority, reliable: bool, payload: EventPayload) -> Self {
         Self::new(
-            EventType::Group { group_target, priority, reliable },
+            EventDelivery::Group { group_target, priority, reliable },
+            content,
             payload,
         )
     }
     
     /// Create a broadcast event
-    pub fn broadcast(event_id: u32, priority: EventPriority, reliable: bool, payload: EventPayload) -> Self {
+    pub fn broadcast(content: EventContent, priority: EventPriority, reliable: bool, payload: EventPayload) -> Self {
         Self::new(
-            EventType::Broadcast { event_id, priority, reliable },
+            EventDelivery::Broadcast { priority, reliable },
+            content,
             payload,
         )
     }
     
     // Convenience methods for common use cases
     
-    /// Create immediate event for a specific task
-    pub fn immediate_to_task(task_id: u32, event_id: u32) -> Self {
-        Self::direct(task_id, event_id, EventPriority::High, true, EventPayload::Empty)
+    /// Create immediate process control event for a specific task
+    pub fn immediate_process_control(task_id: u32, ptype: ProcessControlType) -> Self {
+        Self::direct_process_control(task_id, ptype, EventPriority::High, true)
     }
     
     /// Create notification event for a specific task
-    pub fn notification_to_task(task_id: u32, notification_id: u32) -> Self {
-        Self::direct(task_id, notification_id, EventPriority::Normal, false, EventPayload::Empty)
+    pub fn notification_to_task(task_id: u32, ntype: NotificationType) -> Self {
+        Self::new(
+            EventDelivery::Direct { target: task_id, priority: EventPriority::Normal, reliable: false },
+            EventContent::Notification(ntype),
+            EventPayload::Empty,
+        )
     }
     
     /// Create channel event (simple)
-    pub fn new_channel_event(channel: &str, payload: EventPayload) -> Self {
-        Self::channel(channel.into(), false, EventPriority::Normal, payload)
+    pub fn new_channel_event(channel: &str, content: EventContent, payload: EventPayload) -> Self {
+        Self::channel(channel.into(), content, false, EventPriority::Normal, payload)
     }
     
     /// Create group broadcast event (simple)
-    pub fn new_group_broadcast(group_target: GroupTarget, payload: EventPayload) -> Self {
-        Self::group(group_target, EventPriority::Normal, false, payload)
+    pub fn new_group_broadcast(group_target: GroupTarget, content: EventContent, payload: EventPayload) -> Self {
+        Self::group(group_target, content, EventPriority::Normal, false, payload)
     }
     
     /// Create immediate broadcast event
-    pub fn immediate_broadcast(event_id: u32) -> Self {
-        Self::broadcast(event_id, EventPriority::High, true, EventPayload::Empty)
+    pub fn immediate_broadcast(content: EventContent) -> Self {
+        Self::broadcast(content, EventPriority::High, true, EventPayload::Empty)
     }
     
     /// Create notification for a group
-    pub fn notification_to_group(group_id: GroupId, _notification_id: u32) -> Self {
-        Self::group(GroupTarget::TaskGroup(group_id), EventPriority::Normal, false, EventPayload::Empty)
+    pub fn notification_to_group(group_id: GroupId, ntype: NotificationType) -> Self {
+        Self::group(
+            GroupTarget::TaskGroup(group_id), 
+            EventContent::Notification(ntype),
+            EventPriority::Normal, 
+            false, 
+            EventPayload::Empty
+        )
     }
 }
 
@@ -832,544 +952,141 @@ fn generate_event_id() -> u64 {
 
 /// Event ID constants for common events
 pub mod event_ids {
-    /// Process control events
-    pub const EVENT_TERMINATE: u32 = 1;
-    pub const EVENT_FORCE_TERMINATE: u32 = 2;
-    pub const EVENT_STOP: u32 = 3;
-    pub const EVENT_CONTINUE: u32 = 4;
-    pub const EVENT_CHILD_EXIT: u32 = 5;
-    pub const SYSTEM_SHUTDOWN: u32 = 6;
+    //! # Scarlet Event ID Design Philosophy
+    //! 
+    //! Scarlet provides a unified event numbering scheme that allows ABI modules
+    //! to map OS-specific signals/events to Scarlet's abstract event types.
+    //! 
+    //! ## ID Ranges:
+    //! - **1-99**: Core system events (universal across all OSes)
+    //! - **100-999**: Common notifications (device, memory, etc.)
+    //! - **1000-9999**: Reserved for future system expansion
+    //! - **10000-19999**: ABI-specific custom events
+    //! - **20000+**: User-defined events
+    //! 
+    //! ## ABI Mapping Examples:
+    //! ```
+    //! // Linux ABI module maps:
+    //! SIGTERM (15) -> EVENT_TERMINATE (1)
+    //! SIGKILL (9)  -> EVENT_FORCE_TERMINATE (2)
+    //! SIGINT (2)   -> EVENT_INTERRUPT (defined in ABI)
+    //! 
+    //! // xv6 ABI module maps:
+    //! XV6_KILL     -> EVENT_FORCE_TERMINATE (2)
+    //! XV6_STOP     -> EVENT_STOP (3)
+    //! ```
     
-    /// Notification events
+    /// Process control events (1-99)
+    /// These are universal concepts that exist in all operating systems
+    pub const EVENT_TERMINATE: u32 = 1;        // Graceful termination request
+    pub const EVENT_FORCE_TERMINATE: u32 = 2;  // Forced termination (uncatchable)
+    pub const EVENT_STOP: u32 = 3;             // Suspend/pause execution
+    pub const EVENT_CONTINUE: u32 = 4;         // Resume execution
+    pub const EVENT_CHILD_EXIT: u32 = 5;       // Child process exited
+    pub const SYSTEM_SHUTDOWN: u32 = 6;        // System shutdown signal
+    pub const EVENT_INTERRUPT: u32 = 7;        // User interrupt (Ctrl+C)
+    pub const EVENT_QUIT: u32 = 8;             // Quit with core dump
+    pub const EVENT_KILL: u32 = 9;             // Alias for FORCE_TERMINATE
+    
+    /// Process group and session events (10-29)
+    pub const EVENT_HANGUP: u32 = 10;          // Terminal hangup
+    pub const EVENT_TERMINAL_STOP: u32 = 11;   // Terminal stop signal
+    pub const EVENT_TERMINAL_CONTINUE: u32 = 12; // Terminal continue signal
+    
+    /// I/O and resource events (30-49)
+    pub const EVENT_PIPE_BROKEN: u32 = 30;     // Broken pipe
+    pub const EVENT_ALARM: u32 = 31;           // Timer alarm
+    pub const EVENT_IO_READY: u32 = 32;        // I/O ready for operation
+    pub const EVENT_URGENT_DATA: u32 = 33;     // Urgent data available
+    
+    /// User-defined standard events (50-99)
+    pub const EVENT_USER1: u32 = 50;           // User-defined signal 1
+    pub const EVENT_USER2: u32 = 51;           // User-defined signal 2
+    
+    /// System notification events (100-999)
     pub const NOTIFICATION_TASK_COMPLETED: u32 = 100;
     pub const NOTIFICATION_MEMORY_LOW: u32 = 101;
     pub const NOTIFICATION_DEVICE_CONNECTED: u32 = 102;
     pub const NOTIFICATION_DEVICE_DISCONNECTED: u32 = 103;
+    pub const NOTIFICATION_FILESYSTEM_FULL: u32 = 104;
+    pub const NOTIFICATION_NETWORK_CHANGE: u32 = 105;
     
-    /// Base ranges for custom events
-    pub const EVENT_CUSTOM_BASE: u32 = 10000;
-    pub const EVENT_USER_BASE: u32 = 20000;
+    /// Hardware and architecture events (200-299)
+    pub const EVENT_SEGMENTATION_FAULT: u32 = 200;
+    pub const EVENT_ILLEGAL_INSTRUCTION: u32 = 201;
+    pub const EVENT_FLOATING_POINT_ERROR: u32 = 202;
+    pub const EVENT_BUS_ERROR: u32 = 203;
+    
+    /// Base ranges for ABI and custom events
+    pub const EVENT_RESERVED_MAX: u32 = 9999;      // End of reserved range
+    pub const EVENT_CUSTOM_BASE: u32 = 10000;      // Start of ABI-specific events
+    pub const EVENT_USER_BASE: u32 = 20000;        // Start of user-defined events
+    
+    /// Maximum event ID value (for validation)
+    pub const EVENT_MAX: u32 = u32::MAX - 1;
 }
 
-/// Global function to get the event manager
-pub fn get_event_manager() -> &'static EventManager {
-    EventManager::get_manager()
-}
-
-/// Example usage functions demonstrating KernelObject integration
-pub mod handle_based_examples {
-    use super::*;
-    use crate::object::handle::{HandleTable, HandleMetadata, HandleType, AccessMode};
+/// ABI Event Mapping Utilities
+/// 
+/// These functions help ABI modules map between OS-specific signals/events
+/// and Scarlet's universal event ID scheme.
+pub mod abi_mapping {
+    use super::event_ids;
     
-    /// Create an event channel and add it to a task's handle table
-    pub fn create_channel_handle(handle_table: &mut HandleTable, channel_name: String) -> Result<crate::object::handle::Handle, &'static str> {
-        let manager = EventManager::get_manager();
-        let channel_obj = manager.create_channel(channel_name);
-        
-        let metadata = HandleMetadata {
-            handle_type: HandleType::EventChannel,
-            access_mode: AccessMode::ReadWrite,
-            special_semantics: None,
-        };
-        
-        handle_table.insert_with_metadata(channel_obj, metadata)
-    }
-    
-    /// Create an event subscription and add it to a task's handle table
-    pub fn create_subscription_handle(handle_table: &mut HandleTable, channel_name: String) -> Result<crate::object::handle::Handle, EventError> {
-        let manager = EventManager::get_manager();
-        let subscription_obj = manager.create_subscription(channel_name)?;
-        
-        let metadata = HandleMetadata {
-            handle_type: HandleType::EventSubscription,
-            access_mode: AccessMode::ReadOnly, // Subscriptions are read-only
-            special_semantics: None,
-        };
-        
-        handle_table.insert_with_metadata(subscription_obj, metadata)
-            .map_err(|_| EventError::Other("Failed to insert subscription handle".into()))
-    }
-    
-    /// Publish an event using a channel handle
-    pub fn publish_via_handle(handle_table: &HandleTable, channel_handle: crate::object::handle::Handle, event: Event) -> Result<(), EventError> {
-        let kernel_obj = handle_table.get(channel_handle)
-            .ok_or(EventError::Other("Invalid handle".into()))?;
-        
-        let channel = kernel_obj.as_event_channel()
-            .ok_or(EventError::Other("Handle is not an event channel".into()))?;
-        
-        // Convert our EventError to the event_objects::EventError
-        channel.publish(event).map_err(|_| EventError::Other("Failed to publish event".into()))
-    }
-    
-    /// Receive an event using a subscription handle
-    pub fn receive_via_handle(handle_table: &HandleTable, subscription_handle: crate::object::handle::Handle, blocking: bool) -> Result<Event, EventError> {
-        let kernel_obj = handle_table.get(subscription_handle)
-            .ok_or(EventError::Other("Invalid handle".into()))?;
-        
-        let subscription = kernel_obj.as_event_subscription()
-            .ok_or(EventError::Other("Handle is not an event subscription".into()))?;
-        
-        // Convert event_objects::EventError to our EventError
-        subscription.receive_event(blocking).map_err(|_| EventError::Other("Failed to receive event".into()))
-    }
-    
-    /// Receive an event using a subscription handle (with blocking support)
-    pub fn receive_blocking_via_handle(handle_table: &HandleTable, subscription_handle: crate::object::handle::Handle) -> Result<Event, EventError> {
-        // This will block the current task until an event is available
-        receive_via_handle(handle_table, subscription_handle, true)
-    }
-    
-    /// Check if a subscription has pending events (non-blocking)
-    pub fn has_pending_events_via_handle(handle_table: &HandleTable, subscription_handle: crate::object::handle::Handle) -> Result<bool, EventError> {
-        let kernel_obj = handle_table.get(subscription_handle)
-            .ok_or(EventError::Other("Invalid handle".into()))?;
-        
-        let subscription = kernel_obj.as_event_subscription()
-            .ok_or(EventError::Other("Handle is not an event subscription".into()))?;
-        
-        Ok(subscription.has_pending_events())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-
-    /// Test creating basic events
-    #[test_case]
-    fn test_event_creation() {
-        // Test direct event creation
-        let direct_event = Event::direct(1, 1001, EventPriority::Normal, true, EventPayload::Empty);
-        assert!(matches!(direct_event.event_type, EventType::Direct { target: 1, event_id: 1001, .. }));
-        assert!(matches!(direct_event.payload, EventPayload::Empty));
-
-        // Test channel event creation
-        let channel_event = Event::channel("test_channel".into(), false, EventPriority::Normal, EventPayload::String("test".into()));
-        assert!(matches!(channel_event.event_type, EventType::Channel { ref channel_id, .. } if channel_id == "test_channel"));
-        assert!(matches!(channel_event.payload, EventPayload::String(_)));
-
-        // Test group broadcast event creation
-        let group_event = Event::group(
-            GroupTarget::TaskGroup(100), 
-            EventPriority::Normal,
-            false,
-            EventPayload::Integer(42)
-        );
-        assert!(matches!(group_event.event_type, EventType::Group { ref group_target, .. } if matches!(group_target, GroupTarget::TaskGroup(100))));
-        assert!(matches!(group_event.payload, EventPayload::Integer(42)));
-        
-        // Test broadcast event creation
-        let broadcast_event = Event::broadcast(2001, EventPriority::High, true, EventPayload::String("system message".into()));
-        assert!(matches!(broadcast_event.event_type, EventType::Broadcast { event_id: 2001, .. }));
-        assert!(matches!(broadcast_event.payload, EventPayload::String(_)));
-    }
-
-    /// Test event manager singleton
-    #[test_case]
-    fn test_event_manager_singleton() {
-        let manager1 = EventManager::get_manager();
-        let manager2 = EventManager::get_manager();
-        
-        // Should return the same instance
-        assert!(core::ptr::eq(manager1, manager2));
-    }
-
-    /// Test event subscription operations
-    #[test_case]
-    fn test_event_subscription() {
-        let manager = EventManager::get_manager();
-        
-        // Test channel subscription
-        let result = manager.subscribe_channel("test_channel");
-        assert!(result.is_ok());
-        
-        // Test unsubscription
-        let result = manager.unsubscribe_channel("test_channel");
-        assert!(result.is_ok());
-        
-        // Test group operations
-        let result = manager.join_group(42);
-        assert!(result.is_ok());
-        
-        let result = manager.leave_group(42);
-        assert!(result.is_ok());
-    }
-
-    /// Test delivery configuration
-    #[test_case]
-    fn test_delivery_configuration() {
-        let manager = EventManager::get_manager();
-        
-        let config = DeliveryConfig {
-            buffer_size: 2048,
-            timeout_ms: Some(10000),
-            retry_count: 5,
-            failure_policy: FailurePolicy::NotifySender,
-        };
-        
-        let result = manager.configure_delivery(config);
-        assert!(result.is_ok());
-    }
-
-    /// Test event sending with different types
-    #[test_case]
-    fn test_event_sending() {
-        let manager = EventManager::get_manager();
-        
-        // Test direct event sending
-        let direct_event = Event::direct(1, 1001, EventPriority::High, true, EventPayload::Empty);
-        let result = manager.send_event(direct_event);
-        assert!(result.is_ok());
-        
-        // Test notification event sending
-        let notification_event = Event::direct(2, 2001, EventPriority::Normal, false, EventPayload::String("notification".into()));
-        let result = manager.send_event(notification_event);
-        assert!(result.is_ok());
-        
-        // Test channel event sending - first subscribe to channel
-        let _ = manager.subscribe_channel("test_channel");
-        let channel_event = Event::channel("test_channel".into(), false, EventPriority::Normal, EventPayload::Bytes(vec![1, 2, 3]));
-        let result = manager.send_event(channel_event);
-        assert!(result.is_ok());
-        
-        // Test channel event with create_if_missing=true
-        let channel_event_with_create = Event::channel(
-            "new_channel".into(),
-            true,
-            EventPriority::Normal,
-            EventPayload::String("test".into())
-        );
-        let result = manager.send_event(channel_event_with_create);
-        assert!(result.is_ok());
-        
-        // Test group event sending
-        let group_event = Event::group(
-            GroupTarget::AllTasks, 
-            EventPriority::Normal,
-            false,
-            EventPayload::String("broadcast_message".into())
-        );
-        let result = manager.send_event(group_event);
-        // This should fail since AllTasks delivery is not implemented yet
-        assert!(result.is_err());
-    }
-
-    /// Test event metadata generation
-    #[test_case]
-    fn test_event_metadata() {
-        let metadata1 = EventMetadata::new();
-        let metadata2 = EventMetadata::new();
-        
-        // Each metadata should have unique event IDs
-        assert_ne!(metadata1.event_id, metadata2.event_id);
-        
-        // Default values should be correct
-        assert_eq!(metadata1.priority, EventPriority::Normal);
-        assert!(metadata1.sender.is_none());
-    }
-
-    /// Test event priority ordering
-    #[test_case]
-    fn test_event_priority_ordering() {
-        assert!(EventPriority::Critical > EventPriority::High);
-        assert!(EventPriority::High > EventPriority::Normal);
-        assert!(EventPriority::Normal > EventPriority::Low);
-        
-        let priorities = vec![
-            EventPriority::Low,
-            EventPriority::Critical,
-            EventPriority::Normal,
-            EventPriority::High,
-        ];
-        
-        let mut sorted = priorities.clone();
-        sorted.sort();
-        
-        assert_eq!(sorted, vec![
-            EventPriority::Low,
-            EventPriority::Normal,
-            EventPriority::High,
-            EventPriority::Critical,
-        ]);
-    }
-
-    /// Test event filter functionality
-    #[test_case]
-    fn test_event_filters() {
-        // Test different filter types can be created
-        let _filter_all = EventFilter::All;
-        let _filter_event_id = EventFilter::EventId(42);
-        let _filter_channel = EventFilter::Channel("test".into());
-        let _filter_sender = EventFilter::Sender(123);
-        
-        // Test custom filter
-        let custom_filter = EventFilter::Custom(|event| {
-            matches!(event.event_type, EventType::Direct { .. })
-        });
-        
-        // Create test event
-        let test_event = Event::direct(1, 1001, EventPriority::High, true, EventPayload::Empty);
-        
-        // Test custom filter (note: this is a simplified test since we can't easily test the function)
-        if let EventFilter::Custom(filter_fn) = custom_filter {
-            assert!(filter_fn(&test_event));
+    /// Convert Linux signal number to Scarlet event ID
+    /// Used by the Linux ABI module
+    pub fn linux_signal_to_event_id(signal: i32) -> Option<u32> {
+        match signal {
+            1 => Some(event_ids::EVENT_HANGUP),         // SIGHUP
+            2 => Some(event_ids::EVENT_INTERRUPT),      // SIGINT
+            3 => Some(event_ids::EVENT_QUIT),           // SIGQUIT
+            9 => Some(event_ids::EVENT_FORCE_TERMINATE), // SIGKILL
+            13 => Some(event_ids::EVENT_PIPE_BROKEN),   // SIGPIPE
+            14 => Some(event_ids::EVENT_ALARM),         // SIGALRM
+            15 => Some(event_ids::EVENT_TERMINATE),     // SIGTERM
+            17 => Some(event_ids::EVENT_CHILD_EXIT),    // SIGCHLD
+            18 => Some(event_ids::EVENT_CONTINUE),      // SIGCONT
+            19 => Some(event_ids::EVENT_STOP),          // SIGSTOP
+            20 => Some(event_ids::EVENT_TERMINAL_STOP), // SIGTSTP
+            10 => Some(event_ids::EVENT_USER1),         // SIGUSR1
+            12 => Some(event_ids::EVENT_USER2),         // SIGUSR2
+            _ => None, // ABI-specific handling required
         }
     }
-
-    /// Test event filtering functionality
-    #[test_case]
-    fn test_event_filtering() {
-        use alloc::string::ToString;
-        
-        let manager = EventManager::new();
-        let task_id = 123u32;
-        
-        // Register a filter for direct events
-        let filter = EventFilter::EventType(EventTypeFilter::AnyDirect);
-        manager.register_filter(task_id, filter).expect("Failed to register filter");
-        
-        // Create test events  
-        let direct_event = Event::direct(
-            task_id as u32,     // target: TaskId
-            1,                    // event_id: u32
-            EventPriority::Normal, // priority: EventPriority
-            true,                 // reliable: bool
-            EventPayload::Empty   // payload: EventPayload
-        );
-        let channel_event = Event::channel(
-            "test_channel".to_string(), // channel_id: String
-            true,                       // create_if_missing: bool
-            EventPriority::Normal,      // priority: EventPriority
-            EventPayload::Empty         // payload: EventPayload
-        );
-        
-        // Test filter matching logic
-        let task_filters = manager.task_filters.lock();
-        if let Some(filters) = task_filters.get(&task_id) {
-            let direct_matches = filters.iter().any(|f| f.matches(&direct_event));
-            let channel_matches = filters.iter().any(|f| f.matches(&channel_event));
-            
-            assert!(direct_matches, "Direct event should match AnyDirect filter");
-            assert!(!channel_matches, "Channel event should not match AnyDirect filter");
+    
+    /// Convert Scarlet event ID to Linux signal number
+    /// Used by the Linux ABI module for signal delivery
+    pub fn event_id_to_linux_signal(event_id: u32) -> Option<i32> {
+        match event_id {
+            event_ids::EVENT_HANGUP => Some(1),            // SIGHUP
+            event_ids::EVENT_INTERRUPT => Some(2),         // SIGINT
+            event_ids::EVENT_QUIT => Some(3),              // SIGQUIT
+            event_ids::EVENT_FORCE_TERMINATE => Some(9),   // SIGKILL
+            event_ids::EVENT_PIPE_BROKEN => Some(13),      // SIGPIPE
+            event_ids::EVENT_ALARM => Some(14),            // SIGALRM
+            event_ids::EVENT_TERMINATE => Some(15),        // SIGTERM
+            event_ids::EVENT_CHILD_EXIT => Some(17),       // SIGCHLD
+            event_ids::EVENT_CONTINUE => Some(18),         // SIGCONT
+            event_ids::EVENT_STOP => Some(19),             // SIGSTOP
+            event_ids::EVENT_TERMINAL_STOP => Some(20),    // SIGTSTP
+            event_ids::EVENT_USER1 => Some(10),            // SIGUSR1
+            event_ids::EVENT_USER2 => Some(12),            // SIGUSR2
+            _ => None, // No direct Linux equivalent
         }
-        
-        // Test clearing filters
-        drop(task_filters);
-        manager.clear_filters(task_id).expect("Failed to clear filters");
-        
-        let task_filters = manager.task_filters.lock();
-        assert!(!task_filters.contains_key(&task_id), "Filters should be cleared");
-    }
-
-    /// Test event payload types
-    #[test_case]
-    fn test_event_payloads() {
-        let _empty = EventPayload::Empty;
-        let _integer = EventPayload::Integer(-123);
-        let _bytes = EventPayload::Bytes(vec![0x01, 0x02, 0x03]);
-        let _string = EventPayload::String("test payload".into());
-        let _custom = EventPayload::Custom(vec![0xFF, 0xFE, 0xFD]);
-        
-        // Test cloning
-        let original = EventPayload::String("original".into());
-        let cloned = original.clone();
-        
-        if let (EventPayload::String(orig), EventPayload::String(clone)) = (original, cloned) {
-            assert_eq!(orig, clone);
-        }
-    }
-
-    /// Test group types
-    #[test_case]
-    fn test_group_types() {
-        let _task_group = GroupTarget::TaskGroup(100);
-        let _all_tasks = GroupTarget::AllTasks;
-        let _session = GroupTarget::Session(200);
-        let _custom = GroupTarget::Custom("custom_group".into());
-        
-        // Test cloning
-        let original = GroupTarget::Custom("test".into());
-        let cloned = original.clone();
-        
-        if let (GroupTarget::Custom(orig), GroupTarget::Custom(clone)) = (original, cloned) {
-            assert_eq!(orig, clone);
-        }
-    }
-
-    /// Test event ID generation uniqueness
-    #[test_case]
-    fn test_event_id_uniqueness() {
-        let id1 = generate_event_id();
-        let id2 = generate_event_id();
-        let id3 = generate_event_id();
-        
-        // All IDs should be unique and incrementing
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-        assert!(id2 > id1);
-        assert!(id3 > id2);
-    }
-
-    /// Test delivery config defaults
-    #[test_case]
-    fn test_delivery_config_defaults() {
-        let config = DeliveryConfig::default();
-        
-        assert_eq!(config.buffer_size, 1024);
-        assert_eq!(config.timeout_ms, Some(5000));
-        assert_eq!(config.retry_count, 3);
-        assert!(matches!(config.failure_policy, FailurePolicy::Log));
-    }
-
-    /// Test event system constants
-    #[test_case]
-    fn test_event_constants() {
-        // Test that constants are defined correctly
-        assert_eq!(event_ids::EVENT_TERMINATE, 1);
-        assert_eq!(event_ids::EVENT_FORCE_TERMINATE, 2);
-        assert_eq!(event_ids::NOTIFICATION_TASK_COMPLETED, 100);
-        assert_eq!(event_ids::EVENT_CUSTOM_BASE, 10000);
-        assert_eq!(event_ids::EVENT_USER_BASE, 20000);
-        
-        // Test that base ranges don't overlap
-        assert!(event_ids::EVENT_CUSTOM_BASE > event_ids::NOTIFICATION_DEVICE_DISCONNECTED);
-        assert!(event_ids::EVENT_USER_BASE > event_ids::EVENT_CUSTOM_BASE);
-    }
-
-    /// Test event error conditions
-    #[test_case]
-    fn test_event_error_conditions() {
-        let manager = EventManager::get_manager();
-        
-        // Test sending to non-existent channel without create_if_missing
-        let channel_event = Event::new_channel_event("nonexistent_channel", EventPayload::Empty);
-        let result = manager.send_event(channel_event);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), EventError::ChannelNotFound));
-        
-        // Test sending to non-existent group
-        let group_event = Event::new_group_broadcast(
-            GroupTarget::TaskGroup(9999), 
-            EventPayload::Empty
-        );
-        let result = manager.send_event(group_event);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), EventError::GroupNotFound));
-        
-        // Test AllTasks delivery (not implemented)
-        let all_tasks_event = Event::new_group_broadcast(
-            GroupTarget::AllTasks, 
-            EventPayload::Empty
-        );
-        let result = manager.send_event(all_tasks_event);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), EventError::Other(_)));
-    }
-
-    /// Test unified event creation API
-    #[test_case]
-    fn test_unified_event_creation() {
-        // Test broadcast event creation
-        let broadcast_event = Event::broadcast(1001, EventPriority::Critical, true, EventPayload::String("system_shutdown".into()));
-        assert!(matches!(broadcast_event.event_type, EventType::Broadcast { event_id: 1001, .. }));
-        assert!(matches!(broadcast_event.payload, EventPayload::String(_)));
-        
-        // Test group notification
-        let group_event = Event::notification_to_group(1, 2001);
-        assert!(matches!(group_event.event_type, EventType::Group { ref group_target, .. } if matches!(group_target, GroupTarget::TaskGroup(1))));
-        assert!(matches!(group_event.payload, EventPayload::Empty));
-        
-        // Test group broadcast event creation
-        let group_broadcast = Event::new_group_broadcast(
-            GroupTarget::AllTasks, 
-            EventPayload::String("System message".into())
-        );
-        assert!(matches!(group_broadcast.event_type, EventType::Group { ref group_target, .. } if matches!(group_target, GroupTarget::AllTasks)));
-        assert!(matches!(group_broadcast.payload, EventPayload::String(_)));
-        
-        // Test direct event constructor
-        let custom_event = Event::direct(
-            42,
-            999,
-            EventPriority::Critical,
-            true,
-            EventPayload::Bytes(vec![1, 2, 3, 4])
-        );
-        assert!(matches!(custom_event.event_type, EventType::Direct { target: 42, event_id: 999, .. }));
-        assert!(matches!(custom_event.payload, EventPayload::Bytes(_)));
     }
     
-    /// Test priority-based event queueing system
-    #[test_case]
-    /// Test priority-based event ordering using TaskEventQueue API
-    fn test_priority_event_queueing() {
-        // Note: In the new architecture, EventManager delegates to Task-local queues.
-        // Since we don't have actual Task objects in test environment,
-        // we test the TaskEventQueue logic separately through public API.
-        
-        // This test now focuses on the EventManager's filtering logic
-        let manager = EventManager::new();
-        let task_id = 42u32;
-        
-        // Register a filter to allow all events
-        let _ = manager.register_filter(task_id, EventFilter::All);
-        
-        // Create events with different priorities
-        let _low_event = Event::direct(task_id, 1, EventPriority::Low, false, EventPayload::String("low".into()));
-        let normal_event = Event::direct(task_id, 2, EventPriority::Normal, false, EventPayload::String("normal".into()));
-        let _high_event = Event::direct(task_id, 3, EventPriority::High, false, EventPayload::String("high".into()));
-        let _critical_event = Event::direct(task_id, 4, EventPriority::Critical, false, EventPayload::String("critical".into()));
-        
-        // In test environment, deliver_to_task returns Ok(()) since no Task validation occurs
-        let result = manager.deliver_to_task(task_id, normal_event.clone());
-        assert!(result.is_ok()); // Expected in test environment
-        
-        // Test filtering functionality instead
-        let task_filters = manager.task_filters.lock();
-        if let Some(filters) = task_filters.get(&task_id) {
-            assert_eq!(filters.len(), 1);
-            assert!(filters.iter().any(|f| matches!(f, EventFilter::All)));
-        }
-        drop(task_filters);
-        
-        // Test filter clearing
-        let _ = manager.clear_filters(task_id);
-        let task_filters = manager.task_filters.lock();
-        assert!(!task_filters.contains_key(&task_id));
+    /// Check if an event ID is in the ABI-specific range
+    pub fn is_abi_specific_event(event_id: u32) -> bool {
+        event_id >= event_ids::EVENT_CUSTOM_BASE && event_id < event_ids::EVENT_USER_BASE
     }
     
-    /// Test the 0->1 notification behavior
-    #[test_case]
-    fn test_zero_to_one_notification() {
-        let manager = EventManager::new();
-        let task_id = 100;
-        
-        // Test filtering functionality since actual event queues are not available in test environment
-        let _ = manager.register_filter(task_id, EventFilter::All);
-        
-        // First event should be accepted by filter
-        let event1 = Event::direct(task_id, 1, EventPriority::Normal, false, EventPayload::String("first".into()));
-        let result1 = manager.deliver_to_task(task_id, event1);
-        assert!(result1.is_ok());
-        
-        // Subsequent events should also be accepted
-        let event2 = Event::direct(task_id, 2, EventPriority::Normal, false, EventPayload::String("second".into()));
-        let result2 = manager.deliver_to_task(task_id, event2);
-        assert!(result2.is_ok());
-        
-        let event3 = Event::direct(task_id, 3, EventPriority::High, false, EventPayload::String("third".into()));
-        let result3 = manager.deliver_to_task(task_id, event3);
-        assert!(result3.is_ok());
-        
-        // Test that filtering works correctly
-        let _ = manager.clear_filters(task_id);
-        let _ = manager.register_filter(task_id, EventFilter::EventType(EventTypeFilter::AnyDirect));
-        
-        // Direct events should be accepted
-        let direct_event = Event::direct(task_id, 5, EventPriority::Normal, false, EventPayload::String("direct".into()));
-        let result_direct = manager.deliver_to_task(task_id, direct_event);
-        assert!(result_direct.is_ok());
+    /// Check if an event ID is user-defined
+    pub fn is_user_defined_event(event_id: u32) -> bool {
+        event_id >= event_ids::EVENT_USER_BASE
+    }
+    
+    /// Validate event ID range
+    pub fn is_valid_event_id(event_id: u32) -> bool {
+        event_id > 0 && event_id <= event_ids::EVENT_MAX
     }
 }

@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_TOP}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::{self, HandleTable}, sched::scheduler::get_scheduler, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_TOP}, fs::VfsManager, ipc::event::{EventContent, ProcessControlType}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::{self, HandleTable}, sched::scheduler::get_scheduler, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -1188,17 +1188,17 @@ impl Task {
     /// Check if an event is critical and should be processed immediately
     /// Critical events typically cannot be ignored and affect task state directly
     fn is_critical_event(&self, event: &crate::ipc::event::Event) -> bool {
-        use crate::ipc::event::{EventType, EventPriority};
+        use crate::ipc::event::EventPriority;
         
         // High/Critical priority events are always considered critical
         match event.metadata.priority {
             EventPriority::Critical => return true,
             EventPriority::High => {
-                // Some high priority events are critical depending on type
-                match &event.event_type {
-                    EventType::Direct { event_id, .. } => {
+                // Some high priority events are critical depending on content
+                match &event.content {
+                    EventContent::ProcessControl(ProcessControlType::Kill) => true,
+                    EventContent::Custom { event_id, .. } => {
                         // Could map specific event IDs to critical signals
-                        // For now, treat all high priority direct events as critical
                         *event_id == 9 // SIGKILL-like event
                     }
                     _ => false
