@@ -146,7 +146,7 @@ pub enum NotificationType {
 }
 
 /// Group targeting options
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GroupTarget {
     /// Specific task group
     TaskGroup(GroupId),
@@ -950,143 +950,522 @@ fn generate_event_id() -> u64 {
     id
 }
 
-/// Event ID constants for common events
-pub mod event_ids {
-    //! # Scarlet Event ID Design Philosophy
-    //! 
-    //! Scarlet provides a unified event numbering scheme that allows ABI modules
-    //! to map OS-specific signals/events to Scarlet's abstract event types.
-    //! 
-    //! ## ID Ranges:
-    //! - **1-99**: Core system events (universal across all OSes)
-    //! - **100-999**: Common notifications (device, memory, etc.)
-    //! - **1000-9999**: Reserved for future system expansion
-    //! - **10000-19999**: ABI-specific custom events
-    //! - **20000+**: User-defined events
-    //! 
-    //! ## ABI Mapping Examples:
-    //! ```
-    //! // Linux ABI module maps:
-    //! SIGTERM (15) -> EVENT_TERMINATE (1)
-    //! SIGKILL (9)  -> EVENT_FORCE_TERMINATE (2)
-    //! SIGINT (2)   -> EVENT_INTERRUPT (defined in ABI)
-    //! 
-    //! // xv6 ABI module maps:
-    //! XV6_KILL     -> EVENT_FORCE_TERMINATE (2)
-    //! XV6_STOP     -> EVENT_STOP (3)
-    //! ```
-    
-    /// Process control events (1-99)
-    /// These are universal concepts that exist in all operating systems
-    pub const EVENT_TERMINATE: u32 = 1;        // Graceful termination request
-    pub const EVENT_FORCE_TERMINATE: u32 = 2;  // Forced termination (uncatchable)
-    pub const EVENT_STOP: u32 = 3;             // Suspend/pause execution
-    pub const EVENT_CONTINUE: u32 = 4;         // Resume execution
-    pub const EVENT_CHILD_EXIT: u32 = 5;       // Child process exited
-    pub const SYSTEM_SHUTDOWN: u32 = 6;        // System shutdown signal
-    pub const EVENT_INTERRUPT: u32 = 7;        // User interrupt (Ctrl+C)
-    pub const EVENT_QUIT: u32 = 8;             // Quit with core dump
-    pub const EVENT_KILL: u32 = 9;             // Alias for FORCE_TERMINATE
-    
-    /// Process group and session events (10-29)
-    pub const EVENT_HANGUP: u32 = 10;          // Terminal hangup
-    pub const EVENT_TERMINAL_STOP: u32 = 11;   // Terminal stop signal
-    pub const EVENT_TERMINAL_CONTINUE: u32 = 12; // Terminal continue signal
-    
-    /// I/O and resource events (30-49)
-    pub const EVENT_PIPE_BROKEN: u32 = 30;     // Broken pipe
-    pub const EVENT_ALARM: u32 = 31;           // Timer alarm
-    pub const EVENT_IO_READY: u32 = 32;        // I/O ready for operation
-    pub const EVENT_URGENT_DATA: u32 = 33;     // Urgent data available
-    
-    /// User-defined standard events (50-99)
-    pub const EVENT_USER1: u32 = 50;           // User-defined signal 1
-    pub const EVENT_USER2: u32 = 51;           // User-defined signal 2
-    
-    /// System notification events (100-999)
-    pub const NOTIFICATION_TASK_COMPLETED: u32 = 100;
-    pub const NOTIFICATION_MEMORY_LOW: u32 = 101;
-    pub const NOTIFICATION_DEVICE_CONNECTED: u32 = 102;
-    pub const NOTIFICATION_DEVICE_DISCONNECTED: u32 = 103;
-    pub const NOTIFICATION_FILESYSTEM_FULL: u32 = 104;
-    pub const NOTIFICATION_NETWORK_CHANGE: u32 = 105;
-    
-    /// Hardware and architecture events (200-299)
-    pub const EVENT_SEGMENTATION_FAULT: u32 = 200;
-    pub const EVENT_ILLEGAL_INSTRUCTION: u32 = 201;
-    pub const EVENT_FLOATING_POINT_ERROR: u32 = 202;
-    pub const EVENT_BUS_ERROR: u32 = 203;
-    
-    /// Base ranges for ABI and custom events
-    pub const EVENT_RESERVED_MAX: u32 = 9999;      // End of reserved range
-    pub const EVENT_CUSTOM_BASE: u32 = 10000;      // Start of ABI-specific events
-    pub const EVENT_USER_BASE: u32 = 20000;        // Start of user-defined events
-    
-    /// Maximum event ID value (for validation)
-    pub const EVENT_MAX: u32 = u32::MAX - 1;
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::ToString;
 
-/// ABI Event Mapping Utilities
-/// 
-/// These functions help ABI modules map between OS-specific signals/events
-/// and Scarlet's universal event ID scheme.
-pub mod abi_mapping {
-    use super::event_ids;
-    
-    /// Convert Linux signal number to Scarlet event ID
-    /// Used by the Linux ABI module
-    pub fn linux_signal_to_event_id(signal: i32) -> Option<u32> {
-        match signal {
-            1 => Some(event_ids::EVENT_HANGUP),         // SIGHUP
-            2 => Some(event_ids::EVENT_INTERRUPT),      // SIGINT
-            3 => Some(event_ids::EVENT_QUIT),           // SIGQUIT
-            9 => Some(event_ids::EVENT_FORCE_TERMINATE), // SIGKILL
-            13 => Some(event_ids::EVENT_PIPE_BROKEN),   // SIGPIPE
-            14 => Some(event_ids::EVENT_ALARM),         // SIGALRM
-            15 => Some(event_ids::EVENT_TERMINATE),     // SIGTERM
-            17 => Some(event_ids::EVENT_CHILD_EXIT),    // SIGCHLD
-            18 => Some(event_ids::EVENT_CONTINUE),      // SIGCONT
-            19 => Some(event_ids::EVENT_STOP),          // SIGSTOP
-            20 => Some(event_ids::EVENT_TERMINAL_STOP), // SIGTSTP
-            10 => Some(event_ids::EVENT_USER1),         // SIGUSR1
-            12 => Some(event_ids::EVENT_USER2),         // SIGUSR2
-            _ => None, // ABI-specific handling required
+    #[test_case]
+    fn test_event_creation() {
+        let event = Event::new(
+            EventDelivery::Direct { 
+                target: 123, 
+                priority: EventPriority::High, 
+                reliable: true 
+            },
+            EventContent::ProcessControl(ProcessControlType::Terminate),
+            EventPayload::Empty,
+        );
+
+        match event.delivery {
+            EventDelivery::Direct { target, priority, reliable } => {
+                assert_eq!(target, 123);
+                assert_eq!(priority, EventPriority::High);
+                assert_eq!(reliable, true);
+            },
+            _ => panic!("Wrong delivery type"),
+        }
+
+        match event.content {
+            EventContent::ProcessControl(ProcessControlType::Terminate) => {},
+            _ => panic!("Wrong content type"),
+        }
+
+        assert_eq!(event.metadata.priority, EventPriority::High);
+    }
+
+    #[test_case]
+    fn test_event_convenience_functions() {
+        // Test direct process control event
+        let event = Event::direct_process_control(
+            42, 
+            ProcessControlType::Kill, 
+            EventPriority::Critical, 
+            true
+        );
+        
+        match event.delivery {
+            EventDelivery::Direct { target, priority, reliable } => {
+                assert_eq!(target, 42);
+                assert_eq!(priority, EventPriority::Critical);
+                assert_eq!(reliable, true);
+            },
+            _ => panic!("Wrong delivery type"),
+        }
+
+        match event.content {
+            EventContent::ProcessControl(ProcessControlType::Kill) => {},
+            _ => panic!("Wrong content type"),
+        }
+
+        // Test immediate process control event
+        let event = Event::immediate_process_control(99, ProcessControlType::Stop);
+        match event.delivery {
+            EventDelivery::Direct { target, priority, reliable } => {
+                assert_eq!(target, 99);
+                assert_eq!(priority, EventPriority::High);
+                assert_eq!(reliable, true);
+            },
+            _ => panic!("Wrong delivery type"),
         }
     }
-    
-    /// Convert Scarlet event ID to Linux signal number
-    /// Used by the Linux ABI module for signal delivery
-    pub fn event_id_to_linux_signal(event_id: u32) -> Option<i32> {
-        match event_id {
-            event_ids::EVENT_HANGUP => Some(1),            // SIGHUP
-            event_ids::EVENT_INTERRUPT => Some(2),         // SIGINT
-            event_ids::EVENT_QUIT => Some(3),              // SIGQUIT
-            event_ids::EVENT_FORCE_TERMINATE => Some(9),   // SIGKILL
-            event_ids::EVENT_PIPE_BROKEN => Some(13),      // SIGPIPE
-            event_ids::EVENT_ALARM => Some(14),            // SIGALRM
-            event_ids::EVENT_TERMINATE => Some(15),        // SIGTERM
-            event_ids::EVENT_CHILD_EXIT => Some(17),       // SIGCHLD
-            event_ids::EVENT_CONTINUE => Some(18),         // SIGCONT
-            event_ids::EVENT_STOP => Some(19),             // SIGSTOP
-            event_ids::EVENT_TERMINAL_STOP => Some(20),    // SIGTSTP
-            event_ids::EVENT_USER1 => Some(10),            // SIGUSR1
-            event_ids::EVENT_USER2 => Some(12),            // SIGUSR2
-            _ => None, // No direct Linux equivalent
+
+    #[test_case]
+    fn test_event_channel_creation() {
+        let event = Event::channel(
+            "test_channel".to_string(),
+            EventContent::Notification(NotificationType::TaskCompleted),
+            true,
+            EventPriority::Normal,
+            EventPayload::Empty,
+        );
+
+        match event.delivery {
+            EventDelivery::Channel { channel_id, create_if_missing, priority } => {
+                assert_eq!(channel_id, "test_channel");
+                assert_eq!(create_if_missing, true);
+                assert_eq!(priority, EventPriority::Normal);
+            },
+            _ => panic!("Wrong delivery type"),
+        }
+
+        match event.content {
+            EventContent::Notification(NotificationType::TaskCompleted) => {},
+            _ => panic!("Wrong content type"),
         }
     }
-    
-    /// Check if an event ID is in the ABI-specific range
-    pub fn is_abi_specific_event(event_id: u32) -> bool {
-        event_id >= event_ids::EVENT_CUSTOM_BASE && event_id < event_ids::EVENT_USER_BASE
+
+    #[test_case]
+    fn test_event_group_creation() {
+        let event = Event::group(
+            GroupTarget::AllTasks,
+            EventContent::Message { 
+                message_type: 42, 
+                category: MessageCategory::Control 
+            },
+            EventPriority::Low,
+            false,
+            EventPayload::Empty,
+        );
+
+        match event.delivery {
+            EventDelivery::Group { group_target, priority, reliable } => {
+                assert_eq!(group_target, GroupTarget::AllTasks);
+                assert_eq!(priority, EventPriority::Low);
+                assert_eq!(reliable, false);
+            },
+            _ => panic!("Wrong delivery type"),
+        }
+
+        match event.content {
+            EventContent::Message { message_type, category } => {
+                assert_eq!(message_type, 42);
+                assert_eq!(category, MessageCategory::Control);
+            },
+            _ => panic!("Wrong content type"),
+        }
     }
-    
-    /// Check if an event ID is user-defined
-    pub fn is_user_defined_event(event_id: u32) -> bool {
-        event_id >= event_ids::EVENT_USER_BASE
+
+    #[test_case]
+    fn test_event_broadcast_creation() {
+        let event = Event::broadcast(
+            EventContent::Custom { 
+                namespace: "test_namespace".to_string(), 
+                event_id: 100 
+            },
+            EventPriority::Normal,
+            true,
+            EventPayload::Bytes(alloc::vec![1, 2, 3, 4]),
+        );
+
+        match event.delivery {
+            EventDelivery::Broadcast { priority, reliable } => {
+                assert_eq!(priority, EventPriority::Normal);
+                assert_eq!(reliable, true);
+            },
+            _ => panic!("Wrong delivery type"),
+        }
+
+        match event.content {
+            EventContent::Custom { namespace, event_id } => {
+                assert_eq!(namespace, "test_namespace");
+                assert_eq!(event_id, 100);
+            },
+            _ => panic!("Wrong content type"),
+        }
+
+        match event.payload {
+            EventPayload::Bytes(data) => {
+                assert_eq!(data, alloc::vec![1, 2, 3, 4]);
+            },
+            _ => panic!("Wrong payload type"),
+        }
     }
-    
-    /// Validate event ID range
-    pub fn is_valid_event_id(event_id: u32) -> bool {
-        event_id > 0 && event_id <= event_ids::EVENT_MAX
+
+    #[test_case]
+    fn test_event_filter_event_type() {
+        let filter = EventFilter::EventType(EventTypeFilter::AnyDirect);
+        
+        let direct_event = Event::direct_process_control(
+            123, 
+            ProcessControlType::Terminate, 
+            EventPriority::High, 
+            true
+        );
+        
+        let channel_event = Event::channel(
+            "test".to_string(),
+            EventContent::ProcessControl(ProcessControlType::Terminate),
+            false,
+            EventPriority::High,
+            EventPayload::Empty,
+        );
+
+        assert_eq!(filter.matches(&direct_event), true);
+        assert_eq!(filter.matches(&channel_event), false);
+    }
+
+    #[test_case]
+    fn test_event_filter_channel() {
+        let filter = EventFilter::Channel("test_channel".to_string());
+        
+        let matching_event = Event::channel(
+            "test_channel".to_string(),
+            EventContent::Notification(NotificationType::TaskCompleted),
+            false,
+            EventPriority::Normal,
+            EventPayload::Empty,
+        );
+        
+        let non_matching_event = Event::channel(
+            "other_channel".to_string(),
+            EventContent::Notification(NotificationType::TaskCompleted),
+            false,
+            EventPriority::Normal,
+            EventPayload::Empty,
+        );
+
+        assert_eq!(filter.matches(&matching_event), true);
+        assert_eq!(filter.matches(&non_matching_event), false);
+    }
+
+    #[test_case]
+    fn test_event_filter_sender() {
+        let filter = EventFilter::Sender(42);
+        
+        let mut matching_event = Event::immediate_process_control(123, ProcessControlType::Terminate);
+        matching_event.metadata.sender = Some(42);
+        
+        let mut non_matching_event = Event::immediate_process_control(123, ProcessControlType::Terminate);
+        non_matching_event.metadata.sender = Some(99);
+
+        assert_eq!(filter.matches(&matching_event), true);
+        assert_eq!(filter.matches(&non_matching_event), false);
+    }
+
+    #[test_case]
+    fn test_task_event_queue_basic() {
+        let mut queue = TaskEventQueue::new();
+        
+        assert_eq!(queue.is_empty(), true);
+        assert_eq!(queue.len(), 0);
+        
+        let event = Event::immediate_process_control(123, ProcessControlType::Terminate);
+        assert_eq!(queue.enqueue(event.clone()), true);
+        
+        assert_eq!(queue.is_empty(), false);
+        assert_eq!(queue.len(), 1);
+        
+        let dequeued = queue.dequeue();
+        assert!(dequeued.is_some());
+        
+        assert_eq!(queue.is_empty(), true);
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test_case]
+    fn test_task_event_queue_priority_ordering() {
+        let mut queue = TaskEventQueue::new();
+        
+        // Add events in non-priority order
+        let low_event = Event::direct_process_control(
+            1, ProcessControlType::Stop, EventPriority::Low, true
+        );
+        let critical_event = Event::direct_process_control(
+            2, ProcessControlType::Kill, EventPriority::Critical, true
+        );
+        let high_event = Event::direct_process_control(
+            3, ProcessControlType::Terminate, EventPriority::High, true
+        );
+        let normal_event = Event::direct_process_control(
+            4, ProcessControlType::Continue, EventPriority::Normal, true
+        );
+        
+        queue.enqueue(low_event);
+        queue.enqueue(critical_event);
+        queue.enqueue(high_event);
+        queue.enqueue(normal_event);
+        
+        assert_eq!(queue.len(), 4);
+        
+        // Should dequeue in priority order: Critical -> High -> Normal -> Low
+        let first = queue.dequeue().unwrap();
+        assert_eq!(first.metadata.priority, EventPriority::Critical);
+        
+        let second = queue.dequeue().unwrap();
+        assert_eq!(second.metadata.priority, EventPriority::High);
+        
+        let third = queue.dequeue().unwrap();
+        assert_eq!(third.metadata.priority, EventPriority::Normal);
+        
+        let fourth = queue.dequeue().unwrap();
+        assert_eq!(fourth.metadata.priority, EventPriority::Low);
+        
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test_case]
+    fn test_event_manager_creation() {
+        let manager = EventManager::new();
+        assert!(manager.subscriptions.lock().is_empty());
+    }
+
+    #[test_case]
+    fn test_process_control_type_variants() {
+        // Test all ProcessControlType variants
+        let variants = [
+            ProcessControlType::Terminate,
+            ProcessControlType::Kill,
+            ProcessControlType::Stop,
+            ProcessControlType::Continue,
+            ProcessControlType::Interrupt,
+            ProcessControlType::Quit,
+            ProcessControlType::Hangup,
+            ProcessControlType::ChildExit,
+            ProcessControlType::User1,
+            ProcessControlType::User2,
+        ];
+        
+        for &variant in &variants {
+            let event = Event::immediate_process_control(123, variant);
+            match event.content {
+                EventContent::ProcessControl(received_variant) => {
+                    assert_eq!(received_variant, variant);
+                },
+                _ => panic!("Wrong content type for variant {:?}", variant),
+            }
+        }
+    }
+
+    #[test_case]
+    fn test_notification_type_variants() {
+        // Test all NotificationType variants
+        let variants = [
+            NotificationType::TaskCompleted,
+            NotificationType::MemoryLow,
+            NotificationType::DeviceConnected,
+            NotificationType::DeviceDisconnected,
+            NotificationType::FilesystemFull,
+            NotificationType::NetworkChange,
+        ];
+        
+        for &variant in &variants {
+            let event = Event::notification_to_task(123, variant);
+            match event.content {
+                EventContent::Notification(received_variant) => {
+                    assert_eq!(received_variant, variant);
+                },
+                _ => panic!("Wrong content type for variant {:?}", variant),
+            }
+        }
+    }
+
+    #[test_case]
+    fn test_event_payload_variants() {
+        // Test Empty payload
+        let empty_event = Event::immediate_process_control(123, ProcessControlType::Terminate);
+        match empty_event.payload {
+            EventPayload::Empty => {},
+            _ => panic!("Expected Empty payload"),
+        }
+        
+        // Test Integer payload
+        let integer_event = Event::broadcast(
+            EventContent::Custom { 
+                namespace: "test".to_string(), 
+                event_id: 42 
+            },
+            EventPriority::Normal,
+            false,
+            EventPayload::Integer(12345),
+        );
+        match integer_event.payload {
+            EventPayload::Integer(value) => {
+                assert_eq!(value, 12345);
+            },
+            _ => panic!("Expected Integer payload"),
+        }
+        
+        // Test Bytes payload
+        let data = alloc::vec![1, 2, 3, 4, 5];
+        let bytes_event = Event::broadcast(
+            EventContent::Custom { 
+                namespace: "test".to_string(), 
+                event_id: 43 
+            },
+            EventPriority::Normal,
+            false,
+            EventPayload::Bytes(data.clone()),
+        );
+        match bytes_event.payload {
+            EventPayload::Bytes(received_data) => {
+                assert_eq!(received_data, data);
+            },
+            _ => panic!("Expected Bytes payload"),
+        }
+        
+        // Test String payload
+        let text = "Hello, World!".to_string();
+        let string_event = Event::broadcast(
+            EventContent::Custom { 
+                namespace: "test".to_string(), 
+                event_id: 44 
+            },
+            EventPriority::Normal,
+            false,
+            EventPayload::String(text.clone()),
+        );
+        match string_event.payload {
+            EventPayload::String(received_text) => {
+                assert_eq!(received_text, text);
+            },
+            _ => panic!("Expected String payload"),
+        }
+    }
+
+    #[test_case]
+    fn test_process_control_type_variants() {
+        // Test all ProcessControlType variants
+        let variants = [
+            ProcessControlType::Kill,
+            ProcessControlType::Terminate,
+            ProcessControlType::Stop,
+            ProcessControlType::Continue,
+            ProcessControlType::Interrupt,
+            ProcessControlType::Quit,
+            ProcessControlType::Hangup,
+            ProcessControlType::User1,
+            ProcessControlType::User2,
+            ProcessControlType::PipeBroken,
+            ProcessControlType::Alarm,
+            ProcessControlType::ChildExit,
+            ProcessControlType::IoReady,
+        ];
+        
+        for &variant in &variants {
+            let event = Event::immediate_process_control(123, variant);
+            match event.content {
+                EventContent::ProcessControl(received_variant) => {
+                    assert_eq!(received_variant, variant);
+                },
+                _ => panic!("Wrong content type for variant {:?}", variant),
+            }
+        }
+    }
+
+    #[test_case]
+    fn test_notification_type_variants() {
+        // Test all NotificationType variants
+        let variants = [
+            NotificationType::TaskCompleted,
+            NotificationType::MemoryLow,
+            NotificationType::DeviceConnected,
+            NotificationType::DeviceDisconnected,
+            NotificationType::FilesystemFull,
+            NotificationType::NetworkChange,
+        ];
+        
+        for &variant in &variants {
+            let event = Event::notification_to_task(123, variant);
+            match event.content {
+                EventContent::Notification(received_variant) => {
+                    assert_eq!(received_variant, variant);
+                },
+                _ => panic!("Wrong content type for variant {:?}", variant),
+            }
+        }
+    }
+
+    #[test_case]
+    fn test_event_payload_variants() {
+        // Test Empty payload
+        let empty_event = Event::immediate_process_control(123, ProcessControlType::Terminate);
+        match empty_event.payload {
+            EventPayload::Empty => {},
+            _ => panic!("Expected Empty payload"),
+        }
+        
+        // Test Integer payload
+        let integer_event = Event::broadcast(
+            EventContent::Custom { 
+                namespace: "test".to_string(), 
+                event_id: 42 
+            },
+            EventPriority::Normal,
+            false,
+            EventPayload::Integer(12345),
+        );
+        match integer_event.payload {
+            EventPayload::Integer(value) => {
+                assert_eq!(value, 12345);
+            },
+            _ => panic!("Expected Integer payload"),
+        }
+        
+        // Test Bytes payload
+        let data = alloc::vec![1, 2, 3, 4, 5];
+        let bytes_event = Event::broadcast(
+            EventContent::Custom { 
+                namespace: "test".to_string(), 
+                event_id: 43 
+            },
+            EventPriority::Normal,
+            false,
+            EventPayload::Bytes(data.clone()),
+        );
+        match bytes_event.payload {
+            EventPayload::Bytes(received_data) => {
+                assert_eq!(received_data, data);
+            },
+            _ => panic!("Expected Bytes payload"),
+        }
+        
+        // Test String payload
+        let text = "Hello, World!".to_string();
+        let string_event = Event::broadcast(
+            EventContent::Custom { 
+                namespace: "test".to_string(), 
+                event_id: 44 
+            },
+            EventPriority::Normal,
+            false,
+            EventPayload::String(text.clone()),
+        );
+        match string_event.payload {
+            EventPayload::String(received_text) => {
+                assert_eq!(received_text, text);
+            },
+            _ => panic!("Expected String payload"),
+        }
     }
 }

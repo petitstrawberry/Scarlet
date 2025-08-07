@@ -19,7 +19,13 @@ use crate::{
             proc::{sys_chdir, sys_sbrk}
         }, 
         AbiModule
-    }, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    }, 
+    arch::{self, Registers}, 
+    early_initcall, 
+    fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, 
+    register_abi, 
+    task::elf_loader::load_elf_into_task, 
+    vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
