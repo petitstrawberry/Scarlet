@@ -535,9 +535,6 @@ impl TaskEventQueue {
 
 /// Event Manager - Main implementation of the event system
 pub struct EventManager {
-    /// Channel subscriptions
-    subscriptions: Mutex<HashMap<String, Vec<u32>>>,
-    
     /// Task group memberships
     groups: Mutex<HashMap<GroupId, Vec<u32>>>,
     
@@ -548,22 +545,22 @@ pub struct EventManager {
     task_filters: Mutex<HashMap<u32, Vec<EventFilter>>>,
     
     /// Next event ID
+    #[allow(dead_code)]
     next_event_id: Mutex<u64>,
     
-    /// Handle-based channel registry for KernelObject integration
-    handle_channels: Mutex<HashMap<String, Arc<EventChannelObject>>>,
+    /// Channel registry - EventManager only manages channels, channels manage their own subscriptions
+    channels: Mutex<HashMap<String, Arc<EventChannelObject>>>,
 }
 
 impl EventManager {
     /// Create a new EventManager
     pub fn new() -> Self {
         Self {
-            subscriptions: Mutex::new(HashMap::new()),
             groups: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
             task_filters: Mutex::new(HashMap::new()),
             next_event_id: Mutex::new(1),
-            handle_channels: Mutex::new(HashMap::new()),
+            channels: Mutex::new(HashMap::new()),
         }
     }
     
@@ -578,7 +575,7 @@ impl EventManager {
     /// This method creates an EventChannel that can be inserted into a HandleTable,
     /// providing consistent resource management with other kernel objects.
     pub fn create_channel(&self, name: String) -> crate::object::KernelObject {
-        let mut channels = self.handle_channels.lock();
+        let mut channels = self.channels.lock();
         
         let channel = channels
             .entry(name.clone())
@@ -594,12 +591,20 @@ impl EventManager {
     /// 
     /// This method creates an EventSubscription that can be inserted into a HandleTable,
     /// allowing tasks to receive events through the standard handle interface.
-    pub fn create_subscription(&self, channel_name: String) -> Result<crate::object::KernelObject, EventError> {
-        // Generate unique subscription ID
-        let subscription_id = format!("sub_{}_{}", channel_name, self.next_event_id.lock());
+    pub fn create_subscription(&self, channel_name: String, task_id: u32) -> Result<crate::object::KernelObject, EventError> {
+        // Get or create the channel first
+        let mut channels = self.channels.lock();
+        let channel = channels
+            .entry(channel_name.clone())
+            .or_insert_with(|| {
+                Arc::new(EventChannelObject::new(channel_name.clone()))
+            })
+            .clone();
+        drop(channels);
         
-        let subscription = EventSubscriptionObject::new(subscription_id, channel_name);
-        Ok(crate::object::KernelObject::EventSubscription(Arc::new(subscription)))
+        // Create subscription through the channel
+        let subscription = channel.create_subscription(task_id)?;
+        Ok(crate::object::KernelObject::EventSubscription(subscription))
     }
     
     // === Core Event Operations ===
@@ -645,13 +650,18 @@ impl EventManager {
         // TODO: Get current task ID from task system
         let current_task_id = 1; // Placeholder
         
-        let mut subscriptions = self.subscriptions.lock();
-        let channel_subscribers = subscriptions.entry(format!("{}", channel)).or_insert_with(Vec::new);
+        // Get or create the channel
+        let mut channels = self.channels.lock();
+        let channel_obj = channels
+            .entry(channel.into())
+            .or_insert_with(|| {
+                Arc::new(EventChannelObject::new(channel.into()))
+            })
+            .clone();
+        drop(channels);
         
-        if !channel_subscribers.contains(&current_task_id) {
-            channel_subscribers.push(current_task_id);
-        }
-        
+        // Subscribe through the channel (ignore the returned subscription object for backward compatibility)
+        let _ = channel_obj.subscribe(current_task_id)?;
         Ok(())
     }
     
@@ -659,12 +669,12 @@ impl EventManager {
     pub fn unsubscribe_channel(&self, channel: &str) -> Result<(), EventError> {
         let current_task_id = 1; // TODO: Get from task system
         
-        let mut subscriptions = self.subscriptions.lock();
-        if let Some(channel_subscribers) = subscriptions.get_mut(channel) {
-            channel_subscribers.retain(|&task_id| task_id != current_task_id);
+        let channels = self.channels.lock();
+        if let Some(channel_obj) = channels.get(channel) {
+            channel_obj.unsubscribe(current_task_id)
+        } else {
+            Err(EventError::ChannelNotFound)
         }
-        
-        Ok(())
     }
     
     /// Join a task group
@@ -712,19 +722,18 @@ impl EventManager {
     
     /// Deliver to channel subscribers
     fn deliver_to_channel(&self, event: Event, channel_id: &str, create_if_missing: bool, _priority: EventPriority) -> Result<(), EventError> {
-        let subscriptions = self.subscriptions.lock();
+        let mut channels = self.channels.lock();
         
-        if let Some(subscribers) = subscriptions.get(channel_id) {
-            for &task_id in subscribers {
-                let _ = self.deliver_to_task(task_id, event.clone());
-            }
-            Ok(())
+        if let Some(channel) = channels.get(channel_id) {
+            let channel = channel.clone();
+            drop(channels);
+            channel.broadcast_to_subscribers(event)
         } else if create_if_missing {
             // Create empty channel
-            drop(subscriptions);
-            let mut subscriptions = self.subscriptions.lock();
-            subscriptions.insert(format!("{}", channel_id), Vec::new());
-            Ok(())
+            let channel = Arc::new(EventChannelObject::new(channel_id.into()));
+            channels.insert(channel_id.into(), channel.clone());
+            drop(channels);
+            channel.broadcast_to_subscribers(event)
         } else {
             Err(EventError::ChannelNotFound)
         }
@@ -940,6 +949,9 @@ impl Event {
 /// EventChannel implementation for KernelObject integration
 pub struct EventChannelObject {
     name: String,
+    /// Channel manages its own subscriptions as EventSubscriptionObjects
+    subscriptions: Mutex<HashMap<String, Arc<EventSubscriptionObject>>>,
+    #[allow(dead_code)]
     manager_ref: &'static EventManager,
 }
 
@@ -947,6 +959,7 @@ impl EventChannelObject {
     pub fn new(name: String) -> Self {
         Self {
             name,
+            subscriptions: Mutex::new(HashMap::new()),
             manager_ref: EventManager::get_manager(),
         }
     }
@@ -954,20 +967,79 @@ impl EventChannelObject {
     pub fn name(&self) -> &str {
         &self.name
     }
+    
+    /// Create a new subscription for this channel
+    pub fn create_subscription(&self, task_id: u32) -> Result<Arc<EventSubscriptionObject>, EventError> {
+        let subscription_id = format!("sub_{}_task_{}", self.name, task_id);
+        let subscription = Arc::new(EventSubscriptionObject::new(
+            subscription_id.clone(), 
+            self.name.clone(), 
+            task_id
+        ));
+        
+        let mut subscriptions = self.subscriptions.lock();
+        subscriptions.insert(subscription_id, subscription.clone());
+        
+        Ok(subscription)
+    }
+    
+    /// Remove a subscription from this channel
+    pub fn remove_subscription(&self, subscription_id: &str) -> Result<(), EventError> {
+        let mut subscriptions = self.subscriptions.lock();
+        subscriptions.remove(subscription_id);
+        Ok(())
+    }
+    
+    /// Get all subscriptions for this channel
+    pub fn get_subscriptions(&self) -> Vec<Arc<EventSubscriptionObject>> {
+        self.subscriptions.lock().values().cloned().collect()
+    }
+    
+    /// Get list of current subscriber task IDs
+    pub fn get_subscribers(&self) -> Vec<u32> {
+        self.subscriptions.lock()
+            .values()
+            .map(|sub| sub.task_id())
+            .collect()
+    }
+    
+    /// Send event to all subscribers of this channel
+    pub fn broadcast_to_subscribers(&self, event: Event) -> Result<(), EventError> {
+        let subscribers = self.get_subscribers();
+        for task_id in subscribers {
+            let _ = self.manager_ref.deliver_to_task(task_id, event.clone());
+        }
+        Ok(())
+    }
+    
+    /// Subscribe a task to this channel (legacy method for backward compatibility)
+    pub fn subscribe(&self, task_id: u32) -> Result<Arc<EventSubscriptionObject>, EventError> {
+        self.create_subscription(task_id)
+    }
+    
+    /// Unsubscribe a task from this channel (legacy method for backward compatibility)
+    pub fn unsubscribe(&self, task_id: u32) -> Result<(), EventError> {
+        let mut subscriptions = self.subscriptions.lock();
+        subscriptions.retain(|_, sub| sub.task_id() != task_id);
+        Ok(())
+    }
 }
 
 /// EventSubscription implementation for KernelObject integration  
 pub struct EventSubscriptionObject {
     subscription_id: String,
     channel_name: String,
+    task_id: u32,
+    #[allow(dead_code)]
     manager_ref: &'static EventManager,
 }
 
 impl EventSubscriptionObject {
-    pub fn new(subscription_id: String, channel_name: String) -> Self {
+    pub fn new(subscription_id: String, channel_name: String, task_id: u32) -> Self {
         Self {
             subscription_id,
             channel_name,
+            task_id,
             manager_ref: EventManager::get_manager(),
         }
     }
@@ -978,6 +1050,10 @@ impl EventSubscriptionObject {
     
     pub fn channel_name(&self) -> &str {
         &self.channel_name
+    }
+    
+    pub fn task_id(&self) -> u32 {
+        self.task_id
     }
 }
 
@@ -1003,12 +1079,12 @@ impl crate::object::capability::EventReceiver for EventSubscriptionObject {
 }
 
 impl crate::object::capability::EventSubscriber for EventSubscriptionObject {
-    fn register_filter(&self, filter: EventFilter, handler_id: usize) -> Result<(), &'static str> {
+    fn register_filter(&self, _filter: EventFilter, _handler_id: usize) -> Result<(), &'static str> {
         // TODO: Register filter with EventManager
         Ok(())
     }
     
-    fn unregister_filter(&self, handler_id: usize) -> Result<(), &'static str> {
+    fn unregister_filter(&self, _handler_id: usize) -> Result<(), &'static str> {
         // TODO: Unregister filter from EventManager
         Ok(())
     }
@@ -1030,7 +1106,7 @@ impl crate::object::capability::CloneOps for EventChannelObject {
 impl crate::object::capability::CloneOps for EventSubscriptionObject {
     fn custom_clone(&self) -> crate::object::KernelObject {
         crate::object::KernelObject::EventSubscription(alloc::sync::Arc::new(
-            EventSubscriptionObject::new(self.subscription_id.clone(), self.channel_name.clone())
+            EventSubscriptionObject::new(self.subscription_id.clone(), self.channel_name.clone(), self.task_id)
         ))
     }
 }
@@ -1331,7 +1407,7 @@ mod tests {
     #[test_case]
     fn test_event_manager_creation() {
         let manager = EventManager::new();
-        assert!(manager.subscriptions.lock().is_empty());
+        assert!(manager.channels.lock().is_empty());
     }
 
     #[test_case]
