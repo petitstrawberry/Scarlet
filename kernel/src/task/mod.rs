@@ -1128,29 +1128,27 @@ impl Task {
             return Ok(()); // Events disabled, skip processing
         }
         
-        // Check if there are pending events
-        let has_events = {
-            let queue = self.event_queue.lock();
-            !queue.is_empty()
-        };
-        
-        if has_events {
-            // Delegate to ABI module for event processing
-            if let Some(abi) = &self.abi {
-                // Process events one by one until queue is empty or events are disabled
-                while self.events_enabled() {
-                    let event = {
-                        let mut queue = self.event_queue.lock();
-                        queue.dequeue()
-                    };
-                    
-                    match event {
-                        Some(event) => {
-                            // Let ABI handle the event
-                            abi.handle_event(event, self.id as u32)?;
+        // Delegate to ABI module for event processing
+        if let Some(abi) = &self.abi {
+            // Process events one by one until queue is empty
+            loop {
+                let event = {
+                    let mut queue = self.event_queue.lock();
+                    queue.dequeue()
+                };
+                
+                match event {
+                    Some(event) => {
+                        // Let ABI handle the event
+                        abi.handle_event(event, self.id as u32)?;
+                        
+                        // Check if events are still enabled after handling
+                        // (ABI module might disable events during handling)
+                        if !self.events_enabled() {
+                            break;
                         }
-                        None => break, // No more events
                     }
+                    None => break, // No more events
                 }
             }
         }
