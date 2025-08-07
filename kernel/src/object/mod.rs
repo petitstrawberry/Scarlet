@@ -10,16 +10,16 @@ pub mod handle;
 use alloc::{sync::Arc, vec::Vec};
 use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
-use crate::ipc::event_objects::{EventChannelObject, EventSubscriptionObject};
+use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::StreamIpcOps;
-use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, EventIpcOps};
+use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps};
 
 /// Unified representation of all kernel-managed resources
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
-    EventChannel(Arc<dyn EventChannelObject>),
-    EventSubscription(Arc<dyn EventSubscriptionObject>),
+    EventChannel(Arc<EventChannelObject>),
+    EventSubscription(Arc<EventSubscriptionObject>),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // SharedMemory(Arc<dyn SharedMemoryObject>),
@@ -37,15 +37,15 @@ impl KernelObject {
     pub fn from_pipe_object(pipe_object: Arc<dyn PipeObject>) -> Self {
         KernelObject::Pipe(pipe_object)
     }
-    
+
     /// Create a KernelObject from an EventChannelObject
-    pub fn from_event_channel_object(event_channel_object: Arc<dyn EventChannelObject>) -> Self {
-        KernelObject::EventChannel(event_channel_object)
+    pub fn from_event_channel_object(event_channel: Arc<EventChannelObject>) -> Self {
+        KernelObject::EventChannel(event_channel)
     }
-    
+
     /// Create a KernelObject from an EventSubscriptionObject
-    pub fn from_event_subscription_object(event_subscription_object: Arc<dyn EventSubscriptionObject>) -> Self {
-        KernelObject::EventSubscription(event_subscription_object)
+    pub fn from_event_subscription(event_subscription: Arc<EventSubscriptionObject>) -> Self {
+        KernelObject::EventSubscription(event_subscription)
     }
     
     /// Try to get StreamOps capability
@@ -233,36 +233,12 @@ impl KernelObject {
             }
         }
     }
-    
-    /// Try to get EventIpcOps capability
-    pub fn as_event_ipc(&self) -> Option<&dyn EventIpcOps> {
-        match self {
-            KernelObject::File(_) => {
-                // Regular files don't provide event-based IPC operations
-                None
-            }
-            KernelObject::Pipe(_) => {
-                // Stream-based pipes don't implement EventIpcOps directly
-                None
-            }
-            KernelObject::EventChannel(event_channel) => {
-                // EventChannel implements EventIpcOps
-                let event_ipc_ops: &dyn EventIpcOps = event_channel.as_ref();
-                Some(event_ipc_ops)
-            }
-            KernelObject::EventSubscription(event_subscription) => {
-                // EventSubscription implements EventIpcOps
-                let event_ipc_ops: &dyn EventIpcOps = event_subscription.as_ref();
-                Some(event_ipc_ops)
-            }
-        }
-    }
 
     /// Try to get EventChannelObject
-    pub fn as_event_channel(&self) -> Option<&dyn EventChannelObject> {
+    pub fn as_event_channel(&self) -> Option<&EventChannelObject> {
         match self {
             KernelObject::EventChannel(event_channel) => {
-                let event_channel_obj: &dyn EventChannelObject = event_channel.as_ref();
+                let event_channel_obj: &EventChannelObject = event_channel.as_ref();
                 Some(event_channel_obj)
             }
             _ => None
@@ -270,10 +246,10 @@ impl KernelObject {
     }
     
     /// Try to get EventSubscriptionObject
-    pub fn as_event_subscription(&self) -> Option<&dyn EventSubscriptionObject> {
+    pub fn as_event_subscription(&self) -> Option<&EventSubscriptionObject> {
         match self {
             KernelObject::EventSubscription(event_subscription) => {
-                let event_subscription_obj: &dyn EventSubscriptionObject = event_subscription.as_ref();
+                let event_subscription_obj: &EventSubscriptionObject = event_subscription.as_ref();
                 Some(event_subscription_obj)
             }
             _ => None

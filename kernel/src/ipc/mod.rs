@@ -16,7 +16,6 @@ use alloc::string::String;
 
 pub mod pipe;
 pub mod event;
-pub mod event_objects;
 pub mod syscall;
 
 /// Represents errors specific to IPC operations
@@ -62,7 +61,7 @@ pub trait StreamIpcOps: StreamOps {
 
 // Future IPC trait definitions:
 
-/// Event channel operations (implements EventIpcOps capability)
+/// Event channel operations (implements EventSender + EventReceiver capabilities)
 /// 
 /// This trait defines objects that provide event-based communication
 /// channels with pub/sub semantics, different from stream-based pipes.

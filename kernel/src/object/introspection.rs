@@ -49,8 +49,8 @@ pub struct ObjectCapabilities {
     pub file_ops: bool,
     /// Supports PipeOps (pipe-specific operations)
     pub pipe_ops: bool,
-    /// Supports EventIpcOps (event channel/subscription operations)
-    pub event_ipc_ops: bool,
+    /// Supports Event capabilities (EventSender/EventReceiver/EventSubscriber operations)
+    pub event_ops: bool,
     /// Supports CloneOps (custom cloning)
     pub clone_ops: bool,
     /// Reserved for future capabilities
@@ -78,7 +78,7 @@ impl KernelObjectInfo {
                 stream_ops: true,
                 file_ops: true,
                 pipe_ops: false,
-                event_ipc_ops: false,
+                event_ops: false,
                 clone_ops: false,
                 reserved: [false; 3],
             },
@@ -95,7 +95,7 @@ impl KernelObjectInfo {
                 stream_ops: true,
                 file_ops: false,
                 pipe_ops: true,
-                event_ipc_ops: false,
+                event_ops: false,
                 clone_ops: true,
                 reserved: [false; 3],
             },
@@ -112,7 +112,7 @@ impl KernelObjectInfo {
                 stream_ops: false,
                 file_ops: false,
                 pipe_ops: false,
-                event_ipc_ops: true,
+                event_ops: true,
                 clone_ops: true,
                 reserved: [false; 3],
             },
@@ -129,7 +129,7 @@ impl KernelObjectInfo {
                 stream_ops: true,  // Can receive events like reading
                 file_ops: false,
                 pipe_ops: false,
-                event_ipc_ops: true,
+                event_ops: true,
                 clone_ops: true,
                 reserved: [false; 3],
             },
@@ -146,7 +146,7 @@ impl KernelObjectInfo {
                 stream_ops: false,
                 file_ops: false,
                 pipe_ops: false,
-                event_ipc_ops: false,
+                event_ops: false,
                 clone_ops: false,
                 reserved: [false; 3],
             },

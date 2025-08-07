@@ -551,7 +551,7 @@ pub struct EventManager {
     next_event_id: Mutex<u64>,
     
     /// Handle-based channel registry for KernelObject integration
-    handle_channels: Mutex<HashMap<String, Arc<crate::ipc::event_objects::EventChannel>>>,
+    handle_channels: Mutex<HashMap<String, Arc<EventChannelObject>>>,
 }
 
 impl EventManager {
@@ -583,11 +583,11 @@ impl EventManager {
         let channel = channels
             .entry(name.clone())
             .or_insert_with(|| {
-                Arc::new(crate::ipc::event_objects::EventChannel::new(name.clone()))
+                Arc::new(EventChannelObject::new(name.clone()))
             })
             .clone();
         
-        crate::object::KernelObject::from_event_channel_object(channel)
+        crate::object::KernelObject::EventChannel(channel)
     }
     
     /// Create a subscription to a channel as a KernelObject handle
@@ -595,14 +595,11 @@ impl EventManager {
     /// This method creates an EventSubscription that can be inserted into a HandleTable,
     /// allowing tasks to receive events through the standard handle interface.
     pub fn create_subscription(&self, channel_name: String) -> Result<crate::object::KernelObject, EventError> {
-        let channels = self.handle_channels.lock();
+        // Generate unique subscription ID
+        let subscription_id = format!("sub_{}_{}", channel_name, self.next_event_id.lock());
         
-        let channel = channels.get(&channel_name)
-            .ok_or(EventError::ChannelNotFound)?;
-        
-        let subscription = channel.create_subscription(Some(1024)); // Default queue size
-        
-        Ok(crate::object::KernelObject::from_event_subscription_object(Arc::new(subscription)))
+        let subscription = EventSubscriptionObject::new(subscription_id, channel_name);
+        Ok(crate::object::KernelObject::EventSubscription(Arc::new(subscription)))
     }
     
     // === Core Event Operations ===
@@ -937,6 +934,104 @@ impl Event {
             false, 
             EventPayload::Empty
         )
+    }
+}
+
+/// EventChannel implementation for KernelObject integration
+pub struct EventChannelObject {
+    name: String,
+    manager_ref: &'static EventManager,
+}
+
+impl EventChannelObject {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            manager_ref: EventManager::get_manager(),
+        }
+    }
+    
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// EventSubscription implementation for KernelObject integration  
+pub struct EventSubscriptionObject {
+    subscription_id: String,
+    channel_name: String,
+    manager_ref: &'static EventManager,
+}
+
+impl EventSubscriptionObject {
+    pub fn new(subscription_id: String, channel_name: String) -> Self {
+        Self {
+            subscription_id,
+            channel_name,
+            manager_ref: EventManager::get_manager(),
+        }
+    }
+    
+    pub fn subscription_id(&self) -> &str {
+        &self.subscription_id
+    }
+    
+    pub fn channel_name(&self) -> &str {
+        &self.channel_name
+    }
+}
+
+impl crate::object::capability::EventSender for EventChannelObject {
+    fn send_event(&self, event: Event) -> Result<(), &'static str> {
+        self.manager_ref.send_event(event)
+            .map_err(|_| "Failed to send event")?;
+        Ok(())
+    }
+}
+
+impl crate::object::capability::EventReceiver for EventChannelObject {
+    fn has_pending_events(&self) -> bool {
+        false
+    }
+}
+
+impl crate::object::capability::EventReceiver for EventSubscriptionObject {
+    fn has_pending_events(&self) -> bool {
+        // TODO: Check subscription state
+        false
+    }
+}
+
+impl crate::object::capability::EventSubscriber for EventSubscriptionObject {
+    fn register_filter(&self, filter: EventFilter, handler_id: usize) -> Result<(), &'static str> {
+        // TODO: Register filter with EventManager
+        Ok(())
+    }
+    
+    fn unregister_filter(&self, handler_id: usize) -> Result<(), &'static str> {
+        // TODO: Unregister filter from EventManager
+        Ok(())
+    }
+    
+    fn get_filters(&self) -> Vec<(usize, EventFilter)> {
+        // TODO: Get filters from EventManager
+        Vec::new()
+    }
+}
+
+impl crate::object::capability::CloneOps for EventChannelObject {
+    fn custom_clone(&self) -> crate::object::KernelObject {
+        crate::object::KernelObject::EventChannel(alloc::sync::Arc::new(
+            EventChannelObject::new(self.name.clone())
+        ))
+    }
+}
+
+impl crate::object::capability::CloneOps for EventSubscriptionObject {
+    fn custom_clone(&self) -> crate::object::KernelObject {
+        crate::object::KernelObject::EventSubscription(alloc::sync::Arc::new(
+            EventSubscriptionObject::new(self.subscription_id.clone(), self.channel_name.clone())
+        ))
     }
 }
 

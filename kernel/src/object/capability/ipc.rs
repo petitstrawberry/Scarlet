@@ -1,41 +1,62 @@
-//! Simplified Event-based IPC operations capability for kernel objects
+//! Event-based IPC capabilities for kernel objects
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
+use crate::ipc::event::{Event, EventFilter};
 
-/// Event-based IPC operations capability
+/// Event sending capability
 /// 
-/// Simplified interface for event-driven IPC mechanisms.
-pub trait EventIpcOps: Send + Sync {
-    /// Subscribe to an event channel
+/// Objects that can send events to other objects or channels.
+pub trait EventSender: Send + Sync {
+    /// Send an event
     /// 
     /// # Arguments
-    /// * `channel_name` - Name of the channel to subscribe to
+    /// * `event` - The event to send
     /// 
     /// # Returns
-    /// * `Ok(())` on successful subscription
+    /// * `Ok(())` on successful send
     /// * `Err(error_message)` on failure
-    fn subscribe_channel(&self, channel_name: String) -> Result<(), &'static str>;
-    
-    /// Unsubscribe from an event channel
+    fn send_event(&self, event: Event) -> Result<(), &'static str>;
+}
+
+/// Event receiving capability
+/// 
+/// Objects that can receive and poll for events.
+pub trait EventReceiver: Send + Sync {
+    /// Check if events are pending
+    /// 
+    /// # Returns
+    /// * `true` if events are available, `false` otherwise
+    fn has_pending_events(&self) -> bool;
+}
+
+/// Event subscription management capability
+/// 
+/// Objects that can manage event filters and subscriptions.
+pub trait EventSubscriber: Send + Sync {
+    /// Register an event filter with a handler ID
     /// 
     /// # Arguments
-    /// * `channel_name` - Name of the channel to unsubscribe from
+    /// * `filter` - Event filter to register
+    /// * `handler_id` - Unique identifier for this handler
     /// 
     /// # Returns
-    /// * `Ok(())` on successful unsubscription
+    /// * `Ok(())` on successful registration
     /// * `Err(error_message)` on failure
-    fn unsubscribe_channel(&self, channel_name: &str) -> Result<(), &'static str>;
+    fn register_filter(&self, filter: EventFilter, handler_id: usize) -> Result<(), &'static str>;
     
-    /// Get list of subscribed channels
+    /// Unregister an event filter by handler ID
+    /// 
+    /// # Arguments
+    /// * `handler_id` - Handler ID to unregister
     /// 
     /// # Returns
-    /// * `Vec<String>` - List of channel names this object is subscribed to
-    fn get_subscribed_channels(&self) -> Vec<String>;
+    /// * `Ok(())` on successful unregistration
+    /// * `Err(error_message)` on failure
+    fn unregister_filter(&self, handler_id: usize) -> Result<(), &'static str>;
     
-    /// Get task ID if this object represents a task
+    /// Get registered filters and their handler IDs
     /// 
     /// # Returns
-    /// * `Some(task_id)` if this object represents a task
-    /// * `None` otherwise
-    fn get_task_id(&self) -> Option<usize>;
+    /// * `Vec<(usize, EventFilter)>` - List of (handler_id, filter) pairs
+    fn get_filters(&self) -> Vec<(usize, EventFilter)>;
 }
