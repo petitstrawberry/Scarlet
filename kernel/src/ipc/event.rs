@@ -117,8 +117,7 @@ pub enum ProcessControlType {
     PipeBroken,        // Broken pipe
     Alarm,             // Timer alarm
     IoReady,           // I/O ready
-    User1,             // User-defined 1
-    User2,             // User-defined 2
+    User(u32),         // User-defined control signal (0-65535)
     // Add more as needed
 }
 
@@ -1252,8 +1251,7 @@ mod tests {
             ProcessControlType::Quit,
             ProcessControlType::Hangup,
             ProcessControlType::ChildExit,
-            ProcessControlType::User1,
-            ProcessControlType::User2,
+            ProcessControlType::User(0),
         ];
         
         for &variant in &variants {
@@ -1364,8 +1362,7 @@ mod tests {
             ProcessControlType::Interrupt,
             ProcessControlType::Quit,
             ProcessControlType::Hangup,
-            ProcessControlType::User1,
-            ProcessControlType::User2,
+            ProcessControlType::User(0),
             ProcessControlType::PipeBroken,
             ProcessControlType::Alarm,
             ProcessControlType::ChildExit,
