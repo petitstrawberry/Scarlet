@@ -4,7 +4,6 @@
 
 pub mod syscall;
 pub mod elf_loader;
-pub mod event_syscall;
 
 extern crate alloc;
 

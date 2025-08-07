@@ -71,7 +71,6 @@
 use crate::arch::Trapframe;
 use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_sleep, sys_waitpid};
-use crate::task::event_syscall::{sys_send_task_event, sys_set_event_action, sys_block_events, sys_get_pending_events, sys_has_pending_events, sys_send_event_generic, sys_subscribe_channel, sys_unsubscribe_channel, sys_join_process_group, sys_leave_process_group, sys_broadcast_event};
 use crate::ipc::syscall::sys_pipe;
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate, sys_handle_control};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
@@ -139,29 +138,13 @@ syscall_table! {
     Pipe = 600 => sys_pipe,                // Create pipe handles
     
     // Event Channels (Pub/Sub pattern)
-    IpcSubscribeChannel = 610 => sys_subscribe_channel,     // Subscribe to event channel
-    IpcUnsubscribeChannel = 611 => sys_unsubscribe_channel, // Unsubscribe from channel  
-    IpcPublishToChannel = 612 => sys_send_event_generic, // Publish event to channel
     
     // Process Group Communication
-    IpcJoinProcessGroup = 620 => sys_join_process_group,    // Join process group
-    IpcLeaveProcessGroup = 621 => sys_leave_process_group,  // Leave process group
-    IpcSendToProcessGroup = 622 => sys_send_event_generic, // Send to process group
+
     
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
     
     // === Task Event Operations ===
-    TaskSendEvent = 800 => sys_send_task_event,            // Send signal/event to specific task
-    TaskSetEventAction = 801 => sys_set_event_action, // Set event action for current task
-    TaskBlockEvents = 802 => sys_block_events,        // Block/unblock event delivery
-    TaskGetPendingEvents = 803 => sys_get_pending_events, // Get pending event count
-    TaskHasPendingEvents = 804 => sys_has_pending_events, // Check if has pending events
-    TaskSendEventGeneric = 805 => sys_send_event_generic, // Send event with generic payload
-    TaskSubscribeChannel = 806 => sys_subscribe_channel, // Subscribe to a channel
-    TaskUnsubscribeChannel = 807 => sys_unsubscribe_channel, // Unsubscribe from a channel
-    TaskJoinProcessGroup = 808 => sys_join_process_group, // Join a process group
-    TaskLeaveProcessGroup = 809 => sys_leave_process_group, // Leave a process group
-    TaskBroadcastEvent = 810 => sys_broadcast_event,        // Broadcast event to all tasks in group
 }
