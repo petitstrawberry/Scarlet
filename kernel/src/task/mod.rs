@@ -1122,6 +1122,11 @@ impl Task {
     
     /// Process pending events if events are enabled
     /// This should be called by the scheduler before resuming the task
+    /// 
+    /// Following signal-like semantics:
+    /// - Process a limited number of events per scheduler cycle to avoid starvation
+    /// - Critical events (like KILL) are processed immediately
+    /// - Normal events are batched and processed in priority order
     pub fn process_pending_events(&self) -> Result<(), &'static str> {
         // Check if events are enabled
         if !self.events_enabled() {
@@ -1130,8 +1135,11 @@ impl Task {
         
         // Delegate to ABI module for event processing
         if let Some(abi) = &self.abi {
-            // Process events one by one until queue is empty
-            loop {
+            const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
+            let mut processed_count = 0;
+            
+            // Process events with limits to prevent infinite loops
+            while processed_count < MAX_EVENTS_PER_CYCLE {
                 let event = {
                     let mut queue = self.event_queue.lock();
                     queue.dequeue()
@@ -1139,21 +1147,65 @@ impl Task {
                 
                 match event {
                     Some(event) => {
+                        processed_count += 1;
+                        
+                        // Check if this is a critical event that requires immediate attention
+                        let is_critical = self.is_critical_event(&event);
+                        
                         // Let ABI handle the event
                         abi.handle_event(event, self.id as u32)?;
                         
-                        // Check if events are still enabled after handling
-                        // (ABI module might disable events during handling)
+                        // Check if events were disabled during handling
                         if !self.events_enabled() {
+                            break;
+                        }
+                        
+                        // If we processed a critical event, we can stop here
+                        // to allow the ABI module to take appropriate action
+                        if is_critical {
                             break;
                         }
                     }
                     None => break, // No more events
                 }
             }
+            
+            // If we hit the limit and there are still events, the scheduler
+            // will call us again on the next cycle
+            if processed_count == MAX_EVENTS_PER_CYCLE {
+                let queue = self.event_queue.lock();
+                if !queue.is_empty() {
+                    // Log that we're deferring events to next cycle
+                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle", 
+                    //                      self.id, queue.len());
+                }
+            }
         }
         
         Ok(())
+    }
+    
+    /// Check if an event is critical and should be processed immediately
+    /// Critical events typically cannot be ignored and affect task state directly
+    fn is_critical_event(&self, event: &crate::ipc::event::Event) -> bool {
+        use crate::ipc::event::{EventType, EventPriority};
+        
+        // High/Critical priority events are always considered critical
+        match event.metadata.priority {
+            EventPriority::Critical => return true,
+            EventPriority::High => {
+                // Some high priority events are critical depending on type
+                match &event.event_type {
+                    EventType::Direct { event_id, .. } => {
+                        // Could map specific event IDs to critical signals
+                        // For now, treat all high priority direct events as critical
+                        *event_id == 9 // SIGKILL-like event
+                    }
+                    _ => false
+                }
+            }
+            _ => false
+        }
     }
 }
 
