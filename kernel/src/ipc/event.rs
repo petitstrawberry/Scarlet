@@ -541,8 +541,8 @@ pub struct EventManager {
     /// Delivery configurations per task
     configs: Mutex<HashMap<u32, DeliveryConfig>>,
     
-    /// Task-specific event filters
-    task_filters: Mutex<HashMap<u32, Vec<EventFilter>>>,
+    /// Task-specific event filters (handler_id, filter)
+    task_filters: Mutex<HashMap<u32, Vec<(usize, EventFilter)>>>,
     
     /// Next event ID
     #[allow(dead_code)]
@@ -568,6 +568,25 @@ impl EventManager {
     pub fn get_manager() -> &'static EventManager {
         static INSTANCE: spin::once::Once<EventManager> = spin::once::Once::new();
         INSTANCE.call_once(|| EventManager::new())
+    }
+    
+    /// Helper: get the currently running task id, if available
+    fn get_current_task_id(&self) -> Option<u32> {
+        #[cfg(test)]
+        {
+            // In unit tests, there is no real scheduler context
+            return Some(1);
+        }
+        #[cfg(not(test))]
+        {
+            let cpu = crate::arch::get_cpu();
+            let cpu_id = cpu.get_cpuid();
+            let sched = crate::sched::scheduler::get_scheduler();
+            if let Some(task) = sched.get_current_task(cpu_id) {
+                return Some(task.get_id() as u32);
+            }
+            None
+        }
     }
     
     /// Create or get an event channel as a KernelObject handle
@@ -630,12 +649,42 @@ impl EventManager {
         }
     }
     
-    /// Register an event filter for a task
+    /// Register an event filter for a task (without handler id)
     pub fn register_filter(&self, task_id: u32, filter: EventFilter) -> Result<(), EventError> {
         let mut task_filters = self.task_filters.lock();
         let filters = task_filters.entry(task_id).or_insert_with(Vec::new);
-        filters.push(filter);
+        // Assign a simple handler id: next index
+        let handler_id = filters.len();
+        filters.push((handler_id, filter));
         Ok(())
+    }
+
+    /// Register an event filter for a task with explicit handler id
+    pub fn register_filter_with_id(&self, task_id: u32, handler_id: usize, filter: EventFilter) -> Result<(), EventError> {
+        let mut task_filters = self.task_filters.lock();
+        let filters = task_filters.entry(task_id).or_insert_with(Vec::new);
+        // If an entry with same handlerId exists, replace it
+        if let Some(slot) = filters.iter_mut().find(|(hid, _)| *hid == handler_id) {
+            *slot = (handler_id, filter);
+        } else {
+            filters.push((handler_id, filter));
+        }
+        Ok(())
+    }
+    
+    /// Unregister a filter by handler id
+    pub fn unregister_filter_by_id(&self, task_id: u32, handler_id: usize) -> Result<(), EventError> {
+        let mut task_filters = self.task_filters.lock();
+        if let Some(filters) = task_filters.get_mut(&task_id) {
+            filters.retain(|(hid, _)| *hid != handler_id);
+        }
+        Ok(())
+    }
+    
+    /// Get a snapshot of filters for a task
+    pub fn get_filters_for_task(&self, task_id: u32) -> Vec<(usize, EventFilter)> {
+        let task_filters = self.task_filters.lock();
+        task_filters.get(&task_id).cloned().unwrap_or_default()
     }
     
     /// Remove all filters for a task
@@ -647,8 +696,10 @@ impl EventManager {
     
     /// Subscribe to a channel
     pub fn subscribe_channel(&self, channel: &str) -> Result<(), EventError> {
-        // TODO: Get current task ID from task system
-        let current_task_id = 1; // Placeholder
+        // Resolve current task ID from scheduler
+        let current_task_id = self
+            .get_current_task_id()
+            .ok_or_else(|| EventError::Other("No current task".into()))?;
         
         // Get or create the channel
         let mut channels = self.channels.lock();
@@ -667,7 +718,9 @@ impl EventManager {
     
     /// Unsubscribe from a channel
     pub fn unsubscribe_channel(&self, channel: &str) -> Result<(), EventError> {
-        let current_task_id = 1; // TODO: Get from task system
+        let current_task_id = self
+            .get_current_task_id()
+            .ok_or_else(|| EventError::Other("No current task".into()))?;
         
         let channels = self.channels.lock();
         if let Some(channel_obj) = channels.get(channel) {
@@ -679,7 +732,9 @@ impl EventManager {
     
     /// Join a task group
     pub fn join_group(&self, group_id: GroupId) -> Result<(), EventError> {
-        let current_task_id = 1; // TODO: Get from task system
+        let current_task_id = self
+            .get_current_task_id()
+            .ok_or_else(|| EventError::Other("No current task".into()))?;
         
         let mut groups = self.groups.lock();
         let group_members = groups.entry(group_id).or_insert_with(Vec::new);
@@ -693,7 +748,9 @@ impl EventManager {
     
     /// Leave a task group
     pub fn leave_group(&self, group_id: GroupId) -> Result<(), EventError> {
-        let current_task_id = 1; // TODO: Get from task system
+        let current_task_id = self
+            .get_current_task_id()
+            .ok_or_else(|| EventError::Other("No current task".into()))?;
         
         let mut groups = self.groups.lock();
         if let Some(group_members) = groups.get_mut(&group_id) {
@@ -705,7 +762,9 @@ impl EventManager {
     
     /// Configure delivery settings
     pub fn configure_delivery(&self, config: DeliveryConfig) -> Result<(), EventError> {
-        let current_task_id = 1; // TODO: Get from task system
+        let current_task_id = self
+            .get_current_task_id()
+            .ok_or_else(|| EventError::Other("No current task".into()))?;
         
         let mut configs = self.configs.lock();
         configs.insert(current_task_id, config);
@@ -745,7 +804,10 @@ impl EventManager {
             GroupTarget::TaskGroup(group_id) => {
                 let groups = self.groups.lock();
                 if let Some(members) = groups.get(group_id) {
-                    for &task_id in members {
+                    // snapshot to avoid holding lock while delivering
+                    let targets: alloc::vec::Vec<u32> = members.iter().cloned().collect();
+                    drop(groups);
+                    for &task_id in &targets {
                         let _ = self.deliver_to_task(task_id, event.clone());
                     }
                     Ok(())
@@ -754,9 +816,13 @@ impl EventManager {
                 }
             }
             GroupTarget::AllTasks => {
-                // TODO: Deliver to all tasks in the system
-                // This would require integration with the task manager
-                Err(EventError::Other(format!("AllTasks delivery not implemented")))
+                // snapshot all task ids from scheduler
+                let sched = crate::sched::scheduler::get_scheduler();
+                let all_ids: alloc::vec::Vec<u32> = sched.get_all_task_ids().into_iter().map(|x| x as u32).collect();
+                for tid in all_ids {
+                    let _ = self.deliver_to_task(tid, event.clone());
+                }
+                Ok(())
             }
             _ => Err(EventError::Other(format!("Group target not implemented"))),
         }
@@ -764,10 +830,13 @@ impl EventManager {
     
     /// Deliver broadcast event to all tasks
     fn deliver_broadcast(&self, event: Event, _priority: EventPriority, _reliable: bool) -> Result<(), EventError> {
-        // TODO: Deliver to all tasks in the system
-        // This would require integration with the task manager
-        let _ = event; // Suppress unused warning for now
-        Err(EventError::Other(format!("Broadcast delivery not implemented")))
+        // broadcast to every task in the system
+        let sched = crate::sched::scheduler::get_scheduler();
+        let all_ids: alloc::vec::Vec<u32> = sched.get_all_task_ids().into_iter().map(|x| x as u32).collect();
+        for tid in all_ids {
+            let _ = self.deliver_to_task(tid, event.clone());
+        }
+        Ok(())
     }
     
     /// Deliver event to a specific task
@@ -778,7 +847,7 @@ impl EventManager {
         if let Some(filters) = task_filters.get(&task_id) {
             // If task has filters, check if event matches any of them
             if !filters.is_empty() {
-                let matches = filters.iter().any(|filter| filter.matches(&event));
+                let matches = filters.iter().any(|(_, filter)| filter.matches(&event));
                 if !matches {
                     // Event doesn't match any filter, drop it
                     return Ok(());
@@ -1030,6 +1099,8 @@ pub struct EventSubscriptionObject {
     subscription_id: String,
     channel_name: String,
     task_id: u32,
+    /// Local registry of filters keyed by handler ID for this subscription
+    filters: Mutex<HashMap<usize, EventFilter>>,    
     #[allow(dead_code)]
     manager_ref: &'static EventManager,
 }
@@ -1040,6 +1111,7 @@ impl EventSubscriptionObject {
             subscription_id,
             channel_name,
             task_id,
+            filters: Mutex::new(HashMap::new()),
             manager_ref: EventManager::get_manager(),
         }
     }
@@ -1067,31 +1139,83 @@ impl crate::object::capability::EventSender for EventChannelObject {
 
 impl crate::object::capability::EventReceiver for EventChannelObject {
     fn has_pending_events(&self) -> bool {
+        // Check if any subscriber task has pending events for THIS channel specifically
+        let subscriber_ids = self.get_subscribers();
+        for tid in subscriber_ids {
+            if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(tid as usize) {
+                let queue = task.event_queue.lock();
+                for (_prio, q) in queue.events.iter() {
+                    for ev in q.iter() {
+                        if let EventDelivery::Channel { channel_id, .. } = &ev.delivery {
+                            if channel_id == &self.name {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         false
     }
 }
 
 impl crate::object::capability::EventReceiver for EventSubscriptionObject {
     fn has_pending_events(&self) -> bool {
-        // TODO: Check subscription state
+        // Only consider events delivered to this subscription's channel and matching its local filters
+        if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(self.task_id as usize) {
+            let queue = task.event_queue.lock();
+            let channel_name = self.channel_name.as_str();
+            // Take a snapshot of local filters
+            let local_filters: alloc::vec::Vec<EventFilter> = {
+                let guard = self.filters.lock();
+                guard.values().cloned().collect()
+            };
+            let use_filters = !local_filters.is_empty();
+
+            for (_prio, q) in queue.events.iter() {
+                for ev in q.iter() {
+                    if let EventDelivery::Channel { channel_id, .. } = &ev.delivery {
+                        if channel_id == channel_name {
+                            if use_filters {
+                                if local_filters.iter().any(|f| f.matches(ev)) {
+                                    return true;
+                                }
+                            } else {
+                                return true; // No local filters => any event on this channel counts
+                            }
+                        }
+                    }
+                }
+            }
+        }
         false
     }
 }
 
 impl crate::object::capability::EventSubscriber for EventSubscriptionObject {
-    fn register_filter(&self, _filter: EventFilter, _handler_id: usize) -> Result<(), &'static str> {
-        // TODO: Register filter with EventManager
-        Ok(())
+    fn register_filter(&self, filter: EventFilter, handler_id: usize) -> Result<(), &'static str> {
+        // Store locally
+        self.filters.lock().insert(handler_id, filter.clone());
+        // Register with manager for actual delivery filtering
+        self.manager_ref
+            .register_filter_with_id(self.task_id, handler_id, filter)
+            .map_err(|_| "failed to register filter")
     }
     
-    fn unregister_filter(&self, _handler_id: usize) -> Result<(), &'static str> {
-        // TODO: Unregister filter from EventManager
-        Ok(())
+    fn unregister_filter(&self, handler_id: usize) -> Result<(), &'static str> {
+        self.filters.lock().remove(&handler_id);
+        self.manager_ref
+            .unregister_filter_by_id(self.task_id, handler_id)
+            .map_err(|_| "failed to unregister filter")
     }
     
     fn get_filters(&self) -> Vec<(usize, EventFilter)> {
-        // TODO: Get filters from EventManager
-        Vec::new()
+        // Return a snapshot of local filters
+        self.filters
+            .lock()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
     }
 }
 
@@ -1124,6 +1248,7 @@ fn generate_event_id() -> u64 {
 mod tests {
     use super::*;
     use alloc::string::ToString;
+    use crate::object::capability::{EventSubscriber, EventReceiver}; // bring traits into scope
 
     #[test_case]
     fn test_event_creation() {
@@ -1635,5 +1760,364 @@ mod tests {
             },
             _ => panic!("Expected String payload"),
         }
+    }
+
+    #[test_case]
+    fn test_channel_subscription_management() {
+        let manager = EventManager::get_manager();
+        // Create channel via manager
+        let ch = manager.create_channel("sub_test".to_string());
+        let channel = match ch {
+            crate::object::KernelObject::EventChannel(arc) => arc,
+            _ => panic!("Expected EventChannel"),
+        };
+
+        // Initially no subscribers
+        assert_eq!(channel.get_subscribers().len(), 0);
+
+        // Subscribe task 1 and 2
+        let _s1 = channel.subscribe(1).expect("subscribe(1)");
+        let _s2 = channel.subscribe(2).expect("subscribe(2)");
+        let mut subs = channel.get_subscribers();
+        subs.sort();
+        assert_eq!(subs, alloc::vec![1, 2]);
+
+        // Unsubscribe task 1
+        channel.unsubscribe(1).expect("unsubscribe(1)");
+        let subs = channel.get_subscribers();
+        assert_eq!(subs, alloc::vec![2]);
+
+        // Remove remaining via remove_subscription using id
+        let ids: alloc::vec::Vec<String> = channel
+            .get_subscriptions()
+            .into_iter()
+            .map(|s| s.subscription_id().to_string())
+            .collect();
+        for id in ids {
+            channel.remove_subscription(&id).unwrap();
+        }
+        assert_eq!(channel.get_subscribers().len(), 0);
+    }
+
+    #[test_case]
+    fn test_event_manager_subscription_creation() {
+        let manager = EventManager::get_manager();
+        // Create subscription through manager, it should create channel if missing
+        let ko = manager
+            .create_subscription("mgr_sub_test".to_string(), 42)
+            .expect("create_subscription");
+        let sub = match ko {
+            crate::object::KernelObject::EventSubscription(arc) => arc,
+            _ => panic!("Expected EventSubscription"),
+        };
+        assert_eq!(sub.channel_name(), "mgr_sub_test");
+        assert_eq!(sub.task_id(), 42);
+
+        // Ensure channel was registered and contains the subscriber
+        let channels = manager.channels.lock();
+        let ch = channels.get("mgr_sub_test").expect("channel exists").clone();
+        drop(channels);
+        let subs = ch.get_subscribers();
+        assert_eq!(subs, alloc::vec![42]);
+    }
+
+    #[test_case]
+    fn test_channel_broadcast_no_error() {
+        let manager = EventManager::get_manager();
+        let ch = manager.create_channel("bc_test".to_string());
+        let channel = match ch {
+            crate::object::KernelObject::EventChannel(arc) => arc,
+            _ => panic!("Expected EventChannel"),
+        };
+        let _ = channel.subscribe(100).unwrap();
+        let _ = channel.subscribe(200).unwrap();
+
+        // Since in cfg(test) deliver_to_task is a stub that returns Ok, we only
+        // verify that broadcast completes without error when subscribers exist.
+        let ev = Event::new_channel_event(
+            "bc_test",
+            EventContent::Notification(NotificationType::TaskCompleted),
+            EventPayload::Empty,
+        );
+        channel.broadcast_to_subscribers(ev).expect("broadcast ok");
+    }
+
+    #[test_case]
+    fn test_subscription_filter_registration() {
+        let manager = EventManager::get_manager();
+        let ch = manager.create_channel("filter_test".to_string());
+        let channel = match ch { crate::object::KernelObject::EventChannel(arc) => arc, _ => panic!("Expected EventChannel"), };
+        let sub = channel.subscribe(7).expect("subscribe");
+
+        // Register two filters
+        sub.register_filter(EventFilter::All, 1).expect("reg1");
+        sub.register_filter(EventFilter::Sender(7), 2).expect("reg2");
+        let filters = sub.get_filters();
+        assert_eq!(filters.len(), 2);
+
+        // Unregister one
+        sub.unregister_filter(1).expect("unreg1");
+        let filters = sub.get_filters();
+        assert_eq!(filters.len(), 1);
+    }
+
+    #[test_case]
+    fn test_subscription_pending_scoped_to_channel() {
+        // Create a kernel task and register it into the scheduler
+        let task = crate::task::Task::new("evt_pending_task".to_string(), 1, crate::task::TaskType::Kernel);
+        let tid = task.get_id();
+        crate::sched::scheduler::get_scheduler().add_task(task, 0);
+
+        // Create two channels and subscribe the same task to both
+        let mgr = EventManager::get_manager();
+        let ch_a = match mgr.create_channel("chanA_scope".to_string()) {
+            crate::object::KernelObject::EventChannel(arc) => arc,
+            _ => panic!("Expected EventChannel"),
+        };
+        let ch_b = match mgr.create_channel("chanB_scope".to_string()) {
+            crate::object::KernelObject::EventChannel(arc) => arc,
+            _ => panic!("Expected EventChannel"),
+        };
+
+        let sub_a = ch_a.subscribe(tid as u32).expect("subscribe A");
+        let _sub_b = ch_b.subscribe(tid as u32).expect("subscribe B");
+
+        // Prepare events: Direct, Channel B (only)
+        let ev_direct = Event::immediate_process_control(tid as u32, ProcessControlType::Kill);
+        let ev_b = Event::channel(
+            "chanB_scope".to_string(),
+            EventContent::Notification(NotificationType::TaskCompleted),
+            false,
+            EventPriority::Normal,
+            EventPayload::Empty,
+        );
+
+        // Enqueue only direct + B events: A should have no pending
+        if let Some(t) = crate::sched::scheduler::get_scheduler().get_task_by_id(tid) {
+            let mut q = t.event_queue.lock();
+            q.enqueue(ev_direct);
+            q.enqueue(ev_b);
+        }
+
+        assert_eq!(sub_a.has_pending_events(), false, "sub A should not see events for other channels");
+        assert_eq!(ch_a.has_pending_events(), false, "channel A should not see pending without A events");
+        assert_eq!(ch_b.has_pending_events(), true, "channel B should see its event");
+
+        // Now enqueue an event for channel A -> both sub A and channel A should report pending
+        let ev_a = Event::channel(
+            "chanA_scope".to_string(),
+            EventContent::Notification(NotificationType::DeviceConnected),
+            false,
+            EventPriority::Normal,
+            EventPayload::Empty,
+        );
+        if let Some(t) = crate::sched::scheduler::get_scheduler().get_task_by_id(tid) {
+            let mut q = t.event_queue.lock();
+            q.enqueue(ev_a);
+        }
+        assert_eq!(sub_a.has_pending_events(), true);
+        assert_eq!(ch_a.has_pending_events(), true);
+    }
+
+    #[test_case]
+    fn test_subscription_pending_respects_local_filters() {
+        // New task for isolation
+        let task = crate::task::Task::new("evt_filter_task".to_string(), 1, crate::task::TaskType::Kernel);
+        let tid = task.get_id();
+        crate::sched::scheduler::get_scheduler().add_task(task, 0);
+
+        let mgr = EventManager::get_manager();
+        let ch = match mgr.create_channel("chanFilt".to_string()) {
+            crate::object::KernelObject::EventChannel(arc) => arc,
+            _ => panic!("Expected EventChannel"),
+        };
+        let sub = ch.subscribe(tid as u32).expect("subscribe");
+
+        // Create an event on the channel and set sender = 7
+        let mut ev = Event::channel(
+            "chanFilt".to_string(),
+            EventContent::Notification(NotificationType::NetworkChange),
+            false,
+            EventPriority::High,
+            EventPayload::Empty,
+        );
+        ev.metadata.sender = Some(7);
+        if let Some(t) = crate::sched::scheduler::get_scheduler().get_task_by_id(tid) {
+            let mut q = t.event_queue.lock();
+            q.enqueue(ev);
+        }
+
+        // Without filters -> pending exists
+        assert_eq!(sub.has_pending_events(), true);
+
+        // Register a mismatching local filter -> pending should be false
+        sub.register_filter(EventFilter::Sender(999), 1).expect("register mismatch");
+        assert_eq!(sub.has_pending_events(), false);
+
+        // Add an allow-all filter -> pending becomes true
+        sub.register_filter(EventFilter::All, 2).expect("register all");
+        assert_eq!(sub.has_pending_events(), true);
+
+        // Remove the allow-all -> revert to false
+        sub.unregister_filter(2).expect("unregister all");
+        assert_eq!(sub.has_pending_events(), false);
+    }
+
+    #[test_case]
+    fn test_event_type_filter_variants_channel_group_broadcast() {
+        // Channel filter
+        let f_chan = EventFilter::EventType(EventTypeFilter::Channel("chX".to_string()));
+        let ev_chan_ok = Event::channel(
+            "chX".to_string(),
+            EventContent::Notification(NotificationType::TaskCompleted),
+            false,
+            EventPriority::Normal,
+            EventPayload::Empty,
+        );
+        let ev_chan_ng = Event::channel(
+            "other".to_string(),
+            EventContent::Notification(NotificationType::TaskCompleted),
+            false,
+            EventPriority::Normal,
+            EventPayload::Empty,
+        );
+        assert!(f_chan.matches(&ev_chan_ok));
+        assert!(!f_chan.matches(&ev_chan_ng));
+
+        // Group filter (TaskGroup)
+        let f_grp = EventFilter::EventType(EventTypeFilter::Group(9));
+        let ev_grp_ok = Event::group(
+            GroupTarget::TaskGroup(9),
+            EventContent::Message { message_type: 1, category: MessageCategory::Status },
+            EventPriority::Low,
+            false,
+            EventPayload::Empty,
+        );
+        let ev_grp_ng = Event::group(
+            GroupTarget::TaskGroup(8),
+            EventContent::Message { message_type: 1, category: MessageCategory::Status },
+            EventPriority::Low,
+            false,
+            EventPayload::Empty,
+        );
+        assert!(f_grp.matches(&ev_grp_ok));
+        assert!(!f_grp.matches(&ev_grp_ng));
+
+        // Broadcast filter (by content event_id when Custom)
+        let f_bc = EventFilter::EventType(EventTypeFilter::Broadcast(555));
+        let ev_bc_ok = Event::broadcast(
+            EventContent::Custom { namespace: "ns".to_string(), event_id: 555 },
+            EventPriority::High,
+            true,
+            EventPayload::Empty,
+        );
+        assert!(f_bc.matches(&ev_bc_ok));
+    }
+
+    #[test_case]
+    fn test_event_manager_task_filter_registration_snapshot() {
+        let mgr = EventManager::get_manager();
+        // Prepare a task
+        let task = crate::task::Task::new("flt_snap_task".to_string(), 1, crate::task::TaskType::Kernel);
+        let tid = task.get_id();
+        crate::sched::scheduler::get_scheduler().add_task(task, 0);
+        // Clean slate
+        mgr.clear_filters(tid as u32).ok();
+
+        // Register and check snapshot
+        mgr.register_filter_with_id(tid as u32, 10, EventFilter::Sender(tid as u32)).expect("register");
+        let filters = mgr.get_filters_for_task(tid as u32);
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].0, 10);
+        match &filters[0].1 {
+            EventFilter::Sender(id) => assert_eq!(*id, tid as u32),
+            _ => panic!("unexpected filter kind"),
+        }
+
+        // Replace same id
+        mgr.register_filter_with_id(tid as u32, 10, EventFilter::All).expect("replace");
+        let filters = mgr.get_filters_for_task(tid as u32);
+        assert_eq!(filters.len(), 1);
+        match &filters[0].1 { EventFilter::All => {}, _ => panic!("expected All") }
+
+        // Unregister
+        mgr.unregister_filter_by_id(tid as u32, 10).expect("unregister");
+        let filters = mgr.get_filters_for_task(tid as u32);
+        assert!(filters.is_empty());
+    }
+
+    #[test_case]
+    fn test_event_manager_pending_count_and_has_pending() {
+        let mgr = EventManager::get_manager();
+        let task = crate::task::Task::new("pending_cnt_task".to_string(), 1, crate::task::TaskType::Kernel);
+        let tid = task.get_id();
+        crate::sched::scheduler::get_scheduler().add_task(task, 0);
+
+        assert_eq!(mgr.get_pending_event_count(tid as u32), 0);
+        assert_eq!(mgr.has_pending_events(tid as u32), false);
+
+        // Enqueue two events directly into the task queue
+        if let Some(t) = crate::sched::scheduler::get_scheduler().get_task_by_id(tid) {
+            let mut q = t.event_queue.lock();
+            q.enqueue(Event::immediate_process_control(tid as u32, ProcessControlType::Interrupt));
+            q.enqueue(Event::channel(
+                "pc_cnt".to_string(),
+                EventContent::Notification(NotificationType::NetworkChange),
+                false,
+                EventPriority::Normal,
+                EventPayload::Empty,
+            ));
+        }
+
+        assert_eq!(mgr.get_pending_event_count(tid as u32), 2);
+        assert!(mgr.has_pending_events(tid as u32));
+
+        // Dequeue both and verify back to zero
+        if let Some(t) = crate::sched::scheduler::get_scheduler().get_task_by_id(tid) {
+            let mut q = t.event_queue.lock();
+            assert!(q.dequeue().is_some());
+            assert!(q.dequeue().is_some());
+        }
+        assert_eq!(mgr.get_pending_event_count(tid as u32), 0);
+        assert!(!mgr.has_pending_events(tid as u32));
+    }
+
+    #[test_case]
+    fn test_clone_preserves_fields_for_subscription_and_channel() {
+        use crate::object::capability::CloneOps;
+        let mgr = EventManager::get_manager();
+        let ch = match mgr.create_channel("clone_ch".to_string()) { crate::object::KernelObject::EventChannel(arc) => arc, _ => panic!("Expected channel") };
+        let sub = ch.subscribe(1234).expect("subscribe");
+
+        // Clone subscription via CloneOps
+        let ko = CloneOps::custom_clone(&*sub);
+        let sub2 = match ko { crate::object::KernelObject::EventSubscription(arc) => arc, _ => panic!("Expected sub clone") };
+        assert_eq!(sub.subscription_id(), sub2.subscription_id());
+        assert_eq!(sub.channel_name(), sub2.channel_name());
+        assert_eq!(sub.task_id(), sub2.task_id());
+
+        // Clone channel and verify name is preserved
+        let ko = CloneOps::custom_clone(&*ch);
+        let ch2 = match ko { crate::object::KernelObject::EventChannel(arc) => arc, _ => panic!("Expected channel clone") };
+        assert_eq!(ch.name(), ch2.name());
+    }
+
+    #[test_case]
+    fn test_group_alltasks_delivery_no_error() {
+        let mgr = EventManager::get_manager();
+        // Register a few tasks so AllTasks has some IDs
+        for i in 0..3 {
+            let task = crate::task::Task::new(format!("g_all_{}", i), 1, crate::task::TaskType::Kernel);
+            crate::sched::scheduler::get_scheduler().add_task(task, 0);
+        }
+        let ev = Event::group(
+            GroupTarget::AllTasks,
+            EventContent::Notification(NotificationType::FilesystemFull),
+            EventPriority::Normal,
+            false,
+            EventPayload::Empty,
+        );
+        // In tests, deliver_to_task is a stub, so we just ensure it returns Ok
+        assert!(mgr.send_event(ev).is_ok());
     }
 }
