@@ -137,9 +137,19 @@ syscall_table! {
     // === IPC Operations ===
     Pipe = 600 => sys_pipe,                // Create pipe handles
     
-    // Event Channels (Pub/Sub pattern)
-    
-    // Process Group Communication
+    // Event System (Modern event-driven IPC)
+    EventHandlerRegister = 610 => |_: &mut Trapframe| {
+        // Event handler registration - placeholder
+        usize::MAX // Not implemented yet
+    },
+    EventSendDirect = 611 => |_: &mut Trapframe| {
+        // Direct event sending - placeholder
+        usize::MAX // Not implemented yet
+    },
+    EventPollPending = 612 => |_: &mut Trapframe| {
+        // Event polling - placeholder
+        usize::MAX // Not implemented yet
+    },
 
     
     // === Memory Mapping Operations ===

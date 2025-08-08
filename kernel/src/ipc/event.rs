@@ -829,12 +829,89 @@ impl EventManager {
         
         Ok(())
     }
-    
+
+    /// Get a task's delivery configuration or the default if none is set
+    fn get_task_config_or_default(&self, task_id: u32) -> DeliveryConfig {
+        self.configs
+            .lock()
+            .get(&task_id)
+            .cloned()
+            .unwrap_or_else(DeliveryConfig::default)
+    }
+
+    /// Handle delivery failures according to the sender's configured policy
+    fn handle_delivery_failure(&self, sender: Option<u32>, err: &EventError, event: &Event) {
+        // Determine policy from sender's config if available, else default to Log
+        let policy = match sender {
+            Some(sid) => self.get_task_config_or_default(sid).failure_policy.clone(),
+            None => FailurePolicy::Log,
+        };
+
+        match policy {
+            FailurePolicy::Ignore => { /* do nothing */ }
+            FailurePolicy::Log => {
+                crate::early_println!(
+                    "[EventManager] Delivery failure: {:?}, sender={:?}, delivery={:?}",
+                    err,
+                    sender,
+                    event.delivery
+                );
+            }
+            FailurePolicy::NotifySender => {
+                // Best-effort notify the sender without causing recursive failure handling
+                if let Some(sid) = sender {
+                    let notice = Event::direct_custom(
+                        sid,
+                        "system".into(),
+                        0x1001,
+                        EventPriority::Low,
+                        false,
+                        EventPayload::String(format!("Delivery failed: {:?}", err)),
+                    );
+                    let _ = self.deliver_to_task(sid, notice);
+                } else {
+                    // Fall back to logging when there is no sender
+                    crate::early_println!("[EventManager] Delivery failure without sender: {:?}", err);
+                }
+            }
+            FailurePolicy::SystemEvent => {
+                // For now, log the failure to avoid recursive broadcasts. Can be expanded later.
+                crate::early_println!(
+                    "[EventManager] SystemEvent policy: delivery failure: {:?}, sender={:?}",
+                    err,
+                    sender
+                );
+            }
+        }
+    }
+
     // === Internal Event Delivery Methods ===
     
     /// Deliver direct event to specific task
     fn deliver_direct(&self, event: Event, target: TaskId, _priority: EventPriority, _reliable: bool) -> Result<(), EventError> {
-        self.deliver_to_task(target, event)
+        // Attempt delivery; if reliable, retry according to sender's config
+        let mut result = self.deliver_to_task(target, event.clone());
+        if result.is_err() && _reliable {
+            // Determine retry count from sender's config
+            let retries = match event.metadata.sender {
+                Some(sender) => self.get_task_config_or_default(sender).retry_count,
+                None => DeliveryConfig::default().retry_count,
+            };
+            let mut attempts = 0u32;
+            while attempts < retries {
+                // Simple immediate retry (no sleep to keep no_std constraints)
+                result = self.deliver_to_task(target, event.clone());
+                if result.is_ok() { break; }
+                attempts += 1;
+            }
+            if let Err(ref e) = result {
+                self.handle_delivery_failure(event.metadata.sender, e, &event);
+            }
+        } else if let Err(ref e) = result {
+            // Not reliable, still honor failure policy for observability
+            self.handle_delivery_failure(event.metadata.sender, e, &event);
+        }
+        result
     }
     
     /// Deliver to channel subscribers
@@ -844,13 +921,26 @@ impl EventManager {
         if let Some(channel) = channels.get(channel_id) {
             let channel = channel.clone();
             drop(channels);
-            channel.broadcast_to_subscribers(event)
+            // Broadcast and handle per-target failures
+            let subscribers = channel.get_subscribers();
+            for task_id in subscribers {
+                if let Err(e) = self.deliver_to_task(task_id, event.clone()) {
+                    self.handle_delivery_failure(event.metadata.sender, &e, &event);
+                }
+            }
+            Ok(())
         } else if create_if_missing {
             // Create empty channel
             let channel = Arc::new(EventChannelObject::new(channel_id.into()));
             channels.insert(channel_id.into(), channel.clone());
             drop(channels);
-            channel.broadcast_to_subscribers(event)
+            let subscribers = channel.get_subscribers();
+            for task_id in subscribers {
+                if let Err(e) = self.deliver_to_task(task_id, event.clone()) {
+                    self.handle_delivery_failure(event.metadata.sender, &e, &event);
+                }
+            }
+            Ok(())
         } else {
             Err(EventError::ChannelNotFound)
         }
@@ -865,7 +955,9 @@ impl EventManager {
                     let targets: alloc::vec::Vec<u32> = members.iter().cloned().collect();
                     drop(groups);
                     for &task_id in &targets {
-                        let _ = self.deliver_to_task(task_id, event.clone());
+                        if let Err(e) = self.deliver_to_task(task_id, event.clone()) {
+                            self.handle_delivery_failure(event.metadata.sender, &e, &event);
+                        }
                     }
                     Ok(())
                 } else {
@@ -875,7 +967,7 @@ impl EventManager {
             GroupTarget::AllTasks => {
                 let sched = crate::sched::scheduler::get_scheduler();
                 let all_ids: alloc::vec::Vec<u32> = sched.get_all_task_ids().into_iter().map(|x| x as u32).collect();
-                for tid in all_ids { let _ = self.deliver_to_task(tid, event.clone()); }
+                for tid in all_ids { if let Err(e) = self.deliver_to_task(tid, event.clone()) { self.handle_delivery_failure(event.metadata.sender, &e, &event); } }
                 Ok(())
             }
             GroupTarget::Session(session_id) => {
@@ -883,7 +975,7 @@ impl EventManager {
                 if let Some(members) = sessions.get(session_id) {
                     let targets: alloc::vec::Vec<u32> = members.iter().cloned().collect();
                     drop(sessions);
-                    for &task_id in &targets { let _ = self.deliver_to_task(task_id, event.clone()); }
+                    for &task_id in &targets { if let Err(e) = self.deliver_to_task(task_id, event.clone()) { self.handle_delivery_failure(event.metadata.sender, &e, &event); } }
                     Ok(())
                 } else {
                     Err(EventError::GroupNotFound)
@@ -894,7 +986,7 @@ impl EventManager {
                 if let Some(members) = named.get(name) {
                     let targets: alloc::vec::Vec<u32> = members.iter().cloned().collect();
                     drop(named);
-                    for &task_id in &targets { let _ = self.deliver_to_task(task_id, event.clone()); }
+                    for &task_id in &targets { if let Err(e) = self.deliver_to_task(task_id, event.clone()) { self.handle_delivery_failure(event.metadata.sender, &e, &event); } }
                     Ok(())
                 } else {
                     Err(EventError::GroupNotFound)
@@ -909,7 +1001,9 @@ impl EventManager {
         let sched = crate::sched::scheduler::get_scheduler();
         let all_ids: alloc::vec::Vec<u32> = sched.get_all_task_ids().into_iter().map(|x| x as u32).collect();
         for tid in all_ids {
-            let _ = self.deliver_to_task(tid, event.clone());
+            if let Err(e) = self.deliver_to_task(tid, event.clone()) {
+                self.handle_delivery_failure(event.metadata.sender, &e, &event);
+            }
         }
         Ok(())
     }
@@ -934,8 +1028,13 @@ impl EventManager {
 
         // Get the task and deliver event to its local queue
         if let Some(task) = crate::sched::scheduler::get_scheduler().get_task_by_id(task_id as usize) {
-            // Enqueue the event since it passed filtering
+            // Enforce buffer size from the target task's config
+            let cfg = self.get_task_config_or_default(task_id);
             let mut queue = task.event_queue.lock();
+            if queue.len() >= cfg.buffer_size {
+                return Err(EventError::BufferFull);
+            }
+            // Enqueue the event since it passed filtering and buffer check
             queue.enqueue(event);
             Ok(())
         } else {
@@ -978,6 +1077,20 @@ impl EventManager {
             !queue.is_empty()
         } else {
             false
+        }
+    }
+
+    /// Get a channel by name, if it exists.
+    pub fn get_channel(&self, name: &str) -> Option<alloc::sync::Arc<EventChannelObject>> {
+        self.channels.lock().get(name).cloned()
+    }
+
+    /// Remove a subscription from a channel by name and subscription id.
+    pub fn remove_subscription_from_channel(&self, channel_name: &str, subscription_id: &str) -> Result<(), EventError> {
+        if let Some(ch) = self.channels.lock().get(channel_name).cloned() {
+            ch.remove_subscription(subscription_id)
+        } else {
+            Err(EventError::ChannelNotFound)
         }
     }
 }
