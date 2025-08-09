@@ -9,7 +9,7 @@ mod pipe;
 
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
-use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
+use proc::{sys_exit, sys_fork, sys_wait, sys_getpid, sys_kill};
 
 use crate::{
     abi::{
@@ -19,7 +19,13 @@ use crate::{
             proc::{sys_chdir, sys_sbrk}
         }, 
         AbiModule
-    }, arch::{self, Registers}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    }, 
+    arch::{self, Registers}, 
+    early_initcall, 
+    fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, 
+    register_abi, 
+    task::elf_loader::load_elf_into_task, 
+    vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -387,7 +393,7 @@ syscall_table! {
     Wait = 3 => sys_wait,
     Pipe = 4 => sys_pipe,
     Read = 5 => sys_read,
-    // Kill = 6 => sys_kill,
+    //    Kill = 6 => sys_kill,
     Exec = 7 => sys_exec,
     Fstat = 8 => sys_fstat,
     Chdir = 9 => sys_chdir,

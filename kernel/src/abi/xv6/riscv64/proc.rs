@@ -91,10 +91,27 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     usize::MAX // -1 (In current implementation, this will not be reached)
 }
 
-pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut Trapframe) -> usize {
-    // Implement the kill syscall
-    // This syscall is not yet implemented. Returning ENOSYS error code (-1).
-    usize::MAX
+pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let pid = trapframe.get_arg(0) as usize;
+    let signal = trapframe.get_arg(1) as i32;
+
+    trapframe.increment_pc_next(task);
+
+    // For xv6 compatibility, only signal 9 (SIGKILL) is implemented for now
+    if signal != 9 {
+        return usize::MAX; // -1 (unsupported signal)
+    }
+
+    // Find the target task via scheduler
+    let scheduler = get_scheduler();
+    if let Some(target_task) = scheduler.get_task_by_id(pid) {
+        // For xv6 compatibility, immediately terminate the target task
+        target_task.exit(9); // SIGKILL equivalent - exit with signal 9
+        0 // Success
+    } else {
+        usize::MAX // -1 (no such process)
+    }
 }
 
 pub fn sys_sbrk(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {

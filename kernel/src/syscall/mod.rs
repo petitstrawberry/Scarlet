@@ -44,9 +44,16 @@
 //! 
 //! ### IPC Operations (600-699)
 //! - Pipe (600)
+//! - Event Channels: Subscribe (610), Unsubscribe (611), Publish (612)
+//! - Process Groups: Join (620), Leave (621), Send (622)
 //! 
 //! ### Memory Mapping Operations (700-799)
 //! - MemoryMap (700), MemoryUnmap (701)
+//! 
+//! ### Task Event Operations (800-899)  
+//! - Basic Events: Send (800), SetAction (801), Block (802)
+//! - Event Status: GetPending (803), HasPending (804)
+//! - Signal-like Operations: Terminate, Kill, Interrupt, etc.
 //! 
 //! ## Design Principles
 //! 
@@ -130,7 +137,24 @@ syscall_table! {
     // === IPC Operations ===
     Pipe = 600 => sys_pipe,                // Create pipe handles
     
+    // Event System (Modern event-driven IPC)
+    EventHandlerRegister = 610 => |_: &mut Trapframe| {
+        // Event handler registration - placeholder
+        usize::MAX // Not implemented yet
+    },
+    EventSendDirect = 611 => |_: &mut Trapframe| {
+        // Direct event sending - placeholder
+        usize::MAX // Not implemented yet
+    },
+    EventPollPending = 612 => |_: &mut Trapframe| {
+        // Event polling - placeholder
+        usize::MAX // Not implemented yet
+    },
+
+    
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
+    
+    // === Task Event Operations ===
 }

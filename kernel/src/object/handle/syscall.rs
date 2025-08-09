@@ -171,6 +171,8 @@ fn decode_handle_type(raw: usize) -> Option<HandleType> {
         2 => Some(HandleType::StandardInputOutput(StandardInputOutput::Stdin)),
         3 => Some(HandleType::StandardInputOutput(StandardInputOutput::Stdout)),
         4 => Some(HandleType::StandardInputOutput(StandardInputOutput::Stderr)),
+        5 => Some(HandleType::EventChannel),
+        6 => Some(HandleType::EventSubscription),
         _ => None,
     }
 }
@@ -183,6 +185,8 @@ pub fn encode_handle_type(handle_type: &HandleType) -> usize {
         HandleType::StandardInputOutput(StandardInputOutput::Stdin) => 2,
         HandleType::StandardInputOutput(StandardInputOutput::Stdout) => 3,
         HandleType::StandardInputOutput(StandardInputOutput::Stderr) => 4,
+        HandleType::EventChannel => 5,
+        HandleType::EventSubscription => 6,
     }
 }
 

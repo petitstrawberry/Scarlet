@@ -25,12 +25,16 @@ pub enum KernelObjectType {
     File = 1,
     /// Pipe object for IPC
     Pipe = 2,
+    /// Event channel for pub/sub IPC
+    EventChannel = 3,
+    /// Event subscription for receiving events
+    EventSubscription = 4,
     /// Character device (future)
-    CharDevice = 3,
+    CharDevice = 5,
     /// Block device (future)
-    BlockDevice = 4,
+    BlockDevice = 6,
     /// Socket (future)
-    Socket = 5,
+    Socket = 7,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -45,10 +49,12 @@ pub struct ObjectCapabilities {
     pub file_ops: bool,
     /// Supports PipeOps (pipe-specific operations)
     pub pipe_ops: bool,
+    /// Supports Event capabilities (EventSender/EventReceiver/EventSubscriber operations)
+    pub event_ops: bool,
     /// Supports CloneOps (custom cloning)
     pub clone_ops: bool,
     /// Reserved for future capabilities
-    pub reserved: [bool; 4],
+    pub reserved: [bool; 3],
 }
 
 /// Handle role information (simplified from HandleType)
@@ -72,8 +78,9 @@ impl KernelObjectInfo {
                 stream_ops: true,
                 file_ops: true,
                 pipe_ops: false,
+                event_ops: false,
                 clone_ops: false,
-                reserved: [false; 4],
+                reserved: [false; 3],
             },
             handle_role,
             access_mode: Self::encode_access_mode(readable, writable),
@@ -88,11 +95,46 @@ impl KernelObjectInfo {
                 stream_ops: true,
                 file_ops: false,
                 pipe_ops: true,
+                event_ops: false,
                 clone_ops: true,
-                reserved: [false; 4],
+                reserved: [false; 3],
             },
             handle_role,
             access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+    
+    /// Create info for an EventChannel KernelObject
+    pub fn for_event_channel(handle_role: HandleRole) -> Self {
+        Self {
+            object_type: KernelObjectType::EventChannel,
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: true,
+                clone_ops: true,
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(true, true), // Channel can be read and written
+        }
+    }
+    
+    /// Create info for an EventSubscription KernelObject
+    pub fn for_event_subscription(handle_role: HandleRole) -> Self {
+        Self {
+            object_type: KernelObjectType::EventSubscription,
+            capabilities: ObjectCapabilities {
+                stream_ops: true,  // Can receive events like reading
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: true,
+                clone_ops: true,
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(true, false), // Subscription is read-only
         }
     }
     
@@ -104,8 +146,9 @@ impl KernelObjectInfo {
                 stream_ops: false,
                 file_ops: false,
                 pipe_ops: false,
+                event_ops: false,
                 clone_ops: false,
-                reserved: [false; 4],
+                reserved: [false; 3],
             },
             handle_role: HandleRole::Regular,
             access_mode: 0,
@@ -126,6 +169,8 @@ impl From<crate::object::handle::HandleType> for HandleRole {
         match handle_type {
             crate::object::handle::HandleType::StandardInputOutput(_) => HandleRole::StandardInputOutput,
             crate::object::handle::HandleType::IpcChannel => HandleRole::IpcChannel,
+            crate::object::handle::HandleType::EventChannel => HandleRole::IpcChannel, // Map to IPC channel for now
+            crate::object::handle::HandleType::EventSubscription => HandleRole::IpcChannel, // Map to IPC channel for now
             crate::object::handle::HandleType::Regular => HandleRole::Regular,
         }
     }

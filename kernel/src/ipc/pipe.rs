@@ -11,12 +11,12 @@ use spin::Mutex;
 
 use crate::object::capability::{StreamOps, StreamError, CloneOps};
 use crate::object::KernelObject;
-use super::{IpcObject, IpcError};
+use super::{StreamIpcOps, IpcError};
 
 /// Pipe-specific operations
 /// 
-/// This trait extends IpcObject with pipe-specific functionality.
-pub trait PipeObject: IpcObject + CloneOps {
+/// This trait extends StreamIpcOps with pipe-specific functionality.
+pub trait PipeObject: StreamIpcOps + CloneOps {
     /// Check if there are readers on the other end
     fn has_readers(&self) -> bool;
     
@@ -186,7 +186,7 @@ impl StreamOps for PipeEndpoint {
     }
 }
 
-impl IpcObject for PipeEndpoint {
+impl StreamIpcOps for PipeEndpoint {
     fn is_connected(&self) -> bool {
         let state = self.state.lock();
         !state.closed && (state.reader_count > 0 || state.writer_count > 0)
@@ -354,7 +354,7 @@ impl StreamOps for UnidirectionalPipe {
     }
 }
 
-impl IpcObject for UnidirectionalPipe {
+impl StreamIpcOps for UnidirectionalPipe {
     fn is_connected(&self) -> bool {
         self.endpoint.is_connected()
     }

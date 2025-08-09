@@ -72,6 +72,14 @@ impl HandleTable {
                 // ConfigFile, LogOutput, etc.
                 HandleType::Regular
             }
+            KernelObject::EventChannel(_) => {
+                // Event channels are used for pub/sub communication
+                HandleType::EventChannel
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions are used for receiving events
+                HandleType::EventSubscription
+            }
         };
 
         HandleMetadata {
@@ -189,6 +197,12 @@ impl HandleTable {
                 KernelObject::Pipe(_) => {
                     Some(introspection::KernelObjectInfo::for_pipe(handle_role, readable, writable))
                 }
+                KernelObject::EventChannel(_) => {
+                    Some(introspection::KernelObjectInfo::for_event_channel(handle_role))
+                }
+                KernelObject::EventSubscription(_) => {
+                    Some(introspection::KernelObjectInfo::for_event_subscription(handle_role))
+                }
             }
         } else {
             None
@@ -251,6 +265,10 @@ pub enum HandleType {
     StandardInputOutput(StandardInputOutput),
     /// Inter-process communication channel
     IpcChannel,
+    /// Event channel for pub/sub communication
+    EventChannel,
+    /// Event subscription for receiving events
+    EventSubscription,
     /// Default/generic usage
     Regular,
 }
