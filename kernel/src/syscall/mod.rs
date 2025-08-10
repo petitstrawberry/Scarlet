@@ -71,7 +71,7 @@
 use crate::arch::Trapframe;
 use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_sleep, sys_waitpid};
-use crate::ipc::syscall::sys_pipe;
+use crate::ipc::syscall::{sys_pipe, sys_event_channel_create, sys_event_subscribe, sys_event_unsubscribe, sys_event_publish, sys_event_handler_register, sys_event_send_direct};
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate, sys_handle_control};
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
@@ -137,19 +137,13 @@ syscall_table! {
     // === IPC Operations ===
     Pipe = 600 => sys_pipe,                // Create pipe handles
     
-    // Event System (Modern event-driven IPC)
-    EventHandlerRegister = 610 => |_: &mut Trapframe| {
-        // Event handler registration - placeholder
-        usize::MAX // Not implemented yet
-    },
-    EventSendDirect = 611 => |_: &mut Trapframe| {
-        // Direct event sending - placeholder
-        usize::MAX // Not implemented yet
-    },
-    EventPollPending = 612 => |_: &mut Trapframe| {
-        // Event polling - placeholder
-        usize::MAX // Not implemented yet
-    },
+    // Event System (Handle-based, ABI-layer only)
+    EventChannelCreate = 610 => sys_event_channel_create,      // Create/open event channel (ABI use)
+    EventSubscribe = 611 => sys_event_subscribe,               // Subscribe to channel (ABI use)
+    EventUnsubscribe = 612 => sys_event_unsubscribe,           // Unsubscribe from channel (ABI use)
+    EventPublish = 613 => sys_event_publish,                   // Publish event to channel (ABI use)
+    EventHandlerRegister = 614 => sys_event_handler_register,  // Register event filter (ABI use)
+    EventSendDirect = 615 => sys_event_send_direct,            // Send direct event to task (ABI use)
 
     
     // === Memory Mapping Operations ===
