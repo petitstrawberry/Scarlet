@@ -1738,7 +1738,7 @@ mod tests {
     }
 
     #[test_case]
-    fn test_process_control_type_variants() {
+    fn test_process_control_type_variants_full() {
         // Test all ProcessControlType variants
         let variants = [
             ProcessControlType::Terminate,
