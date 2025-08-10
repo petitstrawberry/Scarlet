@@ -1323,3 +1323,41 @@ pub fn sys_faccessat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Tr
     trapframe.increment_pc_next(task);
     0
 }
+
+/// Linux sys_mkdirat implementation
+/// 
+/// Currently supports only AT_FDCWD (current working directory) as dirfd.
+///
+pub fn sys_mkdirat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    trapframe.increment_pc_next(task);
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let path = match cstring_to_string(path_ptr, 128) {
+        Ok((p, _)) => p,
+        Err(_) => return usize::MAX,
+    };
+    // NOTE: Currently only AT_FDCWD is supported
+    if dirfd != -100 { // AT_FDCWD
+        return usize::MAX;
+    }
+
+    let abs_path = match to_absolute_path_v2(&task, &path) {
+        Ok(p) => p,
+        Err(_) => return usize::MAX,
+    };
+    let vfs = match task.vfs.as_mut() {
+        Some(v) => v,
+        None => return usize::MAX,
+    };
+    match vfs.create_dir(&abs_path) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX,
+    }
+}
