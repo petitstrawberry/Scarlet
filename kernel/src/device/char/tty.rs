@@ -299,7 +299,50 @@ impl CharDevice for TtyDevice {
 
 impl ControlOps for TtyDevice {
     // TTY devices don't support control operations by default
-    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
-        Err("Control operations not supported")
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        // Linux like control operations
+
+        // Keyboard control commands
+        const KDGKBTYPE: u32 = 0x4B33; // Get keyboard type
+        const KDGKBMODE: u32 = 0x4B44; // Get keyboard mode
+        const KDSKBMODE: u32 = 0x4B45; // Set keyboard mode
+
+        // Keyboard type
+        const KB_101: u32 = 0x02; // 101-key keyboard
+
+        match command {
+            KDGKBTYPE => {
+                // Return 101-key keyboard type
+                if arg == 0 {
+                    return Err("Null pointer for KDGKBTYPE");
+                }
+                let task = mytask().ok_or("No current task found")?;
+                let kbd_type_ptr = task.vm_manager.translate_vaddr(arg)
+                    .ok_or("Invalid pointer for KDGKBTYPE")? as *mut u32;
+
+                unsafe {
+                    *kbd_type_ptr = KB_101;
+                }
+
+                Ok(0 as i32)
+            },
+            KDGKBMODE => {
+                // Return current keyboard mode
+                if arg == 0 {
+                    return Err("Null pointer for KDGKBMODE");
+                }
+                let task = mytask().ok_or("No current task found")?;
+                let kbd_mode_ptr = task.vm_manager.translate_vaddr(arg)
+                    .ok_or("Invalid pointer for KDGKBMODE")? as *mut u32;
+
+                unsafe {
+                    *kbd_mode_ptr = 0; // Placeholder for actual mode
+                }
+
+                Ok(0 as i32)
+            },
+
+            _ => Err("Unsupported control command for TTY device"),
+        }
     }
 }
