@@ -1879,7 +1879,7 @@ mod tests {
     }
 
     #[test_case]
-    fn test_notification_type_variants() {
+    fn test_notification_type_variants_notification() {
         // Test all NotificationType variants
         let variants = [
             NotificationType::TaskCompleted,
