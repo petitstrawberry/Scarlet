@@ -1902,7 +1902,7 @@ mod tests {
     }
 
     #[test_case]
-    fn test_event_payload_variants() {
+    fn test_event_payload_variants_extended() {
         // Test Empty payload
         let empty_event = Event::immediate_process_control(123, ProcessControlType::Terminate);
         match empty_event.payload {
