@@ -240,6 +240,26 @@ pub trait AbiModule: 'static {
         //     .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
         Ok(())
     }
+    
+    /// Handle incoming event from EventManager
+    /// 
+    /// This method is called when an event is delivered to a task using this ABI.
+    /// Each ABI can implement its own event handling strategy:
+    /// - Scarlet ABI: Handle-based queuing with EventSubscription objects
+    /// - xv6 ABI: POSIX-like signals and pipe notifications
+    /// - Other ABIs: Custom event processing mechanisms
+    /// 
+    /// # Arguments
+    /// * `event` - The event to be delivered
+    /// * `target_task_id` - ID of the task that should receive the event
+    /// 
+    /// # Returns
+    /// * `Ok(())` if the event was successfully handled
+    /// * `Err(message)` if event delivery failed
+    fn handle_event(&self, _event: crate::ipc::Event, _target_task_id: u32) -> Result<(), &'static str> {
+        // Default implementation: ignore events
+        Ok(())
+    }
 }
 
 /// ABI registry.

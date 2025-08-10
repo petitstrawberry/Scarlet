@@ -294,15 +294,15 @@ impl CloneOps for MockPipeObject {
     }
 }
 
-impl crate::ipc::IpcObject for MockPipeObject {
+impl crate::ipc::StreamIpcOps for MockPipeObject {
     fn is_connected(&self) -> bool {
         true // Mock implementation
     }
-    
+
     fn peer_count(&self) -> usize {
         1 // Mock implementation
     }
-    
+
     fn description(&self) -> alloc::string::String {
         "Mock Pipe".to_string()
     }
