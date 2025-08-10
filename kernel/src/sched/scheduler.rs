@@ -108,7 +108,14 @@ impl Scheduler {
                                 continue;
                             },
                             _ => {
+                                // Task is ready to run
                                 t.time_slice = 1; // Reset time slice on dispatch
+                                
+                                // Process pending events before dispatching task
+                                if let Err(e) = t.process_pending_events() {
+                                    crate::early_println!("Warning: Event processing failed for task {}: {}", t.get_id(), e);
+                                }
+                                
                                 if self.current_task_id[cpu_id] != Some(t.get_id()) {
                                     self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 }
@@ -168,6 +175,12 @@ impl Scheduler {
                             },
                             _ => {
                                 t.time_slice = 1; // Reset time slice on dispatch
+                                
+                                // Process pending events before dispatching task
+                                if let Err(e) = t.process_pending_events() {
+                                    crate::early_println!("Warning: Event processing failed for task {}: {}", t.get_id(), e);
+                                }
+                                
                                 // Simply dispatch the task without prev_task logic
                                 self.dispatcher[cpu_id].dispatch(cpu, &mut t);
                                 self.current_task_id[cpu_id] = Some(t.get_id());
@@ -343,6 +356,34 @@ impl Scheduler {
             }
         }
         false
+    }
+
+    /// Get IDs of all tasks across ready, blocked, and zombie queues
+    ///
+    /// This helper is used by subsystems (e.g., event broadcast) that need
+    /// to target every task in the system without holding a mutable
+    /// reference to the scheduler during delivery.
+    pub fn get_all_task_ids(&self) -> alloc::vec::Vec<usize> {
+        let mut ids = alloc::vec::Vec::new();
+        // Ready tasks
+        for q in &self.ready_queue {
+            for t in q.iter() {
+                ids.push(t.get_id());
+            }
+        }
+        // Blocked tasks
+        for q in &self.blocked_queue {
+            for t in q.iter() {
+                ids.push(t.get_id());
+            }
+        }
+        // Zombie tasks
+        for q in &self.zombie_queue {
+            for t in q.iter() {
+                ids.push(t.get_id());
+            }
+        }
+        ids
     }
 }
 

@@ -7,6 +7,7 @@ pub mod stream;
 pub mod file;
 pub mod control;
 pub mod memory_mapping;
+pub mod ipc;
 
 #[cfg(test)]
 mod control_tests;
@@ -24,6 +25,9 @@ pub use control::ControlOps;
 
 // Re-export memory mapping types
 pub use memory_mapping::MemoryMappingOps;
+
+// Re-export IPC types
+pub use ipc::{EventSender, EventReceiver, EventSubscriber};
 
 /// Clone operations capability
 /// 
