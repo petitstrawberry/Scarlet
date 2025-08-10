@@ -1,6 +1,5 @@
-use alloc::string::{String, ToString};
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi, arch::{get_cpu, Trapframe}, fs::FileType, library::std::string::cstring_to_string, sched::scheduler::get_scheduler, task::{get_parent_waker, mytask, CloneFlags, WaitError}
+    abi::linux::riscv64::LinuxRiscv64Abi, arch::{get_cpu, Trapframe}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags}
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -311,4 +310,25 @@ pub fn sys_uname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     }
 
     0 // Success
+}
+
+/// Minimal sys_clone implementation for Linux ABI (ignores flags/stack, just clones the current task)
+pub fn sys_clone(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let parent_task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    trapframe.increment_pc_next(parent_task);
+    parent_task.vcpu.store(trapframe);
+    
+    match parent_task.clone_task(CloneFlags::default()) {
+        Ok(mut child_task) => {
+            let child_id = child_task.get_id();
+            child_task.vcpu.regs.reg[10] = 0; // a0 = 0 in child
+            get_scheduler().add_task(child_task, get_cpu().get_cpuid());
+            child_id
+        },
+        Err(_) => usize::MAX,
+    }
 }
