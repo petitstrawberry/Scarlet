@@ -14,7 +14,7 @@ use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
-    abi::AbiModule, arch::{self, Registers}, early_initcall, environment::PAGE_SIZE, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    abi::AbiModule, arch::{self, Registers, Trapframe}, early_initcall, environment::PAGE_SIZE, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -28,6 +28,8 @@ pub struct LinuxRiscv64Abi {
     fd_flags: [u32; MAX_FDS],
     /// Free file descriptor list for O(1) allocation/deallocation
     free_fds: Vec<usize>,
+    /// Signal handling state
+    pub signal_state: Arc<spin::Mutex<signal::SignalState>>,
 }
 
 impl Default for LinuxRiscv64Abi {
@@ -40,6 +42,7 @@ impl Default for LinuxRiscv64Abi {
             fd_to_handle: [None; MAX_FDS],
             fd_flags: [0; MAX_FDS],
             free_fds,
+            signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
         }
     }
 }
@@ -163,6 +166,27 @@ impl LinuxRiscv64Abi {
             .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
             .collect()
     }
+    
+    /// Process pending signals and handle them according to Linux semantics
+    /// Returns true if execution should be interrupted (signal handler called or process terminated)
+    pub fn process_signals(&self, trapframe: &mut Trapframe) -> bool {
+        let mut signal_state = self.signal_state.lock();
+        signal::process_pending_signals_with_state(&mut *signal_state, trapframe)
+    }
+    
+    /// Handle incoming event from Scarlet event system and convert to signal if applicable
+    pub fn handle_event_direct(&self, event: &crate::ipc::event::Event) {
+        if let Some(signal) = signal::handle_event_to_signal(event) {
+            let mut signal_state = self.signal_state.lock();
+            signal_state.add_pending(signal);
+        }
+    }
+    
+    /// Check if there are pending signals ready for delivery
+    pub fn has_pending_signals(&self) -> bool {
+        let signal_state = self.signal_state.lock();
+        signal_state.next_deliverable_signal().is_some()
+    }
 }
 
 impl AbiModule for LinuxRiscv64Abi {
@@ -180,6 +204,38 @@ impl AbiModule for LinuxRiscv64Abi {
     
     fn handle_syscall(&mut self, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
         syscall_handler(self, trapframe)
+    }
+
+    fn handle_event(&self, event: crate::ipc::Event, target_task_id: u32) -> Result<(), &'static str> {
+        // Convert event to signal if applicable
+        if let Some(signal) = signal::handle_event_to_signal(&event) {
+            let scheduler = crate::sched::scheduler::get_scheduler();
+            let target_task = scheduler.get_task_by_id(target_task_id as usize)
+                .ok_or("Target task not found")?;
+            
+            // Check if this is a fatal signal that should terminate immediately
+            match signal {
+                signal::LinuxSignal::SIGKILL | 
+                signal::LinuxSignal::SIGTERM | 
+                signal::LinuxSignal::SIGINT => {
+                    // Fatal signals: terminate task immediately
+                    let exit_code = 128 + (signal as i32); // Standard Unix exit code for signals
+                    crate::early_println!("Linux ABI: Terminating task {} due to signal {} (exit code {})", 
+                                         target_task.get_id(), signal as u32, exit_code);
+                    target_task.exit(exit_code);
+                }
+                _ => {
+                    // Other signals: add to pending (for future handler implementation)
+                    let mut signal_state = self.signal_state.lock();
+                    signal_state.add_pending(signal);
+                    crate::early_println!("Linux ABI: Added signal {} to pending for task {}", 
+                                         signal as u32, target_task_id);
+                }
+            }
+        }
+        
+        // For non-signal events, just acknowledge
+        Ok(())
     }
 
     fn can_execute_binary(
@@ -497,6 +553,7 @@ syscall_table! {
     },
     Fcntl = 25 => fs::sys_fcntl,
     Ioctl = 29 => fs::sys_ioctl,
+    MkdirAt = 34 => fs::sys_mkdirat,
     FaccessAt = 48 => fs::sys_faccessat,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
@@ -520,6 +577,7 @@ syscall_table! {
     GetUid = 174 => proc::sys_getuid,
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
+    Clone = 220 => proc::sys_clone,
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
 }
