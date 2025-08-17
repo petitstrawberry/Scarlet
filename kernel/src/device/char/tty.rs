@@ -13,7 +13,7 @@ use crate::device::{Device, DeviceType};
 use crate::device::char::CharDevice;
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
 use crate::device::manager::DeviceManager;
-use crate::drivers::uart;
+use crate::ipc::event::{Event, EventPriority, ProcessControlType, EventManager};
 use crate::sync::waker::Waker;
 use crate::late_initcall;
 use crate::task::mytask;
@@ -76,6 +76,9 @@ pub struct TtyDevice {
     canonical_mode: bool,
     echo_enabled: bool,
     
+    // Foreground task (temporary until process groups implemented)
+    foreground_task: Mutex<Option<u32>>, // Task ID to deliver interrupt (SIGINT)
+    
     // Terminal state (placeholder for future features)
     // process_group: Option<ProcessGroupId>,  // Job control placeholder
     // session_id: Option<SessionId>,           // Session management placeholder
@@ -90,7 +93,18 @@ impl TtyDevice {
             input_waker: Waker::new_interruptible("tty_input"),
             canonical_mode: true,
             echo_enabled: true,
+            foreground_task: Mutex::new(None),
         }
+    }
+    
+    /// Set the foreground task that should receive terminal-generated interrupts (Ctrl-C)
+    pub fn set_foreground_task(&self, task_id: u32) {
+        *self.foreground_task.lock() = Some(task_id);
+    }
+    
+    /// Clear the foreground task
+    pub fn clear_foreground_task(&self) {
+        *self.foreground_task.lock() = None;
     }
     
     /// Handle input byte from UART device.
@@ -124,16 +138,29 @@ impl TtyDevice {
                     drop(input_buffer);
                     self.input_waker.wake_all();
                 }
-                // Control characters (placeholder for signal processing)
+                // Ctrl-C (ETX)
                 0x03 => {
-                    crate::early_println!("TTY: Ctrl+C detected");
-                    // Ctrl+C: Send SIGINT (placeholder)
-                    // TODO: Implement signal processing when process management is ready
+                    crate::early_println!("TTY: Ctrl+C detected -> sending ProcessControl::Interrupt event");
+                    if self.echo_enabled {
+                        // Echo caret notation like typical terminals: ^C
+                        self.echo_char('^' as u8);
+                        self.echo_char('C' as u8);
+                        self.echo_char('\r' as u8);
+                        self.echo_char('\n' as u8);
+                    }
+                    if let Some(fg) = *self.foreground_task.lock() {
+                        let ev = Event::direct_process_control(
+                            fg,
+                            ProcessControlType::Interrupt,
+                            EventPriority::High,
+                            true,
+                        );
+                        let _ = EventManager::get_manager().send_event(ev);
+                    }
                 }
+                // Ctrl-Z (SUB) placeholder
                 0x1A => {
-                    crate::early_println!("TTY: Ctrl+Z detected");
-                    // Ctrl+Z: Send SIGTSTP (placeholder)
-                    // TODO: Implement job control when process management is ready
+                    crate::early_println!("TTY: Ctrl+Z detected (job control not yet implemented)");
                 }
                 // Regular characters
                 byte => {
@@ -305,7 +332,6 @@ impl ControlOps for TtyDevice {
         // Keyboard control commands
         const KDGKBTYPE: u32 = 0x4B33; // Get keyboard type
         const KDGKBMODE: u32 = 0x4B44; // Get keyboard mode
-        const KDSKBMODE: u32 = 0x4B45; // Set keyboard mode
 
         // Keyboard type
         const KB_101: u32 = 0x02; // 101-key keyboard
