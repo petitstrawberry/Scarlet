@@ -86,14 +86,6 @@ pub const F_DUPFD_CLOEXEC: u32 = 1030; // Duplicate with close-on-exec
 // Linux file descriptor flags
 pub const FD_CLOEXEC: u32 = 1;          // Close-on-exec flag
 
-// Linux keyboard ioctl command constants (subset used by Scarlet)
-pub const KDGKBMODE: u32 = 0x4B44; // Get keyboard mode
-pub const KDSKBMODE: u32 = 0x4B45; // Set keyboard mode
-
-// Linux keyboard mode values (subset)
-pub const K_RAW: u32 = 0x00;
-pub const K_XLATE: u32 = 0x01;
-
 // 追加: デバイス Capability 判定のため
 use crate::device::DeviceCapability;
 
