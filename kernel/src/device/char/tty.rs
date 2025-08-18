@@ -8,16 +8,34 @@ use core::any::Any;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::get_cpu;
-use crate::device::{Device, DeviceType};
-use crate::device::char::CharDevice;
+use crate::device::{Device, DeviceType, DeviceCapability};
+use crate::device::char::{CharDevice, TtyControl};
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
 use crate::device::manager::DeviceManager;
-use crate::ipc::event::{Event, EventPriority, ProcessControlType, EventManager};
 use crate::sync::waker::Waker;
 use crate::late_initcall;
 use crate::task::mytask;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+
+/// Scarlet-private, OS-agnostic control opcodes for TTY devices.
+/// These are stable only within Scarlet and must be mapped by ABI adapters.
+pub mod tty_ctl {
+    /// Magic 'ST' (0x53, 0x54) followed by sequential IDs to avoid collisions.
+    pub const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
+    pub const SCTL_TTY_GET_ECHO: u32 = 0x5354_0002;
+    pub const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
+    pub const SCTL_TTY_GET_CANONICAL: u32 = 0x5354_0004;
+    /// arg = (cols<<16 | rows)
+    pub const SCTL_TTY_SET_WINSIZE: u32 = 0x5354_0005;
+    /// ret = (cols<<16 | rows)
+    pub const SCTL_TTY_GET_WINSIZE: u32 = 0x5354_0006;
+}
+use tty_ctl::*;
+
+// Provide a static capabilities slice for TTY devices
+static TTY_CAPS: [DeviceCapability; 1] = [DeviceCapability::Tty];
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -72,16 +90,13 @@ pub struct TtyDevice {
     // Waker for blocking reads
     input_waker: Waker,
     
-    // Line discipline flags (Phase 2 expansion)
-    canonical_mode: bool,
-    echo_enabled: bool,
-    
-    // Foreground task (temporary until process groups implemented)
-    foreground_task: Mutex<Option<u32>>, // Task ID to deliver interrupt (SIGINT)
-    
-    // Terminal state (placeholder for future features)
-    // process_group: Option<ProcessGroupId>,  // Job control placeholder
-    // session_id: Option<SessionId>,           // Session management placeholder
+    // Line discipline flags (OS/ABI-neutral)
+    canonical_mode: AtomicBool,
+    echo_enabled: AtomicBool,
+
+    // Window size in character cells (OS/ABI-neutral)
+    winsize_cols: Mutex<u16>,
+    winsize_rows: Mutex<u16>,
 }
 
 impl TtyDevice {
@@ -91,89 +106,60 @@ impl TtyDevice {
             uart_device_id,
             input_buffer: Arc::new(Mutex::new(VecDeque::new())),
             input_waker: Waker::new_interruptible("tty_input"),
-            canonical_mode: true,
-            echo_enabled: true,
-            foreground_task: Mutex::new(None),
+            canonical_mode: AtomicBool::new(true),
+            echo_enabled: AtomicBool::new(true),
+            winsize_cols: Mutex::new(80),
+            winsize_rows: Mutex::new(25),
         }
-    }
-    
-    /// Set the foreground task that should receive terminal-generated interrupts (Ctrl-C)
-    pub fn set_foreground_task(&self, task_id: u32) {
-        *self.foreground_task.lock() = Some(task_id);
-    }
-    
-    /// Clear the foreground task
-    pub fn clear_foreground_task(&self) {
-        *self.foreground_task.lock() = None;
     }
     
     /// Handle input byte from UART device.
     /// 
     /// This method processes incoming bytes and applies line discipline.
     fn handle_input_byte(&self, byte: u8) {
-        // crate::early_println!("TTY processing byte: {:02x}", byte);
-        
-        // Phase 2: Canonical mode processing
-        if self.canonical_mode {
+        // Canonical mode processing
+        if self.canonical_mode.load(Ordering::Relaxed) {
             match byte {
                 // Backspace/DEL
                 0x08 | 0x7F => {
-                    // crate::early_println!("TTY: Backspace detected");
                     let mut input_buffer = self.input_buffer.lock();
-                    if input_buffer.pop_back().is_some() && self.echo_enabled {
+                    if input_buffer.pop_back().is_some() && self.echo_enabled.load(Ordering::Relaxed) {
                         self.echo_backspace();
                     }
                 }
                 // Enter/Line feed
                 b'\r' | b'\n' => {
-                    // crate::early_println!("TTY: Enter/newline detected");
-                    if self.echo_enabled {
+                    if self.echo_enabled.load(Ordering::Relaxed) {
                         self.echo_char(b'\r');
                         self.echo_char(b'\n');
                     }
                     let mut input_buffer = self.input_buffer.lock();
                     input_buffer.push_back(b'\n');
-                    // crate::early_println!("TTY: Line added to buffer, size now: {}", input_buffer.len());
-                    // Wake up waiting processes
                     drop(input_buffer);
                     self.input_waker.wake_all();
                 }
-                // Ctrl-C (ETX)
+                // Ctrl-C (ETX) — policy deferred to ABI layer; no signal delivery here
                 0x03 => {
-                    crate::early_println!("TTY: Ctrl+C detected -> sending ProcessControl::Interrupt event");
-                    if self.echo_enabled {
-                        // Echo caret notation like typical terminals: ^C
+                    if self.echo_enabled.load(Ordering::Relaxed) {
                         self.echo_char('^' as u8);
                         self.echo_char('C' as u8);
                         self.echo_char('\r' as u8);
                         self.echo_char('\n' as u8);
                     }
-                    if let Some(fg) = *self.foreground_task.lock() {
-                        let ev = Event::direct_process_control(
-                            fg,
-                            ProcessControlType::Interrupt,
-                            EventPriority::High,
-                            true,
-                        );
-                        let _ = EventManager::get_manager().send_event(ev);
-                    }
                 }
                 // Ctrl-Z (SUB) placeholder
                 0x1A => {
-                    crate::early_println!("TTY: Ctrl+Z detected (job control not yet implemented)");
+                    // No job-control semantics in device layer
                 }
                 // Regular characters
                 byte => {
-                    // crate::early_println!("TTY: Regular character: {:02x}", byte);
-                    if self.echo_enabled {
+                    if self.echo_enabled.load(Ordering::Relaxed) {
                         self.echo_char(byte);
                     }
                     let mut input_buffer = self.input_buffer.lock();
                     input_buffer.push_back(byte);
-                    // crate::early_println!("TTY: Character added to buffer, size now: {}", input_buffer.len());
-                    // Wake up waiting processes in RAW mode or for immediate input
                     drop(input_buffer);
-                    if !self.canonical_mode {
+                    if !self.canonical_mode.load(Ordering::Relaxed) {
                         self.input_waker.wake_all();
                     }
                 }
@@ -183,7 +169,6 @@ impl TtyDevice {
             let mut input_buffer = self.input_buffer.lock();
             input_buffer.push_back(byte);
             drop(input_buffer);
-            // Wake up waiting processes immediately in RAW mode
             self.input_waker.wake_all();
         }
     }
@@ -209,16 +194,29 @@ impl TtyDevice {
     }
 }
 
+impl TtyControl for TtyDevice {
+    fn set_echo(&self, enabled: bool) {
+        self.echo_enabled.store(enabled, Ordering::Relaxed);
+    }
+    fn is_echo_enabled(&self) -> bool { self.echo_enabled.load(Ordering::Relaxed) }
+
+    fn set_canonical(&self, enabled: bool) {
+        self.canonical_mode.store(enabled, Ordering::Relaxed);
+    }
+    fn is_canonical(&self) -> bool { self.canonical_mode.load(Ordering::Relaxed) }
+
+    fn set_winsize(&self, cols: u16, rows: u16) {
+        *self.winsize_cols.lock() = cols;
+        *self.winsize_rows.lock() = rows;
+    }
+    fn get_winsize(&self) -> (u16, u16) {
+        (*self.winsize_cols.lock(), *self.winsize_rows.lock())
+    }
+}
+
 impl DeviceEventListener for TtyDevice {
     fn on_device_event(&self, event: &dyn DeviceEvent) {
         if let Some(input_event) = event.as_any().downcast_ref::<InputEvent>() {
-            // crate::early_println!("TTY received input event: byte={:02x} ('{}')", 
-            //     input_event.data, 
-            //     if input_event.data.is_ascii_graphic() || input_event.data == b' ' { 
-            //         input_event.data as char 
-            //     } else { 
-            //         '?' 
-            //     });
             self.handle_input_byte(input_event.data);
         }
     }
@@ -266,6 +264,10 @@ impl Device for TtyDevice {
     
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
+    }
+
+    fn capabilities(&self) -> &'static [DeviceCapability] {
+        &TTY_CAPS
     }
 }
 
@@ -325,49 +327,34 @@ impl CharDevice for TtyDevice {
 }
 
 impl ControlOps for TtyDevice {
-    // TTY devices don't support control operations by default
+    // TTY devices accept Scarlet-private, OS-agnostic control opcodes.
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
-        // Linux like control operations
-
-        // Keyboard control commands
-        const KDGKBTYPE: u32 = 0x4B33; // Get keyboard type
-        const KDGKBMODE: u32 = 0x4B44; // Get keyboard mode
-
-        // Keyboard type
-        const KB_101: u32 = 0x02; // 101-key keyboard
-
         match command {
-            KDGKBTYPE => {
-                // Return 101-key keyboard type
-                if arg == 0 {
-                    return Err("Null pointer for KDGKBTYPE");
-                }
-                let task = mytask().ok_or("No current task found")?;
-                let kbd_type_ptr = task.vm_manager.translate_vaddr(arg)
-                    .ok_or("Invalid pointer for KDGKBTYPE")? as *mut u32;
-
-                unsafe {
-                    *kbd_type_ptr = KB_101;
-                }
-
-                Ok(0 as i32)
-            },
-            KDGKBMODE => {
-                // Return current keyboard mode
-                if arg == 0 {
-                    return Err("Null pointer for KDGKBMODE");
-                }
-                let task = mytask().ok_or("No current task found")?;
-                let kbd_mode_ptr = task.vm_manager.translate_vaddr(arg)
-                    .ok_or("Invalid pointer for KDGKBMODE")? as *mut u32;
-
-                unsafe {
-                    *kbd_mode_ptr = 0; // Placeholder for actual mode
-                }
-
-                Ok(0 as i32)
-            },
-
+            SCTL_TTY_SET_ECHO => {
+                self.set_echo(arg != 0);
+                Ok(0)
+            }
+            SCTL_TTY_GET_ECHO => {
+                Ok(self.is_echo_enabled() as i32)
+            }
+            SCTL_TTY_SET_CANONICAL => {
+                self.set_canonical(arg != 0);
+                Ok(0)
+            }
+            SCTL_TTY_GET_CANONICAL => {
+                Ok(self.is_canonical() as i32)
+            }
+            SCTL_TTY_SET_WINSIZE => {
+                let cols = ((arg >> 16) & 0xFFFF) as u16;
+                let rows = (arg & 0xFFFF) as u16;
+                self.set_winsize(cols, rows);
+                Ok(0)
+            }
+            SCTL_TTY_GET_WINSIZE => {
+                let (cols, rows) = self.get_winsize();
+                let packed = ((cols as u32) << 16) | (rows as u32);
+                Ok(packed as i32)
+            }
             _ => Err("Unsupported control command for TTY device"),
         }
     }
