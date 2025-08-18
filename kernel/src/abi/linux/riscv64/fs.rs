@@ -86,7 +86,6 @@ pub const F_DUPFD_CLOEXEC: u32 = 1030; // Duplicate with close-on-exec
 // Linux file descriptor flags
 pub const FD_CLOEXEC: u32 = 1;          // Close-on-exec flag
 
-// 追加: デバイス Capability 判定のため
 use crate::device::DeviceCapability;
 
 impl LinuxStat {
