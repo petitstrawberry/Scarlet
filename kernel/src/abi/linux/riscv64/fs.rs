@@ -5,7 +5,7 @@ use crate::{
     device::manager::DeviceManager, 
     executor::TransparentExecutor, 
     fs::{
-        DeviceFileInfo, DirectoryEntry, FileType, SeekFrom
+        DirectoryEntry, FileType, SeekFrom
     }, 
     library::std::string::{
         cstring_to_string, 
@@ -85,6 +85,17 @@ pub const F_DUPFD_CLOEXEC: u32 = 1030; // Duplicate with close-on-exec
 
 // Linux file descriptor flags
 pub const FD_CLOEXEC: u32 = 1;          // Close-on-exec flag
+
+// Linux keyboard ioctl command constants (subset used by Scarlet)
+pub const KDGKBMODE: u32 = 0x4B44; // Get keyboard mode
+pub const KDSKBMODE: u32 = 0x4B45; // Set keyboard mode
+
+// Linux keyboard mode values (subset)
+pub const K_RAW: u32 = 0x00;
+pub const K_XLATE: u32 = 0x01;
+
+// 追加: デバイス Capability 判定のため
+use crate::device::DeviceCapability;
 
 impl LinuxStat {
     /// Create a new LinuxStat from Scarlet FileMetadata
@@ -492,7 +503,7 @@ pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 /// 
 /// # Returns
 /// - Number of bytes written on success
-/// - usize::MAX on error (-1 in Linux)
+/// - usize::MAX on error
 pub fn sys_writev(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
@@ -941,33 +952,55 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         None => return usize::MAX, // Invalid handle
     };
 
-    // Perform the control operation using the ControlOps capability
-    let result = match kernel_object.as_control() {
-        Some(control_ops) => {
-
-            control_ops.control(request, arg)
-        }
-        None => {
-            // Fallback: if object doesn't support control operations,
-            // return ENOTTY (inappropriate ioctl for device)
-            Err("Inappropriate ioctl for device") 
-        }
-    };
-
-    // Convert result to Linux ioctl semantics
-    match result {
-        Ok(value) => {
-            // Linux ioctl returns non-negative values on success
-            if value >= 0 {
-                value as usize
-            } else {
-                usize::MAX // Negative values are treated as errors
+    // Determine device capabilities for per-device translation
+    let mut caps: Option<&'static [DeviceCapability]> = None;
+    if let Some(file_obj) = kernel_object.as_file() {
+        if let Ok(metadata) = file_obj.metadata() {
+            if let FileType::CharDevice(info) = metadata.file_type {
+                if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
+                    caps = Some(dev.capabilities());
+                }
             }
         }
-        Err(_) => usize::MAX, // Return -1 on error
+    }
+
+    if let Some(caps) = caps {
+        // TTY translation
+        if caps.iter().any(|c| *c == DeviceCapability::Tty) {
+            match crate::abi::linux::device::tty::handle_ioctl(request, arg, kernel_object) {
+                Ok(Some(ret)) => return ret,
+                Ok(None) => { /* not handled; fall through to passthrough */ }
+                Err(_) => return usize::MAX,
+            }
+        }
+        // Future: match on other capabilities here
+    }
+
+    // Default path: pass-through to ControlOps if available
+    let result = match kernel_object.as_control() {
+        Some(control_ops) => control_ops.control(request, arg),
+        None => Err("Inappropriate ioctl for device"),
+    };
+
+    match result {
+        Ok(value) => if value >= 0 { value as usize } else { usize::MAX },
+        Err(_) => usize::MAX,
     }
 }
 
+/// Linux execve system call implementation
+///
+/// This system call executes a program specified by the given path, replacing the
+/// current process image with a new one. It also allows passing arguments and
+/// environment variables to the new program.
+///
+/// # Arguments
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///
+/// # Returns
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
 pub fn sys_execve(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     

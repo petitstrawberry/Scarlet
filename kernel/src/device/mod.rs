@@ -20,6 +20,13 @@ use core::any::Any;
 use alloc::vec::Vec;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
 
+/// Device capability flags for neutral feature discovery across ABIs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceCapability {
+    /// Device behaves like a terminal/TTY (byte stream with line discipline hooks)
+    Tty,
+}
+
 pub trait DeviceInfo {
     fn name(&self) -> &'static str;
     fn id(&self) -> usize;
@@ -69,11 +76,14 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     
+    /// Optional capabilities exposed by this device (default: none)
+    fn capabilities(&self) -> &'static [DeviceCapability] { &[] }
+    
     /// Cast to CharDevice if this device is a character device
     fn as_char_device(&self) -> Option<&dyn char::CharDevice> {
         None
     }
-    
+
     /// Cast to BlockDevice if this device is a block device  
     fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
         None
