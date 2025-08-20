@@ -104,12 +104,6 @@ pub struct PageTable {
 }
 
 impl PageTable {
-    pub const fn new() -> Self {
-        PageTable {
-            entries: [PageTableEntry::new(); 512],
-        }
-    }
-
     pub fn switch(&self, asid: u16) {
         let satp = self.get_val_for_satp(asid);
         unsafe {
@@ -146,7 +140,7 @@ impl PageTable {
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(asid, vaddr, paddr, mmap.permissions);
+            self.map(asid, vaddr, paddr, mmap.permissions);    
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
                 None => break,

@@ -39,6 +39,15 @@ impl Dispatcher {
                 let trapframe = cpu.get_trapframe();
                 trapframe.set_trap_handler(get_user_trap_handler());
                 trapframe.set_next_address_space(task.vm_manager.get_asid());
+                // Set the per-task kernel stack
+                let kernel_stack_bottom = task.get_kernel_stack_bottom();
+                // let kernel_stack_memory_area = task.get_kernel_stack_memory_area();
+                // crate::early_println!("Dispatcher: Task {} kernel stack memory area: {:#x} - {:#x}",
+                //     task.get_id(),
+                //     kernel_stack_memory_area.unwrap().start,
+                //     kernel_stack_memory_area.unwrap().end);
+                // crate::early_println!("Dispatcher: Task {} kernel stack bottom: {:#x}", task.get_id(), kernel_stack_bottom);
+                trapframe.set_kernel_stack(kernel_stack_bottom);
                 task.vcpu.set_pc(task.entry as u64);
                 task.vcpu.switch(cpu);
                 set_next_mode(task.vcpu.get_mode());
@@ -48,6 +57,15 @@ impl Dispatcher {
                 let trapframe = cpu.get_trapframe();
                 trapframe.set_trap_handler(get_user_trap_handler());
                 trapframe.set_next_address_space(task.vm_manager.get_asid());
+                // Set the per-task kernel stack
+                let kernel_stack_bottom = task.get_kernel_stack_bottom();
+                // let kernel_stack_memory_area = task.get_kernel_stack_memory_area();
+                // crate::early_println!("Dispatcher: Task {} kernel stack memory area: {:#x} - {:#x}",
+                //     task.get_id(),
+                //     kernel_stack_memory_area.unwrap().start,
+                //     kernel_stack_memory_area.unwrap().end);
+                // crate::early_println!("Dispatcher: Task {} kernel stack bottom: {:#x}", task.get_id(), kernel_stack_bottom);
+                trapframe.set_kernel_stack(kernel_stack_bottom);
                 task.vcpu.switch(cpu);
                 set_next_mode(task.vcpu.get_mode());
             }

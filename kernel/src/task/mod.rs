@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_TOP}, fs::VfsManager, ipc::event::{EventContent, ProcessControlType}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::{self, HandleTable}, sched::scheduler::get_scheduler, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch, KernelContext}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{event::ProcessControlType, EventContent}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::get_scheduler, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -182,6 +182,8 @@ pub struct Task {
     pub name: String,
     pub priority: u32,
     pub vcpu: Vcpu,
+    /// Kernel context for context switching
+    pub kernel_context: KernelContext,
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
@@ -296,6 +298,7 @@ static TASK_ID: Mutex<usize> = Mutex::new(1);
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
+        
         let task = Task {
             id: *taskid,
             name,
@@ -304,6 +307,7 @@ impl Task {
                 TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
                 TaskType::User => crate::arch::vcpu::Mode::User,
             }),
+            kernel_context: KernelContext::new(0),
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
@@ -333,6 +337,10 @@ impl Task {
     }
     
     pub fn init(&mut self) {
+        // Initialize kernel context with the task's entry point
+        // The kernel stack is allocated within the KernelContext
+        self.kernel_context = KernelContext::new(self.entry as u64);
+
         match self.task_type {
             TaskType::Kernel => {
                 user_kernel_vm_init(self);
@@ -343,7 +351,7 @@ impl Task {
             TaskType::User => { 
                 user_vm_init(self);
                 /* Set sp to the top of the user stack */
-                self.vcpu.set_sp(USER_STACK_TOP);
+                self.vcpu.set_sp(USER_STACK_END);
             }
         }
         
@@ -968,6 +976,9 @@ impl Task {
             child.abi = None; // No ABI set
         }
 
+        // Initialize kernel context with proper entry point and new kernel stack
+        child.kernel_context = KernelContext::new(child.entry as u64);
+
         // Set the state to Ready
         child.state = self.state;
 
@@ -1118,7 +1129,8 @@ impl Task {
     pub fn events_enabled(&self) -> bool {
         *self.events_enabled.lock()
     }
-    
+
+        
     /// Process pending events if events are enabled
     /// This should be called by the scheduler before resuming the task
     /// 
@@ -1205,6 +1217,34 @@ impl Task {
             }
             _ => false
         }
+    }
+    
+    /// Get a mutable reference to the kernel context for context switching
+    pub fn get_kernel_context_mut(&mut self) -> &mut KernelContext {
+        &mut self.kernel_context
+    }
+
+    /// Get a reference to the kernel context
+    pub fn get_kernel_context(&self) -> &KernelContext {
+        &self.kernel_context
+    }
+
+    /// Get the kernel stack bottom address for this task
+    ///
+    /// # Returns
+    /// The kernel stack bottom address as u64, or 0 if no kernel stack is allocated
+    pub fn get_kernel_stack_bottom(&self) -> u64 {
+        self.kernel_context.get_kernel_stack_bottom()
+    }
+
+    /// Get the kernel stack memory area for this task
+    /// 
+    /// # Returns
+    /// The kernel stack memory area as a MemoryArea, or None if no kernel stack is
+    /// allocated
+    /// 
+    pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
+        self.kernel_context.get_kernel_stack_memory_area()
     }
 }
 
@@ -1491,9 +1531,9 @@ mod tests {
         // Find the stack memory map in parent
         let stack_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| {
-                // Stack should be near USER_STACK_TOP and have stack permissions
+                // Stack should be near USER_STACK_END and have stack permissions
                 use crate::vm::vmem::VirtualMemoryRegion;
-                mmap.vmarea.end == crate::environment::USER_STACK_TOP - 1 && 
+                mmap.vmarea.end == crate::environment::USER_STACK_END - 1 && 
                 mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
             })
             .expect("Stack memory map not found in parent task")

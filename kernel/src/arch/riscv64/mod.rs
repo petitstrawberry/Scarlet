@@ -25,6 +25,7 @@ pub mod vcpu;
 pub mod timer;
 pub mod vm;
 pub mod registers;
+pub mod context;
 
 pub use earlycon::*;
 pub use registers::Registers;
@@ -83,6 +84,10 @@ impl Trapframe {
 
         let satp = root_pagetable.get_val_for_satp(asid);
         self.satp = satp as u64;
+    }
+
+    pub fn set_kernel_stack(&mut self, initial_top: u64) {
+        self.kernel_stack = initial_top;
     }
 
 
@@ -148,16 +153,13 @@ pub fn get_user_trap_handler() -> usize {
 fn trap_init(riscv: &mut Riscv64) {
     early_println!("[riscv64] Hart {}: Initializing trap....", riscv.hartid);
     
-    let trap_stack_top = unsafe { KERNEL_STACK.top() };
+    let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size =  STACK_SIZE;
 
-    let trap_stack = trap_stack_top + stack_size * (riscv.hartid + 1) as usize;
-    early_println!("[riscv64] Hart {}: Trap stack top     : {:#x}", riscv.hartid, trap_stack_top);
-    early_println!("[riscv64] Hart {}: Trap stack bottom  : {:#x}", riscv.hartid, trap_stack);
-
+    let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
+    early_println!("[riscv64] Hart {}: Trap stack area    : {:#x} - {:#x}", riscv.hartid, trap_stack - stack_size, trap_stack - 1);
     early_println!("[riscv64] Hart {}: Trap stack size    : {:#x}", riscv.hartid, stack_size);
-
-    // Setup for Scratch space for Riscv64 struct
+    early_println!("[riscv64] Hart {}: Trap stack pointer : {:#x}", riscv.hartid, trap_stack);
     early_println!("[riscv64] Hart {}: Setting up scratch space....", riscv.hartid);
     riscv.kernel_stack = trap_stack as u64;
     riscv.kernel_trap = arch_kernel_trap_handler as u64;
