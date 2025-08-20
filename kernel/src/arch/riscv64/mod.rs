@@ -26,6 +26,7 @@ pub mod timer;
 pub mod vm;
 pub mod registers;
 pub mod context;
+pub mod switch;
 
 pub use earlycon::*;
 pub use registers::Registers;
