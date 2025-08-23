@@ -244,21 +244,29 @@ impl Device for TtyDevice {
 
 impl CharDevice for TtyDevice {
     fn read_byte(&self) -> Option<u8> {
-        let mut input_buffer = self.input_buffer.lock();
-        if let Some(byte) = input_buffer.pop_front() {
-            return Some(byte);
-        }
-        drop(input_buffer);
-        
-        // No data available, block the current task
-        if let Some(mut task) = mytask() {
-            let mut cpu = get_cpu();
+        // Loop until data becomes available
+        loop {
+            let mut input_buffer = self.input_buffer.lock();
+            if let Some(byte) = input_buffer.pop_front() {
+                return Some(byte);
+            }
+            drop(input_buffer);
+            
+            // No data available, block the current task
+            if let Some(mut task) = mytask() {
+                let mut cpu = get_cpu();
 
-            // This never returns - the syscall will be restarted when the task is woken up
-            self.input_waker.wait(&mut task, &mut cpu);
+                // Wait for input to become available
+                // This will return when the task is woken up by input_waker.wake_all()
+                self.input_waker.wait(&mut task, &mut cpu);
+                
+                // Continue the loop to re-check if data is available
+                continue;
+            } else {
+                // No current task context, return None
+                return None;
+            }
         }
-
-        None
     }
     
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {

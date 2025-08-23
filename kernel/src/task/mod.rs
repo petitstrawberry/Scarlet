@@ -993,9 +993,7 @@ impl Task {
     /// # Arguments
     /// * `status` - The exit status
     /// 
-    pub fn exit(&mut self, status: i32) {
-        // crate::println!("Task {} ({}) exiting with status {}", self.id, self.name, status);
-        
+    pub fn exit(&mut self, status: i32) {        
         // Close all open handles when task exits
         self.handle_table.close_all();
         
@@ -1021,6 +1019,9 @@ impl Task {
         }
         
         // Task cleanup completed - ABI module handles event cleanup
+
+        // The scheduler will handle saving the current task state internally
+        get_scheduler().schedule(get_cpu());
     }
 
     /// Wait for a child task to exit and collect its status
@@ -1032,6 +1033,7 @@ impl Task {
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
     pub fn wait(&mut self, child_id: usize) -> Result<i32, WaitError> {
         if !self.children.contains(&child_id) {
+            crate::println!("[Task {}] wait: No such child task: {}", self.id, child_id);
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
         }
 
