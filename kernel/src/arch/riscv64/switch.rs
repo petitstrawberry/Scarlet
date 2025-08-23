@@ -123,7 +123,7 @@ mod tests {
     /// Test kernel context initialization
     #[test_case]
     fn test_init_kernel_context() {
-        let mut ctx = KernelContext::new(0);
+        let mut ctx = KernelContext::new();
         let stack = Box::new([0u8; TASK_KERNEL_STACK_SIZE]);
         let stack_top = stack.as_ptr() as u64 + TASK_KERNEL_STACK_SIZE as u64;
         
