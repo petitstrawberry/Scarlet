@@ -17,12 +17,10 @@ use core::panic;
 
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_next_mode, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
-
-use super::dispatcher::Dispatcher;
 use crate::task::Task;
 
 static mut SCHEDULER: Option<Scheduler> = None;
@@ -46,7 +44,6 @@ pub struct Scheduler {
     blocked_queue: [VecDeque<Task>; NUM_OF_CPUS],
     /// Queue for zombie tasks (finished but not yet cleaned up)
     zombie_queue: [VecDeque<Task>; NUM_OF_CPUS],
-    dispatcher: [Dispatcher; NUM_OF_CPUS],
     interval: u64, /* in microseconds */
     current_task_id: [Option<usize>; NUM_OF_CPUS],
 }
@@ -57,7 +54,6 @@ impl Scheduler {
             ready_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             blocked_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
             zombie_queue: [const { VecDeque::new() }; NUM_OF_CPUS],
-            dispatcher: [const { Dispatcher::new() }; NUM_OF_CPUS],
             interval: 10000, /* 1ms */
             current_task_id: [const { None }; NUM_OF_CPUS],
         }
@@ -68,10 +64,21 @@ impl Scheduler {
         self.ready_queue[cpu_id].push_back(task);
     }
 
-    fn run(&mut self, cpu: &mut Arch) {
+    /// Determines the next task to run and returns current and next task IDs
+    /// 
+    /// This method performs the core scheduling algorithm and task state management
+    /// without performing actual context switches or hardware setup.
+    /// 
+    /// # Arguments
+    /// * `cpu` - The CPU architecture state (for CPU ID)
+    /// 
+    /// # Returns
+    /// * `(old_task_id, new_task_id)` - Tuple of old and new task IDs
+    fn run(&mut self, cpu: &mut Arch) -> (Option<usize>, Option<usize>) {
         let cpu_id = cpu.get_cpuid();
+        let old_current_task_id = self.current_task_id[cpu_id];
 
-        // Continue trying to run tasks until we successfully dispatch one or run out of ready tasks
+        // Continue trying to find a suitable task to run
         loop {
             let task = self.ready_queue[cpu_id].pop_front();
 
@@ -84,7 +91,6 @@ impl Scheduler {
                                 let task_id = t.get_id();
                                 let parent_id = t.get_parent_id();
                                 self.zombie_queue[cpu_id].push_back(t);
-                                // crate::println!("Scheduler: Task {} is now a zombie", task_id);
                                 self.current_task_id[cpu_id] = None;
                                 // Wake up any processes waiting for this specific task
                                 wake_task_waiters(task_id);
@@ -93,7 +99,6 @@ impl Scheduler {
                                     wake_parent_waiters(parent_id);
                                 }
                                 continue;
-                                // panic!("At least one task must be scheduled");
                             },
                             TaskState::Terminated => {
                                 panic!("At least one task must be scheduled");
@@ -110,27 +115,15 @@ impl Scheduler {
                             _ => {
                                 // Task is ready to run
                                 t.time_slice = 1; // Reset time slice on dispatch
-                                
-                                // Process pending events before dispatching task
-                                if let Err(e) = t.process_pending_events() {
-                                    crate::early_println!("Warning: Event processing failed for task {}: {}", t.get_id(), e);
-                                }
-                                
-                                if self.current_task_id[cpu_id] != Some(t.get_id()) {
-                                    self.dispatcher[cpu_id].dispatch(cpu, &mut t);
-                                }
-                                self.current_task_id[cpu_id] = Some(t.get_id());
+                                let next_task_id = t.get_id();
+                                self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(t);
-                                break;
+                                return (old_current_task_id, Some(next_task_id));
                             }
                         }
                     }
-                    // If no tasks are ready, we can either go idle or wait for an interrupt
+                    // If no tasks are ready, create an idle task
                     None => {
-                        // panic!("MUST NOT reach here: No tasks ready to run");
-                        // crate::println!("[Warning] Scheduler: No tasks ready, going idle");
-                        // crate::println!("[Warning] This is wrong, there should always be at least one task (idle task) ready to run");
-                        // crate::println!("[Warning] Creating idle task for CPU {}", cpu_id);
                         let mut kernel_task = new_kernel_task("idle".to_string(), 0, || {
                             // Idle loop
                             loop {
@@ -164,7 +157,6 @@ impl Scheduler {
                                 continue;
                             },
                             TaskState::Blocked(_) => {
-                                // crate::println!("Scheduler: Task {} is blocked, moving to blocked queue", t.get_id());
                                 // Reset current_task_id since this task is no longer current
                                 if self.current_task_id[cpu_id] == Some(t.get_id()) {
                                     self.current_task_id[cpu_id] = None;
@@ -175,21 +167,14 @@ impl Scheduler {
                             },
                             _ => {
                                 t.time_slice = 1; // Reset time slice on dispatch
-                                
-                                // Process pending events before dispatching task
-                                if let Err(e) = t.process_pending_events() {
-                                    crate::early_println!("Warning: Event processing failed for task {}: {}", t.get_id(), e);
-                                }
-                                
-                                // Simply dispatch the task without prev_task logic
-                                self.dispatcher[cpu_id].dispatch(cpu, &mut t);
-                                self.current_task_id[cpu_id] = Some(t.get_id());
+                                let next_task_id = t.get_id();
+                                self.current_task_id[cpu_id] = Some(next_task_id);
                                 self.ready_queue[cpu_id].push_back(t);
-                                break;
+                                return (old_current_task_id, Some(next_task_id));
                             }
                         }
                     }
-                    None => break,
+                    None => return (old_current_task_id, self.current_task_id[cpu_id]),
                 }
             }
         }
@@ -198,7 +183,7 @@ impl Scheduler {
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
     pub fn on_tick(&mut self, cpu_id: usize) {
-        if let Some(task_id) = self.current_task_id[cpu_id] {
+        if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id) {
                 if task.time_slice > 0 {
                     task.time_slice -= 1;
@@ -215,54 +200,48 @@ impl Scheduler {
         }
     }
 
-    /// Schedule tasks on the CPU, saving the currently running task's state
+    /// Schedule tasks on the CPU with kernel context switching
     /// 
-    /// This function is called by the timer interrupt handler. It saves the current
-    /// task's state and switches to the next task.
+    /// This function performs cooperative scheduling by switching between task
+    /// kernel contexts. It returns to the caller, allowing the trap handler
+    /// to handle user space return.
     /// 
     /// # Arguments
     /// * `cpu` - The CPU architecture state
     pub fn schedule(&mut self, cpu: &mut Arch) {
         let cpu_id = cpu.get_cpuid();
 
-        // Save current task state if there is one
-        if let Some(current_task_id) = self.current_task_id[cpu_id] {
-            if let Some(current_task) = self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == current_task_id) {
+        // Step 1: Run scheduling algorithm to get current and next task IDs
+        let (current_task_id, next_task_id) = self.run(cpu);
+
+        // Step 2: Check if a context switch is needed
+        if next_task_id.is_some() && current_task_id != next_task_id {
+            let next_task_id = next_task_id.expect("Next task ID should be valid");
+
+            // Store current task's user state to VCPU
+            if let Some(current_task_id) = current_task_id {
+                let current_task = self.get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.store(cpu);
+                // Perform kernel context switch
+                self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
+                // NOTE: After this point, the current task will not execute until it is scheduled again
+
+                // Restore trapframe of same task
+                let current_task = self.get_task_by_id(current_task_id).unwrap();
+                Self::setup_task_execution(cpu, current_task);
+            } else {
+                // No current task (e.g., first scheduling), just switch to next task
+                let next_task = self.get_task_by_id(next_task_id).unwrap();
+                Self::setup_task_execution(cpu, next_task);
             }
         }
 
-        if !self.ready_queue[cpu_id].is_empty() {
-            self.run(cpu);
-            arch_switch_to_user_space(cpu);
+        // Step 3: Setup task execution and process events (after context switch)
+        if let Some(current_task) = self.get_current_task(cpu_id) {
+            // Process pending events before dispatching task
+            let _ = current_task.process_pending_events();
         }
-        idle();
-    }
-
-    /// Schedule tasks on the CPU without current task (for initial startup)
-    /// 
-    /// This function is called at initial startup when there is no current task
-    /// to save state for. It should only be used during system initialization.
-    /// 
-    /// # Arguments
-    /// * `cpu` - The CPU architecture state
-    pub fn schedule_initial(&mut self, cpu: &mut Arch) -> ! {
-        let cpu_id = cpu.get_cpuid();
-
-        let timer = get_kernel_timer();
-        timer.stop(cpu_id);
-        timer.set_interval_us(cpu_id, self.interval);
-
-        // No current task state to save during initial startup
-
-        if !self.ready_queue[cpu_id].is_empty() {
-            self.run(cpu);
-            timer.start(cpu_id);
-            arch_switch_to_user_space(cpu);
-        }
-        // If the task queue is empty, go to idle
-        timer.start(cpu_id);
-        idle();
+        // Schedule returns - trap handler will call arch_switch_to_user_space()
     }
 
     /* MUST NOT raise any exception in this function before the idle loop */
@@ -276,7 +255,6 @@ impl Scheduler {
         let trapframe = get_trampoline_trapframe(cpu_id);
         set_trapvector(trap_vector);
         set_trapframe(trapframe);
-        // cpu.get_trapframe().set_trap_handler(get_user_trap_handler());
         let trapframe = cpu.get_trapframe();
         trapframe.set_trap_handler(get_user_trap_handler());
         trapframe.set_next_address_space(get_kernel_vm_manager().get_asid());
@@ -293,6 +271,10 @@ impl Scheduler {
             Some(task_id) => self.ready_queue[cpu_id].iter_mut().find(|t| t.get_id() == task_id),
             None => None
         }
+    }
+
+    pub fn get_current_task_id(&self, cpu_id: usize) -> Option<usize> {
+        self.current_task_id[cpu_id]
     }
 
     /// Returns a mutable reference to the task with the specified ID, if found.
@@ -384,6 +366,67 @@ impl Scheduler {
             }
         }
         ids
+    }
+
+    /// Perform kernel context switch between tasks
+    /// 
+    /// This function handles the low-level kernel context switching between
+    /// the current task and the next selected task.
+    /// 
+    /// # Arguments
+    /// * `cpu_id` - The CPU ID
+    /// * `from_task_id` - Current task ID
+    /// * `to_task_id` - Next task ID
+    fn kernel_context_switch(&mut self, cpu_id: usize, from_task_id: usize, to_task_id: usize) {
+        if from_task_id != to_task_id {
+            // Find tasks in ready queue
+            let mut from_ctx_ptr: *mut crate::arch::KernelContext = core::ptr::null_mut();
+            let mut to_ctx_ptr: *const crate::arch::KernelContext = core::ptr::null();
+            
+            // Find context pointers using iterators
+            for task in self.ready_queue[cpu_id].iter_mut() {
+                if task.get_id() == from_task_id {
+                    from_ctx_ptr = &mut task.kernel_context as *mut crate::arch::KernelContext;
+                } else if task.get_id() == to_task_id {
+                    to_ctx_ptr = &task.kernel_context as *const crate::arch::KernelContext;
+                }
+            }
+            
+            if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
+                // Perform kernel context switch
+                unsafe {
+                    crate::arch::switch::switch_to(from_ctx_ptr, to_ctx_ptr);
+                }
+                // Execution resumes here when this task is rescheduled
+            }
+        }
+    }
+
+    /// Setup task execution by configuring hardware and user context
+    /// 
+    /// This replaces the old dispatcher functionality with a more direct approach.
+    /// 
+    /// # Arguments
+    /// * `cpu` - The CPU architecture state
+    /// * `task` - The task to setup for execution
+    fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
+        // Update task state
+        task.state = TaskState::Running;
+        
+        // Setup trap vector
+        set_trapvector(get_trampoline_trap_vector());
+
+        // Setup trapframe for hardware
+        let trapframe = cpu.get_trapframe();
+        trapframe.set_trap_handler(get_user_trap_handler());
+        trapframe.set_next_address_space(task.vm_manager.get_asid());
+        trapframe.set_kernel_stack(task.get_kernel_stack_bottom());
+
+        task.vcpu.switch(cpu);
+
+        set_next_mode(task.vcpu.get_mode());
+        
+        // Note: User context (VCPU) will be restored in schedule() after run() returns
     }
 }
 
