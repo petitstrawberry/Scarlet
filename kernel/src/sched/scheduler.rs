@@ -13,11 +13,11 @@
 
 extern crate alloc;
 
-use core::panic;
+use core::{future::Ready, panic};
 
-use alloc::{collections::vec_deque::VecDeque, string::ToString};
+use alloc::{collections::vec_deque::VecDeque, string::ToString, task};
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_next_mode, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, kernel, set_next_mode, set_trapframe, set_trapvector, trap::user::arch_switch_to_user_space, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
 use crate::println;
 use crate::print;
 
@@ -87,6 +87,9 @@ impl Scheduler {
                 match task {
                     Some(mut t) => {
                         match t.state {
+                            TaskState::NotInitialized => {
+                                panic!("Task must be initialized before scheduling");
+                            },
                             TaskState::Zombie => {
                                 let task_id = t.get_id();
                                 let parent_id = t.get_parent_id();
@@ -112,7 +115,8 @@ impl Scheduler {
                                 self.blocked_queue[cpu_id].push_back(t);
                                 continue;
                             },
-                            _ => {
+                            TaskState::Ready | TaskState::Running => {
+                                t.state = TaskState::Running;
                                 // Task is ready to run
                                 t.time_slice = 1; // Reset time slice on dispatch
                                 let next_task_id = t.get_id();
@@ -141,6 +145,9 @@ impl Scheduler {
                 match task {
                     Some(mut t) => {
                         match t.state {
+                            TaskState::NotInitialized => {
+                                panic!("Task must be initialized before scheduling");
+                            },
                             TaskState::Zombie => {
                                 let task_id = t.get_id();
                                 let parent_id = t.get_parent_id();
@@ -165,7 +172,8 @@ impl Scheduler {
                                 self.blocked_queue[cpu_id].push_back(t);
                                 continue;
                             },
-                            _ => {
+                            TaskState::Ready | TaskState::Running => {
+
                                 t.time_slice = 1; // Reset time slice on dispatch
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
@@ -222,6 +230,13 @@ impl Scheduler {
             if let Some(current_task_id) = current_task_id {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.store(cpu);
+
+                let next_task = self.get_task_by_id(next_task_id).unwrap();
+
+                if next_task.kernel_context.get_entry_point() == 0 {
+                    next_task.kernel_context.set_entry_point(Self::dispatch as u64);
+                }
+
                 // Perform kernel context switch
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
                 // NOTE: After this point, the current task will not execute until it is scheduled again
@@ -232,6 +247,7 @@ impl Scheduler {
             } else {
                 // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
+                next_task.state = TaskState::Running;
                 Self::setup_task_execution(cpu, next_task);
             }
         }
@@ -242,6 +258,13 @@ impl Scheduler {
             let _ = current_task.process_pending_events();
         }
         // Schedule returns - trap handler will call arch_switch_to_user_space()
+    }
+
+    fn dispatch() -> ! {
+        let cpu = get_cpu();
+        let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
+        Self::setup_task_execution(cpu, current_task);
+        arch_switch_to_user_space(cpu.get_trapframe());
     }
 
     /* MUST NOT raise any exception in this function before the idle loop */
@@ -410,8 +433,6 @@ impl Scheduler {
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-        // Update task state
-        task.state = TaskState::Running;
         
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());

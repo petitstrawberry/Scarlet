@@ -65,6 +65,40 @@ impl KernelContext {
             None => None,
         }
     }
+
+    pub fn get_kernel_stack_ptr(&self) -> Option<*const u8> {
+        match &self.kernel_stack {
+            Some(stack) => Some(stack.as_ptr()),
+            None => None,
+        }
+    }
+
+    /// Set the kernel stack for this context
+    /// # Arguments
+    /// * `stack` - Boxed slice representing the kernel stack memory
+    /// 
+    pub fn set_kernel_stack(&mut self, stack: Box<[u8]>) {
+        self.kernel_stack = Some(stack);
+        self.sp = self.get_kernel_stack_bottom();
+    }
+
+    /// Set entry point for this context
+    /// 
+    /// # Arguments
+    /// * `entry_point` - Function address to set as entry point
+    /// 
+    pub fn set_entry_point(&mut self, entry_point: u64) {
+        self.ra = entry_point;
+    }
+
+    /// Get entry point of this context
+    /// 
+    /// # Returns
+    /// 
+    /// Function address of the entry point
+    pub fn get_entry_point(&self) -> u64 {
+        self.ra
+    }
 }
 
 /// Switch from current context to target context
