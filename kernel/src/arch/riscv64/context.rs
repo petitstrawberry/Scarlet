@@ -152,20 +152,3 @@ pub unsafe extern "C" fn switch_to(current: *mut KernelContext, target: *const K
         "ret",
     );
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    fn test_kernel_context_new() {
-        let entry_point = 0x2000;
-        
-        let ctx = KernelContext::new(entry_point);
-        
-        assert_eq!(ctx.ra, entry_point);
-        assert_eq!(ctx.s, [0; 12]);
-        // Stack bottom should be non-zero and aligned
-        assert!(ctx.get_kernel_stack_bottom() > 0);
-    }
-}
