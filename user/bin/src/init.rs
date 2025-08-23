@@ -232,7 +232,7 @@ fn main() -> i32 {
         println!("init: Failed to setup new root, continuing with current root");
     }
     
-    println!("init: Starting shell process...");
+    println!("init: Starting login process...");
 
     match fork() {
         0 => {
@@ -274,7 +274,7 @@ fn main() -> i32 {
             loop {}
         }
         pid => {
-            println!("init: Shell process created, child PID: {}", pid);
+            println!("init: Login process created, child PID: {}", pid);
             
             let res = loop {
                 let res = waitpid(pid, 0);
