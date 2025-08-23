@@ -231,12 +231,6 @@ impl Scheduler {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 current_task.vcpu.store(cpu);
 
-                let next_task = self.get_task_by_id(next_task_id).unwrap();
-
-                if next_task.kernel_context.get_entry_point() == 0 {
-                    next_task.kernel_context.set_entry_point(Self::dispatch as u64);
-                }
-
                 // Perform kernel context switch
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
                 // NOTE: After this point, the current task will not execute until it is scheduled again
@@ -247,7 +241,6 @@ impl Scheduler {
             } else {
                 // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
-                next_task.state = TaskState::Running;
                 Self::setup_task_execution(cpu, next_task);
             }
         }
@@ -260,12 +253,6 @@ impl Scheduler {
         // Schedule returns - trap handler will call arch_switch_to_user_space()
     }
 
-    fn dispatch() -> ! {
-        let cpu = get_cpu();
-        let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
-        Self::setup_task_execution(cpu, current_task);
-        arch_switch_to_user_space(cpu.get_trapframe());
-    }
 
     /* MUST NOT raise any exception in this function before the idle loop */
     pub fn start_scheduler(&mut self) {
@@ -432,8 +419,7 @@ impl Scheduler {
     /// # Arguments
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
-    fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-        
+    pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());
 

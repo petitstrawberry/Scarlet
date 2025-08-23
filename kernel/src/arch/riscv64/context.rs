@@ -33,19 +33,16 @@ pub struct KernelContext {
 impl KernelContext {
     /// Create a new kernel context with kernel stack
     /// 
-    /// # Arguments
-    /// * `entry_point` - Function to execute when this context is first scheduled
-    /// 
     /// # Returns
     /// A new KernelContext with allocated kernel stack ready for scheduling
-    pub fn new(entry_point: u64) -> Self {
+    pub fn new() -> Self {
         // Directly allocate on heap to avoid stack overflow
         let kernel_stack = alloc::vec![0u8; crate::environment::TASK_KERNEL_STACK_SIZE].into_boxed_slice();
         let stack_top = kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64; // Initial stack top = stack bottom
 
         Self {
             sp: stack_top,
-            ra: entry_point,
+            ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
             kernel_stack: Some(kernel_stack),
         }

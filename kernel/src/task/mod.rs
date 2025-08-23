@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch, KernelContext}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{event::ProcessControlType, EventContent}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::get_scheduler, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch, KernelContext}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{event::ProcessControlType, EventContent}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::{get_scheduler, Scheduler}, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -307,7 +307,7 @@ impl Task {
                 TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
                 TaskType::User => crate::arch::vcpu::Mode::User,
             }),
-            kernel_context: KernelContext::new(0),
+            kernel_context: KernelContext::new(),
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
@@ -339,7 +339,7 @@ impl Task {
     pub fn init(&mut self) {
         // Initialize kernel context with the task's entry point
         // The kernel stack is allocated within the KernelContext
-        self.kernel_context = KernelContext::new(self.entry as u64);
+        self.kernel_context = KernelContext::new();
 
         match self.task_type {
             TaskType::Kernel => {
@@ -976,9 +976,8 @@ impl Task {
             child.abi = None; // No ABI set
         }
 
-        // Initialize kernel context with proper entry point and new kernel stack
-        child.kernel_context = KernelContext::new(child.entry as u64);
-
+        // Initialize kernel context
+        child.kernel_context = KernelContext::new();
         // Set the state to Ready
         child.state = self.state;
 
@@ -1364,6 +1363,15 @@ pub fn set_current_task_cwd(path: String) -> bool {
     } else {
         false
     }
+}
+
+/// Internal function to perform kernel context switch between tasks
+/// This function is called when a task is first scheduled.
+pub fn task_initial_kernel_entrypoint() -> ! {
+    let cpu = get_cpu();
+    let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
+    Scheduler::setup_task_execution(cpu, current_task);
+    arch_switch_to_user_space(cpu.get_trapframe());
 }
 
 #[cfg(test)]
