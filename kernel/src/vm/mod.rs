@@ -128,7 +128,7 @@ pub fn user_vm_init(task: &mut Task) {
     task.vm_manager.set_asid(asid);
 
     /* User stack page */
-    let num_of_stack_page = 16; // 4 pages for user stack
+    let num_of_stack_page = 16; // 16 pages for user stack
     let stack_start = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
 
