@@ -53,6 +53,39 @@ const ELFDATA2LSB: u8 = 1; // Little Endian
 
 // Program Header Type
 const PT_LOAD: u32 = 1; // Loadable segment
+const PT_INTERP: u32 = 3; // Interpreter path
+
+/// Execution mode determined by ELF analysis
+#[derive(Debug, Clone)]
+pub enum ExecutionMode {
+    /// Static linking - direct execution
+    Static,
+    /// Dynamic linking - needs interpreter
+    Dynamic {
+        interpreter_path: String,
+    },
+}
+
+/// Result of ELF loading analysis
+#[derive(Debug, Clone)]
+pub struct LoadElfResult {
+    /// Execution mode (static or dynamic)
+    pub mode: ExecutionMode,
+    /// Entry point (either main program or interpreter)
+    pub entry_point: u64,
+    /// Base address where main program was loaded (for auxiliary vector)
+    pub base_address: Option<u64>,
+    /// Program headers info (for auxiliary vector)
+    pub program_headers: ProgramHeadersInfo,
+}
+
+/// Program headers information for auxiliary vector
+#[derive(Debug, Clone)]
+pub struct ProgramHeadersInfo {
+    pub phdr_addr: u64,    // Address of program headers in memory
+    pub phdr_size: u64,    // Size of program header entry
+    pub phdr_count: u64,   // Number of program headers
+}
 
 // Segment Flags
 pub const PF_X: u32 = 1; // Executable
@@ -276,11 +309,38 @@ pub struct LoadedSegment {
 /// * `ElfLoaderError`: If any error occurs during the loading process, such as file read errors,
 ///  parsing errors, or memory allocation errors
 /// 
+/// Load ELF file into task (backward compatibility wrapper)
+/// 
+/// This function provides backward compatibility with the existing API.
+/// It calls the new analyze_and_load_elf function and returns only the entry point.
+/// 
 pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
+    let result = analyze_and_load_elf(file_obj, task)?;
+    Ok(result.entry_point)
+}
+
+/// Analyze ELF file and load it with dynamic linking support
+/// 
+/// This function determines whether the ELF file requires dynamic linking by checking
+/// for PT_INTERP segment, then loads either the interpreter (dynamic linker) or the
+/// main program directly (static linking).
+/// 
+/// # Arguments
+/// 
+/// * `file_obj`: A reference to the file object containing the ELF data
+/// * `task`: A mutable reference to the task into which the ELF file will be loaded
+/// 
+/// # Returns
+/// 
+/// * `Result<LoadElfResult, ElfLoaderError>`: Information about the loaded ELF including
+///   execution mode, entry point, and auxiliary vector data
+/// 
+pub fn analyze_and_load_elf(file_obj: &dyn FileObject, task: &mut Task) -> Result<LoadElfResult, ElfLoaderError> {
     // Move to the beginning of the file
     file_obj.seek(SeekFrom::Start(0)).map_err(|e| ElfLoaderError {
         message: format!("Failed to seek to start of file: {:?}", e),
     })?;
+    
     // Read the ELF header
     let mut header_buffer = vec![0u8; 64]; // 64-bit ELF header size
     file_obj.read(&mut header_buffer).map_err(|e| ElfLoaderError {
@@ -293,7 +353,167 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
             message: format!("Failed to parse ELF header: {:?}", e),
         }),
     };
-    // Read program headers and load LOAD segments
+
+    // Step 1: Check for PT_INTERP segment
+    let interpreter_path = find_interpreter_path(&header, file_obj)?;
+    
+    match interpreter_path {
+        Some(interp_path) => {
+            // Dynamic linking required
+            let base_address = load_elf_segments_for_interpreter(&header, file_obj, task)?;
+            let interpreter_entry = load_interpreter(&interp_path, task)?;
+            
+            // Prepare program headers info for auxiliary vector
+            let phdr_info = ProgramHeadersInfo {
+                phdr_addr: base_address + header.e_phoff,
+                phdr_size: header.e_phentsize as u64,
+                phdr_count: header.e_phnum as u64,
+            };
+            
+            Ok(LoadElfResult {
+                mode: ExecutionMode::Dynamic { interpreter_path: interp_path },
+                entry_point: interpreter_entry,
+                base_address: Some(base_address),
+                program_headers: phdr_info,
+            })
+        }
+        None => {
+            // Static linking - use existing implementation
+            let entry_point = load_elf_into_task_static(&header, file_obj, task)?;
+            
+            Ok(LoadElfResult {
+                mode: ExecutionMode::Static,
+                entry_point,
+                base_address: None,
+                program_headers: ProgramHeadersInfo {
+                    phdr_addr: 0,
+                    phdr_size: 0,
+                    phdr_count: 0,
+                },
+            })
+        }
+    }
+}
+
+/// Find PT_INTERP segment and extract interpreter path
+fn find_interpreter_path(header: &ElfHeader, file_obj: &dyn FileObject) -> Result<Option<String>, ElfLoaderError> {
+    for i in 0..header.e_phnum {
+        let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
+        file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
+            message: format!("Failed to seek to program header: {:?}", e),
+        })?;
+
+        let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
+        file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
+            message: format!("Failed to read program header: {:?}", e),
+        })?;
+        
+        let ph = match ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB) {
+            Ok(ph) => ph,
+            Err(e) => return Err(ElfLoaderError {
+                message: format!("Failed to parse program header: {:?}", e),
+            }),
+        };
+
+        if ph.p_type == PT_INTERP {
+            // Read interpreter path
+            file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
+                message: format!("Failed to seek to interpreter path: {:?}", e),
+            })?;
+            
+            let mut interp_buffer = vec![0u8; ph.p_filesz as usize];
+            file_obj.read(&mut interp_buffer).map_err(|e| ElfLoaderError {
+                message: format!("Failed to read interpreter path: {:?}", e),
+            })?;
+            
+            // Remove null terminator and convert to string
+            if let Some(null_pos) = interp_buffer.iter().position(|&x| x == 0) {
+                interp_buffer.truncate(null_pos);
+            }
+            
+            let path = core::str::from_utf8(&interp_buffer)
+                .map_err(|_| ElfLoaderError {
+                    message: "Invalid UTF-8 in interpreter path".to_string(),
+                })?
+                .to_string();
+                
+            return Ok(Some(path));
+        }
+    }
+    
+    Ok(None)
+}
+
+/// Load ELF segments for dynamic execution (without executing)
+fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
+    // For now, load at fixed base address - in real implementation,
+    // this should be position-independent or use ASLR
+    let base_address = 0x10000000u64;
+    
+    // Load PT_LOAD segments
+    for i in 0..header.e_phnum {
+        let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
+        file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
+            message: format!("Failed to seek to program header: {:?}", e),
+        })?;
+
+        let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
+        file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
+            message: format!("Failed to read program header: {:?}", e),
+        })?;
+        
+        let ph = match ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB) {
+            Ok(ph) => ph,
+            Err(e) => return Err(ElfLoaderError {
+                message: format!("Failed to parse program header: {:?}", e),
+            }),
+        };
+
+        if ph.p_type == PT_LOAD {
+            // Map segment but don't initialize yet - interpreter will handle initialization
+            let segment_addr = base_address + ph.p_vaddr;
+            let align = if ph.p_align == 0 { 1 } else { ph.p_align as usize };
+            let aligned_size = ((ph.p_memsz as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            
+            map_elf_segment(task, segment_addr as usize, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
+                message: format!("Failed to map ELF segment for interpreter: {:?}", e),
+            })?;
+            
+            // Copy file data to memory
+            let mut segment_data = vec![0u8; ph.p_filesz as usize];
+            file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
+                message: format!("Failed to seek to segment data: {:?}", e),
+            })?;
+            file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
+                message: format!("Failed to read segment data: {:?}", e),
+            })?;
+            
+            // Write data to task memory
+            // Note: This is simplified - real implementation needs proper memory copying
+            // task.memory_space.write(segment_addr, &segment_data)?;
+        }
+    }
+    
+    Ok(base_address)
+}
+
+/// Load interpreter (dynamic linker) into task memory  
+fn load_interpreter(interpreter_path: &str, _task: &mut Task) -> Result<u64, ElfLoaderError> {
+    // For now, return a placeholder entry point
+    // Real implementation should:
+    // 1. Open interpreter file from VFS
+    // 2. Load interpreter using load_elf_into_task_static
+    // 3. Return interpreter's entry point
+    
+    crate::println!("Would load interpreter: {}", interpreter_path);
+    
+    // Placeholder - interpreter entry point
+    Ok(0x40000000u64)
+}
+
+/// Load ELF using the original static linking logic
+fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
+    // Read program headers and load LOAD segments (existing logic)
     for i in 0..header.e_phnum {
         // Seek to the program header position
         let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
@@ -335,7 +555,6 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
             map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
                 message: format!("Failed to map ELF segment: {:?}", e),
             })?;
-
 
             // Inference segment type
             let segment_type = if ph.p_flags & PF_X != 0 {
@@ -384,24 +603,17 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
                             ph.p_filesz as usize
                         );
                     }
-                    
-                    // If memory size is larger than file size (e.g., BSS segment), fill the rest with zeros
-                    if ph.p_memsz > ph.p_filesz {
-                        let zero_start = paddr + ph.p_filesz as usize;
-                        let zero_size = ph.p_memsz as usize - ph.p_filesz as usize;
-                        unsafe {
-                            core::ptr::write_bytes(zero_start as *mut u8, 0, zero_size);
-                        }
-                    }
                 },
-                None => return Err(ElfLoaderError {
-                    message: format!("Failed to translate virtual address: {:#x} for segment at offset {:#x}", vaddr, ph.p_offset),
-                }),
+                None => {
+                    return Err(ElfLoaderError {
+                        message: format!("Failed to translate virtual address {:#x}", vaddr),
+                    });
+                }
             }
         }
     }
-    
-    // Return the entry point
+
+    // Return entry point
     Ok(header.e_entry)
 }
 

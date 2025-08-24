@@ -7,7 +7,7 @@
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 
-use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
+use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf, ExecutionMode}, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -102,9 +102,9 @@ impl AbiModule for ScarletAbi {
                 task.stack_size = 0;
                 task.brk = None;
 
-                // Load the ELF file and replace the current process
-                match load_elf_into_task(file_obj, task) {
-                    Ok(entry_point) => {
+                // Load and analyze the ELF file with dynamic linking support
+                match analyze_and_load_elf(file_obj, task) {
+                    Ok(elf_result) => {
                         // Set the name from argv[0] or use default
                         task.name = argv.get(0).map_or("Unnamed Task".to_string(), |s| s.to_string());
                         
@@ -116,8 +116,26 @@ impl AbiModule for ScarletAbi {
                         setup_trampoline(&mut task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
-                        // Set the new entry point
-                        task.set_entry_point(entry_point as usize);
+                        // Handle different execution modes
+                        match elf_result.mode {
+                            ExecutionMode::Static => {
+                                // Static linking - direct execution
+                                task.set_entry_point(elf_result.entry_point as usize);
+                            }
+                            ExecutionMode::Dynamic { interpreter_path } => {
+                                // Dynamic linking - setup auxiliary vector and jump to interpreter
+                                crate::println!("Scarlet ABI: Using dynamic linker at {}", interpreter_path);
+                                
+                                // TODO: Setup auxiliary vector on stack with:
+                                // - AT_PHDR: elf_result.program_headers.phdr_addr
+                                // - AT_PHENT: elf_result.program_headers.phdr_size  
+                                // - AT_PHNUM: elf_result.program_headers.phdr_count
+                                // - AT_ENTRY: original program entry point
+                                // - AT_BASE: elf_result.base_address
+                                
+                                task.set_entry_point(elf_result.entry_point as usize);
+                            }
+                        }
                         
                         // Reset task's registers for clean start
                         task.vcpu.regs = Registers::new();
