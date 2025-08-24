@@ -210,6 +210,39 @@ fn test_load_elf_invalid_alignment() {
 }
 
 #[test_case]
+fn test_dynamic_info_extraction() {
+    use crate::task::elf_loader::load_elf_into_task_with_dynamic_info;
+
+    let manager = VfsManager::new();
+    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
+    let fs = TmpFS::new(params.memory_limit);
+    manager.mount(fs.clone(), "/", 0).expect("Failed to mount test filesystem");
+    let file_path = "/test.elf";
+    manager.create_file(file_path, FileType::RegularFile).expect("Failed to create test file");
+    let kernel_obj = manager.open(file_path, 0).expect("Failed to open file");
+    let file = kernel_obj.as_file().expect("Failed to get file reference");
+    file.write(include_bytes!("test.elf")).expect("Failed to write test ELF file");
+    
+    // Seek to beginning for reading
+    file.seek(SeekFrom::Start(0)).expect("Failed to seek to start");
+    
+    // Create a new task
+    let mut task = new_user_task("test_dynamic".to_string(), 0);
+    
+    // Load the ELF file into the task and get dynamic info
+    let (entry_point, dynamic_info) = load_elf_into_task_with_dynamic_info(file, &mut task)
+        .expect("Failed to load ELF file with dynamic info");
+    
+    // Verify that we got the entry point (same as static test)
+    assert_eq!(entry_point, 0x0, "Entry point should match");
+    
+    // For this static test binary, dynamic info should be empty
+    assert!(dynamic_info.needed_libraries.is_empty(), "Static binary should have no needed libraries");
+    assert!(dynamic_info.interpreter_path.is_none(), "Static binary should have no interpreter");
+    assert!(dynamic_info.symbol_table.is_none(), "Static binary should have no dynamic symbol table");
+}
+
+#[test_case]
 fn test_load_elf_bss_zeroed() {
     use crate::task::elf_loader::load_elf_into_task;
 

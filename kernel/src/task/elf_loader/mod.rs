@@ -36,7 +36,7 @@ use crate::fs::{FileObject, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
-use alloc::{format, vec};
+use alloc::{format, vec, vec::Vec};
 use alloc::string::{String, ToString};
 use crate::task::Task;
 
@@ -53,11 +53,39 @@ const ELFDATA2LSB: u8 = 1; // Little Endian
 
 // Program Header Type
 const PT_LOAD: u32 = 1; // Loadable segment
+const PT_DYNAMIC: u32 = 2; // Dynamic linking information segment
+const PT_INTERP: u32 = 3; // Interpreter pathname
 
 // Segment Flags
 pub const PF_X: u32 = 1; // Executable
 pub const PF_W: u32 = 2; // Writable
 pub const PF_R: u32 = 4; // Readable
+
+// Dynamic Section Tag Types
+const DT_NULL: u64 = 0; // End of dynamic section
+const DT_NEEDED: u64 = 1; // Name of needed library
+const DT_PLTRELSZ: u64 = 2; // Size in bytes of PLT relocs
+const DT_PLTGOT: u64 = 3; // Processor defined value
+const DT_HASH: u64 = 4; // Address of symbol hash table
+const DT_STRTAB: u64 = 5; // Address of string table
+const DT_SYMTAB: u64 = 6; // Address of symbol table
+const DT_RELA: u64 = 7; // Address of Rela relocs
+const DT_RELASZ: u64 = 8; // Total size of Rela relocs
+const DT_RELAENT: u64 = 9; // Size of one Rela reloc
+const DT_STRSZ: u64 = 10; // Size of string table
+const DT_SYMENT: u64 = 11; // Size of one symbol table entry
+const DT_INIT: u64 = 12; // Address of init function
+const DT_FINI: u64 = 13; // Address of termination function
+const DT_SONAME: u64 = 14; // Name of shared object
+const DT_RPATH: u64 = 15; // Library search path
+const DT_SYMBOLIC: u64 = 16; // Start symbol search here
+const DT_REL: u64 = 17; // Address of Rel relocs
+const DT_RELSZ: u64 = 18; // Total size of Rel relocs
+const DT_RELENT: u64 = 19; // Size of one Rel reloc
+const DT_PLTREL: u64 = 20; // Type of reloc in PLT
+const DT_DEBUG: u64 = 21; // For debugging; unspecified
+const DT_TEXTREL: u64 = 22; // Reloc might modify .text
+const DT_JMPREL: u64 = 23; // Address of PLT relocs
 
 // ELF Identifier Indices
 const EI_MAG0: usize = 0;
@@ -220,6 +248,19 @@ impl ElfHeader {
     }
 }
 
+impl DynamicEntry {
+    pub fn parse(buffer: &[u8], is_little_endian: bool) -> Result<Self, String> {
+        if buffer.len() < 16 {
+            return Err("Dynamic entry too small".to_string());
+        }
+
+        let d_tag = read_u64(buffer, 0, is_little_endian);
+        let d_val = read_u64(buffer, 8, is_little_endian);
+
+        Ok(Self { d_tag, d_val })
+    }
+}
+
 impl ProgramHeader {
     pub fn parse(buffer: &[u8], is_little_endian: bool) -> Result<Self, ProgramHeaderParseError> {
         if buffer.len() < 56 {
@@ -259,6 +300,29 @@ pub struct LoadedSegment {
     pub flags: u32,        // Flags (R/W/X)
 }
 
+/// Dynamic section entry
+#[derive(Debug, Clone)]
+pub struct DynamicEntry {
+    pub d_tag: u64,        // Dynamic entry type
+    pub d_val: u64,        // Value (address, size, etc.)
+}
+
+/// Dynamic linking information for a loaded ELF
+#[derive(Debug, Default)]
+pub struct DynamicInfo {
+    pub needed_libraries: Vec<String>,  // Libraries needed (DT_NEEDED)
+    pub symbol_table: Option<u64>,      // Address of symbol table (DT_SYMTAB)
+    pub string_table: Option<u64>,      // Address of string table (DT_STRTAB)
+    pub string_table_size: Option<u64>, // Size of string table (DT_STRSZ)
+    pub rela_table: Option<u64>,        // Address of RELA relocations (DT_RELA)
+    pub rela_table_size: Option<u64>,   // Size of RELA relocations (DT_RELASZ)
+    pub rel_table: Option<u64>,         // Address of REL relocations (DT_REL)
+    pub rel_table_size: Option<u64>,    // Size of REL relocations (DT_RELSZ)
+    pub init_function: Option<u64>,     // Address of init function (DT_INIT)
+    pub fini_function: Option<u64>,     // Address of fini function (DT_FINI)
+    pub interpreter_path: Option<String>, // Dynamic linker path (PT_INTERP)
+}
+
 /// Load an ELF file into a task's memory space
 /// 
 /// # Arguments
@@ -277,6 +341,23 @@ pub struct LoadedSegment {
 ///  parsing errors, or memory allocation errors
 /// 
 pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
+    let dynamic_info = load_elf_into_task_with_dynamic_info(file_obj, task)?;
+    Ok(dynamic_info.0)
+}
+
+/// Load an ELF file into a task's memory space and return dynamic linking information
+/// 
+/// # Arguments
+/// 
+/// * `file`: A mutable reference to a file object containing the ELF file
+/// * `task`: A mutable reference to the task into which the ELF file will be loaded
+/// 
+/// # Returns
+/// 
+/// * `Result<(u64, DynamicInfo), ElfLoaderError>`: A tuple containing the entry point address 
+///   and dynamic linking information on success, or an `ElfLoaderError` on failure
+/// 
+pub fn load_elf_into_task_with_dynamic_info(file_obj: &dyn FileObject, task: &mut Task) -> Result<(u64, DynamicInfo), ElfLoaderError> {
     // Move to the beginning of the file
     file_obj.seek(SeekFrom::Start(0)).map_err(|e| ElfLoaderError {
         message: format!("Failed to seek to start of file: {:?}", e),
@@ -293,7 +374,11 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
             message: format!("Failed to parse ELF header: {:?}", e),
         }),
     };
-    // Read program headers and load LOAD segments
+    
+    let mut dynamic_info = DynamicInfo::default();
+    
+    // First pass: collect information about all segments
+    let mut program_headers = Vec::new();
     for i in 0..header.e_phnum {
         // Seek to the program header position
         let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
@@ -313,8 +398,46 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
                 message: format!("Failed to parse program header: {:?}", e),
             }),
         };
-
-        // For LOAD segments, load them into memory
+        
+        program_headers.push(ph);
+    }
+    
+    // Second pass: process PT_INTERP and PT_DYNAMIC segments to collect metadata
+    for ph in &program_headers {
+        match ph.p_type {
+            PT_INTERP => {
+                // Read interpreter path
+                if ph.p_filesz > 0 && ph.p_filesz < 1024 { // Reasonable size limit
+                    file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
+                        message: format!("Failed to seek to interpreter segment: {:?}", e),
+                    })?;
+                    
+                    let mut interp_data = vec![0u8; ph.p_filesz as usize];
+                    file_obj.read(&mut interp_data).map_err(|e| ElfLoaderError {
+                        message: format!("Failed to read interpreter segment: {:?}", e),
+                    })?;
+                    
+                    // Convert to string, removing null terminator
+                    if let Some(null_pos) = interp_data.iter().position(|&b| b == 0) {
+                        interp_data.truncate(null_pos);
+                    }
+                    if let Ok(interp_path) = String::from_utf8(interp_data) {
+                        dynamic_info.interpreter_path = Some(interp_path);
+                    }
+                }
+            },
+            PT_DYNAMIC => {
+                // We'll process dynamic entries after loading segments into memory
+                // since we need to access them through virtual addresses
+            },
+            _ => {
+                // Other segment types don't affect dynamic linking metadata at this stage
+            }
+        }
+    }
+    
+    // Third pass: load LOAD segments into memory
+    for ph in &program_headers {
         if ph.p_type == PT_LOAD {
             // Calculate proper alignment-aware mapping
             let align = ph.p_align as usize;
@@ -401,8 +524,21 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
         }
     }
     
-    // Return the entry point
-    Ok(header.e_entry)
+    // Fourth pass: process PT_DYNAMIC segments now that memory is loaded
+    for ph in &program_headers {
+        if ph.p_type == PT_DYNAMIC {
+            let dynamic_entries = parse_dynamic_section(task, ph.p_vaddr, ph.p_memsz).map_err(|e| ElfLoaderError {
+                message: format!("Failed to parse dynamic section: {}", e),
+            })?;
+            
+            process_dynamic_entries(&mut dynamic_info, &dynamic_entries, task).map_err(|e| ElfLoaderError {
+                message: format!("Failed to process dynamic entries: {}", e),
+            })?;
+        }
+    }
+    
+    // Return the entry point and dynamic information
+    Ok((header.e_entry, dynamic_info))
 }
 
 fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
@@ -480,6 +616,82 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
         });
     }
 
+    Ok(())
+}
+
+/// Parse dynamic section entries from memory
+fn parse_dynamic_section(task: &Task, vaddr: u64, size: u64) -> Result<Vec<DynamicEntry>, String> {
+    let mut entries = Vec::new();
+    let entry_size = 16; // Size of dynamic entry (8 + 8 bytes)
+    let num_entries = size / entry_size;
+    
+    for i in 0..num_entries {
+        let entry_vaddr = vaddr + i * entry_size;
+        let paddr = task.vm_manager.translate_vaddr(entry_vaddr as usize)
+            .ok_or_else(|| format!("Failed to translate dynamic entry address: {:#x}", entry_vaddr))?;
+        
+        let entry_data: [u8; 16] = unsafe {
+            core::ptr::read(paddr as *const [u8; 16])
+        };
+        
+        let entry = DynamicEntry::parse(&entry_data, true)?; // Assume little endian for now
+        
+        if entry.d_tag == DT_NULL {
+            break; // End of dynamic section
+        }
+        
+        entries.push(entry);
+    }
+    
+    Ok(entries)
+}
+
+/// Process dynamic entries to populate DynamicInfo
+fn process_dynamic_entries(
+    dynamic_info: &mut DynamicInfo,
+    entries: &[DynamicEntry],
+    task: &Task,
+) -> Result<(), String> {
+    for entry in entries {
+        match entry.d_tag {
+            DT_NEEDED => {
+                // Library name offset in string table - we'll resolve this later
+                // For now, just note that we have needed libraries
+                dynamic_info.needed_libraries.push(format!("library_{}", entry.d_val));
+            },
+            DT_SYMTAB => {
+                dynamic_info.symbol_table = Some(entry.d_val);
+            },
+            DT_STRTAB => {
+                dynamic_info.string_table = Some(entry.d_val);
+            },
+            DT_STRSZ => {
+                dynamic_info.string_table_size = Some(entry.d_val);
+            },
+            DT_RELA => {
+                dynamic_info.rela_table = Some(entry.d_val);
+            },
+            DT_RELASZ => {
+                dynamic_info.rela_table_size = Some(entry.d_val);
+            },
+            DT_REL => {
+                dynamic_info.rel_table = Some(entry.d_val);
+            },
+            DT_RELSZ => {
+                dynamic_info.rel_table_size = Some(entry.d_val);
+            },
+            DT_INIT => {
+                dynamic_info.init_function = Some(entry.d_val);
+            },
+            DT_FINI => {
+                dynamic_info.fini_function = Some(entry.d_val);
+            },
+            _ => {
+                // Ignore unknown dynamic entry types for now
+            }
+        }
+    }
+    
     Ok(())
 }
 
