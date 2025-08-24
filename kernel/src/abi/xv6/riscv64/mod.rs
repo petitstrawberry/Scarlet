@@ -8,6 +8,7 @@ mod pipe;
 // pub mod drivers;
 
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
+use hashbrown::HashMap;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use proc::{sys_exit, sys_fork, sys_wait, sys_getpid, sys_kill};
 
@@ -32,9 +33,8 @@ const MAX_FDS: usize = 1024; // Maximum number of file descriptors
 
 #[derive(Clone)]
 pub struct Xv6Riscv64Abi {
-    /// File descriptor to handle mapping table (fd -> handle)
-    /// None means the fd is not allocated
-    fd_to_handle: [Option<u32>; MAX_FDS],
+    /// File descriptor to handle mapping (fd -> handle)
+    fd_to_handle: HashMap<usize, u32>,
     /// Free file descriptor list for O(1) allocation/deallocation
     free_fds: Vec<usize>,
 }
@@ -46,7 +46,7 @@ impl Default for Xv6Riscv64Abi {
         let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
         Self {
-            fd_to_handle: [None; MAX_FDS],
+            fd_to_handle: HashMap::new(), // Empty HashMap
             free_fds,
         }
     }
@@ -63,14 +63,14 @@ impl Xv6Riscv64Abi {
             return Err("Too many open files");
         };
         
-        self.fd_to_handle[fd] = Some(handle);
+        self.fd_to_handle.insert(fd, handle);
         Ok(fd)
     }
     
     /// Get handle from file descriptor
     pub fn get_handle(&self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
-            self.fd_to_handle[fd]
+            self.fd_to_handle.get(&fd).copied()
         } else {
             None
         }
@@ -79,7 +79,7 @@ impl Xv6Riscv64Abi {
     /// Remove file descriptor mapping
     pub fn remove_fd(&mut self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
-            if let Some(handle) = self.fd_to_handle[fd].take() {
+            if let Some(handle) = self.fd_to_handle.remove(&fd) {
                 // Add the freed fd back to the free list for reuse (O(1))
                 self.free_fds.push(fd);
                 Some(handle)
@@ -93,11 +93,9 @@ impl Xv6Riscv64Abi {
     
     /// Find file descriptor by handle (linear search)
     pub fn find_fd_by_handle(&self, handle: u32) -> Option<usize> {
-        for (fd, &mapped_handle) in self.fd_to_handle.iter().enumerate() {
-            if let Some(h) = mapped_handle {
-                if h == handle {
-                    return Some(fd);
-                }
+        for (&fd, &mapped_handle) in self.fd_to_handle.iter() {
+            if mapped_handle == handle {
+                return Some(fd);
             }
         }
         None
@@ -106,7 +104,7 @@ impl Xv6Riscv64Abi {
     /// Remove handle mapping (requires linear search)
     pub fn remove_handle(&mut self, handle: u32) -> Option<usize> {
         if let Some(fd) = self.find_fd_by_handle(handle) {
-            self.fd_to_handle[fd] = None;
+            self.fd_to_handle.remove(&fd);
             self.free_fds.push(fd);
             Some(fd)
         } else {
@@ -117,9 +115,9 @@ impl Xv6Riscv64Abi {
     /// Initialize standard file descriptors (stdin, stdout, stderr)
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
         // XV6 convention: fd 0 = stdin, fd 1 = stdout, fd 2 = stderr
-        self.fd_to_handle[0] = Some(stdin_handle);
-        self.fd_to_handle[1] = Some(stdout_handle);
-        self.fd_to_handle[2] = Some(stderr_handle);
+        self.fd_to_handle.insert(0, stdin_handle);
+        self.fd_to_handle.insert(1, stdout_handle);
+        self.fd_to_handle.insert(2, stderr_handle);
         
         // Remove std fds from free list
         self.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
@@ -127,15 +125,12 @@ impl Xv6Riscv64Abi {
     
     /// Get total number of allocated file descriptors
     pub fn fd_count(&self) -> usize {
-        self.fd_to_handle.iter().filter(|&&h| h.is_some()).count()
+        self.fd_to_handle.len()
     }
     
     /// Get the list of allocated file descriptors (for debugging)
     pub fn allocated_fds(&self) -> Vec<usize> {
-        self.fd_to_handle.iter()
-            .enumerate()
-            .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
-            .collect()
+        self.fd_to_handle.keys().copied().collect()
     }
 }
 

@@ -11,6 +11,7 @@ use spin::Mutex;
 
 use crate::object::capability::{StreamOps, StreamError, CloneOps};
 use crate::object::KernelObject;
+use crate::sync::waker::Waker;
 use super::{StreamIpcOps, IpcError};
 
 /// Pipe-specific operations
@@ -75,6 +76,10 @@ struct PipeState {
     writer_count: usize,
     /// Whether the pipe has been closed
     closed: bool,
+    /// Waker for tasks waiting to read from this pipe
+    read_waker: Waker,
+    /// Waker for tasks waiting to write to this pipe
+    write_waker: Waker,
 }
 
 impl PipeState {
@@ -85,6 +90,8 @@ impl PipeState {
             reader_count: 0,
             writer_count: 0,
             closed: false,
+            read_waker: Waker::new_interruptible("pipe_read"),
+            write_waker: Waker::new_interruptible("pipe_write"),
         }
     }
 }
@@ -144,14 +151,31 @@ impl StreamOps for PipeEndpoint {
                 // No writers left, return EOF
                 return Ok(0);
             } else {
-                // Writers exist but no data available
-                return Err(StreamError::WouldBlock);
+                // Writers exist but no data available - block until data becomes available
+                // Block the current task using the pipe read waker
+                use crate::task::mytask;
+                use crate::arch::get_cpu;
+                if let Some(task) = mytask() {
+                    let mut cpu = get_cpu();
+                    state.read_waker.wait(task.get_id(), &mut cpu);
+                    
+                    // After waking up, retry the read operation
+                    return self.read(buffer);
+                } else {
+                    // No current task context, return WouldBlock for non-blocking fallback
+                    return Err(StreamError::WouldBlock);
+                }
             }
         }
         
         let bytes_to_read = buffer.len().min(state.buffer.len());
         for i in 0..bytes_to_read {
             buffer[i] = state.buffer.pop_front().unwrap();
+        }
+        
+        // Data was consumed, wake up any waiting writers
+        if bytes_to_read > 0 {
+            state.write_waker.wake_all();
         }
         
         Ok(bytes_to_read)
@@ -174,12 +198,30 @@ impl StreamOps for PipeEndpoint {
         
         let available_space = state.max_size - state.buffer.len();
         if available_space == 0 {
-            return Err(StreamError::WouldBlock);
+            // No space available - block until space becomes available
+            // Block the current task using the pipe write waker
+            use crate::task::mytask;
+            use crate::arch::get_cpu;
+            if let Some(task) = mytask() {
+                let mut cpu = get_cpu();
+                state.write_waker.wait(task.get_id(), &mut cpu);
+                
+                // After waking up, retry the write operation
+                return self.write(buffer);
+            } else {
+                // No current task context, return WouldBlock for non-blocking fallback
+                return Err(StreamError::WouldBlock);
+            }
         }
         
         let bytes_to_write = buffer.len().min(available_space);
         for &byte in &buffer[..bytes_to_write] {
             state.buffer.push_back(byte);
+        }
+        
+        // Data was written, wake up any waiting readers
+        if bytes_to_write > 0 {
+            state.read_waker.wake_all();
         }
         
         Ok(bytes_to_write)

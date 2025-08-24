@@ -60,35 +60,40 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     let task = mytask().unwrap();
     let status_ptr = trapframe.get_arg(0) as *mut i32;
 
-    for pid in task.get_children().clone() {
-        match task.wait(pid) {
-            Ok(status) => {
-                // If the child proc is exited, we can return the status
-                if status_ptr != core::ptr::null_mut() {
-                    let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
-                    unsafe {
-                        *status_ptr = status;
+    // Loop until a child exits or an error occurs
+    loop {
+        // Wait for any child process
+        for child_pid in task.get_children().clone() {
+            match task.wait(child_pid) {
+                Ok(status) => {
+                    // Child has exited, return the status
+                    if status_ptr != core::ptr::null_mut() {
+                        let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                        unsafe {
+                            *status_ptr = status;
+                        }
                     }
-                }
-                trapframe.increment_pc_next(task);
-                return pid;
-            },
-            Err(error) => {
-                match error {
-                    WaitError::ChildNotExited(_) => continue,
-                    _ => {
-                        return trapframe.get_return_value();
-                    },
+                    trapframe.increment_pc_next(task);
+                    return child_pid;
+                },
+                Err(error) => {
+                    match error {
+                        WaitError::ChildNotExited(_) => continue,
+                        _ => {
+                            trapframe.increment_pc_next(task);
+                            return usize::MAX;
+                        },
+                    }
                 }
             }
         }
+        
+        // No child has exited yet, block until one does
+        let parent_waker = get_parent_waitpid_waker(task.get_id());
+        parent_waker.wait(task.get_id(), trapframe);
+        // Continue the loop to re-check after waking up
+        continue;
     }
-    
-    // No child has exited yet, block until one does
-    // xv6's wait() is equivalent to waitpid(-1), so we use the parent waker
-    let parent_waker = get_parent_waitpid_waker(task.get_id());
-    parent_waker.wait(task.get_id(), trapframe);
-    usize::MAX // -1 (In current implementation, this will not be reached)
 }
 
 pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {

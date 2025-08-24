@@ -87,7 +87,7 @@ pub extern "C" fn _user_trap_entry() {
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_exit")]
 #[unsafe(naked)]
-pub extern "C" fn _user_trap_exit() -> ! {
+pub extern "C" fn _user_trap_exit(trapframe: &mut Trapframe) -> ! {
     unsafe {
         naked_asm!("
         .option norvc

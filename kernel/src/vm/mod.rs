@@ -20,7 +20,7 @@ use crate::environment::KERNEL_VM_STACK_SIZE;
 use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::PAGE_SIZE;
-use crate::environment::USER_STACK_TOP;
+use crate::environment::USER_STACK_END;
 use crate::environment::VMMAX;
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
@@ -95,6 +95,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     manager.add_memory_map(kernel_map.clone()).map_err(|e| panic!("Failed to add kernel memory map: {}", e)).unwrap();
     /* Pre-map the kernel space */
+    crate::early_println!("Mapping kernel space: {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
     root_page_table.map_memory_area(asid, kernel_map).map_err(|e| panic!("Failed to map kernel memory area: {}", e)).unwrap();
 
     let dev_map = VirtualMemoryMap {
@@ -127,8 +128,8 @@ pub fn user_vm_init(task: &mut Task) {
     task.vm_manager.set_asid(asid);
 
     /* User stack page */
-    let num_of_stack_page = 4; // 4 pages for user stack
-    let stack_start = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
+    let num_of_stack_page = 16; // 4 pages for user stack
+    let stack_start = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_start, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
 
     /* Guard page */
@@ -189,12 +190,12 @@ pub fn user_kernel_vm_init(task: &mut Task) {
 pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
     /* User stack page */
     let num_of_stack_page = 16; // 4 pages for user stack
-    let stack_base = USER_STACK_TOP - num_of_stack_page * PAGE_SIZE;
+    let stack_base = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
     task.allocate_stack_pages(stack_base, num_of_stack_page).map_err(|e| panic!("Failed to allocate user stack pages: {}", e)).unwrap();
     /* Guard page */
     task.allocate_guard_pages(stack_base - PAGE_SIZE, 1).map_err(|e| panic!("Failed to allocate guard page: {}", e)).unwrap();
     
-    (stack_base, USER_STACK_TOP)
+    (stack_base, USER_STACK_END)
 }
 
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;

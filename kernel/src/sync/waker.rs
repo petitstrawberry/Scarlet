@@ -88,26 +88,37 @@ impl Waker {
     }
 
     /// Block the current task and add it to the wait queue
-    ///
-    /// This method is intended for the current (running) task only.
-    /// It sets the task state to Blocked, adds it to the wait queue,
-    /// and yields the CPU to the scheduler. CPU state saving is handled
-    /// by the scheduler internally.
-    ///
-    /// # Arguments
-    /// * `current_task_id` - The ID of the current task
-    /// * `cpu` - The current CPU context
-    pub fn wait(&self, current_task_id: usize, cpu: &mut Arch) {
+    /// 
+    /// This method puts the current task into a blocked state and adds its ID
+    /// to the wait queue. The task will remain blocked until another part of
+    /// the system calls `wake_one()` or `wake_all()` on this waker.
+    /// 
+    /// # Behavior
+    /// 
+    /// 1. Gets the current task ID
+    /// 2. Sets the task state to `Blocked(self.block_type)`
+    /// 3. Adds the task ID to the wait queue
+    /// 4. Calls the scheduler to yield CPU to other tasks
+    /// 5. Returns when the task is woken up and rescheduled
+    /// 
+    /// # Note
+    /// 
+    /// This function returns when the task is woken up by another part of the system.
+    /// The calling code can then continue execution, typically to re-check the
+    /// condition that caused the wait.
+    pub fn wait(&self, task_id: usize, cpu: &mut Arch) {
+        // crate::println!("[WAKER] Task {} waiting on waker '{}'", task_id, self.name);
+                
         // Add task to wait queue first
         {
             let mut queue = self.wait_queue.lock();
-            queue.push_back(current_task_id);
+            queue.push_back(task_id);
         }
 
         let sched = get_scheduler();
 
         // Set the task state to Blocked
-        sched.block_task(current_task_id, self.block_type)
+        sched.block_task(task_id, self.block_type)
                 .expect("Failed to block task");
 
         // Yield CPU to scheduler - this never returns
@@ -115,23 +126,33 @@ impl Waker {
         sched.schedule(cpu);
     }
 
-    /// Block any task (not limited to the current task) and add it to the wait queue
-    ///
-    /// This method is intended for blocking tasks other than the current one.
-    /// It sets the specified task's state to Blocked and adds it to the wait queue.
-    /// No scheduler switch or CPU state saving is performed.
-    ///
-    /// # Arguments
-    /// * `task_id` - The ID of the task to be blocked
-    pub fn block(&self, task_id: usize) {
-        {
-            let mut queue = self.wait_queue.lock();
-            queue.push_back(task_id);
-        }
-        get_scheduler().block_task(task_id, self.block_type)
-            .expect("Failed to block task"); // Ensure the task was found and blocked     
-        // No scheduler switch or CPU state save here
-    }
+    // /// Block any task (not limited to the current task) and add it to the wait queue
+    // ///
+    // /// This method is intended for blocking tasks other than the current one.
+    // /// It sets the specified task's state to Blocked and adds it to the wait queue.
+    // /// No scheduler switch or CPU state saving is performed.
+    // ///
+    // /// # Arguments
+    // /// * `task_id` - The ID of the task to be blocked
+    // pub fn block(&self, task_id: usize) {
+    //     {
+    //         let mut queue = self.wait_queue.lock();
+    //         queue.push_back(task_id);
+    //     }
+
+    //     if let Some(task) = get_scheduler().get_task_by_id(task_id) {
+    //         // Set task state to blocked
+    //         task.set_state(TaskState::Blocked(self.block_type));
+    //     } else {
+    //         panic!("[WAKER] Task ID {} not found in scheduler", task_id);
+    //     }
+
+    //     // Yield CPU to scheduler - this will return when the task is woken up
+    //     get_scheduler().schedule(cpu);
+        
+    //     // When we reach here, the task has been woken up and rescheduled
+    //     // crate::println!("[WAKER] Task {} woken up from waker '{}'", task_id, self.name);
+    // }
 
     /// Wake up one waiting task
     /// 

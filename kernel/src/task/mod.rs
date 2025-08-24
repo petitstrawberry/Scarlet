@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_TOP}, fs::VfsManager, ipc::event::{EventContent, ProcessControlType}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::{self, HandleTable}, sched::scheduler::get_scheduler, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch, KernelContext}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{event::ProcessControlType, EventContent}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::{get_scheduler, Scheduler}, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -45,7 +45,7 @@ fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
 /// 
 /// # Returns
 /// 
-/// A reference to the waitpid/wait waker for the specified task
+/// A reference to the waker for the specified task
 pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
     let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
@@ -75,7 +75,7 @@ pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
 /// 
 /// # Returns
 /// 
-/// A reference to the parent waitpid(-1) waker
+/// A reference to the parent waker
 pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
     let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
@@ -184,6 +184,8 @@ pub struct Task {
     pub name: String,
     pub priority: u32,
     pub vcpu: Vcpu,
+    /// Kernel context for context switching
+    pub kernel_context: KernelContext,
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
@@ -304,6 +306,7 @@ static TASK_ID: Mutex<usize> = Mutex::new(1);
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
+        
         let task = Task {
             id: *taskid,
             name,
@@ -312,6 +315,7 @@ impl Task {
                 TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
                 TaskType::User => crate::arch::vcpu::Mode::User,
             }),
+            kernel_context: KernelContext::new(),
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
@@ -343,6 +347,10 @@ impl Task {
     }
     
     pub fn init(&mut self) {
+        // Initialize kernel context with the task's entry point
+        // The kernel stack is allocated within the KernelContext
+        self.kernel_context = KernelContext::new();
+
         match self.task_type {
             TaskType::Kernel => {
                 user_kernel_vm_init(self);
@@ -353,7 +361,7 @@ impl Task {
             TaskType::User => { 
                 user_vm_init(self);
                 /* Set sp to the top of the user stack */
-                self.vcpu.set_sp(USER_STACK_TOP);
+                self.vcpu.set_sp(USER_STACK_END);
             }
         }
         
@@ -978,6 +986,8 @@ impl Task {
             child.abi = None; // No ABI set
         }
 
+        // Initialize kernel context
+        child.kernel_context = KernelContext::new();
         // Set the state to Ready
         child.state = self.state;
 
@@ -993,9 +1003,7 @@ impl Task {
     /// # Arguments
     /// * `status` - The exit status
     /// 
-    pub fn exit(&mut self, status: i32) {
-        // crate::println!("Task {} ({}) exiting with status {}", self.id, self.name, status);
-        
+    pub fn exit(&mut self, status: i32) {        
         // Close all open handles when task exits
         self.handle_table.close_all();
         
@@ -1021,6 +1029,9 @@ impl Task {
         }
         
         // Task cleanup completed - ABI module handles event cleanup
+
+        // The scheduler will handle saving the current task state internally
+        get_scheduler().schedule(get_cpu());
     }
 
     /// Wait for a child task to exit and collect its status
@@ -1032,6 +1043,7 @@ impl Task {
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
     pub fn wait(&mut self, child_id: usize) -> Result<i32, WaitError> {
         if !self.children.contains(&child_id) {
+            crate::println!("[Task {}] wait: No such child task: {}", self.id, child_id);
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
         }
 
@@ -1068,7 +1080,9 @@ impl Task {
                 if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
                     let handler: Arc<dyn TimerHandler> = self.clone();
                     task.remove_software_timer_handler(&handler);
-                    task.sleep_waker.wake_all();
+                    // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
+                    let waker = get_waitpid_waker(self.task_id);
+                    waker.wake_all();
                 }
             }
         }
@@ -1081,7 +1095,8 @@ impl Task {
         add_timer(wake_tick, &handler, 0);
 
         self.add_software_timer_handler(handler);
-        self.sleep_waker.wait(self.get_id(), cpu);
+        let waker = get_waitpid_waker(self.id);
+        waker.wait(self.get_id(), cpu);
     }
 
     // VFS Helper Methods
@@ -1125,7 +1140,8 @@ impl Task {
     pub fn events_enabled(&self) -> bool {
         *self.events_enabled.lock()
     }
-    
+
+        
     /// Process pending events if events are enabled
     /// This should be called by the scheduler before resuming the task
     /// 
@@ -1212,6 +1228,34 @@ impl Task {
             }
             _ => false
         }
+    }
+    
+    /// Get a mutable reference to the kernel context for context switching
+    pub fn get_kernel_context_mut(&mut self) -> &mut KernelContext {
+        &mut self.kernel_context
+    }
+
+    /// Get a reference to the kernel context
+    pub fn get_kernel_context(&self) -> &KernelContext {
+        &self.kernel_context
+    }
+
+    /// Get the kernel stack bottom address for this task
+    ///
+    /// # Returns
+    /// The kernel stack bottom address as u64, or 0 if no kernel stack is allocated
+    pub fn get_kernel_stack_bottom(&self) -> u64 {
+        self.kernel_context.get_kernel_stack_bottom()
+    }
+
+    /// Get the kernel stack memory area for this task
+    /// 
+    /// # Returns
+    /// The kernel stack memory area as a MemoryArea, or None if no kernel stack is
+    /// allocated
+    /// 
+    pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
+        self.kernel_context.get_kernel_stack_memory_area()
     }
 }
 
@@ -1331,6 +1375,15 @@ pub fn set_current_task_cwd(path: String) -> bool {
     } else {
         false
     }
+}
+
+/// Internal function to perform kernel context switch between tasks
+/// This function is called when a task is first scheduled.
+pub fn task_initial_kernel_entrypoint() -> ! {
+    let cpu = get_cpu();
+    let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
+    Scheduler::setup_task_execution(cpu, current_task);
+    arch_switch_to_user_space(cpu.get_trapframe());
 }
 
 #[cfg(test)]
@@ -1498,9 +1551,9 @@ mod tests {
         // Find the stack memory map in parent
         let stack_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| {
-                // Stack should be near USER_STACK_TOP and have stack permissions
+                // Stack should be near USER_STACK_END and have stack permissions
                 use crate::vm::vmem::VirtualMemoryRegion;
-                mmap.vmarea.end == crate::environment::USER_STACK_TOP - 1 && 
+                mmap.vmarea.end == crate::environment::USER_STACK_END - 1 && 
                 mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
             })
             .expect("Stack memory map not found in parent task")
