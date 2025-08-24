@@ -210,6 +210,92 @@ fn test_load_elf_invalid_alignment() {
 }
 
 #[test_case]
+fn test_dynamic_segment_parsing() {
+    use crate::task::elf_loader::load_elf_into_task_with_dynamic_info;
+
+    let manager = VfsManager::new();
+    let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
+    let fs = TmpFS::new(params.memory_limit);
+    manager.mount(fs.clone(), "/", 0).expect("Failed to mount test filesystem");
+    let file_path = "/test_dynamic.elf";
+    manager.create_file(file_path, FileType::RegularFile).expect("Failed to create test file");
+
+    // Create a minimal ELF file with PT_DYNAMIC and PT_INTERP segments
+    let mut elf_data = vec![0u8; 64]; // ELF header
+    elf_data[EI_MAG0] = ELFMAG[0];
+    elf_data[EI_MAG1] = ELFMAG[1];
+    elf_data[EI_MAG2] = ELFMAG[2];
+    elf_data[EI_MAG3] = ELFMAG[3];
+    elf_data[EI_CLASS] = ELFCLASS64;
+    elf_data[EI_DATA] = ELFDATA2LSB;
+    
+    // Set header fields (little endian)
+    elf_data[16] = 0x3; // e_type = ET_DYN (dynamic executable)
+    elf_data[18] = 0xF3; // e_machine = RISC-V
+    elf_data[20] = 0x1; // e_version
+    elf_data[24] = 0x0; // e_entry = 0x1000 (little endian)
+    elf_data[25] = 0x10;
+    elf_data[32] = 64; // e_phoff = 64 (program headers start after ELF header)
+    elf_data[54] = 56; // e_phentsize = 56 (program header size)
+    elf_data[56] = 2; // e_phnum = 2 (two program headers: PT_LOAD and PT_INTERP)
+
+    // Add program headers (2 headers * 56 bytes each = 112 bytes)
+    // PT_LOAD program header
+    elf_data.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // p_type = PT_LOAD
+    elf_data.extend_from_slice(&[0x05, 0x00, 0x00, 0x00]); // p_flags = R+X
+    elf_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_offset = 0
+    elf_data.extend_from_slice(&[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_vaddr = 0x1000
+    elf_data.extend_from_slice(&[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_paddr = 0x1000
+    elf_data.extend_from_slice(&[0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_filesz = 0x2000
+    elf_data.extend_from_slice(&[0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_memsz = 0x2000
+    elf_data.extend_from_slice(&[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_align = 0x1000
+
+    // PT_INTERP program header
+    elf_data.extend_from_slice(&[0x03, 0x00, 0x00, 0x00]); // p_type = PT_INTERP
+    elf_data.extend_from_slice(&[0x04, 0x00, 0x00, 0x00]); // p_flags = R
+    elf_data.extend_from_slice(&[0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_offset = 0x200
+    elf_data.extend_from_slice(&[0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_vaddr = 0x1200
+    elf_data.extend_from_slice(&[0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_paddr = 0x1200
+    elf_data.extend_from_slice(&[0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_filesz = 32
+    elf_data.extend_from_slice(&[0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_memsz = 32
+    elf_data.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_align = 1
+
+    // Pad to offset 0x200 for interpreter string
+    while elf_data.len() < 0x200 {
+        elf_data.push(0);
+    }
+
+    // Add interpreter path at offset 0x200
+    elf_data.extend_from_slice(b"/lib/ld-linux-riscv64.so.1\0");
+
+    // Pad to total size of 0x2000 to match p_filesz
+    while elf_data.len() < 0x2000 {
+        elf_data.push(0);
+    }
+
+    let kernel_obj = manager.open(file_path, 0o777).map_err(|_| "Failed to create file").unwrap();
+    let file = kernel_obj.as_file().expect("Failed to get file reference");
+    file.write(&elf_data).expect("Failed to write ELF data");
+
+    // Create a new task
+    let mut task = new_user_task("test_dynamic_segment".to_string(), 0);
+
+    // Load the ELF file into the task and get dynamic info
+    let (entry_point, dynamic_info) = load_elf_into_task_with_dynamic_info(file, &mut task)
+        .expect("Failed to load ELF file with dynamic info");
+
+    // Verify that we got the entry point
+    assert_eq!(entry_point, 0x1000, "Entry point should be 0x1000");
+
+    // Verify that the interpreter path was extracted
+    assert!(dynamic_info.interpreter_path.is_some(), "Should have interpreter path");
+    assert_eq!(dynamic_info.interpreter_path.unwrap(), "/lib/ld-linux-riscv64.so.1", "Interpreter path should match");
+
+    // For this test, dynamic info should show no needed libraries (no PT_DYNAMIC segment)
+    assert!(dynamic_info.needed_libraries.is_empty(), "Should have no needed libraries in this test");
+}
+
+#[test_case]
 fn test_dynamic_info_extraction() {
     use crate::task::elf_loader::load_elf_into_task_with_dynamic_info;
 

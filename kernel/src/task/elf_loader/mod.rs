@@ -323,6 +323,32 @@ pub struct DynamicInfo {
     pub interpreter_path: Option<String>, // Dynamic linker path (PT_INTERP)
 }
 
+/// ELF symbol table entry (64-bit)
+#[derive(Debug, Clone)]
+pub struct ElfSymbol {
+    pub st_name: u32,     // Symbol name (string table index)
+    pub st_info: u8,      // Symbol type and binding
+    pub st_other: u8,     // Symbol visibility
+    pub st_shndx: u16,    // Section index
+    pub st_value: u64,    // Symbol value
+    pub st_size: u64,     // Symbol size
+}
+
+/// Relocation entry with addend (RELA)
+#[derive(Debug, Clone)]
+pub struct ElfRelocationA {
+    pub r_offset: u64,    // Address
+    pub r_info: u64,      // Relocation type and symbol index
+    pub r_addend: i64,    // Addend
+}
+
+/// Relocation entry without addend (REL)
+#[derive(Debug, Clone)]
+pub struct ElfRelocation {
+    pub r_offset: u64,    // Address
+    pub r_info: u64,      // Relocation type and symbol index
+}
+
 /// Load an ELF file into a task's memory space
 /// 
 /// # Arguments
@@ -527,7 +553,7 @@ pub fn load_elf_into_task_with_dynamic_info(file_obj: &dyn FileObject, task: &mu
     // Fourth pass: process PT_DYNAMIC segments now that memory is loaded
     for ph in &program_headers {
         if ph.p_type == PT_DYNAMIC {
-            let dynamic_entries = parse_dynamic_section(task, ph.p_vaddr, ph.p_memsz).map_err(|e| ElfLoaderError {
+            let dynamic_entries = parse_dynamic_section(task, ph.p_vaddr, ph.p_memsz, header.ei_data == ELFDATA2LSB).map_err(|e| ElfLoaderError {
                 message: format!("Failed to parse dynamic section: {}", e),
             })?;
             
@@ -620,7 +646,7 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
 }
 
 /// Parse dynamic section entries from memory
-fn parse_dynamic_section(task: &Task, vaddr: u64, size: u64) -> Result<Vec<DynamicEntry>, String> {
+fn parse_dynamic_section(task: &Task, vaddr: u64, size: u64, is_little_endian: bool) -> Result<Vec<DynamicEntry>, String> {
     let mut entries = Vec::new();
     let entry_size = 16; // Size of dynamic entry (8 + 8 bytes)
     let num_entries = size / entry_size;
@@ -634,7 +660,7 @@ fn parse_dynamic_section(task: &Task, vaddr: u64, size: u64) -> Result<Vec<Dynam
             core::ptr::read(paddr as *const [u8; 16])
         };
         
-        let entry = DynamicEntry::parse(&entry_data, true)?; // Assume little endian for now
+        let entry = DynamicEntry::parse(&entry_data, is_little_endian)?;
         
         if entry.d_tag == DT_NULL {
             break; // End of dynamic section
@@ -646,27 +672,53 @@ fn parse_dynamic_section(task: &Task, vaddr: u64, size: u64) -> Result<Vec<Dynam
     Ok(entries)
 }
 
+/// Read a null-terminated string from virtual memory
+fn read_string_from_vaddr(task: &Task, vaddr: u64, max_length: usize) -> Result<String, String> {
+    let mut result = Vec::new();
+    let mut current_addr = vaddr;
+    
+    for _ in 0..max_length {
+        let paddr = task.vm_manager.translate_vaddr(current_addr as usize)
+            .ok_or_else(|| format!("Failed to translate string address: {:#x}", current_addr))?;
+        
+        let byte = unsafe { core::ptr::read(paddr as *const u8) };
+        
+        if byte == 0 {
+            break; // Null terminator found
+        }
+        
+        result.push(byte);
+        current_addr += 1;
+    }
+    
+    String::from_utf8(result)
+        .map_err(|e| format!("Invalid UTF-8 string: {}", e))
+}
+
 /// Process dynamic entries to populate DynamicInfo
 fn process_dynamic_entries(
     dynamic_info: &mut DynamicInfo,
     entries: &[DynamicEntry],
     task: &Task,
 ) -> Result<(), String> {
+    // First pass: collect addresses for string table and other key structures
+    let mut string_table_addr: Option<u64> = None;
+    let mut string_table_size: Option<u64> = None;
+    let mut needed_offsets: Vec<u64> = Vec::new();
+    
     for entry in entries {
         match entry.d_tag {
+            DT_STRTAB => {
+                string_table_addr = Some(entry.d_val);
+            },
+            DT_STRSZ => {
+                string_table_size = Some(entry.d_val);
+            },
             DT_NEEDED => {
-                // Library name offset in string table - we'll resolve this later
-                // For now, just note that we have needed libraries
-                dynamic_info.needed_libraries.push(format!("library_{}", entry.d_val));
+                needed_offsets.push(entry.d_val);
             },
             DT_SYMTAB => {
                 dynamic_info.symbol_table = Some(entry.d_val);
-            },
-            DT_STRTAB => {
-                dynamic_info.string_table = Some(entry.d_val);
-            },
-            DT_STRSZ => {
-                dynamic_info.string_table_size = Some(entry.d_val);
             },
             DT_RELA => {
                 dynamic_info.rela_table = Some(entry.d_val);
@@ -689,6 +741,38 @@ fn process_dynamic_entries(
             _ => {
                 // Ignore unknown dynamic entry types for now
             }
+        }
+    }
+    
+    // Store the string table information
+    dynamic_info.string_table = string_table_addr;
+    dynamic_info.string_table_size = string_table_size;
+    
+    // Second pass: resolve library names using string table
+    if let (Some(strtab_addr), Some(strtab_size)) = (string_table_addr, string_table_size) {
+        for offset in needed_offsets {
+            if offset < strtab_size {
+                let lib_name_addr = strtab_addr + offset;
+                match read_string_from_vaddr(task, lib_name_addr, 256) { // 256 byte limit for library names
+                    Ok(lib_name) => {
+                        if !lib_name.is_empty() {
+                            dynamic_info.needed_libraries.push(lib_name);
+                        }
+                    },
+                    Err(_) => {
+                        // If we can't read the string, fall back to a placeholder
+                        dynamic_info.needed_libraries.push(format!("library_at_offset_{}", offset));
+                    }
+                }
+            } else {
+                // Invalid offset, use placeholder
+                dynamic_info.needed_libraries.push(format!("invalid_library_offset_{}", offset));
+            }
+        }
+    } else {
+        // No string table available, use placeholders
+        for (i, _) in needed_offsets.iter().enumerate() {
+            dynamic_info.needed_libraries.push(format!("library_{}", i));
         }
     }
     
