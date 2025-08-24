@@ -51,9 +51,46 @@ const ELFCLASS64: u8 = 2; // 64-bit
 const ELFDATA2LSB: u8 = 1; // Little Endian
 // const ELFDATA2MSB: u8 = 2; // Big Endian
 
+// ELF File Type
+pub const ET_EXEC: u16 = 2; // Executable file
+pub const ET_DYN: u16 = 3;  // Shared object file / Position Independent Executable
+
 // Program Header Type
 const PT_LOAD: u32 = 1; // Loadable segment
 const PT_INTERP: u32 = 3; // Interpreter path
+
+/// Target type for ELF loading (determines base address strategy)
+#[derive(Debug, Clone, Copy)]
+pub enum LoadTarget {
+    MainProgram,  // Main executable being loaded
+    Interpreter,  // Dynamic linker/interpreter 
+    SharedLib,    // Shared library (future use)
+}
+
+/// Choose base address for ELF loading based on type and target
+fn choose_base_address(elf_type: u16, target: LoadTarget) -> u64 {
+    match (elf_type, target) {
+        // ET_EXEC: Use absolute addresses from ELF file (no base offset)
+        (ET_EXEC, _) => 0,
+        
+        // ET_DYN: Choose appropriate base address for relocation
+        (ET_DYN, LoadTarget::MainProgram) => {
+            // PIE main program: low memory area
+            0x10000  // 64KB - avoid null pointer region
+        },
+        (ET_DYN, LoadTarget::Interpreter) => {
+            // Dynamic linker: high memory area to avoid conflicts
+            0x40000000  // 1GB - separate from main program space
+        },
+        (ET_DYN, LoadTarget::SharedLib) => {
+            // Shared libraries: medium memory area
+            0x50000000  // 1.25GB - between interpreter and heap
+        },
+        
+        // Unknown type: fallback to main program strategy
+        _ => 0x10000,
+    }
+}
 
 /// Execution mode determined by ELF analysis
 #[derive(Debug, Clone)]
@@ -446,9 +483,8 @@ fn find_interpreter_path(header: &ElfHeader, file_obj: &dyn FileObject) -> Resul
 
 /// Load ELF segments for dynamic execution (without executing)
 fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
-    // For now, load at fixed base address - in real implementation,
-    // this should be position-independent or use ASLR
-    let base_address = 0x10000000u64;
+    // Use ABI-aware base address selection
+    let base_address = choose_base_address_with_abi(header.e_type, LoadTarget::MainProgram);
     
     // Load PT_LOAD segments
     for i in 0..header.e_phnum {
@@ -488,9 +524,37 @@ fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObje
                 message: format!("Failed to read segment data: {:?}", e),
             })?;
             
-            // Write data to task memory
-            // Note: This is simplified - real implementation needs proper memory copying
-            // task.memory_space.write(segment_addr, &segment_data)?;
+            // Write data to task memory - same approach as static loader
+            let vaddr = segment_addr as usize;
+            match task.vm_manager.translate_vaddr(vaddr) {
+                Some(paddr) => {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            segment_data.as_ptr(),
+                            paddr as *mut u8,
+                            ph.p_filesz as usize
+                        );
+                    }
+                },
+                None => {
+                    return Err(ElfLoaderError {
+                        message: format!("Failed to translate virtual address {:#x} for interpreter loading", vaddr),
+                    });
+                }
+            }
+            
+            // Update task size information (for proper memory management)
+            let segment_type = if ph.p_flags & PF_X != 0 {
+                task.text_size += aligned_size;
+                "text"
+            } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
+                task.data_size += aligned_size;
+                "data"
+            } else {
+                "unknown"
+            };
+            
+            crate::println!("Loaded {} segment at {:#x} (size: {:#x})", segment_type, segment_addr, aligned_size);
         }
     }
     
@@ -499,16 +563,23 @@ fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObje
 
 /// Load interpreter (dynamic linker) into task memory  
 fn load_interpreter(interpreter_path: &str, _task: &mut Task) -> Result<u64, ElfLoaderError> {
-    // For now, return a placeholder entry point
-    // Real implementation should:
-    // 1. Open interpreter file from VFS
-    // 2. Load interpreter using load_elf_into_task_static
-    // 3. Return interpreter's entry point
+    // Get ABI-aware interpreter path (allows ABI override)
+    let actual_interpreter_path = get_interpreter_path_with_abi(interpreter_path);
+    crate::println!("Would load interpreter: {} (resolved to: {})", interpreter_path, actual_interpreter_path);
     
-    crate::println!("Would load interpreter: {}", interpreter_path);
+    // Use ABI-aware base address selection for interpreters
+    let interpreter_base = choose_base_address_with_abi(ET_DYN, LoadTarget::Interpreter);
     
-    // Placeholder - interpreter entry point
-    Ok(0x40000000u64)
+    // TODO: Real implementation should:
+    // 1. Open interpreter file from VFS using task's current ABI  
+    // 2. Parse interpreter ELF header to check e_type
+    // 3. Call choose_base_address(interpreter_elf.e_type, LoadTarget::Interpreter)
+    // 4. Load segments at: base_address + p_vaddr for each PT_LOAD
+    // 5. Return actual entry point: base_address + interpreter_elf.e_entry
+    
+    // For now, return placeholder entry point at interpreter base
+    // Real entry would be: interpreter_base + interpreter_elf.e_entry
+    Ok(interpreter_base)
 }
 
 /// Load ELF using the original static linking logic
@@ -693,6 +764,37 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     }
 
     Ok(())
+}
+
+/// Choose base address for ELF loading with ABI support
+/// 
+/// This function first checks if the current task's ABI module provides
+/// a custom base address, and falls back to kernel default if not.
+fn choose_base_address_with_abi(elf_type: u16, target: LoadTarget) -> u64 {
+    if let Some(task) = crate::task::mytask() {
+        if let Some(abi) = &task.abi {
+            if let Some(addr) = abi.choose_load_address(elf_type, target) {
+                return addr;
+            }
+        }
+    }
+    
+    // Fallback to kernel default
+    choose_base_address(elf_type, target)
+}
+
+/// Get interpreter path with ABI support
+/// 
+/// This function allows ABI modules to override the interpreter path
+/// for compatibility or security reasons.
+fn get_interpreter_path_with_abi(requested: &str) -> String {
+    if let Some(task) = crate::task::mytask() {
+        if let Some(abi) = &task.abi {
+            return abi.get_interpreter_path(requested);
+        }
+    }
+    
+    requested.to_string()
 }
 
 #[cfg(test)]

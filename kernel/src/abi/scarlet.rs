@@ -172,6 +172,30 @@ impl AbiModule for ScarletAbi {
         }
     }
 
+    fn choose_load_address(&self, elf_type: u16, target: crate::task::elf_loader::LoadTarget) -> Option<u64> {
+        use crate::task::elf_loader::{LoadTarget, ET_DYN};
+        
+        // Scarlet Native ABI uses standard Linux-style memory layout
+        if elf_type == ET_DYN {
+            match target {
+                LoadTarget::MainProgram => {
+                    // PIE main program: low memory area, avoiding null pointer region
+                    Some(0x10000)  // 64KB base
+                },
+                LoadTarget::Interpreter => {
+                    // Dynamic linker: high memory area to avoid conflicts with main program
+                    Some(0x40000000)  // 1GB base
+                },
+                LoadTarget::SharedLib => {
+                    // Shared libraries: medium memory area
+                    Some(0x50000000)  // 1.25GB base  
+                },
+            }
+        } else {
+            None  // Use kernel default for ET_EXEC and other types
+        }
+    }
+
     fn normalize_env_to_scarlet(&self, envp: &mut Vec<String>) {
         // Scarlet ABI is already in canonical format, but ensure all paths are absolute
         // Modify in-place to avoid allocations
