@@ -45,7 +45,7 @@ fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
 /// # Returns
 /// 
 /// A reference to the waker for the specified task
-pub fn get_task_waker(task_id: usize) -> &'static Waker {
+pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
     let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
     let mut wakers = wakers_mutex.lock();
     if !wakers.contains_key(&task_id) {
@@ -74,7 +74,7 @@ pub fn get_task_waker(task_id: usize) -> &'static Waker {
 /// # Returns
 /// 
 /// A reference to the parent waker
-pub fn get_parent_waker(parent_id: usize) -> &'static Waker {
+pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
     let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
     let mut wakers = wakers_mutex.lock();
     
@@ -1071,7 +1071,7 @@ impl Task {
                     let handler: Arc<dyn TimerHandler> = self.clone();
                     task.remove_software_timer_handler(&handler);
                     // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
-                    let waker = get_task_waker(self.task_id);
+                    let waker = get_waitpid_waker(self.task_id);
                     waker.wake_all();
                 }
             }
@@ -1085,7 +1085,7 @@ impl Task {
         add_timer(wake_tick, &handler, 0);
 
         self.add_software_timer_handler(handler);
-        let waker = get_task_waker(self.id);
+        let waker = get_waitpid_waker(self.id);
         waker.wait(self, cpu);
     }
 

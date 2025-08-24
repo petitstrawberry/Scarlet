@@ -24,7 +24,7 @@ use crate::library::std::string::{parse_c_string_from_userspace, parse_string_ar
 
 use crate::arch::{get_cpu, Trapframe};
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{get_parent_waker, get_task_waker, CloneFlags, WaitError};
+use crate::task::{get_parent_waitpid_waker, get_waitpid_waker, CloneFlags, WaitError};
 use crate::timer::{get_tick, ms_to_ticks, ns_to_ticks};
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
@@ -308,7 +308,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             }
             
             // No child has exited yet, block until one does
-            let parent_waker = get_parent_waker(task.get_id());
+            let parent_waker = get_parent_waitpid_waker(task.get_id());
             parent_waker.wait(task, trapframe);
             // Continue the loop to re-check after waking up
             continue;
@@ -340,7 +340,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     },
                     WaitError::ChildNotExited(_) => {
                         // If the child task is not exited, we need to wait for it
-                        let child_waker = get_task_waker(pid as usize);
+                        let child_waker = get_waitpid_waker(pid as usize);
                         child_waker.wait(task, trapframe);
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
                         // Continue the loop to re-check after waking up
