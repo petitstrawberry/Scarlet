@@ -155,9 +155,9 @@ impl StreamOps for PipeEndpoint {
                 // Block the current task using the pipe read waker
                 use crate::task::mytask;
                 use crate::arch::get_cpu;
-                if let Some(mut task) = mytask() {
+                if let Some(task) = mytask() {
                     let mut cpu = get_cpu();
-                    state.read_waker.wait(&mut task, &mut cpu);
+                    state.read_waker.wait(task.get_id(), &mut cpu);
                     
                     // After waking up, retry the read operation
                     return self.read(buffer);
@@ -202,9 +202,9 @@ impl StreamOps for PipeEndpoint {
             // Block the current task using the pipe write waker
             use crate::task::mytask;
             use crate::arch::get_cpu;
-            if let Some(mut task) = mytask() {
+            if let Some(task) = mytask() {
                 let mut cpu = get_cpu();
-                state.write_waker.wait(&mut task, &mut cpu);
+                state.write_waker.wait(task.get_id(), &mut cpu);
                 
                 // After waking up, retry the write operation
                 return self.write(buffer);

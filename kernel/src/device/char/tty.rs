@@ -258,7 +258,7 @@ impl CharDevice for TtyDevice {
 
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
-                self.input_waker.wait(&mut task, &mut cpu);
+                self.input_waker.wait(task.get_id(), &mut cpu);
                 
                 // Continue the loop to re-check if data is available
                 continue;

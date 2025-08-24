@@ -90,7 +90,7 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
         
         // No child has exited yet, block until one does
         let parent_waker = get_parent_waitpid_waker(task.get_id());
-        parent_waker.wait(task, trapframe);
+        parent_waker.wait(task.get_id(), trapframe);
         // Continue the loop to re-check after waking up
         continue;
     }

@@ -1086,7 +1086,7 @@ impl Task {
 
         self.add_software_timer_handler(handler);
         let waker = get_waitpid_waker(self.id);
-        waker.wait(self, cpu);
+        waker.wait(self.get_id(), cpu);
     }
 
     // VFS Helper Methods

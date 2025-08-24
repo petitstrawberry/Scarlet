@@ -309,7 +309,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             
             // No child has exited yet, block until one does
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait(task, trapframe);
+            parent_waker.wait(task.get_id(), trapframe);
             // Continue the loop to re-check after waking up
             continue;
         }
@@ -341,7 +341,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     WaitError::ChildNotExited(_) => {
                         // If the child task is not exited, we need to wait for it
                         let child_waker = get_waitpid_waker(pid as usize);
-                        child_waker.wait(task, trapframe);
+                        child_waker.wait(task.get_id(), trapframe);
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
                         // Continue the loop to re-check after waking up
                         continue;
