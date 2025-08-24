@@ -378,6 +378,19 @@ impl Scheduler {
                 }
             }
         }
+        // Not found in blocked queues. This can happen if a wake occurs between
+        // a task marking itself Blocked and the scheduler moving it to the
+        // blocked_queue. In that case, ensure the task state is set back to
+        // Running so that the scheduler does not park it.
+        if let Some(task) = self.task_pool.get_task(task_id) {
+            if let TaskState::Blocked(_) = task.state {
+                task.state = TaskState::Running;
+                // Do not enqueue here to avoid duplicating entries: the task is
+                // still present in the ready_queue (or is current) and will be
+                // handled as Running by the scheduler.
+                return true;
+            }
+        }
         false
     }
 
