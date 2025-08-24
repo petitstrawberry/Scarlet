@@ -17,19 +17,19 @@ use alloc::collections::BTreeMap;
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
-static TASK_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
-static PARENT_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
-/// Initialize the task wakers registry
-fn init_task_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+/// Initialize the waitpid wakers registry
+fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
-/// Initialize the parent waker registry
-fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+/// Initialize the parent waitpid waker registry
+fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
@@ -46,7 +46,7 @@ fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
 /// 
 /// A reference to the waker for the specified task
 pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     if !wakers.contains_key(&task_id) {
         let waker_name = alloc::format!("task_{}", task_id);
@@ -75,7 +75,7 @@ pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
 /// 
 /// A reference to the parent waker
 pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     
     // Create a new waker if it doesn't exist
@@ -103,7 +103,7 @@ pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
 /// 
 /// * `task_id` - The ID of the task that has exited
 pub fn wake_task_waiters(task_id: usize) {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let wakers = wakers_mutex.lock();
     if let Some(waker) = wakers.get(&task_id) {
         waker.wake_all();
@@ -118,7 +118,7 @@ pub fn wake_task_waiters(task_id: usize) {
 /// 
 /// * `parent_id` - The ID of the parent task
 pub fn wake_parent_waiters(parent_id: usize) {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let wakers = wakers_mutex.lock();
     if let Some(waker) = wakers.get(&parent_id) {
         waker.wake_all();
@@ -134,7 +134,7 @@ pub fn wake_parent_waiters(parent_id: usize) {
 /// 
 /// * `task_id` - The ID of the task to clean up
 pub fn cleanup_task_waker(task_id: usize) {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&task_id);
 }
@@ -147,7 +147,7 @@ pub fn cleanup_task_waker(task_id: usize) {
 /// 
 /// * `parent_id` - The ID of the parent task to clean up
 pub fn cleanup_parent_waker(parent_id: usize) {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&parent_id);
 }
