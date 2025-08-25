@@ -382,6 +382,46 @@ impl ProgramHeader {
     }
 }
 
+/// Read and parse a program header at the specified index
+fn read_program_header(
+    header: &ElfHeader, 
+    file_obj: &dyn FileObject, 
+    index: u16
+) -> Result<ProgramHeader, ElfLoaderError> {
+    let offset = header.e_phoff + (index as u64) * (header.e_phentsize as u64);
+    file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
+        message: format!("Failed to seek to program header {}: {:?}", index, e),
+    })?;
+
+    let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
+    file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
+        message: format!("Failed to read program header {}: {:?}", index, e),
+    })?;
+    
+    ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB).map_err(|e| ElfLoaderError {
+        message: format!("Failed to parse program header {}: {:?}", index, e),
+    })
+}
+
+/// Iterate through all program headers and call a closure for each one
+fn for_each_program_header<F>(
+    header: &ElfHeader,
+    file_obj: &dyn FileObject,
+    mut callback: F,
+) -> Result<(), ElfLoaderError>
+where
+    F: FnMut(u16, &ProgramHeader) -> Result<bool, ElfLoaderError>, // Return false to break early
+{
+    for i in 0..header.e_phnum {
+        let ph = read_program_header(header, file_obj, i)?;
+        let should_continue = callback(i, &ph)?;
+        if !should_continue {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct LoadedSegment {
     pub vaddr: u64,        // Virtual address
@@ -537,24 +577,9 @@ pub fn analyze_and_load_elf_with_strategy(
 
 /// Find PT_INTERP segment and extract interpreter path
 fn find_interpreter_path(header: &ElfHeader, file_obj: &dyn FileObject) -> Result<Option<String>, ElfLoaderError> {
-    for i in 0..header.e_phnum {
-        let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
-        file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
-            message: format!("Failed to seek to program header: {:?}", e),
-        })?;
-
-        let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
-        file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
-            message: format!("Failed to read program header: {:?}", e),
-        })?;
-        
-        let ph = match ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB) {
-            Ok(ph) => ph,
-            Err(e) => return Err(ElfLoaderError {
-                message: format!("Failed to parse program header: {:?}", e),
-            }),
-        };
-
+    let mut result = None;
+    
+    for_each_program_header(header, file_obj, |_i, ph| {
         if ph.p_type == PT_INTERP {
             // Read interpreter path
             file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
@@ -577,11 +602,13 @@ fn find_interpreter_path(header: &ElfHeader, file_obj: &dyn FileObject) -> Resul
                 })?
                 .to_string();
                 
-            return Ok(Some(path));
+            result = Some(path);
+            return Ok(false); // Break early
         }
-    }
+        Ok(true) // Continue iteration
+    })?;
     
-    Ok(None)
+    Ok(result)
 }
 
 /// Load ELF segments for dynamic execution (without executing)
@@ -590,77 +617,14 @@ fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObje
     let needs_relocation = header.e_type == ET_DYN;
     let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
     
-    // Load PT_LOAD segments
-    for i in 0..header.e_phnum {
-        let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
-        file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
-            message: format!("Failed to seek to program header: {:?}", e),
-        })?;
-
-        let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
-        file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
-            message: format!("Failed to read program header: {:?}", e),
-        })?;
-        
-        let ph = match ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB) {
-            Ok(ph) => ph,
-            Err(e) => return Err(ElfLoaderError {
-                message: format!("Failed to parse program header: {:?}", e),
-            }),
-        };
-
+    // Load PT_LOAD segments using simplified approach
+    for_each_program_header(header, file_obj, |_i, ph| {
         if ph.p_type == PT_LOAD {
-            // Map segment but don't initialize yet - interpreter will handle initialization
             let segment_addr = base_address + ph.p_vaddr;
-            let align = if ph.p_align == 0 { 1 } else { ph.p_align as usize };
-            let aligned_size = ((ph.p_memsz as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            
-            map_elf_segment(task, segment_addr as usize, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
-                message: format!("Failed to map ELF segment for interpreter: {:?}", e),
-            })?;
-            
-            // Copy file data to memory
-            let mut segment_data = vec![0u8; ph.p_filesz as usize];
-            file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
-                message: format!("Failed to seek to segment data: {:?}", e),
-            })?;
-            file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
-                message: format!("Failed to read segment data: {:?}", e),
-            })?;
-            
-            // Write data to task memory
-            let vaddr = segment_addr as usize;
-            match task.vm_manager.translate_vaddr(vaddr) {
-                Some(paddr) => {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            segment_data.as_ptr(),
-                            paddr as *mut u8,
-                            ph.p_filesz as usize
-                        );
-                    }
-                },
-                None => {
-                    return Err(ElfLoaderError {
-                        message: format!("Failed to translate virtual address {:#x} for interpreter loading", vaddr),
-                    });
-                }
-            }
-            
-            // Update task size information (for proper memory management)
-            let segment_type = if ph.p_flags & PF_X != 0 {
-                task.text_size += aligned_size;
-                "text"
-            } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
-                task.data_size += aligned_size;
-                "data"
-            } else {
-                "unknown"
-            };
-            
-            crate::println!("Loaded interpreter {} segment at {:#x} (size: {:#x})", segment_type, segment_addr, aligned_size);
+            load_elf_segment_at_address(ph, file_obj, task, segment_addr)?;
         }
-    }
+        Ok(true) // Continue iteration
+    })?;
     
     Ok(base_address)
 }
@@ -754,76 +718,13 @@ fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy:
 /// Load ELF segments for interpreter with specified base address
 fn load_elf_segments_with_base(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task, base_address: u64) -> Result<(), ElfLoaderError> {
     // Load PT_LOAD segments with provided base address
-    for i in 0..header.e_phnum {
-        let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
-        file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
-            message: format!("Failed to seek to program header: {:?}", e),
-        })?;
-
-        let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
-        file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
-            message: format!("Failed to read program header: {:?}", e),
-        })?;
-        
-        let ph = match ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB) {
-            Ok(ph) => ph,
-            Err(e) => return Err(ElfLoaderError {
-                message: format!("Failed to parse program header: {:?}", e),
-            }),
-        };
-
+    for_each_program_header(header, file_obj, |_i, ph| {
         if ph.p_type == PT_LOAD {
-            // Map segment for interpreter
             let segment_addr = base_address + ph.p_vaddr;
-            let align = if ph.p_align == 0 { 1 } else { ph.p_align as usize };
-            let aligned_size = ((ph.p_memsz as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-            
-            map_elf_segment(task, segment_addr as usize, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
-                message: format!("Failed to map ELF segment for interpreter: {:?}", e),
-            })?;
-            
-            // Copy file data to memory
-            let mut segment_data = vec![0u8; ph.p_filesz as usize];
-            file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
-                message: format!("Failed to seek to segment data: {:?}", e),
-            })?;
-            file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
-                message: format!("Failed to read segment data: {:?}", e),
-            })?;
-            
-            // Write data to task memory
-            let vaddr = segment_addr as usize;
-            match task.vm_manager.translate_vaddr(vaddr) {
-                Some(paddr) => {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            segment_data.as_ptr(),
-                            paddr as *mut u8,
-                            ph.p_filesz as usize
-                        );
-                    }
-                },
-                None => {
-                    return Err(ElfLoaderError {
-                        message: format!("Failed to translate virtual address {:#x} for interpreter loading", vaddr),
-                    });
-                }
-            }
-            
-            // Update task size information for proper memory management
-            let segment_type = if ph.p_flags & PF_X != 0 {
-                task.text_size += aligned_size;
-                "text"
-            } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
-                task.data_size += aligned_size;
-                "data"
-            } else {
-                "unknown"
-            };
-            
-            crate::println!("Loaded interpreter {} segment at {:#x} (size: {:#x})", segment_type, segment_addr, aligned_size);
+            load_elf_segment_at_address(ph, file_obj, task, segment_addr)?;
         }
-    }
+        Ok(true) // Continue iteration
+    })?;
     
     Ok(())
 }
@@ -834,26 +735,7 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
     let needs_relocation = header.e_type == ET_DYN;
     let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
     // Read program headers and load LOAD segments (existing logic)
-    for i in 0..header.e_phnum {
-        // Seek to the program header position
-        let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
-        file_obj.seek(SeekFrom::Start(offset)).map_err(|e| ElfLoaderError {
-            message: format!("Failed to seek to program header: {:?}", e),
-        })?;
-
-        // Read program header
-        let mut ph_buffer = vec![0u8; header.e_phentsize as usize];
-        file_obj.read(&mut ph_buffer).map_err(|e| ElfLoaderError {
-            message: format!("Failed to read program header: {:?}", e),
-        })?;
-        
-        let ph = match ProgramHeader::parse(&ph_buffer, header.ei_data == ELFDATA2LSB) {
-            Ok(ph) => ph,
-            Err(e) => return Err(ElfLoaderError {
-                message: format!("Failed to parse program header: {:?}", e),
-            }),
-        };
-
+    for_each_program_header(header, file_obj, |_i, ph| {
         // For LOAD segments, load them into memory
         if ph.p_type == PT_LOAD {
             // Calculate proper alignment-aware mapping with base address
@@ -900,39 +782,42 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
                 }
             }
             
-            // Prepare segment data (file size)
-            let mut segment_data = vec![0u8; ph.p_filesz as usize];
-            
-            // Seek to segment data position
-            file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
-                message: format!("Failed to seek to segment data: {:?}", e),
-            })?;
+            // Load segment data using common function (if there's file data)
+            if ph.p_filesz > 0 {
+                let mut segment_data = vec![0u8; ph.p_filesz as usize];
+                
+                // Seek to segment data position
+                file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
+                    message: format!("Failed to seek to segment data: {:?}", e),
+                })?;
 
-            // Read segment data
-            file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
-                message: format!("Failed to read segment data: {:?}", e),
-            })?;
-            
-            // Copy data to task's memory space
-            let vaddr = segment_addr as usize;
-            match task.vm_manager.translate_vaddr(vaddr) {
-                Some(paddr) => {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            segment_data.as_ptr(),
-                            paddr as *mut u8,
-                            ph.p_filesz as usize
-                        );
+                // Read segment data
+                file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
+                    message: format!("Failed to read segment data: {:?}", e),
+                })?;
+                
+                // Copy data to task's memory space
+                let vaddr = segment_addr as usize;
+                match task.vm_manager.translate_vaddr(vaddr) {
+                    Some(paddr) => {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                segment_data.as_ptr(),
+                                paddr as *mut u8,
+                                ph.p_filesz as usize
+                            );
+                        }
+                    },
+                    None => {
+                        return Err(ElfLoaderError {
+                            message: format!("Failed to translate virtual address {:#x}", vaddr),
+                        });
                     }
-                },
-                None => {
-                    return Err(ElfLoaderError {
-                        message: format!("Failed to translate virtual address {:#x}", vaddr),
-                    });
                 }
             }
         }
-    }
+        Ok(true) // Continue iteration
+    })?;
 
     // Return entry point
     Ok(header.e_entry)
@@ -1098,3 +983,63 @@ pub fn setup_auxiliary_vector_on_stack(
 
 #[cfg(test)]
 mod tests;
+
+/// Load a single ELF segment into task memory at the specified address
+fn load_elf_segment_at_address(
+    ph: &ProgramHeader,
+    file_obj: &dyn FileObject,
+    task: &mut Task,
+    segment_addr: u64,
+) -> Result<(), ElfLoaderError> {
+    let align = if ph.p_align == 0 { 1 } else { ph.p_align as usize };
+    let aligned_size = ((ph.p_memsz as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    
+    // Map segment
+    map_elf_segment(task, segment_addr as usize, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
+        message: format!("Failed to map ELF segment at {:#x}: {:?}", segment_addr, e),
+    })?;
+    
+    // Copy file data to memory if there's any
+    if ph.p_filesz > 0 {
+        let mut segment_data = vec![0u8; ph.p_filesz as usize];
+        file_obj.seek(SeekFrom::Start(ph.p_offset)).map_err(|e| ElfLoaderError {
+            message: format!("Failed to seek to segment data: {:?}", e),
+        })?;
+        file_obj.read(&mut segment_data).map_err(|e| ElfLoaderError {
+            message: format!("Failed to read segment data: {:?}", e),
+        })?;
+        
+        // Write data to task memory
+        let vaddr = segment_addr as usize;
+        match task.vm_manager.translate_vaddr(vaddr) {
+            Some(paddr) => {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        segment_data.as_ptr(),
+                        paddr as *mut u8,
+                        ph.p_filesz as usize
+                    );
+                }
+            },
+            None => {
+                return Err(ElfLoaderError {
+                    message: format!("Failed to translate virtual address {:#x} for segment loading", vaddr),
+                });
+            }
+        }
+    }
+    
+    // Update task size information for proper memory management
+    let segment_type = if ph.p_flags & PF_X != 0 {
+        task.text_size += aligned_size;
+        "text"
+    } else if ph.p_flags & PF_W != 0 || ph.p_flags & PF_R != 0 {
+        task.data_size += aligned_size;
+        "data"
+    } else {
+        "unknown"
+    };
+    
+    crate::println!("Loaded {} segment at {:#x} (size: {:#x})", segment_type, segment_addr, aligned_size);
+    Ok(())
+}
