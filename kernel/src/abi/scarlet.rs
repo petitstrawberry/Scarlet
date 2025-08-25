@@ -7,7 +7,7 @@
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 
-use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf_with_strategy, ExecutionMode, LoadStrategy, LoadTarget}, vm::{setup_trampoline, setup_user_stack}};
+use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf_with_strategy, build_auxiliary_vector, ExecutionMode, LoadStrategy, LoadTarget, setup_auxiliary_vector_on_stack}, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -138,16 +138,31 @@ impl AbiModule for ScarletAbi {
                                 // Static linking - direct execution
                                 task.set_entry_point(elf_result.entry_point as usize);
                             }
-                            ExecutionMode::Dynamic { interpreter_path } => {
+                            ExecutionMode::Dynamic { ref interpreter_path } => {
                                 // Dynamic linking - setup auxiliary vector and jump to interpreter
                                 crate::println!("Scarlet ABI: Using dynamic linker at {}", interpreter_path);
                                 
-                                // TODO: Setup auxiliary vector on stack with:
-                                // - AT_PHDR: elf_result.program_headers.phdr_addr
-                                // - AT_PHENT: elf_result.program_headers.phdr_size  
-                                // - AT_PHNUM: elf_result.program_headers.phdr_count
-                                // - AT_ENTRY: original program entry point
-                                // - AT_BASE: elf_result.base_address
+                                // Calculate interpreter base address from entry point
+                                let interpreter_base = if let Some(base) = elf_result.base_address {
+                                    // For PIE executables, we need the interpreter base
+                                    Some(elf_result.entry_point - base) // This calculation might need adjustment
+                                } else {
+                                    None
+                                };
+                                
+                                // Build auxiliary vector for dynamic linking
+                                let auxv = build_auxiliary_vector(&elf_result, interpreter_base);
+                                
+                                // Setup auxiliary vector on stack
+                                match setup_auxiliary_vector_on_stack(task, &auxv) {
+                                    Ok(_auxv_addr) => {
+                                        crate::println!("Scarlet ABI: Auxiliary vector setup complete");
+                                    }
+                                    Err(e) => {
+                                        crate::println!("Scarlet ABI: Failed to setup auxiliary vector: {}", e.message);
+                                        return Err("Failed to setup auxiliary vector");
+                                    }
+                                }
                                 
                                 task.set_entry_point(elf_result.entry_point as usize);
                             }
