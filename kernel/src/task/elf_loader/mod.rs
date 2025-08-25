@@ -67,6 +67,31 @@ pub enum LoadTarget {
     SharedLib,    // Shared library (future use)
 }
 
+/// Binary loading strategy (format-agnostic)
+/// 
+/// This structure allows ABI modules to customize how binaries are loaded
+/// without being tied to specific binary formats like ELF.
+pub struct LoadStrategy {
+    pub choose_base_address: fn(target: LoadTarget, needs_relocation: bool) -> u64,
+    pub resolve_interpreter: fn(requested: Option<&str>) -> Option<String>,
+}
+
+impl Default for LoadStrategy {
+    fn default() -> Self {
+        Self {
+            choose_base_address: |target, needs_relocation| {
+                match (target, needs_relocation) {
+                    (LoadTarget::MainProgram, false) => 0,        // Absolute addresses
+                    (LoadTarget::MainProgram, true) => 0x10000,   // PIE executable
+                    (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
+                    (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
+                }
+            },
+            resolve_interpreter: |requested| requested.map(|s| s.to_string()),
+        }
+    }
+}
+
 /// Choose base address for ELF loading based on type and target
 fn choose_base_address(elf_type: u16, target: LoadTarget) -> u64 {
     match (elf_type, target) {
@@ -373,6 +398,31 @@ pub fn load_elf_into_task(file_obj: &dyn FileObject, task: &mut Task) -> Result<
 ///   execution mode, entry point, and auxiliary vector data
 /// 
 pub fn analyze_and_load_elf(file_obj: &dyn FileObject, task: &mut Task) -> Result<LoadElfResult, ElfLoaderError> {
+    analyze_and_load_elf_with_strategy(file_obj, task, &LoadStrategy::default())
+}
+
+/// Analyze ELF file and load it with custom loading strategy
+/// 
+/// This function determines whether the ELF file requires dynamic linking by checking
+/// for PT_INTERP segment, then loads either the interpreter (dynamic linker) or the
+/// main program directly (static linking) using the provided strategy.
+/// 
+/// # Arguments
+/// 
+/// * `file_obj`: A reference to the file object containing the ELF data
+/// * `task`: A mutable reference to the task into which the ELF file will be loaded
+/// * `strategy`: Loading strategy provided by ABI module
+/// 
+/// # Returns
+/// 
+/// * `Result<LoadElfResult, ElfLoaderError>`: Information about the loaded ELF including
+///   execution mode, entry point, and auxiliary vector data
+/// 
+pub fn analyze_and_load_elf_with_strategy(
+    file_obj: &dyn FileObject, 
+    task: &mut Task,
+    strategy: &LoadStrategy
+) -> Result<LoadElfResult, ElfLoaderError> {
     // Move to the beginning of the file
     file_obj.seek(SeekFrom::Start(0)).map_err(|e| ElfLoaderError {
         message: format!("Failed to seek to start of file: {:?}", e),
@@ -394,29 +444,43 @@ pub fn analyze_and_load_elf(file_obj: &dyn FileObject, task: &mut Task) -> Resul
     // Step 1: Check for PT_INTERP segment
     let interpreter_path = find_interpreter_path(&header, file_obj)?;
     
+    // Convert ELF type to format-agnostic information
+    let needs_relocation = header.e_type == ET_DYN;
+    
     match interpreter_path {
         Some(interp_path) => {
             // Dynamic linking required
-            let base_address = load_elf_segments_for_interpreter(&header, file_obj, task)?;
-            let interpreter_entry = load_interpreter(&interp_path, task)?;
             
-            // Prepare program headers info for auxiliary vector
-            let phdr_info = ProgramHeadersInfo {
-                phdr_addr: base_address + header.e_phoff,
-                phdr_size: header.e_phentsize as u64,
-                phdr_count: header.e_phnum as u64,
-            };
+            // Let strategy resolve the actual interpreter to use
+            let actual_interpreter = (strategy.resolve_interpreter)(Some(&interp_path));
             
-            Ok(LoadElfResult {
-                mode: ExecutionMode::Dynamic { interpreter_path: interp_path },
-                entry_point: interpreter_entry,
-                base_address: Some(base_address),
-                program_headers: phdr_info,
-            })
+            if let Some(final_interp_path) = actual_interpreter {
+                let base_address = load_elf_segments_for_interpreter(&header, file_obj, task, strategy)?;
+                let interpreter_entry = load_interpreter(&final_interp_path, task, strategy)?;
+                
+                // Prepare program headers info for auxiliary vector
+                let phdr_info = ProgramHeadersInfo {
+                    phdr_addr: base_address + header.e_phoff,
+                    phdr_size: header.e_phentsize as u64,
+                    phdr_count: header.e_phnum as u64,
+                };
+                
+                Ok(LoadElfResult {
+                    mode: ExecutionMode::Dynamic { interpreter_path: final_interp_path },
+                    entry_point: interpreter_entry,
+                    base_address: Some(base_address),
+                    program_headers: phdr_info,
+                })
+            } else {
+                // Strategy rejected dynamic linking (e.g., xv6 ABI)
+                return Err(ElfLoaderError {
+                    message: "Dynamic linking not supported by current ABI".to_string(),
+                });
+            }
         }
         None => {
             // Static linking - use existing implementation
-            let entry_point = load_elf_into_task_static(&header, file_obj, task)?;
+            let entry_point = load_elf_into_task_static(&header, file_obj, task, strategy)?;
             
             Ok(LoadElfResult {
                 mode: ExecutionMode::Static,
@@ -482,9 +546,10 @@ fn find_interpreter_path(header: &ElfHeader, file_obj: &dyn FileObject) -> Resul
 }
 
 /// Load ELF segments for dynamic execution (without executing)
-fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
-    // Use ABI-aware base address selection
-    let base_address = choose_base_address_with_abi(header.e_type, LoadTarget::MainProgram);
+fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
+    // Use strategy to determine base address
+    let needs_relocation = header.e_type == ET_DYN;
+    let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
     
     // Load PT_LOAD segments
     for i in 0..header.e_phnum {
@@ -562,18 +627,17 @@ fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObje
 }
 
 /// Load interpreter (dynamic linker) into task memory  
-fn load_interpreter(interpreter_path: &str, _task: &mut Task) -> Result<u64, ElfLoaderError> {
-    // Get ABI-aware interpreter path (allows ABI override)
-    let actual_interpreter_path = get_interpreter_path_with_abi(interpreter_path);
-    crate::println!("Would load interpreter: {} (resolved to: {})", interpreter_path, actual_interpreter_path);
+fn load_interpreter(interpreter_path: &str, _task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
+    crate::println!("Would load interpreter: {}", interpreter_path);
     
-    // Use ABI-aware base address selection for interpreters
-    let interpreter_base = choose_base_address_with_abi(ET_DYN, LoadTarget::Interpreter);
+    // Use strategy to determine interpreter base address
+    // Interpreters are typically position-independent (needs_relocation = true)
+    let interpreter_base = (strategy.choose_base_address)(LoadTarget::Interpreter, true);
     
     // TODO: Real implementation should:
     // 1. Open interpreter file from VFS using task's current ABI  
     // 2. Parse interpreter ELF header to check e_type
-    // 3. Call choose_base_address(interpreter_elf.e_type, LoadTarget::Interpreter)
+    // 3. Use strategy to determine base address
     // 4. Load segments at: base_address + p_vaddr for each PT_LOAD
     // 5. Return actual entry point: base_address + interpreter_elf.e_entry
     
@@ -582,8 +646,11 @@ fn load_interpreter(interpreter_path: &str, _task: &mut Task) -> Result<u64, Elf
     Ok(interpreter_base)
 }
 
-/// Load ELF using the original static linking logic
-fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task) -> Result<u64, ElfLoaderError> {
+/// Load ELF using the static linking logic with strategy support
+fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
+    // Use strategy to determine base address for main program
+    let needs_relocation = header.e_type == ET_DYN;
+    let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
     // Read program headers and load LOAD segments (existing logic)
     for i in 0..header.e_phnum {
         // Seek to the program header position
@@ -607,7 +674,8 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
 
         // For LOAD segments, load them into memory
         if ph.p_type == PT_LOAD {
-            // Calculate proper alignment-aware mapping
+            // Calculate proper alignment-aware mapping with base address
+            let segment_addr = base_address + ph.p_vaddr;
             let align = ph.p_align as usize;
             // Handle zero or invalid alignment (ELF spec: 0 or 1 means no alignment constraint)
             if align == 0 {
@@ -615,8 +683,8 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
                     message: format!("Invalid alignment value: segment has zero alignment requirement"),
                 });
             }
-            let page_offset = (ph.p_vaddr as usize) % align;
-            let mapping_start = (ph.p_vaddr as usize) - page_offset;
+            let page_offset = (segment_addr as usize) % align;
+            let mapping_start = (segment_addr as usize) - page_offset;
             let mapping_size = (ph.p_memsz as usize) + page_offset;
             
             // Align to page boundaries for actual allocation
@@ -664,7 +732,7 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
             })?;
             
             // Copy data to task's memory space
-            let vaddr = ph.p_vaddr as usize;
+            let vaddr = segment_addr as usize;
             match task.vm_manager.translate_vaddr(vaddr) {
                 Some(paddr) => {
                     unsafe {
@@ -764,37 +832,6 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     }
 
     Ok(())
-}
-
-/// Choose base address for ELF loading with ABI support
-/// 
-/// This function first checks if the current task's ABI module provides
-/// a custom base address, and falls back to kernel default if not.
-fn choose_base_address_with_abi(elf_type: u16, target: LoadTarget) -> u64 {
-    if let Some(task) = crate::task::mytask() {
-        if let Some(abi) = &task.abi {
-            if let Some(addr) = abi.choose_load_address(elf_type, target) {
-                return addr;
-            }
-        }
-    }
-    
-    // Fallback to kernel default
-    choose_base_address(elf_type, target)
-}
-
-/// Get interpreter path with ABI support
-/// 
-/// This function allows ABI modules to override the interpreter path
-/// for compatibility or security reasons.
-fn get_interpreter_path_with_abi(requested: &str) -> String {
-    if let Some(task) = crate::task::mytask() {
-        if let Some(abi) = &task.abi {
-            return abi.get_interpreter_path(requested);
-        }
-    }
-    
-    requested.to_string()
 }
 
 #[cfg(test)]

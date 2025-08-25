@@ -7,7 +7,7 @@
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 
-use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf, ExecutionMode}, vm::{setup_trampoline, setup_user_stack}};
+use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf_with_strategy, ExecutionMode, LoadStrategy, LoadTarget}, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -102,8 +102,24 @@ impl AbiModule for ScarletAbi {
                 task.stack_size = 0;
                 task.brk = None;
 
-                // Load and analyze the ELF file with dynamic linking support
-                match analyze_and_load_elf(file_obj, task) {
+                // Create Scarlet-specific loading strategy
+                let strategy = LoadStrategy {
+                    choose_base_address: |target, needs_relocation| {
+                        match (target, needs_relocation) {
+                            (LoadTarget::MainProgram, false) => 0,        // ET_EXEC: absolute
+                            (LoadTarget::MainProgram, true) => 0x10000,   // ET_DYN: PIE
+                            (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
+                            (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
+                        }
+                    },
+                    resolve_interpreter: |requested| {
+                        // Scarlet ABI: use interpreter as specified in ELF
+                        requested.map(|s| s.to_string())
+                    },
+                };
+
+                // Load and analyze the ELF file with Scarlet strategy
+                match analyze_and_load_elf_with_strategy(file_obj, task, &strategy) {
                     Ok(elf_result) => {
                         // Set the name from argv[0] or use default
                         task.name = argv.get(0).map_or("Unnamed Task".to_string(), |s| s.to_string());
