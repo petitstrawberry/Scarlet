@@ -14,7 +14,7 @@ use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec::Vec};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
-    abi::AbiModule, arch::{self, Registers, Trapframe}, early_initcall, environment::PAGE_SIZE, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}
+    abi::AbiModule, arch::{self, Registers, Trapframe}, early_initcall, environment::PAGE_SIZE, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::{analyze_and_load_elf_with_strategy, ExecutionMode, LoadStrategy, LoadTarget}, vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -316,27 +316,70 @@ impl AbiModule for LinuxRiscv64Abi {
                 task.stack_size = 0;
                 task.brk = None;
 
-                // Load ELF using Linux-compatible method
-                match load_elf_into_task(file_obj, task) {
-                    Ok(entry_point) => {
+                // Load ELF using Linux-compatible method with dynamic linking support
+                match analyze_and_load_elf_with_strategy(file_obj, task, &LoadStrategy {
+                    choose_base_address: |target, needs_relocation| {
+                        match (target, needs_relocation) {
+                            (LoadTarget::MainProgram, false) => 0,        // Static executables
+                            (LoadTarget::MainProgram, true) => 0x10000,   // PIE executables
+                            (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
+                            (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
+                        }
+                    },
+                    resolve_interpreter: |requested| {
+                        // Map interpreter paths to system paths
+                        requested.map(|path| {
+                            if path.starts_with("/lib/ld-") || path.starts_with("/lib64/ld-") {
+                                // Map to our system path
+                                format!("/scarlet/system/linux-riscv64{}", path)
+                            } else {
+                                path.to_string()
+                            }
+                        })
+                    },
+                }) {
+                    Ok(load_result) => {
                         // Set the name
                         task.name = argv.get(0).map_or("linux".to_string(), |s| s.to_string());
+                        crate::println!("Executing Linux binary: {} with entry point {:#x}", task.name, load_result.entry_point);
+                        
+                        match &load_result.mode {
+                            ExecutionMode::Static => {
+                                crate::println!("Binary uses static linking");
+                            },
+                            ExecutionMode::Dynamic { interpreter_path } => {
+                                crate::println!("Binary uses dynamic linking with interpreter: {}", interpreter_path);
+                            }
+                        }
+                        
                         // Clear page table entries
                         let idx = arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
                         let root_page_table = arch::vm::get_pagetable(idx).unwrap();
                         root_page_table.unmap_all();
                         // Setup the trampoline
                         setup_trampoline(&mut task.vm_manager);
-                        // Setup the stack
+                        // Setup the stack following Linux ABI standard layout
                         let (_, stack_top) = setup_user_stack(task);
                         let mut sp = stack_top as usize;
 
-                        // --- 1. Argument strings ---
+                        // For dynamic executables, reserve space for the dynamic linker's stack frame
+                        if let ExecutionMode::Dynamic { .. } = &load_result.mode {
+                            // Reserve 96 bytes for the dynamic linker's stack frame
+                            // This matches what _dlstart_c expects
+                            sp -= 96;
+                            // Zero out the reserved space
+                            unsafe {
+                                let paddr = task.vm_manager.translate_vaddr(sp).unwrap();
+                                let slice = core::slice::from_raw_parts_mut(paddr as *mut u8, 96);
+                                slice.fill(0);
+                            }
+                        }
+
+                        // --- 1. Argument and environment strings (at high addresses) ---
                         let mut arg_vaddrs: Vec<u64> = Vec::new();
                         for &arg in argv.iter() {
                             let len = arg.len() + 1; // +1 for null terminator
                             sp -= len;
-
                             let vaddr = sp;
                             unsafe {
                                 let paddr = task.vm_manager.translate_vaddr(vaddr).unwrap();
@@ -361,65 +404,98 @@ impl AbiModule for LinuxRiscv64Abi {
                             env_vaddrs.push(vaddr as u64);
                         }
 
-                        // --- 2. Stack alignment ---
-                        sp &= !0xF;
+                        // --- 2. Platform-specific padding and auxiliary vector ---
+                        // Align to 16 bytes before starting structured data
 
-                        // --- 3. Auxiliary vector (auxv) ---
-                        // Set up the auxiliary vector on the stack.
-                        // The C runtime (such as musl) reads important information like page size from here.
-                        const AT_NULL: u64 = 0;     // End of vector
-                        const AT_PAGESZ: u64 = 6;   // Key indicating page size
+                        sp = sp & !0xF;
 
-                        // Push AT_NULL entry (type=0, value=0)
-                        sp -= 16; // auxv entry is 16 bytes (u64 type, u64 val)
-                        unsafe {
-                            let paddr = task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64;
-                            *paddr = AT_NULL;
-                            *(paddr.add(1)) = 0;
-                        }
+                        // Build auxiliary vector based on the ELF loading result
+                        use crate::task::elf_loader::build_auxiliary_vector;
+                        let auxv = build_auxiliary_vector(&load_result, load_result.interpreter_base);
+                        
+                        // --- Calculate total size needed for structured data ---
+                        let auxv_size = auxv.len() * 16; // Each auxv entry is 16 bytes
+                        let envp_size = (env_vaddrs.len() + 1) * 8; // +1 for NULL terminator
+                        let argv_size = (arg_vaddrs.len() + 1) * 8; // +1 for NULL terminator
+                        let argc_size = 8;
+                        let total_structured_size = auxv_size + envp_size + argv_size + argc_size;
+                        
+                        // Align the total size and calculate final sp
+                        let aligned_size = (total_structured_size + 15) & !15; // Round up to 16-byte boundary
+                        sp -= aligned_size;
+                        let final_sp = sp;
+                        let mut current_pos = final_sp;
 
-                        // Push AT_PAGESZ entry (type=6, value=PAGE_SIZE)
-                        sp -= 16;
-                        unsafe {
-                            let paddr = task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64;
-                            *paddr = AT_PAGESZ;
-                            *(paddr.add(1)) = PAGE_SIZE as u64;
-                        }
-
-                        // --- 4. envp pointer array ---
-                        sp -= 8; // NULL terminator for envp
-                        unsafe {
-                            *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = 0;
-                        }
-                        for &env_vaddr in env_vaddrs.iter().rev() {
-                            sp -= 8;
-                            unsafe {
-                                *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = env_vaddr;
-                            }
-                        }
-
-                        // --- 5. argv pointer array ---
-                        sp -= 8; // NULL terminator for argv
-                        unsafe {
-                            *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = 0;
-                        }
-                        for &arg_vaddr in arg_vaddrs.iter().rev() {
-                            sp -= 8;
-                            unsafe {
-                                *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = arg_vaddr;
-                            }
-                        }
-
-                        // --- 6. argc ---
+                        // --- Place data from the calculated position ---
+                        
+                        // --- 1. Argument count (argc) ---
                         let argc = argv.len() as u64;
-                        sp -= 8;
                         unsafe {
-                            *(task.vm_manager.translate_vaddr(sp).unwrap() as *mut u64) = argc;
+                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = argc;
+                        }
+                        current_pos += 8;
+
+                        // --- 2. Argument pointer array (argv) ---
+                        for &arg_vaddr in arg_vaddrs.iter() {
+                            unsafe {
+                                *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = arg_vaddr;
+                            }
+                            current_pos += 8;
+                        }
+                        // NULL terminator for argv
+                        unsafe {
+                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = 0;
+                        }
+                        current_pos += 8;
+
+                        // --- 3. Environment pointer array (envp) ---
+                        for &env_vaddr in env_vaddrs.iter() {
+                            unsafe {
+                                *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = env_vaddr;
+                            }
+                            current_pos += 8;
+                        }
+                        // NULL terminator for envp
+                        unsafe {
+                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = 0;
+                        }
+                        current_pos += 8;
+
+                        // --- 4. Auxiliary vector (auxv) ---
+                        crate::println!("Setting up auxiliary vector with {} entries:", auxv.len());
+                        for (i, auxv_entry) in auxv.iter().enumerate() {
+                            crate::println!("  auxv[{}]: type={:#x} value={:#x} @ sp={:#x}", 
+                                i, auxv_entry.a_type, auxv_entry.a_val, current_pos);
+                            unsafe {
+                                let paddr = task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64;
+                                *paddr = auxv_entry.a_type;
+                                *(paddr.add(1)) = auxv_entry.a_val;
+                            }
+                            current_pos += 16; // Each entry is 16 bytes
                         }
 
-                        task.set_entry_point(entry_point as usize);
+                        // Use the aligned final_sp
+                        sp = final_sp;
+
+                        // // Debug: Dump stack contents around the final SP
+                        // crate::println!("DEBUG: Final stack dump from sp={:#x}:", sp);
+                        // for i in 0..32 {
+                        //     let addr = sp + (i * 8);
+                        //     if let Some(paddr) = task.vm_manager.translate_vaddr(addr) {
+                        //         let value = unsafe { *(paddr as *const u64) };
+                        //         crate::println!("  [{:#x}] = {:#018x} ({})", addr, value, 
+                        //             core::str::from_utf8(&value.to_le_bytes()).unwrap_or("<invalid>"));
+                        //     }
+                        // }
+
+                        task.set_entry_point(load_result.entry_point as usize);
                         task.vcpu.regs = Registers::new(); // Clear registers
                         task.vcpu.set_sp(sp); // Set stack pointer
+
+                        // Initialize trapframe with clean state
+                        trapframe.regs = task.vcpu.regs;
+                        trapframe.epc = load_result.entry_point;
+                        crate::println!("DEBUG: Set trapframe.epc to {:#x}", trapframe.epc);
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);
