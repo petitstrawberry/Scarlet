@@ -29,7 +29,6 @@
 //!
 //! The module provides endian-aware data reading functions to correctly parse ELF files
 //! regardless of the endianness used in the file.
-use core::num;
 
 use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
@@ -137,6 +136,8 @@ pub struct LoadElfResult {
     pub entry_point: u64,
     /// Base address where main program was loaded (for auxiliary vector)
     pub base_address: Option<u64>,
+    /// Base address where interpreter was loaded (for AT_BASE)
+    pub interpreter_base: Option<u64>,
     /// Program headers info (for auxiliary vector)
     pub program_headers: ProgramHeadersInfo,
 }
@@ -525,11 +526,13 @@ pub fn analyze_and_load_elf_with_strategy(
     match interpreter_path {
         Some(interp_path) => {
             // Dynamic linking required
+            crate::println!("ELF requires dynamic linking with interpreter: {}", interp_path);
             
             // Let strategy resolve the actual interpreter to use
             let actual_interpreter = (strategy.resolve_interpreter)(Some(&interp_path));
             
             if let Some(final_interp_path) = actual_interpreter {
+                crate::println!("Using interpreter: {}", final_interp_path);
                 let base_address = load_elf_segments_for_interpreter(&header, file_obj, task, strategy)?;
                 let interpreter_entry = load_interpreter(&final_interp_path, task, strategy)?;
                 
@@ -540,10 +543,14 @@ pub fn analyze_and_load_elf_with_strategy(
                     phdr_count: header.e_phnum as u64,
                 };
                 
+                // TODO: Get actual interpreter base address from load_interpreter result
+                let interpreter_base = 0x40000000u64; // Hardcoded for now
+                
                 Ok(LoadElfResult {
                     mode: ExecutionMode::Dynamic { interpreter_path: final_interp_path },
                     entry_point: interpreter_entry,
                     base_address: Some(base_address),
+                    interpreter_base: Some(interpreter_base),
                     program_headers: phdr_info,
                 })
             } else {
@@ -569,6 +576,7 @@ pub fn analyze_and_load_elf_with_strategy(
                 mode: ExecutionMode::Static,
                 entry_point,
                 base_address: if needs_relocation { Some(base_address) } else { None },
+                interpreter_base: None, // No interpreter for static linking
                 program_headers: phdr_info,
             })
         }
@@ -674,10 +682,20 @@ fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy:
         message: format!("Failed to seek to start of interpreter file: {:?}", e),
     })?;
     
-    let mut header_buffer = vec![0u8; core::mem::size_of::<ElfHeader>()];
-    file_object.read(&mut header_buffer).map_err(|e| ElfLoaderError {
+    // ELF header is always 64 bytes for 64-bit ELF files
+    let mut header_buffer = vec![0u8; 64];
+    let bytes_read = file_object.read(&mut header_buffer).map_err(|e| ElfLoaderError {
         message: format!("Failed to read interpreter ELF header: {:?}", e),
     })?;
+    
+    crate::println!("Read {} bytes for interpreter ELF header (expected 64)", bytes_read);
+    
+    // Check if we actually read enough bytes
+    if bytes_read < 64 {
+        return Err(ElfLoaderError {
+            message: format!("Interpreter ELF header too small: read {} bytes, expected 64", bytes_read),
+        });
+    }
     
     let interp_header = ElfHeader::parse(&header_buffer).map_err(|e| ElfLoaderError {
         message: format!("Failed to parse interpreter ELF header: {}", e.message),
@@ -733,6 +751,8 @@ fn load_elf_segments_with_base(header: &ElfHeader, file_obj: &dyn FileObject, ta
 fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
     // Use strategy to determine base address for main program
     let needs_relocation = header.e_type == ET_DYN;
+    // let needs_relocation = false;
+
     let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
     // Read program headers and load LOAD segments (existing logic)
     for_each_program_header(header, file_obj, |_i, ph| {
@@ -741,22 +761,51 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
             // Calculate proper alignment-aware mapping with base address
             let segment_addr = base_address + ph.p_vaddr;
             let align = ph.p_align as usize;
-            // Handle zero or invalid alignment (ELF spec: 0 or 1 means no alignment constraint)
-            if align == 0 {
-                return Err(ElfLoaderError {
-                    message: format!("Invalid alignment value: segment has zero alignment requirement"),
-                });
-            }
-            let page_offset = (segment_addr as usize) % align;
-            let mapping_start = (segment_addr as usize) - page_offset;
-            let mapping_size = (ph.p_memsz as usize) + page_offset;
             
-            // Align to page boundaries for actual allocation
-            let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            // Calculate the final mapping parameters according to ELF specification
+            let (mapping_addr, aligned_size, effective_align) = if align == 0 || align == 1 {
+                // No specific alignment requirement, use page alignment
+                let page_offset = (segment_addr as usize) % PAGE_SIZE;
+                let mapping_start = (segment_addr as usize) - page_offset;
+                let mapping_size = (ph.p_memsz as usize) + page_offset;
+                let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                (mapping_start, aligned_size, PAGE_SIZE)
+            } else {
+                // Use p_align, but ensure it's at least PAGE_SIZE for memory mapping
+                let effective_align = core::cmp::max(align, PAGE_SIZE);
+                
+                // Calculate aligned base address following ELF specification:
+                // The aligned base should satisfy: (vaddr % p_align) == (offset % p_align)
+                let vaddr_offset = (segment_addr as usize) % align;
+                let file_offset = (ph.p_offset as usize) % align;
+                
+                // Ensure the alignment relationship is preserved
+                if vaddr_offset != file_offset {
+                    // Adjust the base address to maintain the required relationship
+                    let adjustment = if vaddr_offset >= file_offset {
+                        vaddr_offset - file_offset
+                    } else {
+                        align - (file_offset - vaddr_offset)
+                    };
+                    let adjusted_segment_addr = (segment_addr as usize) - adjustment;
+                    let aligned_addr = (adjusted_segment_addr) & !(effective_align - 1);
+                    let offset = (segment_addr as usize) - aligned_addr;
+                    let mapping_size = (ph.p_memsz as usize) + offset;
+                    let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                    (aligned_addr, aligned_size, effective_align)
+                } else {
+                    // Normal case: alignment relationship is already correct
+                    let aligned_addr = (segment_addr as usize) & !(effective_align - 1);
+                    let offset = (segment_addr as usize) - aligned_addr;
+                    let mapping_size = (ph.p_memsz as usize) + offset;
+                    let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+                    (aligned_addr, aligned_size, effective_align)
+                }
+            };
             
-            // Allocate memory for the segment with proper alignment handling
-            map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
-                message: format!("Failed to map ELF segment: {:?}", e),
+            // Map the segment with calculated parameters
+            map_elf_segment(task, mapping_addr, aligned_size, effective_align, ph.p_flags).map_err(|e| ElfLoaderError {
+                message: format!("Failed to map ELF segment at {:#x}: {:?}", mapping_addr, e),
             })?;
 
             // Inference segment type
@@ -796,9 +845,27 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
                     message: format!("Failed to read segment data: {:?}", e),
                 })?;
                 
-                // Copy data to task's memory space
-                let vaddr = segment_addr as usize;
-                match task.vm_manager.translate_vaddr(vaddr) {
+                // Copy data to task's memory space at the correct virtual address
+                // Calculate the offset from the mapped region to the actual segment address
+                let data_offset = (segment_addr as usize) - mapping_addr;
+                let target_vaddr = mapping_addr + data_offset;
+                
+                // // Debug: Check if this segment contains the entry point
+                // let entry_point = 0x5d912; // Known entry point for debugging
+                // if segment_addr <= entry_point && entry_point < segment_addr + ph.p_memsz {
+                //     crate::println!("DEBUG: Loading segment containing entry point {:#x}", entry_point);
+                //     crate::println!("  segment_addr={:#x}, size={:#x}, file_offset={:#x}", 
+                //         segment_addr, ph.p_filesz, ph.p_offset);
+                //     crate::println!("  target_vaddr={:#x}, first 16 bytes of data:", target_vaddr);
+                //     let preview_len = core::cmp::min(16, segment_data.len());
+                //     let mut hex_str = alloc::string::String::new();
+                //     for i in 0..preview_len {
+                //         hex_str.push_str(&format!("{:02x} ", segment_data[i]));
+                //     }
+                //     crate::println!("  data: {}", hex_str);
+                // }
+                
+                match task.vm_manager.translate_vaddr(target_vaddr) {
                     Some(paddr) => {
                         unsafe {
                             core::ptr::copy_nonoverlapping(
@@ -810,7 +877,7 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
                     },
                     None => {
                         return Err(ElfLoaderError {
-                            message: format!("Failed to translate virtual address {:#x}", vaddr),
+                            message: format!("Failed to translate virtual address {:#x}", target_vaddr),
                         });
                     }
                 }
@@ -819,8 +886,13 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
         Ok(true) // Continue iteration
     })?;
 
-    // Return entry point
-    Ok(header.e_entry)
+    // Return entry point adjusted for base address
+    let final_entry_point = if needs_relocation {
+        base_address + header.e_entry
+    } else {
+        header.e_entry
+    };
+    Ok(final_entry_point)
 }
 
 fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
@@ -828,13 +900,20 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     if align == 0 {
         return Err("Alignment must be greater than zero");
     }
-    // Check if the size is valid
-    if size == 0 || size % align != 0 {
-        return Err("Invalid size");
+    
+    // Ensure alignment is a power of 2 and at least PAGE_SIZE
+    if !align.is_power_of_two() || align < PAGE_SIZE {
+        return Err("Invalid alignment: must be power of 2 and at least PAGE_SIZE");
     }
-    // Check if the address is aligned
-    if vaddr % align != 0 {
-        return Err("Address is not aligned");
+    
+    // Check if the size is valid (must be page-aligned for memory mapping)
+    if size == 0 || size % PAGE_SIZE != 0 {
+        return Err("Invalid size: must be non-zero and page-aligned");
+    }
+    
+    // Check if the address is page-aligned (required for memory mapping)
+    if vaddr % PAGE_SIZE != 0 {
+        return Err("Address is not aligned to PAGE_SIZE");
     }
 
     // Convert flags to VirtualMemoryPermission
@@ -918,13 +997,26 @@ pub fn build_auxiliary_vector(
     // System information
     auxv.push(AuxVec::new(AT_PAGESZ, PAGE_SIZE as u64));
     
-    // Entry point of main program
-    if let Some(base) = load_result.base_address {
-        auxv.push(AuxVec::new(AT_ENTRY, base));
+    // Entry point of main program (not the interpreter)
+    // For dynamic executables, AT_ENTRY should be the original program's entry point
+    match &load_result.mode {
+        ExecutionMode::Dynamic { .. } => {
+            // For dynamic executables, we need the original program entry point
+            // This should be calculated from base_address + original e_entry
+            if let Some(_base) = load_result.base_address {
+                // This is a placeholder - we need to pass the original e_entry
+                // For now, we'll omit AT_ENTRY for dynamic executables
+                // TODO: Pass original e_entry through LoadElfResult
+            }
+        }
+        ExecutionMode::Static => {
+            // For static executables, entry point is load_result.entry_point
+            auxv.push(AuxVec::new(AT_ENTRY, load_result.entry_point));
+        }
     }
     
     // Base address of interpreter (if dynamically linked)
-    if let Some(interp_base) = interpreter_base {
+    if let Some(interp_base) = load_result.interpreter_base {
         auxv.push(AuxVec::new(AT_BASE, interp_base));
     }
     
@@ -991,12 +1083,19 @@ fn load_elf_segment_at_address(
     task: &mut Task,
     segment_addr: u64,
 ) -> Result<(), ElfLoaderError> {
-    let align = if ph.p_align == 0 { 1 } else { ph.p_align as usize };
-    let aligned_size = ((ph.p_memsz as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let align = if ph.p_align == 0 || ph.p_align == 1 { PAGE_SIZE } else { 
+        core::cmp::max(ph.p_align as usize, PAGE_SIZE) 
+    };
     
-    // Map segment
-    map_elf_segment(task, segment_addr as usize, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
-        message: format!("Failed to map ELF segment at {:#x}: {:?}", segment_addr, e),
+    // Calculate page-aligned mapping parameters
+    let page_offset = (segment_addr as usize) % PAGE_SIZE;
+    let mapping_start = (segment_addr as usize) - page_offset;
+    let mapping_size = (ph.p_memsz as usize) + page_offset;
+    let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    
+    // Map segment with proper page alignment
+    map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
+        message: format!("Failed to map ELF segment at {:#x}: {:?}", mapping_start, e),
     })?;
     
     // Copy file data to memory if there's any
@@ -1009,9 +1108,11 @@ fn load_elf_segment_at_address(
             message: format!("Failed to read segment data: {:?}", e),
         })?;
         
-        // Write data to task memory
-        let vaddr = segment_addr as usize;
-        match task.vm_manager.translate_vaddr(vaddr) {
+        // Write data to task memory at the correct offset within the mapped region
+        let data_offset = (segment_addr as usize) - mapping_start;
+        let target_vaddr = mapping_start + data_offset;
+        
+        match task.vm_manager.translate_vaddr(target_vaddr) {
             Some(paddr) => {
                 unsafe {
                     core::ptr::copy_nonoverlapping(
@@ -1023,7 +1124,7 @@ fn load_elf_segment_at_address(
             },
             None => {
                 return Err(ElfLoaderError {
-                    message: format!("Failed to translate virtual address {:#x} for segment loading", vaddr),
+                    message: format!("Failed to translate virtual address {:#x} for segment loading", target_vaddr),
                 });
             }
         }
