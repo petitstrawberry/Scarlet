@@ -202,17 +202,60 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 //     0
 // }
 
-// pub fn sys_getpid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-//     let task = mytask().unwrap();
-//     trapframe.increment_pc_next(task);
-//     task.get_id()
-// }
+pub fn sys_getpid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    // Return the task ID as the process ID
+    task.get_id()
+}
+
+pub fn sys_getpgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    // Return 0 as the process group ID (stub implementation)
+    // In a real implementation, this would return the process group ID
+    // of the specified process (or current process if pid=0)
+    0
+}
+
+pub fn sys_setpgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    // Return 0 for success (stub implementation)
+    // In a real implementation, this would set the process group ID
+    // of the specified process to the specified group ID
+    0
+}
 
 pub fn sys_getuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
     0 // Return 0 for the root user (UID 0)
+}
+
+pub fn sys_geteuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    0 // Return 0 for the root user (EUID 0)
+}
+
+pub fn sys_getgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    0 // Return 0 for the root group (GID 0)
+}
+
+pub fn sys_getegid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+
+    0 // Return 0 for the root group (EGID 0)
 }
 
 /// Linux utsname structure for uname system call

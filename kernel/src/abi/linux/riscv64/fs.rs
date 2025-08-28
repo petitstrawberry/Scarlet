@@ -86,6 +86,28 @@ pub const F_DUPFD_CLOEXEC: u32 = 1030; // Duplicate with close-on-exec
 // Linux file descriptor flags
 pub const FD_CLOEXEC: u32 = 1;          // Close-on-exec flag
 
+// Linux open flags
+pub const O_RDONLY: i32 = 0o0;        // Read only
+pub const O_WRONLY: i32 = 0o1;        // Write only  
+pub const O_RDWR: i32 = 0o2;          // Read and write
+pub const O_CREAT: i32 = 0o100;       // Create file if it doesn't exist
+pub const O_EXCL: i32 = 0o200;        // Fail if file exists (with O_CREAT)
+pub const O_NOCTTY: i32 = 0o400;      // Don't assign controlling terminal
+pub const O_TRUNC: i32 = 0o1000;      // Truncate file to zero length
+pub const O_APPEND: i32 = 0o2000;     // Append mode
+pub const O_NONBLOCK: i32 = 0o4000;   // Non-blocking mode
+pub const O_DSYNC: i32 = 0o10000;     // Data sync
+pub const O_ASYNC: i32 = 0o20000;     // Asynchronous I/O
+pub const O_DIRECT: i32 = 0o40000;    // Direct I/O
+pub const O_LARGEFILE: i32 = 0o100000; // Large file support
+pub const O_DIRECTORY: i32 = 0o200000; // Must be a directory
+pub const O_NOFOLLOW: i32 = 0o400000; // Don't follow symlinks
+pub const O_NOATIME: i32 = 0o1000000; // Don't update access time
+pub const O_CLOEXEC: i32 = 0o2000000; // Close-on-exec
+pub const O_SYNC: i32 = O_DSYNC;       // Data and metadata sync
+pub const O_PATH: i32 = 0o10000000;   // Path-based operations only
+pub const O_TMPFILE: i32 = 0o20000000; // Create temporary file
+
 use crate::device::DeviceCapability;
 
 impl LinuxStat {
@@ -276,21 +298,68 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     // Open the file using VfsManager::open_relative
     let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
 
-    match file {
-        Ok(kernel_obj) => {
-            // Register the file with the task using HandleTable
-            let handle = task.handle_table.insert(kernel_obj);
-            match handle {
-                Ok(handle) => {
-                    match abi.allocate_fd(handle as u32) {
-                        Ok(fd) => fd,
-                        Err(_) => usize::MAX, // Too many open files
+    let kernel_obj = match file {
+        Ok(obj) => obj,
+        Err(_) => {
+            // If open failed and O_CREAT flag is set, try to create the file
+            if flags & O_CREAT != 0 {
+                // Build absolute path for file creation before getting mutable VFS reference
+                let absolute_path = if path_str.starts_with('/') {
+                    path_str.to_string()
+                } else {
+                    // Construct absolute path by resolving relative to current working directory
+                    match to_absolute_path_v2(&task, &path_str) {
+                        Ok(p) => p,
+                        Err(_) => return usize::MAX,
                     }
-                },
-                Err(_) => usize::MAX, // Handle table full
+                };
+                
+                // Get mutable VFS reference for file creation
+                let vfs_mut = match task.vfs.as_mut() {
+                    Some(v) => v,
+                    None => return usize::MAX,
+                };
+
+                // Create the file (regular file type)
+                match vfs_mut.create_file(&absolute_path, FileType::RegularFile) {
+                    Ok(_) => {
+                        // File created successfully, now try to open it
+                        // Get immutable VFS reference again for opening
+                        let vfs = task.vfs.as_ref().unwrap();
+                        match vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32) {
+                            Ok(obj) => obj,
+                            Err(_) => return usize::MAX, // Failed to open newly created file
+                        }
+                    },
+                    Err(_) => {
+                        // Check if file already exists and O_EXCL is set
+                        if flags & O_EXCL != 0 {
+                            return usize::MAX; // File exists and O_EXCL is set
+                        }
+                        // Try to open the existing file
+                        let vfs = task.vfs.as_ref().unwrap();
+                        match vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32) {
+                            Ok(obj) => obj,
+                            Err(_) => return usize::MAX, // Still failed to open
+                        }
+                    }
+                }
+            } else {
+                return usize::MAX; // open_relative error and no O_CREAT
             }
         }
-        Err(_) => usize::MAX, // open_relative error
+    };
+
+    // Register the file with the task using HandleTable
+    let handle = task.handle_table.insert(kernel_obj);
+    match handle {
+        Ok(handle) => {
+            match abi.allocate_fd(handle as u32) {
+                Ok(fd) => fd,
+                Err(_) => usize::MAX, // Too many open files
+            }
+        },
+        Err(_) => usize::MAX, // Handle table full
     }
 }
 
@@ -891,6 +960,177 @@ pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
+/// Linux sys_linkat implementation for Scarlet VFS v2
+///
+/// Creates a hard link to an existing file. Both oldpath and newpath
+/// can be relative to their respective directory file descriptors.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: olddirfd (old directory file descriptor)
+///   - arg1: oldpath_ptr (pointer to source path string)
+///   - arg2: newdirfd (new directory file descriptor) 
+///   - arg3: newpath_ptr (pointer to destination path string)
+///   - arg4: flags (link flags)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let olddirfd = trapframe.get_arg(0) as i32;
+    let oldpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let newdirfd = trapframe.get_arg(2) as i32;
+    let newpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(3)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let flags = trapframe.get_arg(4) as i32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Parse paths from user space
+    let oldpath_str = match cstring_to_string(oldpath_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => path,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    let newpath_str = match cstring_to_string(newpath_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => path,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    // Linux constants for linkat
+    const AT_FDCWD: i32 = -100;
+    const AT_SYMLINK_FOLLOW: i32 = 0x400;
+    const AT_EMPTY_PATH: i32 = 0x1000;
+
+    let vfs = match task.vfs.as_ref() {
+        Some(v) => v,
+        None => return usize::MAX,
+    };
+
+    // Determine base directory for old path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+    
+    let (old_base_entry, old_base_mount) = if olddirfd == AT_FDCWD {
+        // Use current working directory as base
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        // Use directory file descriptor as base
+        let handle = match abi.get_handle(olddirfd as usize) {
+            Some(h) => h,
+            None => return usize::MAX,
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return usize::MAX,
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return usize::MAX,
+        };
+        let vfs_file_obj = file_obj.as_any().downcast_ref::<VfsFileObject>().ok_or(()).unwrap();
+        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
+    };
+
+    // Determine base directory for new path resolution
+    let (new_base_entry, new_base_mount) = if newdirfd == AT_FDCWD {
+        // Use current working directory as base
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        // Use directory file descriptor as base
+        let handle = match abi.get_handle(newdirfd as usize) {
+            Some(h) => h,
+            None => return usize::MAX,
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return usize::MAX,
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return usize::MAX,
+        };
+        let vfs_file_obj = file_obj.as_any().downcast_ref::<VfsFileObject>().ok_or(()).unwrap();
+        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
+    };
+
+    // Resolve the source path to verify it exists
+    let _source_entry = match vfs.resolve_path_from(&old_base_entry, &old_base_mount, &oldpath_str) {
+        Ok((entry, _mount_point)) => entry,
+        Err(_) => return usize::MAX, // Source file doesn't exist
+    };
+
+    // For now, we'll implement a simplified version using absolute paths
+    // since VFS v2 may not have direct hard link support yet
+    
+    // Convert paths to absolute paths
+    let old_absolute_path = if oldpath_str.starts_with('/') {
+        oldpath_str.to_string()
+    } else {
+        match to_absolute_path_v2(&task, &oldpath_str) {
+            Ok(p) => p,
+            Err(_) => return usize::MAX,
+        }
+    };
+
+    let new_absolute_path = if newpath_str.starts_with('/') {
+        newpath_str.to_string()
+    } else {
+        match to_absolute_path_v2(&task, &newpath_str) {
+            Ok(p) => p,
+            Err(_) => return usize::MAX,
+        }
+    };
+
+    // Get mutable VFS reference for link creation
+    let vfs_mut = match task.vfs.as_mut() {
+        Some(v) => v,
+        None => return usize::MAX,
+    };
+
+    // TODO: Handle flags properly
+    // AT_SYMLINK_FOLLOW: follow symbolic links in oldpath
+    // AT_EMPTY_PATH: allow empty oldpath if olddirfd refers to a file
+    let _follow_symlinks = (flags & AT_SYMLINK_FOLLOW) != 0;
+    let _empty_path = (flags & AT_EMPTY_PATH) != 0;
+
+    // Try to create the hard link
+    // Note: This is a simplified implementation. A full implementation would:
+    // 1. Check if source and destination are on the same filesystem
+    // 2. Verify the source is not a directory (unless allowed)
+    // 3. Handle proper hard link semantics
+    // 4. Update inode reference counts
+    
+    // For now, we'll return success as a stub implementation
+    // since VFS v2 might not support true hard links yet.
+    // Real hard link functionality would require:
+    // - Filesystem-level support for hard links
+    // - Inode reference counting
+    // - Cross-filesystem link prevention
+    
+    // Stub implementation: just return success
+    // This prevents applications from crashing when they use linkat
+    // but doesn't provide true hard link semantics
+    0 // Success (stub implementation)
+}
+
 /// VFS v2 helper function for path absolutization using VfsManager
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {
@@ -1285,7 +1525,7 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     };
     let stream = match kernel_obj.as_stream() {
         Some(s) => s,
-        None => return usize::MAX,
+        None => return usize::MAX, // Not a stream object
     };
     let iovec_vaddr = match task.vm_manager.translate_vaddr(iovec_ptr) {
         Some(addr) => addr as *mut IoVec,
@@ -1384,4 +1624,464 @@ pub fn sys_mkdirat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Ok(_) => 0,
         Err(_) => usize::MAX,
     }
+}
+
+
+
+/// Linux sys_newfstat implementation for Scarlet VFS v2
+///
+/// Gets file status information from a file descriptor.
+/// This is equivalent to stat() but uses a file descriptor instead of a path.
+/// 
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: fd (file descriptor)
+///   - arg1: stat_ptr (pointer to LinuxStat structure)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_newfstat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let fd = trapframe.get_arg(0) as i32;
+    let stat_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *mut u8,
+        None => return usize::MAX,
+    };
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Validate arguments
+    if stat_ptr.is_null() {
+        return usize::MAX; // Return -1 if stat pointer is null
+    }
+
+    // Get handle from file descriptor
+    let handle = match abi.get_handle(fd as usize) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    // Get kernel object from handle
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Handle not found
+    };
+
+    // Get file object
+    let file_obj = match kernel_obj.as_file() {
+        Some(f) => f,
+        None => return usize::MAX, // Not a file object
+    };
+
+    // Get VFS file object to access metadata
+    use crate::fs::vfs_v2::core::VfsFileObject;
+    let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
+        Some(vfs_obj) => vfs_obj,
+        None => {
+            // For non-VFS files (like devices), create a basic stat with minimal info
+            let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
+            *stat = LinuxStat {
+                st_dev: 0,
+                st_ino: handle as u64, // Use handle as inode
+                st_mode: S_IFCHR | 0o666, // Character device with rw-rw-rw- permissions
+                st_nlink: 1,
+                st_uid: 0,
+                st_gid: 0,
+                st_rdev: handle as u64,
+                st_size: 0,
+                st_blksize: 4096,
+                st_blocks: 0,
+                st_atime: 0,
+                st_atime_nsec: 0,
+                st_mtime: 0,
+                st_mtime_nsec: 0,
+                st_ctime: 0,
+                st_ctime_nsec: 0,
+                __unused: [0; 2],
+            };
+            return 0; // Success
+        }
+    };
+
+    // Get VFS entry and metadata
+    let entry = vfs_file_obj.get_vfs_entry();
+    let node = entry.node();
+    
+    match node.metadata() {
+        Ok(metadata) => {
+            let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
+            *stat = LinuxStat::from_metadata(&metadata);
+            0 // Success
+        },
+        Err(_) => usize::MAX, // Error getting metadata
+    }
+}
+
+/// Linux sys_unlinkat implementation for Scarlet VFS v2
+///
+/// Removes a file or directory relative to a directory file descriptor.
+/// If dirfd == AT_FDCWD, uses the current working directory as the base.
+/// Otherwise, resolves the base directory from the file descriptor.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: dirfd (directory file descriptor)
+///   - arg1: path_ptr (pointer to path string)
+///   - arg2: flags (unlink flags)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_unlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let flags = trapframe.get_arg(2) as i32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Parse path from user space
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => path,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+
+    // Linux constants for unlinkat
+    const AT_FDCWD: i32 = -100;
+    const AT_REMOVEDIR: i32 = 0x200;
+
+    let vfs = match task.vfs.as_ref() {
+        Some(v) => v,
+        None => return usize::MAX,
+    };
+
+    // Determine base directory for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+    
+       
+    
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+        // Use current working directory as base
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        // Use directory file descriptor as base
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return usize::MAX,
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return usize::MAX,
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return usize::MAX,
+        };
+        let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
+            Some(vfs_obj) => vfs_obj,
+            None => return usize::MAX,
+        };
+        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
+    };
+
+    // Resolve the target path and perform the removal operation
+    match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+        Ok((entry, _mount_point)) => {
+            // Prepare absolute path before getting mutable VFS reference
+            let absolute_path = if path_str.starts_with('/') {
+                path_str.to_string()
+            } else {
+                // Construct absolute path by resolving relative to current working directory
+                match to_absolute_path_v2(&task, &path_str) {
+                    Ok(p) => p,
+                    Err(_) => return usize::MAX,
+                }
+            };
+            
+            // Get mutable reference to VFS for removal operations
+            let vfs_mut = match task.vfs.as_mut() {
+                Some(v) => v,
+                None => return usize::MAX,
+            };
+            
+            // Check if AT_REMOVEDIR flag is set
+            if flags & AT_REMOVEDIR != 0 {
+                // Remove directory - check if it's actually a directory
+                let node = entry.node();
+                match node.metadata() {
+                    Ok(metadata) => {
+                        if metadata.file_type == FileType::Directory {
+                            // Try to remove the directory using VFS remove operation
+                            match vfs_mut.remove(&absolute_path) {
+                                Ok(_) => 0, // Success
+                                Err(_) => usize::MAX, // Error removing directory
+                            }
+                        } else {
+                            usize::MAX // Not a directory, cannot use AT_REMOVEDIR
+                        }
+                    },
+                    Err(_) => usize::MAX, // Cannot get metadata
+                }
+            } else {
+                // Remove file or directory (standard removal)
+                match vfs_mut.remove(&absolute_path) {
+                    Ok(_) => 0, // Success
+                    Err(_) => usize::MAX, // Error removing file
+                }
+            }
+        },
+        Err(_) => usize::MAX, // Path resolution failed
+    }
+}
+
+/// Linux epoll_create1 implementation (stub)
+/// 
+/// Creates an epoll file descriptor. This is a stub implementation that
+/// simply returns a dummy file descriptor to prevent application crashes.
+/// Real epoll functionality is not implemented.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context  
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: flags (epoll creation flags)
+///
+/// Returns:
+/// - file descriptor on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_epoll_create1(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let _flags = trapframe.get_arg(0) as i32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Create a dummy file handle to act as an epoll fd
+    // This is a workaround since we don't have real epoll implementation
+    // We'll use a simple placeholder handle
+    
+    // Use a high handle number that's unlikely to conflict with real handles
+    const EPOLL_DUMMY_HANDLE: u32 = 0x1000_0000;
+    
+    // For now, just return a dummy fd number that doesn't conflict with real fds
+    // This is not a proper implementation, but it prevents crashes
+    match abi.allocate_fd(EPOLL_DUMMY_HANDLE) {
+        Ok(fd) => fd,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Linux epoll_ctl implementation (stub)
+/// 
+/// Controls an epoll file descriptor by adding, modifying, or removing
+/// file descriptors from the epoll interest list. This is a stub implementation
+/// that simply returns success without doing anything.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: epfd (epoll file descriptor)
+///   - arg1: op (operation: EPOLL_CTL_ADD, EPOLL_CTL_MOD, EPOLL_CTL_DEL)
+///   - arg2: fd (target file descriptor)
+///   - arg3: event (pointer to epoll_event structure)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_epoll_ctl(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let _epfd = trapframe.get_arg(0) as i32;
+    let _op = trapframe.get_arg(1) as i32;
+    let _fd = trapframe.get_arg(2) as i32;
+    let _event_ptr = trapframe.get_arg(3);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Stub implementation: just return success
+    // In a real implementation, we would:
+    // 1. Validate the epoll fd
+    // 2. Parse the operation (EPOLL_CTL_ADD/MOD/DEL)
+    // 3. Manage the interest list
+    // 4. Set up event monitoring
+    0 // Success
+}
+
+/// Linux epoll_wait implementation (stub)
+/// 
+/// Waits for events on an epoll file descriptor. This is a stub implementation
+/// that immediately returns 0 (no events ready) to prevent blocking.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: epfd (epoll file descriptor)
+///   - arg1: events (pointer to epoll_event array)
+///   - arg2: maxevents (maximum number of events)
+///   - arg3: timeout (timeout in milliseconds)
+///
+/// Returns:
+/// - number of ready events
+/// - usize::MAX (Linux -1) on error
+pub fn sys_epoll_wait(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let _epfd = trapframe.get_arg(0) as i32;
+    let _events_ptr = trapframe.get_arg(1);
+    let _maxevents = trapframe.get_arg(2) as i32;
+    let _timeout = trapframe.get_arg(3) as i32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Stub implementation: return 0 (no events ready)
+    // In a real implementation, we would:
+    // 1. Validate the epoll fd
+    // 2. Check for ready events
+    // 3. Block if no events and timeout > 0
+    // 4. Fill the events array with ready events
+    0 // No events ready
+}
+
+/// Linux epoll_pwait implementation (stub)
+/// 
+/// Like epoll_wait but with signal mask. This is a stub implementation
+/// that immediately returns 0 (no events ready).
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: epfd (epoll file descriptor)  
+///   - arg1: events (pointer to epoll_event array)
+///   - arg2: maxevents (maximum number of events)
+///   - arg3: timeout (timeout in milliseconds)
+///   - arg4: sigmask (signal mask)
+///
+/// Returns:
+/// - number of ready events
+/// - usize::MAX (Linux -1) on error
+pub fn sys_epoll_pwait(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let _epfd = trapframe.get_arg(0) as i32;
+    let _events_ptr = trapframe.get_arg(1);
+    let _maxevents = trapframe.get_arg(2) as i32;
+    let _timeout = trapframe.get_arg(3) as i32;
+    let _sigmask_ptr = trapframe.get_arg(4);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Stub implementation: return 0 (no events ready)
+    0 // No events ready
+}
+
+/// Linux sys_fchmod implementation (stub)
+/// 
+/// Changes the permissions of a file using its file descriptor.
+/// This is a stub implementation that simply validates the file descriptor
+/// and returns success without actually changing permissions.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: fd (file descriptor)
+///   - arg1: mode (new file permissions)
+///
+/// Returns:
+/// - 0 on success (if fd is valid)
+/// - usize::MAX (Linux -1) on error (if fd is invalid)
+pub fn sys_fchmod(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let fd = trapframe.get_arg(0) as i32;
+    let _mode = trapframe.get_arg(1) as u32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Validate the file descriptor
+    let handle = match abi.get_handle(fd as usize) {
+        Some(h) => h,
+        None => return usize::MAX, // Invalid file descriptor
+    };
+
+    // Check if the handle exists in the handle table
+    match task.handle_table.get(handle) {
+        Some(_) => {
+            // File descriptor is valid, return success
+            // In a real implementation, we would change the file permissions here
+            0 // Success
+        },
+        None => usize::MAX, // Handle not found
+    }
+}
+
+/// Linux sys_umask implementation (stub)
+/// 
+/// Sets the file mode creation mask (umask) and returns the previous value.
+/// This is a stub implementation that simply returns the provided mask
+/// without actually storing or using it for file creation permissions.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: mask (new file creation mask)
+///
+/// Returns:
+/// - The provided mask value (simulating the previous umask)
+pub fn sys_umask(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let mask = trapframe.get_arg(0) as u32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // In a real implementation, we would:
+    // 1. Store the current umask value to return it
+    // 2. Set the new umask value for future file creation operations
+    // 3. Return the previous umask value
+    // 
+    // For this stub implementation, we simply return the provided mask
+    // This satisfies most applications that just want to set a umask
+    mask as usize // Return the provided mask as if it was the previous value
 }

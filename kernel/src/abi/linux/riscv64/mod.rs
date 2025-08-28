@@ -9,7 +9,7 @@ mod pipe;
 
 // pub mod drivers;
 
-use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec::Vec};
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
@@ -536,7 +536,7 @@ impl AbiModule for LinuxRiscv64Abi {
         }
     }
 
-    fn initialize_from_existing_handles(&mut self, task: &mut crate::task::Task) -> Result<(), &'static str> {
+    fn initialize_from_existing_handles(&mut self, _task: &mut crate::task::Task) -> Result<(), &'static str> {
         // _task.handle_table.close_all();
         self.init_std_fds(
             0, // stdin handle
@@ -551,10 +551,16 @@ syscall_table! {
     Invalid = 0 => |_abi: &mut crate::abi::linux::riscv64::LinuxRiscv64Abi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
+    EpollCreate1 = 20 => fs::sys_epoll_create1,
+    EpollCtl = 21 => fs::sys_epoll_ctl,
+    EpollPwait = 22 => fs::sys_epoll_pwait,
     Fcntl = 25 => fs::sys_fcntl,
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
+    UnlinkAt = 35 => fs::sys_unlinkat,
+    LinkAt = 37 => fs::sys_linkat,
     FaccessAt = 48 => fs::sys_faccessat,
+    Fchmod = 52 => fs::sys_fchmod,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
     Pipe2 = 59 => pipe::sys_pipe2,
@@ -565,6 +571,7 @@ syscall_table! {
     Readv = 65 => fs::sys_readv,
     Writev = 66 => fs::sys_writev,
     NewFstAtAt = 79 => fs::sys_newfstatat,
+    NewFstat = 80 => fs::sys_newfstat,
     SetTidAddress = 96 => proc::sys_set_tid_address,
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
@@ -573,13 +580,21 @@ syscall_table! {
     ClockGettime = 113 => time::sys_clock_gettime,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
+    SetPgid = 154 => proc::sys_setpgid,
+    GetPgid = 155 => proc::sys_getpgid,
     Uname = 160 => proc::sys_uname,
+    Umask = 166 => fs::sys_umask,
+    GetPid = 172 => proc::sys_getpid,
     GetUid = 174 => proc::sys_getuid,
+    GetEuid = 175 => proc::sys_geteuid,
+    GetGid = 176 => proc::sys_getgid,
+    GetEgid = 177 => proc::sys_getegid,
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
     Clone = 220 => proc::sys_clone,
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
+    EpollWait = 232 => fs::sys_epoll_wait,
 }
 
 fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
