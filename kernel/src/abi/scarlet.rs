@@ -7,7 +7,7 @@
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 
-use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::load_elf_into_task, vm::{setup_trampoline, setup_user_stack}};
+use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf_with_strategy, build_auxiliary_vector, ExecutionMode, LoadStrategy, LoadTarget, setup_auxiliary_vector_on_stack}, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -102,9 +102,25 @@ impl AbiModule for ScarletAbi {
                 task.stack_size = 0;
                 task.brk = None;
 
-                // Load the ELF file and replace the current process
-                match load_elf_into_task(file_obj, task) {
-                    Ok(entry_point) => {
+                // Create Scarlet-specific loading strategy
+                let strategy = LoadStrategy {
+                    choose_base_address: |target, needs_relocation| {
+                        match (target, needs_relocation) {
+                            (LoadTarget::MainProgram, false) => 0,        // ET_EXEC: absolute
+                            (LoadTarget::MainProgram, true) => 0x10000,   // ET_DYN: PIE
+                            (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
+                            (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
+                        }
+                    },
+                    resolve_interpreter: |requested| {
+                        // Scarlet ABI: use interpreter as specified in ELF
+                        requested.map(|s| s.to_string())
+                    },
+                };
+
+                // Load and analyze the ELF file with Scarlet strategy
+                match analyze_and_load_elf_with_strategy(file_obj, task, &strategy) {
+                    Ok(elf_result) => {
                         // Set the name from argv[0] or use default
                         task.name = argv.get(0).map_or("Unnamed Task".to_string(), |s| s.to_string());
                         
@@ -116,8 +132,41 @@ impl AbiModule for ScarletAbi {
                         setup_trampoline(&mut task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
-                        // Set the new entry point
-                        task.set_entry_point(entry_point as usize);
+                        // Handle different execution modes
+                        match elf_result.mode {
+                            ExecutionMode::Static => {
+                                // Static linking - direct execution
+                                task.set_entry_point(elf_result.entry_point as usize);
+                            }
+                            ExecutionMode::Dynamic { ref interpreter_path } => {
+                                // Dynamic linking - setup auxiliary vector and jump to interpreter
+                                crate::println!("Scarlet ABI: Using dynamic linker at {}", interpreter_path);
+                                
+                                // Calculate interpreter base address from entry point
+                                let interpreter_base = if let Some(base) = elf_result.base_address {
+                                    // For PIE executables, we need the interpreter base
+                                    Some(elf_result.entry_point - base) // This calculation might need adjustment
+                                } else {
+                                    None
+                                };
+                                
+                                // Build auxiliary vector for dynamic linking
+                                let auxv = build_auxiliary_vector(&elf_result, interpreter_base);
+                                
+                                // Setup auxiliary vector on stack
+                                match setup_auxiliary_vector_on_stack(task, &auxv) {
+                                    Ok(_auxv_addr) => {
+                                        crate::println!("Scarlet ABI: Auxiliary vector setup complete");
+                                    }
+                                    Err(e) => {
+                                        crate::println!("Scarlet ABI: Failed to setup auxiliary vector: {}", e.message);
+                                        return Err("Failed to setup auxiliary vector");
+                                    }
+                                }
+                                
+                                task.set_entry_point(elf_result.entry_point as usize);
+                            }
+                        }
                         
                         // Reset task's registers for clean start
                         task.vcpu.regs = Registers::new();
@@ -151,6 +200,30 @@ impl AbiModule for ScarletAbi {
                 }
             },
             None => Err("Invalid file object type for binary execution"),
+        }
+    }
+
+    fn choose_load_address(&self, elf_type: u16, target: crate::task::elf_loader::LoadTarget) -> Option<u64> {
+        use crate::task::elf_loader::{LoadTarget, ET_DYN};
+        
+        // Scarlet Native ABI uses standard Linux-style memory layout
+        if elf_type == ET_DYN {
+            match target {
+                LoadTarget::MainProgram => {
+                    // PIE main program: low memory area, avoiding null pointer region
+                    Some(0x10000)  // 64KB base
+                },
+                LoadTarget::Interpreter => {
+                    // Dynamic linker: high memory area to avoid conflicts with main program
+                    Some(0x40000000)  // 1GB base
+                },
+                LoadTarget::SharedLib => {
+                    // Shared libraries: medium memory area
+                    Some(0x50000000)  // 1.25GB base  
+                },
+            }
+        } else {
+            None  // Use kernel default for ET_EXEC and other types
         }
     }
 

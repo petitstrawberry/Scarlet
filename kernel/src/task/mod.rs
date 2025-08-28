@@ -356,12 +356,14 @@ impl Task {
                 user_kernel_vm_init(self);
                 /* Set sp to the top of the kernel stack */
                 self.vcpu.set_sp(KERNEL_VM_STACK_END + 1);
-
+                /* Set pc to the task's entry point */
+                self.vcpu.set_pc(self.entry as u64);
             },
             TaskType::User => { 
                 user_vm_init(self);
                 /* Set sp to the top of the user stack */
                 self.vcpu.set_sp(USER_STACK_END);
+                /* PC will be set when loading the ELF binary */
             }
         }
         
