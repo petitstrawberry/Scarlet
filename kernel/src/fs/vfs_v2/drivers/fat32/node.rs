@@ -172,6 +172,10 @@ pub struct Fat32FileObject {
     node: Arc<Fat32Node>,
     /// Current file position
     position: RwLock<usize>,
+    /// Cached file content in memory (lazily loaded)
+    cached_content: RwLock<Option<Vec<u8>>>,
+    /// Whether the cached content has been modified and needs to be written back
+    is_dirty: RwLock<bool>,
 }
 
 impl Fat32FileObject {
@@ -179,7 +183,90 @@ impl Fat32FileObject {
         Self {
             node,
             position: RwLock::new(0),
+            cached_content: RwLock::new(None),
+            is_dirty: RwLock::new(false),
         }
+    }
+    
+    /// Load file content from disk into cache if not already loaded
+    fn ensure_content_loaded(&self) -> Result<(), StreamError> {
+        let mut cached = self.cached_content.write();
+        
+        // If already loaded, nothing to do
+        if cached.is_some() {
+            return Ok(());
+        }
+        
+        // Get filesystem reference
+        let fs = self.node.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        
+        // Downcast to Fat32FileSystem
+        let fat32_fs = fs.as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        let file_size = self.node.metadata.read().size;
+        let cluster = self.node.cluster();
+        
+        // Read entire file content from disk
+        let content = if file_size > 0 && cluster != 0 {
+            fat32_fs.read_file_content(cluster, file_size)
+                .map_err(|_| StreamError::IoError)?
+        } else {
+            Vec::new()
+        };
+        
+        *cached = Some(content);
+        Ok(())
+    }
+    
+    /// Write cached content back to disk if dirty
+    fn sync_to_disk(&self) -> Result<(), StreamError> {
+        let is_dirty = *self.is_dirty.read();
+        if !is_dirty {
+            return Ok(()); // Nothing to sync
+        }
+        
+        let cached = self.cached_content.read();
+        let content = cached.as_ref().ok_or(StreamError::IoError)?;
+        
+        // Get filesystem reference
+        let fs = self.node.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        
+        // Downcast to Fat32FileSystem
+        let fat32_fs = fs.as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        let cluster = self.node.cluster();
+        
+        // Write content to disk
+        if content.len() > 0 {
+            let new_cluster = fat32_fs.write_file_content(cluster, content)
+                .map_err(|_| StreamError::IoError)?;
+            
+            // Update cluster if it changed
+            if new_cluster != cluster {
+                *self.node.cluster.write() = new_cluster;
+            }
+        }
+        
+        // Update file size in metadata
+        {
+            let mut metadata = self.node.metadata.write();
+            metadata.size = content.len();
+        }
+        
+        // Clear dirty flag
+        *self.is_dirty.write() = false;
+        
+        Ok(())
     }
 }
 
@@ -188,123 +275,75 @@ impl Debug for Fat32FileObject {
         f.debug_struct("Fat32FileObject")
             .field("node", &self.node.name.read())
             .field("position", &self.position.read())
+            .field("is_dirty", &self.is_dirty.read())
             .finish()
     }
 }
 
 impl StreamOps for Fat32FileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        // Get filesystem reference
-        let fs = self.node.filesystem.read()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
-            .ok_or(StreamError::Closed)?;
+        // Ensure content is loaded into cache
+        self.ensure_content_loaded()?;
         
-        // Downcast to Fat32FileSystem
-        let fat32_fs = fs.as_any()
-            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
-            .ok_or(StreamError::NotSupported)?;
+        let cached = self.cached_content.read();
+        let content = cached.as_ref().ok_or(StreamError::IoError)?;
         
         let pos = *self.position.read();
-        let metadata = self.node.metadata.read();
-        let file_size = metadata.size;
         
         // Check if we're at or past EOF
-        if pos >= file_size {
+        if pos >= content.len() {
             return Ok(0); // EOF
         }
         
         // Calculate how much we can read
-        let remaining = file_size - pos;
+        let remaining = content.len() - pos;
         let to_read = core::cmp::min(buffer.len(), remaining);
         
         if to_read == 0 {
             return Ok(0);
         }
         
-        // Read file content from block device
-        let cluster = *self.node.cluster.read();
-        match fat32_fs.read_file_content(cluster, file_size) {
-            Ok(content) => {
-                let end_pos = pos + to_read;
-                if end_pos > content.len() {
-                    return Err(StreamError::Interrupted);
-                }
-                
-                buffer[..to_read].copy_from_slice(&content[pos..end_pos]);
-                
-                // Update position
-                {
-                    let mut position = self.position.write();
-                    *position += to_read;
-                }
-                
-                Ok(to_read)
-            },
-            Err(_) => Err(StreamError::Interrupted),
+        // Copy data from cached content
+        buffer[..to_read].copy_from_slice(&content[pos..pos + to_read]);
+        
+        // Update position
+        {
+            let mut position = self.position.write();
+            *position += to_read;
         }
+        
+        Ok(to_read)
     }
     
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        // Get filesystem reference
-        let fs = self.node.filesystem.read()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
-            .ok_or(StreamError::Closed)?;
-        
-        // Downcast to Fat32FileSystem
-        let fat32_fs = fs.as_any()
-            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
-            .ok_or(StreamError::NotSupported)?;
+        // Ensure content is loaded into cache
+        self.ensure_content_loaded()?;
         
         let pos = *self.position.read();
-        let mut metadata = self.node.metadata.write();
-        let current_size = metadata.size;
+        let mut cached = self.cached_content.write();
+        let content = cached.as_mut().ok_or(StreamError::IoError)?;
         
         // Calculate new size
-        let new_size = core::cmp::max(current_size, pos + buffer.len());
-        
-        // Read current content if the file has data
-        let cluster = *self.node.cluster.read();
-        let mut content = if cluster >= 2 && current_size > 0 {
-            match fat32_fs.read_file_content(cluster, current_size) {
-                Ok(data) => data,
-                Err(_) => return Err(StreamError::Interrupted),
-            }
-        } else {
-            Vec::new()
-        };
+        let new_size = core::cmp::max(content.len(), pos + buffer.len());
         
         // Extend content if needed
         if new_size > content.len() {
             content.resize(new_size, 0);
         }
         
-        // Write new data
+        // Write new data to cached content
         content[pos..pos + buffer.len()].copy_from_slice(buffer);
         
-        // Write back to block device
-        let start_cluster = if cluster >= 2 { cluster } else { 2 }; // Allocate cluster if needed
-        match fat32_fs.write_file_content(start_cluster, &content) {
-            Ok(_) => {
-                // Update metadata
-                metadata.size = new_size;
-                
-                // Update cluster if it was allocated
-                if cluster < 2 {
-                    *self.node.cluster.write() = start_cluster;
-                }
-                
-                // Update position
-                {
-                    let mut position = self.position.write();
-                    *position += buffer.len();
-                }
-                
-                Ok(buffer.len())
-            },
-            Err(_) => Err(StreamError::Interrupted),
+        // Mark as dirty
+        *self.is_dirty.write() = true;
+        
+        // Update position
+        {
+            let mut position = self.position.write();
+            *position += buffer.len();
         }
+        
+        Ok(buffer.len())
     }
 }
 
@@ -315,20 +354,49 @@ impl ControlOps for Fat32FileObject {
 }
 
 impl MemoryMappingOps for Fat32FileObject {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) -> Result<(usize, usize, bool), &'static str> {
-        Err("Memory mapping not supported for FAT32 files")
+    fn get_mapping_info(&self, offset: usize, length: usize) -> Result<(usize, usize, bool), &'static str> {
+        // Ensure content is loaded into cache
+        self.ensure_content_loaded().map_err(|_| "Failed to load file content")?;
+        
+        let cached = self.cached_content.read();
+        let content = cached.as_ref().ok_or("No cached content available")?;
+        
+        // Check bounds
+        if offset >= content.len() {
+            return Err("Offset beyond file size");
+        }
+        
+        let available_length = content.len() - offset;
+        if length > available_length {
+            return Err("Length extends beyond file size");
+        }
+        
+        // Return the virtual address of the cached content as the physical address
+        // This is a simplified implementation - in a real OS, this would involve
+        // proper virtual-to-physical address translation
+        let content_ptr = content.as_ptr() as usize;
+        let paddr = content_ptr + offset;
+        
+        // Return read/write permissions (0x3 = read | write)
+        // Not shared between processes (false)
+        Ok((paddr, 0x3, false))
     }
     
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
-        // Not supported
+        // For a simple implementation, we don't need to track mappings
+        // In a more complex system, we might track active mappings here
     }
     
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
-        // Not supported
+        // For a simple implementation, we don't need to track unmappings
+        // In a more complex system, we might want to sync dirty pages here
+        
+        // Optionally sync to disk when unmapped
+        let _ = self.sync_to_disk();
     }
     
     fn supports_mmap(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -362,6 +430,10 @@ impl FileObject for Fat32FileObject {
     
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError> {
         Ok(self.node.metadata.read().clone())
+    }
+    
+    fn sync(&self) -> Result<(), StreamError> {
+        self.sync_to_disk()
     }
     
     fn as_any(&self) -> &dyn Any {
