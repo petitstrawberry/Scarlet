@@ -444,6 +444,10 @@ impl FileSystemOperations for TmpFS {
     fn name(&self) -> &str {
         &self.name
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// TmpNode represents a file, directory, or device node in TmpFS.

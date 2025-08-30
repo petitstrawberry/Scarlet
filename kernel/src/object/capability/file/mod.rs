@@ -59,5 +59,24 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps {
         Err(StreamError::NotSupported)
     }
     
+    /// Synchronize file content to storage
+    /// 
+    /// This method ensures that any buffered changes to the file are written
+    /// to the underlying storage device. This is important for filesystems
+    /// that cache file content in memory.
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), StreamError>` - Ok if the sync was successful
+    /// 
+    /// # Errors
+    /// 
+    /// * `StreamError` - If the sync operation fails or is not supported
+    fn sync(&self) -> Result<(), StreamError> {
+        // Default implementation does nothing - files that don't cache content
+        // don't need to sync
+        Ok(())
+    }
+    
     fn as_any(&self) -> &dyn Any;
 }

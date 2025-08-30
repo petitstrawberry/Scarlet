@@ -189,6 +189,10 @@ impl FileSystemOperations for DevFS {
             "DevFS is read-only: cannot remove files"
         ))
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// A node in the DevFS filesystem

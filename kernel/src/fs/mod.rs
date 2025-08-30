@@ -452,7 +452,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// * `_block_device` - The block device to use for creating the file system
     /// * `_block_size` - The block size of the device
     /// 
-    fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
+    fn create_from_block(&self, _block_device: Arc<dyn BlockDevice>, _block_size: usize) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
         if self.filesystem_type() == FileSystemType::Memory || self.filesystem_type() == FileSystemType::Virtual {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
@@ -734,7 +734,7 @@ impl FileSystemDriverManager {
     pub fn create_from_block(
         &self,
         driver_name: &str,
-        block_device: Box<dyn BlockDevice>,
+        block_device: Arc<dyn BlockDevice>,
         block_size: usize,
     ) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
         let binding = self.drivers.read();
