@@ -134,6 +134,8 @@ pub struct LoadElfResult {
     pub mode: ExecutionMode,
     /// Entry point (either main program or interpreter)
     pub entry_point: u64,
+    /// Original program entry point (for AT_ENTRY in dynamic linking)
+    pub original_entry_point: Option<u64>,
     /// Base address where main program was loaded (for auxiliary vector)
     pub base_address: Option<u64>,
     /// Base address where interpreter was loaded (for AT_BASE)
@@ -549,6 +551,7 @@ pub fn analyze_and_load_elf_with_strategy(
                 Ok(LoadElfResult {
                     mode: ExecutionMode::Dynamic { interpreter_path: final_interp_path },
                     entry_point: interpreter_entry,
+                    original_entry_point: Some(base_address + header.e_entry),
                     base_address: Some(base_address),
                     interpreter_base: Some(interpreter_base),
                     program_headers: phdr_info,
@@ -575,6 +578,7 @@ pub fn analyze_and_load_elf_with_strategy(
             Ok(LoadElfResult {
                 mode: ExecutionMode::Static,
                 entry_point,
+                original_entry_point: None, // Same as entry_point for static executables
                 base_address: if needs_relocation { Some(base_address) } else { None },
                 interpreter_base: None, // No interpreter for static linking
                 program_headers: phdr_info,
@@ -1001,12 +1005,9 @@ pub fn build_auxiliary_vector(
     // For dynamic executables, AT_ENTRY should be the original program's entry point
     match &load_result.mode {
         ExecutionMode::Dynamic { .. } => {
-            // For dynamic executables, we need the original program entry point
-            // This should be calculated from base_address + original e_entry
-            if let Some(_base) = load_result.base_address {
-                // This is a placeholder - we need to pass the original e_entry
-                // For now, we'll omit AT_ENTRY for dynamic executables
-                // TODO: Pass original e_entry through LoadElfResult
+            // For dynamic executables, use the original program's entry point
+            if let Some(orig_entry) = load_result.original_entry_point {
+                auxv.push(AuxVec::new(AT_ENTRY, orig_entry));
             }
         }
         ExecutionMode::Static => {
