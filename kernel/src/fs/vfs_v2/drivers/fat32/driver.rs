@@ -41,7 +41,7 @@ impl FileSystemDriver for Fat32Driver {
     
     fn create_from_block(
         &self, 
-        block_device: Box<dyn BlockDevice>, 
+        block_device: Arc<dyn BlockDevice>, 
         _block_size: usize
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         // Create FAT32 filesystem from the block device
@@ -208,7 +208,7 @@ mod tests {
         
         // We need to write the boot sector to the mock device
         // For now, this test is simplified - in a real scenario we'd set up the device properly
-        let result = driver.create_from_block(Box::new(mock_device), 512);
+        let result = driver.create_from_block(Arc::new(mock_device), 512);
         
         // Note: This test might fail due to the mock implementation,
         // but it tests the interface

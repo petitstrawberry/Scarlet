@@ -56,7 +56,7 @@ pub use driver::Fat32Driver;
 /// through the VFS v2 interface.
 pub struct Fat32FileSystem {
     /// Reference to the underlying block device
-    block_device: Box<dyn BlockDevice>,
+    block_device: Arc<dyn BlockDevice>,
     /// Boot sector information
     boot_sector: Fat32BootSector,
     /// Root directory cluster
@@ -88,7 +88,7 @@ impl Debug for Fat32FileSystem {
 
 impl Fat32FileSystem {
     /// Create a new FAT32 filesystem from a block device
-    pub fn new(block_device: Box<dyn BlockDevice>) -> Result<Arc<Self>, FileSystemError> {
+    pub fn new(block_device: Arc<dyn BlockDevice>) -> Result<Arc<Self>, FileSystemError> {
         // Read boot sector
         let boot_sector = Self::read_boot_sector(&*block_device)?;
         

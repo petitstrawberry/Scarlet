@@ -113,7 +113,7 @@ fn test_fat32_create_from_mock_device() {
     
     // For this test, we expect it to fail because the mock device 
     // doesn't have a proper FAT32 boot sector
-    let result = driver.create_from_block(Box::new(mock_device), 512);
+    let result = driver.create_from_block(Arc::new(mock_device), 512);
     
     // Should fail due to invalid boot sector
     assert!(result.is_err());
