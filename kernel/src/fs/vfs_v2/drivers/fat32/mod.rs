@@ -25,7 +25,7 @@ use alloc::{
     boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
-use core::{fmt::Debug, mem};
+use core::{fmt::Debug, mem, any::Any};
 
 use crate::{
     device::block::BlockDevice,
@@ -264,6 +264,315 @@ impl Fat32FileSystem {
         
         Ok(buffer)
     }
+    
+    /// Write cluster data to the block device
+    fn write_cluster(&self, cluster: u32, data: &[u8]) -> Result<(), FileSystemError> {
+        if cluster < 2 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid cluster number"
+            ));
+        }
+        
+        // Calculate sector number for this cluster
+        let first_data_sector = self.boot_sector.reserved_sectors as u32 +
+            (self.boot_sector.fat_count as u32 * self.boot_sector.sectors_per_fat);
+        let cluster_sector = first_data_sector + (cluster - 2) * self.sectors_per_cluster;
+        
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+        
+        // Ensure data doesn't exceed cluster size
+        if data.len() > cluster_size {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Data exceeds cluster size"
+            ));
+        }
+        
+        // Prepare full cluster data (pad with zeros if needed)
+        let mut cluster_data = vec![0u8; cluster_size];
+        cluster_data[..data.len()].copy_from_slice(data);
+        
+        // Write cluster data sector by sector
+        for i in 0..self.sectors_per_cluster {
+            let start_offset = (i * self.bytes_per_sector) as usize;
+            let end_offset = start_offset + self.bytes_per_sector as usize;
+            let sector_data = cluster_data[start_offset..end_offset].to_vec();
+            
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: (cluster_sector + i) as usize,
+                sector_count: 1,
+                head: 0,
+                cylinder: 0,
+                buffer: sector_data,
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            if let Some(result) = results.first() {
+                if let Err(e) = &result.result {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        format!("Failed to write cluster sector: {}", e)
+                    ));
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device"
+                ));
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Read FAT entry for a given cluster
+    fn read_fat_entry(&self, cluster: u32) -> Result<u32, FileSystemError> {
+        // Check for cached entry first
+        {
+            let cache = self.fat_cache.lock();
+            if let Some(&entry) = cache.get(&cluster) {
+                return Ok(entry);
+            }
+        }
+        
+        // Calculate FAT offset and sector
+        let fat_offset = cluster * 4; // FAT32 uses 4 bytes per entry
+        let fat_sector = self.boot_sector.reserved_sectors as u32 + (fat_offset / self.bytes_per_sector);
+        let sector_offset = (fat_offset % self.bytes_per_sector) as usize;
+        
+        // Read FAT sector
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: fat_sector as usize,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.bytes_per_sector as usize],
+        });
+        
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => {
+                    // Extract 32-bit FAT entry (only lower 28 bits are used in FAT32)
+                    if sector_offset + 4 > result.request.buffer.len() {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "FAT entry spans sector boundary"
+                        ));
+                    }
+                    
+                    let fat_entry = u32::from_le_bytes([
+                        result.request.buffer[sector_offset],
+                        result.request.buffer[sector_offset + 1],
+                        result.request.buffer[sector_offset + 2],
+                        result.request.buffer[sector_offset + 3],
+                    ]) & 0x0FFFFFFF; // Mask to 28 bits for FAT32
+                    
+                    // Cache the entry
+                    {
+                        let mut cache = self.fat_cache.lock();
+                        cache.insert(cluster, fat_entry);
+                    }
+                    
+                    Ok(fat_entry)
+                },
+                Err(e) => {
+                    Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        format!("Failed to read FAT sector: {}", e)
+                    ))
+                }
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from block device"
+            ))
+        }
+    }
+    
+    /// Write FAT entry for a given cluster
+    fn write_fat_entry(&self, cluster: u32, value: u32) -> Result<(), FileSystemError> {
+        // Calculate FAT offset and sector
+        let fat_offset = cluster * 4; // FAT32 uses 4 bytes per entry
+        let fat_sector = self.boot_sector.reserved_sectors as u32 + (fat_offset / self.bytes_per_sector);
+        let sector_offset = (fat_offset % self.bytes_per_sector) as usize;
+        
+        // Read current FAT sector
+        let mut request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: fat_sector as usize,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.bytes_per_sector as usize],
+        });
+        
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        let mut sector_buffer = if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(e) => {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        format!("Failed to read FAT sector: {}", e)
+                    ));
+                }
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from block device"
+            ));
+        };
+        
+        // Update FAT entry (preserve upper 4 bits, update lower 28 bits)
+        if sector_offset + 4 > sector_buffer.len() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "FAT entry spans sector boundary"
+            ));
+        }
+        
+        let current_entry = u32::from_le_bytes([
+            sector_buffer[sector_offset],
+            sector_buffer[sector_offset + 1],
+            sector_buffer[sector_offset + 2],
+            sector_buffer[sector_offset + 3],
+        ]);
+        
+        let new_entry = (current_entry & 0xF0000000) | (value & 0x0FFFFFFF);
+        let new_bytes = new_entry.to_le_bytes();
+        
+        sector_buffer[sector_offset..sector_offset + 4].copy_from_slice(&new_bytes);
+        
+        // Write updated sector back
+        let write_request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Write,
+            sector: fat_sector as usize,
+            sector_count: 1,
+            head: 0,
+            cylinder: 0,
+            buffer: sector_buffer,
+        });
+        
+        self.block_device.enqueue_request(write_request);
+        let write_results = self.block_device.process_requests();
+        
+        if let Some(result) = write_results.first() {
+            match &result.result {
+                Ok(_) => {
+                    // Update cache
+                    {
+                        let mut cache = self.fat_cache.lock();
+                        cache.insert(cluster, value);
+                    }
+                    Ok(())
+                },
+                Err(e) => {
+                    Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        format!("Failed to write FAT sector: {}", e)
+                    ))
+                }
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from block device"
+            ))
+        }
+    }
+    
+    /// Read file content by following cluster chain
+    pub fn read_file_content(&self, start_cluster: u32, size: usize) -> Result<Vec<u8>, FileSystemError> {
+        if start_cluster < 2 {
+            return Ok(Vec::new()); // Empty file
+        }
+        
+        let mut content = Vec::new();
+        let mut current_cluster = start_cluster;
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+        
+        loop {
+            // Read current cluster
+            let cluster_data = self.read_cluster(current_cluster)?;
+            
+            // Add data to content (up to requested size)
+            let remaining_size = size.saturating_sub(content.len());
+            if remaining_size == 0 {
+                break;
+            }
+            
+            let bytes_to_copy = core::cmp::min(cluster_data.len(), remaining_size);
+            content.extend_from_slice(&cluster_data[..bytes_to_copy]);
+            
+            // Check if we've read enough
+            if content.len() >= size {
+                break;
+            }
+            
+            // Get next cluster from FAT
+            let fat_entry = self.read_fat_entry(current_cluster)?;
+            
+            // Check for end of chain
+            if fat_entry >= 0x0FFFFFF8 {
+                break; // End of file
+            }
+            
+            current_cluster = fat_entry;
+        }
+        
+        // Truncate to exact size if needed
+        content.truncate(size);
+        Ok(content)
+    }
+    
+    /// Write file content by allocating and writing to clusters
+    pub fn write_file_content(&self, start_cluster: u32, data: &[u8]) -> Result<u32, FileSystemError> {
+        let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+        let clusters_needed = (data.len() + cluster_size - 1) / cluster_size;
+        
+        if clusters_needed == 0 {
+            return Ok(start_cluster);
+        }
+        
+        let mut current_cluster = start_cluster;
+        let mut data_offset = 0;
+        
+        for i in 0..clusters_needed {
+            let data_end = core::cmp::min(data_offset + cluster_size, data.len());
+            let chunk = &data[data_offset..data_end];
+            
+            // Write data to current cluster
+            self.write_cluster(current_cluster, chunk)?;
+            
+            data_offset = data_end;
+            
+            // If this is the last cluster, mark end of chain
+            if i == clusters_needed - 1 {
+                self.write_fat_entry(current_cluster, 0x0FFFFFFF)?; // End of chain
+                break;
+            }
+            
+            // Allocate next cluster if needed
+            // For now, use a simple sequential allocation
+            let next_cluster = current_cluster + 1;
+            self.write_fat_entry(current_cluster, next_cluster)?;
+            current_cluster = next_cluster;
+        }
+        
+        Ok(start_cluster)
+    }
 }
 
 impl FileSystemOperations for Fat32FileSystem {
@@ -456,6 +765,10 @@ impl FileSystemOperations for Fat32FileSystem {
     
     fn name(&self) -> &str {
         &self.name
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

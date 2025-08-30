@@ -401,6 +401,10 @@ impl FileSystemOperations for CpioFS {
         
         Ok(entries)
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// File object for CPIO regular files

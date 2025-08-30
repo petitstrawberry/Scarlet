@@ -884,6 +884,10 @@ impl FileSystemOperations for OverlayFS {
         entries.sort_by(|a, b| a.file_id.cmp(&b.file_id)); // Sort entries by file_id
         Ok(entries)
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// File object for OverlayFS directory operations

@@ -20,6 +20,7 @@ use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations};
 /// 
 /// This structure represents a file or directory in the FAT32 filesystem.
 /// It implements the VfsNode trait to integrate with the VFS v2 architecture.
+/// Content is read/written directly from/to the block device, not stored in memory.
 pub struct Fat32Node {
     /// Node name
     pub name: RwLock<String>,
@@ -27,9 +28,7 @@ pub struct Fat32Node {
     pub file_type: RwLock<FileType>,
     /// File metadata
     pub metadata: RwLock<FileMetadata>,
-    /// File content (for regular files)
-    pub content: RwLock<Vec<u8>>,
-    /// Child nodes (for directories)
+    /// Child nodes (for directories) - cached, but loaded from disk on demand
     pub children: RwLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
     pub parent: RwLock<Option<Weak<Fat32Node>>>,
@@ -37,6 +36,8 @@ pub struct Fat32Node {
     pub filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Starting cluster number in FAT32
     pub cluster: RwLock<u32>,
+    /// Directory entries loaded flag (for directories)
+    pub children_loaded: RwLock<bool>,
 }
 
 impl Debug for Fat32Node {
@@ -46,6 +47,7 @@ impl Debug for Fat32Node {
             .field("file_type", &self.file_type.read())
             .field("metadata", &self.metadata.read())
             .field("cluster", &self.cluster.read())
+            .field("children_loaded", &self.children_loaded.read())
             .field("parent", &self.parent.read().as_ref().map(|p| p.strong_count()))
             .finish()
     }
@@ -71,11 +73,11 @@ impl Fat32Node {
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
             parent: RwLock::new(None),
             filesystem: RwLock::new(None),
             cluster: RwLock::new(cluster),
+            children_loaded: RwLock::new(false),
         }
     }
     
@@ -98,11 +100,11 @@ impl Fat32Node {
                 file_id,
                 link_count: 1,
             }),
-            content: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
             parent: RwLock::new(None),
             filesystem: RwLock::new(None),
             cluster: RwLock::new(cluster),
+            children_loaded: RwLock::new(false),
         }
     }
     
@@ -155,11 +157,11 @@ impl Clone for Fat32Node {
             name: RwLock::new(self.name.read().clone()),
             file_type: RwLock::new(self.file_type.read().clone()),
             metadata: RwLock::new(self.metadata.read().clone()),
-            content: RwLock::new(self.content.read().clone()),
             children: RwLock::new(self.children.read().clone()),
             parent: RwLock::new(self.parent.read().clone()),
             filesystem: RwLock::new(self.filesystem.read().clone()),
             cluster: RwLock::new(*self.cluster.read()),
+            children_loaded: RwLock::new(*self.children_loaded.read()),
         }
     }
 }
@@ -192,42 +194,117 @@ impl Debug for Fat32FileObject {
 
 impl StreamOps for Fat32FileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        let content = self.node.content.read();
-        let mut pos = self.position.write();
+        // Get filesystem reference
+        let fs = self.node.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
         
-        if *pos >= content.len() {
+        // Downcast to Fat32FileSystem
+        let fat32_fs = fs.as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        let pos = *self.position.read();
+        let metadata = self.node.metadata.read();
+        let file_size = metadata.size;
+        
+        // Check if we're at or past EOF
+        if pos >= file_size {
             return Ok(0); // EOF
         }
         
-        let remaining = content.len() - *pos;
+        // Calculate how much we can read
+        let remaining = file_size - pos;
         let to_read = core::cmp::min(buffer.len(), remaining);
         
-        buffer[..to_read].copy_from_slice(&content[*pos..*pos + to_read]);
-        *pos += to_read;
+        if to_read == 0 {
+            return Ok(0);
+        }
         
-        Ok(to_read)
+        // Read file content from block device
+        let cluster = *self.node.cluster.read();
+        match fat32_fs.read_file_content(cluster, file_size) {
+            Ok(content) => {
+                let end_pos = pos + to_read;
+                if end_pos > content.len() {
+                    return Err(StreamError::Interrupted);
+                }
+                
+                buffer[..to_read].copy_from_slice(&content[pos..end_pos]);
+                
+                // Update position
+                {
+                    let mut position = self.position.write();
+                    *position += to_read;
+                }
+                
+                Ok(to_read)
+            },
+            Err(_) => Err(StreamError::Interrupted),
+        }
     }
     
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        let mut content = self.node.content.write();
-        let mut pos = self.position.write();
+        // Get filesystem reference
+        let fs = self.node.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
         
-        // Extend content if necessary
-        if *pos + buffer.len() > content.len() {
-            content.resize(*pos + buffer.len(), 0);
+        // Downcast to Fat32FileSystem
+        let fat32_fs = fs.as_any()
+            .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        let pos = *self.position.read();
+        let mut metadata = self.node.metadata.write();
+        let current_size = metadata.size;
+        
+        // Calculate new size
+        let new_size = core::cmp::max(current_size, pos + buffer.len());
+        
+        // Read current content if the file has data
+        let cluster = *self.node.cluster.read();
+        let mut content = if cluster >= 2 && current_size > 0 {
+            match fat32_fs.read_file_content(cluster, current_size) {
+                Ok(data) => data,
+                Err(_) => return Err(StreamError::Interrupted),
+            }
+        } else {
+            Vec::new()
+        };
+        
+        // Extend content if needed
+        if new_size > content.len() {
+            content.resize(new_size, 0);
         }
         
-        // Write data
-        content[*pos..*pos + buffer.len()].copy_from_slice(buffer);
-        *pos += buffer.len();
+        // Write new data
+        content[pos..pos + buffer.len()].copy_from_slice(buffer);
         
-        // Update file size in metadata
-        {
-            let mut metadata = self.node.metadata.write();
-            metadata.size = content.len();
+        // Write back to block device
+        let start_cluster = if cluster >= 2 { cluster } else { 2 }; // Allocate cluster if needed
+        match fat32_fs.write_file_content(start_cluster, &content) {
+            Ok(_) => {
+                // Update metadata
+                metadata.size = new_size;
+                
+                // Update cluster if it was allocated
+                if cluster < 2 {
+                    *self.node.cluster.write() = start_cluster;
+                }
+                
+                // Update position
+                {
+                    let mut position = self.position.write();
+                    *position += buffer.len();
+                }
+                
+                Ok(buffer.len())
+            },
+            Err(_) => Err(StreamError::Interrupted),
         }
-        
-        Ok(buffer.len())
     }
 }
 
@@ -257,16 +334,17 @@ impl MemoryMappingOps for Fat32FileObject {
 
 impl FileObject for Fat32FileObject {
     fn seek(&self, from: SeekFrom) -> Result<u64, StreamError> {
-        let content = self.node.content.read();
+        let metadata = self.node.metadata.read();
+        let file_size = metadata.size;
         let mut pos = self.position.write();
         
         let new_pos = match from {
             SeekFrom::Start(offset) => offset as usize,
             SeekFrom::End(offset) => {
                 if offset < 0 {
-                    content.len().saturating_sub((-offset) as usize)
+                    file_size.saturating_sub((-offset) as usize)
                 } else {
-                    content.len() + offset as usize
+                    file_size + offset as usize
                 }
             },
             SeekFrom::Current(offset) => {
