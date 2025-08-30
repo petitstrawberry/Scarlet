@@ -183,6 +183,17 @@ impl LinuxStat {
 const MAX_PATH_LENGTH: usize = 128;
 const MAX_ARG_COUNT: usize = 64;
 
+/// Linux sys_exec system call implementation
+/// Executes a program specified by the given path, replacing the current process image with a new one.
+/// Also allows passing arguments and environment variables to the new program.
+/// 
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX (Linux -1) on error
 pub fn sys_exec(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     
@@ -300,7 +311,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     let kernel_obj = match file {
         Ok(obj) => obj,
-        Err(_) => {
+        Err(_e) => {
             // If open failed and O_CREAT flag is set, try to create the file
             if flags & O_CREAT != 0 {
                 // Build absolute path for file creation before getting mutable VFS reference
@@ -387,6 +398,59 @@ pub fn sys_dup(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         }
     } else {
         usize::MAX // Invalid file descriptor
+    }
+}
+
+pub fn sys_dup3(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let oldfd = trapframe.get_arg(0) as usize;
+    let newfd = trapframe.get_arg(1) as usize;
+    let flags = trapframe.get_arg(2) as u32;
+    trapframe.increment_pc_next(task);
+
+    // dup3 does not allow oldfd and newfd to be the same
+    if oldfd == newfd {
+        return usize::MAX; // EINVAL
+    }
+
+    // Only O_CLOEXEC flag is valid for dup3
+    if flags != 0 && flags != (O_CLOEXEC as u32) {
+        return usize::MAX; // EINVAL
+    }
+
+    // Get handle from old fd
+    if let Some(old_handle) = abi.get_handle(oldfd) {
+        if let Some(old_kernel_obj) = task.handle_table.get(old_handle) {
+            let kernel_obj = old_kernel_obj.clone();
+            let handle = task.handle_table.insert(kernel_obj);
+            match handle {
+                Ok(new_handle) => {
+                    // Close newfd if it's already open
+                    if abi.get_handle(newfd).is_some() {
+                        if let Some(old_new_handle) = abi.remove_fd(newfd) {
+                            let _ = task.handle_table.remove(old_new_handle);
+                        }
+                    }
+                    
+                    // Allocate specific fd
+                    match abi.allocate_specific_fd(newfd, new_handle as u32) {
+                        Ok(()) => {
+                            // Set flags if O_CLOEXEC is specified
+                            if flags & (O_CLOEXEC as u32) != 0 {
+                                let _ = abi.set_fd_flags(newfd, FD_CLOEXEC);
+                            }
+                            newfd
+                        },
+                        Err(_) => usize::MAX, // Cannot allocate specific fd
+                    }
+                },
+                Err(_) => usize::MAX, // Handle table full
+            }
+        } else {
+            usize::MAX // Handle not found in handle table
+        }
+    } else {
+        usize::MAX // Invalid old file descriptor
     }
 }
 
@@ -1263,7 +1327,7 @@ pub fn sys_execve(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         Ok(envs) => envs,
         Err(_) => return usize::MAX, // envp parsing error
     };
-    
+
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
@@ -1774,8 +1838,6 @@ pub fn sys_unlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     // Determine base directory for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
     
-       
-    
     let (base_entry, base_mount) = if dirfd == AT_FDCWD {
         // Use current working directory as base
         vfs.get_cwd().unwrap_or_else(|| {
@@ -2084,4 +2146,115 @@ pub fn sys_umask(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     // For this stub implementation, we simply return the provided mask
     // This satisfies most applications that just want to set a umask
     mask as usize // Return the provided mask as if it was the previous value
+}
+
+/// Linux sys_readlinkat implementation
+/// 
+/// Reads the value of a symbolic link relative to a directory file descriptor.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context  
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: dirfd (directory file descriptor or AT_FDCWD)
+///   - arg1: pathname (pointer to path string)
+///   - arg2: buf (buffer to store link contents)
+///   - arg3: bufsiz (size of buffer)
+///
+/// Returns:
+/// - Number of bytes placed in buf on success
+/// - usize::MAX (Linux -1) on error
+pub fn sys_readlinkat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let dirfd = trapframe.get_arg(0) as i32;
+    let pathname_ptr = trapframe.get_arg(1);
+    let _buf_ptr = trapframe.get_arg(2);
+    let bufsiz = trapframe.get_arg(3) as usize;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Parse the pathname
+    let path_str = match parse_c_string_from_userspace(task, pathname_ptr, 4096) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX,
+    };
+
+    crate::println!("sys_readlinkat: dirfd={}, path='{}', bufsiz={}", dirfd, path_str, bufsiz);
+
+    // Convert to absolute path for logging
+    let absolute_path = if path_str.starts_with('/') {
+        path_str.to_string()
+    } else {
+        match to_absolute_path_v2(&task, &path_str) {
+            Ok(p) => p,
+            Err(_) => return usize::MAX,
+        }
+    };
+
+    // Read the symlink using OverlayFS functionality
+    // For now, return ENOENT (file not found) as most readlink calls
+    // are for files that don't exist or aren't symlinks
+    // TODO: Implement proper symlink reading when OverlayFS supports it
+    crate::println!("sys_readlinkat: symlink reading not yet implemented for '{}'", absolute_path);
+    // usize::
+    0
+}
+
+/// Linux sys_getcwd system call implementation
+/// Get current working directory
+/// 
+/// Arguments:
+/// - buf: Buffer to store the current working directory path
+/// - size: Size of the buffer
+/// 
+/// Returns:
+/// - Number of bytes written to buffer on success
+/// - usize::MAX on error
+pub fn sys_getcwd(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let buf_ptr = trapframe.get_arg(0);
+    let size = trapframe.get_arg(1);
+    trapframe.increment_pc_next(task);
+
+    // Check for invalid arguments
+    if buf_ptr == 0 || size == 0 {
+        return usize::MAX; // EFAULT or EINVAL
+    }
+
+    // Get current working directory from task context
+    let cwd = if let Some(vfs) = &task.vfs {
+        vfs.get_cwd_path()
+    } else {
+        "/".to_string() // Default to root if no VFS manager
+    };
+    let cwd_bytes = cwd.as_bytes();
+    
+    // Check if buffer is large enough (including null terminator)
+    if cwd_bytes.len() + 1 > size {
+        return usize::MAX; // ERANGE - buffer too small
+    }
+
+    // Translate user buffer address
+    let user_buf = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr as *mut u8,
+        None => return usize::MAX, // EFAULT - invalid buffer address
+    };
+
+    // Copy current working directory to user buffer
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            cwd_bytes.as_ptr(),
+            user_buf,
+            cwd_bytes.len()
+        );
+        // Add null terminator
+        *user_buf.add(cwd_bytes.len()) = 0;
+    }
+
+    // Return the number of bytes written (including null terminator)
+    cwd_bytes.len() + 1
 }

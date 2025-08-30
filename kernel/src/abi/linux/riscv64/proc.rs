@@ -205,29 +205,55 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_getpid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-
-    // Return the task ID as the process ID
     task.get_id()
 }
 
-pub fn sys_getpgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_getppid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-
-    // Return 0 as the process group ID (stub implementation)
-    // In a real implementation, this would return the process group ID
-    // of the specified process (or current process if pid=0)
-    0
+    task.get_parent_id().unwrap_or(1) // Return parent PID or 1 if none
 }
 
 pub fn sys_setpgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    let _pid = trapframe.get_arg(0);
+    let _pgid = trapframe.get_arg(1);
+    trapframe.increment_pc_next(task);
+    0 // Always succeed
+}
+
+pub fn sys_getpgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let _pid = trapframe.get_arg(0);
+    trapframe.increment_pc_next(task);
+    task.get_id() // Return current task ID as process group ID
+}
+
+pub fn sys_prlimit64(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let _pid = trapframe.get_arg(0) as i32;
+    let _resource = trapframe.get_arg(1);
+    let _new_rlim_ptr = trapframe.get_arg(2);
+    let old_rlim_ptr = trapframe.get_arg(3);
+
     trapframe.increment_pc_next(task);
 
-    // Return 0 for success (stub implementation)
-    // In a real implementation, this would set the process group ID
-    // of the specified process to the specified group ID
-    0
+    // If old_rlim is requested, write some reasonable default values
+    if old_rlim_ptr != 0 {
+        if let Some(old_rlim_paddr) = task.vm_manager.translate_vaddr(old_rlim_ptr) {
+            unsafe {
+                // Write a simple rlimit structure with high limits
+                // struct rlimit { rlim_t rlim_cur; rlim_t rlim_max; }
+                let rlimit = old_rlim_paddr as *mut [u64; 2];
+                *rlimit = [
+                    0xFFFFFFFF, // rlim_cur - current limit (high value)
+                    0xFFFFFFFF, // rlim_max - maximum limit (high value)
+                ];
+            }
+        }
+    }
+
+    0 // Always succeed
 }
 
 pub fn sys_getuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -374,4 +400,52 @@ pub fn sys_clone(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         },
         Err(_) => usize::MAX,
     }
+}
+
+/// Linux sys_setgid implementation (syscall 144)
+///
+/// Set group ID. This is a stub implementation that always succeeds.
+///
+/// Arguments:
+/// - gid: group ID to set
+///
+/// Returns:
+/// - 0 on success
+pub fn sys_setgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX - 1, // -EPERM
+    };
+
+    let _gid = trapframe.get_arg(0);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Always succeed - group ID is ignored in this stub
+    0
+}
+
+/// Linux sys_setuid implementation (syscall 146)
+///
+/// Set user ID. This is a stub implementation that always succeeds.
+///
+/// Arguments:
+/// - uid: user ID to set
+///
+/// Returns:
+/// - 0 on success
+pub fn sys_setuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX - 1, // -EPERM
+    };
+
+    let _uid = trapframe.get_arg(0);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Always succeed - user ID is ignored in this stub
+    0
 }

@@ -6,6 +6,7 @@ mod fs;
 mod time;
 mod signal;
 mod pipe;
+mod socket;
 
 // pub mod drivers;
 
@@ -60,6 +61,26 @@ impl LinuxRiscv64Abi {
         
         self.fd_to_handle[fd] = Some(handle);
         Ok(fd)
+    }
+    
+    /// Allocate a specific file descriptor and map it to a handle
+    pub fn allocate_specific_fd(&mut self, fd: usize, handle: u32) -> Result<(), &'static str> {
+        if fd >= MAX_FDS {
+            return Err("File descriptor out of range");
+        }
+        
+        // Check if the fd is already in use
+        if self.fd_to_handle[fd].is_some() {
+            return Err("File descriptor already in use");
+        }
+        
+        // Remove from free list if present
+        if let Some(pos) = self.free_fds.iter().position(|&x| x == fd) {
+            self.free_fds.remove(pos);
+        }
+        
+        self.fd_to_handle[fd] = Some(handle);
+        Ok(())
     }
     
     /// Get handle from file descriptor
@@ -321,7 +342,7 @@ impl AbiModule for LinuxRiscv64Abi {
                     choose_base_address: |target, needs_relocation| {
                         match (target, needs_relocation) {
                             (LoadTarget::MainProgram, false) => 0,        // Static executables
-                            (LoadTarget::MainProgram, true) => 0x10000,   // PIE executables
+                            (LoadTarget::MainProgram, true) => 0,   // PIE executables
                             (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
                             (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
                         }
@@ -627,9 +648,12 @@ syscall_table! {
     Invalid = 0 => |_abi: &mut crate::abi::linux::riscv64::LinuxRiscv64Abi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
+    Getcwd = 17 => fs::sys_getcwd,
     EpollCreate1 = 20 => fs::sys_epoll_create1,
     EpollCtl = 21 => fs::sys_epoll_ctl,
     EpollPwait = 22 => fs::sys_epoll_pwait,
+    Dup = 23 => fs::sys_dup,
+    Dup3 = 24 => fs::sys_dup3,
     Fcntl = 25 => fs::sys_fcntl,
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
@@ -648,19 +672,24 @@ syscall_table! {
     Writev = 66 => fs::sys_writev,
     NewFstAtAt = 79 => fs::sys_newfstatat,
     NewFstat = 80 => fs::sys_newfstat,
+    ReadLinkAt = 78 => fs::sys_readlinkat,
     SetTidAddress = 96 => proc::sys_set_tid_address,
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
     SetRobustList = 99 => proc::sys_set_robust_list,
     Nanosleep = 101 => time::sys_nanosleep,
     ClockGettime = 113 => time::sys_clock_gettime,
+    ClockGetres = 114 => time::sys_clock_getres,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
+    SetGid = 144 => proc::sys_setgid,
+    SetUid = 146 => proc::sys_setuid,
     SetPgid = 154 => proc::sys_setpgid,
     GetPgid = 155 => proc::sys_getpgid,
     Uname = 160 => proc::sys_uname,
     Umask = 166 => fs::sys_umask,
     GetPid = 172 => proc::sys_getpid,
+    GetPpid = 173 => proc::sys_getppid,
     GetUid = 174 => proc::sys_getuid,
     GetEuid = 175 => proc::sys_geteuid,
     GetGid = 176 => proc::sys_getgid,
@@ -668,9 +697,19 @@ syscall_table! {
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
     Clone = 220 => proc::sys_clone,
+    Execve = 221 => fs::sys_execve,
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
     EpollWait = 232 => fs::sys_epoll_wait,
+    Prlimit64 = 261 => proc::sys_prlimit64,
+    Socket = 198 => socket::sys_socket,
+    Bind = 200 => socket::sys_bind,
+    Listen = 201 => socket::sys_listen,
+    Accept = 202 => socket::sys_accept,
+    Connect = 203 => socket::sys_connect,
+    GetSockname = 204 => socket::sys_getsockname,
+    SetSockopt = 208 => socket::sys_setsockopt,
+    GetSockopt = 209 => socket::sys_getsockopt,
 }
 
 fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {

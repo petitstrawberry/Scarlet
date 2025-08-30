@@ -141,6 +141,50 @@ pub fn sys_nanosleep(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     0
 }
 
+/// Linux sys_clock_getres implementation (stub)
+///
+/// Get clock resolution. This is a stub implementation that
+/// returns a reasonable resolution for the specified clock.
+///
+/// Arguments:
+/// - abi: LinuxRiscv64Abi context
+/// - trapframe: Trapframe containing syscall arguments
+///   - arg0: clk_id (clock ID)
+///   - arg1: res (pointer to timespec structure for resolution)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_clock_getres(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+
+    let _clk_id = trapframe.get_arg(0) as i32;
+    let res_ptr = trapframe.get_arg(1);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // If res pointer is provided, write resolution
+    if res_ptr != 0 {
+        if let Some(res_paddr) = task.vm_manager.translate_vaddr(res_ptr) {
+            unsafe {
+                // Write timespec structure with nanosecond resolution
+                // struct timespec { long tv_sec; long tv_nsec; }
+                let timespec = res_paddr as *mut [u64; 2];
+                *timespec = [
+                    0,         // tv_sec = 0
+                    1_000_000, // tv_nsec = 1 millisecond (reasonable resolution)
+                ];
+            }
+        }
+    }
+
+    0 // Always succeed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
