@@ -4,7 +4,7 @@
 //! enabling the filesystem to be registered with the VFS manager
 //! and created from block devices.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec};
 
 use crate::{
     device::block::BlockDevice,
@@ -221,7 +221,7 @@ mod tests {
                 // filesystem format, not interface issues
                 assert!(
                     e.kind == FileSystemErrorKind::IoError || 
-                    e.kind == FileSystemErrorKind::InvalidFormat
+                    e.kind == FileSystemErrorKind::InvalidData
                 );
             }
         }

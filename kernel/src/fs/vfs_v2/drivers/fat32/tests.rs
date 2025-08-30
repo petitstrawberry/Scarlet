@@ -73,7 +73,7 @@ fn test_fat32_boot_sector_validation() {
 
 #[test_case]
 fn test_fat32_directory_entry() {
-    let mut entry = Fat32DirectoryEntry::new_file("TEST.TXT", 100, 1024);
+    let entry = Fat32DirectoryEntry::new_file("TEST.TXT", 100, 1024);
     
     // Test basic properties
     assert!(!entry.is_free());
@@ -86,8 +86,9 @@ fn test_fat32_directory_entry() {
     // Test cluster number
     assert_eq!(entry.cluster(), 100);
     
-    // Test file size
-    assert_eq!(entry.file_size, 1024);
+    // Test file size (copy to avoid unaligned reference)
+    let file_size = entry.file_size;
+    assert_eq!(file_size, 1024);
     
     // Test filename
     let filename = entry.filename();
@@ -98,7 +99,9 @@ fn test_fat32_directory_entry() {
     assert!(dir_entry.is_directory());
     assert!(!dir_entry.is_file());
     assert_eq!(dir_entry.cluster(), 200);
-    assert_eq!(dir_entry.file_size, 0);
+    // Test directory file size (copy to avoid unaligned reference)
+    let dir_file_size = dir_entry.file_size;
+    assert_eq!(dir_file_size, 0);
 }
 
 #[test_case]

@@ -4,13 +4,13 @@
 //! It provides the interface between the VFS layer and FAT32-specific node data.
 
 use alloc::{
-    collections::BTreeMap, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
+    collections::BTreeMap, string::String, sync::{Arc, Weak}, vec::Vec
 };
 use spin::rwlock::RwLock;
 use core::{any::Any, fmt::Debug};
 
 use crate::fs::{
-    FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType, SeekFrom
+    FileMetadata, FileObject, FilePermission, FileSystemError, FileType, SeekFrom
 };
 use crate::object::capability::{StreamOps, StreamError, ControlOps, MemoryMappingOps};
 

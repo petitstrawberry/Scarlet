@@ -22,19 +22,18 @@
 //! - Data structures for FAT32 format (boot sector, directory entries, etc.)
 
 use alloc::{
-    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::{Arc, Weak}, vec, vec::Vec
+    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
-use core::{any::Any, fmt::Debug, mem};
+use core::{fmt::Debug, mem};
 
 use crate::{
     device::block::BlockDevice,
     driver_initcall,
     fs::{
-        get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, 
-        FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom
-    },
-    object::capability::{StreamOps, StreamError, ControlOps, MemoryMappingOps}
+        get_fs_driver_manager, FileObject, FileSystemDriver, 
+        FileSystemError, FileSystemErrorKind, FileSystemType, FileType
+    }
 };
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
