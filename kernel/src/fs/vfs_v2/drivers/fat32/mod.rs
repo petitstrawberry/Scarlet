@@ -43,6 +43,9 @@ pub mod structures;
 pub mod node;
 pub mod driver;
 
+#[cfg(test)]
+pub mod tests;
+
 pub use structures::*;
 pub use node::{Fat32Node, Fat32FileObject, Fat32DirectoryObject};
 pub use driver::Fat32Driver;
@@ -464,16 +467,3 @@ fn register_driver() {
 }
 
 driver_initcall!(register_driver);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::device::block::mockblk::MockBlockDevice;
-    
-    #[test_case]
-    fn test_fat32_driver_registration() {
-        let fs_driver_manager = get_fs_driver_manager();
-        let driver_type = fs_driver_manager.get_driver_type("fat32");
-        assert_eq!(driver_type, Some(FileSystemType::Block));
-    }
-}
