@@ -1021,9 +1021,16 @@ pub fn build_auxiliary_vector(
         auxv.push(AuxVec::new(AT_BASE, interp_base));
     }
     
+    // Add UID/GID entries to prevent musl secure mode
+    // Set all IDs to 0 (root) to make real and effective IDs equal
+    // This prevents libc.secure from being set to true
+    auxv.push(AuxVec::new(AT_UID, 0));    // Real user ID
+    auxv.push(AuxVec::new(AT_EUID, 0));   // Effective user ID  
+    auxv.push(AuxVec::new(AT_GID, 0));    // Real group ID
+    auxv.push(AuxVec::new(AT_EGID, 0));   // Effective group ID
+    
     // TODO: Add more auxiliary vector entries as needed:
     // - AT_RANDOM: Random bytes for stack canaries
-    // - AT_UID, AT_EUID, AT_GID, AT_EGID: User/group IDs
     // - AT_PLATFORM: Platform string
     // - AT_HWCAP: Hardware capabilities
     
