@@ -20,10 +20,10 @@
 //! - Data structures for EXT2 format (superblock, inodes, directory entries, etc.)
 
 use alloc::{
-    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec, vec::Vec
+    boxed::Box, collections::BTreeMap, string::{String, ToString}, sync::Arc, vec, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
-use core::{any::Any, mem};
+use core::any::Any;
 
 use crate::{
     device::block::{BlockDevice, request::{BlockIORequest, BlockIORequestType}},
@@ -373,7 +373,7 @@ impl FileSystemOperations for Ext2FileSystem {
             },
             _ => {
                 Err(FileSystemError::new(
-                    FileSystemErrorKind::FileNotFound,
+                    FileSystemErrorKind::NotFound,
                     "File not found"
                 ))
             }

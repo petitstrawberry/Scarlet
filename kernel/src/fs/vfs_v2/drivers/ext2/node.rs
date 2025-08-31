@@ -58,10 +58,9 @@ impl Debug for Ext2Node {
 
 impl Ext2Node {
     /// Create a new EXT2 file node
-    pub fn new_file(name: String, file_id: u64, inode_number: u32, size: u64) -> Self {
+    pub fn new_file(name: String, file_id: u64, inode_number: u32, size: usize) -> Self {
         let metadata = FileMetadata {
             file_type: FileType::RegularFile,
-            file_id,
             size,
             permissions: FilePermission {
                 owner_read: true,
@@ -74,11 +73,11 @@ impl Ext2Node {
                 other_write: false,
                 other_execute: false,
             },
-            owner_id: 0,
-            group_id: 0,
-            access_time: 0,
-            modify_time: 0,
-            change_time: 0,
+            created_time: 0,
+            modified_time: 0,
+            accessed_time: 0,
+            file_id,
+            link_count: 1,
         };
 
         Self {
@@ -98,7 +97,6 @@ impl Ext2Node {
     pub fn new_directory(name: String, file_id: u64, inode_number: u32) -> Self {
         let metadata = FileMetadata {
             file_type: FileType::Directory,
-            file_id,
             size: 0, // Directories have size 0 in metadata, actual size is in blocks
             permissions: FilePermission {
                 owner_read: true,
@@ -111,11 +109,11 @@ impl Ext2Node {
                 other_write: false,
                 other_execute: true,
             },
-            owner_id: 0,
-            group_id: 0,
-            access_time: 0,
-            modify_time: 0,
-            change_time: 0,
+            created_time: 0,
+            modified_time: 0,
+            accessed_time: 0,
+            file_id,
+            link_count: 2, // Directories start with 2 links (. and parent/..)
         };
 
         Self {
@@ -167,12 +165,10 @@ impl Ext2Node {
         
         // Update metadata from inode
         let mut metadata = self.metadata.write();
-        metadata.size = inode.size as u64;
-        metadata.access_time = inode.atime as u64;
-        metadata.modify_time = inode.mtime as u64;
-        metadata.change_time = inode.ctime as u64;
-        metadata.owner_id = inode.uid;
-        metadata.group_id = inode.gid;
+        metadata.size = inode.size as usize;
+        metadata.accessed_time = inode.atime as u64;
+        metadata.modified_time = inode.mtime as u64;
+        metadata.created_time = inode.ctime as u64;
         
         // Update file type based on inode mode
         let file_type = if inode.is_directory() {

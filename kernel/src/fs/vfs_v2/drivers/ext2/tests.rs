@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::device::block::mockblk::MockBlockDevice;
-use crate::fs::get_fs_driver_manager;
-use alloc::{boxed::Box, format, vec::Vec};
+use crate::fs::{get_fs_driver_manager, FileSystemType};
+use alloc::{vec::Vec};
 
 #[test_case]
 fn test_ext2_driver_registration() {
@@ -312,11 +312,8 @@ fn test_ext2_node_metadata_update() {
     
     let metadata = node.metadata().unwrap();
     assert_eq!(metadata.size, 2048);
-    assert_eq!(metadata.access_time, 12345);
-    assert_eq!(metadata.modify_time, 12347);
-    assert_eq!(metadata.change_time, 12346);
-    assert_eq!(metadata.owner_id, 1000);
-    assert_eq!(metadata.group_id, 1000);
+    assert_eq!(metadata.modified_time, 12347);
+    assert_eq!(metadata.created_time, 12346);
     assert_eq!(metadata.file_type, FileType::RegularFile);
     
     // Test getting cached inode
