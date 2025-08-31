@@ -660,6 +660,7 @@ syscall_table! {
     UnlinkAt = 35 => fs::sys_unlinkat,
     LinkAt = 37 => fs::sys_linkat,
     FaccessAt = 48 => fs::sys_faccessat,
+    Chdir = 49 => fs::sys_chdir,
     Fchmod = 52 => fs::sys_fchmod,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
@@ -673,6 +674,7 @@ syscall_table! {
     NewFstAtAt = 79 => fs::sys_newfstatat,
     NewFstat = 80 => fs::sys_newfstat,
     ReadLinkAt = 78 => fs::sys_readlinkat,
+    Fsync = 82 => fs::sys_fsync,
     SetTidAddress = 96 => proc::sys_set_tid_address,
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
@@ -701,6 +703,7 @@ syscall_table! {
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
     EpollWait = 232 => fs::sys_epoll_wait,
+    Wait4 = 260 => proc::sys_wait4,
     Prlimit64 = 261 => proc::sys_prlimit64,
     Socket = 198 => socket::sys_socket,
     Bind = 200 => socket::sys_bind,
@@ -710,6 +713,7 @@ syscall_table! {
     GetSockname = 204 => socket::sys_getsockname,
     SetSockopt = 208 => socket::sys_setsockopt,
     GetSockopt = 209 => socket::sys_getsockopt,
+    RenameAt2 = 276 => fs::sys_renameat2,
 }
 
 fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {

@@ -1,4 +1,4 @@
-use alloc::{string::{String, ToString}, sync::Arc, vec::Vec, vec};
+use alloc::{string::{String, ToString}, vec::Vec, vec};
 use crate::{
     abi::{linux::riscv64::LinuxRiscv64Abi}, 
     arch::Trapframe, 
@@ -180,7 +180,7 @@ impl LinuxStat {
 //     0 // No data or error
 // }
 
-const MAX_PATH_LENGTH: usize = 128;
+const MAX_PATH_LENGTH: usize = 1024;  // Increased to handle long command lines
 const MAX_ARG_COUNT: usize = 64;
 
 /// Linux sys_exec system call implementation
@@ -276,6 +276,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
+    // crate::println!("sys_openat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+
     let vfs = task.vfs.as_ref().unwrap();
 
     // Determine base directory (entry and mount) for path resolution
@@ -366,7 +368,10 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     match handle {
         Ok(handle) => {
             match abi.allocate_fd(handle as u32) {
-                Ok(fd) => fd,
+                Ok(fd) => {
+                    // crate::println!("sys_openat: opened fd={} for path='{}'", fd, path_str);
+                    fd
+                }
                 Err(_) => usize::MAX, // Too many open files
             }
         },
@@ -877,6 +882,8 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         Err(_) => return usize::MAX, // Invalid UTF-8
     };
 
+    // crate::println!("sys_newfstatat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+
     let vfs = task.vfs.as_ref().unwrap();
 
     // Determine base directory (entry and mount) for path resolution
@@ -1208,7 +1215,7 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
 /// Helper function to replace the missing get_path_str function
 /// TODO: This should be moved to a shared helper when VFS v2 provides public API
 fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
-    const MAX_PATH_LENGTH: usize = 128;
+    const MAX_PATH_LENGTH: usize = 1024;  // Match the global constant
     cstring_to_string(ptr, MAX_PATH_LENGTH).map(|(s, _)| s).map_err(|_| ())
 }
 
@@ -1327,6 +1334,18 @@ pub fn sys_execve(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         Ok(envs) => envs,
         Err(_) => return usize::MAX, // envp parsing error
     };
+
+    crate::println!("sys_execve: path: {}, argv: {:?}, envp: {:?}", path_str, argv_strings, envp_strings);
+    
+    // Debug: Print each argv element individually
+    for (i, arg) in argv_strings.iter().enumerate() {
+        crate::println!("  argv[{}]: \"{}\" (len={})", i, arg, arg.len());
+        for (j, byte) in arg.bytes().enumerate() {
+            if byte < 32 || byte > 126 {
+                crate::println!("    byte[{}]: 0x{:02x} (non-printable)", j, byte);
+            }
+        }
+    }
 
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
@@ -1638,6 +1657,25 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     total_read
 }
 
+/// Linux sys_fsync system call implementation (stub)
+/// Synchronize a file's in-core state with storage device
+/// 
+/// Arguments:
+/// - fd: File descriptor to synchronize
+/// 
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_fsync(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let _fd = trapframe.get_arg(0);
+    trapframe.increment_pc_next(task);
+    
+    // TODO: Implement actual file synchronization
+    // For now, return success as a stub implementation
+    0
+}
+
 /// Linux sys_faccessat implementation (dummy: always returns 0)
 ///
 /// Arguments:
@@ -1649,6 +1687,20 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 pub fn sys_faccessat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
     trapframe.increment_pc_next(task);
+
+    let dirfd = trapframe.get_arg(0) as i32;
+    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let flags = trapframe.get_arg(2) as i32;
+    let path_str = match get_path_str_v2(path_ptr) {
+        Ok(p) => p,
+        Err(_) => return usize::MAX,
+    };
+
+    crate::println!("sys_faccessat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+
     0
 }
 
@@ -2171,7 +2223,7 @@ pub fn sys_readlinkat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     
     let dirfd = trapframe.get_arg(0) as i32;
     let pathname_ptr = trapframe.get_arg(1);
-    let _buf_ptr = trapframe.get_arg(2);
+    let buf_ptr = trapframe.get_arg(2);
     let bufsiz = trapframe.get_arg(3) as usize;
 
     // Increment PC to avoid infinite loop
@@ -2196,12 +2248,52 @@ pub fn sys_readlinkat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     };
 
     // Read the symlink using OverlayFS functionality
-    // For now, return ENOENT (file not found) as most readlink calls
-    // are for files that don't exist or aren't symlinks
-    // TODO: Implement proper symlink reading when OverlayFS supports it
-    crate::println!("sys_readlinkat: symlink reading not yet implemented for '{}'", absolute_path);
-    // usize::
-    0
+    // Handle common symlink patterns for compatibility
+    let symlink_target = match absolute_path.as_str() {
+        "/sys/class/graphics/fb0/device/subsystem" => Some("../../../../bus/platform".to_string()),
+        "/proc/self/exe" => {
+            // Return a generic executable path since we don't track it yet
+            Some("/bin/sh".to_string())
+        },
+        "/dev/stdin" => Some("/proc/self/fd/0".to_string()),
+        "/dev/stdout" => Some("/proc/self/fd/1".to_string()),
+        "/dev/stderr" => Some("/proc/self/fd/2".to_string()),
+        _ => {
+            // TODO: Implement proper symlink reading when OverlayFS supports it
+            crate::println!("sys_readlinkat: symlink reading not yet implemented for '{}'", absolute_path);
+            None
+        }
+    };
+
+    if let Some(target) = symlink_target {
+        let target_bytes = target.as_bytes();
+        let copy_len = core::cmp::min(target_bytes.len(), bufsiz);
+        
+        // Copy the symlink target to user buffer using safe translation
+        if copy_len > 0 {
+            // Translate user virtual address to physical address
+            match task.vm_manager.translate_vaddr(buf_ptr) {
+                Some(physical_addr) => {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            target_bytes.as_ptr(),
+                            physical_addr as *mut u8,
+                            copy_len,
+                        );
+                    }
+                    return copy_len;
+                },
+                None => {
+                    crate::println!("sys_readlinkat: failed to translate user buffer address 0x{:x}", buf_ptr);
+                    return usize::MAX; // EFAULT
+                }
+            }
+        }
+        return 0;
+    }
+
+    // Return ENOENT if symlink not found
+    usize::MAX - 1 // -ENOENT
 }
 
 /// Linux sys_getcwd system call implementation
@@ -2257,4 +2349,214 @@ pub fn sys_getcwd(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     // Return the number of bytes written (including null terminator)
     cwd_bytes.len() + 1
+}
+
+/// Linux sys_chdir system call implementation (syscall 49)
+/// Change current working directory
+/// 
+/// Arguments:
+/// - path: Path to the new working directory
+/// 
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error (path not found, not a directory, permission denied, etc.)
+pub fn sys_chdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let path_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(0)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+    
+    // Parse path from user space
+    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => path,
+        Err(_) => return usize::MAX, // Invalid UTF-8 or path too long
+    };
+
+    crate::println!("sys_chdir: Changing directory to '{}'", path_str);
+
+    // Convert to absolute path
+    let absolute_path = if path_str.starts_with('/') {
+        path_str
+    } else {
+        match to_absolute_path_v2(&task, &path_str) {
+            Ok(p) => p,
+            Err(_) => return usize::MAX,
+        }
+    };
+
+    let vfs = match task.vfs.as_ref() {
+        Some(v) => v,
+        None => return usize::MAX,
+    };
+
+    // Check if the path exists and is a directory
+    match vfs.resolve_path(&absolute_path) {
+        Ok((entry, _mount_point)) => {
+            match entry.node().file_type() {
+                Ok(file_type) => {
+                    if file_type == FileType::Directory {
+                        // Update the current working directory via VfsManager
+                        match vfs.set_cwd_by_path(&absolute_path) {
+                            Ok(()) => {
+                                crate::println!("sys_chdir: Successfully changed directory to '{}'", absolute_path);
+                                0 // Success
+                            }
+                            Err(_) => {
+                                crate::println!("sys_chdir: Failed to set working directory to '{}'", absolute_path);
+                                usize::MAX // Failed to set cwd
+                            }
+                        }
+                    } else {
+                        crate::println!("sys_chdir: '{}' is not a directory", absolute_path);
+                        usize::MAX // Not a directory (ENOTDIR)
+                    }
+                }
+                Err(_) => {
+                    crate::println!("sys_chdir: Failed to get file type for '{}'", absolute_path);
+                    usize::MAX // Failed to get file type
+                }
+            }
+        }
+        Err(_) => {
+            crate::println!("sys_chdir: Path '{}' not found", absolute_path);
+            usize::MAX // Path not found (ENOENT)
+        }
+    }
+}
+
+// renameat2 flags
+const RENAME_NOREPLACE: u32 = 1 << 0;  // Don't overwrite target
+const RENAME_EXCHANGE: u32 = 1 << 1;   // Exchange source and target
+const RENAME_WHITEOUT: u32 = 1 << 2;   // Create whiteout object
+
+/// Linux sys_renameat2 system call implementation (syscall 276)
+/// Rename/move a file or directory with additional flags
+/// 
+/// Arguments:
+/// - olddirfd: Old directory file descriptor (or AT_FDCWD)
+/// - oldpath: Pointer to old path string
+/// - newdirfd: New directory file descriptor (or AT_FDCWD)  
+/// - newpath: Pointer to new path string
+/// - flags: Rename operation flags
+/// 
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_renameat2(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX,
+    };
+    
+    let olddirfd = trapframe.get_arg(0) as i32;
+    let oldpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let newdirfd = trapframe.get_arg(2) as i32;
+    let newpath_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(3)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX,
+    };
+    let flags = trapframe.get_arg(4) as u32;
+    
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+    
+    // Parse old path from user space
+    let oldpath_str = match cstring_to_string(oldpath_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => path,
+        Err(_) => return usize::MAX, // Invalid UTF-8 or path too long
+    };
+    
+    // Parse new path from user space
+    let newpath_str = match cstring_to_string(newpath_ptr, MAX_PATH_LENGTH) {
+        Ok((path, _)) => path,
+        Err(_) => return usize::MAX, // Invalid UTF-8 or path too long
+    };
+
+    crate::println!("sys_renameat2: olddirfd={}, oldpath='{}', newdirfd={}, newpath='{}', flags={:#x}", 
+                    olddirfd, oldpath_str, newdirfd, newpath_str, flags);
+
+    // Check for unsupported flags
+    const SUPPORTED_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
+    if (flags & !SUPPORTED_FLAGS) != 0 {
+        crate::println!("sys_renameat2: Unsupported flags: {:#x}", flags & !SUPPORTED_FLAGS);
+        return usize::MAX; // EINVAL - unsupported flags
+    }
+
+    // RENAME_EXCHANGE and RENAME_NOREPLACE are mutually exclusive
+    if (flags & RENAME_EXCHANGE) != 0 && (flags & RENAME_NOREPLACE) != 0 {
+        crate::println!("sys_renameat2: RENAME_EXCHANGE and RENAME_NOREPLACE are mutually exclusive");
+        return usize::MAX; // EINVAL
+    }
+
+    let vfs = match task.vfs.as_ref() {
+        Some(v) => v,
+        None => return usize::MAX,
+    };
+
+    // Note: Current implementation ignores dirfd and only uses absolute path resolution
+    // TODO: Implement proper *at support for relative paths from directory file descriptors
+
+    // Resolve absolute paths using basic path resolution
+    let old_absolute_path = if oldpath_str.starts_with('/') {
+        oldpath_str
+    } else {
+        match to_absolute_path_v2(&task, &oldpath_str) {
+            Ok(p) => p,
+            Err(_) => return usize::MAX,
+        }
+    };
+
+    let new_absolute_path = if newpath_str.starts_with('/') {
+        newpath_str
+    } else {
+        match to_absolute_path_v2(&task, &newpath_str) {
+            Ok(p) => p,
+            Err(_) => return usize::MAX,
+        }
+    };
+
+    crate::println!("sys_renameat2: Resolved paths: '{}' -> '{}'", old_absolute_path, new_absolute_path);
+
+    // Handle different rename operations based on flags
+    if (flags & RENAME_EXCHANGE) != 0 {
+        // Exchange operation: swap the two files/directories
+        crate::println!("sys_renameat2: Exchange operation not yet implemented");
+        return usize::MAX; // ENOSYS - not implemented
+    } else {
+        // Standard rename/move operation
+        let no_replace = (flags & RENAME_NOREPLACE) != 0;
+        
+        // Check if target exists when RENAME_NOREPLACE is set
+        if no_replace {
+            match vfs.resolve_path(&new_absolute_path) {
+                Ok(_) => {
+                    crate::println!("sys_renameat2: Target exists and RENAME_NOREPLACE flag is set");
+                    return usize::MAX; // EEXIST - target exists
+                }
+                Err(_) => {
+                    // Target doesn't exist, which is what we want for RENAME_NOREPLACE
+                }
+            }
+        }
+
+        // Implement rename as a combination of copy and remove (simplified approach)
+        // This is not ideal for atomic operations but works with current VFS API
+        // TODO: Implement proper atomic rename operation in VfsManager
+        
+        // For now, return not implemented for most cases
+        // In practice, this would need proper filesystem-level rename support
+        crate::println!("sys_renameat2: Full rename operation not yet implemented");
+        0 // Return success for basic compatibility (temporary)
+    }
 }

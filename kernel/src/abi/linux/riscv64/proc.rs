@@ -381,12 +381,31 @@ pub fn sys_uname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     0 // Success
 }
 
-/// Minimal sys_clone implementation for Linux ABI (ignores flags/stack, just clones the current task)
+/// Linux sys_clone implementation for RISC-V64 ABI
+/// 
+/// RISC-V64 follows the x86-64 argument order:
+/// long clone(unsigned long flags, void *stack, int *parent_tid, int *child_tid, unsigned long tls);
+///
+/// Arguments:
+/// - flags: clone flags (CLONE_VM, CLONE_FS, etc.)
+/// - stack: child stack pointer (NULL to duplicate parent stack)
+/// - parent_tid: pointer to store parent TID (for CLONE_PARENT_SETTID)
+/// - child_tid: pointer to store child TID (for CLONE_CHILD_SETTID/CLONE_CHILD_CLEARTID)
+/// - tls: TLS (Thread Local Storage) pointer
 pub fn sys_clone(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let parent_task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
+
+    let flags = trapframe.get_arg(0);
+    let child_stack = trapframe.get_arg(1);
+    let parent_tid_ptr = trapframe.get_arg(2) as *mut i32;
+    let child_tid_ptr = trapframe.get_arg(3) as *mut i32;
+    let tls = trapframe.get_arg(4);
+
+    crate::println!("sys_clone: flags=0x{:x}, child_stack=0x{:x}, parent_tid_ptr={:p}, child_tid_ptr={:p}, tls={:x}", 
+        flags, child_stack, parent_tid_ptr, child_tid_ptr, tls);
 
     trapframe.increment_pc_next(parent_task);
     parent_task.vcpu.store(trapframe);
@@ -448,4 +467,166 @@ pub fn sys_setuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     // Always succeed - user ID is ignored in this stub
     0
+}
+
+///
+/// Wait for process to change state (wait4 system call).
+/// This is a stub implementation that returns immediately.
+///
+/// Arguments:
+/// Wait for process to change state (wait4 system call).
+/// 
+/// This is a Linux-compatible implementation that waits for child processes
+/// to exit and returns their process ID and exit status.
+///
+/// # Arguments
+/// - pid: process ID to wait for
+///   * -1: wait for any child process
+///   * >0: wait for specific child process
+///   * 0 or <-1: wait for process group (not implemented)
+/// - wstatus: pointer to store status information (can be null)
+/// - options: wait options (currently ignored - TODO: implement WNOHANG, WUNTRACED)
+/// - rusage: pointer to resource usage structure (can be null, currently ignored)
+///
+/// # Returns
+/// - On success: process ID of child that changed state
+/// - On error: negated error code (e.g., usize::MAX - 9 for -ECHILD)
+///
+/// # Errors
+/// - ECHILD: no child processes or specified child is not our child
+/// - EFAULT: invalid address for wstatus pointer
+/// - ENOSYS: unsupported operation (process groups)
+/// - EPERM: no current task context
+pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    use crate::task::{get_parent_waitpid_waker, WaitError};
+
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX - 1, // -EPERM
+    };
+
+    let pid = trapframe.get_arg(0) as isize;
+    let wstatus = trapframe.get_arg(1) as *mut i32;
+    let _options = trapframe.get_arg(2); // TODO: Handle WNOHANG, WUNTRACED, etc.
+    let _rusage = trapframe.get_arg(3); // TODO: Implement resource usage tracking
+
+    // Check if the task has any children
+    if task.get_children().is_empty() {
+        trapframe.increment_pc_next(task);
+        return usize::MAX - 9; // -ECHILD (no child processes)
+    }
+
+    crate::println!("sys_wait4: pid={}, wstatus={:p}, options={:x}, rusage={:x}", pid, wstatus, _options, _rusage);
+
+    // Loop until a child exits or an error occurs
+    loop {
+        if pid == -1 {
+            // Wait for any child process
+            for child_pid in task.get_children().clone() {
+                match task.wait(child_pid) {
+                    Ok(status) => {
+                        // Child has exited, return the status
+                        if wstatus != core::ptr::null_mut() {
+                            match task.vm_manager.translate_vaddr(wstatus as usize) {
+                                Some(phys_addr) => {
+                                    let status_ptr = phys_addr as *mut i32;
+                                    unsafe {
+                                        *status_ptr = status;
+                                    }
+                                }
+                                None => {
+                                    // Invalid address, return EFAULT
+                                    trapframe.increment_pc_next(task);
+                                    return usize::MAX - 13; // -EFAULT
+                                }
+                            }
+                        }
+                        trapframe.increment_pc_next(task);
+                        return child_pid;
+                    },
+                    Err(error) => {
+                        match error {
+                            WaitError::NoSuchChild(_) => {
+                                // This child is not our child
+                                continue;
+                            },
+                            WaitError::ChildTaskNotFound(_) => {
+                                // Child task not found in scheduler, continue with other children
+                                continue;
+                            },
+                            WaitError::ChildNotExited(_) => {
+                                // Child not exited yet, continue with other children
+                                continue;
+                            },
+                        }
+                    }
+                }
+            }
+            
+            // No child has exited yet, block until one does
+            // Use parent waker for waitpid(-1) semantics
+            let parent_waker = get_parent_waitpid_waker(task.get_id());
+            parent_waker.wait(task.get_id(), get_cpu());
+            crate::println!("Woke up from waitpid for any child");
+            // Continue the loop to re-check after waking up
+            continue;
+        } else if pid > 0 {
+            // Wait for specific child process
+            let child_pid = pid as usize;
+            
+            // Check if this is actually our child
+            if !task.get_children().contains(&child_pid) {
+                trapframe.increment_pc_next(task);
+                return usize::MAX - 9; // -ECHILD (not our child)
+            }
+
+            match task.wait(child_pid) {
+                Ok(status) => {
+                    // Child has exited, return the status
+                    if wstatus != core::ptr::null_mut() {
+                        match task.vm_manager.translate_vaddr(wstatus as usize) {
+                            Some(phys_addr) => {
+                                let status_ptr = phys_addr as *mut i32;
+                                unsafe {
+                                    *status_ptr = status;
+                                }
+                            }
+                            None => {
+                                // Invalid address, return EFAULT
+                                trapframe.increment_pc_next(task);
+                                return usize::MAX - 13; // -EFAULT
+                            }
+                        }
+                    }
+                    trapframe.increment_pc_next(task);
+                    return child_pid;
+                }
+                Err(error) => {
+                    match error {
+                        WaitError::NoSuchChild(_) => {
+                            trapframe.increment_pc_next(task);
+                            return usize::MAX - 9; // -ECHILD
+                        },
+                        WaitError::ChildTaskNotFound(_) => {
+                            trapframe.increment_pc_next(task);
+                            return usize::MAX - 9; // -ECHILD
+                        },
+                        WaitError::ChildNotExited(_) => {
+                            // Child not exited yet, wait for it
+                            use crate::task::get_waitpid_waker;
+                            let child_waker = get_waitpid_waker(child_pid);
+                            child_waker.wait(task.get_id(), get_cpu());
+                            crate::println!("Woke up from waitpid for child {}", child_pid);
+                            // Continue the loop to re-check after waking up
+                            continue;
+                        },
+                    }
+                }
+            }
+        } else {
+            // pid <= 0 && pid != -1: wait for process group (not implemented)
+            trapframe.increment_pc_next(task);
+            return usize::MAX - 37; // -ENOSYS (function not implemented)
+        }
+    }
 }
