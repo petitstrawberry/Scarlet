@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
 IMAGE_PATH="$KERNEL_DIR/$IMAGE_NAME"
 
-echo "Creating FAT32 test image: $IMAGE_PATH"
+echo "Creating fresh FAT32 test image: $IMAGE_PATH"
 
 # Clean up any existing image
 rm -f "$IMAGE_PATH"
@@ -93,8 +93,7 @@ rm -f /tmp/hello.txt /tmp/readme.txt /tmp/numbers.txt /tmp/small.txt /tmp/1kb.tx
 rm -f /tmp/doc1.txt /tmp/test_binary /tmp/japanese.txt /tmp/config.ini
 rmdir "$MOUNT_POINT"
 
-echo "FAT32 test image created successfully: $IMAGE_PATH"
-echo "Image size: $(ls -lh "$IMAGE_PATH" | awk '{print $5}')"
+echo "Fresh FAT32 test image ready: $IMAGE_PATH ($(ls -lh "$IMAGE_PATH" | awk '{print $5}'))"
 
 # Verify the image
 echo "Verifying filesystem..."
@@ -106,20 +105,4 @@ else
 fi
 
 echo ""
-echo "To use this image in tests, update the virtio-blk drive parameter:"
-echo "  -drive id=x0,file=$IMAGE_NAME,format=raw,if=none"
-echo ""
-echo "Files in the test image:"
-# Show contents using mtools if available
-if command -v mdir >/dev/null 2>&1; then
-    echo "Root directory:"
-    mdir -i "$IMAGE_PATH" ::
-    echo ""
-    echo "Test files directory:"
-    mdir -i "$IMAGE_PATH" ::$TEST_FILES_DIR
-else
-    echo "Install mtools to see directory contents: apt install mtools"
-fi
-
-echo ""
-echo "Image ready for testing!"
+echo "Ready for testing!"
