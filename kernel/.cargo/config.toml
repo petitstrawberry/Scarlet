@@ -1,8 +1,14 @@
 [profile.dev]
 opt-level = 0
 
+[profile.test]
+opt-level = 0
+
 [target.riscv64gc-unknown-none-elf]
-runner = "tools/test.sh"
+# Use different runners for different contexts
+# For normal runs, use run.sh
+# For tests, use test.sh (this will be overridden by CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER for tests)
+runner = "tools/run.sh"
 
 [build]
 target = "targets/riscv64gc-unknown-none-elf.json"
