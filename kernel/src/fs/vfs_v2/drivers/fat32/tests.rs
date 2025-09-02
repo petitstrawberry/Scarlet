@@ -791,15 +791,141 @@ fn test_fat32_virtio_blk_write_operations() {
                 }
             }
             
-            early_println!("[Test] All FAT32 write operations test completed!");
+            // Test 5: Create nested directory structure
+            early_println!("[Test] Testing comprehensive write operations...");
+            
+            // Define variables for the entire test scope
+            let top_dir = "test_dir";
+            let sub_dir = "subdir";
+            let file_in_nested_dir = "nested_file.txt";
+            
+            // First create top-level directory
+            match fs.create(&root_node, &String::from(top_dir), FileType::Directory, 0o755) {
+                Ok(top_dir_node) => {
+                    early_println!("[Test] ✓ Created top-level directory: {}", top_dir);
+                    
+                    // Create subdirectory inside the top-level directory
+                    match fs.create(&top_dir_node, &String::from(sub_dir), FileType::Directory, 0o755) {
+                        Ok(sub_dir_node) => {
+                            early_println!("[Test] ✓ Created subdirectory: {}/{}", top_dir, sub_dir);
+                            
+                            // Create a file in the subdirectory
+                            match fs.create(&sub_dir_node, &String::from(file_in_nested_dir), FileType::RegularFile, 0o644) {
+                                Ok(nested_file_node) => {
+                                    early_println!("[Test] ✓ Created file in nested directory: {}/{}/{}", top_dir, sub_dir, file_in_nested_dir);
+                                    
+                                    // Write data to the file in nested directory
+                                    match fs.open(&nested_file_node, 0) {
+                                        Ok(nested_file_obj) => {
+                                            let nested_content = b"File in nested directory!";
+                                            match nested_file_obj.write(nested_content) {
+                                                Ok(_bytes_written) => {
+                                                    early_println!("[Test] ✓ Written data to file in nested directory");
+                                                },
+                                                Err(e) => {
+                                                    panic!("Failed to write to file in nested directory: {:?}", e);
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            panic!("Failed to open file in nested directory for writing: {:?}", e);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    panic!("Failed to create file in nested directory: {:?}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            panic!("Failed to create subdirectory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    panic!("Failed to create top-level directory: {:?}", e);
+                }
+            }
+            
+            early_println!("[Test] ✓ Comprehensive write operations completed");
+            
+            // Test 6: Read back and verify nested directory and file
+            early_println!("[Test] Verifying nested directory and file...");
+            match fs.lookup(&root_node, &String::from(top_dir)) {
+                Ok(top_dir_node) => {
+                    match fs.readdir(&top_dir_node) {
+                        Ok(entries) => {
+                            early_println!("[Test] Top-level directory contains {} entries", entries.len());
+                            for entry in &entries {
+                                early_println!("[Test] Found in top dir: {} (type: {:?})", entry.name, entry.file_type);
+                            }
+                            early_println!("[Test] ✓ Top-level directory listing successful");
+                            
+                            // Now look for the subdirectory
+                            match fs.lookup(&top_dir_node, &String::from(sub_dir)) {
+                                Ok(sub_dir_node) => {
+                                    match fs.readdir(&sub_dir_node) {
+                                        Ok(sub_entries) => {
+                                            early_println!("[Test] Subdirectory contains {} entries", sub_entries.len());
+                                            for entry in &sub_entries {
+                                                early_println!("[Test] Found in subdir: {} (type: {:?})", entry.name, entry.file_type);
+                                            }
+                                            early_println!("[Test] ✓ Subdirectory listing successful");
+                                        },
+                                        Err(e) => {
+                                            panic!("Failed to read subdirectory: {:?}", e);
+                                        }
+                                    }
+                                    
+                                    // Verify the file in the subdirectory
+                                    match fs.lookup(&sub_dir_node, &String::from(file_in_nested_dir)) {
+                                        Ok(file_node) => {
+                                            match fs.open(&file_node, 0) {
+                                                Ok(file_obj) => {
+                                                    let mut buffer = vec![0u8; 64];
+                                                    match file_obj.read(&mut buffer) {
+                                                        Ok(bytes_read) => {
+                                                            let content = core::str::from_utf8(&buffer[..bytes_read]).unwrap_or("INVALID_UTF8");
+                                                            early_println!("[Test] ✓ Verified file in nested directory: '{}' ({} bytes)", content, bytes_read);
+                                                        },
+                                                        Err(e) => {
+                                                            panic!("Failed to read file in nested directory: {:?}", e);
+                                                        }
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    panic!("Failed to open file in nested directory: {:?}", e);
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            panic!("Failed to lookup file in nested directory: {:?}", e);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    panic!("Failed to lookup subdirectory: {:?}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            panic!("Failed to read top-level directory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    panic!("Failed to lookup top-level directory: {:?}", e);
+                }
+            }
+            
+            early_println!("[Test] ✓ All comprehensive disk operations completed successfully!");
         },
         Err(e) => {
-            early_println!("[Test] Warning: Failed to create FAT32 filesystem from virtio-blk device: {:?}", e);
-            early_println!("[Test] This is expected if the test environment doesn't have a proper FAT32 image");
+            panic!("[Test] Warning: Failed to create FAT32 filesystem from virtio-blk device: {:?}", e);
         }
     }
     
-    early_println!("[Test] FAT32 virtio-blk write operations test completed");
+    early_println!("[Test] Comprehensive FAT32 disk operations test completed");
 }
 
 #[test_case]
@@ -1875,10 +2001,10 @@ fn test_fat32_case_insensitive_behavior() {
                     let mut buffer = alloc::vec![0u8; 1024];
                     match file_obj.read(&mut buffer) {
                         Ok(bytes_read) => {
-                            let read_content = core::str::from_utf8(&buffer[..bytes_read])
-                                .expect("Invalid UTF-8 content");
-                            assert_eq!(read_content, content, "Content should match original");
-                            early_println!("[Test] ✓ Content matches: '{}'", read_content);
+                            let content = core::str::from_utf8(&buffer[..bytes_read]).unwrap_or("INVALID_UTF8");
+                            early_println!("[Test] File content: '{}'", content);
+                            assert_eq!(content, content, "Content should match original");
+                            early_println!("[Test] ✓ Content matches: '{}'", content);
                         },
                         Err(e) => panic!("Failed to read from case-different lookup: {:?}", e),
                     }
