@@ -176,15 +176,18 @@ pub struct Fat32FileObject {
     cached_content: RwLock<Option<Vec<u8>>>,
     /// Whether the cached content has been modified and needs to be written back
     is_dirty: RwLock<bool>,
+    /// Parent directory cluster (for directory entry updates)
+    parent_cluster: u32,
 }
 
 impl Fat32FileObject {
-    pub fn new(node: Arc<Fat32Node>) -> Self {
+    pub fn new(node: Arc<Fat32Node>, parent_cluster: u32) -> Self {
         Self {
             node,
             position: RwLock::new(0),
             cached_content: RwLock::new(None),
             is_dirty: RwLock::new(false),
+            parent_cluster,
         }
     }
     
@@ -229,44 +232,91 @@ impl Fat32FileObject {
         if !is_dirty {
             return Ok(()); // Nothing to sync
         }
-        
+
         let cached = self.cached_content.read();
         let content = cached.as_ref().ok_or(StreamError::IoError)?;
-        
+
         // Get filesystem reference
         let fs = self.node.filesystem.read()
             .as_ref()
             .and_then(|weak| weak.upgrade())
             .ok_or(StreamError::Closed)?;
-        
+
         // Downcast to Fat32FileSystem
         let fat32_fs = fs.as_any()
             .downcast_ref::<crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem>()
             .ok_or(StreamError::NotSupported)?;
-        
-        let cluster = self.node.cluster();
-        
+
+        let current_cluster = self.node.cluster();
+
         // Write content to disk
-        if content.len() > 0 {
-            let new_cluster = fat32_fs.write_file_content(cluster, content)
-                .map_err(|_| StreamError::IoError)?;
-            
-            // Update cluster if it changed
-            if new_cluster != cluster {
-                *self.node.cluster.write() = new_cluster;
+        let new_cluster = if content.len() > 0 {
+            fat32_fs.write_file_content(current_cluster, content)
+                .map_err(|_| StreamError::IoError)?
+        } else {
+            0 // Empty file
+        };
+
+        // crate::early_println!("[FAT32] Debug: parent_cluster={}, current_cluster={}, new_cluster={}", 
+        //                        self.parent_cluster, current_cluster, new_cluster);
+
+        // Update cluster if it changed
+        if new_cluster != current_cluster {
+            *self.node.cluster.write() = new_cluster;
+
+            // Update the directory entry to reflect the new cluster and size
+            // crate::early_println!("[FAT32] Updating directory entry: cluster={}, size={}", new_cluster, content.len());
+            if let Err(_e) = self.update_directory_entry(fat32_fs, new_cluster, content.len()) {
+                // Log error but don't fail the operation
+                #[cfg(test)]
+                {
+                    panic!("[FAT32] Error: Failed to update directory entry: {:?}", _e);
+                }
             }
         }
-        
+
         // Update file size in metadata
         {
             let mut metadata = self.node.metadata.write();
             metadata.size = content.len();
         }
-        
+
         // Clear dirty flag
         *self.is_dirty.write() = false;
-        
+
         Ok(())
+    }
+
+    /// Update the directory entry for this file
+    fn update_directory_entry(&self, fat32_fs: &crate::fs::vfs_v2::drivers::fat32::Fat32FileSystem, cluster: u32, size: usize) -> Result<(), StreamError> {
+        // Determine the actual parent cluster to use
+        let actual_parent_cluster = if self.parent_cluster == 0 {
+            // For files in root directory, use the root cluster
+            fat32_fs.root_cluster
+        } else {
+            self.parent_cluster
+        };
+        
+        // crate::early_println!("[FAT32] Debug: parent_cluster={}, actual_parent_cluster={}, updating file with cluster={}, size={}", 
+        //                        self.parent_cluster, actual_parent_cluster, cluster, size);
+
+        // Create updated directory entry
+        let filename = self.node.name.read().clone();
+        // crate::early_println!("[FAT32] Debug: Updating directory entry for filename: '{}'", filename);
+        
+        let dir_entry = crate::fs::vfs_v2::drivers::fat32::structures::Fat32DirectoryEntry::new_file(&filename, cluster, size as u32);
+
+        // Write the updated directory entry
+        match fat32_fs.update_directory_entry(actual_parent_cluster, &filename, &dir_entry) {
+            Ok(()) => {
+                // crate::early_println!("[FAT32] Debug: Successfully updated directory entry");
+                Ok(())
+            }
+            Err(e) => {
+                crate::early_println!("[FAT32] Error: Failed to update directory entry: {:?}", e);
+                Err(StreamError::IoError)
+            }
+        }
     }
 }
 
