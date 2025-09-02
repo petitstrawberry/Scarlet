@@ -1094,6 +1094,74 @@ impl Fat32FileSystem {
         
         Ok(())
     }
+
+    /// Update FS Info sector to increment free cluster count
+    fn update_fs_info_freed_cluster(&self, freed_count: u32) -> Result<(), FileSystemError> {
+        let fs_info_sector = self.boot_sector.fs_info_sector;
+        if fs_info_sector != 0 && fs_info_sector != 0xFFFF {
+            let fs_info_lba = fs_info_sector as usize;
+            
+            // Read current FS Info sector
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: fs_info_lba,
+                sector_count: 1,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; 512],
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => {
+                        let mut buffer = result.request.buffer.clone();
+                        
+                        // Check FS Info signature
+                        if &buffer[0..4] == b"RRaA" && &buffer[484..488] == b"rrAa" {
+                            // Read current free cluster count
+                            let current_free = u32::from_le_bytes([
+                                buffer[488], buffer[489], buffer[490], buffer[491]
+                            ]);
+                            
+                            // Update free cluster count (add freed clusters)
+                            let new_free = current_free.saturating_add(freed_count);
+                            let new_free_bytes = new_free.to_le_bytes();
+                            buffer[488] = new_free_bytes[0];
+                            buffer[489] = new_free_bytes[1];
+                            buffer[490] = new_free_bytes[2];
+                            buffer[491] = new_free_bytes[3];
+                            
+                            // Write back to disk
+                            let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                                request_type: crate::device::block::request::BlockIORequestType::Write,
+                                sector: fs_info_lba,
+                                sector_count: 1,
+                                head: 0,
+                                cylinder: 0,
+                                buffer,
+                            });
+                            
+                            self.block_device.enqueue_request(write_request);
+                            self.block_device.process_requests();
+                        }
+                    }
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read FS Info sector for free cluster update"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from FS Info sector read"
+                ));
+            }
+        }
+        Ok(())
+    }
     
     /// Free a cluster chain starting from the given cluster
     fn free_cluster_chain(&self, start_cluster: u32) -> Result<(), FileSystemError> {
@@ -1104,6 +1172,7 @@ impl Fat32FileSystem {
         // }
         
         let mut current = start_cluster;
+        let mut freed_count = 0;
         
         // Only process valid cluster numbers (>= 2)
         while current >= 2 && current < 0x0FFFFFF0 {
@@ -1122,6 +1191,7 @@ impl Fat32FileSystem {
             // }
             
             self.write_fat_entry(current, 0)?; // Mark as free
+            freed_count += 1;
             
             // Check if we've reached the end of chain or invalid cluster
             if next >= 0x0FFFFFF8 || next == 0 || next == 1 {
@@ -1140,6 +1210,9 @@ impl Fat32FileSystem {
         //     use crate::early_println;
         //     early_println!("[FAT32] free_cluster_chain completed");
         // }
+
+        // Update FS Info sector with number of freed clusters
+        self.update_fs_info_freed_cluster(freed_count)?;
         
         Ok(())
     }
