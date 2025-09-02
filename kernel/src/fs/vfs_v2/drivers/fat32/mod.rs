@@ -680,34 +680,34 @@ impl Fat32FileSystem {
         
         // Free existing chain if we're overwriting
         if current_cluster != 0 {
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] freeing existing cluster chain starting from cluster {}", current_cluster);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] freeing existing cluster chain starting from cluster {}", current_cluster);
+            // }
             self.free_cluster_chain(current_cluster)?;
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] finished freeing cluster chain");
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] finished freeing cluster chain");
+            // }
         }
         
         // Allocate new cluster chain
         let mut clusters = Vec::new();
         for cluster_index in 0..clusters_needed {
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] allocating cluster {} of {}", cluster_index + 1, clusters_needed);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] allocating cluster {} of {}", cluster_index + 1, clusters_needed);
+            // }
             match self.allocate_cluster() {
                 Ok(new_cluster) => {
-                    #[cfg(test)]
-                    {
-                        use crate::early_println;
-                        // early_println!("[FAT32] allocated cluster: {}", new_cluster);
-                    }
+                    // #[cfg(test)]
+                    // {
+                    //     use crate::early_println;
+                    //     // early_println!("[FAT32] allocated cluster: {}", new_cluster);
+                    // }
                     clusters.push(new_cluster);
                 }
                 Err(e) => {
@@ -722,35 +722,35 @@ impl Fat32FileSystem {
         }
         
         // Chain the clusters together in FAT
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] setting up FAT chain for {} clusters", clusters.len());
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] setting up FAT chain for {} clusters", clusters.len());
+        // }
         for i in 0..clusters.len() - 1 {
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] setting FAT entry: cluster {} -> {}", clusters[i], clusters[i + 1]);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] setting FAT entry: cluster {} -> {}", clusters[i], clusters[i + 1]);
+            // }
             self.write_fat_entry(clusters[i], clusters[i + 1])?;
         }
         // Mark the last cluster as end of chain
         if !clusters.is_empty() {
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] marking last cluster {} as end of chain", clusters[clusters.len() - 1]);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] marking last cluster {} as end of chain", clusters[clusters.len() - 1]);
+            // }
             self.write_fat_entry(clusters[clusters.len() - 1], 0x0FFFFFF8)?; // End of chain marker
         }
         
         // Write content to clusters
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] writing content to {} clusters", clusters.len());
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] writing content to {} clusters", clusters.len());
+        // }
         for (i, &cluster) in clusters.iter().enumerate() {
             let start_offset = i * cluster_size;
             let end_offset = core::cmp::min(start_offset + cluster_size, content.len());
@@ -758,43 +758,43 @@ impl Fat32FileSystem {
             if start_offset < content.len() {
                 let chunk = &content[start_offset..end_offset];
                 
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    // early_println!("[FAT32] writing cluster {}: {} bytes (offset {}..{})", cluster, chunk.len(), start_offset, end_offset);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] writing cluster {}: {} bytes (offset {}..{})", cluster, chunk.len(), start_offset, end_offset);
+                // }
                 
                 self.write_cluster_data(cluster, chunk)?;
             }
         }
         
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] write_file_content completed, start_cluster={}", clusters.first().copied().unwrap_or(0));
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] write_file_content completed, start_cluster={}", clusters.first().copied().unwrap_or(0));
+        // }
         
         Ok(clusters.first().copied().unwrap_or(0))
     }
     
     /// Read FAT entry directly from disk without caching
     fn read_fat_entry_direct(&self, cluster: u32) -> Result<u32, FileSystemError> {
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] reading FAT entry for cluster {} directly from disk", cluster);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] reading FAT entry for cluster {} directly from disk", cluster);
+        // }
         
         // Calculate FAT sector and offset
         let fat_offset = cluster * 4; // 4 bytes per FAT32 entry
         let fat_sector = self.boot_sector.reserved_sectors as u32 + (fat_offset / self.bytes_per_sector);
         let entry_offset = (fat_offset % self.bytes_per_sector) as usize;
         
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] fat_sector={}, entry_offset={}", fat_sector, entry_offset);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] fat_sector={}, entry_offset={}", fat_sector, entry_offset);
+        // }
         
         // Read FAT sector
         let buffer = vec![0u8; self.bytes_per_sector as usize];
@@ -807,20 +807,20 @@ impl Fat32FileSystem {
             buffer,
         });
         
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] enqueuing FAT read request for sector {}", fat_sector);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] enqueuing FAT read request for sector {}", fat_sector);
+        // }
         
         self.block_device.enqueue_request(request);
         let results = self.block_device.process_requests();
         
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] FAT read request completed, results.len()={}", results.len());
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] FAT read request completed, results.len()={}", results.len());
+        // }
         
         if results.is_empty() || results[0].result.is_err() {
             return Err(FileSystemError::new(
@@ -840,56 +840,56 @@ impl Fat32FileSystem {
             buffer[entry_offset + 3],
         ]) & 0x0FFFFFFF;
         
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] read FAT entry for cluster {}: {:#x}", cluster, entry);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] read FAT entry for cluster {}: {:#x}", cluster, entry);
+        // }
         
         Ok(entry)
     }
 
     /// Allocate a free cluster from the FAT and mark it as allocated
     fn allocate_cluster(&self) -> Result<u32, FileSystemError> {
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] searching for free cluster...");
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] searching for free cluster...");
+        // }
         
         // Simple allocation: find first free cluster starting from cluster 2
         for cluster in 2..100 { // Reduced search range for faster debugging
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] checking cluster {}", cluster);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] checking cluster {}", cluster);
+            // }
             
             // Read FAT entry directly without caching to avoid stale cache issues
             let fat_entry = self.read_fat_entry_direct(cluster)?;
             
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                if cluster <= 20 || fat_entry == 0 {
-                    // early_println!("[FAT32] cluster {} has FAT entry: {:#x}", cluster, fat_entry);
-                }
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     if cluster <= 20 || fat_entry == 0 {
+            //         early_println!("[FAT32] cluster {} has FAT entry: {:#x}", cluster, fat_entry);
+            //     }
+            // }
             
             if fat_entry == 0 {
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    // early_println!("[FAT32] found free cluster: {}", cluster);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] found free cluster: {}", cluster);
+                // }
                 // Mark as allocated immediately to prevent duplicate allocation
                 self.write_fat_entry(cluster, 0x0FFFFFF8)?; // End of chain marker (will be updated later if part of chain)
                 
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    // early_println!("[FAT32] allocated cluster: {}", cluster);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] allocated cluster: {}", cluster);
+                // }
                 return Ok(cluster);
             }
         }
@@ -902,49 +902,49 @@ impl Fat32FileSystem {
     
     /// Free a cluster chain starting from the given cluster
     fn free_cluster_chain(&self, start_cluster: u32) -> Result<(), FileSystemError> {
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] free_cluster_chain: starting from cluster {}", start_cluster);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] free_cluster_chain: starting from cluster {}", start_cluster);
+        // }
         
         let mut current = start_cluster;
         
         // Only process valid cluster numbers (>= 2)
         while current >= 2 && current < 0x0FFFFFF0 {
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] freeing cluster {}, reading next cluster...", current);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] freeing cluster {}, reading next cluster...", current);
+            // }
             
             let next = self.read_fat_entry(current)?;
             
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] cluster {} next = {:#x}, marking as free", current, next);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] cluster {} next = {:#x}, marking as free", current, next);
+            // }
             
             self.write_fat_entry(current, 0)?; // Mark as free
             
             // Check if we've reached the end of chain or invalid cluster
             if next >= 0x0FFFFFF8 || next == 0 || next == 1 {
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    // early_println!("[FAT32] reached end of chain at cluster {} (next={:#x})", current, next);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] reached end of chain at cluster {} (next={:#x})", current, next);
+                // }
                 break; // End of chain or invalid next cluster
             }
             current = next;
         }
         
-        #[cfg(test)]
-        {
-            // use crate::early_println;
-            // early_println!("[FAT32] free_cluster_chain completed");
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] free_cluster_chain completed");
+        // }
         
         Ok(())
     }
@@ -1138,22 +1138,22 @@ impl Fat32FileSystem {
     
     /// Write a new directory entry with LFN support to the specified directory cluster
     fn write_directory_entry_with_name(&self, dir_cluster: u32, filename: &str, cluster: u32, size: u32, is_directory: bool) -> Result<(), FileSystemError> {
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            early_println!("[FAT32] write_directory_entry_with_name: dir_cluster={}, filename='{}'", 
-                      dir_cluster, filename);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] write_directory_entry_with_name: dir_cluster={}, filename='{}'", 
+        //               dir_cluster, filename);
+        // }
         
         // Generate a unique SFN for this filename
         let unique_sfn = self.generate_unique_sfn(dir_cluster, filename)?;
         
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            let sfn_str = core::str::from_utf8(&unique_sfn).unwrap_or("<invalid>");
-            early_println!("[FAT32] generated unique SFN for '{}': '{}'", filename, sfn_str);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     let sfn_str = core::str::from_utf8(&unique_sfn).unwrap_or("<invalid>");
+        //     early_println!("[FAT32] generated unique SFN for '{}': '{}'", filename, sfn_str);
+        // }
         
         // Create the SFN entry with the generated SFN
         let entry = if is_directory {
