@@ -5,10 +5,7 @@
 
 use alloc::{sync::Arc, vec, vec::Vec, format, string::ToString};
 use crate::{
-    device::block::{mockblk::MockBlockDevice, request::BlockIORequest, request::BlockIORequestType},
-    fs::{get_fs_driver_manager, FileSystemType, FileSystemError, FileSystemErrorKind, FileType},
-    early_println,
-    object::capability::StreamOps
+    device::block::{mockblk::MockBlockDevice, request::{BlockIORequest, BlockIORequestType}}, drivers::block::virtio_blk::VirtioBlockDevice, early_println, fs::{get_fs_driver_manager, FileSystemError, FileSystemErrorKind, FileSystemType, FileType}, object::capability::StreamOps
 };
 
 use super::*;
@@ -961,4 +958,322 @@ fn test_ext2_virtio_blk_write_operations() {
     }
     
     early_println!("[Test] ext2 virtio-blk write operations test completed");
+}
+
+/// Test ext2 delete operations with virtio-blk
+#[test_case]
+fn test_ext2_virtio_blk_delete_operations() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+
+    early_println!("[Test] Starting ext2 delete operations test...");
+
+    // Create a virtio-blk device for testing
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_dev = VirtioBlockDevice::new(base_addr);
+    
+    // Register the ext2 driver if not already registered
+    let fs_driver_manager = get_fs_driver_manager();
+    fs_driver_manager.register_driver(Box::new(super::Ext2Driver));
+    
+    // Create an ext2 filesystem instance using the virtio-blk device
+    match fs_driver_manager.create_from_block("ext2", Arc::new(virtio_dev), 1024) {
+        Ok(fs) => {
+            early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
+            
+            let root_node = fs.root_node();
+            
+            // Test 1: Try to delete . and .. entries (should fail)
+            early_println!("[Test] Testing deletion of special entries...");
+            
+            let dot_name = String::from(".");
+            match fs.remove(&root_node, &dot_name) {
+                Ok(_) => {
+                    panic!("Deletion of '.' should not be allowed");
+                },
+                Err(_) => {
+                    early_println!("[Test] ✓ Correctly prevented deletion of '.' entry");
+                }
+            }
+            
+            let dotdot_name = String::from("..");
+            match fs.remove(&root_node, &dotdot_name) {
+                Ok(_) => {
+                    panic!("Deletion of '..' should not be allowed");
+                },
+                Err(_) => {
+                    early_println!("[Test] ✓ Correctly prevented deletion of '..' entry");
+                }
+            }
+            
+            // Test 2: Create and delete files with various names
+            early_println!("[Test] Testing deletion of files with various names...");
+            
+            let test_names = vec![
+                "short.txt",
+                "very_long_filename_that_tests_name_length_limits.txt",
+                "with spaces.txt",
+                "with-dashes.txt",
+                "with_underscores.txt",
+                "with.dots.txt",
+                "123numbers.txt",
+            ];
+            
+            for name in &test_names {
+                let file_name = String::from(*name);
+                
+                // Create file
+                match fs.create(&root_node, &file_name, FileType::RegularFile, 0o644) {
+                    Ok(_) => {
+                        early_println!("[Test] ✓ Created file: {}", file_name);
+                        
+                        // Try to delete it
+                        match fs.remove(&root_node, &file_name) {
+                            Ok(_) => {
+                                early_println!("[Test] ✓ Successfully deleted file: {}", file_name);
+                                
+                                // Verify the file is really gone
+                                match fs.lookup(&root_node, &file_name) {
+                                    Ok(_) => {
+                                        panic!("[Test] Deleted file '{}' still exists!", file_name);
+                                    },
+                                    Err(_) => {
+                                        early_println!("[Test] ✓ Confirmed file '{}' is deleted", file_name);
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                panic!("[Test] Failed to delete file '{}': {:?}", file_name, e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        panic!("[Test] Failed to create file '{}': {:?}", file_name, e);
+                    }
+                }
+            }
+            
+            // Test 3: Create and delete nested directories
+            early_println!("[Test] Testing nested directory deletion...");
+            
+            let parent_dir = String::from("parent_dir");
+            match fs.create(&root_node, &parent_dir, FileType::Directory, 0o755) {
+                Ok(parent_node) => {
+                    early_println!("[Test] ✓ Created parent directory: {}", parent_dir);
+                    
+                    let child_dir = String::from("child_dir");
+                    match fs.create(&parent_node, &child_dir, FileType::Directory, 0o755) {
+                        Ok(child_node) => {
+                            early_println!("[Test] ✓ Created child directory: {}", child_dir);
+                            
+                            // Create a file in the child directory
+                            let nested_file = String::from("nested_file.txt");
+                            match fs.create(&child_node, &nested_file, FileType::RegularFile, 0o644) {
+                                Ok(_) => {
+                                    early_println!("[Test] ✓ Created nested file: {}", nested_file);
+                                    
+                                    // Delete the nested file first
+                                    match fs.remove(&child_node, &nested_file) {
+                                        Ok(_) => {
+                                            early_println!("[Test] ✓ Successfully deleted nested file");
+                                            
+                                            // Verify the file is really gone
+                                            match fs.lookup(&child_node, &nested_file) {
+                                                Ok(_) => {
+                                                    panic!("[Test] Deleted file still exists!");
+                                                },
+                                                Err(_) => {
+                                                    early_println!("[Test] ✓ Confirmed nested file is deleted");
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            panic!("[Test] Failed to delete nested file: {:?}", e);
+                                        }
+                                    }
+                                    
+                                    // Delete the child directory (should be empty now)
+                                    match fs.remove(&parent_node, &child_dir) {
+                                        Ok(_) => {
+                                            early_println!("[Test] ✓ Successfully deleted child directory");
+                                            
+                                            // Verify the directory is really gone
+                                            match fs.lookup(&parent_node, &child_dir) {
+                                                Ok(_) => {
+                                                    panic!("[Test] Deleted directory still exists!");
+                                                },
+                                                Err(_) => {
+                                                    early_println!("[Test] ✓ Confirmed child directory is deleted");
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            panic!("[Test] Failed to delete child directory: {:?}", e);
+                                        }
+                                    }
+                                    
+                                    // Delete the parent directory (should be empty now)
+                                    match fs.remove(&root_node, &parent_dir) {
+                                        Ok(_) => {
+                                            early_println!("[Test] ✓ Successfully deleted parent directory");
+                                            
+                                            // Verify the parent directory is really gone
+                                            match fs.lookup(&root_node, &parent_dir) {
+                                                Ok(_) => {
+                                                    panic!("[Test] Deleted parent directory still exists!");
+                                                },
+                                                Err(_) => {
+                                                    early_println!("[Test] ✓ Confirmed parent directory is deleted");
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            panic!("[Test] Failed to delete parent directory: {:?}", e);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    panic!("[Test] Failed to create nested file: {:?}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            panic!("[Test] Failed to create child directory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to create parent directory: {:?}", e);
+                }
+            }
+            
+            // Test 4: Test deletion of non-existent files (should fail gracefully)
+            early_println!("[Test] Testing deletion of non-existent files...");
+            
+            let nonexistent_file = String::from("this_file_does_not_exist.txt");
+            match fs.remove(&root_node, &nonexistent_file) {
+                Ok(_) => {
+                    panic!("[Test] Deletion of non-existent file should fail");
+                },
+                Err(_) => {
+                    early_println!("[Test] ✓ Correctly failed to delete non-existent file");
+                }
+            }
+            
+            let nonexistent_dir = String::from("this_dir_does_not_exist");
+            match fs.remove(&root_node, &nonexistent_dir) {
+                Ok(_) => {
+                    panic!("[Test] Deletion of non-existent directory should fail");
+                },
+                Err(_) => {
+                    early_println!("[Test] ✓ Correctly failed to delete non-existent directory");
+                }
+            }
+            
+            // Test 5: Test deletion with special characters in names
+            early_println!("[Test] Testing deletion of files with special characters...");
+            
+            let special_names = vec![
+                "file with spaces.txt",
+                "file-with-hyphens.txt", 
+                "file_with_underscores.txt",
+                "file.with.many.dots.txt",
+                "123numeric_start.txt",
+                "UPPERCASE.TXT",
+                "mixedCaSe.txt",
+            ];
+            
+            for name in &special_names {
+                let file_name = String::from(*name);
+                
+                // Create file with special name
+                match fs.create(&root_node, &file_name, FileType::RegularFile, 0o644) {
+                    Ok(_) => {
+                        early_println!("[Test] ✓ Created file with special name: {}", file_name);
+                        
+                        // Delete it
+                        match fs.remove(&root_node, &file_name) {
+                            Ok(_) => {
+                                early_println!("[Test] ✓ Successfully deleted file with special name: {}", file_name);
+                            },
+                            Err(e) => {
+                                panic!("[Test] Failed to delete file with special name '{}': {:?}", file_name, e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        panic!("[Test] Failed to create file with special name '{}': {:?}", file_name, e);
+                    }
+                }
+            }
+            
+            // Test 6: Test bulk creation and deletion
+            early_println!("[Test] Testing bulk creation and deletion...");
+            
+            let mut created_files = Vec::new();
+            for i in 0..10 {
+                let file_name = format!("bulk_test_file_{}.txt", i);
+                match fs.create(&root_node, &file_name, FileType::RegularFile, 0o644) {
+                    Ok(_) => {
+                        early_println!("[Test] ✓ Created bulk file: {}", file_name);
+                        created_files.push(file_name);
+                    },
+                    Err(e) => {
+                        panic!("[Test] Failed to create bulk file {}: {:?}", file_name, e);
+                    }
+                }
+            }
+            
+            // Delete all bulk files
+            for file_name in &created_files {
+                match fs.remove(&root_node, file_name) {
+                    Ok(_) => {
+                        early_println!("[Test] ✓ Successfully deleted bulk file: {}", file_name);
+                    },
+                    Err(e) => {
+                        panic!("[Test] Failed to delete bulk file '{}': {:?}", file_name, e);
+                    }
+                }
+            }
+            
+            // Test 7: Verify directory state after all deletions
+            early_println!("[Test] Verifying root directory state after all deletions...");
+            match fs.readdir(&root_node) {
+                Ok(entries) => {
+                    early_println!("[Test] Root directory contains {} entries after all deletion tests", entries.len());
+                    for entry in &entries {
+                        early_println!("[Test] Remaining entry: {} (type: {:?})", entry.name, entry.file_type);
+                    }
+                    
+                    // Should only have the original files and directories, plus "." and ".."
+                    let expected_system_entries = vec![".", ".."];
+                    let mut system_entry_count = 0;
+                    
+                    for entry in &entries {
+                        if expected_system_entries.contains(&entry.name.as_str()) {
+                            system_entry_count += 1;
+                        }
+                    }
+                    
+                    if system_entry_count == expected_system_entries.len() {
+                        early_println!("[Test] ✓ System entries (. and ..) are present");
+                    } else {
+                        panic!("[Test] System entries count mismatch. Expected {}, found {}", 
+                               expected_system_entries.len(), system_entry_count);
+                    }
+                    
+                    early_println!("[Test] ✓ Root directory integrity maintained after all deletions");
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read root directory after all deletions: {:?}", e);
+                }
+            }
+
+            early_println!("[Test] ext2 delete edge cases test completed");
+        },
+        Err(e) => {
+            panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
+        }
+    }
+    
+    early_println!("[Test] ext2 delete edge cases test completed");
 }
