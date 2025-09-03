@@ -362,6 +362,62 @@ impl Ext2FileSystem {
             ))
         }
     }
+
+    /// Read the entire content of a file given its inode number
+    pub fn read_file_content(&self, inode_num: u32, size: usize) -> Result<Vec<u8>, FileSystemError> {
+        let inode = self.read_inode(inode_num)?;
+        let mut content = Vec::with_capacity(size);
+        let mut remaining = size;
+        let mut current_block = 0;
+
+        while remaining > 0 {
+            let block_num = self.get_inode_block(&inode, current_block)?;
+            if block_num == 0 {
+                // Sparse block - fill with zeros
+                let bytes_to_add = core::cmp::min(remaining, self.block_size as usize);
+                content.extend_from_slice(&vec![0u8; bytes_to_add]);
+                remaining -= bytes_to_add;
+            } else {
+                // Read the block
+                let block_sector = block_num * 2; // Convert block to sector
+                let request = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Read,
+                    sector: block_sector as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: vec![0u8; self.block_size as usize],
+                });
+                
+                self.block_device.enqueue_request(request);
+                let results = self.block_device.process_requests();
+                
+                let block_data = if let Some(result) = results.first() {
+                    match &result.result {
+                        Ok(_) => result.request.buffer.clone(),
+                        Err(_) => return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read file block"
+                        )),
+                    }
+                } else {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "No result from block device read"
+                    ));
+                };
+
+                // Add the needed bytes from this block
+                let bytes_to_add = core::cmp::min(remaining, self.block_size as usize);
+                content.extend_from_slice(&block_data[..bytes_to_add]);
+                remaining -= bytes_to_add;
+            }
+
+            current_block += 1;
+        }
+
+        Ok(content)
+    }
 }
 
 impl FileSystemOperations for Ext2FileSystem {
@@ -487,7 +543,14 @@ impl FileSystemOperations for Ext2FileSystem {
                         FileSystemErrorKind::InvalidOperation,
                         "Node is not an Ext2Node"
                     ))?;
-                Ok(Arc::new(Ext2FileObject::new(ext2_node.inode_number(), ext2_node.id())))
+                let file_obj = Arc::new(Ext2FileObject::new(ext2_node.inode_number(), ext2_node.id()));
+                
+                // Set filesystem reference
+                if let Some(fs_weak) = ext2_node.filesystem() {
+                    file_obj.set_filesystem(fs_weak);
+                }
+                
+                Ok(file_obj)
             },
             FileType::Directory => {
                 let ext2_node = node.as_any().downcast_ref::<Ext2Node>()
@@ -495,7 +558,14 @@ impl FileSystemOperations for Ext2FileSystem {
                         FileSystemErrorKind::InvalidOperation,
                         "Node is not an Ext2Node"
                     ))?;
-                Ok(Arc::new(Ext2DirectoryObject::new(ext2_node.inode_number(), ext2_node.id())))
+                let dir_obj = Arc::new(Ext2DirectoryObject::new(ext2_node.inode_number(), ext2_node.id()));
+                
+                // Set filesystem reference
+                if let Some(fs_weak) = ext2_node.filesystem() {
+                    dir_obj.set_filesystem(fs_weak);
+                }
+                
+                Ok(dir_obj)
             },
             _ => Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
