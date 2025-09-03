@@ -28,16 +28,17 @@ fn test_ext2_mockdevice_basic_creation() {
     // Try to create ext2 filesystem from the mock device
     match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
         Ok(fs) => {
-            early_println!("[Test] Successfully created ext2 filesystem from mock device");
+            // early_println!("[Test] Successfully created ext2 filesystem from mock device");
             
             // Get the root node
-            let root_node = fs.root_node();
-            early_println!("[Test] Got root node with ID: {}", root_node.id());
+            let _root_node = fs.root_node();
+            // early_println!("[Test] Got root node with ID: {}", root_node.id());
             
             // Test basic filesystem operations
             assert_eq!(fs.name(), "ext2");
         },
         Err(e) => {
+            //早期実行で期待される失敗のケース - エラーログは抑制せずに残す
             early_println!("[Test] Failed to create ext2 filesystem from mock device: {:?}", e);
             early_println!("[Test] This is expected since our mock device doesn't have proper ext2 structure");
             assert!(
@@ -58,7 +59,7 @@ fn test_ext2_mockdevice_directory_operations() {
     
     match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
         Ok(fs) => {
-            early_println!("[Test] Successfully created ext2 filesystem with files");
+            // early_println!("[Test] Successfully created ext2 filesystem with files");
             
             // Get the root node
             let root_node = fs.root_node();
@@ -66,18 +67,18 @@ fn test_ext2_mockdevice_directory_operations() {
             // Test directory reading
             match fs.readdir(&root_node) {
                 Ok(entries) => {
-                    early_println!("[Test] Root directory contains {} entries", entries.len());
-                    for entry in &entries {
-                        early_println!("[Test] Found entry: {} (type: {:?})", entry.name, entry.file_type);
+                    // early_println!("[Test] Root directory contains {} entries", entries.len());
+                    for _entry in &entries {
+                        // early_println!("[Test] Found entry: {} (type: {:?})", entry.name, entry.file_type);
                     }
                 },
-                Err(e) => {
-                    early_println!("[Test] Failed to read directory: {:?}", e);
+                Err(_e) => {
+                    // early_println!("[Test] Failed to read directory: {:?}", e);
                 }
             }
         },
-        Err(e) => {
-            early_println!("[Test] Expected failure for mock device: {:?}", e);
+        Err(_e) => {
+            // early_println!("[Test] Expected failure for mock device: {:?}", e);
             // Expected to fail since our mock device structure is incomplete
         }
     }
@@ -87,19 +88,19 @@ fn test_ext2_mockdevice_directory_operations() {
 fn test_ext2_superblock_parsing() {
     use super::structures::*;
     
-    early_println!("[Test] Starting ext2 superblock parsing test");
+    // early_println!("[Test] Starting ext2 superblock parsing test");
     
     // Create a minimal valid ext2 superblock
     let mut superblock_data = vec![0u8; 1024];  // Standard ext2 superblock size
     
-    early_println!("[Test] Created superblock data buffer of size {}", superblock_data.len());
+    // early_println!("[Test] Created superblock data buffer of size {}", superblock_data.len());
     
     // Fill in essential superblock fields manually
     // Magic at offset 56 (0x38)
     superblock_data[56] = (EXT2_SUPER_MAGIC & 0xFF) as u8;
     superblock_data[57] = ((EXT2_SUPER_MAGIC >> 8) & 0xFF) as u8;
     
-    early_println!("[Test] Set magic bytes to {:02x} {:02x}", superblock_data[56], superblock_data[57]);
+    // early_println!("[Test] Set magic bytes to {:02x} {:02x}", superblock_data[56], superblock_data[57]);
     
     // blocks_count at offset 4
     superblock_data[4] = 0x00;
@@ -121,8 +122,8 @@ fn test_ext2_superblock_parsing() {
     
     // Test that the magic bytes are set correctly
     let magic_from_bytes = u16::from_le_bytes([superblock_data[56], superblock_data[57]]);
-    early_println!("[Test] Magic bytes from data: {:04x}, Expected: {:04x}", magic_from_bytes, EXT2_SUPER_MAGIC);
-    early_println!("[Test] Raw bytes at 56-57: {:02x} {:02x}", superblock_data[56], superblock_data[57]);
+    // early_println!("[Test] Magic bytes from data: {:04x}, Expected: {:04x}", magic_from_bytes, EXT2_SUPER_MAGIC);
+    // early_println!("[Test] Raw bytes at 56-57: {:02x} {:02x}", superblock_data[56], superblock_data[57]);
     assert_eq!(magic_from_bytes, EXT2_SUPER_MAGIC, "Magic bytes should be set correctly");
     
     // Test superblock parsing
@@ -146,7 +147,7 @@ fn test_ext2_superblock_parsing() {
     assert_eq!(blocks_count, 8192);
     assert_eq!(inodes_count, 2048);
     
-    early_println!("[Test] ✓ ext2 superblock parsing test passed");
+    // early_println!("[Test] ✓ ext2 superblock parsing test passed");
 }
 
 #[test_case]
@@ -182,7 +183,7 @@ fn test_ext2_inode_parsing() {
     assert_eq!(size, 1024);
     assert_eq!(links_count, 1);
     
-    early_println!("[Test] ✓ ext2 inode parsing test passed");
+    // early_println!("[Test] ✓ ext2 inode parsing test passed");
 }
 
 #[test_case]
@@ -214,7 +215,7 @@ fn test_ext2_directory_entry_parsing() {
     assert_eq!(name_len, name.len() as u8);
     assert_eq!(name, "test.txt");
     
-    early_println!("[Test] ✓ ext2 directory entry parsing test passed");
+    // early_println!("[Test] ✓ ext2 directory entry parsing test passed");
 }
 
 #[test_case]
@@ -260,7 +261,7 @@ fn test_ext2_block_group_descriptor_parsing() {
     assert_eq!(inode_table, 5);
     assert_eq!(free_blocks_count, 1000);
     
-    early_println!("[Test] ✓ ext2 block group descriptor parsing test passed");
+    // early_println!("[Test] ✓ ext2 block group descriptor parsing test passed");
 }
 
 #[test_case]
@@ -279,13 +280,13 @@ fn test_ext2_node_creation() {
     assert_eq!(dir_node.id(), 1);
     assert_eq!(dir_node.file_type().unwrap(), FileType::Directory);
     
-    early_println!("[Test] ✓ ext2 node creation test passed");
+    // early_println!("[Test] ✓ ext2 node creation test passed");
 }
 
 #[test_case]
 fn test_ext2_file_object_operations() {
     use super::node::*;
-    use crate::fs::SeekFrom;
+    // use crate::fs::SeekFrom; // 使用されていないため無効化
     use crate::object::capability::StreamOps;
     
     // Create a file object
@@ -307,7 +308,7 @@ fn test_ext2_file_object_operations() {
     // Read should fail since no filesystem reference is set, but should not panic
     assert!(read_result.is_err(), "Read should error when no filesystem is set");
     
-    early_println!("[Test] ✓ ext2 file object operations test passed");
+    // early_println!("[Test] ✓ ext2 file object operations test passed");
 }
 
 // Helper function to create a mock ext2 device with proper structure
@@ -389,7 +390,7 @@ fn create_test_ext2_device() -> MockBlockDevice {
 
 // Helper function to create a mock ext2 device with files and directories
 fn create_test_ext2_device_with_files() -> MockBlockDevice {
-    let mut mock_device = create_test_ext2_device();
+    let mock_device = create_test_ext2_device();
     
     // This would be much more complex in a real implementation
     // For now, just return the basic device
@@ -401,7 +402,7 @@ fn create_test_ext2_device_with_files() -> MockBlockDevice {
 // Test that verifies ext2 can handle realistic filesystem operations
 #[test_case]
 fn test_ext2_realistic_operations() {
-    early_println!("[Test] Running ext2 realistic operations test");
+    // early_println!("[Test] Running ext2 realistic operations test");
     
     let fs_driver_manager = get_fs_driver_manager();
     
@@ -411,11 +412,11 @@ fn test_ext2_realistic_operations() {
     
     match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
         Ok(fs) => {
-            early_println!("[Test] Successfully created ext2 filesystem");
+            // early_println!("[Test] Successfully created ext2 filesystem");
             
             // Test root node access
             let root_node = fs.root_node();
-            early_println!("[Test] Got root node with ID: {}", root_node.id());
+            // early_println!("[Test] Got root node with ID: {}", root_node.id());
             
             // Test filesystem metadata operations
             assert_eq!(fs.name(), "ext2");
@@ -423,20 +424,20 @@ fn test_ext2_realistic_operations() {
             // Test root directory metadata
             if let Ok(file) = fs.open(&root_node, 0) {
                 if let Ok(metadata) = file.metadata() {
-                    early_println!("[Test] Root directory metadata - size: {}, type: {:?}", 
-                                 metadata.size, metadata.file_type);
+                    // early_println!("[Test] Root directory metadata - size: {}, type: {:?}", 
+                    //              metadata.size, metadata.file_type);
                     assert_eq!(metadata.file_type, crate::fs::FileType::Directory);
                 }
             }
             
-            early_println!("[Test] ✓ Realistic ext2 operations test passed!");
+            // early_println!("[Test] ✓ Realistic ext2 operations test passed!");
         },
-        Err(e) => {
-            early_println!("[Test] Expected filesystem creation failure for mock device: {:?}", e);
+        Err(_e) => {
+            // early_println!("[Test] Expected filesystem creation failure for mock device: {:?}", e);
             // This is expected since our mock device doesn't have complete ext2 structure
             assert!(
-                e.kind == FileSystemErrorKind::IoError || 
-                e.kind == FileSystemErrorKind::InvalidData
+                _e.kind == FileSystemErrorKind::IoError || 
+                _e.kind == FileSystemErrorKind::InvalidData
             );
         }
     }
@@ -445,7 +446,7 @@ fn test_ext2_realistic_operations() {
 // Test ext2 memory mapping operations 
 #[test_case]
 fn test_ext2_memory_mapping_operations() {
-    early_println!("[Test] Running ext2 memory mapping operations test");
+    // early_println!("[Test] Running ext2 memory mapping operations test");
     
     let fs_driver_manager = get_fs_driver_manager();
     let mock_device = create_test_ext2_device();
@@ -461,22 +462,22 @@ fn test_ext2_memory_mapping_operations() {
                 // Test supports_mmap
                 assert!(!file.supports_mmap()); // Directory shouldn't support mmap
                 
-                early_println!("[Test] ✓ Memory mapping capability detection works");
+                // early_println!("[Test] ✓ Memory mapping capability detection works");
             }
         },
         Err(_) => {
-            early_println!("[Test] Filesystem creation failed as expected for mock device");
+            // early_println!("[Test] Filesystem creation failed as expected for mock device");
             // This is expected behavior for incomplete mock data
         }
     }
     
-    early_println!("[Test] Memory mapping operations test completed");
+    // early_println!("[Test] Memory mapping operations test completed");
 }
 
 // Test ext2 file content and metadata reading
 #[test_case] 
 fn test_ext2_file_content_and_metadata() {
-    early_println!("[Test] Running ext2 file content and metadata test");
+    // early_println!("[Test] Running ext2 file content and metadata test");
     
     let fs_driver_manager = get_fs_driver_manager();
     let mock_device = create_test_ext2_device();
@@ -490,8 +491,8 @@ fn test_ext2_file_content_and_metadata() {
             if let Ok(file) = fs.open(&root_node, 0) {
                 // Test metadata operation
                 if let Ok(metadata) = file.metadata() {
-                    early_println!("[Test] Successfully read metadata: size={}, permissions={:?}", 
-                                 metadata.size, metadata.permissions);
+                    // early_println!("[Test] Successfully read metadata: size={}, permissions={:?}", 
+                    //              metadata.size, metadata.permissions);
                     
                     // Verify this is a directory
                     assert_eq!(metadata.file_type, crate::fs::FileType::Directory);
@@ -499,25 +500,25 @@ fn test_ext2_file_content_and_metadata() {
                 
                 // Test seek operations
                 if let Ok(new_pos) = file.seek(crate::object::capability::file::SeekFrom::Start(0)) {
-                    early_println!("[Test] Seek to start: {}", new_pos);
+                    // early_println!("[Test] Seek to start: {}", new_pos);
                     assert_eq!(new_pos, 0);
                 }
             }
             
-            early_println!("[Test] ✓ File content and metadata test passed!");
+            // early_println!("[Test] ✓ File content and metadata test passed!");
         },
-        Err(e) => {
-            early_println!("[Test] Expected filesystem failure: {:?}", e);
+        Err(_e) => {
+            // early_println!("[Test] Expected filesystem failure: {:?}", e);
             // Expected for mock device without complete ext2 structure
         }
     }
     
-    early_println!("[Test] File content and metadata test completed");
+    // early_println!("[Test] File content and metadata test completed");
 }
 
 #[test_case]
 fn test_ext2_comprehensive_mock_operations() {
-    early_println!("[Test] Running comprehensive ext2 mock operations test");
+    // early_println!("[Test] Running comprehensive ext2 mock operations test");
     
     let fs_driver_manager = get_fs_driver_manager();
     
@@ -528,29 +529,29 @@ fn test_ext2_comprehensive_mock_operations() {
     // Test filesystem creation
     match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
         Ok(fs) => {
-            early_println!("[Test] Successfully created ext2 filesystem");
+            // early_println!("[Test] Successfully created ext2 filesystem");
             
             // Test root node access
-            let root_node = fs.root_node();
-            early_println!("[Test] Got root node with ID: {}", root_node.id());
+            let _root_node = fs.root_node();
+            // early_println!("[Test] Got root node with ID: {}", root_node.id());
             
             // Test filesystem name
             assert_eq!(fs.name(), "ext2");
-            early_println!("[Test] Filesystem name: {}", fs.name());
+            // early_println!("[Test] Filesystem name: {}", fs.name());
             
-            early_println!("[Test] ✓ All basic ext2 operations completed successfully!");
+            // early_println!("[Test] ✓ All basic ext2 operations completed successfully!");
         },
-        Err(e) => {
-            early_println!("[Test] Expected filesystem creation failure: {:?}", e);
+        Err(_e) => {
+            // early_println!("[Test] Expected filesystem creation failure: {:?}", e);
             // This is expected since our mock device doesn't have complete ext2 structure
             assert!(
-                e.kind == FileSystemErrorKind::IoError || 
-                e.kind == FileSystemErrorKind::InvalidData
+                _e.kind == FileSystemErrorKind::IoError || 
+                _e.kind == FileSystemErrorKind::InvalidData
             );
         }
     }
     
-    early_println!("[Test] Comprehensive ext2 mock operations test completed");
+    // early_println!("[Test] Comprehensive ext2 mock operations test completed");
 }
 
 // ========== ext2 virtio-blk Integration Tests ==========
@@ -560,14 +561,14 @@ fn test_ext2_comprehensive_mock_operations() {
 fn test_ext2_virtio_blk_filesystem() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
-    early_println!("[Test] Testing ext2 with virtio-blk...");
+    // early_println!("[Test] Testing ext2 with virtio-blk...");
 
     // Create a virtio-blk device for testing ext2 image on bus.5
     let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
-    early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
-    early_println!("[Test] Device size: {} bytes", virtio_device.get_disk_size());
+    // early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
+    // early_println!("[Test] Device size: {} bytes", virtio_device.get_disk_size());
 
     // Register the ext2 driver if not already registered
     let fs_driver_manager = get_fs_driver_manager();
@@ -598,15 +599,15 @@ fn test_ext2_virtio_blk_filesystem() {
             let block_device_arc = Arc::new(virtio_device);
             match fs_driver_manager.create_from_block("ext2", block_device_arc, 1024) {
                 Ok(fs) => {
-                    early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
+                    // early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
                     
                     // Get the root node
-                    let root_node = fs.root_node();
-                    early_println!("[Test] Got root node with ID: {}", root_node.id());
+                    let _root_node = fs.root_node();
+                    // early_println!("[Test] Got root node with ID: {}", root_node.id());
                     
                     // Verify filesystem type
                     assert_eq!(fs.name(), "ext2");
-                    early_println!("[Test] ✓ Confirmed ext2 filesystem on virtio-blk device");
+                    // early_println!("[Test] ✓ Confirmed ext2 filesystem on virtio-blk device");
                 },
                 Err(e) => {
                     early_println!("[Test] Failed to create ext2 filesystem: {:?}", e);
@@ -619,21 +620,21 @@ fn test_ext2_virtio_blk_filesystem() {
         }
     }
 
-    early_println!("[Test] ext2 virtio-blk integration test completed successfully");
+    // early_println!("[Test] ext2 virtio-blk integration test completed successfully");
 }
 
 #[test_case] 
 fn test_ext2_virtio_blk_file_operations() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
-    early_println!("[Test] Testing ext2 file operations with virtio-blk...");
+    // early_println!("[Test] Testing ext2 file operations with virtio-blk...");
 
     // Create a virtio-blk device for testing
     let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
-    early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
-    early_println!("[Test] Device size: {} bytes", virtio_device.get_disk_size());
+    // early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
+    // early_println!("[Test] Device size: {} bytes", virtio_device.get_disk_size());
 
     // Create ext2 filesystem from the virtio-blk device
     let fs_driver_manager = get_fs_driver_manager();
@@ -641,21 +642,21 @@ fn test_ext2_virtio_blk_file_operations() {
 
     match fs_driver_manager.create_from_block("ext2", block_device_arc, 1024) {
         Ok(fs) => {
-            early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
+            // early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
             
             // Get the root node
             let root_node = fs.root_node();
-            early_println!("[Test] Got root node for file operations");
+            // early_println!("[Test] Got root node for file operations");
             
             // Test 1: Read root directory
-            early_println!("[Test] Reading root directory...");
+            // early_println!("[Test] Reading root directory...");
             match fs.readdir(&root_node) {
                 Ok(entries) => {
-                    early_println!("[Test] Root directory contains {} entries", entries.len());
-                    for entry in &entries {
-                        early_println!("[Test] Found: {} (type: {:?})", entry.name, entry.file_type);
+                    // early_println!("[Test] Root directory contains {} entries", entries.len());
+                    for _entry in &entries {
+                        // early_println!("[Test] Found: {} (type: {:?})", entry.name, entry.file_type);
                     }
-                    early_println!("[Test] ✓ Root directory read successful");
+                    // early_println!("[Test] ✓ Root directory read successful");
                 },
                 Err(e) => {
                     panic!("Could not read root directory: {:?}", e);
@@ -663,25 +664,25 @@ fn test_ext2_virtio_blk_file_operations() {
             }
             
             // Test 2: Look for and read hello.txt file
-            early_println!("[Test] Looking for hello.txt file...");
+            // early_println!("[Test] Looking for hello.txt file...");
             match fs.lookup(&root_node, &String::from("hello.txt")) {
                 Ok(file_node) => {
-                    early_println!("[Test] Successfully found hello.txt");
+                    // early_println!("[Test] Successfully found hello.txt");
                     match fs.open(&file_node, 0) {
                         Ok(file_obj) => {
                             let mut buffer = vec![0u8; 64];
                             match file_obj.read(&mut buffer) {
                                 Ok(bytes_read) => {
-                                    early_println!("[Test] Read {} bytes from hello.txt", bytes_read);
+                                    // early_println!("[Test] Read {} bytes from hello.txt", bytes_read);
                                     
                                     // Convert to string and verify content
                                     let content = core::str::from_utf8(&buffer[..bytes_read])
                                         .unwrap_or("INVALID_UTF8");
-                                    early_println!("[Test] File content: '{}'", content);
+                                    // early_println!("[Test] File content: '{}'", content);
                                     
                                     let expected = "Hello, Scarlet!\n";
                                     assert_eq!(content, expected, "hello.txt content should match expected text");
-                                    early_println!("[Test] ✓ File read operation successful");
+                                    // early_println!("[Test] ✓ File read operation successful");
                                 },
                                 Err(e) => {
                                     panic!("Failed to read from hello.txt: {:?}", e);
@@ -693,8 +694,8 @@ fn test_ext2_virtio_blk_file_operations() {
                         }
                     }
                 },
-                Err(e) => {
-                    early_println!("[Test] Could not find hello.txt: {:?}", e);
+                Err(_e) => {
+                    // early_println!("[Test] Could not find hello.txt: {:?}", e);
                 }
             }
             
@@ -1289,12 +1290,11 @@ fn test_ext2_virtio_blk_symlink_operations() {
     
     match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
         Ok(fs) => {
-            early_println!("[Test] Starting ext2 symlink operations test");
+            // early_println!("[Test] Starting ext2 symlink operations test");
             
             let root_node = fs.root_node();
             
             // Test 1: Create a fast symlink (short target path)
-            early_println!("[Test] Creating fast symlink...");
             let fast_target = "/short/path".to_string();
             let fast_symlink = match fs.create(
                 &root_node,
@@ -1302,10 +1302,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
                 FileType::SymbolicLink(fast_target.clone()),
                 0o777
             ) {
-                Ok(node) => {
-                    early_println!("[Test] ✓ Fast symlink created successfully");
-                    node
-                },
+                Ok(node) => node,
                 Err(e) => {
                     panic!("[Test] Failed to create fast symlink: {:?}", e);
                 }
@@ -1315,7 +1312,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
             match fast_symlink.read_link() {
                 Ok(target) => {
                     if target == fast_target {
-                        early_println!("[Test] ✓ Fast symlink target read correctly: {}", target);
+                        // early_println!("[Test] ✓ Fast symlink target read correctly: {}", target);
                     } else {
                         panic!("[Test] Fast symlink target mismatch. Expected: {}, Got: {}", fast_target, target);
                     }
@@ -1326,7 +1323,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
             }
             
             // Test 3: Create a slow symlink (long target path)
-            early_println!("[Test] Creating slow symlink...");
+            // early_println!("[Test] Creating slow symlink...");
             let slow_target = "/this/is/a/very/long/path/that/exceeds/sixty/characters/and/should/be/stored/in/data/blocks".to_string();
             let slow_symlink = match fs.create(
                 &root_node,
@@ -1335,7 +1332,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
                 0o777
             ) {
                 Ok(node) => {
-                    early_println!("[Test] ✓ Slow symlink created successfully");
+                    // early_println!("[Test] ✓ Slow symlink created successfully");
                     node
                 },
                 Err(e) => {
@@ -1347,7 +1344,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
             match slow_symlink.read_link() {
                 Ok(target) => {
                     if target == slow_target {
-                        early_println!("[Test] ✓ Slow symlink target read correctly (length: {})", target.len());
+                        // early_println!("[Test] ✓ Slow symlink target read correctly (length: {})", target.len());
                     } else {
                         panic!("[Test] Slow symlink target mismatch. Expected length: {}, Got length: {}", slow_target.len(), target.len());
                     }
@@ -1358,7 +1355,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
             }
             
             // Test 5: Verify symlinks appear in directory listing
-            early_println!("[Test] Checking directory listing for symlinks...");
+            // early_println!("[Test] Checking directory listing for symlinks...");
             match fs.readdir(&root_node) {
                 Ok(entries) => {
                     let mut fast_link_found = false;
@@ -1367,11 +1364,11 @@ fn test_ext2_virtio_blk_symlink_operations() {
                     for entry in &entries {
                         if entry.name == "fast_link" {
                             fast_link_found = true;
-                            early_println!("[Test] ✓ Fast symlink found in directory listing");
+                            // early_println!("[Test] ✓ Fast symlink found in directory listing");
                         }
                         if entry.name == "slow_link" {
                             slow_link_found = true;
-                            early_println!("[Test] ✓ Slow symlink found in directory listing");
+                            // early_println!("[Test] ✓ Slow symlink found in directory listing");
                         }
                     }
                     

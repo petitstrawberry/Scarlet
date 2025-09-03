@@ -759,8 +759,8 @@ impl Ext2FileSystem {
                 
                 let allocated_block = bit + 1; // Convert back to 1-based block number
                 
-                #[cfg(test)]
-                crate::early_println!("EXT2: Allocated block {} (bit {})", allocated_block, bit);
+                // Debug: Allocated block (disabled to reduce log noise)
+                // crate::early_println!("EXT2: Allocated block {} (bit {})", allocated_block, bit);
                 
                 return Ok(allocated_block as u64);
             }
@@ -899,8 +899,8 @@ impl Ext2FileSystem {
                 
                 let allocated_inode = bit + 1; // Convert back to 1-based inode number
                 
-                #[cfg(test)]
-                crate::early_println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
+                // Debug: Allocated inode (disabled to reduce log noise)
+                // crate::early_println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
                 
                 return Ok(allocated_inode);
             }
@@ -1195,8 +1195,8 @@ impl Ext2FileSystem {
         
         // Free all data blocks used by this inode
         for block_num in blocks_to_free {
-            #[cfg(test)]
-            crate::early_println!("EXT2: Freeing data block {}", block_num);
+            // Debug: Freeing data block (disabled to reduce log noise)
+            // crate::early_println!("EXT2: Freeing data block {}", block_num);
             self.free_block(block_num)?;
         }
         
@@ -1903,9 +1903,9 @@ impl Ext2FileSystem {
             let bytes = new_count.to_le_bytes();
             superblock_data[12..16].copy_from_slice(&bytes);
             
-            #[cfg(test)]
-            crate::early_println!("EXT2: Updated free_blocks_count: {} -> {} (delta: {})", 
-                                  current, new_count, block_delta);
+            // Debug: Updated free_blocks_count (disabled to reduce log noise)
+            // crate::early_println!("EXT2: Updated free_blocks_count: {} -> {} (delta: {})", 
+            //                       current, new_count, block_delta);
         }
 
         if inode_delta != 0 {
@@ -1920,9 +1920,9 @@ impl Ext2FileSystem {
             let bytes = new_count.to_le_bytes();
             superblock_data[16..20].copy_from_slice(&bytes);
             
-            #[cfg(test)]
-            crate::early_println!("EXT2: Updated free_inodes_count: {} -> {} (delta: {})", 
-                                  current, new_count, inode_delta);
+            // Debug: Updated free_inodes_count (disabled to reduce log noise)
+            // crate::early_println!("EXT2: Updated free_inodes_count: {} -> {} (delta: {})", 
+            //                       current, new_count, inode_delta);
         }
 
         // Write back superblock
@@ -1940,9 +1940,8 @@ impl Ext2FileSystem {
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
-                Ok(_) => {
-                    #[cfg(test)]
-                    crate::early_println!("EXT2: Superblock successfully updated");
+                Ok(_) => {                // Debug: Superblock successfully updated (disabled to reduce log noise)
+                // crate::early_println!("EXT2: Superblock successfully updated");
                     Ok(())
                 },
                 Err(_) => Err(FileSystemError::new(
