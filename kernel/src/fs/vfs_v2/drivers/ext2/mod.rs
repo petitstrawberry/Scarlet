@@ -1344,6 +1344,8 @@ impl Ext2FileSystem {
             ));
         }
 
+        self.clear_inode_on_disk(inode_number)?;
+
         // Update superblock statistics
         self.update_superblock_free_counts(0, 1)?;
 
@@ -1352,6 +1354,13 @@ impl Ext2FileSystem {
             let mut cache = self.inode_cache.lock();
             cache.remove(&inode_number);
         }
+
+        Ok(())
+    }
+
+    fn clear_inode_on_disk(&self, inode_number: u32) -> Result<(), FileSystemError> {
+        let inode = Ext2Inode::empty();
+        self.write_inode(inode_number, &inode)?;
 
         Ok(())
     }
