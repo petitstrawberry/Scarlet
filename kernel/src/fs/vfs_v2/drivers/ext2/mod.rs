@@ -439,20 +439,227 @@ impl Ext2FileSystem {
         Ok(next_inode)
     }
     
-    /// Write an inode to disk (simplified implementation)
+    /// Write an inode to disk
     fn write_inode(&self, inode_number: u32, inode: &Ext2Inode) -> Result<(), FileSystemError> {
-        // For a complete implementation, this would:
-        // 1. Calculate which block group contains this inode
-        // 2. Calculate the offset within the inode table
-        // 3. Read the inode table block
-        // 4. Update the inode data in the block
-        // 5. Write the block back to disk
+        // Calculate which block group contains this inode
+        let inodes_per_group = self.superblock.inodes_per_group;
+        let group_number = (inode_number - 1) / inodes_per_group;
+        let inode_index = (inode_number - 1) % inodes_per_group;
         
-        // For now, this is a no-op since we can't easily implement proper disk writing
-        // without more comprehensive ext2 metadata management
+        // Read the block group descriptor to get the inode table location
+        let bgd_sector = 4; // Block group descriptors start at block 2 (sector 4)
+        let bgd_request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: bgd_sector,
+            sector_count: 2, // Read one block worth of BGDs
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; 1024],
+        });
+        
+        self.block_device.enqueue_request(bgd_request);
+        let bgd_results = self.block_device.process_requests();
+        
+        let bgd_data = if let Some(result) = bgd_results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read block group descriptors"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from BGD read"
+            ));
+        };
+        
+        // Parse the block group descriptor
+        let bgd_offset = (group_number as usize) * 32; // Each BGD is 32 bytes
+        if bgd_offset + 32 > bgd_data.len() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Block group descriptor offset out of bounds"
+            ));
+        }
+        
+        // Extract inode table block from BGD
+        let inode_table_block = u32::from_le_bytes([
+            bgd_data[bgd_offset + 8],
+            bgd_data[bgd_offset + 9],
+            bgd_data[bgd_offset + 10],
+            bgd_data[bgd_offset + 11],
+        ]);
+        
+        // Calculate the block and offset within that block for this inode
+        let inode_size = self.superblock.inode_size as u32;
+        let inodes_per_block = self.block_size / inode_size;
+        let block_offset = inode_index / inodes_per_block;
+        let inode_offset_in_block = (inode_index % inodes_per_block) * inode_size;
+        
+        let target_block = inode_table_block + block_offset;
+        let target_sector = target_block * 2; // Convert block to sector
+        
+        // Read the current block containing the inode
+        let read_request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: target_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.block_size as usize],
+        });
+        
+        self.block_device.enqueue_request(read_request);
+        let read_results = self.block_device.process_requests();
+        
+        let mut block_data = if let Some(result) = read_results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read inode table block"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from inode table block read"
+            ));
+        };
+        
+        // Write the inode data into the block
+        let inode_bytes = unsafe {
+            core::slice::from_raw_parts(
+                inode as *const Ext2Inode as *const u8,
+                core::mem::size_of::<Ext2Inode>()
+            )
+        };
+        
+        let start_offset = inode_offset_in_block as usize;
+        let end_offset = start_offset + inode_bytes.len();
+        
+        if end_offset > block_data.len() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Inode data would exceed block boundary"
+            ));
+        }
+        
+        block_data[start_offset..end_offset].copy_from_slice(inode_bytes);
+        
+        // Write the modified block back to disk
+        let write_request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Write,
+            sector: target_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: block_data,
+        });
+        
+        self.block_device.enqueue_request(write_request);
+        let write_results = self.block_device.process_requests();
+        
+        if let Some(result) = write_results.first() {
+            match &result.result {
+                Ok(_) => {
+                    // Also update the cache
+                    let mut cache = self.inode_cache.lock();
+                    cache.insert(inode_number, inode.clone());
+                    Ok(())
+                },
+                Err(_) => Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to write inode to disk"
+                )),
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from inode write"
+            ))
+        }
+    }
+    
+    /// Initialize a new directory with . and .. entries
+    fn initialize_directory(&self, dir_inode_number: u32, parent_inode_number: u32) -> Result<(), FileSystemError> {
+        // Allocate a block for the directory
+        let block_number = self.allocate_block()?;
+        
+        // Create directory entries for . and ..
+        let block_size = self.block_size as usize;
+        let mut block_data = vec![0u8; block_size];
+        
+        // Create "." entry
+        let dot_entry_size = 12; // 4 (inode) + 2 (rec_len) + 1 (name_len) + 1 (file_type) + 1 (name) + 3 (padding)
+        let dot_inode = dir_inode_number.to_le_bytes();
+        let dot_rec_len = dot_entry_size as u16;
+        let dot_name_len = 1u8;
+        let dot_file_type = 2u8; // Directory
+        
+        block_data[0..4].copy_from_slice(&dot_inode);
+        block_data[4..6].copy_from_slice(&dot_rec_len.to_le_bytes());
+        block_data[6] = dot_name_len;
+        block_data[7] = dot_file_type;
+        block_data[8] = b'.';
+        
+        // Create ".." entry - takes up the rest of the block
+        let dotdot_offset = dot_entry_size;
+        let dotdot_rec_len = (block_size - dotdot_offset) as u16;
+        let dotdot_name_len = 2u8;
+        let dotdot_file_type = 2u8; // Directory
+        let dotdot_inode = parent_inode_number.to_le_bytes();
+        
+        block_data[dotdot_offset..dotdot_offset + 4].copy_from_slice(&dotdot_inode);
+        block_data[dotdot_offset + 4..dotdot_offset + 6].copy_from_slice(&dotdot_rec_len.to_le_bytes());
+        block_data[dotdot_offset + 6] = dotdot_name_len;
+        block_data[dotdot_offset + 7] = dotdot_file_type;
+        block_data[dotdot_offset + 8] = b'.';
+        block_data[dotdot_offset + 9] = b'.';
+        
+        // Write the block to disk
+        let block_sector = (block_number * 2) as u64;
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Write,
+            sector: block_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: block_data,
+        });
+        
+        // Submit write request
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        if results.is_empty() || results[0].result.is_err() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Failed to write directory block"
+            ));
+        }
+        
+        // Update the directory inode to point to this block and set size
+        let mut dir_inode = self.read_inode(dir_inode_number)?;
+        dir_inode.block[0] = block_number.to_le();
+        dir_inode.size = block_size as u32;
+        dir_inode.blocks = 2; // 2 sectors for 1 block
+        
+        self.write_inode(dir_inode_number, &dir_inode)?;
+        
         Ok(())
     }
     
+    /// Allocate a free block (simplified implementation)
+    fn allocate_block(&self) -> Result<u32, FileSystemError> {
+        // This is a simplified allocation - in a real implementation,
+        // we would read the block bitmap and find a free block
+        static NEXT_BLOCK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1000);
+        Ok(NEXT_BLOCK.fetch_add(1, core::sync::atomic::Ordering::SeqCst))
+    }
+
     /// Add a directory entry to a parent directory
     fn add_directory_entry(&self, parent_inode: u32, name: &String, child_inode: u32, file_type: FileType) -> Result<(), FileSystemError> {
         // Read the parent directory inode
@@ -483,7 +690,6 @@ impl Ext2FileSystem {
         };
 
         // Find a suitable block in the directory with enough space
-        let mut current_block = 0;
         let blocks_in_dir = (parent_dir_inode.get_size() as u64 + self.block_size as u64 - 1) / self.block_size as u64;
 
         for block_idx in 0..blocks_in_dir.max(1) {
@@ -1077,6 +1283,16 @@ impl FileSystemOperations for Ext2FileSystem {
         // Add directory entry to parent directory
         self.add_directory_entry(ext2_parent.inode_number(), name, new_inode_number, file_type.clone())?;
         
+        // Initialize directory contents if it's a directory
+        if file_type == FileType::Directory {
+            self.initialize_directory(new_inode_number, ext2_parent.inode_number())?;
+        }
+        
+        // Initialize directory contents if it's a directory
+        if file_type == FileType::Directory {
+            self.initialize_directory(new_inode_number, ext2_parent.inode_number())?;
+        }
+        
         // Create new node
         let new_node = match file_type {
             FileType::RegularFile => {
@@ -1158,7 +1374,7 @@ impl FileSystemOperations for Ext2FileSystem {
 
 /// Register the ext2 driver with the filesystem driver manager
 fn register_driver() {
-    let mut manager = get_fs_driver_manager();
+    let manager = get_fs_driver_manager();
     manager.register_driver(Box::new(Ext2Driver));
 }
 

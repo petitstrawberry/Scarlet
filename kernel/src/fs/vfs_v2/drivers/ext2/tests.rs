@@ -41,8 +41,8 @@ fn test_ext2_mockdevice_basic_creation() {
             assert_eq!(fs.name(), "ext2");
         },
         Err(e) => {
-            early_println!("[Test] Warning: Failed to create ext2 filesystem from mock device: {:?}", e);
-            // This is expected since our mock device doesn't have proper ext2 structure
+            early_println!("[Test] Failed to create ext2 filesystem from mock device: {:?}", e);
+            early_println!("[Test] This is expected since our mock device doesn't have proper ext2 structure");
             assert!(
                 e.kind == FileSystemErrorKind::IoError || 
                 e.kind == FileSystemErrorKind::InvalidData
@@ -661,7 +661,7 @@ fn test_ext2_virtio_blk_file_operations() {
                     early_println!("[Test] ✓ Root directory read successful");
                 },
                 Err(e) => {
-                    early_println!("[Test] Warning: Could not read root directory: {:?}", e);
+                    panic!("Could not read root directory: {:?}", e);
                 }
             }
             
@@ -751,12 +751,12 @@ fn test_ext2_virtio_blk_file_operations() {
                             early_println!("[Test] ✓ Directory read operation successful");
                         },
                         Err(e) => {
-                            early_println!("[Test] Warning: Could not read test_files directory: {:?}", e);
+                            panic!("Could not read test_files directory: {:?}", e);
                         }
                     }
                 },
                 Err(e) => {
-                    early_println!("[Test] Warning: Could not lookup test_files directory: {:?}", e);
+                    panic!("Could not lookup test_files directory: {:?}", e);
                 }
             }
             
@@ -825,27 +825,27 @@ fn test_ext2_virtio_blk_write_operations() {
                                                     early_println!("[Test] ✓ Write-read verification successful");
                                                 },
                                                 Err(e) => {
-                                                    early_println!("[Test] Warning: Could not read back written data: {:?}", e);
+                                                    panic!("Could not read back written data: {:?}", e);
                                                 }
                                             }
                                         },
                                         Err(e) => {
-                                            early_println!("[Test] Warning: Could not seek to beginning of file: {:?}", e);
+                                            panic!("Could not seek to beginning of file: {:?}", e);
                                         }
                                     }
                                 },
                                 Err(e) => {
-                                    early_println!("[Test] Warning: Could not write to file: {:?}", e);
+                                    panic!("Could not write to file: {:?}", e);
                                 }
                             }
                         },
                         Err(e) => {
-                            early_println!("[Test] Warning: Could not open file for writing: {:?}", e);
+                            panic!("Could not open file for writing: {:?}", e);
                         }
                     }
                 },
                 Err(e) => {
-                    early_println!("[Test] Warning: Could not create new file: {:?}", e);
+                    panic!("Could not create new file: {:?}", e);
                     // This is expected since ext2 write operations require proper implementation
                 }
             }
@@ -866,13 +866,12 @@ fn test_ext2_virtio_blk_write_operations() {
                             }
                         },
                         Err(e) => {
-                            early_println!("[Test] Warning: Could not read new directory: {:?}", e);
+                            panic!("[Test] Could not read new directory: {:?}", e);
                         }
                     }
                 },
                 Err(e) => {
-                    early_println!("[Test] Warning: Could not create directory: {:?}", e);
-                    // This is expected since ext2 write operations require proper implementation
+                    panic!("[Test] Could not create directory: {:?}", e);
                 }
             }
             
@@ -906,27 +905,27 @@ fn test_ext2_virtio_blk_write_operations() {
                                                     early_println!("[Test] ✓ Written data to file in nested directory");
                                                 },
                                                 Err(e) => {
-                                                    early_println!("[Test] Warning: Failed to write to file in nested directory: {:?}", e);
+                                                    panic!("Failed to write to file in nested directory: {:?}", e);
                                                 }
                                             }
                                         },
                                         Err(e) => {
-                                            early_println!("[Test] Warning: Failed to open file in nested directory for writing: {:?}", e);
+                                            panic!("Failed to open file in nested directory for writing: {:?}", e);
                                         }
                                     }
                                 },
                                 Err(e) => {
-                                    early_println!("[Test] Warning: Failed to create file in nested directory: {:?}", e);
+                                    panic!("Failed to create file in nested directory: {:?}", e);
                                 }
                             }
                         },
                         Err(e) => {
-                            early_println!("[Test] Warning: Failed to create subdirectory: {:?}", e);
+                            panic!("Failed to create subdirectory: {:?}", e);
                         }
                     }
                 },
                 Err(e) => {
-                    early_println!("[Test] Warning: Failed to create top-level directory: {:?}", e);
+                    panic!("Failed to create top-level directory: {:?}", e);
                 }
             }
             
@@ -945,20 +944,19 @@ fn test_ext2_virtio_blk_write_operations() {
                             early_println!("[Test] ✓ Top-level directory listing successful");
                         },
                         Err(e) => {
-                            early_println!("[Test] Warning: Failed to read top-level directory: {:?}", e);
+                            panic!("Failed to read top-level directory: {:?}", e);
                         }
                     }
                 },
                 Err(e) => {
-                    early_println!("[Test] Warning: Failed to lookup top-level directory: {:?}", e);
+                    panic!("Failed to lookup top-level directory: {:?}", e);
                 }
             }
             
             early_println!("[Test] All ext2 write tests completed (some operations expected to fail due to incomplete write support)");
         },
         Err(e) => {
-            early_println!("[Test] Warning: Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
-            // This might happen if the image is not properly formatted or write operations are not supported
+            panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
         }
     }
     
