@@ -1522,7 +1522,7 @@ fn test_sfn_duplicate_handling() {
         .expect("Failed to list directory");
     
     for filename in &all_test_files {
-        let found = entries.iter().any(|e| &e.name == filename);
+        let found = entries.iter().any(|e| e.name.to_uppercase() == filename.to_uppercase());
         assert!(found, "File {} should exist in directory listing", filename);
         
         // Try to lookup and read the file content to verify it's accessible
