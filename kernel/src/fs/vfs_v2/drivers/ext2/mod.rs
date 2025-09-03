@@ -453,45 +453,400 @@ impl Ext2FileSystem {
         Ok(())
     }
     
-    /// Add a directory entry to a parent directory (simplified implementation)
+    /// Add a directory entry to a parent directory
     fn add_directory_entry(&self, parent_inode: u32, name: &String, child_inode: u32, file_type: FileType) -> Result<(), FileSystemError> {
-        // For a complete implementation, this would:
-        // 1. Read the parent directory's data blocks
-        // 2. Find space for the new directory entry
-        // 3. Write the new directory entry
-        // 4. Update the parent directory's size if needed
-        // 5. Write the updated blocks back to disk
+        // Read the parent directory inode
+        let parent_dir_inode = self.read_inode(parent_inode)?;
         
-        // For now, this is a no-op since we can't easily implement proper disk writing
-        // without more comprehensive ext2 metadata management
-        Ok(())
+        if !parent_dir_inode.is_dir() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Parent is not a directory"
+            ));
+        }
+
+        // Calculate the length of the new directory entry
+        // Directory entry format: inode(4) + rec_len(2) + name_len(1) + file_type(1) + name + padding to 4-byte boundary
+        let entry_name_len = name.len() as u8;
+        let entry_total_len = ((8 + entry_name_len as usize + 3) / 4) * 4; // Round up to 4-byte boundary
+
+        // Convert FileType to ext2 file type
+        let ext2_file_type = match file_type {
+            FileType::RegularFile => 1,
+            FileType::Directory => 2,
+            FileType::CharDevice(_) => 3,
+            FileType::BlockDevice(_) => 4,
+            FileType::Pipe => 5,
+            FileType::Socket => 6,
+            FileType::SymbolicLink(_) => 7,
+            FileType::Unknown => 0,
+        };
+
+        // Find a suitable block in the directory with enough space
+        let mut current_block = 0;
+        let blocks_in_dir = (parent_dir_inode.get_size() as u64 + self.block_size as u64 - 1) / self.block_size as u64;
+
+        for block_idx in 0..blocks_in_dir.max(1) {
+            let block_num = self.get_inode_block(&parent_dir_inode, block_idx)?;
+            if block_num == 0 {
+                continue; // Sparse block
+            }
+
+            // Read the directory block
+            let block_sector = (block_num * 2) as u64; // Convert block to sector
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: block_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+
+            let mut block_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => continue, // Try next block
+                }
+            } else {
+                continue;
+            };
+
+            // Parse directory entries to find available space
+            let mut offset = 0;
+            let mut last_entry_offset = 0;
+            let mut last_entry_rec_len = 0;
+
+            while offset < self.block_size as usize {
+                if offset + 8 > block_data.len() {
+                    break;
+                }
+
+                let entry = Ext2DirectoryEntryRaw::from_bytes(&block_data[offset..])?;
+                let rec_len = entry.get_rec_len();
+                
+                if rec_len == 0 {
+                    break; // Invalid entry
+                }
+
+                last_entry_offset = offset;
+                last_entry_rec_len = rec_len as usize;
+                
+                offset += rec_len as usize;
+            }
+
+            // Calculate actual space used by the last entry
+            if last_entry_offset > 0 {
+                let last_entry = Ext2DirectoryEntryRaw::from_bytes(&block_data[last_entry_offset..])?;
+                let actual_last_entry_len = ((8 + last_entry.get_name_len() as usize + 3) / 4) * 4;
+                let available_space = last_entry_rec_len - actual_last_entry_len;
+
+                if available_space >= entry_total_len {
+                    // We have space! Adjust the last entry's rec_len and add our entry
+                    
+                    // Update last entry's rec_len to its actual size
+                    let actual_rec_len_bytes = (actual_last_entry_len as u16).to_le_bytes();
+                    block_data[last_entry_offset + 4] = actual_rec_len_bytes[0];
+                    block_data[last_entry_offset + 5] = actual_rec_len_bytes[1];
+
+                    // Add our new entry
+                    let new_entry_offset = last_entry_offset + actual_last_entry_len;
+                    let remaining_space = last_entry_rec_len - actual_last_entry_len;
+                    
+                    // Write new entry header
+                    let child_inode_bytes = child_inode.to_le_bytes();
+                    let rec_len_bytes = (remaining_space as u16).to_le_bytes();
+                    
+                    block_data[new_entry_offset..new_entry_offset + 4].copy_from_slice(&child_inode_bytes);
+                    block_data[new_entry_offset + 4..new_entry_offset + 6].copy_from_slice(&rec_len_bytes);
+                    block_data[new_entry_offset + 6] = entry_name_len;
+                    block_data[new_entry_offset + 7] = ext2_file_type;
+                    
+                    // Write name
+                    block_data[new_entry_offset + 8..new_entry_offset + 8 + entry_name_len as usize]
+                        .copy_from_slice(name.as_bytes());
+                    
+                    // Write the updated block back to disk
+                    let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                        request_type: crate::device::block::request::BlockIORequestType::Write,
+                        sector: block_sector as usize,
+                        sector_count: (self.block_size / 512) as usize,
+                        head: 0,
+                        cylinder: 0,
+                        buffer: block_data,
+                    });
+
+                    self.block_device.enqueue_request(write_request);
+                    let write_results = self.block_device.process_requests();
+
+                    if let Some(write_result) = write_results.first() {
+                        match &write_result.result {
+                            Ok(_) => return Ok(()),
+                            Err(_) => return Err(FileSystemError::new(
+                                FileSystemErrorKind::IoError,
+                                "Failed to write directory entry"
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we get here, we couldn't find space in existing blocks
+        // In a full implementation, we would allocate a new block for the directory
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NoSpace,
+            "No space available in directory for new entry"
+        ))
     }
     
-    /// Remove a directory entry from a parent directory (simplified implementation)
+    /// Remove a directory entry from a parent directory
     fn remove_directory_entry(&self, parent_inode: u32, name: &String) -> Result<(), FileSystemError> {
-        // For a complete implementation, this would:
-        // 1. Read the parent directory's data blocks
-        // 2. Find the directory entry to remove
-        // 3. Remove or mark the entry as deleted
-        // 4. Compact the directory if needed
-        // 5. Write the updated blocks back to disk
+        // Read the parent directory inode
+        let parent_dir_inode = self.read_inode(parent_inode)?;
         
-        // For now, this is a no-op since we can't easily implement proper disk writing
-        // without more comprehensive ext2 metadata management
-        Ok(())
+        if !parent_dir_inode.is_dir() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Parent is not a directory"
+            ));
+        }
+
+        // Search through all directory blocks to find the entry to remove
+        let blocks_in_dir = (parent_dir_inode.get_size() as u64 + self.block_size as u64 - 1) / self.block_size as u64;
+
+        for block_idx in 0..blocks_in_dir {
+            let block_num = self.get_inode_block(&parent_dir_inode, block_idx)?;
+            if block_num == 0 {
+                continue; // Sparse block
+            }
+
+            // Read the directory block
+            let block_sector = (block_num * 2) as u64; // Convert block to sector
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: block_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+
+            let mut block_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => continue, // Try next block
+                }
+            } else {
+                continue;
+            };
+
+            // Parse directory entries to find the one to remove
+            let mut offset = 0;
+            let mut prev_entry_offset = None;
+
+            while offset < self.block_size as usize {
+                if offset + 8 > block_data.len() {
+                    break;
+                }
+
+                let entry = match Ext2DirectoryEntryRaw::from_bytes(&block_data[offset..]) {
+                    Ok(entry) => entry,
+                    Err(_) => break,
+                };
+                
+                let rec_len = entry.get_rec_len();
+                if rec_len == 0 {
+                    break; // Invalid entry
+                }
+
+                let name_len = entry.get_name_len() as usize;
+                if offset + 8 + name_len <= block_data.len() {
+                    let entry_name_bytes = &block_data[offset + 8..offset + 8 + name_len];
+                    if let Ok(entry_name) = core::str::from_utf8(entry_name_bytes) {
+                        if entry_name == name {
+                            // Found the entry to remove!
+                            if let Some(prev_offset) = prev_entry_offset {
+                                // Extend the previous entry's rec_len to cover this entry
+                                let prev_entry = Ext2DirectoryEntryRaw::from_bytes(&block_data[prev_offset..])?;
+                                let new_rec_len = prev_entry.get_rec_len() + rec_len;
+                                let new_rec_len_bytes = new_rec_len.to_le_bytes();
+                                
+                                block_data[prev_offset + 4] = new_rec_len_bytes[0];
+                                block_data[prev_offset + 5] = new_rec_len_bytes[1];
+                            } else {
+                                // This is the first entry in the block, mark it as free by setting inode to 0
+                                block_data[offset..offset + 4].fill(0);
+                            }
+
+                            // Write the updated block back to disk
+                            let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                                request_type: crate::device::block::request::BlockIORequestType::Write,
+                                sector: block_sector as usize,
+                                sector_count: (self.block_size / 512) as usize,
+                                head: 0,
+                                cylinder: 0,
+                                buffer: block_data,
+                            });
+
+                            self.block_device.enqueue_request(write_request);
+                            let write_results = self.block_device.process_requests();
+
+                            if let Some(write_result) = write_results.first() {
+                                match &write_result.result {
+                                    Ok(_) => return Ok(()),
+                                    Err(_) => return Err(FileSystemError::new(
+                                        FileSystemErrorKind::IoError,
+                                        "Failed to write updated directory block"
+                                    )),
+                                }
+                            }
+
+                            return Err(FileSystemError::new(
+                                FileSystemErrorKind::IoError,
+                                "No response from block device write"
+                            ));
+                        }
+                    }
+                }
+
+                prev_entry_offset = Some(offset);
+                offset += rec_len as usize;
+            }
+        }
+
+        // Entry not found
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotFound,
+            "Directory entry not found"
+        ))
     }
     
-    /// Free an inode (simplified implementation)
+    /// Free an inode and update bitmaps
     fn free_inode(&self, inode_number: u32) -> Result<(), FileSystemError> {
-        // For a complete implementation, this would:
-        // 1. Mark the inode as free in the inode bitmap
-        // 2. Free any data blocks used by the inode
-        // 3. Update the superblock free inode count
-        // 4. Write the updated bitmaps and superblock to disk
+        // Calculate which block group contains this inode
+        let group = (inode_number - 1) / self.superblock.get_inodes_per_group();
+        let local_inode = (inode_number - 1) % self.superblock.get_inodes_per_group();
         
-        // For now, this is a no-op since we can't easily implement proper disk writing
-        // without more comprehensive ext2 metadata management
-        Ok(())
+        // Read block group descriptor to find inode bitmap location
+        let bgd_block_sector = ((group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
+                       if self.block_size == 1024 { 2 } else { 1 }) * 2; // Convert block to sector
+        
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: bgd_block_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.block_size as usize],
+        });
+        
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        let bgd_data = if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read block group descriptor"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from block device read"
+            ));
+        };
+
+        let bgd_offset = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) % self.block_size;
+        let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset as usize..])?;
+
+        // Read the inode bitmap
+        let inode_bitmap_block = bgd.get_inode_bitmap();
+        let bitmap_sector = (inode_bitmap_block * 2) as u64; // Convert block to sector
+        
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: bitmap_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.block_size as usize],
+        });
+
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+
+        let mut bitmap_data = if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read inode bitmap"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from inode bitmap read"
+            ));
+        };
+
+        // Clear the bit for this inode (mark as free)
+        let byte_index = (local_inode / 8) as usize;
+        let bit_index = (local_inode % 8) as u8;
+        
+        if byte_index >= bitmap_data.len() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Inode bitmap index out of bounds"
+            ));
+        }
+
+        // Clear the bit (0 = free, 1 = used in ext2)
+        bitmap_data[byte_index] &= !(1 << bit_index);
+
+        // Write the updated bitmap back to disk
+        let write_request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Write,
+            sector: bitmap_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: bitmap_data,
+        });
+
+        self.block_device.enqueue_request(write_request);
+        let write_results = self.block_device.process_requests();
+
+        if let Some(write_result) = write_results.first() {
+            match &write_result.result {
+                Ok(_) => {
+                    // Remove from inode cache if present
+                    {
+                        let mut cache = self.inode_cache.lock();
+                        cache.remove(&inode_number);
+                    }
+                    Ok(())
+                },
+                Err(_) => Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to write updated inode bitmap"
+                )),
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No response from inode bitmap write"
+            ))
+        }
     }
 }
 
