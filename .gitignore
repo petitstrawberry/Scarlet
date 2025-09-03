@@ -5,3 +5,4 @@
 /mkfs/initramfs/system/scarlet/bin/*
 /mkfs/*.cpio
 dist/
+/kernel/fat32-test.img

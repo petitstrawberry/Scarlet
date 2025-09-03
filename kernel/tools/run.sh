@@ -1,7 +1,5 @@
 #!/bin/bash
 
-#!/bin/bash
-
 # Check for debug mode environment variable or command line argument
 DEBUG_MODE=${SCARLET_DEBUG_MODE:-false}
 KERNEL_PATH=""
@@ -20,6 +18,23 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# If no kernel path provided, try to find the default build
+if [ -z "$KERNEL_PATH" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
+    
+    if [ "$DEBUG_MODE" = "true" ]; then
+        KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/kernel"
+    else
+        # For release mode or default run
+        if [ -f "$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/kernel" ]; then
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/kernel"
+        else
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/kernel"
+        fi
+    fi
+fi
 
 if [ "$DEBUG_MODE" = "true" ]; then
     echo "Starting qemu in debug mode with gdb server..."
