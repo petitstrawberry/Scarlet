@@ -1195,6 +1195,8 @@ impl Ext2FileSystem {
         
         // Free all data blocks used by this inode
         for block_num in blocks_to_free {
+            #[cfg(test)]
+            crate::early_println!("EXT2: Freeing data block {}", block_num);
             self.free_block(block_num)?;
         }
         
@@ -1299,13 +1301,13 @@ impl Ext2FileSystem {
                 Ok(_) => {},
                 Err(_) => return Err(FileSystemError::new(
                     FileSystemErrorKind::IoError,
-                    "Failed to write updated inode bitmap"
+                    "Failed to write inode to disk"
                 )),
             }
         } else {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::IoError,
-                "No response from inode bitmap write"
+                "No result from inode write"
             ));
         }
 
@@ -1468,9 +1470,62 @@ impl Ext2FileSystem {
         Ok(())
     }
 
+    /// Convert ext2 inode mode to FileType
+    pub fn file_type_from_inode(&self, inode: &Ext2Inode, _inode_number: u32) -> Result<FileType, FileSystemError> {
+        let mode = inode.get_mode();
+        let file_type_bits = mode & EXT2_S_IFMT;
+        
+        match file_type_bits {
+            EXT2_S_IFREG => Ok(FileType::RegularFile),
+            EXT2_S_IFDIR => Ok(FileType::Directory),
+            EXT2_S_IFLNK => {
+                // For symlinks, we need to read the target path
+                let size = inode.get_size() as usize;
+                
+                if size <= 60 {
+                    // Fast symlink: target stored in inode.block array
+                    // Use safe byte-level access to read the block data
+                    let inode_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            inode as *const Ext2Inode as *const u8,
+                            core::mem::size_of::<Ext2Inode>()
+                        )
+                    };
+                    // Block array starts at offset 40 in the inode structure
+                    let block_start_offset = 40;
+                    let block_bytes = &inode_bytes[block_start_offset..block_start_offset + 60];
+                    
+                    let target_bytes = &block_bytes[..size];
+                    let target = String::from_utf8(target_bytes.to_vec()).map_err(|_| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::InvalidData,
+                            "Invalid UTF-8 in fast symlink target"
+                        )
+                    })?;
+                    Ok(FileType::SymbolicLink(target))
+                } else {
+                    // Slow symlink: target stored in data blocks
+                    // For now, return a placeholder - this will be resolved when read_link is called
+                    Ok(FileType::SymbolicLink("".to_string()))
+                }
+            }
+            _ => Ok(FileType::Unknown),
+        }
+    }
+
     /// Get all data blocks used by an inode
     fn get_inode_data_blocks(&self, inode: &Ext2Inode) -> Result<Vec<u32>, FileSystemError> {
         let mut blocks = Vec::new();
+        
+        // Check if this is a symbolic link
+        let mode = inode.get_mode();
+        let is_symlink = (mode & EXT2_S_IFMT) == EXT2_S_IFLNK;
+        
+        if is_symlink && inode.get_size() <= 60 {
+            // Fast symlink: target is stored in inode.block array, no data blocks used
+            return Ok(blocks);
+        }
+        
         let blocks_in_file = (inode.get_size() as u64 + self.block_size as u64 - 1) / self.block_size as u64;
         
         for block_idx in 0..blocks_in_file {
@@ -1848,8 +1903,9 @@ impl Ext2FileSystem {
             let bytes = new_count.to_le_bytes();
             superblock_data[12..16].copy_from_slice(&bytes);
             
-            // Also update the in-memory superblock to keep it consistent
-            // Note: This is a temporary fix - we should properly reload the superblock
+            #[cfg(test)]
+            crate::early_println!("EXT2: Updated free_blocks_count: {} -> {} (delta: {})", 
+                                  current, new_count, block_delta);
         }
 
         if inode_delta != 0 {
@@ -1863,6 +1919,10 @@ impl Ext2FileSystem {
             };
             let bytes = new_count.to_le_bytes();
             superblock_data[16..20].copy_from_slice(&bytes);
+            
+            #[cfg(test)]
+            crate::early_println!("EXT2: Updated free_inodes_count: {} -> {} (delta: {})", 
+                                  current, new_count, inode_delta);
         }
 
         // Write back superblock
@@ -1880,7 +1940,11 @@ impl Ext2FileSystem {
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
-                Ok(_) => Ok(()),
+                Ok(_) => {
+                    #[cfg(test)]
+                    crate::early_println!("EXT2: Superblock successfully updated");
+                    Ok(())
+                },
                 Err(_) => Err(FileSystemError::new(
                     FileSystemErrorKind::IoError,
                     "Failed to write updated superblock"
@@ -2090,9 +2154,10 @@ impl FileSystemOperations for Ext2FileSystem {
         let new_inode_number = self.allocate_inode()?;
         
         // Create the inode structure on disk
-        let mode = match file_type {
+        let mode = match &file_type {
             FileType::RegularFile => EXT2_S_IFREG | 0o644,
             FileType::Directory => EXT2_S_IFDIR | 0o755,
+            FileType::SymbolicLink(_) => EXT2_S_IFLNK | 0o777,
             _ => return Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Unsupported file type for ext2"
@@ -2101,7 +2166,7 @@ impl FileSystemOperations for Ext2FileSystem {
         
         // Create new inode with proper initialization
         let initial_nlinks: u16 = if file_type == FileType::Directory { 2 } else { 1 }; // Directory gets "." and initial link
-        let new_inode = Ext2Inode {
+        let mut new_inode = Ext2Inode {
             mode: mode.to_le(),
             uid: 0_u16.to_le(),
             size: 0_u32.to_le(),
@@ -2122,6 +2187,66 @@ impl FileSystemOperations for Ext2FileSystem {
             osd2: [0_u8; 12],
         };
         
+        // Handle symbolic link target path storage
+        if let FileType::SymbolicLink(target_path) = &file_type {
+            let target_bytes = target_path.as_bytes();
+            new_inode.size = (target_bytes.len() as u32).to_le();
+            
+            if target_bytes.len() <= 60 {
+                // Fast symlink: store target path directly in inode.block array
+                // Clear the block array first
+                new_inode.block = [0u32; 15];
+                // Copy target path bytes into the block array safely
+                // Convert to byte array representation and back to avoid alignment issues
+                let mut block_as_bytes = [0u8; 60];
+                block_as_bytes[..target_bytes.len()].copy_from_slice(target_bytes);
+                
+                // Copy the bytes to the block array as u32 values
+                for (i, chunk) in block_as_bytes.chunks(4).enumerate() {
+                    if i >= 15 { break; }
+                    let mut val = [0u8; 4];
+                    val[..chunk.len()].copy_from_slice(chunk);
+                    new_inode.block[i] = u32::from_le_bytes(val);
+                }
+            } else {
+                // Slow symlink: allocate a block and store target path there
+                let block_number = self.allocate_block()? as u32;
+                new_inode.block[0] = block_number.to_le();
+                new_inode.blocks = (self.block_size / 512).to_le(); // Update block count
+                
+                // Write target path to the allocated block
+                let mut block_data = vec![0u8; self.block_size as usize];
+                block_data[..target_bytes.len()].copy_from_slice(target_bytes);
+                
+                let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: (block_number * 2) as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: block_data,
+                });
+                
+                self.block_device.enqueue_request(write_request);
+                let write_results = self.block_device.process_requests();
+                
+                if let Some(write_result) = write_results.first() {
+                    match &write_result.result {
+                        Ok(_) => {},
+                        Err(_) => return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to write symlink target data"
+                        )),
+                    }
+                } else {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "No response from symlink target write"
+                    ));
+                }
+            }
+        }
+        
         // Write the inode to disk
         self.write_inode(new_inode_number, &new_inode)?;
         
@@ -2129,7 +2254,7 @@ impl FileSystemOperations for Ext2FileSystem {
         self.add_directory_entry(ext2_parent.inode_number(), name, new_inode_number, file_type.clone())?;
         
         // Initialize directory contents if it's a directory
-        if file_type == FileType::Directory {
+        if matches!(file_type, FileType::Directory) {
             self.initialize_directory(new_inode_number, ext2_parent.inode_number())?;
             
             // Update parent directory's nlinks count (adding ".." entry)
@@ -2165,12 +2290,15 @@ impl FileSystemOperations for Ext2FileSystem {
         }
         
         // Create new node
-        let new_node = match file_type {
+        let new_node = match &file_type {
             FileType::RegularFile => {
                 Arc::new(Ext2Node::new(new_inode_number, FileType::RegularFile, file_id))
             },
             FileType::Directory => {
                 Arc::new(Ext2Node::new(new_inode_number, FileType::Directory, file_id))
+            },
+            FileType::SymbolicLink(_) => {
+                Arc::new(Ext2Node::new(new_inode_number, file_type.clone(), file_id))
             },
             _ => {
                 return Err(FileSystemError::new(

@@ -3,7 +3,7 @@
 //! This module implements the VFS node interface for ext2 filesystem nodes,
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
-use alloc::{sync::{Arc, Weak}, string::String, vec::Vec, boxed::Box};
+use alloc::{sync::{Arc, Weak}, string::String, vec::Vec, vec, boxed::Box};
 use spin::{RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
 
@@ -115,6 +115,98 @@ impl VfsNode for Ext2Node {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        // Check if this is actually a symbolic link
+        if !matches!(self.file_type, FileType::SymbolicLink(_)) {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link"
+            ));
+        }
+
+        // Get filesystem reference
+        let filesystem = self.filesystem()
+            .and_then(|weak_fs| weak_fs.upgrade())
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem not available"
+            ))?;
+        
+        let ext2_fs = filesystem.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid filesystem type"
+            ))?;
+        
+        // Read the inode to get symlink data
+        let inode = ext2_fs.read_inode(self.inode_number)?;
+        let size = inode.get_size() as usize;
+        
+        if size <= 60 {
+            // Fast symlink: target path is stored in inode.block array
+            let inode_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &inode as *const Ext2Inode as *const u8,
+                    core::mem::size_of::<Ext2Inode>()
+                )
+            };
+            // Block array starts at offset 40 in the inode structure
+            let block_start_offset = 40;
+            let block_bytes = &inode_bytes[block_start_offset..block_start_offset + 60];
+            let target_bytes = &block_bytes[..size];
+            
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid UTF-8 in symlink target"
+            ))
+        } else {
+            // Slow symlink: target path is stored in data blocks
+            let first_block = u32::from_le(inode.block[0]);
+            if first_block == 0 {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Symlink has no data block"
+                ));
+            }
+            
+            // Read the block containing the target path
+            let block_sector = (first_block * 2) as u64;
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: block_sector as usize,
+                sector_count: (ext2_fs.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; ext2_fs.block_size as usize],
+            });
+            
+            ext2_fs.block_device.enqueue_request(request);
+            let results = ext2_fs.block_device.process_requests();
+            
+            let block_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read symlink data block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from symlink data block read"
+                ));
+            };
+            
+            let target_bytes = &block_data[..size];
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid UTF-8 in symlink target"
+            ))
+        }
     }
 }
 

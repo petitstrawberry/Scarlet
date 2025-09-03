@@ -1274,6 +1274,358 @@ fn test_ext2_virtio_blk_delete_operations() {
             panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
         }
     }
+}
+
+#[test_case]
+fn test_ext2_virtio_blk_symlink_operations() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
     
-    early_println!("[Test] ext2 delete edge cases test completed");
+    let fs_driver_manager = get_fs_driver_manager();
+    
+    // Get VirtIO block device for ext2-test.img
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+    let block_device_arc = Arc::new(virtio_device);
+    
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
+        Ok(fs) => {
+            early_println!("[Test] Starting ext2 symlink operations test");
+            
+            let root_node = fs.root_node();
+            
+            // Test 1: Create a fast symlink (short target path)
+            early_println!("[Test] Creating fast symlink...");
+            let fast_target = "/short/path".to_string();
+            let fast_symlink = match fs.create(
+                &root_node,
+                &"fast_link".to_string(),
+                FileType::SymbolicLink(fast_target.clone()),
+                0o777
+            ) {
+                Ok(node) => {
+                    early_println!("[Test] ✓ Fast symlink created successfully");
+                    node
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to create fast symlink: {:?}", e);
+                }
+            };
+            
+            // Test 2: Read fast symlink target
+            match fast_symlink.read_link() {
+                Ok(target) => {
+                    if target == fast_target {
+                        early_println!("[Test] ✓ Fast symlink target read correctly: {}", target);
+                    } else {
+                        panic!("[Test] Fast symlink target mismatch. Expected: {}, Got: {}", fast_target, target);
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read fast symlink target: {:?}", e);
+                }
+            }
+            
+            // Test 3: Create a slow symlink (long target path)
+            early_println!("[Test] Creating slow symlink...");
+            let slow_target = "/this/is/a/very/long/path/that/exceeds/sixty/characters/and/should/be/stored/in/data/blocks".to_string();
+            let slow_symlink = match fs.create(
+                &root_node,
+                &"slow_link".to_string(),
+                FileType::SymbolicLink(slow_target.clone()),
+                0o777
+            ) {
+                Ok(node) => {
+                    early_println!("[Test] ✓ Slow symlink created successfully");
+                    node
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to create slow symlink: {:?}", e);
+                }
+            };
+            
+            // Test 4: Read slow symlink target
+            match slow_symlink.read_link() {
+                Ok(target) => {
+                    if target == slow_target {
+                        early_println!("[Test] ✓ Slow symlink target read correctly (length: {})", target.len());
+                    } else {
+                        panic!("[Test] Slow symlink target mismatch. Expected length: {}, Got length: {}", slow_target.len(), target.len());
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read slow symlink target: {:?}", e);
+                }
+            }
+            
+            // Test 5: Verify symlinks appear in directory listing
+            early_println!("[Test] Checking directory listing for symlinks...");
+            match fs.readdir(&root_node) {
+                Ok(entries) => {
+                    let mut fast_link_found = false;
+                    let mut slow_link_found = false;
+                    
+                    for entry in &entries {
+                        if entry.name == "fast_link" {
+                            fast_link_found = true;
+                            early_println!("[Test] ✓ Fast symlink found in directory listing");
+                        }
+                        if entry.name == "slow_link" {
+                            slow_link_found = true;
+                            early_println!("[Test] ✓ Slow symlink found in directory listing");
+                        }
+                    }
+                    
+                    if !fast_link_found {
+                        panic!("[Test] Fast symlink not found in directory listing");
+                    }
+                    if !slow_link_found {
+                        panic!("[Test] Slow symlink not found in directory listing");
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read directory entries: {:?}", e);
+                }
+            }
+            
+            // Test 6: Verify file type detection
+            early_println!("[Test] Verifying symlink file types...");
+            match fast_symlink.file_type() {
+                Ok(FileType::SymbolicLink(_)) => {
+                    early_println!("[Test] ✓ Fast symlink file type detected correctly");
+                },
+                Ok(other) => {
+                    panic!("[Test] Fast symlink file type incorrect. Expected SymbolicLink, got: {:?}", other);
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to get fast symlink file type: {:?}", e);
+                }
+            }
+            
+            match slow_symlink.file_type() {
+                Ok(FileType::SymbolicLink(_)) => {
+                    early_println!("[Test] ✓ Slow symlink file type detected correctly");
+                },
+                Ok(other) => {
+                    panic!("[Test] Slow symlink file type incorrect. Expected SymbolicLink, got: {:?}", other);
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to get slow symlink file type: {:?}", e);
+                }
+            }
+            
+            // Test 7: Test symlink deletion
+            early_println!("[Test] Testing symlink deletion...");
+            match fs.remove(&root_node, &"fast_link".to_string()) {
+                Ok(_) => {
+                    early_println!("[Test] ✓ Fast symlink deleted successfully");
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to delete fast symlink: {:?}", e);
+                }
+            }
+            
+            match fs.remove(&root_node, &"slow_link".to_string()) {
+                Ok(_) => {
+                    early_println!("[Test] ✓ Slow symlink deleted successfully");
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to delete slow symlink: {:?}", e);
+                }
+            }
+            
+            // Test 8: Verify symlinks are removed from directory listing
+            early_println!("[Test] Verifying symlinks are removed from directory...");
+            match fs.readdir(&root_node) {
+                Ok(entries) => {
+                    let mut fast_link_found = false;
+                    let mut slow_link_found = false;
+                    
+                    for entry in &entries {
+                        if entry.name == "fast_link" {
+                            fast_link_found = true;
+                        }
+                        if entry.name == "slow_link" {
+                            slow_link_found = true;
+                        }
+                    }
+                    
+                    if fast_link_found {
+                        panic!("[Test] Fast symlink still found in directory after deletion");
+                    }
+                    if slow_link_found {
+                        panic!("[Test] Slow symlink still found in directory after deletion");
+                    }
+                    
+                    early_println!("[Test] ✓ Both symlinks properly removed from directory");
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read directory entries after deletion: {:?}", e);
+                }
+            }
+            
+            early_println!("[Test] ✓ ext2 symlink operations test completed successfully");
+        },
+        Err(e) => {
+            panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
+        }
+    }
+}
+
+#[test_case]
+fn test_ext2_virtio_blk_symlink_edge_cases() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+    
+    let fs_driver_manager = get_fs_driver_manager();
+    
+    // Get VirtIO block device for ext2-test.img
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+    let block_device_arc = Arc::new(virtio_device);
+    
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
+        Ok(fs) => {
+            early_println!("[Test] Starting ext2 symlink edge cases test");
+            
+            let root_node = fs.root_node();
+            
+            // Test 1: Create symlink with exactly 60 character target (boundary case)
+            early_println!("[Test] Testing 60-character target (fast/slow boundary)...");
+            let boundary_target = "123456789012345678901234567890123456789012345678901234567890".to_string(); // Exactly 60 chars
+            assert_eq!(boundary_target.len(), 60);
+            
+            let boundary_symlink = match fs.create(
+                &root_node,
+                &"boundary_link".to_string(),
+                FileType::SymbolicLink(boundary_target.clone()),
+                0o777
+            ) {
+                Ok(node) => {
+                    early_println!("[Test] ✓ Boundary symlink (60 chars) created successfully");
+                    node
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to create boundary symlink: {:?}", e);
+                }
+            };
+            
+            // Verify boundary symlink target
+            match boundary_symlink.read_link() {
+                Ok(target) => {
+                    if target == boundary_target {
+                        early_println!("[Test] ✓ Boundary symlink target read correctly");
+                    } else {
+                        panic!("[Test] Boundary symlink target mismatch");
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read boundary symlink target: {:?}", e);
+                }
+            }
+            
+            // Test 2: Create symlink with 61 character target (should be slow symlink)
+            early_println!("[Test] Testing 61-character target (slow symlink)...");
+            let slow_61_target = "1234567890123456789012345678901234567890123456789012345678901".to_string(); // 61 chars
+            assert_eq!(slow_61_target.len(), 61);
+            
+            let slow_61_symlink = match fs.create(
+                &root_node,
+                &"slow_61_link".to_string(),
+                FileType::SymbolicLink(slow_61_target.clone()),
+                0o777
+            ) {
+                Ok(node) => {
+                    early_println!("[Test] ✓ 61-char slow symlink created successfully");
+                    node
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to create 61-char slow symlink: {:?}", e);
+                }
+            };
+            
+            // Verify 61-char symlink target
+            match slow_61_symlink.read_link() {
+                Ok(target) => {
+                    if target == slow_61_target {
+                        early_println!("[Test] ✓ 61-char slow symlink target read correctly");
+                    } else {
+                        panic!("[Test] 61-char slow symlink target mismatch");
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read 61-char slow symlink target: {:?}", e);
+                }
+            }
+            
+            // Test 3: Create symlink with empty target
+            early_println!("[Test] Testing empty target symlink...");
+            let empty_target = "".to_string();
+            
+            let empty_symlink = match fs.create(
+                &root_node,
+                &"empty_link".to_string(),
+                FileType::SymbolicLink(empty_target.clone()),
+                0o777
+            ) {
+                Ok(node) => {
+                    early_println!("[Test] ✓ Empty target symlink created successfully");
+                    node
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to create empty target symlink: {:?}", e);
+                }
+            };
+            
+            // Verify empty symlink target
+            match empty_symlink.read_link() {
+                Ok(target) => {
+                    if target == empty_target {
+                        early_println!("[Test] ✓ Empty target symlink read correctly");
+                    } else {
+                        panic!("[Test] Empty target symlink mismatch");
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read empty target symlink: {:?}", e);
+                }
+            }
+            
+            // Test 4: Test calling read_link on non-symlink (should fail)
+            early_println!("[Test] Testing read_link on non-symlink...");
+            let regular_file = match fs.create(
+                &root_node,
+                &"regular_file".to_string(),
+                FileType::RegularFile,
+                0o644
+            ) {
+                Ok(node) => node,
+                Err(e) => {
+                    panic!("[Test] Failed to create regular file: {:?}", e);
+                }
+            };
+            
+            match regular_file.read_link() {
+                Ok(_) => {
+                    panic!("[Test] read_link on regular file should have failed");
+                },
+                Err(e) => {
+                    if e.kind == FileSystemErrorKind::NotSupported {
+                        early_println!("[Test] ✓ read_link correctly failed on non-symlink");
+                    } else {
+                        panic!("[Test] read_link failed with wrong error type: {:?}", e);
+                    }
+                }
+            }
+            
+            // Cleanup: Remove test files
+            fs.remove(&root_node, &"boundary_link".to_string()).ok();
+            fs.remove(&root_node, &"slow_61_link".to_string()).ok();
+            fs.remove(&root_node, &"empty_link".to_string()).ok();
+            fs.remove(&root_node, &"regular_file".to_string()).ok();
+            
+            early_println!("[Test] ✓ ext2 symlink edge cases test completed successfully");
+        },
+        Err(e) => {
+            panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
+        }
+    }
 }
