@@ -1907,6 +1907,14 @@ impl FileSystemOperations for Ext2FileSystem {
         parent: &Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<(), FileSystemError> {
+        // Prevent deletion of special entries
+        if name == "." || name == ".." {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidOperation,
+                "Cannot delete '.' or '..' entries"
+            ));
+        }
+        
         let ext2_parent = parent.as_any()
             .downcast_ref::<Ext2Node>()
             .ok_or_else(|| FileSystemError::new(
