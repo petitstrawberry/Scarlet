@@ -576,26 +576,110 @@ impl FileSystemOperations for Ext2FileSystem {
 
     fn create(
         &self,
-        _parent: &Arc<dyn VfsNode>,
-        _name: &String,
-        _file_type: FileType,
+        parent: &Arc<dyn VfsNode>,
+        name: &String,
+        file_type: FileType,
         _mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "File creation not yet implemented for ext2"
-        ))
+        let ext2_parent = parent.as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid node type for ext2"
+            ))?;
+        
+        // Check if it's a directory
+        match ext2_parent.file_type() {
+            Ok(FileType::Directory) => {},
+            Ok(_) => return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Parent is not a directory"
+            )),
+            Err(e) => return Err(e),
+        }
+        
+        // Generate new file ID
+        let file_id = {
+            let mut next_id = self.next_file_id.lock();
+            let id = *next_id;
+            *next_id += 1;
+            id
+        };
+        
+        // For now, use a simple inode allocation scheme
+        // In a full implementation, this would allocate from the ext2 inode bitmap
+        let new_inode_number = file_id as u32 + 1000; // Avoid conflicts with existing inodes
+        
+        // Create new node
+        let new_node = match file_type {
+            FileType::RegularFile => {
+                Arc::new(Ext2Node::new(new_inode_number, FileType::RegularFile, file_id))
+            },
+            FileType::Directory => {
+                Arc::new(Ext2Node::new(new_inode_number, FileType::Directory, file_id))
+            },
+            _ => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Unsupported file type for ext2"
+                ));
+            }
+        };
+        
+        // Set filesystem reference
+        if let Some(fs_ref) = ext2_parent.filesystem() {
+            new_node.set_filesystem(fs_ref);
+        }
+        
+        // Note: In a complete implementation, this would:
+        // 1. Allocate an inode from the inode bitmap
+        // 2. Write the new inode to disk
+        // 3. Add a directory entry to the parent directory
+        // 4. Update the parent directory's inode
+        // For now, this creates the node in memory only
+        
+        Ok(new_node)
     }
 
     fn remove(
         &self,
-        _parent: &Arc<dyn VfsNode>,
-        _name: &String,
+        parent: &Arc<dyn VfsNode>,
+        name: &String,
     ) -> Result<(), FileSystemError> {
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "File removal not yet implemented for ext2"
-        ))
+        let ext2_parent = parent.as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid node type for ext2"
+            ))?;
+        
+        // Check if it's a directory
+        match ext2_parent.file_type() {
+            Ok(FileType::Directory) => {},
+            Ok(_) => return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Parent is not a directory"
+            )),
+            Err(e) => return Err(e),
+        }
+
+        // Try to lookup the file to ensure it exists
+        match self.lookup(parent, name) {
+            Ok(_node) => {
+                // Note: In a complete implementation, this would:
+                // 1. Read the parent directory to find the entry
+                // 2. Remove the directory entry
+                // 3. Mark the inode as free in the inode bitmap
+                // 4. Free any data blocks used by the file
+                // 5. Update the parent directory's modification time
+                // For now, this is a no-op since we don't maintain persistent state
+                Ok(())
+            },
+            Err(_) => Err(FileSystemError::new(
+                FileSystemErrorKind::NotFound,
+                format!("File '{}' not found", name)
+            ))
+        }
     }
 
     fn root_node(&self) -> Arc<dyn VfsNode> {

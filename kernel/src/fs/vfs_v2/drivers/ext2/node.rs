@@ -219,9 +219,35 @@ impl StreamOps for Ext2FileObject {
         Ok(bytes_to_read)
     }
 
-    fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
-        // TODO: Implement file writing to ext2 blocks
-        Err(StreamError::IoError)
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        // Ensure content is loaded into cache
+        self.ensure_content_loaded()?;
+        
+        let pos = *self.position.lock() as usize;
+        let mut cached = self.cached_content.write();
+        let content = cached.as_mut().ok_or(StreamError::IoError)?;
+        
+        // Calculate new size
+        let new_size = core::cmp::max(content.len(), pos + buffer.len());
+        
+        // Extend content if needed
+        if new_size > content.len() {
+            content.resize(new_size, 0);
+        }
+        
+        // Write new data to cached content
+        content[pos..pos + buffer.len()].copy_from_slice(buffer);
+        
+        // Mark as dirty
+        *self.is_dirty.write() = true;
+        
+        // Update position
+        {
+            let mut position = self.position.lock();
+            *position += buffer.len() as u64;
+        }
+        
+        Ok(buffer.len())
     }
 }
 
