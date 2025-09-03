@@ -93,17 +93,22 @@ fn test_ext2_superblock_parsing() {
     // Create a minimal valid ext2 superblock
     let mut superblock_data = vec![0u8; 1024];
     
-    // Fill in essential superblock fields
-    let superblock_ptr = superblock_data.as_mut_ptr() as *mut Ext2Superblock;
-    unsafe {
-        (*superblock_ptr).magic = EXT2_SUPER_MAGIC;
-        (*superblock_ptr).blocks_count = 8192;
-        (*superblock_ptr).inodes_count = 2048;
-        (*superblock_ptr).log_block_size = 0; // 1KB blocks
-        (*superblock_ptr).blocks_per_group = 8192;
-        (*superblock_ptr).inodes_per_group = 2048;
-        (*superblock_ptr).inode_size = 128;
-    }
+    // Fill in essential superblock fields manually
+    // Magic at offset 56 (0x38)
+    superblock_data[56] = (EXT2_SUPER_MAGIC & 0xFF) as u8;
+    superblock_data[57] = ((EXT2_SUPER_MAGIC >> 8) & 0xFF) as u8;
+    
+    // blocks_count at offset 4
+    superblock_data[4] = 0x00;
+    superblock_data[5] = 0x20;
+    superblock_data[6] = 0x00;
+    superblock_data[7] = 0x00; // 8192
+    
+    // inodes_count at offset 0
+    superblock_data[0] = 0x00;
+    superblock_data[1] = 0x08;
+    superblock_data[2] = 0x00;
+    superblock_data[3] = 0x00; // 2048
     
     // Test superblock parsing
     let result = Ext2Superblock::from_bytes(&superblock_data);
@@ -127,13 +132,19 @@ fn test_ext2_inode_parsing() {
     // Create a test inode
     let mut inode_data = vec![0u8; 128];
     
-    let inode_ptr = inode_data.as_mut_ptr() as *mut Ext2Inode;
-    unsafe {
-        (*inode_ptr).mode = EXT2_S_IFREG | 0o644; // Regular file with 644 permissions
-        (*inode_ptr).size = 1024;
-        (*inode_ptr).links_count = 1;
-        (*inode_ptr).blocks = 2; // 2 * 512-byte blocks = 1024 bytes
-    }
+    // mode at offset 0
+    inode_data[0] = 0x44; // 0x8044 = EXT2_S_IFREG | 0o644
+    inode_data[1] = 0x81;
+    
+    // size at offset 4
+    inode_data[4] = 0x00;
+    inode_data[5] = 0x04;
+    inode_data[6] = 0x00;
+    inode_data[7] = 0x00; // 1024
+    
+    // links_count at offset 26
+    inode_data[26] = 0x01;
+    inode_data[27] = 0x00; // 1
     
     // Test inode parsing
     let result = Ext2Inode::from_bytes(&inode_data);
@@ -189,15 +200,27 @@ fn test_ext2_block_group_descriptor_parsing() {
     // Create a test block group descriptor
     let mut bgd_data = vec![0u8; 32];
     
-    let bgd_ptr = bgd_data.as_mut_ptr() as *mut Ext2BlockGroupDescriptor;
-    unsafe {
-        (*bgd_ptr).block_bitmap = 3;
-        (*bgd_ptr).inode_bitmap = 4;
-        (*bgd_ptr).inode_table = 5;
-        (*bgd_ptr).free_blocks_count = 1000;
-        (*bgd_ptr).free_inodes_count = 500;
-        (*bgd_ptr).used_dirs_count = 10;
-    }
+    // block_bitmap at offset 0
+    bgd_data[0] = 0x03;
+    bgd_data[1] = 0x00;
+    bgd_data[2] = 0x00;
+    bgd_data[3] = 0x00; // 3
+    
+    // inode_bitmap at offset 4  
+    bgd_data[4] = 0x04;
+    bgd_data[5] = 0x00;
+    bgd_data[6] = 0x00;
+    bgd_data[7] = 0x00; // 4
+    
+    // inode_table at offset 8
+    bgd_data[8] = 0x05;
+    bgd_data[9] = 0x00;
+    bgd_data[10] = 0x00;
+    bgd_data[11] = 0x00; // 5
+    
+    // free_blocks_count at offset 12
+    bgd_data[12] = 0xE8;
+    bgd_data[13] = 0x03; // 1000
     
     // Test BGD parsing
     let result = Ext2BlockGroupDescriptor::from_bytes(&bgd_data);
@@ -273,19 +296,56 @@ fn create_test_ext2_device() -> MockBlockDevice {
     // Create a minimal ext2 superblock in block 1 (sectors 2-3 for 1KB block)
     let mut superblock_data = vec![0u8; 1024];
     
-    // Set up superblock fields
-    let superblock_ptr = superblock_data.as_mut_ptr() as *mut Ext2Superblock;
-    unsafe {
-        (*superblock_ptr).magic = EXT2_SUPER_MAGIC;
-        (*superblock_ptr).blocks_count = 8192;
-        (*superblock_ptr).inodes_count = 2048;
-        (*superblock_ptr).log_block_size = 0; // 1KB blocks
-        (*superblock_ptr).blocks_per_group = 8192;
-        (*superblock_ptr).inodes_per_group = 2048;
-        (*superblock_ptr).inode_size = 128;
-        (*superblock_ptr).first_data_block = 1;
-        (*superblock_ptr).rev_level = 1;
-    }
+    // Set up superblock fields manually in byte array
+    // Magic at offset 56 (0x38)
+    superblock_data[56] = (EXT2_SUPER_MAGIC & 0xFF) as u8;
+    superblock_data[57] = ((EXT2_SUPER_MAGIC >> 8) & 0xFF) as u8;
+    
+    // blocks_count at offset 4
+    superblock_data[4] = 0x00;
+    superblock_data[5] = 0x20;
+    superblock_data[6] = 0x00;
+    superblock_data[7] = 0x00; // 8192
+    
+    // inodes_count at offset 0  
+    superblock_data[0] = 0x00;
+    superblock_data[1] = 0x08;
+    superblock_data[2] = 0x00;
+    superblock_data[3] = 0x00; // 2048
+    
+    // log_block_size at offset 24
+    superblock_data[24] = 0x00;
+    superblock_data[25] = 0x00;
+    superblock_data[26] = 0x00;
+    superblock_data[27] = 0x00; // 0 = 1KB blocks
+    
+    // blocks_per_group at offset 32
+    superblock_data[32] = 0x00;
+    superblock_data[33] = 0x20;
+    superblock_data[34] = 0x00;
+    superblock_data[35] = 0x00; // 8192
+    
+    // inodes_per_group at offset 40  
+    superblock_data[40] = 0x00;
+    superblock_data[41] = 0x08;
+    superblock_data[42] = 0x00;
+    superblock_data[43] = 0x00; // 2048
+    
+    // inode_size at offset 88
+    superblock_data[88] = 0x80;
+    superblock_data[89] = 0x00; // 128
+    
+    // first_data_block at offset 20
+    superblock_data[20] = 0x01;
+    superblock_data[21] = 0x00;
+    superblock_data[22] = 0x00;
+    superblock_data[23] = 0x00; // 1
+    
+    // rev_level at offset 76
+    superblock_data[76] = 0x01;
+    superblock_data[77] = 0x00;
+    superblock_data[78] = 0x00;
+    superblock_data[79] = 0x00; // 1
     
     // Write superblock to sectors 2-3 (block 1)
     let superblock_request = Box::new(BlockIORequest {

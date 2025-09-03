@@ -107,19 +107,62 @@ pub struct Ext2Superblock {
 impl Ext2Superblock {
     /// Parse superblock from raw bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
-        if data.len() < mem::size_of::<Self>() {
+        if data.len() < 1024 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
                 "Insufficient data for ext2 superblock"
             ));
         }
 
-        // Safety: We've checked the size and ext2 superblock has a fixed layout
-        let superblock = unsafe {
-            core::ptr::read_unaligned(data.as_ptr() as *const Self)
-        };
+        // Read the core superblock fields manually to avoid packed struct issues
+        let magic = u16::from_le_bytes([data[56], data[57]]);
+        let blocks_count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let inodes_count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let log_block_size = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
+        let blocks_per_group = u32::from_le_bytes([data[32], data[33], data[34], data[35]]);
+        let inodes_per_group = u32::from_le_bytes([data[40], data[41], data[42], data[43]]);
+        let inode_size = u16::from_le_bytes([data[88], data[89]]);
 
-        Ok(superblock)
+        Ok(Self {
+            inodes_count,
+            blocks_count,
+            r_blocks_count: 0,
+            free_blocks_count: 0,
+            free_inodes_count: 0,
+            first_data_block: u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
+            log_block_size,
+            log_frag_size: 0,
+            blocks_per_group,
+            frags_per_group: 0,
+            inodes_per_group,
+            mtime: 0,
+            wtime: 0,
+            mnt_count: 0,
+            max_mnt_count: 0,
+            magic,
+            state: 0,
+            errors: 0,
+            minor_rev_level: 0,
+            lastcheck: 0,
+            checkinterval: 0,
+            creator_os: 0,
+            rev_level: u32::from_le_bytes([data[76], data[77], data[78], data[79]]),
+            def_resuid: 0,
+            def_resgid: 0,
+            first_ino: 0,
+            inode_size,
+            block_group_nr: 0,
+            feature_compat: 0,
+            feature_incompat: 0,
+            feature_ro_compat: 0,
+            uuid: [0; 16],
+            volume_name: [0; 16],
+            last_mounted: [0; 64],
+            algorithm_usage_bitmap: 0,
+            prealloc_blocks: 0,
+            prealloc_dir_blocks: 0,
+            padding: [0; 1024 - 204],
+        })
     }
 }
 
@@ -151,19 +194,23 @@ pub struct Ext2BlockGroupDescriptor {
 impl Ext2BlockGroupDescriptor {
     /// Parse block group descriptor from raw bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
-        if data.len() < mem::size_of::<Self>() {
+        if data.len() < 32 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
                 "Insufficient data for ext2 block group descriptor"
             ));
         }
 
-        // Safety: We've checked the size and BGD has a fixed layout
-        let bgd = unsafe {
-            core::ptr::read_unaligned(data.as_ptr() as *const Self)
-        };
-
-        Ok(bgd)
+        Ok(Self {
+            block_bitmap: u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+            inode_bitmap: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+            inode_table: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+            free_blocks_count: u16::from_le_bytes([data[12], data[13]]),
+            free_inodes_count: u16::from_le_bytes([data[14], data[15]]),
+            used_dirs_count: u16::from_le_bytes([data[16], data[17]]),
+            pad: 0,
+            reserved: [0; 3],
+        })
     }
 }
 
@@ -215,19 +262,39 @@ pub struct Ext2Inode {
 impl Ext2Inode {
     /// Parse inode from raw bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
-        if data.len() < mem::size_of::<Self>() {
+        if data.len() < 128 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
                 "Insufficient data for ext2 inode"
             ));
         }
 
-        // Safety: We've checked the size and inode has a fixed layout
-        let inode = unsafe {
-            core::ptr::read_unaligned(data.as_ptr() as *const Self)
-        };
+        let mut block = [0u32; 15];
+        for i in 0..15 {
+            let offset = 40 + i * 4;
+            block[i] = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+        }
 
-        Ok(inode)
+        Ok(Self {
+            mode: u16::from_le_bytes([data[0], data[1]]),
+            uid: u16::from_le_bytes([data[2], data[3]]),
+            size: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+            atime: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+            ctime: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+            mtime: u32::from_le_bytes([data[16], data[17], data[18], data[19]]),
+            dtime: u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
+            gid: u16::from_le_bytes([data[24], data[25]]),
+            links_count: u16::from_le_bytes([data[26], data[27]]),
+            blocks: u32::from_le_bytes([data[28], data[29], data[30], data[31]]),
+            flags: u32::from_le_bytes([data[32], data[33], data[34], data[35]]),
+            osd1: u32::from_le_bytes([data[36], data[37], data[38], data[39]]),
+            block,
+            generation: u32::from_le_bytes([data[100], data[101], data[102], data[103]]),
+            file_acl: u32::from_le_bytes([data[104], data[105], data[106], data[107]]),
+            dir_acl: u32::from_le_bytes([data[108], data[109], data[110], data[111]]),
+            faddr: u32::from_le_bytes([data[112], data[113], data[114], data[115]]),
+            osd2: [0; 12],
+        })
     }
 }
 
