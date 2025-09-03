@@ -35,53 +35,47 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Mount the filesystem to populate it
-sudo mount -o loop "$IMAGE_PATH" "$MOUNT_POINT"
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to mount filesystem"
-    rm -f "$IMAGE_PATH"
-    rmdir "$MOUNT_POINT"
-    exit 1
-fi
-
+# Use mtools to populate the filesystem without mounting (no sudo needed)
 echo "Populating test files..."
 
-# Create various test files
-echo "Hello, Scarlet!" | sudo tee "$MOUNT_POINT/hello.txt" >/dev/null
-echo "This is a test file for ext2 filesystem implementation." | sudo tee "$MOUNT_POINT/readme.txt" >/dev/null
+# Create temp directory for our test files
+TEMP_DIR="/tmp/ext2_staging_$$"
+mkdir -p "$TEMP_DIR"
+mkdir -p "$TEMP_DIR/test_files"
+mkdir -p "$TEMP_DIR/empty_dir"
+mkdir -p "$TEMP_DIR/documents"
+mkdir -p "$TEMP_DIR/bin"
 
-# Create test directory structure
-sudo mkdir -p "$MOUNT_POINT/test_files"
-sudo mkdir -p "$MOUNT_POINT/empty_dir"
-sudo mkdir -p "$MOUNT_POINT/documents"
-sudo mkdir -p "$MOUNT_POINT/bin"
+# Create various test files in staging area
+echo "Hello, Scarlet!" > "$TEMP_DIR/hello.txt"
+echo "This is a test file for ext2 filesystem implementation." > "$TEMP_DIR/readme.txt"
 
 # Create a slightly larger test file
-seq 1 100 | sudo tee "$MOUNT_POINT/test_files/numbers.txt" >/dev/null
+seq 1 100 > "$TEMP_DIR/test_files/numbers.txt"
 
 # Create files with different sizes to test block allocation
-echo "Small file" | sudo tee "$MOUNT_POINT/test_files/small.txt" >/dev/null
+echo "Small file" > "$TEMP_DIR/test_files/small.txt"
 
 # Create 1KB file
-head -c 1024 /dev/urandom | base64 | sudo tee "$MOUNT_POINT/test_files/1kb.txt" >/dev/null
+head -c 1024 /dev/urandom | base64 > "$TEMP_DIR/test_files/1kb.txt"
 
 # Create 4KB file (one block)
-head -c 4096 /dev/urandom | base64 | sudo tee "$MOUNT_POINT/test_files/4kb.txt" >/dev/null
+head -c 4096 /dev/urandom | base64 > "$TEMP_DIR/test_files/4kb.txt"
 
 # Create files in subdirectories
-echo "Document content" | sudo tee "$MOUNT_POINT/documents/doc1.txt" >/dev/null
-echo "Binary data test" | sudo tee "$MOUNT_POINT/bin/test_binary" >/dev/null
+echo "Document content" > "$TEMP_DIR/documents/doc1.txt"
+echo "Binary data test" > "$TEMP_DIR/bin/test_binary"
 
 # Create a file with Japanese text for UTF-8 testing
-echo "こんにちは、世界！" | sudo tee "$MOUNT_POINT/japanese.txt" >/dev/null
+echo "こんにちは、世界！" > "$TEMP_DIR/japanese.txt"
 
 # Create padding files
 for i in {0..3}; do
-    echo "File $i" | sudo tee "$MOUNT_POINT/file$i.txt" >/dev/null
+    echo "File $i" > "$TEMP_DIR/file$i.txt"
 done
 
 # Create a simple config file
-sudo tee "$MOUNT_POINT/config.ini" >/dev/null << EOF
+cat > "$TEMP_DIR/config.ini" << EOF
 [settings]
 debug=true
 log_level=info
@@ -92,10 +86,49 @@ enabled=true
 port=8080
 EOF
 
-# Sync and unmount
-sudo sync
-sudo umount "$MOUNT_POINT"
-rmdir "$MOUNT_POINT"
+# Use debugfs to populate the ext2 filesystem without mounting
+# Create a script for debugfs commands
+DEBUGFS_SCRIPT="/tmp/debugfs_script_$$"
+cat > "$DEBUGFS_SCRIPT" << EOF
+cd /
+mkdir test_files
+mkdir empty_dir
+mkdir documents
+mkdir bin
+write $TEMP_DIR/hello.txt hello.txt
+write $TEMP_DIR/readme.txt readme.txt
+write $TEMP_DIR/japanese.txt japanese.txt
+write $TEMP_DIR/config.ini config.ini
+cd test_files
+write $TEMP_DIR/test_files/numbers.txt numbers.txt
+write $TEMP_DIR/test_files/small.txt small.txt
+write $TEMP_DIR/test_files/1kb.txt 1kb.txt
+write $TEMP_DIR/test_files/4kb.txt 4kb.txt
+cd /documents
+write $TEMP_DIR/documents/doc1.txt doc1.txt
+cd /bin
+write $TEMP_DIR/bin/test_binary test_binary
+cd /
+EOF
+
+# Add file creation commands
+for i in {0..3}; do
+    echo "write $TEMP_DIR/file$i.txt file$i.txt" >> "$DEBUGFS_SCRIPT"
+done
+
+# Populate the filesystem using debugfs
+debugfs -w -f "$DEBUGFS_SCRIPT" "$IMAGE_PATH" >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "Warning: debugfs population failed, trying alternative method..."
+    # Fallback: create a simpler filesystem
+    echo "Hello, Scarlet!" | debugfs -w -R "write /dev/stdin hello.txt" "$IMAGE_PATH" >/dev/null 2>&1
+fi
+
+# Clean up temporary files
+rm -rf "$TEMP_DIR"
+rm -f "$DEBUGFS_SCRIPT"
+# Clean up mount point directory
+rmdir "$MOUNT_POINT" 2>/dev/null || true
 
 echo "Fresh ext2 test image ready: $IMAGE_PATH ($(ls -lh "$IMAGE_PATH" | awk '{print $5}'))"
 

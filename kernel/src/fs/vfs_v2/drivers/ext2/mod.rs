@@ -114,7 +114,7 @@ impl Ext2FileSystem {
             ));
         }
 
-        let block_size = 1024 << superblock.log_block_size;
+        let block_size = superblock.get_block_size();
         let root_inode = EXT2_ROOT_INO;
 
         // Create root node

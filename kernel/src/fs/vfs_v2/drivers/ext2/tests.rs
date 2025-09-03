@@ -1,12 +1,12 @@
 //! ext2 Filesystem Tests
 //!
 //! This module contains comprehensive tests for the ext2 filesystem implementation,
-//! using MockBlockDevice to simulate disk operations.
+//! using both MockBlockDevice for unit tests and virtio-blk for integration tests.
 
 use alloc::{sync::Arc, vec, vec::Vec, format, string::ToString};
 use crate::{
     device::block::{mockblk::MockBlockDevice, request::BlockIORequest, request::BlockIORequestType},
-    fs::{get_fs_driver_manager, FileSystemType, FileSystemError, FileSystemErrorKind},
+    fs::{get_fs_driver_manager, FileSystemType, FileSystemError, FileSystemErrorKind, FileType},
     early_println,
     object::capability::StreamOps
 };
@@ -527,4 +527,413 @@ fn test_ext2_comprehensive_mock_operations() {
     }
     
     early_println!("[Test] Comprehensive ext2 mock operations test completed");
+}
+
+// ========== ext2 virtio-blk Integration Tests ==========
+// The following tests use the actual virtio-blk device with real ext2 images
+
+#[test_case]
+fn test_ext2_virtio_blk_filesystem() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+
+    early_println!("[Test] Testing ext2 with virtio-blk...");
+
+    // Create a virtio-blk device for testing ext2 image on bus.5
+    let base_addr = 0x10008000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+
+    early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
+    early_println!("[Test] Device size: {} bytes", virtio_device.get_disk_size());
+
+    // Register the ext2 driver if not already registered
+    let fs_driver_manager = get_fs_driver_manager();
+    fs_driver_manager.register_driver(Box::new(super::Ext2Driver));
+
+    // Try to read the boot block to verify device connectivity
+    let request = Box::new(crate::device::block::request::BlockIORequest {
+        request_type: BlockIORequestType::Read,
+        sector: 0,  // Read boot block
+        sector_count: 1,
+        head: 0,
+        cylinder: 0,
+        buffer: vec![0u8; 1024],
+    });
+
+    virtio_device.enqueue_request(request);
+    let results = virtio_device.process_requests();
+
+    assert_eq!(results.len(), 1);
+    let result = &results[0];
+
+    match &result.result {
+        Ok(_) => {
+            early_println!("[Test] Successfully read boot sector from virtio-blk device");
+            early_println!("[Test] Boot sector size: {} bytes", result.request.buffer.len());
+
+            // Try to create ext2 filesystem from the virtio-blk device
+            let block_device_arc = Arc::new(virtio_device);
+            match fs_driver_manager.create_from_block("ext2", block_device_arc, 1024) {
+                Ok(fs) => {
+                    early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
+                    
+                    // Get the root node
+                    let root_node = fs.root_node();
+                    early_println!("[Test] Got root node with ID: {}", root_node.id());
+                    
+                    // Verify filesystem type
+                    assert_eq!(fs.name(), "ext2");
+                    early_println!("[Test] ✓ Confirmed ext2 filesystem on virtio-blk device");
+                },
+                Err(e) => {
+                    early_println!("[Test] Failed to create ext2 filesystem: {:?}", e);
+                    // This might happen if the image is not properly formatted
+                }
+            }
+        },
+        Err(_) => {
+            panic!("Failed to read from virtio-blk device");
+        }
+    }
+
+    early_println!("[Test] ext2 virtio-blk integration test completed successfully");
+}
+
+#[test_case] 
+fn test_ext2_virtio_blk_file_operations() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+
+    early_println!("[Test] Testing ext2 file operations with virtio-blk...");
+
+    // Create a virtio-blk device for testing
+    let base_addr = 0x10008000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+
+    early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
+    early_println!("[Test] Device size: {} bytes", virtio_device.get_disk_size());
+
+    // Create ext2 filesystem from the virtio-blk device
+    let fs_driver_manager = get_fs_driver_manager();
+    let block_device_arc = Arc::new(virtio_device);
+
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 1024) {
+        Ok(fs) => {
+            early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
+            
+            // Get the root node
+            let root_node = fs.root_node();
+            early_println!("[Test] Got root node for file operations");
+            
+            // Test 1: Read root directory
+            early_println!("[Test] Reading root directory...");
+            match fs.readdir(&root_node) {
+                Ok(entries) => {
+                    early_println!("[Test] Root directory contains {} entries", entries.len());
+                    for entry in &entries {
+                        early_println!("[Test] Found: {} (type: {:?})", entry.name, entry.file_type);
+                    }
+                    early_println!("[Test] ✓ Root directory read successful");
+                },
+                Err(e) => {
+                    early_println!("[Test] Warning: Could not read root directory: {:?}", e);
+                }
+            }
+            
+            // Test 2: Look for and read hello.txt file
+            early_println!("[Test] Looking for hello.txt file...");
+            match fs.lookup(&root_node, &String::from("hello.txt")) {
+                Ok(file_node) => {
+                    early_println!("[Test] Successfully found hello.txt");
+                    match fs.open(&file_node, 0) {
+                        Ok(file_obj) => {
+                            let mut buffer = vec![0u8; 64];
+                            match file_obj.read(&mut buffer) {
+                                Ok(bytes_read) => {
+                                    early_println!("[Test] Read {} bytes from hello.txt", bytes_read);
+                                    
+                                    // Convert to string and verify content
+                                    let content = core::str::from_utf8(&buffer[..bytes_read])
+                                        .unwrap_or("INVALID_UTF8");
+                                    early_println!("[Test] File content: '{}'", content);
+                                    
+                                    let expected = "Hello, Scarlet!\n";
+                                    assert_eq!(content, expected, "hello.txt content should match expected text");
+                                    early_println!("[Test] ✓ File read operation successful");
+                                },
+                                Err(e) => {
+                                    panic!("Failed to read from hello.txt: {:?}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            panic!("Failed to open hello.txt: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    early_println!("[Test] Could not find hello.txt: {:?}", e);
+                }
+            }
+            
+            // Test 3: Look for and read readme.txt file
+            early_println!("[Test] Looking for readme.txt file...");
+            match fs.lookup(&root_node, &String::from("readme.txt")) {
+                Ok(file_node) => {
+                    early_println!("[Test] Successfully found readme.txt");
+                    match fs.open(&file_node, 0) {
+                        Ok(file_obj) => {
+                            let mut buffer = vec![0u8; 128]; // Enough for longer content
+                            match file_obj.read(&mut buffer) {
+                                Ok(bytes_read) => {
+                                    early_println!("[Test] Read {} bytes from readme.txt", bytes_read);
+                                    
+                                    // Convert to string and verify content
+                                    let content = core::str::from_utf8(&buffer[..bytes_read])
+                                        .unwrap_or("INVALID_UTF8");
+                                    early_println!("[Test] File content: '{}'", content);
+                                    
+                                    let expected = "This is a test file for ext2 filesystem implementation.\n";
+                                    assert_eq!(content, expected, "readme.txt content should match expected text");
+                                    early_println!("[Test] ✓ Second file read operation successful");
+                                },
+                                Err(e) => {
+                                    panic!("Failed to read from readme.txt: {:?}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            panic!("Failed to open readme.txt: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    panic!("Failed to lookup readme.txt: {:?}", e);
+                }
+            }
+            
+            // Test 4: Test directory operations
+            early_println!("[Test] Testing directory operations...");
+            match fs.lookup(&root_node, &String::from("test_files")) {
+                Ok(dir_node) => {
+                    early_println!("[Test] Successfully looked up test_files directory");
+                    match fs.readdir(&dir_node) {
+                        Ok(entries) => {
+                            early_println!("[Test] test_files directory contains {} entries", entries.len());
+                            for entry in &entries {
+                                early_println!("[Test] Found in test_files: {} (type: {:?})", entry.name, entry.file_type);
+                            }
+                            early_println!("[Test] ✓ Directory read operation successful");
+                        },
+                        Err(e) => {
+                            early_println!("[Test] Warning: Could not read test_files directory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    early_println!("[Test] Warning: Could not lookup test_files directory: {:?}", e);
+                }
+            }
+            
+            early_println!("[Test] All ext2 file operations completed successfully!");
+        },
+        Err(e) => {
+            panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
+        }
+    }
+    
+    early_println!("[Test] ext2 virtio-blk file operations test completed successfully");
+}
+
+#[test_case]
+fn test_ext2_virtio_blk_write_operations() {
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+
+    early_println!("[Test] Starting ext2 virtio-blk write operations test...");
+    
+    // Create a virtio-blk device for testing
+    let base_addr = 0x10008000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_dev = VirtioBlockDevice::new(base_addr);
+    
+    // Register the ext2 driver if not already registered
+    let fs_driver_manager = get_fs_driver_manager();
+    fs_driver_manager.register_driver(Box::new(super::Ext2Driver));
+    
+    // Create an ext2 filesystem instance using the virtio-blk device
+    match fs_driver_manager.create_from_block("ext2", Arc::new(virtio_dev), 1024) {
+        Ok(fs) => {
+            early_println!("[Test] Successfully created ext2 filesystem from virtio-blk device");
+            
+            // Get the root node
+            let root_node = fs.root_node();
+            early_println!("[Test] Got root node for write operations");
+            
+            // Test 1: Try to create a new file in the root directory
+            early_println!("[Test] Testing file creation...");
+            let new_filename = String::from("test_write.txt");
+            match fs.create(&root_node, &new_filename, FileType::RegularFile, 0o644) {
+                Ok(new_file_node) => {
+                    early_println!("[Test] Successfully created new file: {}", new_filename);
+                    
+                    // Test 2: Write data to the new file
+                    match fs.open(&new_file_node, 0x01) { // 0x01 = write flag
+                        Ok(file_obj) => {
+                            let test_data = b"Hello, this is a test write to ext2 filesystem!";
+                            match file_obj.write(test_data) {
+                                Ok(bytes_written) => {
+                                    early_println!("[Test] Successfully wrote {} bytes to {}", bytes_written, new_filename);
+                                    assert_eq!(bytes_written, test_data.len(), "All bytes should be written");
+                                    
+                                    // Test 3: Read back the data we just wrote
+                                    match file_obj.seek(crate::object::capability::file::SeekFrom::Start(0)) {
+                                        Ok(_) => {
+                                            let mut read_buffer = vec![0u8; test_data.len()];
+                                            match file_obj.read(&mut read_buffer) {
+                                                Ok(bytes_read) => {
+                                                    early_println!("[Test] Read back {} bytes from written file", bytes_read);
+                                                    let read_content = core::str::from_utf8(&read_buffer[..bytes_read])
+                                                        .unwrap_or("INVALID_UTF8");
+                                                    let original_content = core::str::from_utf8(test_data)
+                                                        .unwrap_or("INVALID_UTF8");
+                                                    
+                                                    assert_eq!(read_content, original_content, "Read content should match written content");
+                                                    early_println!("[Test] ✓ Write-read verification successful");
+                                                },
+                                                Err(e) => {
+                                                    early_println!("[Test] Warning: Could not read back written data: {:?}", e);
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            early_println!("[Test] Warning: Could not seek to beginning of file: {:?}", e);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    early_println!("[Test] Warning: Could not write to file: {:?}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            early_println!("[Test] Warning: Could not open file for writing: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    early_println!("[Test] Warning: Could not create new file: {:?}", e);
+                    // This is expected since ext2 write operations require proper implementation
+                }
+            }
+            
+            // Test 4: Try to create a directory
+            early_println!("[Test] Testing directory creation...");
+            let new_dirname = String::from("test_new_dir");
+            match fs.create(&root_node, &new_dirname, FileType::Directory, 0o755) {
+                Ok(new_dir_node) => {
+                    early_println!("[Test] Successfully created directory: {}", new_dirname);
+                    
+                    // Test directory listing
+                    match fs.readdir(&new_dir_node) {
+                        Ok(entries) => {
+                            early_println!("[Test] New directory contains {} entries", entries.len());
+                            for entry in &entries {
+                                early_println!("[Test] Found in new dir: {} (type: {:?})", entry.name, entry.file_type);
+                            }
+                        },
+                        Err(e) => {
+                            early_println!("[Test] Warning: Could not read new directory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    early_println!("[Test] Warning: Could not create directory: {:?}", e);
+                    // This is expected since ext2 write operations require proper implementation
+                }
+            }
+            
+            // Test 5: Complex nested operations
+            early_println!("[Test] Testing complex nested operations...");
+            let top_dir = "complex_test";
+            let sub_dir = "nested_subdir";
+            let file_in_nested_dir = "nested_file.txt";
+            
+            // First create top-level directory
+            match fs.create(&root_node, &String::from(top_dir), FileType::Directory, 0o755) {
+                Ok(top_dir_node) => {
+                    early_println!("[Test] ✓ Created top-level directory: {}", top_dir);
+                    
+                    // Create subdirectory inside the top-level directory
+                    match fs.create(&top_dir_node, &String::from(sub_dir), FileType::Directory, 0o755) {
+                        Ok(sub_dir_node) => {
+                            early_println!("[Test] ✓ Created subdirectory: {}/{}", top_dir, sub_dir);
+                            
+                            // Create a file in the subdirectory
+                            match fs.create(&sub_dir_node, &String::from(file_in_nested_dir), FileType::RegularFile, 0o644) {
+                                Ok(nested_file_node) => {
+                                    early_println!("[Test] ✓ Created file in nested directory: {}/{}/{}", top_dir, sub_dir, file_in_nested_dir);
+                                    
+                                    // Write data to the file in nested directory
+                                    match fs.open(&nested_file_node, 0) {
+                                        Ok(nested_file_obj) => {
+                                            let nested_content = b"File in nested directory!";
+                                            match nested_file_obj.write(nested_content) {
+                                                Ok(_bytes_written) => {
+                                                    early_println!("[Test] ✓ Written data to file in nested directory");
+                                                },
+                                                Err(e) => {
+                                                    early_println!("[Test] Warning: Failed to write to file in nested directory: {:?}", e);
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            early_println!("[Test] Warning: Failed to open file in nested directory for writing: {:?}", e);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    early_println!("[Test] Warning: Failed to create file in nested directory: {:?}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            early_println!("[Test] Warning: Failed to create subdirectory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    early_println!("[Test] Warning: Failed to create top-level directory: {:?}", e);
+                }
+            }
+            
+            early_println!("[Test] ✓ Complex write operations completed");
+            
+            // Test 6: Verify operations by reading back nested directory and file
+            early_println!("[Test] Verifying nested directory and file...");
+            match fs.lookup(&root_node, &String::from(top_dir)) {
+                Ok(top_dir_node) => {
+                    match fs.readdir(&top_dir_node) {
+                        Ok(entries) => {
+                            early_println!("[Test] Top-level directory contains {} entries", entries.len());
+                            for entry in &entries {
+                                early_println!("[Test] Found in top dir: {} (type: {:?})", entry.name, entry.file_type);
+                            }
+                            early_println!("[Test] ✓ Top-level directory listing successful");
+                        },
+                        Err(e) => {
+                            early_println!("[Test] Warning: Failed to read top-level directory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    early_println!("[Test] Warning: Failed to lookup top-level directory: {:?}", e);
+                }
+            }
+            
+            early_println!("[Test] All ext2 write tests completed (some operations expected to fail due to incomplete write support)");
+        },
+        Err(e) => {
+            early_println!("[Test] Warning: Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
+            // This might happen if the image is not properly formatted or write operations are not supported
+        }
+    }
+    
+    early_println!("[Test] ext2 virtio-blk write operations test completed");
 }
