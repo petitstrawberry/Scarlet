@@ -1383,7 +1383,7 @@ impl Ext2FileSystem {
                 let new_block = self.allocate_block()?;
                 #[cfg(test)]
                 crate::early_println!("[ext2] write_file_content: allocated block {} for logical block {}", new_block, block_idx);
-                self.set_inode_block(&mut inode, block_idx as u64, new_block)?;
+                self.set_inode_block(&mut inode, block_idx as u64, new_block as u32)?;
                 block_list.push(new_block);
             } else {
                 #[cfg(test)]
@@ -1545,7 +1545,7 @@ impl Ext2FileSystem {
         } else {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::IoError,
-                "No result from block device read"
+                "No result from block bitmap read"
             ));
         };
 
@@ -1626,7 +1626,111 @@ impl Ext2FileSystem {
         Ok(())
     }
 
-    /// Update group descriptor on disk
+    /// Set the block number for a logical block within an inode
+    fn set_inode_block(&self, inode: &mut Ext2Inode, logical_block: u64, block_number: u32) -> Result<(), FileSystemError> {
+        let blocks_per_indirect = self.block_size / 4; // Each pointer is 4 bytes
+
+        if logical_block < 12 {
+            // Direct blocks
+            inode.block[logical_block as usize] = block_number;
+            Ok(())
+        } else if logical_block < 12 + blocks_per_indirect as u64 {
+            // Single indirect
+            let index = logical_block - 12;
+            
+            // If no indirect block exists, allocate one
+            if inode.block[12] == 0 {
+                let indirect_block = self.allocate_block()? as u32;
+                inode.block[12] = indirect_block;
+                
+                // Clear the indirect block
+                let clear_data = vec![0u8; self.block_size as usize];
+                let clear_request = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: (indirect_block * 2) as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: clear_data,
+                });
+                
+                self.block_device.enqueue_request(clear_request);
+                let _results = self.block_device.process_requests();
+            }
+            
+            let indirect_block = inode.block[12];
+            let indirect_sector = (indirect_block * 2) as u64;
+            
+            // Read the indirect block
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: indirect_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            let mut indirect_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read indirect block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device read"
+                ));
+            };
+            
+            // Update the block pointer
+            let offset = index as usize * 4;
+            let block_bytes = block_number.to_le_bytes();
+            indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
+            
+            // Write back the indirect block
+            let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: indirect_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: indirect_data,
+            });
+            
+            self.block_device.enqueue_request(write_request);
+            let write_results = self.block_device.process_requests();
+            
+            if let Some(write_result) = write_results.first() {
+                match &write_result.result {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write indirect block"
+                    )),
+                }
+            } else {
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No response from indirect block write"
+                ))
+            }
+        } else {
+            // For now, only support direct and single indirect blocks
+            Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Double and triple indirect blocks not yet supported"
+            ))
+        }
+    }
+
+        /// Update group descriptor on disk
     fn update_group_descriptor(&self, group: u32, bgd: &Ext2BlockGroupDescriptor) -> Result<(), FileSystemError> {
         let bgd_block_sector = ((group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
                        if self.block_size == 1024 { 2 } else { 1 }) * 2;

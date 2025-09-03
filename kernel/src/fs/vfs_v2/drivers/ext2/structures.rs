@@ -227,6 +227,46 @@ impl Ext2BlockGroupDescriptor {
     pub fn get_inode_table(&self) -> u32 {
         u32::from_le(self.inode_table)
     }
+
+    /// Get free blocks count
+    pub fn get_free_blocks_count(&self) -> u16 {
+        u16::from_le(self.free_blocks_count)
+    }
+
+    /// Set free blocks count
+    pub fn set_free_blocks_count(&mut self, count: u16) {
+        self.free_blocks_count = count.to_le();
+    }
+
+    /// Get free inodes count
+    pub fn get_free_inodes_count(&self) -> u16 {
+        u16::from_le(self.free_inodes_count)
+    }
+
+    /// Set free inodes count
+    pub fn set_free_inodes_count(&mut self, count: u16) {
+        self.free_inodes_count = count.to_le();
+    }
+
+    /// Get used directories count
+    pub fn get_used_dirs_count(&self) -> u16 {
+        u16::from_le(self.used_dirs_count)
+    }
+
+    /// Set used directories count
+    pub fn set_used_dirs_count(&mut self, count: u16) {
+        self.used_dirs_count = count.to_le();
+    }
+
+    /// Write the descriptor back to bytes
+    pub fn write_to_bytes(&self, data: &mut [u8]) {
+        if data.len() >= mem::size_of::<Self>() {
+            unsafe {
+                let ptr = data.as_mut_ptr() as *mut Self;
+                *ptr = *self;
+            }
+        }
+    }
 }
 
 /// ext2 Inode structure
