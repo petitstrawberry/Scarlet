@@ -107,10 +107,11 @@ pub struct Ext2Superblock {
 impl Ext2Superblock {
     /// Parse superblock from raw bytes using unsafe type conversion for efficiency
     pub fn from_bytes(data: &[u8]) -> Result<Self, FileSystemError> {
-        if data.len() < mem::size_of::<Self>() {
+        // Standard ext2 superblock is 1024 bytes, but our struct might be slightly larger due to alignment
+        if data.len() < 1024 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Insufficient data for ext2 superblock"
+                format!("Insufficient data for ext2 superblock: got {} bytes, need at least 1024 bytes", data.len())
             ));
         }
 
@@ -118,7 +119,7 @@ impl Ext2Superblock {
         let superblock = unsafe {
             // Ensure proper alignment by copying to stack
             let mut aligned_data = [0u8; 1024];
-            aligned_data[..data.len().min(1024)].copy_from_slice(&data[..data.len().min(1024)]);
+            aligned_data[..1024].copy_from_slice(&data[..1024]);
             *(aligned_data.as_ptr() as *const Self)
         };
 

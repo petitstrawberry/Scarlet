@@ -134,9 +134,12 @@ echo "Fresh ext2 test image ready: $IMAGE_PATH ($(ls -lh "$IMAGE_PATH" | awk '{p
 
 # Verify the image
 echo "Verifying filesystem..."
-fsck.ext2 -f -n "$IMAGE_PATH" 2>/dev/null
-if [ $? -eq 0 ]; then
+timeout 10 fsck.ext2 -f -n "$IMAGE_PATH" 2>/dev/null
+FSCK_RESULT=$?
+if [ $FSCK_RESULT -eq 0 ]; then
     echo "Filesystem verification: OK"
+elif [ $FSCK_RESULT -eq 124 ]; then
+    echo "Warning: Filesystem verification timed out"
 else
     echo "Warning: Filesystem verification failed"
 fi

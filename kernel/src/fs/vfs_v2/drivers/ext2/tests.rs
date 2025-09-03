@@ -90,13 +90,19 @@ fn test_ext2_mockdevice_directory_operations() {
 fn test_ext2_superblock_parsing() {
     use super::structures::*;
     
+    early_println!("[Test] Starting ext2 superblock parsing test");
+    
     // Create a minimal valid ext2 superblock
-    let mut superblock_data = vec![0u8; 1024];
+    let mut superblock_data = vec![0u8; 1024];  // Standard ext2 superblock size
+    
+    early_println!("[Test] Created superblock data buffer of size {}", superblock_data.len());
     
     // Fill in essential superblock fields manually
     // Magic at offset 56 (0x38)
     superblock_data[56] = (EXT2_SUPER_MAGIC & 0xFF) as u8;
     superblock_data[57] = ((EXT2_SUPER_MAGIC >> 8) & 0xFF) as u8;
+    
+    early_println!("[Test] Set magic bytes to {:02x} {:02x}", superblock_data[56], superblock_data[57]);
     
     // blocks_count at offset 4
     superblock_data[4] = 0x00;
@@ -116,8 +122,23 @@ fn test_ext2_superblock_parsing() {
     superblock_data[26] = 0x00;
     superblock_data[27] = 0x00; // log_block_size = 0 -> block_size = 1024
     
+    // Test that the magic bytes are set correctly
+    let magic_from_bytes = u16::from_le_bytes([superblock_data[56], superblock_data[57]]);
+    early_println!("[Test] Magic bytes from data: {:04x}, Expected: {:04x}", magic_from_bytes, EXT2_SUPER_MAGIC);
+    early_println!("[Test] Raw bytes at 56-57: {:02x} {:02x}", superblock_data[56], superblock_data[57]);
+    assert_eq!(magic_from_bytes, EXT2_SUPER_MAGIC, "Magic bytes should be set correctly");
+    
     // Test superblock parsing
     let result = Ext2Superblock::from_bytes(&superblock_data);
+    if result.is_err() {
+        early_println!("[Test] Superblock parsing failed: {:?}", result.as_ref().err());
+        early_println!("[Test] Magic bytes at 56-57: {:02x} {:02x}", superblock_data[56], superblock_data[57]);
+        early_println!("[Test] Expected magic: {:04x}", EXT2_SUPER_MAGIC);
+        
+        // Let's also check a few more bytes to see what's going on
+        early_println!("[Test] First 16 bytes: {:02x?}", &superblock_data[0..16]);
+        early_println!("[Test] Bytes around magic (52-60): {:02x?}", &superblock_data[52..60]);
+    }
     assert!(result.is_ok(), "Should be able to parse valid superblock");
     
     let superblock = result.unwrap();
