@@ -203,8 +203,39 @@ impl Ext2FileObject {
             return Ok(());
         }
 
-        // For now, just mark as clean since we don't implement writing yet
+        #[cfg(test)]
+        crate::early_println!("[ext2] sync_to_disk: Starting sync for inode {}", self.inode_number);
+
+        // Get filesystem reference
+        let fs = self.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        
+        // Downcast to Ext2FileSystem
+        let ext2_fs = fs.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        // Get cached content
+        let cached = self.cached_content.read();
+        let content = cached.as_ref().ok_or(StreamError::IoError)?;
+        
+        #[cfg(test)]
+        crate::early_println!("[ext2] sync_to_disk: Writing {} bytes to inode {}", content.len(), self.inode_number);
+        
+        // Write content to disk
+        ext2_fs.write_file_content(self.inode_number, content)
+            .map_err(|_e| {
+                #[cfg(test)]
+                crate::early_println!("[ext2] sync_to_disk: Error writing to disk: {:?}", _e);
+                StreamError::IoError
+            })?;
+        
+        // Mark as clean
         *self.is_dirty.write() = false;
+        #[cfg(test)]
+        crate::early_println!("[ext2] sync_to_disk: Successfully synced inode {}", self.inode_number);
         Ok(())
     }
 }
@@ -616,5 +647,14 @@ impl FileObject for Ext2DirectoryObject {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl Drop for Ext2FileObject {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        crate::early_println!("[ext2] Drop: syncing inode {} to disk", self.inode_number);
+        // Sync to disk when the file object is dropped
+        let _ = self.sync_to_disk();
     }
 }
