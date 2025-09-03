@@ -76,18 +76,37 @@ impl VfsNode for Ext2Node {
     }
 
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
-        // For now, return basic metadata
-        // In a full implementation, we'd read the inode to get real metadata
+        // Read the actual inode to get real metadata
+        let filesystem = self.filesystem()
+            .and_then(|weak_fs| weak_fs.upgrade())
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem not available"
+            ))?;
+        
+        let ext2_fs = filesystem.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid filesystem type"
+            ))?;
+        
+        let inode = ext2_fs.read_inode(self.inode_number)?;
+        
+        // Convert inode mode to permissions
+        let mode = inode.get_mode();
+        let permissions = FilePermission {
+            read: (mode & 0o444) != 0,
+            write: (mode & 0o222) != 0,
+            execute: (mode & 0o111) != 0,
+        };
+        
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
-            size: 0, // Would read from inode
-            permissions: FilePermission {
-                read: true,
-                write: true,
-                execute: false,
-            },
-            created_time: 0,
-            modified_time: 0,
+            size: inode.get_size() as usize,
+            permissions,
+            created_time: inode.get_ctime() as u64,
+            modified_time: inode.get_mtime() as u64,
             accessed_time: 0,
             file_id: self.file_id,
             link_count: 1,
@@ -413,9 +432,124 @@ impl Ext2DirectoryObject {
 
 impl StreamOps for Ext2DirectoryObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        // TODO: Implement directory reading
-        // For now, return empty read to indicate end of directory
-        Ok(0)
+        // Get the filesystem reference
+        let filesystem = self.filesystem.read()
+            .as_ref()
+            .and_then(|weak_fs| weak_fs.upgrade())
+            .ok_or(StreamError::IoError)?;
+        
+        let ext2_fs = filesystem.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::IoError)?;
+        
+        // Read directory entries using the existing read_directory_entries method
+        let current_inode = match ext2_fs.read_inode(self.inode_number) {
+            Ok(inode) => inode,
+            Err(_) => return Ok(0), // Error reading inode
+        };
+        
+        let entries = match ext2_fs.read_directory_entries(&current_inode) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(0), // EOF or error
+        };
+        
+        // position is the entry index
+        let position = *self.position.lock() as usize;
+        
+        // Create a vector to store all entries including "." and ".."
+        let mut all_entries = Vec::new();
+        
+        // Add "." entry (current directory)
+        let current_inode = match ext2_fs.read_inode(self.inode_number) {
+            Ok(inode) => inode,
+            Err(_) => return Ok(0),
+        };
+        
+        all_entries.push(crate::fs::DirectoryEntryInternal {
+            name: String::from("."),
+            file_type: FileType::Directory,
+            size: current_inode.get_size() as usize,
+            file_id: self.file_id,
+            metadata: None,
+        });
+        
+        // Add ".." entry (parent directory) - simplified to point to current for now
+        all_entries.push(crate::fs::DirectoryEntryInternal {
+            name: String::from(".."),
+            file_type: FileType::Directory,
+            size: current_inode.get_size() as usize,
+            file_id: self.file_id,
+            metadata: None,
+        });
+        
+        // Add regular directory entries
+        let mut regular_entries = Vec::new();
+        for entry in entries {
+            let file_type = if entry.entry.inode != 0 {
+                match ext2_fs.read_inode(entry.entry.inode) {
+                    Ok(inode) => {
+                        if inode.is_dir() {
+                            FileType::Directory
+                        } else if inode.is_file() {
+                            FileType::RegularFile
+                        } else {
+                            FileType::RegularFile // Default fallback
+                        }
+                    },
+                    Err(_) => FileType::RegularFile,
+                }
+            } else {
+                continue; // Skip deleted entries
+            };
+            
+            regular_entries.push(crate::fs::DirectoryEntryInternal {
+                name: entry.name,
+                file_type,
+                size: 0, // Size not immediately available
+                file_id: entry.entry.inode as u64,
+                metadata: None,
+            });
+        }
+        
+        // Sort regular entries by file_id
+        regular_entries.sort_by_key(|entry| entry.file_id);
+        
+        // Append sorted regular entries to the result
+        all_entries.extend(regular_entries);
+        
+        if position >= all_entries.len() {
+            return Ok(0); // EOF
+        }
+        
+        // Get current entry
+        let internal_entry = &all_entries[position];
+        
+        // Convert to binary format
+        let dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
+        
+        // Calculate actual entry size
+        let entry_size = dir_entry.entry_size();
+        
+        // Check buffer size
+        if buffer.len() < entry_size {
+            return Err(StreamError::InvalidArgument); // Buffer too small
+        }
+        
+        // Treat struct as byte array
+        let entry_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &dir_entry as *const _ as *const u8,
+                entry_size
+            )
+        };
+        
+        // Copy to buffer
+        buffer[..entry_size].copy_from_slice(entry_bytes);
+        
+        // Move to next entry
+        *self.position.lock() += 1;
+        
+        Ok(entry_size)
     }
 
     fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
