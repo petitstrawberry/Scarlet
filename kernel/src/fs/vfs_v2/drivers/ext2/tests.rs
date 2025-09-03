@@ -110,6 +110,12 @@ fn test_ext2_superblock_parsing() {
     superblock_data[2] = 0x00;
     superblock_data[3] = 0x00; // 2048
     
+    // Set block size field (log_block_size at offset 24)
+    superblock_data[24] = 0x00;
+    superblock_data[25] = 0x00;
+    superblock_data[26] = 0x00;
+    superblock_data[27] = 0x00; // log_block_size = 0 -> block_size = 1024
+    
     // Test superblock parsing
     let result = Ext2Superblock::from_bytes(&superblock_data);
     assert!(result.is_ok(), "Should be able to parse valid superblock");
@@ -539,7 +545,7 @@ fn test_ext2_virtio_blk_filesystem() {
     early_println!("[Test] Testing ext2 with virtio-blk...");
 
     // Create a virtio-blk device for testing ext2 image on bus.5
-    let base_addr = 0x10008000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
     early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
@@ -605,7 +611,7 @@ fn test_ext2_virtio_blk_file_operations() {
     early_println!("[Test] Testing ext2 file operations with virtio-blk...");
 
     // Create a virtio-blk device for testing
-    let base_addr = 0x10008000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
     let virtio_device = VirtioBlockDevice::new(base_addr);
 
     early_println!("[Test] Created virtio-blk device: {}", virtio_device.get_disk_name());
@@ -750,7 +756,7 @@ fn test_ext2_virtio_blk_write_operations() {
     early_println!("[Test] Starting ext2 virtio-blk write operations test...");
     
     // Create a virtio-blk device for testing
-    let base_addr = 0x10008000; // Standard virtio-blk address for QEMU bus.5
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
     let virtio_dev = VirtioBlockDevice::new(base_addr);
     
     // Register the ext2 driver if not already registered
