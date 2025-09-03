@@ -625,7 +625,7 @@ impl Ext2FileSystem {
         let mut dir_inode = self.read_inode(dir_inode_number)?;
         dir_inode.block[0] = block_number as u32;
         dir_inode.size = block_size as u32;
-        dir_inode.blocks = 2; // 2 sectors for 1 block
+        dir_inode.blocks = (self.block_size / 512).to_le(); // Number of 512-byte sectors
         
         self.write_inode(dir_inode_number, &dir_inode)?;
         
@@ -1376,9 +1376,12 @@ impl Ext2FileSystem {
             content_offset += bytes_to_write;
         }
         
-        // Update inode size and modification time
+        // Update inode size, block count, and modification time
         inode.size = content.len() as u32;
         inode.mtime = 0; // TODO: Use proper timestamp when available
+        
+        // Update i_blocks field (count in 512-byte sectors)
+        inode.blocks = blocks_needed * (self.block_size / 512);
         
         // Write updated inode to disk
         self.write_inode(inode_num, &inode)?;
@@ -1607,6 +1610,7 @@ impl FileSystemOperations for Ext2FileSystem {
         } as u16;
         
         // Create new inode with proper initialization
+        let initial_nlinks: u16 = if file_type == FileType::Directory { 2 } else { 1 }; // Directory gets "." and initial link
         let new_inode = Ext2Inode {
             mode: mode.to_le(),
             uid: 0_u16.to_le(),
@@ -1616,7 +1620,7 @@ impl FileSystemOperations for Ext2FileSystem {
             mtime: 0_u32.to_le(),
             dtime: 0_u32.to_le(),
             gid: 0_u16.to_le(),
-            links_count: 1_u16.to_le(),
+            links_count: initial_nlinks.to_le(),
             blocks: 0_u32.to_le(),
             flags: 0_u32.to_le(),
             osd1: 0_u32.to_le(),
@@ -1637,11 +1641,11 @@ impl FileSystemOperations for Ext2FileSystem {
         // Initialize directory contents if it's a directory
         if file_type == FileType::Directory {
             self.initialize_directory(new_inode_number, ext2_parent.inode_number())?;
-        }
-        
-        // Initialize directory contents if it's a directory
-        if file_type == FileType::Directory {
-            self.initialize_directory(new_inode_number, ext2_parent.inode_number())?;
+            
+            // Update parent directory's nlinks count (adding ".." entry)
+            let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
+            parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
+            self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
         }
         
         // Create new node
