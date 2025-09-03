@@ -740,7 +740,16 @@ impl Ext2FileSystem {
                 
                 if let Some(result) = results.first() {
                     match &result.result {
-                        Ok(_) => {},
+                        Ok(_) => {
+                            // Update group descriptor to reflect one less free block
+                            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
+                            let current_free_blocks = u16::from_le(bgd.free_blocks_count);
+                            bgd.free_blocks_count = (current_free_blocks.saturating_sub(1)).to_le();
+                            self.update_group_descriptor(group, &bgd)?;
+                            
+                            // Update superblock free blocks count
+                            self.update_superblock_counts(-1, 0, 0)?;
+                        },
                         Err(_) => return Err(FileSystemError::new(
                             FileSystemErrorKind::IoError,
                             "Failed to write block bitmap"
@@ -871,7 +880,16 @@ impl Ext2FileSystem {
                 
                 if let Some(result) = results.first() {
                     match &result.result {
-                        Ok(_) => {},
+                        Ok(_) => {
+                            // Update group descriptor to reflect one less free inode
+                            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
+                            let current_free_inodes = u16::from_le(bgd.free_inodes_count);
+                            bgd.free_inodes_count = (current_free_inodes.saturating_sub(1)).to_le();
+                            self.update_group_descriptor(group, &bgd)?;
+                            
+                            // Update superblock free inodes count
+                            self.update_superblock_counts(0, -1, 0)?;
+                        },
                         Err(_) => return Err(FileSystemError::new(
                             FileSystemErrorKind::IoError,
                             "Failed to write inode bitmap"
@@ -1407,6 +1425,192 @@ impl Ext2FileSystem {
         }
     }
 
+    /// Update block group descriptor on disk
+    fn update_group_descriptor(&self, group: u32, descriptor: &Ext2BlockGroupDescriptor) -> Result<(), FileSystemError> {
+        // Calculate the block where group descriptors are stored
+        let bgd_block_sector = if self.block_size == 1024 { 
+            2 * 2  // Block 2 for 1KB block size
+        } else { 
+            1 * 2  // Block 1 for larger block sizes
+        };
+        
+        // Read the block group descriptor table
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: bgd_block_sector,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.block_size as usize],
+        });
+        
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        let mut bgd_data = if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read block group descriptor table"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from block group descriptor read"
+            ));
+        };
+        
+        // Calculate offset for this group's descriptor
+        let bgd_offset = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) as usize;
+        
+        if bgd_offset + mem::size_of::<Ext2BlockGroupDescriptor>() > bgd_data.len() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Block group descriptor offset out of bounds"
+            ));
+        }
+        
+        // Update the descriptor in the buffer using unsafe copy
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                descriptor as *const Ext2BlockGroupDescriptor as *const u8,
+                bgd_data[bgd_offset..].as_mut_ptr(),
+                mem::size_of::<Ext2BlockGroupDescriptor>()
+            );
+        }
+        
+        // Write the updated block group descriptor table back to disk
+        let write_request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Write,
+            sector: bgd_block_sector,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: bgd_data,
+        });
+        
+        self.block_device.enqueue_request(write_request);
+        let write_results = self.block_device.process_requests();
+        
+        if let Some(write_result) = write_results.first() {
+            match &write_result.result {
+                Ok(_) => Ok(()),
+                Err(_) => Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to write updated block group descriptor"
+                )),
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No response from block group descriptor write"
+            ))
+        }
+    }
+    
+    /// Update superblock free block and inode counts
+    fn update_superblock_counts(&self, blocks_delta: i32, inodes_delta: i32, _dirs_delta: i32) -> Result<(), FileSystemError> {
+        // Read the superblock (located at sector 2 for 1KB block size)
+        let superblock_sector = 2; // sector 2 = 1024 bytes offset
+        
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: superblock_sector,
+            sector_count: 2, // 1024 bytes = 2 sectors
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; 1024],
+        });
+        
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        let mut superblock_data = if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read superblock"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from superblock read"
+            ));
+        };
+        
+        // Update free blocks count (offset 12 in superblock)
+        if blocks_delta != 0 {
+            let current_free_blocks_bytes = &superblock_data[12..16];
+            let current_free_blocks = u32::from_le_bytes([
+                current_free_blocks_bytes[0],
+                current_free_blocks_bytes[1], 
+                current_free_blocks_bytes[2],
+                current_free_blocks_bytes[3]
+            ]);
+            
+            let new_free_blocks = if blocks_delta < 0 {
+                current_free_blocks.saturating_sub((-blocks_delta) as u32)
+            } else {
+                current_free_blocks.saturating_add(blocks_delta as u32)
+            };
+            
+            let new_free_blocks_bytes = new_free_blocks.to_le_bytes();
+            superblock_data[12..16].copy_from_slice(&new_free_blocks_bytes);
+        }
+        
+        // Update free inodes count (offset 16 in superblock)
+        if inodes_delta != 0 {
+            let current_free_inodes_bytes = &superblock_data[16..20];
+            let current_free_inodes = u32::from_le_bytes([
+                current_free_inodes_bytes[0],
+                current_free_inodes_bytes[1],
+                current_free_inodes_bytes[2], 
+                current_free_inodes_bytes[3]
+            ]);
+            
+            let new_free_inodes = if inodes_delta < 0 {
+                current_free_inodes.saturating_sub((-inodes_delta) as u32)
+            } else {
+                current_free_inodes.saturating_add(inodes_delta as u32)
+            };
+            
+            let new_free_inodes_bytes = new_free_inodes.to_le_bytes();
+            superblock_data[16..20].copy_from_slice(&new_free_inodes_bytes);
+        }
+        
+        // Write the updated superblock back to disk
+        let write_request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Write,
+            sector: superblock_sector,
+            sector_count: 2,
+            head: 0,
+            cylinder: 0,
+            buffer: superblock_data,
+        });
+        
+        self.block_device.enqueue_request(write_request);
+        let write_results = self.block_device.process_requests();
+        
+        if let Some(write_result) = write_results.first() {
+            match &write_result.result {
+                Ok(_) => Ok(()),
+                Err(_) => Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to write updated superblock"
+                )),
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No response from superblock write"
+            ))
+        }
+    }
+
     // ...existing code...
 }
 
@@ -1646,6 +1850,32 @@ impl FileSystemOperations for Ext2FileSystem {
             let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
             parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
             self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
+            
+            // Update group descriptor to reflect one more directory
+            let group = 0; // For now, we only use group 0
+            let bgd_block_sector = if self.block_size == 1024 { 2 * 2 } else { 1 * 2 };
+            
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: bgd_block_sector,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            if let Some(result) = results.first() {
+                if let Ok(_) = &result.result {
+                    let bgd_data = &result.request.buffer;
+                    let mut bgd = Ext2BlockGroupDescriptor::from_bytes(bgd_data)?;
+                    let current_dirs = u16::from_le(bgd.used_dirs_count);
+                    bgd.used_dirs_count = (current_dirs + 1).to_le();
+                    self.update_group_descriptor(group, &bgd)?;
+                }
+            }
         }
         
         // Create new node
