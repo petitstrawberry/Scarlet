@@ -75,6 +75,13 @@ mcopy -i "$IMAGE_PATH" /tmp/test_binary ::bin/test_binary
 echo "こんにちは、世界！" > /tmp/japanese.txt
 mcopy -i "$IMAGE_PATH" /tmp/japanese.txt ::japanese.txt
 
+# Create padding file for filling clusters
+echo "File 0" > /tmp/file0.txt
+mcopy -i "$IMAGE_PATH" /tmp/file0.txt ::file0.txt
+mcopy -i "$IMAGE_PATH" /tmp/file0.txt ::file1.txt
+mcopy -i "$IMAGE_PATH" /tmp/file0.txt ::file2.txt
+mcopy -i "$IMAGE_PATH" /tmp/file0.txt ::file3.txt
+
 # Create a simple config file
 cat << EOF > /tmp/config.ini
 [settings]
@@ -90,7 +97,7 @@ mcopy -i "$IMAGE_PATH" /tmp/config.ini ::config.ini
 
 # Clean up temporary files
 rm -f /tmp/hello.txt /tmp/readme.txt /tmp/numbers.txt /tmp/small.txt /tmp/1kb.txt /tmp/4kb.txt
-rm -f /tmp/doc1.txt /tmp/test_binary /tmp/japanese.txt /tmp/config.ini
+rm -f /tmp/doc1.txt /tmp/test_binary /tmp/japanese.txt /tmp/config.ini /tmp/file0.txt
 rmdir "$MOUNT_POINT"
 
 echo "Fresh FAT32 test image ready: $IMAGE_PATH ($(ls -lh "$IMAGE_PATH" | awk '{print $5}'))"
