@@ -304,11 +304,11 @@ fn test_ext2_file_object_operations() {
     assert!(seek_result.is_ok(), "Should be able to seek current");
     assert_eq!(seek_result.unwrap(), 10);
     
-    // Test read (should return 0 for now since not implemented)
+    // Test read (should fail gracefully since no filesystem is set)
     let mut buffer = vec![0u8; 100];
     let read_result = file_obj.read(&mut buffer);
-    assert!(read_result.is_ok(), "Read should not error");
-    assert_eq!(read_result.unwrap(), 0, "Should read 0 bytes for unimplemented read");
+    // Read should fail since no filesystem reference is set, but should not panic
+    assert!(read_result.is_err(), "Read should error when no filesystem is set");
     
     early_println!("[Test] ✓ ext2 file object operations test passed");
 }

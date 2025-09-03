@@ -192,9 +192,31 @@ impl Ext2FileObject {
 
 impl StreamOps for Ext2FileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        // TODO: Implement file reading from ext2 blocks
-        // For now, return empty read
-        Ok(0)
+        // Ensure file content is loaded into cache
+        self.ensure_content_loaded()?;
+        
+        let content = self.cached_content.read();
+        let content = content.as_ref().ok_or(StreamError::IoError)?;
+        
+        let mut position_guard = self.position.lock();
+        let current_pos = *position_guard as usize;
+        
+        // If position is beyond file size, return 0 bytes read
+        if current_pos >= content.len() {
+            return Ok(0);
+        }
+        
+        // Calculate how many bytes to read
+        let bytes_available = content.len() - current_pos;
+        let bytes_to_read = core::cmp::min(buffer.len(), bytes_available);
+        
+        // Copy data from cached content to buffer
+        buffer[..bytes_to_read].copy_from_slice(&content[current_pos..current_pos + bytes_to_read]);
+        
+        // Update position
+        *position_guard += bytes_to_read as u64;
+        
+        Ok(bytes_to_read)
     }
 
     fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {

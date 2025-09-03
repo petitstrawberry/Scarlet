@@ -27,8 +27,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Create ext2 filesystem
-mkfs.ext2 -F -L "SCARLET" "$IMAGE_PATH" >/dev/null 2>&1
+# Create ext2 filesystem with 1024-byte blocks (required by our driver)
+mkfs.ext2 -F -L "SCARLET" -b 1024 "$IMAGE_PATH" >/dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create ext2 filesystem"
     rm -f "$IMAGE_PATH"
