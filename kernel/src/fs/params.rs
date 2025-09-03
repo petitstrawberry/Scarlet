@@ -39,6 +39,55 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use core::any::Any;
 
+/// File open flags
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OpenFlags {
+    /// Read access
+    pub read: bool,
+    /// Write access  
+    pub write: bool,
+    /// Create file if it doesn't exist
+    pub create: bool,
+    /// Truncate file to zero length
+    pub truncate: bool,
+    /// Append to end of file
+    pub append: bool,
+}
+
+impl Default for OpenFlags {
+    fn default() -> Self {
+        Self {
+            read: true,
+            write: false,
+            create: false,
+            truncate: false,
+            append: false,
+        }
+    }
+}
+
+impl OpenFlags {
+    pub fn read_only() -> Self {
+        Self {
+            read: true,
+            write: false,
+            create: false,
+            truncate: false,
+            append: false,
+        }
+    }
+
+    pub fn read_write() -> Self {
+        Self {
+            read: true,
+            write: true,
+            create: false,
+            truncate: false,
+            append: false,
+        }
+    }
+}
+
 /// Core trait for filesystem parameter types
 /// 
 /// This trait enables type-safe filesystem configuration while maintaining
