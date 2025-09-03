@@ -612,22 +612,23 @@ impl Fat32FileSystem {
         let mut current_cluster = start_cluster;
         let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
         
-        loop {                #[cfg(test)]
-                {
-                    // use crate::early_println;
-                    // early_println!("[FAT32] reading cluster {}", current_cluster);
-                }
+        loop {                
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] reading cluster {}", current_cluster);
+            // }
             
             // Read current cluster
             let cluster_data = self.read_cluster(current_cluster)?;
             
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                // early_println!("[FAT32] read cluster {} data: {} bytes, first 8 bytes: {:?}", 
-                //     current_cluster, cluster_data.len(), 
-                //     &cluster_data[..core::cmp::min(8, cluster_data.len())]);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] read cluster {} data: {} bytes, first 8 bytes: {:?}", 
+            //         current_cluster, cluster_data.len(), 
+            //         &cluster_data[..core::cmp::min(8, cluster_data.len())]);
+            // }
             
             // Add data to content (up to requested size)
             let remaining_size = size.saturating_sub(content.len());
@@ -662,11 +663,11 @@ impl Fat32FileSystem {
     /// Write file content to disk and return the starting cluster
     pub fn write_file_content(&self, current_cluster: u32, content: &[u8]) -> Result<u32, FileSystemError> {
         // Debug output for large file operations
-        #[cfg(test)]
-        {
-            // use crate::early_println;
-            // early_println!("[FAT32] write_file_content: cluster={}, content_len={}", current_cluster, content.len());
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] write_file_content: cluster={}, content_len={}", current_cluster, content.len());
+        // }
         
         // If content is empty, free the cluster chain
         if content.is_empty() {
@@ -680,11 +681,11 @@ impl Fat32FileSystem {
         let clusters_needed = (content.len() + cluster_size - 1) / cluster_size;
         
         // Debug output for allocation
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            // early_println!("[FAT32] clusters_needed={}, cluster_size={}", clusters_needed, cluster_size);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] clusters_needed={}, cluster_size={}", clusters_needed, cluster_size);
+        // }
         
         // Free existing chain if we're overwriting
         if current_cluster != 0 {
@@ -870,7 +871,9 @@ impl Fat32FileSystem {
             // #[cfg(test)]
             // {
             //     use crate::early_println;
-            //     early_println!("[FAT32] checking cluster {}", cluster);
+            //     if cluster <= 10 {
+            //         early_println!("[FAT32] checking cluster {}", cluster);
+            //     }
             // }
             
             // Read FAT entry directly without caching to avoid stale cache issues
@@ -888,7 +891,7 @@ impl Fat32FileSystem {
                 // #[cfg(test)]
                 // {
                 //     use crate::early_println;
-                //     early_println!("[FAT32] found free cluster: {}", cluster);
+                //     early_println!("[FAT32] ✓ found free cluster: {}", cluster);
                 // }
                 // Mark as allocated immediately to prevent duplicate allocation
                 self.write_fat_entry(cluster, 0x0FFFFFFF)?; // End of chain marker (will be updated later if part of chain)
@@ -899,7 +902,7 @@ impl Fat32FileSystem {
                 // #[cfg(test)]
                 // {
                 //     use crate::early_println;
-                //     early_println!("[FAT32] allocated cluster: {}", cluster);
+                //     early_println!("[FAT32] ✓ allocated cluster: {}", cluster);
                 // }
                 return Ok(cluster);
             }
@@ -1406,12 +1409,12 @@ impl Fat32FileSystem {
     
     /// Write a new directory entry with LFN support to the specified directory cluster
     fn write_directory_entry_with_name(&self, dir_cluster: u32, filename: &str, cluster: u32, size: u32, is_directory: bool) -> Result<(), FileSystemError> {
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            early_println!("[FAT32] write_directory_entry_with_name: dir_cluster={}, filename='{}', cluster={}, is_directory={}", 
-                      dir_cluster, filename, cluster, is_directory);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] write_directory_entry_with_name: dir_cluster={}, filename='{}', cluster={}, is_directory={}", 
+        //               dir_cluster, filename, cluster, is_directory);
+        // }
         
         // Generate a unique SFN for this filename
         let unique_sfn = self.generate_unique_sfn(dir_cluster, filename)?;
@@ -1461,7 +1464,7 @@ impl Fat32FileSystem {
         // #[cfg(test)]
         // {
         //     use crate::early_println;
-        //     early_println!("[FAT32] needs_lfn: {}", needs_lfn);
+        //     early_println!("[FAT32] filename='{}', needs_lfn={}", filename, needs_lfn);
         // }
         
         let mut entries_to_write = Vec::new();
@@ -1495,11 +1498,11 @@ impl Fat32FileSystem {
         // Find space for all entries
         let mut current_cluster = dir_cluster;
         
-        #[cfg(test)]
-        {
-            use crate::early_println;
-            early_println!("[FAT32] searching for space in cluster {} for {} entries", current_cluster, total_entries_needed);
-        }
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] searching for space in cluster {} for {} entries", current_cluster, total_entries_needed);
+        // }
         
         loop {
             // Read the current cluster
@@ -1584,62 +1587,62 @@ impl Fat32FileSystem {
                     
                     // Write the modified cluster back to disk
 
-                    #[cfg(test)]
-                    {
-                        use crate::early_println;
-                        early_println!("[FAT32] writing modified directory cluster back to disk");
-                    }
+                    // #[cfg(test)]
+                    // {
+                    //     use crate::early_println;
+                    //     early_println!("[FAT32] writing modified directory cluster back to disk");
+                    // }
                     
                     self.write_cluster_data(current_cluster, &cluster_data)?;
                     
-                    #[cfg(test)]
-                    {
-                        use crate::early_println;
-                        early_println!("[FAT32] write_directory_entry completed successfully");
-                    }
+                    // #[cfg(test)]
+                    // {
+                    //     use crate::early_println;
+                    //     early_println!("[FAT32] write_directory_entry completed successfully");
+                    // }
 
                     return Ok(());
                 }
             }
             
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                early_println!("[FAT32] no space found in cluster {}, checking next cluster", current_cluster);
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] no space found in cluster {}, checking next cluster", current_cluster);
+            // }
             
             // No space found in this cluster, check next cluster in chain
             let next_cluster = self.read_fat_entry(current_cluster)?;
             if next_cluster >= 0x0FFFFFF8 {
                 // End of cluster chain, need to allocate new cluster
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    early_println!("[FAT32] extending directory: allocating new cluster for cluster {}", current_cluster);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] extending directory: allocating new cluster for cluster {}", current_cluster);
+                // }
                 
                 // Find a free cluster
                 let new_cluster = self.allocate_cluster()?;
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    early_println!("[FAT32] allocated new cluster {} for directory extension", new_cluster);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] allocated new cluster {} for directory extension", new_cluster);
+                // }
                 // Link the new cluster to the directory chain
                 self.write_fat_entry(current_cluster, new_cluster)?;
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    early_println!("[FAT32] linked cluster {} -> {}", current_cluster, new_cluster);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] linked cluster {} -> {}", current_cluster, new_cluster);
+                // }
 
                 // Mark the new cluster as end of chain
                 self.write_fat_entry(new_cluster, 0x0FFFFFFF)?;
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    early_println!("[FAT32] marked cluster {} as end of chain", new_cluster);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] marked cluster {} as end of chain", new_cluster);
+                // }
                 
                 // Clear the new cluster (fill with zeros)
                 let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
@@ -1674,12 +1677,12 @@ impl Fat32FileSystem {
                             };
                             empty_cluster[offset..offset + 32].copy_from_slice(entry_bytes);
 
-                            #[cfg(test)]
-                            {
-                                use crate::early_println;
-                                early_println!("[FAT32] wrote SFN entry at offset {} in new cluster, first 8 bytes: {:02x?}", 
-                                          offset, &entry_bytes[0..8]);
-                            }
+                            // #[cfg(test)]
+                            // {
+                            //     use crate::early_println;
+                            //     early_println!("[FAT32] wrote SFN entry at offset {} in new cluster, first 8 bytes: {:02x?}", 
+                            //               offset, &entry_bytes[0..8]);
+                            // }
                         }
                     }
                 }
@@ -1844,13 +1847,24 @@ impl Fat32FileSystem {
     /// Check if a filename requires LFN (Long File Name) entries
     fn requires_lfn(filename: &str) -> bool {
         // LFN is required if:
-        // 1. Filename has lowercase letters
-        // 2. Filename is longer than 8.3 format
-        // 3. Filename contains invalid SFN characters
-        // 4. Extension is longer than 3 characters
-        // 5. Filename contains spaces or other special characters
+        // 1. Filename is longer than 8.3 format
+        // 2. Filename contains invalid SFN characters
+        // 3. Extension is longer than 3 characters
+        // 4. Filename contains spaces or other special characters not allowed in SFN
         
-        if filename.len() > 12 || filename.contains(' ') {
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] checking requires_lfn for '{}'", filename);
+        // }
+        
+        // Quick check for obvious LFN cases
+        if filename.contains(' ') || filename.contains('+') || filename.contains(',') {
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] requires_lfn('{}') = true (contains special chars)", filename);
+            // }
             return true;
         }
         
@@ -1858,27 +1872,53 @@ impl Fat32FileSystem {
             let name_part = &filename[..dot_pos];
             let ext_part = &filename[dot_pos + 1..];
             
-            // Check name part
+            // Check name part and extension length
             if name_part.len() > 8 || ext_part.len() > 3 {
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] requires_lfn('{}') = true (length: name={}, ext={})", filename, name_part.len(), ext_part.len());
+                // }
                 return true;
             }
             
-            // Check for lowercase or invalid characters
-            if name_part.chars().any(|c| c.is_lowercase() || !c.is_ascii_alphanumeric() && c != '_') ||
-               ext_part.chars().any(|c| c.is_lowercase() || !c.is_ascii_alphanumeric()) {
+            // Check for invalid SFN characters (valid: A-Z, a-z, 0-9, ! # $ % & ' ( ) - @ ^ _ ` { } ~)
+            if name_part.chars().any(|c| !Self::is_valid_sfn_char(c)) ||
+               ext_part.chars().any(|c| !Self::is_valid_sfn_char(c)) {
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] requires_lfn('{}') = true (invalid SFN chars)", filename);
+                // }
                 return true;
             }
         } else {
-            // No extension
+            // No extension - just check name length and characters
             if filename.len() > 8 {
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] requires_lfn('{}') = true (no ext, length={})", filename, filename.len());
+                // }
                 return true;
             }
             
-            // Check for lowercase or invalid characters
-            if filename.chars().any(|c| c.is_lowercase() || !c.is_ascii_alphanumeric() && c != '_') {
+            // Check for invalid SFN characters (valid: A-Z, a-z, 0-9, ! # $ % & ' ( ) - @ ^ _ ` { } ~)
+            if filename.chars().any(|c| !Self::is_valid_sfn_char(c)) {
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] requires_lfn('{}') = true (invalid SFN chars)", filename);
+                // }
                 return true;
             }
         }
+        
+        // #[cfg(test)]
+        // {
+        //     use crate::early_println;
+        //     early_println!("[FAT32] requires_lfn('{}') = false (valid 8.3 format)", filename);
+        // }
         
         false
     }
@@ -2110,11 +2150,11 @@ impl Fat32FileSystem {
 
                 // Check both SFN and LFN
                 if entry_filename == filename.to_lowercase() || full_filename == filename {
-                    #[cfg(test)]
-                    {
-                        use crate::early_println;
-                        early_println!("[FAT32] found matching entry at offset {}", entry_offset);
-                    }
+                    // #[cfg(test)]
+                    // {
+                    //     use crate::early_println;
+                    //     early_println!("[FAT32] found matching entry at offset {}", entry_offset);
+                    // }
 
                     // Mark all entries (LFN + SFN) for removal
                     for remove_i in lfn_start..=i {
@@ -2246,7 +2286,7 @@ impl Fat32FileSystem {
     /// Check if a character is valid for SFN according to FAT32 specification
     fn is_valid_sfn_char(ch: char) -> bool {
         match ch {
-            'A'..='Z' | '0'..='9' => true,
+            'A'..='Z' | 'a'..='z' | '0'..='9' => true,
             '!' | '#' | '$' | '%' | '&' | '\'' | '(' | ')' | '-' | '@' | '^' | '_' | '`' | '{' | '}' | '~' => true,
             _ => false,
         }
@@ -2260,20 +2300,20 @@ impl Fat32FileSystem {
             let main_name = &filename[..dot_pos];
             let extension = &filename[dot_pos + 1..];
             
-            #[cfg(test)]
-            {
-                use crate::early_println;
-                early_println!("[FAT32] analyzing filename: '{}' -> name='{}' ({} chars), ext='{}' ({} chars)", 
-                    filename, main_name, main_name.len(), extension, extension.len());
-            }
+            // #[cfg(test)]
+            // {
+            //     use crate::early_println;
+            //     early_println!("[FAT32] analyzing filename: '{}' -> name='{}' ({} chars), ext='{}' ({} chars)", 
+            //         filename, main_name, main_name.len(), extension, extension.len());
+            // }
             
             // Check if main name is longer than 8 chars or extension longer than 3 chars
             if main_name.len() > 8 || extension.len() > 3 {
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    early_println!("[FAT32] filename_needs_numeric_tail: '{}' -> true (length exceeded)", filename);
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] filename_needs_numeric_tail: '{}' -> true (length exceeded)", filename);
+                // }
                 return true;
             }
             
@@ -2303,11 +2343,11 @@ impl Fat32FileSystem {
         } else {
             // No extension - check if name is longer than 8 chars
             if filename.len() > 8 {
-                #[cfg(test)]
-                {
-                    use crate::early_println;
-                    early_println!("[FAT32] filename_needs_numeric_tail: '{}' -> true (no ext, length={})", filename, filename.len());
-                }
+                // #[cfg(test)]
+                // {
+                //     use crate::early_println;
+                //     early_println!("[FAT32] filename_needs_numeric_tail: '{}' -> true (no ext, length={})", filename, filename.len());
+                // }
                 return true;
             }
             
