@@ -115,9 +115,9 @@ fn test_ext2_superblock_parsing() {
     assert!(result.is_ok(), "Should be able to parse valid superblock");
     
     let superblock = result.unwrap();
-    let magic = superblock.magic;
-    let blocks_count = superblock.blocks_count;
-    let inodes_count = superblock.inodes_count;
+    let magic = u16::from_le(superblock.magic);
+    let blocks_count = superblock.get_blocks_count();
+    let inodes_count = superblock.get_inodes_count();
     assert_eq!(magic, EXT2_SUPER_MAGIC);
     assert_eq!(blocks_count, 8192);
     assert_eq!(inodes_count, 2048);
@@ -151,8 +151,8 @@ fn test_ext2_inode_parsing() {
     assert!(result.is_ok(), "Should be able to parse valid inode");
     
     let inode = result.unwrap();
-    let mode = inode.mode;
-    let size = inode.size;
+    let mode = inode.get_mode();
+    let size = inode.get_size();
     let links_count = inode.links_count;
     assert_eq!(mode & EXT2_S_IFMT, EXT2_S_IFREG);
     assert_eq!(size, 1024);
@@ -183,8 +183,8 @@ fn test_ext2_directory_entry_parsing() {
     assert!(result.is_ok(), "Should be able to parse valid directory entry");
     
     let entry = result.unwrap();
-    let inode = entry.entry.inode;
-    let name_len = entry.entry.name_len;
+    let inode = entry.entry.get_inode();
+    let name_len = entry.entry.get_name_len();
     let name = &entry.name;
     assert_eq!(inode, 12);
     assert_eq!(name_len, name.len() as u8);
@@ -228,8 +228,8 @@ fn test_ext2_block_group_descriptor_parsing() {
     
     let bgd = result.unwrap();
     let block_bitmap = bgd.block_bitmap;
-    let inode_bitmap = bgd.inode_bitmap;
-    let inode_table = bgd.inode_table;
+    let inode_bitmap = bgd.get_inode_bitmap();
+    let inode_table = bgd.get_inode_table();
     let free_blocks_count = bgd.free_blocks_count;
     assert_eq!(block_bitmap, 3);
     assert_eq!(inode_bitmap, 4);
