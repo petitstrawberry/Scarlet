@@ -171,31 +171,49 @@ impl Ext2Params {
     
     /// Create ext2 filesystem from these parameters
     pub fn create_filesystem(&mut self) -> Result<Arc<Ext2FileSystem>, FileSystemError> {
+        // crate::early_println!("[EXT2] Creating filesystem from parameters");
+        
         // First resolve device path to device_id if not already resolved
         if self.device_id.is_none() {
+            // crate::early_println!("[EXT2] Resolving device path: {:?}", self.device_path);
             self.resolve_device()?;
         }
         
         // Get device_id (should be resolved by now)
-        let device_id = self.device_id.ok_or_else(|| FileSystemError::new(
-            FileSystemErrorKind::DeviceError,
-            "Device ID not resolved"
-        ))?;
+        let device_id = self.device_id.ok_or_else(|| {
+            // crate::early_println!("[EXT2] Error: Device ID not resolved");
+            FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                "Device ID not resolved"
+            )
+        })?;
+        
+        // crate::early_println!("[EXT2] Using device ID: {}", device_id);
         
         // Get device from DeviceManager
         let device = DeviceManager::get_manager()
             .get_device(device_id)
-            .ok_or_else(|| FileSystemError::new(
-                FileSystemErrorKind::DeviceError,
-                format!("Device with ID {} not found", device_id)
-            ))?;
+            .ok_or_else(|| {
+                // crate::early_println!("[EXT2] Error: Device with ID {} not found", device_id);
+                FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    format!("Device with ID {} not found", device_id)
+                )
+            })?;
+        
+        // crate::early_println!("[EXT2] Found device, converting to block device");
         
         // Convert to block device using the new into_block_device() method
         let block_device = device.into_block_device()
-            .ok_or_else(|| FileSystemError::new(
-                FileSystemErrorKind::DeviceError,
-                "Device is not a block device"
-            ))?;
+            .ok_or_else(|| {
+                // crate::early_println!("[EXT2] Error: Device is not a block device");
+                FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    "Device is not a block device"
+                )
+            })?;
+        
+        // crate::early_println!("[EXT2] Successfully converted to block device, creating filesystem");
         
         // Create ext2 filesystem using existing method
         Ext2FileSystem::new(block_device)
@@ -1132,6 +1150,33 @@ impl Ext2FileSystem {
         ))
     }
 
+    /// Check if a file/directory already exists in the parent directory
+    fn check_entry_exists(&self, parent_inode: u32, name: &String) -> Result<bool, FileSystemError> {
+        // Read the parent directory inode
+        let parent_dir_inode = self.read_inode(parent_inode)?;
+        
+        if !parent_dir_inode.is_dir() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Parent is not a directory"
+            ));
+        }
+
+        // Use the existing read_directory_entries method for robust parsing
+        let entries = self.read_directory_entries(&parent_dir_inode)?;
+        
+        // Check each entry for a name match
+        for entry in entries {
+            let entry_name = &entry.name;
+            
+            if entry_name == name {
+                return Ok(true); // Entry already exists
+            }
+        }
+
+        Ok(false) // Entry does not exist
+    }
+
     /// Add a directory entry to a parent directory
     fn add_directory_entry(&self, parent_inode: u32, name: &String, child_inode: u32, file_type: FileType) -> Result<(), FileSystemError> {
         // Read the parent directory inode
@@ -1970,7 +2015,7 @@ impl Ext2FileSystem {
                     sector_count: (self.block_size / 512) as usize,
                     head: 0,
                     cylinder: 0,
- buffer: clear_data,
+                    buffer: clear_data,
                 });
                 
                 self.block_device.enqueue_request(clear_request);
@@ -2388,6 +2433,14 @@ impl FileSystemOperations for Ext2FileSystem {
             Err(e) => return Err(e),
         }
         
+        // Check if the entry already exists
+        if self.check_entry_exists(ext2_parent.inode_number(), name)? {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::AlreadyExists,
+                "File or directory already exists"
+            ));
+        }
+
         // Generate new file ID
         let file_id = {
             let mut next_id = self.next_file_id.lock();
