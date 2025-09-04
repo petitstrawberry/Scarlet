@@ -61,7 +61,7 @@ qemu-system-riscv64 \
     -serial mon:stdio \
     --no-reboot \
     -global virtio-mmio.force-legacy=false \
-    -drive id=x0,file=test.txt,format=raw,if=none \
+    -drive id=x0,file=../mkfs/dist/rootfs.img,format=raw,if=none \
     -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
     -display vnc=:0 \
     -device virtio-gpu-device,bus=virtio-mmio-bus.1 \

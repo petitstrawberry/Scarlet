@@ -15,15 +15,25 @@ static mut STDERR: Option<Handle> = None;
 fn setup_new_root() -> bool {
     println!("init: Setting up new root filesystem...");
     
-    // 1. Create a tmpfs for demonstration (in a real system, this might be mounting a real device)
-    println!("init: Creating tmpfs for new root at /mnt/newroot");
-    match mount("tmpfs", "/mnt/newroot", "tmpfs", 0, Some("size=50M")) {
+    // 1. Mount ext2 filesystem from first available block device (e.g., /dev/vblk0)
+    println!("init: Mounting ext2 for new root at /mnt/newroot");
+    match mount("/dev/vblk0", "/mnt/newroot", "ext2", 0, Some("device=/dev/vblk0,rw")) {
         Ok(_) => {
-            println!("init: New root filesystem mounted successfully");
+            println!("init: ext2 root filesystem mounted successfully");
         }
         Err(_) => {
-            println!("init: Failed to mount tmpfs at /mnt/newroot");
-            return false;
+            println!("init: Failed to mount ext2 at /mnt/newroot, trying fallback...");
+            // Fallback to tmpfs if ext2 fails
+            println!("init: Falling back to tmpfs for new root");
+            match mount("tmpfs", "/mnt/newroot", "tmpfs", 0, Some("size=50M")) {
+                Ok(_) => {
+                    println!("init: Fallback tmpfs mounted successfully");
+                }
+                Err(_) => {
+                    println!("init: Failed to mount fallback tmpfs at /mnt/newroot");
+                    return false;
+                }
+            }
         }
     }
     
@@ -32,9 +42,9 @@ fn setup_new_root() -> bool {
     
     // 3. Copy essential binaries (update paths based on actual initramfs structure)
     // Copy from the actual location in initramfs
-    copy_dir("/bin", "/mnt/newroot/bin");
+    // copy_dir("/bin", "/mnt/newroot/bin");
     copy_dir("/system", "/mnt/newroot/system");
-    copy_dir("/data", "/mnt/newroot/data");
+    // copy_dir("/data", "/mnt/newroot/data");
     
     // Create old_root directory in the new root (where the old root will be moved)
     match create_directory("/mnt/newroot/old_root") {
@@ -58,6 +68,31 @@ fn setup_devfs() -> Result<(), &'static str> {
         Ok(())
     } else {
         Err("Failed to mount devfs")
+    }
+}
+
+fn check_block_devices() -> bool {
+    println!("init: Checking for available block devices...");
+    
+    // List devices in /dev to see what's available
+    match list_directory("/dev") {
+        Ok(entries) => {
+            println!("init: Available devices in /dev:");
+            let mut block_device_found = false;
+            for entry in entries {
+                println!("init:   - {}", entry.name);
+                // Check for common block device names
+                if entry.name.starts_with("vblk") || entry.name.starts_with("vda") || entry.name.starts_with("sda") || entry.name.starts_with("hda") {
+                    block_device_found = true;
+                    println!("init:     ^ Block device detected!");
+                }
+            }
+            block_device_found
+        }
+        Err(_) => {
+            println!("init: Failed to list /dev directory");
+            false
+        }
     }
 }
 
@@ -206,9 +241,17 @@ fn main() -> i32 {
     setup_stdio();
 
     println!("init: I'm the init process: PID={}", getpid());
+    
+    // Check for available block devices
+    if check_block_devices() {
+        println!("init: Block devices found, proceeding with ext2 mount");
+    } else {
+        println!("init: No block devices found, will fallback to tmpfs");
+    }
+    
     println!("init: Starting root filesystem transition...");
     
-    // Demonstrate pivot_root functionality
+    // Demonstrate pivot_root functionality with ext2 support
     if setup_new_root() {
         if perform_pivot_root() {
             println!("init: Root filesystem transition completed successfully");
