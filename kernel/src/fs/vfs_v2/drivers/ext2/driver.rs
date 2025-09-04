@@ -4,7 +4,7 @@
 //! enabling the filesystem to be registered with the VFS manager
 //! and created from block devices.
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::sync::Arc;
 
 use crate::{
     device::block::BlockDevice,
@@ -14,7 +14,8 @@ use crate::{
     }
 };
 
-use super::{Ext2FileSystem, super::super::core::FileSystemOperations};
+use super::{Ext2FileSystem, Ext2Params};
+use super::super::super::core::FileSystemOperations;
 
 /// ext2 filesystem driver
 /// 
@@ -62,25 +63,34 @@ impl FileSystemDriver for Ext2Driver {
     
     fn create_from_option_string(
         &self, 
-        _options: &str
+        options: &str
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
-        // ext2 requires a block device, cannot create from options alone
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "ext2 filesystem requires a block device, not options"
-        ))
+        // Parse options into Ext2Params
+        let mut params = Ext2Params::from_option_string(options)?;
+        
+        // Create filesystem using params
+        let fs = params.create_filesystem()?;
+        Ok(fs as Arc<dyn FileSystemOperations>)
     }
     
     fn create_from_params(
         &self, 
-        _params: &dyn FileSystemParams
+        params: &dyn FileSystemParams
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
-        // For now, ext2 doesn't support parameter-based creation
-        // This could be extended in the future to support formatting options
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotSupported,
-            "ext2 filesystem parameter-based creation not implemented"
-        ))
+        // Downcast to Ext2Params
+        let ext2_params = params.as_any()
+            .downcast_ref::<Ext2Params>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid parameter type for ext2 filesystem"
+            ))?;
+        
+        // Clone params to make them mutable for device resolution
+        let mut params = ext2_params.clone();
+        
+        // Create filesystem using params
+        let fs = params.create_filesystem()?;
+        Ok(fs as Arc<dyn FileSystemOperations>)
     }
 }
 
@@ -111,7 +121,7 @@ mod tests {
         let driver = Ext2Driver;
         
         // Create a mock block device with a basic ext2 superblock
-        let mut mock_device = MockBlockDevice::new("mock_ext2", 512, 65536);
+        let mock_device = MockBlockDevice::new("mock_ext2", 512, 65536);
         
         // Note: This test might fail due to the mock implementation not having
         // a proper ext2 superblock, but it tests the interface

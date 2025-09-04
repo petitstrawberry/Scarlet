@@ -22,20 +22,18 @@
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
 use alloc::{
-    boxed::Box, collections::BTreeMap, string::{String, ToString}, sync::Arc, vec, vec::Vec
+    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
 use core::{mem, any::Any};
 
 use crate::{
-    device::block::BlockDevice,
-    driver_initcall,
-    fs::{
-        get_fs_driver_manager, FileObject, FileSystemError, FileSystemErrorKind, FileType
-    }
+    arch::get_cpu, device::block::BlockDevice, driver_initcall, fs::{
+        get_fs_driver_manager, params::FileSystemParams, FileObject, FileSystemError, FileSystemErrorKind, FileType
+    }, sched::scheduler::get_scheduler, task::mytask, DeviceManager
 };
 
-use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
+use super::super::{core::{VfsNode, FileSystemOperations, DirectoryEntryInternal}, manager::{VfsManager, get_global_vfs_manager}};
 
 pub mod structures;
 pub mod node;
@@ -47,6 +45,196 @@ pub mod tests;
 pub use structures::*;
 pub use node::{Ext2Node, Ext2FileObject, Ext2DirectoryObject};
 pub use driver::Ext2Driver;
+
+/// ext2 filesystem parameters for mount options
+/// 
+/// This struct holds the parameters parsed from mount option strings
+/// and provides the interface for creating ext2 filesystems.
+#[derive(Debug, Clone)]
+pub struct Ext2Params {
+    /// Device file path (e.g., "/dev/vda")
+    pub device_path: Option<String>,
+    /// Block device ID (if resolved)
+    pub device_id: Option<usize>,
+    /// Mount options
+    pub options: BTreeMap<String, String>,
+}
+
+impl Ext2Params {
+    /// Create new empty parameters
+    pub fn new() -> Self {
+        Self {
+            device_path: None,
+            device_id: None,
+            options: BTreeMap::new(),
+        }
+    }
+    
+    /// Parse parameters from option string
+    /// 
+    /// Expected format: "device=/dev/vda,rw,sync"
+    /// or: "device=/dev/vda,ro"
+    pub fn from_option_string(options: &str) -> Result<Self, FileSystemError> {
+        let mut params = Self::new();
+        
+        for option in options.split(',') {
+            let option = option.trim();
+            if option.is_empty() {
+                continue;
+            }
+            
+            if let Some((key, value)) = option.split_once('=') {
+                match key {
+                    "device" => {
+                        params.device_path = Some(value.to_string());
+                    }
+                    _ => {
+                        params.options.insert(key.to_string(), value.to_string());
+                    }
+                }
+            } else {
+                // Boolean options like "rw", "ro", "sync"
+                params.options.insert(option.to_string(), "true".to_string());
+            }
+        }
+        
+        if params.device_path.is_none() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Device path is required for ext2 filesystem"
+            ));
+        }
+        
+        Ok(params)
+    }
+    
+    /// Resolve device path to device ID
+    pub fn resolve_device(&mut self) -> Result<(), FileSystemError> {
+        if let Some(device_path) = &self.device_path {
+            // Get VFS manager from current task or use global one
+            let vfs_manager = {
+                if let Some(task) = mytask() {
+                    task.vfs.as_ref().cloned().unwrap_or_else(|| get_global_vfs_manager())
+                } else {
+                    get_global_vfs_manager()
+                }
+            };
+            
+            // Use VFS to resolve device file path to device ID
+            let (entry, _mount_point) = vfs_manager.resolve_path(device_path)
+                .map_err(|e| FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    format!("Failed to resolve device path '{}': {:?}", device_path, e)
+                ))?;
+            
+            // Get node from entry and then metadata
+            let node = entry.node();
+            let metadata = node.metadata()
+                .map_err(|e| FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    format!("Failed to get device metadata: {:?}", e)
+                ))?;
+            
+            // Extract device ID from metadata
+            if let FileType::BlockDevice(device_info) = metadata.file_type {
+                self.device_id = Some(device_info.device_id);
+                Ok(())
+            } else {
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::DeviceError,
+                    format!("'{}' is not a block device", device_path)
+                ))
+            }
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "No device path specified"
+            ))
+        }
+    }
+    
+    /// Get the resolved device ID
+    pub fn get_device_id(&self) -> Option<usize> {
+        self.device_id
+    }
+    
+    /// Get a specific option value
+    pub fn get_option(&self, key: &str) -> Option<&String> {
+        self.options.get(key)
+    }
+    
+    /// Check if filesystem should be mounted read-only
+    pub fn is_readonly(&self) -> bool {
+        self.options.get("ro").is_some() || 
+        (self.options.get("rw").is_none() && self.options.get("ro").is_none())
+    }
+    
+    /// Create ext2 filesystem from these parameters
+    pub fn create_filesystem(&mut self) -> Result<Arc<Ext2FileSystem>, FileSystemError> {
+        // First resolve device path to device_id if not already resolved
+        if self.device_id.is_none() {
+            self.resolve_device()?;
+        }
+        
+        // Get device_id (should be resolved by now)
+        let device_id = self.device_id.ok_or_else(|| FileSystemError::new(
+            FileSystemErrorKind::DeviceError,
+            "Device ID not resolved"
+        ))?;
+        
+        // Get device from DeviceManager
+        let device = DeviceManager::get_manager()
+            .get_device(device_id)
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                format!("Device with ID {} not found", device_id)
+            ))?;
+        
+        // Convert to block device using the new into_block_device() method
+        let block_device = device.into_block_device()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                "Device is not a block device"
+            ))?;
+        
+        // Create ext2 filesystem using existing method
+        Ext2FileSystem::new(block_device)
+    }
+}
+impl FileSystemParams for Ext2Params {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn to_string_map(&self) -> BTreeMap<String, String> {
+        let mut map = self.options.clone();
+        if let Some(device_path) = &self.device_path {
+            map.insert("device".to_string(), device_path.clone());
+        }
+        map
+    }
+    
+    fn from_string_map(map: &BTreeMap<String, String>) -> Result<Self, String> {
+        let mut params = Ext2Params::new();
+        
+        for (key, value) in map {
+            match key.as_str() {
+                "device" => {
+                    params.device_path = Some(value.clone());
+                }
+                _ => {
+                    params.options.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        
+        if params.device_path.is_none() {
+            return Err("Device path is required for ext2 filesystem".to_string());
+        }
+        
+        Ok(params)
+    }
+}
 
 /// ext2 Filesystem implementation
 ///
@@ -140,6 +328,38 @@ impl Ext2FileSystem {
         fs.root.read().set_filesystem(fs_weak);
 
         Ok(fs)
+    }
+
+    /// Create a new ext2 filesystem from a device ID using the new Device trait methods
+    pub fn new_from_device_id(device_id: usize) -> Result<Arc<Self>, FileSystemError> {
+        // Get device from DeviceManager
+        let device = DeviceManager::get_manager().get_device(device_id)
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                format!("Device with ID {} not found", device_id)
+            ))?;
+        
+        // Convert to block device using the new into_block_device method
+        let block_device = device.into_block_device()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                format!("Device with ID {} is not a block device", device_id)
+            ))?;
+        
+        // Create ext2 filesystem with the block device
+        Self::new(block_device)
+    }
+    
+    /// Create a new ext2 filesystem from parameters
+    pub fn new_from_params(params: &Ext2Params) -> Result<Arc<Self>, FileSystemError> {
+        if let Some(device_id) = params.get_device_id() {
+            Self::new_from_device_id(device_id)
+        } else {
+            Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Device ID not resolved in parameters"
+            ))
+        }
     }
 
     /// Read an inode from disk
@@ -1750,7 +1970,7 @@ impl Ext2FileSystem {
                     sector_count: (self.block_size / 512) as usize,
                     head: 0,
                     cylinder: 0,
-                    buffer: clear_data,
+ buffer: clear_data,
                 });
                 
                 self.block_device.enqueue_request(clear_request);
@@ -2214,7 +2434,7 @@ impl FileSystemOperations for Ext2FileSystem {
             file_acl: 0_u32.to_le(),
             dir_acl: 0_u32.to_le(),
             faddr: 0_u32.to_le(),
-            osd2: [0_u8; 12],
+            osd2: [0u8; 12],
         };
         
         // Handle symbolic link target path storage
