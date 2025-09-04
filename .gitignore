@@ -6,3 +6,4 @@
 /mkfs/*.cpio
 dist/
 /kernel/fat32-test.img
+/kernel/ext2-test.img
