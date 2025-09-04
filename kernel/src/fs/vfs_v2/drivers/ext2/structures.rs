@@ -18,6 +18,10 @@ pub const EXT2_S_IFMT: u16 = 0xF000;  // File type mask
 pub const EXT2_S_IFREG: u16 = 0x8000; // Regular file
 pub const EXT2_S_IFDIR: u16 = 0x4000; // Directory
 pub const EXT2_S_IFLNK: u16 = 0xA000; // Symbolic link
+pub const EXT2_S_IFCHR: u16 = 0x2000; // Character device
+pub const EXT2_S_IFBLK: u16 = 0x6000; // Block device
+pub const EXT2_S_IFIFO: u16 = 0x1000; // FIFO (pipe)
+pub const EXT2_S_IFSOCK: u16 = 0xC000; // Socket
 
 /// ext2 Superblock structure
 /// 
@@ -406,6 +410,45 @@ impl Ext2Inode {
     /// Check if this is a regular file
     pub fn is_file(&self) -> bool {
         (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFREG
+    }
+
+    /// Check if this is a character device
+    pub fn is_char_device(&self) -> bool {
+        (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFCHR
+    }
+
+    /// Check if this is a block device
+    pub fn is_block_device(&self) -> bool {
+        (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFBLK
+    }
+
+    /// Check if this is a symbolic link
+    pub fn is_symlink(&self) -> bool {
+        (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFLNK
+    }
+
+    /// Check if this is a FIFO (pipe)
+    pub fn is_fifo(&self) -> bool {
+        (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFIFO
+    }
+
+    /// Check if this is a socket
+    pub fn is_socket(&self) -> bool {
+        (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFSOCK
+    }
+
+    /// Get device information for device files
+    /// Returns (major, minor) device numbers
+    pub fn get_device_info(&self) -> Option<(u32, u32)> {
+        if self.is_char_device() || self.is_block_device() {
+            // In ext2, device info is stored in the first direct block pointer
+            let device_id = u32::from_le(self.block[0]);
+            let major = (device_id >> 8) & 0xFF;
+            let minor = device_id & 0xFF;
+            Some((major, minor))
+        } else {
+            None
+        }
     }
 }
 

@@ -3,6 +3,8 @@
 //! This module contains comprehensive tests for the ext2 filesystem implementation,
 //! using both MockBlockDevice for unit tests and virtio-blk for integration tests.
 
+use core::panic;
+
 use alloc::{sync::Arc, vec, vec::Vec, format, string::ToString};
 use crate::{
     device::block::{mockblk::MockBlockDevice, request::{BlockIORequest, BlockIORequestType}}, drivers::block::virtio_blk::VirtioBlockDevice, early_println, fs::{get_fs_driver_manager, FileSystemError, FileSystemErrorKind, FileSystemType, FileType}, object::capability::StreamOps
@@ -1623,6 +1625,189 @@ fn test_ext2_virtio_blk_symlink_edge_cases() {
         },
         Err(e) => {
             panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
+        }
+    }
+}
+
+// Test device file creation with ext2
+#[test_case]
+fn test_ext2_device_file_creation() {
+    use crate::{fs::{DeviceFileInfo, FileType}, device::DeviceType};
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+    
+    let fs_driver_manager = get_fs_driver_manager();
+    
+    // Get VirtIO block device for ext2-test.img
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+    let block_device_arc = Arc::new(virtio_device);
+    
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
+        Ok(fs) => {
+            let root_node = fs.root_node();
+            
+            // Test 1: Create a character device file (e.g., /dev/tty0)
+            let char_device_info = DeviceFileInfo {
+                device_id: 0x0400, // major=4, minor=0 (typical for tty0)
+                device_type: DeviceType::Char,
+            };
+            
+            let char_device_node = match fs.create(
+                &root_node,
+                &"tty0".to_string(),
+                FileType::CharDevice(char_device_info),
+                0o666
+            ) {
+                Ok(node) => node,
+                Err(e) => {
+                    panic!("[Test] Failed to create character device: {:?}", e);
+                }
+            };
+            
+            // Verify character device type
+            match char_device_node.file_type() {
+                Ok(FileType::CharDevice(info)) => {
+                    assert_eq!(info.device_id, 0x0400);
+                    assert_eq!(info.device_type, DeviceType::Char);
+                    // Test passed successfully
+                },
+                Ok(other) => {
+                    panic!("[Test] Character device has wrong type: {:?}", other);
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to get character device type: {:?}", e);
+                }
+            }
+            
+            // Test 2: Create a block device file (e.g., /dev/sda1)
+            let block_device_info = DeviceFileInfo {
+                device_id: 0x0801, // major=8, minor=1 (typical for sda1)
+                device_type: DeviceType::Block,
+            };
+            
+            let block_device_node = match fs.create(
+                &root_node,
+                &"sda1".to_string(),
+                FileType::BlockDevice(block_device_info),
+                0o666
+            ) {
+                Ok(node) => node,
+                Err(e) => {
+                    panic!("[Test] Failed to create block device: {:?}", e);
+                }
+            };
+            
+            // Verify block device type
+            match block_device_node.file_type() {
+                Ok(FileType::BlockDevice(info)) => {
+                    assert_eq!(info.device_id, 0x0801);
+                    assert_eq!(info.device_type, DeviceType::Block);
+                    // Test passed successfully
+                },
+                Ok(other) => {
+                    panic!("[Test] Block device has wrong type: {:?}", other);
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to get block device type: {:?}", e);
+                }
+            }
+            
+            // Test 3: Create a FIFO (pipe)
+            let pipe_node = match fs.create(
+                &root_node,
+                &"my_pipe".to_string(),
+                FileType::Pipe,
+                0o666
+            ) {
+                Ok(node) => node,
+                Err(e) => {
+                    panic!("[Test] Failed to create pipe: {:?}", e);
+                }
+            };
+            
+            // Verify pipe type
+            match pipe_node.file_type() {
+                Ok(FileType::Pipe) => {
+                    // Test passed successfully
+                },
+                Ok(other) => {
+                    panic!("[Test] Pipe has wrong type: {:?}", other);
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to get pipe type: {:?}", e);
+                }
+            }
+            
+            // Test 4: Create a socket
+            let socket_node = match fs.create(
+                &root_node,
+                &"my_socket".to_string(),
+                FileType::Socket,
+                0o666
+            ) {
+                Ok(node) => node,
+                Err(e) => {
+                    panic!("[Test] Failed to create socket: {:?}", e);
+                }
+            };
+            
+            // Verify socket type
+            match socket_node.file_type() {
+                Ok(FileType::Socket) => {
+                    // Test passed successfully
+                },
+                Ok(other) => {
+                    panic!("[Test] Socket has wrong type: {:?}", other);
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to get socket type: {:?}", e);
+                }
+            }
+            
+            // Test 5: Verify all devices appear in directory listing
+            match fs.readdir(&root_node) {
+                Ok(entries) => {
+                    let mut tty0_found = false;
+                    let mut sda1_found = false;
+                    let mut pipe_found = false;
+                    let mut socket_found = false;
+                    
+                    for entry in &entries {
+                        match entry.name.as_str() {
+                            "tty0" => {
+                                tty0_found = true;
+                                assert_eq!(entry.file_type, FileType::CharDevice(char_device_info));
+                            },
+                            "sda1" => {
+                                sda1_found = true;
+                                assert_eq!(entry.file_type, FileType::BlockDevice(block_device_info));
+                            },
+                            "my_pipe" => {
+                                pipe_found = true;
+                                assert_eq!(entry.file_type, FileType::Pipe);
+                            },
+                            "my_socket" => {
+                                socket_found = true;
+                                assert_eq!(entry.file_type, FileType::Socket);
+                            },
+                            _ => {}
+                        }
+                    }
+                    
+                    assert!(tty0_found, "Character device not found in directory listing");
+                    assert!(sda1_found, "Block device not found in directory listing");
+                    assert!(pipe_found, "Pipe not found in directory listing");
+                    assert!(socket_found, "Socket not found in directory listing");
+                    
+                    // early_println!("[Test] ✓ All device files created and verified successfully");
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read directory: {:?}", e);
+                }
+            }
+        },
+        Err(_e) => {
+            panic!("Failed to create ext2 filesystem from virtio-blk device");
         }
     }
 }

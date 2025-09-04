@@ -22,10 +22,10 @@
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
 use alloc::{
-    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec, vec::Vec
+    boxed::Box, collections::BTreeMap, string::{String, ToString}, sync::Arc, vec, vec::Vec
 };
 use spin::{rwlock::RwLock, Mutex};
-use core::{fmt::Debug, mem, any::Any};
+use core::{mem, any::Any};
 
 use crate::{
     device::block::BlockDevice,
@@ -1509,6 +1509,38 @@ impl Ext2FileSystem {
                     Ok(FileType::SymbolicLink("".to_string()))
                 }
             }
+            EXT2_S_IFCHR => {
+                // Character device
+                if let Some((major, minor)) = inode.get_device_info() {
+                    let device_info = crate::fs::DeviceFileInfo {
+                        device_id: ((major << 8) | minor) as usize,
+                        device_type: crate::device::DeviceType::Char,
+                    };
+                    Ok(FileType::CharDevice(device_info))
+                } else {
+                    Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid character device information"
+                    ))
+                }
+            }
+            EXT2_S_IFBLK => {
+                // Block device
+                if let Some((major, minor)) = inode.get_device_info() {
+                    let device_info = crate::fs::DeviceFileInfo {
+                        device_id: ((major << 8) | minor) as usize,
+                        device_type: crate::device::DeviceType::Block,
+                    };
+                    Ok(FileType::BlockDevice(device_info))
+                } else {
+                    Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid block device information"
+                    ))
+                }
+            }
+            EXT2_S_IFIFO => Ok(FileType::Pipe),
+            EXT2_S_IFSOCK => Ok(FileType::Socket),
             _ => Ok(FileType::Unknown),
         }
     }
@@ -2056,13 +2088,8 @@ impl FileSystemOperations for Ext2FileSystem {
             let name = entry.name_str()?;
             let child_inode = self.read_inode(entry.entry.inode)?;
             
-            let file_type = if child_inode.mode & EXT2_S_IFMT == EXT2_S_IFDIR {
-                FileType::Directory
-            } else if child_inode.mode & EXT2_S_IFMT == EXT2_S_IFREG {
-                FileType::RegularFile
-            } else {
-                FileType::Unknown
-            };
+            // Use file_type_from_inode to get the correct file type including device files
+            let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
 
             result.push(DirectoryEntryInternal {
                 name,
@@ -2157,6 +2184,10 @@ impl FileSystemOperations for Ext2FileSystem {
             FileType::RegularFile => EXT2_S_IFREG | 0o644,
             FileType::Directory => EXT2_S_IFDIR | 0o755,
             FileType::SymbolicLink(_) => EXT2_S_IFLNK | 0o777,
+            FileType::CharDevice(_) => EXT2_S_IFCHR | 0o666,
+            FileType::BlockDevice(_) => EXT2_S_IFBLK | 0o666,
+            FileType::Pipe => EXT2_S_IFIFO | 0o666,
+            FileType::Socket => EXT2_S_IFSOCK | 0o666,
             _ => return Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Unsupported file type for ext2"
@@ -2245,6 +2276,18 @@ impl FileSystemOperations for Ext2FileSystem {
                 }
             }
         }
+
+        // Handle device file information storage
+        if let FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) = &file_type {
+            // Store device major/minor numbers in the first direct block pointer
+            // This follows standard ext2 practice for device files
+            // Extract major and minor from device_id (assuming device_id is major<<8 | minor)
+            let major = (device_info.device_id >> 8) & 0xFF;
+            let minor = device_info.device_id & 0xFF;
+            let device_id = (major << 8) | minor;
+            new_inode.block[0] = (device_id as u32).to_le();
+            new_inode.size = 0_u32.to_le(); // Device files have no size
+        }
         
         // Write the inode to disk
         self.write_inode(new_inode_number, &new_inode)?;
@@ -2298,6 +2341,18 @@ impl FileSystemOperations for Ext2FileSystem {
             },
             FileType::SymbolicLink(_) => {
                 Arc::new(Ext2Node::new(new_inode_number, file_type.clone(), file_id))
+            },
+            FileType::CharDevice(_) => {
+                Arc::new(Ext2Node::new(new_inode_number, file_type.clone(), file_id))
+            },
+            FileType::BlockDevice(_) => {
+                Arc::new(Ext2Node::new(new_inode_number, file_type.clone(), file_id))
+            },
+            FileType::Pipe => {
+                Arc::new(Ext2Node::new(new_inode_number, FileType::Pipe, file_id))
+            },
+            FileType::Socket => {
+                Arc::new(Ext2Node::new(new_inode_number, FileType::Socket, file_id))
             },
             _ => {
                 return Err(FileSystemError::new(
