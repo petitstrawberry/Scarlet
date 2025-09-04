@@ -158,12 +158,12 @@ fn copy_dir(src: &str, dest: &str) -> bool {
                     // Recursively remove subdirectory (this will handle nested contents)
                     copy_dir("/dev/null", &dest_entry_path); // Use dummy source to trigger cleanup
                     match remove_directory(&dest_entry_path) {
-                        Ok(_) => println!("init: Removed existing directory: {}", dest_entry_path),
+                        Ok(_) => (),
                         Err(_) => println!("init: Failed to remove directory: {}", dest_entry_path),
                     }
                 } else {
                     match remove_file(&dest_entry_path) {
-                        Ok(_) => println!("init: Removed existing file: {}", dest_entry_path),
+                        Ok(_) => (),
                         Err(_) => println!("init: Failed to remove file: {}", dest_entry_path),
                     }
                 }
@@ -171,7 +171,7 @@ fn copy_dir(src: &str, dest: &str) -> bool {
             
             // Now remove the destination directory itself
             match remove_directory(dest) {
-                Ok(_) => println!("init: Removed existing destination directory: {}", dest),
+                Ok(_) => (),
                 Err(_) => println!("init: Failed to remove destination directory: {}", dest),
             }
         }
@@ -183,9 +183,7 @@ fn copy_dir(src: &str, dest: &str) -> bool {
     
     // Create destination directory
     match create_directory(dest) {
-        Ok(_) => {
-            println!("init: Created directory: {}", dest);
-        }
+        Ok(_) => (),
         Err(_) => {
             println!("init: Failed to create directory: {}", dest);
             return false;
