@@ -276,6 +276,8 @@ pub struct Ext2FileSystem {
     next_file_id: Mutex<u64>,
     /// LRU cached inodes
     inode_cache: Mutex<InodeLruCache>,
+    /// LRU cached blocks
+    block_cache: Mutex<BlockLruCache>,
 }
 
 /// Simple LRU cache implementation for inodes
@@ -324,6 +326,60 @@ impl InodeLruCache {
 
     fn remove(&mut self, inode_num: u32) {
         self.cache.remove(&inode_num);
+    }
+
+    fn len(&self) -> usize {
+        self.cache.len()
+    }
+}
+
+
+/// Simple LRU cache implementation for blocks
+struct BlockLruCache {
+    /// Map from block number to (block_data, access_order)
+    cache: BTreeMap<u64, (Vec<u8>, u64)>,
+    /// Access counter for LRU ordering
+    access_counter: u64,
+    /// Maximum cache size
+    max_size: usize,
+}
+
+impl BlockLruCache {
+    fn new(max_size: usize) -> Self {
+        Self {
+            cache: BTreeMap::new(),
+            access_counter: 0,
+            max_size,
+        }
+    }
+
+    fn get(&mut self, block_num: u64) -> Option<Vec<u8>> {
+        if let Some((block_data, access_order)) = self.cache.get_mut(&block_num) {
+            self.access_counter += 1;
+            *access_order = self.access_counter;
+            Some(block_data.clone())
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, block_num: u64, block_data: Vec<u8>) {
+        self.access_counter += 1;
+        
+        // Remove LRU item if cache is full
+        if self.cache.len() >= self.max_size && !self.cache.contains_key(&block_num) {
+            // Find the item with the smallest access_order (LRU)
+            if let Some((&lru_key, _)) = self.cache.iter()
+                .min_by_key(|(_, (_, access_order))| *access_order) {
+                self.cache.remove(&lru_key);
+            }
+        }
+        
+        self.cache.insert(block_num, (block_data, self.access_counter));
+    }
+
+    fn remove(&mut self, block_num: u64) {
+        self.cache.remove(&block_num);
     }
 
     fn len(&self) -> usize {
@@ -392,6 +448,7 @@ impl Ext2FileSystem {
             name: "ext2".to_string(),
             next_file_id: Mutex::new(2), // Start from 2, root is 1
             inode_cache: Mutex::new(InodeLruCache::new(256)),
+            block_cache: Mutex::new(BlockLruCache::new(512)),
         });
 
         // Set filesystem reference in root node
