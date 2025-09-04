@@ -346,6 +346,10 @@ impl Device for VirtioBlockDevice {
     fn as_block_device(&self) -> Option<&dyn crate::device::block::BlockDevice> {
         Some(self)
     }
+    
+    fn into_block_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn crate::device::block::BlockDevice>> {
+        Some(self)
+    }
 }
 
 impl VirtioDevice for VirtioBlockDevice {
