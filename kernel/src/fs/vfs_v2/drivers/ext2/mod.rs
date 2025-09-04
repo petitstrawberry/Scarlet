@@ -274,8 +274,61 @@ pub struct Ext2FileSystem {
     name: String,
     /// Next file ID generator
     next_file_id: Mutex<u64>,
-    /// Cached inodes
-    inode_cache: Mutex<BTreeMap<u32, Ext2Inode>>,
+    /// LRU cached inodes
+    inode_cache: Mutex<InodeLruCache>,
+}
+
+/// Simple LRU cache implementation for inodes
+struct InodeLruCache {
+    /// Map from inode number to (inode, access_order)
+    cache: BTreeMap<u32, (Ext2Inode, u64)>,
+    /// Access counter for LRU ordering
+    access_counter: u64,
+    /// Maximum cache size
+    max_size: usize,
+}
+
+impl InodeLruCache {
+    fn new(max_size: usize) -> Self {
+        Self {
+            cache: BTreeMap::new(),
+            access_counter: 0,
+            max_size,
+        }
+    }
+
+    fn get(&mut self, inode_num: u32) -> Option<Ext2Inode> {
+        if let Some((inode, access_order)) = self.cache.get_mut(&inode_num) {
+            self.access_counter += 1;
+            *access_order = self.access_counter;
+            Some(*inode)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, inode_num: u32, inode: Ext2Inode) {
+        self.access_counter += 1;
+        
+        // Remove LRU item if cache is full
+        if self.cache.len() >= self.max_size && !self.cache.contains_key(&inode_num) {
+            // Find the item with the smallest access_order (LRU)
+            if let Some((&lru_key, _)) = self.cache.iter()
+                .min_by_key(|(_, (_, access_order))| *access_order) {
+                self.cache.remove(&lru_key);
+            }
+        }
+        
+        self.cache.insert(inode_num, (inode, self.access_counter));
+    }
+
+    fn remove(&mut self, inode_num: u32) {
+        self.cache.remove(&inode_num);
+    }
+
+    fn len(&self) -> usize {
+        self.cache.len()
+    }
 }
 
 impl Ext2FileSystem {
@@ -338,7 +391,7 @@ impl Ext2FileSystem {
             root: RwLock::new(Arc::new(root)),
             name: "ext2".to_string(),
             next_file_id: Mutex::new(2), // Start from 2, root is 1
-            inode_cache: Mutex::new(BTreeMap::new()),
+            inode_cache: Mutex::new(InodeLruCache::new(256)),
         });
 
         // Set filesystem reference in root node
@@ -384,9 +437,9 @@ impl Ext2FileSystem {
     pub fn read_inode(&self, inode_num: u32) -> Result<Ext2Inode, FileSystemError> {
         // Check cache first
         {
-            let cache = self.inode_cache.lock();
-            if let Some(inode) = cache.get(&inode_num) {
-                return Ok(*inode);
+            let mut cache = self.inode_cache.lock();
+            if let Some(inode) = cache.get(inode_num) {
+                return Ok(inode);
             }
         }
 
@@ -464,7 +517,7 @@ impl Ext2FileSystem {
 
         let inode = Ext2Inode::from_bytes(&inode_data[inode_offset as usize..])?;
         
-        // Cache the inode
+        // Cache the inode with LRU eviction
         {
             let mut cache = self.inode_cache.lock();
             cache.insert(inode_num, inode);
@@ -691,7 +744,7 @@ impl Ext2FileSystem {
         }
     }
 
-    /// Read the entire content of a file given its inode number
+    /// Read the entire content of a file given its inode number (optimized)
     pub fn read_file_content(&self, inode_num: u32, size: usize) -> Result<Vec<u8>, FileSystemError> {
         let inode = self.read_inode(inode_num)?;
         let mut content = Vec::with_capacity(size);
@@ -699,33 +752,70 @@ impl Ext2FileSystem {
         let mut current_block = 0;
 
         while remaining > 0 {
-            let block_num = self.get_inode_block(&inode, current_block)?;
-            if block_num == 0 {
-                // Sparse block - fill with zeros
-                let bytes_to_add = core::cmp::min(remaining, self.block_size as usize);
-                content.extend_from_slice(&vec![0u8; bytes_to_add]);
-                remaining -= bytes_to_add;
-            } else {
-                // Read the block
-                let block_sector = block_num * 2; // Convert block to sector
+            // Try to find consecutive blocks for batch reading
+            let mut consecutive_blocks = Vec::new();
+            let mut blocks_to_read = 0;
+            let mut first_block_num = 0;
+            
+            // Look ahead for consecutive blocks (up to 8 blocks max for reasonable batch size)
+            for i in 0..8 {
+                if remaining == 0 {
+                    break;
+                }
+                
+                let block_num = self.get_inode_block(&inode, current_block + i)?;
+                if block_num == 0 {
+                    // Sparse block
+                    if i == 0 {
+                        // First block is sparse
+                        let bytes_to_add = core::cmp::min(remaining, self.block_size as usize);
+                        content.extend_from_slice(&vec![0u8; bytes_to_add]);
+                        remaining -= bytes_to_add;
+                        current_block += 1;
+                        break;
+                    } else {
+                        // End of consecutive sequence
+                        break;
+                    }
+                }
+                
+                if i == 0 {
+                    first_block_num = block_num;
+                    consecutive_blocks.push(block_num);
+                    blocks_to_read = 1;
+                } else if block_num == first_block_num + i {
+                    // Block is consecutive
+                    consecutive_blocks.push(block_num);
+                    blocks_to_read += 1;
+                } else {
+                    // Not consecutive, stop here
+                    break;
+                }
+            }
+            
+            if blocks_to_read > 0 {
+                // Read consecutive blocks
+                let total_sectors = blocks_to_read * (self.block_size / 512) as u64;
+                let start_sector = first_block_num * 2; // Convert block to sector
+                
                 let request = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Read,
-                    sector: block_sector as usize,
-                    sector_count: (self.block_size / 512) as usize,
+                    sector: start_sector as usize,
+                    sector_count: total_sectors as usize,
                     head: 0,
                     cylinder: 0,
-                    buffer: vec![0u8; self.block_size as usize],
+                    buffer: vec![0u8; (blocks_to_read * self.block_size as u64) as usize],
                 });
                 
                 self.block_device.enqueue_request(request);
                 let results = self.block_device.process_requests();
                 
-                let block_data = if let Some(result) = results.first() {
+                let blocks_data = if let Some(result) = results.first() {
                     match &result.result {
                         Ok(_) => result.request.buffer.clone(),
                         Err(_) => return Err(FileSystemError::new(
                             FileSystemErrorKind::IoError,
-                            "Failed to read file block"
+                            "Failed to read file blocks"
                         )),
                     }
                 } else {
@@ -735,13 +825,28 @@ impl Ext2FileSystem {
                     ));
                 };
 
-                // Add the needed bytes from this block
-                let bytes_to_add = core::cmp::min(remaining, self.block_size as usize);
-                content.extend_from_slice(&block_data[..bytes_to_add]);
-                remaining -= bytes_to_add;
+                // Copy needed bytes from the blocks
+                for i in 0..blocks_to_read {
+                    if remaining == 0 {
+                        break;
+                    }
+                    
+                    let block_start = (i * self.block_size as u64) as usize;
+                    let bytes_to_add = core::cmp::min(remaining, self.block_size as usize);
+                    
+                    if block_start + bytes_to_add <= blocks_data.len() {
+                        content.extend_from_slice(&blocks_data[block_start..block_start + bytes_to_add]);
+                        remaining -= bytes_to_add;
+                    } else {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Block data out of bounds"
+                        ));
+                    }
+                }
+                
+                current_block += blocks_to_read;
             }
-
-            current_block += 1;
         }
 
         Ok(content)
@@ -1745,7 +1850,7 @@ impl Ext2FileSystem {
         // Remove from inode cache if present
         {
             let mut cache = self.inode_cache.lock();
-            cache.remove(&inode_number);
+            cache.remove(inode_number);
         }
 
         Ok(())
@@ -1855,8 +1960,11 @@ impl Ext2FileSystem {
         // Write updated inode to disk
         self.write_inode(inode_num, &inode)?;
         
-        // Update inode cache
-        self.inode_cache.lock().insert(inode_num, inode);
+        // Update inode cache with LRU eviction
+        {
+            let mut cache = self.inode_cache.lock();
+            cache.insert(inode_num, inode);
+        }
         
         Ok(())
     }
