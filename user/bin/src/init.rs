@@ -43,7 +43,7 @@ fn setup_new_root() -> bool {
     // 3. Copy essential binaries (update paths based on actual initramfs structure)
     // Copy from the actual location in initramfs
     // copy_dir("/bin", "/mnt/newroot/bin");
-    copy_dir("/system", "/mnt/newroot/system");
+    copy_dir("/system/scarlet", "/mnt/newroot/system/scarlet");
     // copy_dir("/data", "/mnt/newroot/data");
     
     // Create old_root directory in the new root (where the old root will be moved)
@@ -234,23 +234,32 @@ fn copy_file(src: &str, dest: &str) -> bool {
                 Ok(mut dest_file) => {
                     println!("init: Copying file from {} to {}", src, dest);
                     let mut buffer = [0u8; 4096]; // Buffer size of 4KB
+                    let mut total_bytes_copied = 0;
                     
                     loop {
                         match src_file.read(&mut buffer) {
                             Ok(0) => break, // EOF
                             Ok(bytes_read) => {
+                                 
+                                 // Write to destination file
                                 match dest_file.write(&buffer[..bytes_read]) {
                                     Ok(bytes_written) if bytes_written == bytes_read => {
+                                        total_bytes_copied += bytes_written;
                                         // Success, continue
                                     }
-                                    _ => {
+                                    Ok(bytes_written) => {
+                                        println!("init: Partial write! Expected {}, wrote {} bytes to {}", 
+                                                bytes_read, bytes_written, dest);
+                                        return false;
+                                    }
+                                    Err(_) => {
                                         println!("init: Failed to write to destination file: {}", dest);
                                         return false;
                                     }
                                 }
                             }
-                            Err(e) => {
-                                println!("init: Failed to read from source file: {}: {}", src, e);
+                            Err(_) => {
+                                println!("init: Failed to read from source file: {}", src);
                                 return false;
                             }
                         }

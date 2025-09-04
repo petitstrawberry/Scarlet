@@ -15,10 +15,10 @@ fi
 
 # Calculate size needed (in KB)
 ROOTFS_SIZE_KB=$(du -sk "$ROOTFS_DIR" | cut -f1)
-# Add 50% extra space, minimum 10MB
+# Add 50% extra space, minimum 100MB
 EXT2_SIZE_KB=$((ROOTFS_SIZE_KB * 3 / 2))
-if [ $EXT2_SIZE_KB -lt 10240 ]; then
-    EXT2_SIZE_KB=10240
+if [ $EXT2_SIZE_KB -lt 102400 ]; then
+    EXT2_SIZE_KB=102400
 fi
 
 echo "Creating ext2 image: $EXT2_IMAGE (${EXT2_SIZE_KB}KB)"
