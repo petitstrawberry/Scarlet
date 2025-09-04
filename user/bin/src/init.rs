@@ -4,7 +4,7 @@
 extern crate scarlet_std as std;
 
 use std::{
-    format, fs::{create_directory, list_directory, mount, pivot_root, File}, handle::Handle, println, task::{execve_with_flags, exit, fork, getpid, waitpid, EXECVE_FORCE_ABI_REBUILD}
+    format, fs::{create_directory, list_directory, mount, pivot_root, remove_directory, remove_file, File}, handle::Handle, println, task::{execve_with_flags, exit, fork, getpid, waitpid, EXECVE_FORCE_ABI_REBUILD}
 };
 
 // Global variables for standard I/O handles to hold references
@@ -142,14 +142,53 @@ fn perform_pivot_root() -> bool {
 fn copy_dir(src: &str, dest: &str) -> bool {
     println!("init: Copying directory from {} to {}", src, dest);
     
-    // Create destination directory if it doesn't exist
+    // If destination directory exists, remove all its contents first, then remove the directory itself
+    match list_directory(dest) {
+        Ok(entries) => {
+            println!("init: Destination directory {} exists, removing all contents first", dest);
+            // Remove all entries in the destination directory
+            for entry in entries {
+                // Skip . and .. entries
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                
+                let dest_entry_path = format!("{}/{}", dest, entry.name);
+                if entry.is_directory() {
+                    // Recursively remove subdirectory (this will handle nested contents)
+                    copy_dir("/dev/null", &dest_entry_path); // Use dummy source to trigger cleanup
+                    match remove_directory(&dest_entry_path) {
+                        Ok(_) => println!("init: Removed existing directory: {}", dest_entry_path),
+                        Err(_) => println!("init: Failed to remove directory: {}", dest_entry_path),
+                    }
+                } else {
+                    match remove_file(&dest_entry_path) {
+                        Ok(_) => println!("init: Removed existing file: {}", dest_entry_path),
+                        Err(_) => println!("init: Failed to remove file: {}", dest_entry_path),
+                    }
+                }
+            }
+            
+            // Now remove the destination directory itself
+            match remove_directory(dest) {
+                Ok(_) => println!("init: Removed existing destination directory: {}", dest),
+                Err(_) => println!("init: Failed to remove destination directory: {}", dest),
+            }
+        }
+        Err(_) => {
+            // Directory doesn't exist, which is fine
+            println!("init: Destination directory {} does not exist", dest);
+        }
+    }
+    
+    // Create destination directory
     match create_directory(dest) {
         Ok(_) => {
             println!("init: Created directory: {}", dest);
         }
         Err(_) => {
-            // Directory might already exist, that's okay
-            println!("init: Directory {} might already exist (continuing)", dest);
+            println!("init: Failed to create directory: {}", dest);
+            return false;
         }
     }
     
@@ -189,6 +228,9 @@ fn copy_file(src: &str, dest: &str) -> bool {
     // Read source file
     match File::open(src) {
         Ok(mut src_file) => {
+            // Remove existing destination file if it exists (for overwrite support)
+            let _ = remove_file(dest); // Ignore errors if file doesn't exist
+            
             // Create destination file
             match File::create(dest) {
                 Ok(mut dest_file) => {
