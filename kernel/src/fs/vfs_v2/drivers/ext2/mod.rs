@@ -592,11 +592,101 @@ impl Ext2FileSystem {
             ]);
             
             Ok(block_ptr as u64)
+        } else if logical_block < 12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64 {
+            // Double indirect
+            let double_indirect_block = inode.block[13] as u64;
+            if double_indirect_block == 0 {
+                return Ok(0);
+            }
+            
+            let offset_in_double = logical_block - 12 - blocks_per_indirect as u64;
+            let first_indirect_index = offset_in_double / blocks_per_indirect as u64;
+            let second_indirect_index = offset_in_double % blocks_per_indirect as u64;
+            
+            // Read double indirect block
+            let double_indirect_sector = double_indirect_block * 2;
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: double_indirect_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            let double_indirect_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read double indirect block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from double indirect block read"
+                ));
+            };
+            
+            // Get the first level indirect block pointer
+            let first_indirect_ptr = u32::from_le_bytes([
+                double_indirect_data[first_indirect_index as usize * 4],
+                double_indirect_data[first_indirect_index as usize * 4 + 1],
+                double_indirect_data[first_indirect_index as usize * 4 + 2],
+                double_indirect_data[first_indirect_index as usize * 4 + 3],
+            ]);
+            
+            if first_indirect_ptr == 0 {
+                return Ok(0);
+            }
+            
+            // Read the first level indirect block
+            let first_indirect_sector = first_indirect_ptr as u64 * 2;
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: first_indirect_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            let first_indirect_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read first level indirect block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from first level indirect block read"
+                ));
+            };
+            
+            // Get the final block pointer
+            let block_ptr = u32::from_le_bytes([
+                first_indirect_data[second_indirect_index as usize * 4],
+                first_indirect_data[second_indirect_index as usize * 4 + 1],
+                first_indirect_data[second_indirect_index as usize * 4 + 2],
+                first_indirect_data[second_indirect_index as usize * 4 + 3],
+            ]);
+            
+            Ok(block_ptr as u64)
         } else {
-            // For now, only support direct and single indirect blocks
+            // Triple indirect blocks - not implemented yet
             Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
-                "Double and triple indirect blocks not yet supported"
+                "Triple indirect blocks not yet supported"
             ))
         }
     }
@@ -872,16 +962,38 @@ impl Ext2FileSystem {
     
     /// Allocate a new data block using proper bitmap management
     fn allocate_block(&self) -> Result<u64, FileSystemError> {
-        // For now, allocate from Group 0
-        // Based on dumpe2fs: Group 0 data blocks: 810-8192
-        let group = 0;
+        // Try to allocate from any available group
+        let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1) / self.superblock.blocks_per_group;
         
-        // Read block group descriptor for group 0
-        let bgd_block_sector = if self.block_size == 1024 { 2 * 2 } else { 1 * 2 }; // Block 2 in sectors
+        for group in 0..total_groups {
+            match self.allocate_block_in_group(group) {
+                Ok(block_num) => return Ok(block_num),
+                Err(FileSystemError { kind: FileSystemErrorKind::NoSpace, .. }) => {
+                    // Try next group
+                    continue;
+                },
+                Err(e) => return Err(e),
+            }
+        }
+        
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NoSpace,
+            "No free blocks available in any group"
+        ))
+    }
+    
+    /// Allocate a block in a specific group
+    fn allocate_block_in_group(&self, group: u32) -> Result<u64, FileSystemError> {
+        // Read block group descriptor for the specified group
+        let bgd_block_sector = if self.block_size == 1024 { 
+            2 * 2 + (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 / self.block_size) * 2
+        } else { 
+            1 * 2 + (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 / self.block_size) * 2
+        };
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_block_sector,
+            sector: bgd_block_sector as usize,
             sector_count: (self.block_size / 512) as usize,
             head: 0,
             cylinder: 0,
@@ -906,13 +1018,14 @@ impl Ext2FileSystem {
             ));
         };
 
-        let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
+        let bgd_offset = (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 % self.block_size) as usize;
+        let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset..])?;
         
         // Check if there are free blocks
         if bgd.free_blocks_count == 0 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NoSpace,
-                "No free blocks in group 0"
+                &format!("No free blocks in group {}", group)
             ));
         }
 
@@ -946,11 +1059,24 @@ impl Ext2FileSystem {
         };
 
         // Find first free block in bitmap
-        // Start from block 810 (which corresponds to bit 809 since blocks are 1-based but bitmap is 0-based)
-        let start_block = 810;
-        let start_bit = start_block - 1; // Convert to 0-based bit index
+        // Calculate the data block range for this group
+        let group_start_block = group * self.superblock.blocks_per_group;
+        // For group 0, start from after superblock, group descriptors, bitmaps, inode table
+        // For other groups, start from the beginning of the group's data area
+        let data_start_block = if group == 0 {
+            // For group 0, skip reserved blocks (typically block 810 is the first data block)
+            810.max(group_start_block)
+        } else {
+            // For other groups, calculate the proper data start
+            let blocks_for_metadata = 3 + (self.superblock.inodes_per_group * 128 + self.block_size - 1) / self.block_size;
+            group_start_block + blocks_for_metadata
+        };
         
-        for bit in start_bit..self.superblock.blocks_per_group {
+        let group_end_block = (group + 1) * self.superblock.blocks_per_group;
+        let search_end = core::cmp::min(group_end_block, self.superblock.blocks_count as u32);
+        
+        for block_num in data_start_block..search_end {
+            let bit = block_num - group_start_block; // Convert to group-relative bit index
             let byte_index = (bit / 8) as usize;
             let bit_index = bit % 8;
             
@@ -980,7 +1106,7 @@ impl Ext2FileSystem {
                     match &result.result {
                         Ok(_) => {
                             // Update group descriptor to reflect one less free block
-                            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
+                            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset..])?;
                             let current_free_blocks = u16::from_le(bgd.free_blocks_count);
                             bgd.free_blocks_count = (current_free_blocks.saturating_sub(1)).to_le();
                             self.update_group_descriptor(group, &bgd)?;
@@ -995,10 +1121,10 @@ impl Ext2FileSystem {
                     }
                 }
                 
-                let allocated_block = bit + 1; // Convert back to 1-based block number
+                let allocated_block = block_num; // Already in absolute block number
                 
                 // Debug: Allocated block (disabled to reduce log noise)
-                // crate::early_println!("EXT2: Allocated block {} (bit {})", allocated_block, bit);
+                // crate::early_println!("EXT2: Allocated block {} in group {}", allocated_block, group);
                 
                 return Ok(allocated_block as u64);
             }
@@ -2085,11 +2211,189 @@ impl Ext2FileSystem {
                     "No response from indirect block write"
                 ))
             }
+        } else if logical_block < 12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64 {
+            // Double indirect
+            let offset_in_double = logical_block - 12 - blocks_per_indirect as u64;
+            let first_indirect_index = offset_in_double / blocks_per_indirect as u64;
+            let second_indirect_index = offset_in_double % blocks_per_indirect as u64;
+            
+            // If no double indirect block exists, allocate one
+            if inode.block[13] == 0 {
+                let double_indirect_block = self.allocate_block()? as u32;
+                inode.block[13] = double_indirect_block;
+                
+                // Clear the double indirect block
+                let clear_data = vec![0u8; self.block_size as usize];
+                let clear_request = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: (double_indirect_block * 2) as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: clear_data,
+                });
+                
+                self.block_device.enqueue_request(clear_request);
+                let _results = self.block_device.process_requests();
+            }
+            
+            let double_indirect_block = inode.block[13];
+            let double_indirect_sector = (double_indirect_block * 2) as u64;
+            
+            // Read the double indirect block
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: double_indirect_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            let mut double_indirect_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read double indirect block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from double indirect block read"
+                ));
+            };
+            
+            // Get or create the first level indirect block
+            let mut first_indirect_ptr = u32::from_le_bytes([
+                double_indirect_data[first_indirect_index as usize * 4],
+                double_indirect_data[first_indirect_index as usize * 4 + 1],
+                double_indirect_data[first_indirect_index as usize * 4 + 2],
+                double_indirect_data[first_indirect_index as usize * 4 + 3],
+            ]);
+            
+            if first_indirect_ptr == 0 {
+                // Allocate a new first level indirect block
+                first_indirect_ptr = self.allocate_block()? as u32;
+                
+                // Update the double indirect block
+                let first_indirect_bytes = first_indirect_ptr.to_le_bytes();
+                let offset = first_indirect_index as usize * 4;
+                double_indirect_data[offset..offset + 4].copy_from_slice(&first_indirect_bytes);
+                
+                // Write back the double indirect block
+                let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: double_indirect_sector as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: double_indirect_data.clone(),
+                });
+                
+                self.block_device.enqueue_request(write_request);
+                let write_results = self.block_device.process_requests();
+                
+                if let Some(write_result) = write_results.first() {
+                    match &write_result.result {
+                        Ok(_) => {},
+                        Err(_) => return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to write double indirect block"
+                        )),
+                    }
+                } else {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "No response from double indirect block write"
+                    ));
+                }
+                
+                // Clear the new first level indirect block
+                let clear_data = vec![0u8; self.block_size as usize];
+                let clear_request = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: (first_indirect_ptr * 2) as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: clear_data,
+                });
+                
+                self.block_device.enqueue_request(clear_request);
+                let _results = self.block_device.process_requests();
+            }
+            
+            // Read the first level indirect block
+            let first_indirect_sector = (first_indirect_ptr * 2) as u64;
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: first_indirect_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; self.block_size as usize],
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            let mut first_indirect_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read first level indirect block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from first level indirect block read"
+                ));
+            };
+            
+            // Update the block pointer in the first level indirect block
+            let offset = second_indirect_index as usize * 4;
+            let block_bytes = block_number.to_le_bytes();
+            first_indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
+            
+            // Write back the first level indirect block
+            let write_request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: first_indirect_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: first_indirect_data,
+            });
+            
+            self.block_device.enqueue_request(write_request);
+            let write_results = self.block_device.process_requests();
+            
+            if let Some(write_result) = write_results.first() {
+                match &write_result.result {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write first level indirect block"
+                    )),
+                }
+            } else {
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No response from first level indirect block write"
+                ))
+            }
         } else {
-            // For now, only support direct and single indirect blocks
+            // Triple indirect blocks - not implemented yet
             Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
-                "Double and triple indirect blocks not yet supported"
+                "Triple indirect blocks not yet supported"
             ))
         }
     }
