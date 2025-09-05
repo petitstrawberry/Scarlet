@@ -5,6 +5,8 @@
 
 pub mod plic;
 pub mod clint;
+pub mod gic;
 
 pub use plic::Plic;
 pub use clint::Clint;
+pub use gic::Gic;
