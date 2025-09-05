@@ -23,7 +23,7 @@
 //! Requests are processed through the VirtIO descriptor chain mechanism, with proper
 //! memory management using Box allocations to ensure data remains valid during transfers.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec::Vec, collections::VecDeque};
 use alloc::vec;
 use spin::{Mutex, RwLock};
 
@@ -107,7 +107,7 @@ pub struct VirtioBlockDevice {
     sector_size: RwLock<u32>,
     features: RwLock<u32>,
     read_only: RwLock<bool>,
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
+    request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
 }
 
 impl VirtioBlockDevice {
@@ -119,7 +119,7 @@ impl VirtioBlockDevice {
             sector_size: RwLock::new(512), // Default sector size
             features: RwLock::new(0),
             read_only: RwLock::new(false),
-            request_queue: Mutex::new(Vec::new()),
+            request_queue: Mutex::new(VecDeque::new()),
         };
         
         // Initialize the device
@@ -422,17 +422,15 @@ impl BlockDevice for VirtioBlockDevice {
     
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
         // Enqueue the request
-        self.request_queue.lock().push(request);
+        self.request_queue.lock().push_back(request);
     }
     
     fn process_requests(&self) -> Vec<BlockIOResult> {
         let mut results = Vec::new();
         let mut queue = self.request_queue.lock();
-        while let Some(mut request) = queue.pop() {
-            drop(queue); // Release the lock before processing
+        while let Some(mut request) = queue.pop_front() {
             let result = self.process_request(&mut *request);
             results.push(BlockIOResult { request, result });
-            queue = self.request_queue.lock(); // Reacquire the lock
         }
         
         results
