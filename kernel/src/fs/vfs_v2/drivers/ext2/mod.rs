@@ -1800,7 +1800,8 @@ impl Ext2FileSystem {
             }
         }
         
-        // Write content to blocks
+        // Write content to blocks using batched write
+        let mut blocks_to_write = BTreeMap::new();
         let mut remaining = content.len();
         let mut content_offset = 0;
         
@@ -1816,39 +1817,19 @@ impl Ext2FileSystem {
             block_data[..bytes_to_write].copy_from_slice(&content[content_offset..content_offset + bytes_to_write]);
             
             #[cfg(test)]
-            crate::early_println!("[ext2] write_file_content: writing block {} ({} bytes) to sector {}", 
-                                  block_num, bytes_to_write, block_num * 2);
+            crate::early_println!("[ext2] write_file_content: preparing block {} ({} bytes)", 
+                                  block_num, bytes_to_write);
             
-            // Write block to disk
-            let block_sector = block_num * 2; // Convert block to sector
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Write,
-                sector: block_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: block_data,
-            });
-            
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-            
-            if let Some(result) = results.first() {
-                if result.result.is_err() {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to write file block"
-                    ));
-                }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from block device write"
-                ));
-            }
+            // Add to batch write map
+            blocks_to_write.insert(block_num, block_data);
             
             remaining -= bytes_to_write;
             content_offset += bytes_to_write;
+        }
+        
+        // Write all blocks in one batch
+        if !blocks_to_write.is_empty() {
+            self.write_blocks_cached(&blocks_to_write)?;
         }
         
         // Update inode size, block count, and modification time
