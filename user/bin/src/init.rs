@@ -323,6 +323,8 @@ fn main() -> i32 {
     } else {
         println!("init: Failed to setup new root, continuing with current root");
     }
+
+    std::profiler::dump_profiler_stats();
     
     println!("init: Starting login process...");
 
