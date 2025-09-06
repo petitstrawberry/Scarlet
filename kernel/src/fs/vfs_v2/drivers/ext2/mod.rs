@@ -2801,53 +2801,16 @@ impl Ext2FileSystem {
 
     /// Read one filesystem block with LRU cache
     fn read_block_cached(&self, block_num: u64) -> Result<Vec<u8>, FileSystemError> {
-        // Check cache first
-        {
-            let mut cache = self.block_cache.lock();
-            if let Some(buf) = cache.get(block_num) {
-                return Ok(buf);
-            }
-        }
-
-        // Miss: read from device
-        let sector = self.block_to_sector(block_num);
-        let sector_count = (self.block_size / 512) as usize;
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector,
-            sector_count,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
-
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        let block_data = if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read block from device",
-                    ))
-                }
-            }
+        // Use the batched read_blocks_cached for efficiency
+        let blocks = self.read_blocks_cached(&[block_num])?;
+        if let Some(block_data) = blocks.into_iter().next() {
+            Ok(block_data)
         } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device read",
-            ));
-        };
-
-        // Insert into cache
-        {
-            let mut cache = self.block_cache.lock();
-            cache.insert(block_num, block_data.clone());
+            Err(FileSystemError::new(
+                FileSystemErrorKind::DeviceError,
+                "Failed to read single block",
+            ))
         }
-
-        Ok(block_data)
     }
 
     /// Write one filesystem block with write-through to device and cache update
