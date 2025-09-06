@@ -594,21 +594,19 @@ impl Ext2FileSystem {
             return Ok(entries);
         }
 
-        // Collect all block numbers to read
-        let mut block_nums = Vec::with_capacity(num_blocks as usize);
-        for i in 0..num_blocks {
-            let block_num = self.get_inode_block(inode, i)?;
-            if block_num > 0 {
-                block_nums.push(block_num);
-            }
-        }
+        // Use batched block mapping to get all block numbers at once
+        let block_nums = self.get_inode_blocks(inode, 0, num_blocks)?;
+        let non_zero_blocks: Vec<u64> = block_nums.iter()
+            .filter(|&&block_num| block_num > 0)
+            .copied()
+            .collect();
 
-        if block_nums.is_empty() {
+        if non_zero_blocks.is_empty() {
             return Ok(entries);
         }
 
         // Read all blocks at once using the cached method
-        let blocks_data = self.read_blocks_cached(&block_nums)?;
+        let blocks_data = self.read_blocks_cached(&non_zero_blocks)?;
 
         // Process each block
         for block_data in blocks_data {
@@ -712,6 +710,86 @@ impl Ext2FileSystem {
         }
     }
 
+    /// Get multiple contiguous block numbers for logical blocks within an inode (batched version)
+    /// This function efficiently maps multiple logical blocks to physical blocks, reducing
+    /// the number of indirect block reads by batching them together.
+    fn get_inode_blocks(&self, inode: &Ext2Inode, start_logical_block: u64, count: u64) -> Result<Vec<u64>, FileSystemError> {
+        profile_scope!("ext2::get_inode_blocks");
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        
+        let blocks_per_indirect = self.block_size / 4; // Each pointer is 4 bytes
+        let mut result = Vec::with_capacity(count as usize);
+        
+        let mut current_block = start_logical_block;
+        let end_block = start_logical_block + count;
+        
+        // For simplicity, we'll read blocks as needed rather than using a complex cache
+        
+        while current_block < end_block {
+            if current_block < 12 {
+                // Direct blocks - process all direct blocks in this range
+                let direct_end = (end_block).min(12);
+                for i in current_block..direct_end {
+                    result.push(inode.block[i as usize] as u64);
+                }
+                current_block = direct_end;
+            } else if current_block < 12 + blocks_per_indirect as u64 {
+                // Single indirect blocks
+                let indirect_block = inode.block[12] as u64;
+                if indirect_block == 0 {
+                    // All blocks in this range are zero
+                    let indirect_end = (end_block).min(12 + blocks_per_indirect as u64);
+                    for _ in current_block..indirect_end {
+                        result.push(0);
+                    }
+                    current_block = indirect_end;
+                } else {
+                    let indirect_data = self.read_block_cached(indirect_block)?;
+                    let indirect_end = (end_block).min(12 + blocks_per_indirect as u64);
+                    
+                    for logical_block in current_block..indirect_end {
+                        let index = logical_block - 12;
+                        let block_ptr = u32::from_le_bytes([
+                            indirect_data[index as usize * 4],
+                            indirect_data[index as usize * 4 + 1],
+                            indirect_data[index as usize * 4 + 2],
+                            indirect_data[index as usize * 4 + 3],
+                        ]);
+                        result.push(block_ptr as u64);
+                    }
+                    current_block = indirect_end;
+                }
+            } else if current_block < 12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64 {
+                // Double indirect
+                let double_indirect_block = inode.block[13] as u64;
+                if double_indirect_block == 0 {
+                    // All blocks in this range are zero
+                    let double_indirect_end = (end_block).min(12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64);
+                    for _ in current_block..double_indirect_end {
+                        result.push(0);
+                    }
+                    current_block = double_indirect_end;
+                } else {
+                    // For now, fall back to single-block reads for double indirect
+                    // TODO: Optimize this further in the future
+                    let block_num = self.get_inode_block(inode, current_block)?;
+                    result.push(block_num);
+                    current_block += 1;
+                }
+            } else {
+                // Triple indirect blocks - not implemented yet
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Triple indirect blocks not yet supported"
+                ));
+            }
+        }
+        
+        Ok(result)
+    }
+
     /// Read the entire content of a file given its inode number (optimized)
     pub fn read_file_content(&self, inode_num: u32, size: usize) -> Result<Vec<u8>, FileSystemError> {
         profile_scope!("ext2::read_file_content");
@@ -723,31 +801,31 @@ impl Ext2FileSystem {
             return Ok(content);
         }
 
-        let mut block_nums_to_read = Vec::new();
-        for i in 0..num_blocks {
-            let block_num = self.get_inode_block(&inode, i)?;
-            if block_num > 0 {
-                block_nums_to_read.push(block_num);
-            } else {
-                // If there are pending blocks to read, read them first
-                if !block_nums_to_read.is_empty() {
-                    let blocks_data = self.read_blocks_cached(&block_nums_to_read)?;
-                    for data in blocks_data {
+        // Use the new batched block mapping function
+        let block_nums = self.get_inode_blocks(&inode, 0, num_blocks)?;
+        let non_zero_blocks: Vec<u64> = block_nums.iter()
+            .filter(|&&block_num| block_num > 0)
+            .copied()
+            .collect();
+
+        if !non_zero_blocks.is_empty() {
+            let blocks_data = self.read_blocks_cached(&non_zero_blocks)?;
+            
+            // Reconstruct content, handling sparse blocks
+            let mut block_data_iter = blocks_data.into_iter();
+            for &block_num in &block_nums {
+                if block_num > 0 {
+                    if let Some(data) = block_data_iter.next() {
                         content.extend_from_slice(&data);
                     }
-                    block_nums_to_read.clear();
+                } else {
+                    // Sparse block - add zeros
+                    content.extend_from_slice(&vec![0u8; self.block_size as usize]);
                 }
-                // Handle sparse block by adding zeros
-                let len_to_add = core::cmp::min(self.block_size as usize, size - content.len());
-                content.extend(core::iter::repeat(0).take(len_to_add));
             }
-        }
-
-        if !block_nums_to_read.is_empty() {
-            let blocks_data = self.read_blocks_cached(&block_nums_to_read)?;
-            for data in blocks_data {
-                content.extend_from_slice(&data);
-            }
+        } else {
+            // All sparse blocks
+            content.extend_from_slice(&vec![0u8; self.block_size as usize * num_blocks as usize]);
         }
 
         // Truncate to the exact size
@@ -1702,10 +1780,12 @@ impl Ext2FileSystem {
         #[cfg(test)]
         crate::early_println!("[ext2] write_file_content: blocks_needed={}", blocks_needed);
         
+        // Get existing block mappings using batched function
+        let existing_blocks = self.get_inode_blocks(&inode, 0, blocks_needed as u64)?;
+        
         // Allocate blocks as needed
         let mut block_list = Vec::new();
-        for block_idx in 0..blocks_needed {
-            let existing_block = self.get_inode_block(&inode, block_idx as u64)?;
+        for (block_idx, &existing_block) in existing_blocks.iter().enumerate() {
             if existing_block == 0 {
                 // Need to allocate a new block
                 let new_block = self.allocate_block()?;
@@ -1777,6 +1857,7 @@ impl Ext2FileSystem {
         
         // Update i_blocks field (count in 512-byte sectors)
         inode.blocks = blocks_needed * (self.block_size / 512);
+        
         
         // Write updated inode to disk
         self.write_inode(inode_num, &inode)?;
