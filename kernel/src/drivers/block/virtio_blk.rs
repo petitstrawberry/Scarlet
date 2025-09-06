@@ -155,6 +155,7 @@ impl VirtioBlockDevice {
     }
     
     fn process_request(&self, req: &mut BlockIORequest) -> Result<(), &'static str> {
+        crate::profile_scope!("virtio_blk::process_request");
         // Allocate memory for request header, data, and status
         let header = Box::new(VirtioBlkReqHeader {
             type_: match req.request_type {
@@ -426,6 +427,7 @@ impl BlockDevice for VirtioBlockDevice {
     }
     
     fn process_requests(&self) -> Vec<BlockIOResult> {
+        crate::profile_scope!("virtio_blk::process_requests");
         let mut results = Vec::new();
         let mut queue = self.request_queue.lock();
         while let Some(mut request) = queue.pop_front() {

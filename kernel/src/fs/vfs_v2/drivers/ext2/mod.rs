@@ -28,12 +28,13 @@ use spin::{rwlock::RwLock, Mutex};
 use core::{mem, any::Any};
 
 use crate::{
-    arch::get_cpu, device::block::BlockDevice, driver_initcall, fs::{
+    device::block::BlockDevice, driver_initcall, fs::{
         get_fs_driver_manager, params::FileSystemParams, FileObject, FileSystemError, FileSystemErrorKind, FileType
-    }, sched::scheduler::get_scheduler, task::mytask, DeviceManager
+    }, task::mytask, DeviceManager,
+    profile_scope,
 };
 
-use super::super::{core::{VfsNode, FileSystemOperations, DirectoryEntryInternal}, manager::{VfsManager, get_global_vfs_manager}};
+use super::super::{core::{VfsNode, FileSystemOperations, DirectoryEntryInternal}, manager::get_global_vfs_manager};
 
 pub mod structures;
 pub mod node;
@@ -492,6 +493,7 @@ impl Ext2FileSystem {
 
     /// Read an inode from disk
     pub fn read_inode(&self, inode_num: u32) -> Result<Ext2Inode, FileSystemError> {
+        profile_scope!("ext2::read_inode");
         // Check cache first
         {
             let mut cache = self.inode_cache.lock();
@@ -639,6 +641,7 @@ impl Ext2FileSystem {
 
     /// Get the block number for a logical block within an inode
     fn get_inode_block(&self, inode: &Ext2Inode, logical_block: u64) -> Result<u64, FileSystemError> {
+        profile_scope!("ext2::get_inode_block");
         let blocks_per_indirect = self.block_size / 4; // Each pointer is 4 bytes
 
         if logical_block < 12 {
@@ -652,33 +655,7 @@ impl Ext2FileSystem {
             }
             
             let index = logical_block - 12;
-            let indirect_sector = indirect_block * 2; // Convert block to sector
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: indirect_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; self.block_size as usize],
-            });
-            
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-            
-            let indirect_data = if let Some(result) = results.first() {
-                match &result.result {
-                    Ok(_) => result.request.buffer.clone(),
-                    Err(_) => return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read indirect block"
-                    )),
-                }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from block device read"
-                ));
-            };
+            let indirect_data = self.read_block_cached(indirect_block)?;
             
             let block_ptr = u32::from_le_bytes([
                 indirect_data[index as usize * 4],
@@ -700,33 +677,7 @@ impl Ext2FileSystem {
             let second_indirect_index = offset_in_double % blocks_per_indirect as u64;
             
             // Read double indirect block
-            let double_indirect_sector = double_indirect_block * 2;
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: double_indirect_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; self.block_size as usize],
-            });
-            
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-            
-            let double_indirect_data = if let Some(result) = results.first() {
-                match &result.result {
-                    Ok(_) => result.request.buffer.clone(),
-                    Err(_) => return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read double indirect block"
-                    )),
-                }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from double indirect block read"
-                ));
-            };
+            let double_indirect_data = self.read_block_cached(double_indirect_block)?;
             
             // Get the first level indirect block pointer
             let first_indirect_ptr = u32::from_le_bytes([
@@ -741,33 +692,7 @@ impl Ext2FileSystem {
             }
             
             // Read the first level indirect block
-            let first_indirect_sector = first_indirect_ptr as u64 * 2;
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: first_indirect_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; self.block_size as usize],
-            });
-            
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-            
-            let first_indirect_data = if let Some(result) = results.first() {
-                match &result.result {
-                    Ok(_) => result.request.buffer.clone(),
-                    Err(_) => return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read first level indirect block"
-                    )),
-                }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from first level indirect block read"
-                ));
-            };
+            let first_indirect_data = self.read_block_cached(first_indirect_ptr as u64)?;
             
             // Get the final block pointer
             let block_ptr = u32::from_le_bytes([
@@ -789,6 +714,7 @@ impl Ext2FileSystem {
 
     /// Read the entire content of a file given its inode number (optimized)
     pub fn read_file_content(&self, inode_num: u32, size: usize) -> Result<Vec<u8>, FileSystemError> {
+        profile_scope!("ext2::read_file_content");
         let inode = self.read_inode(inode_num)?;
         let mut content = Vec::with_capacity(size);
         
@@ -2121,6 +2047,7 @@ impl Ext2FileSystem {
 
     /// Set the block number for a logical block within an inode
     fn set_inode_block(&self, inode: &mut Ext2Inode, logical_block: u64, block_number: u32) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::set_inode_block");
         let blocks_per_indirect = self.block_size / 4; // Each pointer is 4 bytes
 
         if logical_block < 12 {
@@ -2138,49 +2065,13 @@ impl Ext2FileSystem {
                 
                 // Clear the indirect block
                 let clear_data = vec![0u8; self.block_size as usize];
-                let clear_request = Box::new(crate::device::block::request::BlockIORequest {
-                    request_type: crate::device::block::request::BlockIORequestType::Write,
-                    sector: (indirect_block * 2) as usize,
-                    sector_count: (self.block_size / 512) as usize,
-                    head: 0,
-                    cylinder: 0,
-                    buffer: clear_data,
-                });
-                
-                self.block_device.enqueue_request(clear_request);
-                let _results = self.block_device.process_requests();
+                self.write_block_cached(indirect_block as u64, &clear_data)?;
             }
             
             let indirect_block = inode.block[12];
-            let indirect_sector = (indirect_block * 2) as u64;
             
             // Read the indirect block
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: indirect_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; self.block_size as usize],
-            });
-            
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-            
-            let mut indirect_data = if let Some(result) = results.first() {
-                match &result.result {
-                    Ok(_) => result.request.buffer.clone(),
-                    Err(_) => return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read indirect block"
-                    )),
-                }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from block device read"
-                ));
-            };
+            let mut indirect_data = self.read_block_cached(indirect_block as u64)?;
             
             // Update the block pointer
             let offset = index as usize * 4;
@@ -2188,32 +2079,8 @@ impl Ext2FileSystem {
             indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
             
             // Write back the indirect block
-            let write_request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Write,
-                sector: indirect_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: indirect_data,
-            });
-            
-            self.block_device.enqueue_request(write_request);
-            let write_results = self.block_device.process_requests();
-            
-            if let Some(write_result) = write_results.first() {
-                match &write_result.result {
-                    Ok(_) => Ok(()),
-                    Err(_) => Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to write indirect block"
-                    )),
-                }
-            } else {
-                Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No response from indirect block write"
-                ))
-            }
+            self.write_block_cached(indirect_block as u64, &indirect_data)?;
+            Ok(())
         } else if logical_block < 12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64 {
             // Double indirect
             let offset_in_double = logical_block - 12 - blocks_per_indirect as u64;
@@ -2569,6 +2436,8 @@ impl Ext2FileSystem {
     /// Read multiple filesystem blocks with improved LRU cache and batching
     /// Optimized to enqueue all requests first, then process them in one batch
     fn read_blocks_cached(&self, block_nums: &[u64]) -> Result<Vec<Vec<u8>>, FileSystemError> {
+        profile_scope!("ext2::read_blocks_cached");
+
         let mut results = BTreeMap::new();
         let mut missing_blocks = Vec::new();
         let mut cache = self.block_cache.lock();
@@ -2712,6 +2581,8 @@ impl Ext2FileSystem {
 
     /// Write multiple filesystem blocks with write-through to device and cache update
     fn write_blocks_cached(&self, blocks: &BTreeMap<u64, Vec<u8>>) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::write_blocks_cached");
+
         if blocks.is_empty() {
             return Ok(());
         }
@@ -2815,45 +2686,8 @@ impl Ext2FileSystem {
 
     /// Write one filesystem block with write-through to device and cache update
     fn write_block_cached(&self, block_num: u64, data: &[u8]) -> Result<(), FileSystemError> {
-        if data.len() != self.block_size as usize {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Block data size does not match block_size",
-            ));
-        }
-
-        let sector = self.block_to_sector(block_num);
-        let sector_count = (self.block_size / 512) as usize;
-        let request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Write,
-            sector,
-            sector_count,
-            head: 0,
-            cylinder: 0,
-            buffer: data.to_vec(),
-        });
-
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
-
-        if let Some(result) = results.first() {
-            match &result.result {
-                Ok(_) => {
-                    let mut cache = self.block_cache.lock();
-                    cache.insert(block_num, data.to_vec());
-                    Ok(())
-                }
-                Err(_) => Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "Failed to write block to device",
-                )),
-            }
-        } else {
-            Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from block device write",
-            ))
-        }
+        // Use the batched write_blocks_cached for efficiency
+        self.write_blocks_cached(&BTreeMap::from([(block_num, data.to_vec())]))
     }
 }
 
