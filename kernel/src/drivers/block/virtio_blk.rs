@@ -368,12 +368,20 @@ impl VirtioBlockDevice {
             }
         }
         
-        if requests.len() > 1 {
-            crate::early_println!("[virtio_blk] process_requests_batch: {} requests (R:{} W:{})", requests.len(), read_count, write_count);
-            let first_sector = requests[0].sector;
-            let last_sector = requests[requests.len() - 1].sector + requests[requests.len() - 1].sector_count - 1;
-            crate::early_println!("[virtio_blk] Batch range: sectors {}-{}", first_sector, last_sector);
-        }
+        // if requests.len() > 1 {
+        //     crate::early_println!("[virtio_blk] process_requests_batch: {} requests (R:{} W:{})", requests.len(), read_count, write_count);
+            
+        //     // Validate all requests first
+        //     for (i, req) in requests.iter().enumerate() {
+        //         assert!(req.sector_count > 0, 
+        //             "Invalid BlockIORequest[{}]: sector_count=0 for sector={}", i, req.sector);
+        //     }
+            
+        //     let first_sector = requests[0].sector;
+        //     let last_request = &requests[requests.len() - 1];
+        //     let last_sector = last_request.sector + last_request.sector_count - 1;
+        //     crate::early_println!("[virtio_blk] Batch range: sectors {}-{}", first_sector, last_sector);
+        // }
         
         let batch_size = requests.len();
         let mut results = vec![Err("Not processed"); batch_size];
