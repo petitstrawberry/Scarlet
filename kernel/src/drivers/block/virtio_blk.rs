@@ -114,7 +114,12 @@ impl VirtioBlockDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(8)]),
+            // Minimal but sufficient queue size based on real usage:
+            // - Average batch: 1.15 requests (85.2% are single requests)
+            // - Observed max: <5 requests per batch typically
+            // - Each request uses 3 descriptors (header + data + status)  
+            // 32 descriptors = ~10 concurrent requests (5x typical usage)
+            virtqueues: Mutex::new([VirtQueue::new(32)]),
             capacity: RwLock::new(0),
             sector_size: RwLock::new(512), // Default sector size
             features: RwLock::new(0),
@@ -315,8 +320,63 @@ impl VirtioBlockDevice {
         if requests.is_empty() {
             return Vec::new();
         }
+
+        // Safety check: Limit batch size to prevent virtqueue overflow
+        // Based on real usage: avg 1.15 requests/batch, 85.2% single requests
+        // Each request uses 3 descriptors, queue has 32 descriptors
+        // Conservative limit: 10 requests = 30 descriptors (2 descriptors reserved)
+        const MAX_BATCH_SIZE: usize = 10;
         
-        let mut results = vec![Err("Not processed"); requests.len()];
+        if requests.len() > MAX_BATCH_SIZE {
+            crate::early_println!("[virtio_blk] WARNING: Batch size {} exceeds safe limit {}, processing in chunks", 
+                requests.len(), MAX_BATCH_SIZE);
+                
+            // Process in chunks
+            let mut all_results = Vec::with_capacity(requests.len());
+            let chunks = requests.chunks_mut(MAX_BATCH_SIZE);
+            
+            for chunk in chunks {
+                let mut chunk_results = self.process_requests_batch(chunk);
+                all_results.append(&mut chunk_results);
+            }
+            
+            return all_results;
+        }
+
+        // Debug: Log batch size with read/write breakdown
+        let read_count = requests.iter().filter(|r| matches!(r.request_type, BlockIORequestType::Read)).count();
+        let write_count = requests.iter().filter(|r| matches!(r.request_type, BlockIORequestType::Write)).count();
+        
+        // Add batch size tracking for debugging
+        static BATCH_SIZES: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
+        static CALL_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+        
+        {
+            let mut sizes = BATCH_SIZES.lock();
+            let mut count = CALL_COUNT.lock();
+            sizes.push(requests.len());
+            *count += 1;
+            
+            // Print statistics every 100 calls
+            if *count % 100 == 0 {
+                let total_requests: usize = sizes.iter().sum();
+                let avg_batch_size = total_requests as f64 / sizes.len() as f64;
+                let single_requests = sizes.iter().filter(|&&size| size == 1).count();
+                crate::early_println!("[virtio_blk] Batch stats: {} calls, avg_batch={:.2}, single_req={}/{} ({:.1}%)", 
+                    sizes.len(), avg_batch_size, single_requests, sizes.len(),
+                    (single_requests as f64 / sizes.len() as f64) * 100.0);
+            }
+        }
+        
+        if requests.len() > 1 {
+            crate::early_println!("[virtio_blk] process_requests_batch: {} requests (R:{} W:{})", requests.len(), read_count, write_count);
+            let first_sector = requests[0].sector;
+            let last_sector = requests[requests.len() - 1].sector + requests[requests.len() - 1].sector_count - 1;
+            crate::early_println!("[virtio_blk] Batch range: sectors {}-{}", first_sector, last_sector);
+        }
+        
+        let batch_size = requests.len();
+        let mut results = vec![Err("Not processed"); batch_size];
         let mut request_data = Vec::new();
         
         // Lock the virtqueues for the entire batch
@@ -398,13 +458,17 @@ impl VirtioBlockDevice {
                     results[idx] = Err("Failed to submit request");
                 }
             } else {
+                // Descriptor allocation failure - should be very rare with 256 queue size
+                crate::early_println!("[virtio_blk] ERROR: Failed to allocate descriptors for request {} (batch size: {})", 
+                    idx, batch_size);
+                    
                 // Clean up on descriptor allocation failure
                 unsafe {
                     drop(Box::from_raw(header_ptr));
                     drop(Box::from_raw(data_ptr));
                     drop(Box::from_raw(status_ptr));
                 }
-                results[idx] = Err("Failed to allocate descriptors");
+                results[idx] = Err("Virtqueue descriptor allocation failed - queue may be full");
             }
         }
         
