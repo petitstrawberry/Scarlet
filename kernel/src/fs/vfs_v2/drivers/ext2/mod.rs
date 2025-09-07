@@ -594,19 +594,23 @@ impl Ext2FileSystem {
             return Ok(entries);
         }
 
-        // Use batched block mapping to get all block numbers at once
+        // Use batched block reading for better performance
         let block_nums = self.get_inode_blocks(inode, 0, num_blocks)?;
-        let non_zero_blocks: Vec<u64> = block_nums.iter()
-            .filter(|&&block_num| block_num > 0)
-            .copied()
-            .collect();
+        
+        // Filter out zero blocks and collect valid block numbers
+        let mut valid_blocks = Vec::new();
+        for &block_num in &block_nums {
+            if block_num > 0 {
+                valid_blocks.push(block_num);
+            }
+        }
 
-        if non_zero_blocks.is_empty() {
+        if valid_blocks.is_empty() {
             return Ok(entries);
         }
 
         // Read all blocks at once using the cached method
-        let blocks_data = self.read_blocks_cached(&non_zero_blocks)?;
+        let blocks_data = self.read_blocks_cached(&valid_blocks)?;
 
         // Process each block
         for block_data in blocks_data {
@@ -710,7 +714,7 @@ impl Ext2FileSystem {
         }
     }
 
-    /// Get multiple contiguous block numbers for logical blocks within an inode (batched version)
+     /// Get multiple contiguous block numbers for logical blocks within an inode (batched version)
     /// This function efficiently maps multiple logical blocks to physical blocks, reducing
     /// the number of indirect block reads by batching them together.
     fn get_inode_blocks(&self, inode: &Ext2Inode, start_logical_block: u64, count: u64) -> Result<Vec<u64>, FileSystemError> {
@@ -772,11 +776,65 @@ impl Ext2FileSystem {
                     }
                     current_block = double_indirect_end;
                 } else {
-                    // For now, fall back to single-block reads for double indirect
-                    // TODO: Optimize this further in the future
-                    let block_num = self.get_inode_block(inode, current_block)?;
-                    result.push(block_num);
-                    current_block += 1;
+                    // Optimized double indirect block handling
+                    let double_indirect_data = self.read_block_cached(double_indirect_block)?;
+                    let double_indirect_end = (end_block).min(12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64);
+                    
+                    let first_single_indirect_start = 12 + blocks_per_indirect as u64;
+                    let first_single_indirect_index = ((current_block - first_single_indirect_start) / blocks_per_indirect as u64) as usize;
+                    let offset_in_first_single_indirect = ((current_block - first_single_indirect_start) % blocks_per_indirect as u64) as usize;
+                    
+                    let last_single_indirect_index = ((double_indirect_end - 1 - first_single_indirect_start) / blocks_per_indirect as u64) as usize;
+                    
+                    for single_indirect_index in first_single_indirect_index..=last_single_indirect_index {
+                        let single_indirect_ptr = u32::from_le_bytes([
+                            double_indirect_data[single_indirect_index * 4],
+                            double_indirect_data[single_indirect_index * 4 + 1],
+                            double_indirect_data[single_indirect_index * 4 + 2],
+                            double_indirect_data[single_indirect_index * 4 + 3],
+                        ]) as u64;
+                        
+                        if single_indirect_ptr == 0 {
+                            // This entire single indirect block is sparse
+                            let blocks_in_this_indirect = if single_indirect_index == last_single_indirect_index {
+                                let offset_in_last_single_indirect = ((double_indirect_end - 1 - first_single_indirect_start) % blocks_per_indirect as u64) as usize + 1;
+                                if single_indirect_index == first_single_indirect_index {
+                                    offset_in_last_single_indirect - offset_in_first_single_indirect
+                                } else {
+                                    offset_in_last_single_indirect
+                                }
+                            } else if single_indirect_index == first_single_indirect_index {
+                                blocks_per_indirect as usize - offset_in_first_single_indirect
+                            } else {
+                                blocks_per_indirect as usize
+                            };
+                            
+                            for _ in 0..blocks_in_this_indirect {
+                                result.push(0);
+                            }
+                        } else {
+                            // Read this single indirect block
+                            let single_indirect_data = self.read_block_cached(single_indirect_ptr)?;
+                            
+                            let start_offset = if single_indirect_index == first_single_indirect_index { offset_in_first_single_indirect } else { 0 };
+                            let end_offset = if single_indirect_index == last_single_indirect_index {
+                                ((double_indirect_end - 1 - first_single_indirect_start) % blocks_per_indirect as u64) as usize + 1
+                            } else {
+                                blocks_per_indirect as usize
+                            };
+                            
+                            for offset in start_offset..end_offset {
+                                let block_ptr = u32::from_le_bytes([
+                                    single_indirect_data[offset * 4],
+                                    single_indirect_data[offset * 4 + 1],
+                                    single_indirect_data[offset * 4 + 2],
+                                    single_indirect_data[offset * 4 + 3],
+                                ]);
+                                result.push(block_ptr as u64);
+                            }
+                        }
+                    }
+                    current_block = double_indirect_end;
                 }
             } else {
                 // Triple indirect blocks - not implemented yet
@@ -801,31 +859,33 @@ impl Ext2FileSystem {
             return Ok(content);
         }
 
-        // Use the new batched block mapping function
+        // Use batched block reading for better performance
         let block_nums = self.get_inode_blocks(&inode, 0, num_blocks)?;
-        let non_zero_blocks: Vec<u64> = block_nums.iter()
-            .filter(|&&block_num| block_num > 0)
-            .copied()
-            .collect();
-
-        if !non_zero_blocks.is_empty() {
-            let blocks_data = self.read_blocks_cached(&non_zero_blocks)?;
-            
-            // Reconstruct content, handling sparse blocks
-            let mut block_data_iter = blocks_data.into_iter();
-            for &block_num in &block_nums {
-                if block_num > 0 {
-                    if let Some(data) = block_data_iter.next() {
+        
+        let mut block_nums_to_read = Vec::new();
+        for &block_num in block_nums.iter() {
+            if block_num > 0 {
+                block_nums_to_read.push(block_num);
+            } else {
+                // If there are pending blocks to read, read them first
+                if !block_nums_to_read.is_empty() {
+                    let blocks_data = self.read_blocks_cached(&block_nums_to_read)?;
+                    for data in blocks_data {
                         content.extend_from_slice(&data);
                     }
-                } else {
-                    // Sparse block - add zeros
-                    content.extend_from_slice(&vec![0u8; self.block_size as usize]);
+                    block_nums_to_read.clear();
                 }
+                // Handle sparse block by adding zeros
+                let len_to_add = core::cmp::min(self.block_size as usize, size - content.len());
+                content.extend(core::iter::repeat(0).take(len_to_add));
             }
-        } else {
-            // All sparse blocks
-            content.extend_from_slice(&vec![0u8; self.block_size as usize * num_blocks as usize]);
+        }
+
+        if !block_nums_to_read.is_empty() {
+            let blocks_data = self.read_blocks_cached(&block_nums_to_read)?;
+            for data in blocks_data {
+                content.extend_from_slice(&data);
+            }
         }
 
         // Truncate to the exact size
@@ -1780,28 +1840,36 @@ impl Ext2FileSystem {
         #[cfg(test)]
         crate::early_println!("[ext2] write_file_content: blocks_needed={}", blocks_needed);
         
-        // Get existing block mappings using batched function
-        let existing_blocks = self.get_inode_blocks(&inode, 0, blocks_needed as u64)?;
-        
         // Allocate blocks as needed
         let mut block_list = Vec::new();
-        for (block_idx, &existing_block) in existing_blocks.iter().enumerate() {
-            if existing_block == 0 {
-                // Need to allocate a new block
-                let new_block = self.allocate_block()?;
-                #[cfg(test)]
-                crate::early_println!("[ext2] write_file_content: allocated block {} for logical block {}", new_block, block_idx);
-                self.set_inode_block(&mut inode, block_idx as u64, new_block as u32)?;
-                block_list.push(new_block);
-            } else {
-                #[cfg(test)]
-                crate::early_println!("[ext2] write_file_content: reusing existing block {} for logical block {}", existing_block, block_idx);
-                block_list.push(existing_block);
+        let mut new_block_assignments = Vec::new(); // (logical_block_index, block_number)
+        
+        if blocks_needed > 0 {
+            // Use batched block reading to get existing blocks
+            let existing_blocks = self.get_inode_blocks(&inode, 0, blocks_needed as u64)?;
+            
+            for (block_idx, &existing_block) in existing_blocks.iter().enumerate() {
+                if existing_block == 0 {
+                    // Need to allocate a new block
+                    let new_block = self.allocate_block()?;
+                    #[cfg(test)]
+                    crate::early_println!("[ext2] write_file_content: allocated block {} for logical block {}", new_block, block_idx);
+                    new_block_assignments.push((block_idx as u64, new_block as u32));
+                    block_list.push(new_block);
+                } else {
+                    #[cfg(test)]
+                    crate::early_println!("[ext2] write_file_content: reusing existing block {} for logical block {}", existing_block, block_idx);
+                    block_list.push(existing_block);
+                }
             }
         }
         
-        // Write content to blocks using batched write
-        let mut blocks_to_write = BTreeMap::new();
+        // Apply all new block assignments at once using simple batch function
+        if !new_block_assignments.is_empty() {
+            self.set_inode_blocks_simple_batch(&mut inode, &new_block_assignments)?;
+        }
+        
+        // Write content to blocks
         let mut remaining = content.len();
         let mut content_offset = 0;
         
@@ -1817,19 +1885,39 @@ impl Ext2FileSystem {
             block_data[..bytes_to_write].copy_from_slice(&content[content_offset..content_offset + bytes_to_write]);
             
             #[cfg(test)]
-            crate::early_println!("[ext2] write_file_content: preparing block {} ({} bytes)", 
-                                  block_num, bytes_to_write);
+            crate::early_println!("[ext2] write_file_content: writing block {} ({} bytes) to sector {}", 
+                                  block_num, bytes_to_write, block_num * 2);
             
-            // Add to batch write map
-            blocks_to_write.insert(block_num, block_data);
+            // Write block to disk
+            let block_sector = block_num * 2; // Convert block to sector
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Write,
+                sector: block_sector as usize,
+                sector_count: (self.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: block_data,
+            });
+            
+            self.block_device.enqueue_request(request);
+            let results = self.block_device.process_requests();
+            
+            if let Some(result) = results.first() {
+                if result.result.is_err() {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write file block"
+                    ));
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from block device write"
+                ));
+            }
             
             remaining -= bytes_to_write;
             content_offset += bytes_to_write;
-        }
-        
-        // Write all blocks in one batch
-        if !blocks_to_write.is_empty() {
-            self.write_blocks_cached(&blocks_to_write)?;
         }
         
         // Update inode size, block count, and modification time
@@ -1838,7 +1926,6 @@ impl Ext2FileSystem {
         
         // Update i_blocks field (count in 512-byte sectors)
         inode.blocks = blocks_needed * (self.block_size / 512);
-        
         
         // Write updated inode to disk
         self.write_inode(inode_num, &inode)?;
@@ -1942,8 +2029,14 @@ impl Ext2FileSystem {
         
         let blocks_in_file = (inode.get_size() as u64 + self.block_size as u64 - 1) / self.block_size as u64;
         
-        for block_idx in 0..blocks_in_file {
-            let block_num = self.get_inode_block(inode, block_idx)?;
+        if blocks_in_file == 0 {
+            return Ok(blocks);
+        }
+        
+        // Use batched block reading for better performance
+        let block_nums = self.get_inode_blocks(inode, 0, blocks_in_file)?;
+        
+        for &block_num in &block_nums {
             if block_num != 0 {
                 blocks.push(block_num as u32);
             }
@@ -2328,6 +2421,60 @@ impl Ext2FileSystem {
                 "Triple indirect blocks not yet supported"
             ))
         }
+    }
+
+    /// Set multiple inode blocks efficiently by batching operations for Single Indirect blocks
+    fn set_inode_blocks_simple_batch(&self, inode: &mut Ext2Inode, assignments: &[(u64, u32)]) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::set_inode_blocks_simple_batch");
+        
+        crate::early_println!("[ext2] set_inode_blocks_simple_batch: processing {} assignments", assignments.len());
+        
+        let blocks_per_indirect = self.block_size / 4;
+        let mut indirect_blocks_cache = alloc::collections::BTreeMap::new();
+        
+        for &(logical_block, block_number) in assignments {
+            if logical_block < 12 {
+                // Direct blocks - immediate update
+                inode.block[logical_block as usize] = block_number;
+            } else if logical_block < 12 + blocks_per_indirect as u64 {
+                // Single indirect blocks - batch these
+                let index = logical_block - 12;
+                
+                // Ensure indirect block exists
+                if inode.block[12] == 0 {
+                    let indirect_block = self.allocate_block()? as u32;
+                    inode.block[12] = indirect_block;
+                    let clear_data = vec![0u8; self.block_size as usize];
+                    self.write_block_cached(indirect_block as u64, &clear_data)?;
+                }
+                
+                let indirect_block = inode.block[12];
+                
+                // Cache the indirect block data
+                if !indirect_blocks_cache.contains_key(&indirect_block) {
+                    let data = self.read_block_cached(indirect_block as u64)?;
+                    indirect_blocks_cache.insert(indirect_block, data);
+                }
+                
+                // Update in cache
+                if let Some(indirect_data) = indirect_blocks_cache.get_mut(&indirect_block) {
+                    let offset = index as usize * 4;
+                    let block_bytes = block_number.to_le_bytes();
+                    indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
+                }
+            } else {
+                // For double indirect and beyond, fall back to individual calls for now
+                self.set_inode_block(inode, logical_block, block_number)?;
+            }
+        }
+        
+        // Write back all cached indirect blocks at once
+        for (block_num, data) in indirect_blocks_cache {
+            self.write_block_cached(block_num as u64, &data)?;
+        }
+        
+        crate::early_println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments", assignments.len());
+        Ok(())
     }
 
     /// Update group descriptor on disk
