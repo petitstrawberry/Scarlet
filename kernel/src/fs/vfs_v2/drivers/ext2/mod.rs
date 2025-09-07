@@ -1344,6 +1344,333 @@ impl Ext2FileSystem {
         ))
     }
 
+    /// Allocate multiple contiguous blocks in a specific group - OPTIMIZED VERSION
+    fn allocate_blocks_contiguous_in_group(&self, group: u32, count: u32) -> Result<Vec<u64>, FileSystemError> {
+        profile_scope!("ext2::allocate_blocks_contiguous_in_group");
+        
+        crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Starting allocation for {} blocks in group {}", count, group);
+        
+        // Read block group descriptor
+        let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_sector = bgd_block * 2;
+        
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: bgd_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.block_size as usize],
+        });
+        
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        let bgd_data = if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read block group descriptor"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from block device read"
+            ));
+        };
+
+        let bgd_offset = (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 % self.block_size) as usize;
+        let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset..])?;
+        
+        // Check if there are enough free blocks
+        let free_blocks_count = u16::from_le(bgd.free_blocks_count);
+        if free_blocks_count < count as u16 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                &format!("Insufficient free blocks in group {} (need {}, have {})", group, count, free_blocks_count)
+            ));
+        }
+
+        // Read block bitmap
+        let bitmap_sector = bgd.block_bitmap * 2;
+        let request = Box::new(crate::device::block::request::BlockIORequest {
+            request_type: crate::device::block::request::BlockIORequestType::Read,
+            sector: bitmap_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
+            head: 0,
+            cylinder: 0,
+            buffer: vec![0u8; self.block_size as usize],
+        });
+        
+        self.block_device.enqueue_request(request);
+        let results = self.block_device.process_requests();
+        
+        let mut bitmap_data = if let Some(result) = results.first() {
+            match &result.result {
+                Ok(_) => result.request.buffer.clone(),
+                Err(_) => return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "Failed to read block bitmap"
+                )),
+            }
+        } else {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::IoError,
+                "No result from block device read"
+            ));
+        };
+
+        // Find contiguous free blocks in bitmap
+        let group_start_block = group * self.superblock.blocks_per_group;
+        let data_start_block = if group == 0 {
+            810.max(group_start_block)
+        } else {
+            let blocks_for_metadata = 3 + (self.superblock.inodes_per_group * 128 + self.block_size - 1) / self.block_size;
+            group_start_block + blocks_for_metadata
+        };
+        
+        let group_end_block = (group + 1) * self.superblock.blocks_per_group;
+        let search_end = core::cmp::min(group_end_block, self.superblock.blocks_count as u32);
+        
+        // Search for contiguous free blocks
+        for start_block in data_start_block..(search_end.saturating_sub(count - 1)) {
+            let mut all_free = true;
+            
+            // Check if the next 'count' blocks are all free
+            for offset in 0..count {
+                let block_num = start_block + offset;
+                let bit = block_num - group_start_block;
+                let byte_index = (bit / 8) as usize;
+                let bit_index = bit % 8;
+                
+                if byte_index >= bitmap_data.len() {
+                    all_free = false;
+                    break;
+                }
+                
+                // Check if bit is used (1)
+                if (bitmap_data[byte_index] & (1 << bit_index)) != 0 {
+                    all_free = false;
+                    break;
+                }
+            }
+            
+            if all_free {
+                // Mark all blocks as used and collect them
+                let mut allocated_blocks = Vec::new();
+                for offset in 0..count {
+                    let block_num = start_block + offset;
+                    let bit = block_num - group_start_block;
+                    let byte_index = (bit / 8) as usize;
+                    let bit_index = bit % 8;
+                    
+                    bitmap_data[byte_index] |= 1 << bit_index;
+                    allocated_blocks.push(block_num as u64);
+                }
+                
+                crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Found {} contiguous blocks starting at {}, batching updates", count, start_block);
+                
+                // OPTIMIZATION: Batch bitmap + BGD updates
+                
+                // Enqueue bitmap write
+                let bitmap_write = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: bitmap_sector as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: bitmap_data,
+                });
+                self.block_device.enqueue_request(bitmap_write);
+                
+                // Prepare BGD update (reduce free_blocks_count by count)
+                let mut updated_bgd_data = bgd_data.clone();
+                let mut bgd_update = Ext2BlockGroupDescriptor::from_bytes(&updated_bgd_data[bgd_offset..])?;
+                let current_free_blocks = u16::from_le(bgd_update.free_blocks_count);
+                bgd_update.free_blocks_count = (current_free_blocks.saturating_sub(count as u16)).to_le();
+                bgd_update.write_to_bytes(&mut updated_bgd_data[bgd_offset..]);
+                
+                // Enqueue BGD write
+                let bgd_write = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: bgd_sector as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: updated_bgd_data,
+                });
+                self.block_device.enqueue_request(bgd_write);
+                
+                // Process both writes in one batch
+                crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Processing 2 writes in batch for {} blocks", count);
+                let write_results = self.block_device.process_requests();
+                
+                if write_results.len() != 2 || write_results.iter().any(|r| r.result.is_err()) {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write bitmap or BGD"
+                    ));
+                }
+                
+                // Update superblock (batch this in the future)
+                self.update_superblock_counts(-(count as i32), 0, 0)?;
+                
+                crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Successfully allocated {} blocks starting at {} (MAJOR OPTIMIZATION: reduced from {} to ~3 I/O ops)", count, start_block, count * 5);
+                return Ok(allocated_blocks);
+            }
+        }
+        
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NoSpace,
+            &format!("No {} contiguous free blocks found in group {}", count, group)
+        ))
+    }
+
+    fn allocate_blocks_contiguous(&self, count: u32) -> Result<Vec<u64>, FileSystemError> {
+        profile_scope!("ext2::allocate_blocks_contiguous");
+        
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        
+        // If only one block is needed, use regular allocation
+        if count == 1 {
+            let block = self.allocate_block()?;
+            return Ok(vec![block]);
+        }
+        
+        // Calculate number of groups
+        let group_count = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1) / self.superblock.blocks_per_group;
+        
+        // Strategy 1: Try to allocate full contiguous blocks in each group
+        for group in 0..group_count {
+            match self.allocate_blocks_contiguous_in_group(group, count) {
+                Ok(blocks) => {
+                    crate::early_println!("ext2: Allocated {} contiguous blocks starting at {} in group {}", 
+                           count, blocks[0], group);
+                    return Ok(blocks);
+                }
+                Err(FileSystemError { kind: crate::fs::FileSystemErrorKind::NoSpace, .. }) => {
+                    // Continue to next group
+                    continue;
+                }
+                Err(e) => {
+                    // Other errors should be propagated
+                    return Err(e);
+                }
+            }
+        }
+        
+        // Strategy 2: Try partial contiguous allocation (split into chunks)
+        if count >= 6 {  // Only worthwhile for larger requests
+            crate::early_println!("ext2: Full contiguous allocation failed, trying partial contiguous allocation");
+            let mut allocated_blocks = Vec::new();
+            let mut remaining = count;
+            
+            // Try to allocate in decreasing chunk sizes
+            let chunk_sizes = [count / 2, count / 3, count / 4, 8, 4]; // Reasonable chunk sizes
+            
+            for &chunk_size in &chunk_sizes {
+                if chunk_size == 0 || chunk_size >= remaining {
+                    continue;
+                }
+                
+                while remaining >= chunk_size {
+                    let mut allocated_chunk = false;
+                    
+                    // Try each group for this chunk size
+                    for group in 0..group_count {
+                        match self.allocate_blocks_contiguous_in_group(group, chunk_size) {
+                            Ok(mut chunk_blocks) => {
+                                crate::early_println!("ext2: Allocated {} contiguous blocks (chunk) starting at {} in group {}", 
+                                       chunk_size, chunk_blocks[0], group);
+                                allocated_blocks.append(&mut chunk_blocks);
+                                remaining -= chunk_size;
+                                allocated_chunk = true;
+                                break;
+                            }
+                            Err(FileSystemError { kind: crate::fs::FileSystemErrorKind::NoSpace, .. }) => {
+                                continue; // Try next group
+                            }
+                            Err(e) => {
+                                // Cleanup and return error
+                                for &block in &allocated_blocks {
+                                    if let Err(free_err) = self.free_block(block as u32) {
+                                        crate::early_println!("ext2: Failed to free block {} during cleanup: {:?}", block, free_err);
+                                    }
+                                }
+                                return Err(e);
+                            }
+                        }
+                    }
+                    
+                    if !allocated_chunk {
+                        break; // No group can satisfy this chunk size, try smaller
+                    }
+                }
+                
+                if remaining == 0 {
+                    crate::early_println!("ext2: Successfully allocated {} blocks using partial contiguous strategy", count);
+                    return Ok(allocated_blocks);
+                }
+            }
+            
+            // If we have some blocks allocated but not all, continue with individual allocation for remainder
+            if !allocated_blocks.is_empty() && remaining > 0 {
+                crate::early_println!("ext2: Partial contiguous allocation successful ({} blocks), using individual allocation for remaining {} blocks", 
+                       allocated_blocks.len(), remaining);
+                
+                for _ in 0..remaining {
+                    match self.allocate_block() {
+                        Ok(block) => allocated_blocks.push(block),
+                        Err(e) => {
+                            // Cleanup all allocated blocks
+                            for &allocated_block in &allocated_blocks {
+                                if let Err(free_err) = self.free_block(allocated_block as u32) {
+                                    crate::early_println!("ext2: Failed to free block {} during cleanup: {:?}", allocated_block, free_err);
+                                }
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                
+                crate::early_println!("ext2: Hybrid allocation completed: {} blocks total", allocated_blocks.len());
+                return Ok(allocated_blocks);
+            }
+            
+            // Cleanup partial allocations if we couldn't complete
+            for &block in &allocated_blocks {
+                if let Err(free_err) = self.free_block(block as u32) {
+                    crate::early_println!("ext2: Failed to free block {} during cleanup: {:?}", block, free_err);
+                }
+            }
+        }
+        
+        // Strategy 3: Fall back to individual block allocation as last resort
+        crate::early_println!("ext2: All contiguous strategies failed for {} blocks, falling back to individual allocation", count);
+        let mut blocks = Vec::new();
+        for _ in 0..count {
+            match self.allocate_block() {
+                Ok(block) => blocks.push(block),
+                Err(e) => {
+                    // If individual allocation fails, we need to free the blocks we already allocated
+                    for &allocated_block in &blocks {
+                        if let Err(free_err) = self.free_block(allocated_block as u32) {
+                            crate::early_println!("ext2: Failed to free block {} during cleanup: {:?}", allocated_block, free_err);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        
+        crate::early_println!("ext2: Allocated {} blocks individually as fallback", count);
+        Ok(blocks)
+    }
+
     /// Allocate a new inode using proper bitmap management
     fn allocate_inode(&self) -> Result<u32, FileSystemError> {
         profile_scope!("ext2::allocate_inode");
@@ -1909,30 +2236,81 @@ impl Ext2FileSystem {
         // Allocate blocks as needed
         let mut block_list = Vec::new();
         let mut new_block_assignments = Vec::new(); // (logical_block_index, block_number)
-        
-        if blocks_needed > 0 {
+         if blocks_needed > 0 {
             // Use batched block reading to get existing blocks
             let existing_blocks = self.get_inode_blocks(&inode, 0, blocks_needed as u64)?;
+            
+            // Find contiguous ranges of blocks that need allocation
+            let mut allocation_ranges = Vec::new(); // (start_idx, count)
+            let mut current_start = None;
+            let mut current_count = 0;
             
             for (block_idx, &existing_block) in existing_blocks.iter().enumerate() {
                 if existing_block == 0 {
                     // Need to allocate a new block
-
-
-
-
-
-
-
-                    let new_block = self.allocate_block()?;
-                    #[cfg(test)]
-                    crate::early_println!("[ext2] write_file_content: allocated block {} for logical block {}", new_block, block_idx);
-                    new_block_assignments.push((block_idx as u64, new_block as u32));
-                    block_list.push(new_block);
+                    if current_start.is_none() {
+                        current_start = Some(block_idx);
+                        current_count = 1;
+                    } else {
+                        current_count += 1;
+                    }
                 } else {
+                    // Existing block, finalize any current allocation range
+                    if let Some(start) = current_start {
+                        allocation_ranges.push((start, current_count));
+                        current_start = None;
+                        current_count = 0;
+                    }
                     #[cfg(test)]
                     crate::early_println!("[ext2] write_file_content: reusing existing block {} for logical block {}", existing_block, block_idx);
                     block_list.push(existing_block);
+                }
+            }
+            
+            // Finalize any remaining allocation range
+            if let Some(start) = current_start {
+                allocation_ranges.push((start, current_count));
+            }
+            
+            // Perform allocations using multi-block allocation where beneficial
+            for (start_idx, count) in allocation_ranges {
+                if count >= 3 {
+                    // Use multi-block allocation for 3+ blocks for better efficiency
+                    #[cfg(test)]
+                    crate::early_println!("[ext2] write_file_content: using multi-block allocation for {} blocks starting at logical block {}", count, start_idx);
+                    
+                    let allocated_blocks = self.allocate_blocks_contiguous(count as u32)?;
+                    
+                    for (i, &block_num) in allocated_blocks.iter().enumerate() {
+                        let logical_idx = start_idx + i;
+                        new_block_assignments.push((logical_idx as u64, block_num as u32));
+                        
+                        // Insert at the correct position in block_list
+                        while block_list.len() <= logical_idx {
+                            block_list.push(0);
+                        }
+                        block_list[logical_idx] = block_num;
+                        
+                        #[cfg(test)]
+                        crate::early_println!("[ext2] write_file_content: multi-allocated block {} for logical block {}", block_num, logical_idx);
+                    }
+                } else {
+                    // Use individual allocation for small ranges
+                    for i in 0..count {
+                        let logical_idx = start_idx + i;
+                        let new_block = self.allocate_block()?;
+                        
+                        #[cfg(test)]
+                        crate::early_println!("[ext2] write_file_content: individually allocated block {} for logical block {}", new_block, logical_idx);
+                        
+                        new_block_assignments.push((logical_idx as u64, new_block as u32));
+                        
+                        // Insert at the correct position in block_list
+                        while block_list.len() <= logical_idx {
+                            block_list.push(0);
+                        }
+                        block_list[logical_idx] = new_block;
+                    }
                 }
             }
         }
