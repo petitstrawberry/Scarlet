@@ -2860,7 +2860,7 @@ impl Ext2FileSystem {
     fn set_inode_blocks_simple_batch(&self, inode: &mut Ext2Inode, assignments: &[(u64, u32)]) -> Result<(), FileSystemError> {
         profile_scope!("ext2::set_inode_blocks_simple_batch");
         
-        crate::early_println!("[ext2] set_inode_blocks_simple_batch: processing {} assignments", assignments.len());
+        // crate::early_println!("[ext2] set_inode_blocks_simple_batch: processing {} assignments", assignments.len());
         
         let blocks_per_indirect = self.block_size / 4;
         let mut indirect_blocks_cache = alloc::collections::BTreeMap::new();
@@ -2869,6 +2869,8 @@ impl Ext2FileSystem {
         let mut new_indirect_blocks = Vec::new(); // Track newly allocated indirect blocks
         
         for &(logical_block, block_number) in assignments {
+            // crate::early_println!("[ext2] DEBUG: Processing assignment: logical_block={}, block_number={}", logical_block, block_number);
+            
             if logical_block < 12 {
                 // Direct blocks - immediate update
                 inode.block[logical_block as usize] = block_number;
@@ -2878,10 +2880,17 @@ impl Ext2FileSystem {
                 
                 // Ensure indirect block exists
                 if inode.block[12] == 0 {
-                    let indirect_block = self.allocate_block()? as u32;
+                    let indirect_block_u64 = self.allocate_block()?;
+                    if indirect_block_u64 > u32::MAX as u64 {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::InvalidData,
+                            "Block number too large for u32 cast"
+                        ));
+                    }
+                    let indirect_block = indirect_block_u64 as u32;
                     inode.block[12] = indirect_block;
                     new_indirect_blocks.push(indirect_block);
-                    crate::early_println!("[ext2] DEBUG: Allocated new indirect block {} (defer write)", indirect_block);
+                    // crate::early_println!("[ext2] DEBUG: Allocated new indirect block {} (defer write)", indirect_block);
                     indirect_blocks_cache.insert(indirect_block, vec![0u8; self.block_size as usize]);
                 }
                 
@@ -2894,7 +2903,7 @@ impl Ext2FileSystem {
                         indirect_blocks_cache.insert(indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
                         // Existing block, read from disk
-                        crate::early_println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
+                        // crate::early_println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
                         let data = self.read_block_cached(indirect_block as u64)?;
                         indirect_blocks_cache.insert(indirect_block, data);
                     }
@@ -2909,16 +2918,37 @@ impl Ext2FileSystem {
                 }
             } else if logical_block < 12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64 {
                 // Double indirect blocks - OPTIMIZE THIS TOO!
-                let double_offset = logical_block - 12 - blocks_per_indirect as u64;
+                let double_base = 12 + blocks_per_indirect as u64;
+                
+                // Check for underflow before calculation
+                if logical_block < double_base {
+                    crate::early_println!("[ext2] ERROR: Double indirect block calculation would underflow: logical_block={}, double_base={}", logical_block, double_base);
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Double indirect block calculation underflow"
+                    ));
+                }
+                
+                let double_offset = logical_block - double_base;
                 let first_indirect_index = double_offset / blocks_per_indirect as u64;
                 let second_indirect_index = double_offset % blocks_per_indirect as u64;
                 
+                // crate::early_println!("[ext2] DEBUG: Double indirect calculation: logical_block={}, double_offset={}, first_idx={}, second_idx={}", 
+                //                       logical_block, double_offset, first_indirect_index, second_indirect_index);
+                
                 // Ensure double indirect block exists
                 if inode.block[13] == 0 {
-                    let double_indirect_block = self.allocate_block()? as u32;
+                    let double_indirect_block_u64 = self.allocate_block()?;
+                    if double_indirect_block_u64 > u32::MAX as u64 {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::InvalidData,
+                            "Double indirect block number too large for u32 cast"
+                        ));
+                    }
+                    let double_indirect_block = double_indirect_block_u64 as u32;
                     inode.block[13] = double_indirect_block;
                     new_indirect_blocks.push(double_indirect_block);
-                    crate::early_println!("[ext2] DEBUG: Allocated new double indirect block {} (defer write)", double_indirect_block);
+                    // crate::early_println!("[ext2] DEBUG: Allocated new double indirect block {} (defer write)", double_indirect_block);
                     double_indirect_cache.insert(double_indirect_block, vec![0u8; self.block_size as usize]);
                 }
                 
@@ -2929,7 +2959,7 @@ impl Ext2FileSystem {
                     if new_indirect_blocks.contains(&double_indirect_block) {
                         double_indirect_cache.insert(double_indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
-                        crate::early_println!("[ext2] DEBUG: Reading double indirect block {} for caching", double_indirect_block);
+                        // crate::early_println!("[ext2] DEBUG: Reading double indirect block {} for caching", double_indirect_block);
                         let data = self.read_block_cached(double_indirect_block as u64)?;
                         double_indirect_cache.insert(double_indirect_block, data);
                     }
@@ -2950,9 +2980,16 @@ impl Ext2FileSystem {
                 
                 // Allocate first level indirect block if needed
                 let first_indirect_block = if first_indirect_ptr == 0 {
-                    let new_block = self.allocate_block()? as u32;
+                    let new_block_u64 = self.allocate_block()?;
+                    if new_block_u64 > u32::MAX as u64 {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::InvalidData,
+                            "First-level indirect block number too large for u32 cast"
+                        ));
+                    }
+                    let new_block = new_block_u64 as u32;
                     new_indirect_blocks.push(new_block);
-                    crate::early_println!("[ext2] DEBUG: Allocated new first-level indirect block {} (defer write)", new_block);
+                    // crate::early_println!("[ext2] DEBUG: Allocated new first-level indirect block {} (defer write)", new_block);
                     
                     // Update double indirect block in cache
                     if let Some(double_data) = double_indirect_cache.get_mut(&double_indirect_block) {
@@ -2973,7 +3010,7 @@ impl Ext2FileSystem {
                     if new_indirect_blocks.contains(&first_indirect_block) {
                         indirect_blocks_cache.insert(first_indirect_block, vec![0u8; self.block_size as usize]);
                     } else {
-                        crate::early_println!("[ext2] DEBUG: Reading first-level indirect block {} for caching", first_indirect_block);
+                        // crate::early_println!("[ext2] DEBUG: Reading first-level indirect block {} for caching", first_indirect_block);
                         let data = self.read_block_cached(first_indirect_block as u64)?;
                         indirect_blocks_cache.insert(first_indirect_block, data);
                     }
@@ -2988,7 +3025,7 @@ impl Ext2FileSystem {
                 }
             } else {
                 // Triple indirect and beyond - fall back to individual calls
-                crate::early_println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {} (triple indirect)", logical_block);
+                // crate::early_println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {} (triple indirect)", logical_block);
                 self.set_inode_block(inode, logical_block, block_number)?;
             }
         }
@@ -3000,20 +3037,36 @@ impl Ext2FileSystem {
             
             // Add single and first-level indirect blocks
             for (block_num, data) in indirect_blocks_cache {
+                // crate::early_println!("[ext2] DEBUG: Adding indirect block {} to write batch", block_num);
+                if block_num as u64 > (1u64 << 32) {
+                    // crate::early_println!("[ext2] ERROR: Invalid indirect block number: {}", block_num);
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid indirect block number"
+                    ));
+                }
                 write_blocks.insert(block_num as u64, data);
             }
             
             // Add double indirect blocks
             for (block_num, data) in double_indirect_cache {
+                // crate::early_println!("[ext2] DEBUG: Adding double indirect block {} to write batch", block_num);
+                if block_num as u64 > (1u64 << 32) {
+                    // crate::early_println!("[ext2] ERROR: Invalid double indirect block number: {}", block_num);
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid double indirect block number"
+                    ));
+                }
                 write_blocks.insert(block_num as u64, data);
             }
             
-            crate::early_println!("[ext2] DEBUG: Batch writing {} indirect blocks (single + double indirect)", write_blocks.len());
+            // crate::early_println!("[ext2] DEBUG: Batch writing {} indirect blocks (single + double indirect)", write_blocks.len());
             self.write_blocks_cached(&write_blocks)?;
         }
         
-        crate::early_println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes", 
-            assignments.len(), batched_writes);
+        // crate::early_println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes", 
+        //     assignments.len(), batched_writes);
         Ok(())
     }
 
@@ -3349,6 +3402,14 @@ impl Ext2FileSystem {
         }
 
         crate::early_println!("[ext2] write_blocks_cached: {} blocks to write", blocks.len());
+        
+        // Debug: Check for invalid block numbers
+        for (block_num, _) in blocks.iter() {
+            if *block_num > (1u64 << 32) {  // Check for very large values that could be negative casts
+                crate::early_println!("[ext2] ERROR: Invalid block number detected: {} (0x{:x})", block_num, block_num);
+                panic!("Invalid block number: {} (0x{:x})", block_num, block_num);
+            }
+        }
 
         let mut sorted_blocks: Vec<_> = blocks.iter().collect();
         sorted_blocks.sort_by_key(|(k, _)| *k);
@@ -3431,6 +3492,17 @@ impl Ext2FileSystem {
 
     /// Convert ext2 block number to starting sector index
     fn block_to_sector(&self, block_num: u64) -> usize {
+        // Validate block number range
+        if block_num > (1u64 << 32) {
+            crate::early_println!("[ext2] ERROR: block_to_sector called with invalid block_num: {} (0x{:x})", block_num, block_num);
+            panic!("block_to_sector: invalid block_num: {} (0x{:x})", block_num, block_num);
+        }
+        
+        // Check for reasonable upper bound (e.g., filesystem shouldn't have more than 2^30 blocks)
+        if block_num > (1u64 << 30) {
+            crate::early_println!("[ext2] WARNING: block_to_sector called with very large block_num: {}", block_num);
+        }
+        
         (block_num * self.sectors_per_block()) as usize
     }
 
