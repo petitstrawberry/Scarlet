@@ -1187,6 +1187,7 @@ impl Ext2FileSystem {
     
     /// Allocate a block in a specific group
     fn allocate_block_in_group(&self, group: u32) -> Result<u64, FileSystemError> {
+        profile_scope!("ext2::allocate_block_in_group");
         // Read block group descriptor for the specified group
         let bgd_block_sector = if self.block_size == 1024 { 
             2 * 2 + (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 / self.block_size) * 2
