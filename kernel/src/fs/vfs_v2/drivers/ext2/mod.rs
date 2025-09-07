@@ -1564,7 +1564,7 @@ impl Ext2FileSystem {
         }
         
         // Strategy 2: Try partial contiguous allocation (split into chunks)
-        if count >= 6 {  // Only worthwhile for larger requests
+        if count >= 6 {  // Restored to original threshold for stability
             crate::early_println!("ext2: Full contiguous allocation failed, trying partial contiguous allocation");
             let mut allocated_blocks = Vec::new();
             let mut remaining = count;
@@ -2864,7 +2864,9 @@ impl Ext2FileSystem {
         
         let blocks_per_indirect = self.block_size / 4;
         let mut indirect_blocks_cache = alloc::collections::BTreeMap::new();
+        let mut double_indirect_cache = alloc::collections::BTreeMap::new();
         let mut batched_writes = 0;
+        let mut new_indirect_blocks = Vec::new(); // Track newly allocated indirect blocks
         
         for &(logical_block, block_number) in assignments {
             if logical_block < 12 {
@@ -2878,7 +2880,7 @@ impl Ext2FileSystem {
                 if inode.block[12] == 0 {
                     let indirect_block = self.allocate_block()? as u32;
                     inode.block[12] = indirect_block;
-                    // Don't write immediately - add to cache with zero data
+                    new_indirect_blocks.push(indirect_block);
                     crate::early_println!("[ext2] DEBUG: Allocated new indirect block {} (defer write)", indirect_block);
                     indirect_blocks_cache.insert(indirect_block, vec![0u8; self.block_size as usize]);
                 }
@@ -2887,9 +2889,15 @@ impl Ext2FileSystem {
                 
                 // Cache the indirect block data
                 if !indirect_blocks_cache.contains_key(&indirect_block) {
-                    crate::early_println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
-                    let data = self.read_block_cached(indirect_block as u64)?;
-                    indirect_blocks_cache.insert(indirect_block, data);
+                    if new_indirect_blocks.contains(&indirect_block) {
+                        // New block, start with zeros
+                        indirect_blocks_cache.insert(indirect_block, vec![0u8; self.block_size as usize]);
+                    } else {
+                        // Existing block, read from disk
+                        crate::early_println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
+                        let data = self.read_block_cached(indirect_block as u64)?;
+                        indirect_blocks_cache.insert(indirect_block, data);
+                    }
                 }
                 
                 // Update in cache
@@ -2899,20 +2907,108 @@ impl Ext2FileSystem {
                     indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
                     batched_writes += 1;
                 }
+            } else if logical_block < 12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64 {
+                // Double indirect blocks - OPTIMIZE THIS TOO!
+                let double_offset = logical_block - 12 - blocks_per_indirect as u64;
+                let first_indirect_index = double_offset / blocks_per_indirect as u64;
+                let second_indirect_index = double_offset % blocks_per_indirect as u64;
+                
+                // Ensure double indirect block exists
+                if inode.block[13] == 0 {
+                    let double_indirect_block = self.allocate_block()? as u32;
+                    inode.block[13] = double_indirect_block;
+                    new_indirect_blocks.push(double_indirect_block);
+                    crate::early_println!("[ext2] DEBUG: Allocated new double indirect block {} (defer write)", double_indirect_block);
+                    double_indirect_cache.insert(double_indirect_block, vec![0u8; self.block_size as usize]);
+                }
+                
+                let double_indirect_block = inode.block[13];
+                
+                // Cache double indirect block
+                if !double_indirect_cache.contains_key(&double_indirect_block) {
+                    if new_indirect_blocks.contains(&double_indirect_block) {
+                        double_indirect_cache.insert(double_indirect_block, vec![0u8; self.block_size as usize]);
+                    } else {
+                        crate::early_println!("[ext2] DEBUG: Reading double indirect block {} for caching", double_indirect_block);
+                        let data = self.read_block_cached(double_indirect_block as u64)?;
+                        double_indirect_cache.insert(double_indirect_block, data);
+                    }
+                }
+                
+                // Get first level indirect block pointer
+                let first_indirect_ptr = if let Some(double_data) = double_indirect_cache.get(&double_indirect_block) {
+                    let ptr_offset = first_indirect_index as usize * 4;
+                    u32::from_le_bytes([
+                        double_data[ptr_offset],
+                        double_data[ptr_offset + 1],
+                        double_data[ptr_offset + 2],
+                        double_data[ptr_offset + 3],
+                    ])
+                } else {
+                    0
+                };
+                
+                // Allocate first level indirect block if needed
+                let first_indirect_block = if first_indirect_ptr == 0 {
+                    let new_block = self.allocate_block()? as u32;
+                    new_indirect_blocks.push(new_block);
+                    crate::early_println!("[ext2] DEBUG: Allocated new first-level indirect block {} (defer write)", new_block);
+                    
+                    // Update double indirect block in cache
+                    if let Some(double_data) = double_indirect_cache.get_mut(&double_indirect_block) {
+                        let ptr_offset = first_indirect_index as usize * 4;
+                        let block_bytes = new_block.to_le_bytes();
+                        double_data[ptr_offset..ptr_offset + 4].copy_from_slice(&block_bytes);
+                    }
+                    
+                    // Initialize first level block cache
+                    indirect_blocks_cache.insert(new_block, vec![0u8; self.block_size as usize]);
+                    new_block
+                } else {
+                    first_indirect_ptr
+                };
+                
+                // Cache first level indirect block if not already cached
+                if !indirect_blocks_cache.contains_key(&first_indirect_block) {
+                    if new_indirect_blocks.contains(&first_indirect_block) {
+                        indirect_blocks_cache.insert(first_indirect_block, vec![0u8; self.block_size as usize]);
+                    } else {
+                        crate::early_println!("[ext2] DEBUG: Reading first-level indirect block {} for caching", first_indirect_block);
+                        let data = self.read_block_cached(first_indirect_block as u64)?;
+                        indirect_blocks_cache.insert(first_indirect_block, data);
+                    }
+                }
+                
+                // Update first level indirect block in cache
+                if let Some(indirect_data) = indirect_blocks_cache.get_mut(&first_indirect_block) {
+                    let offset = second_indirect_index as usize * 4;
+                    let block_bytes = block_number.to_le_bytes();
+                    indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
+                    batched_writes += 1;
+                }
             } else {
-                // For double indirect and beyond, fall back to individual calls for now
-                crate::early_println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {}", logical_block);
+                // Triple indirect and beyond - fall back to individual calls
+                crate::early_println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {} (triple indirect)", logical_block);
                 self.set_inode_block(inode, logical_block, block_number)?;
             }
         }
         
         // Write back all cached indirect blocks at once using batched write
-        if !indirect_blocks_cache.is_empty() {
+        let total_indirect_blocks = indirect_blocks_cache.len() + double_indirect_cache.len();
+        if total_indirect_blocks > 0 {
             let mut write_blocks = BTreeMap::new();
+            
+            // Add single and first-level indirect blocks
             for (block_num, data) in indirect_blocks_cache {
                 write_blocks.insert(block_num as u64, data);
             }
-            crate::early_println!("[ext2] DEBUG: Batch writing {} indirect blocks", write_blocks.len());
+            
+            // Add double indirect blocks
+            for (block_num, data) in double_indirect_cache {
+                write_blocks.insert(block_num as u64, data);
+            }
+            
+            crate::early_println!("[ext2] DEBUG: Batch writing {} indirect blocks (single + double indirect)", write_blocks.len());
             self.write_blocks_cached(&write_blocks)?;
         }
         
