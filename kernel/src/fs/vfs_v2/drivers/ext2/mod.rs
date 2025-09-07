@@ -1185,19 +1185,19 @@ impl Ext2FileSystem {
         ))
     }
     
-    /// Allocate a block in a specific group
+    /// Allocate a block in a specific group - OPTIMIZED VERSION  
     fn allocate_block_in_group(&self, group: u32) -> Result<u64, FileSystemError> {
         profile_scope!("ext2::allocate_block_in_group");
-        // Read block group descriptor for the specified group
-        let bgd_block_sector = if self.block_size == 1024 { 
-            2 * 2 + (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 / self.block_size) * 2
-        } else { 
-            1 * 2 + (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 / self.block_size) * 2
-        };
+        
+        crate::early_println!("[ext2] allocate_block_in_group: Starting OPTIMIZED allocation for group {}", group);
+        
+        // Read block group descriptor
+        let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_sector = bgd_block * 2; // Convert to sector
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_block_sector as usize,
+            sector: bgd_sector as usize,
             sector_count: (self.block_size / 512) as usize,
             head: 0,
             cylinder: 0,
@@ -1222,7 +1222,7 @@ impl Ext2FileSystem {
             ));
         };
 
-        let bgd_offset = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32 % self.block_size) as usize;
+        let bgd_offset = (group * core::mem::size_of::<Ext2BlockGroupDescriptor>() as u32 % self.block_size) as usize;
         let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset..])?;
         
         // Check if there are free blocks
@@ -1263,15 +1263,10 @@ impl Ext2FileSystem {
         };
 
         // Find first free block in bitmap
-        // Calculate the data block range for this group
         let group_start_block = group * self.superblock.blocks_per_group;
-        // For group 0, start from after superblock, group descriptors, bitmaps, inode table
-        // For other groups, start from the beginning of the group's data area
         let data_start_block = if group == 0 {
-            // For group 0, skip reserved blocks (typically block 810 is the first data block)
             810.max(group_start_block)
         } else {
-            // For other groups, calculate the proper data start
             let blocks_for_metadata = 3 + (self.superblock.inodes_per_group * 128 + self.block_size - 1) / self.block_size;
             group_start_block + blocks_for_metadata
         };
@@ -1280,7 +1275,7 @@ impl Ext2FileSystem {
         let search_end = core::cmp::min(group_end_block, self.superblock.blocks_count as u32);
         
         for block_num in data_start_block..search_end {
-            let bit = block_num - group_start_block; // Convert to group-relative bit index
+            let bit = block_num - group_start_block;
             let byte_index = (bit / 8) as usize;
             let bit_index = bit % 8;
             
@@ -1290,11 +1285,13 @@ impl Ext2FileSystem {
             
             // Check if bit is free (0)
             if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
-                // Mark block as used (set bit to 1)
+                // OPTIMIZATION: Batch bitmap + BGD updates
                 bitmap_data[byte_index] |= 1 << bit_index;
                 
-                // Write back bitmap
-                let request = Box::new(crate::device::block::request::BlockIORequest {
+                crate::early_println!("[ext2] allocate_block_in_group: Found free block {}, batching metadata updates", block_num);
+                
+                // Enqueue bitmap write
+                let bitmap_write = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Write,
                     sector: bitmap_sector as usize,
                     sector_count: (self.block_size / 512) as usize,
@@ -1302,36 +1299,42 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: bitmap_data,
                 });
+                self.block_device.enqueue_request(bitmap_write);
                 
-                self.block_device.enqueue_request(request);
-                let results = self.block_device.process_requests();
+                // Prepare BGD update
+                let mut updated_bgd_data = bgd_data.clone();
+                let mut bgd_update = Ext2BlockGroupDescriptor::from_bytes(&updated_bgd_data[bgd_offset..])?;
+                let current_free_blocks = u16::from_le(bgd_update.free_blocks_count);
+                bgd_update.free_blocks_count = (current_free_blocks.saturating_sub(1)).to_le();
+                bgd_update.write_to_bytes(&mut updated_bgd_data[bgd_offset..]);
                 
-                if let Some(result) = results.first() {
-                    match &result.result {
-                        Ok(_) => {
-                            // Update group descriptor to reflect one less free block
-                            let bgd_offset = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32 % self.block_size) as usize;
-                            let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data[bgd_offset..])?;
-                            let current_free_blocks = u16::from_le(bgd.free_blocks_count);
-                            bgd.free_blocks_count = (current_free_blocks.saturating_sub(1)).to_le();
-                            self.update_group_descriptor(group, &bgd)?;
-                            
-                            // Update superblock free blocks count
-                            self.update_superblock_counts(-1, 0, 0)?;
-                        },
-                        Err(_) => return Err(FileSystemError::new(
-                            FileSystemErrorKind::IoError,
-                            "Failed to write block bitmap"
-                        )),
-                    }
+                // Enqueue BGD write
+                let bgd_write = Box::new(crate::device::block::request::BlockIORequest {
+                    request_type: crate::device::block::request::BlockIORequestType::Write,
+                    sector: bgd_sector as usize,
+                    sector_count: (self.block_size / 512) as usize,
+                    head: 0,
+                    cylinder: 0,
+                    buffer: updated_bgd_data,
+                });
+                self.block_device.enqueue_request(bgd_write);
+                
+                // Process both writes in one batch
+                crate::early_println!("[ext2] allocate_block_in_group: Processing 2 writes in batch (bitmap + BGD)");
+                let write_results = self.block_device.process_requests();
+                
+                if write_results.len() != 2 || write_results.iter().any(|r| r.result.is_err()) {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to write bitmap or BGD"
+                    ));
                 }
                 
-                let allocated_block = block_num; // Already in absolute block number
+                // Update superblock (separate for now - could be batched too)
+                self.update_superblock_counts(-1, 0, 0)?;
                 
-                // Debug: Allocated block (disabled to reduce log noise)
-                // crate::early_println!("EXT2: Allocated block {} in group {}", allocated_block, group);
-                
-                return Ok(allocated_block as u64);
+                crate::early_println!("[ext2] allocate_block_in_group: Successfully allocated block {} (OPTIMIZED: reduced I/O ops)", block_num);
+                return Ok(block_num as u64);
             }
         }
         
