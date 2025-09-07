@@ -289,6 +289,9 @@ struct InodeLruCache {
     access_counter: u64,
     /// Maximum cache size
     max_size: usize,
+    /// Cache statistics
+    hits: u64,
+    misses: u64,
 }
 
 impl InodeLruCache {
@@ -297,6 +300,8 @@ impl InodeLruCache {
             cache: BTreeMap::new(),
             access_counter: 0,
             max_size,
+            hits: 0,
+            misses: 0,
         }
     }
 
@@ -304,8 +309,10 @@ impl InodeLruCache {
         if let Some((inode, access_order)) = self.cache.get_mut(&inode_num) {
             self.access_counter += 1;
             *access_order = self.access_counter;
+            self.hits += 1;
             Some(*inode)
         } else {
+            self.misses += 1;
             None
         }
     }
@@ -332,6 +339,19 @@ impl InodeLruCache {
     fn len(&self) -> usize {
         self.cache.len()
     }
+
+    /// Get cache statistics for debugging and performance analysis
+    fn get_stats(&self) -> (u64, u64, usize) {
+        (self.hits, self.misses, self.cache.len())
+    }
+
+    /// Print cache statistics
+    fn print_stats(&self, cache_name: &str) {
+        let total = self.hits + self.misses;
+        let hit_rate = if total > 0 { (self.hits * 100) / total } else { 0 };
+        crate::early_println!("[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%", 
+            cache_name, self.hits, self.misses, self.cache.len(), hit_rate);
+    }
 }
 
 
@@ -343,6 +363,9 @@ struct BlockLruCache {
     access_counter: u64,
     /// Maximum cache size
     max_size: usize,
+    /// Cache statistics
+    hits: u64,
+    misses: u64,
 }
 
 impl BlockLruCache {
@@ -351,6 +374,8 @@ impl BlockLruCache {
             cache: BTreeMap::new(),
             access_counter: 0,
             max_size,
+            hits: 0,
+            misses: 0,
         }
     }
 
@@ -358,8 +383,10 @@ impl BlockLruCache {
         if let Some((block_data, access_order)) = self.cache.get_mut(&block_num) {
             self.access_counter += 1;
             *access_order = self.access_counter;
+            self.hits += 1;
             Some(block_data.clone())
         } else {
+            self.misses += 1;
             None
         }
     }
@@ -385,6 +412,19 @@ impl BlockLruCache {
 
     fn len(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Get cache statistics for debugging and performance analysis
+    fn get_stats(&self) -> (u64, u64, usize) {
+        (self.hits, self.misses, self.cache.len())
+    }
+
+    /// Print cache statistics
+    fn print_stats(&self, cache_name: &str) {
+        let total = self.hits + self.misses;
+        let hit_rate = if total > 0 { (self.hits * 100) / total } else { 0 };
+        crate::early_println!("[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%", 
+            cache_name, self.hits, self.misses, self.cache.len(), hit_rate);
     }
 }
 
@@ -580,6 +620,16 @@ impl Ext2FileSystem {
         {
             let mut cache = self.inode_cache.lock();
             cache.insert(inode_num, inode);
+        }
+
+        // Print inode cache stats periodically (every 50th call)
+        static mut INODE_CALL_COUNT: u64 = 0;
+        unsafe {
+            INODE_CALL_COUNT += 1;
+            if INODE_CALL_COUNT % 50 == 0 {
+                let cache = self.inode_cache.lock();
+                cache.print_stats("Inode");
+            }
         }
 
         Ok(inode)
@@ -895,6 +945,7 @@ impl Ext2FileSystem {
     
     /// Write an inode to disk
     fn write_inode(&self, inode_number: u32, inode: &Ext2Inode) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::write_inode");
         // Calculate which block group contains this inode
         let inodes_per_group = self.superblock.inodes_per_group;
         let group_number = (inode_number - 1) / inodes_per_group;
@@ -1851,6 +1902,13 @@ impl Ext2FileSystem {
             for (block_idx, &existing_block) in existing_blocks.iter().enumerate() {
                 if existing_block == 0 {
                     // Need to allocate a new block
+
+
+
+
+
+
+
                     let new_block = self.allocate_block()?;
                     #[cfg(test)]
                     crate::early_println!("[ext2] write_file_content: allocated block {} for logical block {}", new_block, block_idx);
@@ -1869,9 +1927,10 @@ impl Ext2FileSystem {
             self.set_inode_blocks_simple_batch(&mut inode, &new_block_assignments)?;
         }
         
-        // Write content to blocks
+        // Write content to blocks using batching
         let mut remaining = content.len();
         let mut content_offset = 0;
+        let mut write_blocks = BTreeMap::new();
         
         for &block_num in block_list.iter() {
             if remaining == 0 {
@@ -1885,39 +1944,20 @@ impl Ext2FileSystem {
             block_data[..bytes_to_write].copy_from_slice(&content[content_offset..content_offset + bytes_to_write]);
             
             #[cfg(test)]
-            crate::early_println!("[ext2] write_file_content: writing block {} ({} bytes) to sector {}", 
-                                  block_num, bytes_to_write, block_num * 2);
+            crate::early_println!("[ext2] write_file_content: preparing block {} ({} bytes) for batch write", 
+                                  block_num, bytes_to_write);
             
-            // Write block to disk
-            let block_sector = block_num * 2; // Convert block to sector
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Write,
-                sector: block_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: block_data,
-            });
-            
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-            
-            if let Some(result) = results.first() {
-                if result.result.is_err() {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to write file block"
-                    ));
-                }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from block device write"
-                ));
-            }
+            // Add to batch write map instead of writing immediately
+            write_blocks.insert(block_num, block_data);
             
             remaining -= bytes_to_write;
             content_offset += bytes_to_write;
+        }
+        
+        // Write all content blocks in one batch
+        if !write_blocks.is_empty() {
+            crate::early_println!("[ext2] write_file_content: batch writing {} content blocks", write_blocks.len());
+            self.write_blocks_cached(&write_blocks)?;
         }
         
         // Update inode size, block count, and modification time
@@ -2431,6 +2471,7 @@ impl Ext2FileSystem {
         
         let blocks_per_indirect = self.block_size / 4;
         let mut indirect_blocks_cache = alloc::collections::BTreeMap::new();
+        let mut batched_writes = 0;
         
         for &(logical_block, block_number) in assignments {
             if logical_block < 12 {
@@ -2444,14 +2485,16 @@ impl Ext2FileSystem {
                 if inode.block[12] == 0 {
                     let indirect_block = self.allocate_block()? as u32;
                     inode.block[12] = indirect_block;
-                    let clear_data = vec![0u8; self.block_size as usize];
-                    self.write_block_cached(indirect_block as u64, &clear_data)?;
+                    // Don't write immediately - add to cache with zero data
+                    crate::early_println!("[ext2] DEBUG: Allocated new indirect block {} (defer write)", indirect_block);
+                    indirect_blocks_cache.insert(indirect_block, vec![0u8; self.block_size as usize]);
                 }
                 
                 let indirect_block = inode.block[12];
                 
                 // Cache the indirect block data
                 if !indirect_blocks_cache.contains_key(&indirect_block) {
+                    crate::early_println!("[ext2] DEBUG: Reading indirect block {} for caching", indirect_block);
                     let data = self.read_block_cached(indirect_block as u64)?;
                     indirect_blocks_cache.insert(indirect_block, data);
                 }
@@ -2461,19 +2504,27 @@ impl Ext2FileSystem {
                     let offset = index as usize * 4;
                     let block_bytes = block_number.to_le_bytes();
                     indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
+                    batched_writes += 1;
                 }
             } else {
                 // For double indirect and beyond, fall back to individual calls for now
+                crate::early_println!("[ext2] DEBUG: Fallback to individual set_inode_block for logical_block {}", logical_block);
                 self.set_inode_block(inode, logical_block, block_number)?;
             }
         }
         
-        // Write back all cached indirect blocks at once
-        for (block_num, data) in indirect_blocks_cache {
-            self.write_block_cached(block_num as u64, &data)?;
+        // Write back all cached indirect blocks at once using batched write
+        if !indirect_blocks_cache.is_empty() {
+            let mut write_blocks = BTreeMap::new();
+            for (block_num, data) in indirect_blocks_cache {
+                write_blocks.insert(block_num as u64, data);
+            }
+            crate::early_println!("[ext2] DEBUG: Batch writing {} indirect blocks", write_blocks.len());
+            self.write_blocks_cached(&write_blocks)?;
         }
         
-        crate::early_println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments", assignments.len());
+        crate::early_println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes", 
+            assignments.len(), batched_writes);
         Ok(())
     }
 
@@ -2785,7 +2836,19 @@ impl Ext2FileSystem {
         }
 
         // Return results in the order of original block_nums
-        Ok(block_nums.iter().map(|b| results.get(b).unwrap().clone()).collect())
+        let result = Ok(block_nums.iter().map(|b| results.get(b).unwrap().clone()).collect());
+        
+        // Print cache stats periodically (every 100th call)
+        static mut CALL_COUNT: u64 = 0;
+        unsafe {
+            CALL_COUNT += 1;
+            if CALL_COUNT % 100 == 0 {
+                let cache = self.block_cache.lock();
+                cache.print_stats("Block");
+            }
+        }
+        
+        result
     }
 
     /// Write multiple filesystem blocks with write-through to device and cache update
@@ -2795,6 +2858,8 @@ impl Ext2FileSystem {
         if blocks.is_empty() {
             return Ok(());
         }
+
+        crate::early_println!("[ext2] write_blocks_cached: {} blocks to write", blocks.len());
 
         let mut sorted_blocks: Vec<_> = blocks.iter().collect();
         sorted_blocks.sort_by_key(|(k, _)| *k);
@@ -2835,6 +2900,7 @@ impl Ext2FileSystem {
         }
 
         // Process all enqueued requests in one batch
+        crate::early_println!("[ext2] write_blocks_cached: Processing {} requests in batch", request_ranges.len());
         let write_results = self.block_device.process_requests();
 
         // Validate that we got the expected number of results
@@ -2895,8 +2961,18 @@ impl Ext2FileSystem {
 
     /// Write one filesystem block with write-through to device and cache update
     fn write_block_cached(&self, block_num: u64, data: &[u8]) -> Result<(), FileSystemError> {
-        // Use the batched write_blocks_cached for efficiency
+        // Note: This is just a wrapper around write_blocks_cached, no separate profiling
+        // to avoid double counting in profiler
         self.write_blocks_cached(&BTreeMap::from([(block_num, data.to_vec())]))
+    }
+
+    /// Print cache statistics for debugging
+    pub fn print_cache_stats(&self) {
+        let inode_cache = self.inode_cache.lock();
+        let block_cache = self.block_cache.lock();
+        
+        inode_cache.print_stats("Inode");
+        block_cache.print_stats("Block");
     }
 }
 
