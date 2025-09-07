@@ -637,6 +637,8 @@ impl Ext2FileSystem {
 
     /// Read directory entries from an inode
     pub fn read_directory_entries(&self, inode: &Ext2Inode) -> Result<Vec<Ext2DirectoryEntry>, FileSystemError> {
+        profile_scope!("ext2::read_directory_entries");
+        
         let mut entries = Vec::new();
         let num_blocks = (inode.size as u64 + self.block_size as u64 - 1) / self.block_size as u64;
         
@@ -1090,6 +1092,8 @@ impl Ext2FileSystem {
     
     /// Initialize a new directory with . and .. entries
     fn initialize_directory(&self, dir_inode_number: u32, parent_inode_number: u32) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::initialize_directory");
+        
         // Allocate a block for the directory
         let block_number = self.allocate_block()?;
         
@@ -1159,6 +1163,8 @@ impl Ext2FileSystem {
     
     /// Allocate a new data block using proper bitmap management
     fn allocate_block(&self) -> Result<u64, FileSystemError> {
+        profile_scope!("ext2::allocate_block");
+        
         // Try to allocate from any available group
         let total_groups = (self.superblock.blocks_count + self.superblock.blocks_per_group - 1) / self.superblock.blocks_per_group;
         
@@ -1336,6 +1342,7 @@ impl Ext2FileSystem {
 
     /// Allocate a new inode using proper bitmap management
     fn allocate_inode(&self) -> Result<u32, FileSystemError> {
+        profile_scope!("ext2::allocate_inode");
         // For now, allocate from Group 0
         // Based on dumpe2fs: Group 0 free inodes: 30-2048
         let group = 0;
@@ -1503,6 +1510,8 @@ impl Ext2FileSystem {
 
     /// Add a directory entry to a parent directory
     fn add_directory_entry(&self, parent_inode: u32, name: &String, child_inode: u32, file_type: FileType) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::add_directory_entry");
+        
         // Read the parent directory inode
         let parent_dir_inode = self.read_inode(parent_inode)?;
         
@@ -1875,6 +1884,8 @@ impl Ext2FileSystem {
 
     /// Write the entire content of a file given its inode number
     pub fn write_file_content(&self, inode_num: u32, content: &[u8]) -> Result<(), FileSystemError> {
+        profile_scope!("ext2::write_file_content");
+        
         #[cfg(test)]
         crate::early_println!("[ext2] write_file_content: inode={}, content_len={}", inode_num, content.len());
         

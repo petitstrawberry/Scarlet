@@ -76,6 +76,8 @@ impl VfsNode for Ext2Node {
     }
 
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
+        crate::profile_scope!("ext2::node::metadata");
+        
         // Read the actual inode to get real metadata
         let filesystem = self.filesystem()
             .and_then(|weak_fs| weak_fs.upgrade())
@@ -254,6 +256,8 @@ impl Ext2FileObject {
 
     /// Load file content from disk into cache if not already loaded
     fn ensure_content_loaded(&self) -> Result<(), StreamError> {
+        crate::profile_scope!("ext2::node::ensure_content_loaded");
+        
         let mut cached = self.cached_content.write();
         
         // If already loaded, nothing to do
@@ -290,6 +294,8 @@ impl Ext2FileObject {
 
     /// Sync cached content to disk
     fn sync_to_disk(&self) -> Result<(), StreamError> {
+        crate::profile_scope!("ext2::node::sync_to_disk");
+        
         let is_dirty = *self.is_dirty.read();
         if !is_dirty {
             return Ok(());
