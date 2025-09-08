@@ -22,8 +22,9 @@
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
 use alloc::{
-    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec, vec::Vec
+    boxed::Box, collections::{BTreeMap, VecDeque}, format, string::{String, ToString}, sync::Arc, vec, vec::Vec
 };
+use hashbrown::HashMap;
 use spin::{rwlock::RwLock, Mutex};
 use core::{mem, any::Any};
 
@@ -281,76 +282,205 @@ pub struct Ext2FileSystem {
     block_cache: Mutex<BlockLruCache>,
 }
 
-/// Efficient O(log n) FIFO cache implementation for inodes
+/// Node in doubly-linked list for O(1) LRU operations for inodes
+#[derive(Debug)]
+struct InodeLruNode {
+    inode_num: u32,
+    inode: Ext2Inode,
+    access_count: u64,
+    prev: Option<NodeId>,
+    next: Option<NodeId>,
+}
+
+/// O(1) LRU cache implementation for inodes using HashMap + doubly-linked list
 struct InodeLruCache {
-    /// Map from inode number to inode
-    cache: BTreeMap<u32, Ext2Inode>,
-    /// Insertion order queue for FIFO eviction
-    order: Vec<u32>,
+    /// Map from inode number to node ID
+    map: HashMap<u32, NodeId>,
+    /// Storage for all nodes
+    nodes: HashMap<NodeId, InodeLruNode>,
+    /// Head of doubly-linked list (most recently used)
+    head: Option<NodeId>,
+    /// Tail of doubly-linked list (least recently used)  
+    tail: Option<NodeId>,
+    /// Next available node ID
+    next_id: NodeId,
     /// Maximum cache size
     max_size: usize,
     /// Cache statistics
     hits: u64,
     misses: u64,
+    /// Access counter for approximate LRU
+    access_counter: u64,
 }
 
 impl InodeLruCache {
     fn new(max_size: usize) -> Self {
         Self {
-            cache: BTreeMap::new(),
-            order: Vec::with_capacity(max_size + 1),
+            map: HashMap::new(),
+            nodes: HashMap::new(),
+            head: None,
+            tail: None,
+            next_id: 0,
             max_size,
             hits: 0,
             misses: 0,
+            access_counter: 0,
         }
     }
 
+    /// O(1) get operation with LRU update
     fn get(&mut self, inode_num: u32) -> Option<Ext2Inode> {
-        if let Some(&inode) = self.cache.get(&inode_num) {
+        if let Some(&node_id) = self.map.get(&inode_num) {
             self.hits += 1;
-            Some(inode)
+            // Move to head (most recently used) - O(1)
+            self.move_to_head(node_id);
+            // Return copy of inode
+            self.nodes.get(&node_id).map(|node| node.inode.clone())
         } else {
             self.misses += 1;
             None
         }
     }
 
+    /// O(1) insert operation with LRU eviction
     fn insert(&mut self, inode_num: u32, inode: Ext2Inode) {
-        // If already exists, just update
-        if self.cache.contains_key(&inode_num) {
-            self.cache.insert(inode_num, inode);
+        self.access_counter += 1;
+        
+        // If already exists, update and move to head - O(1)
+        if let Some(&node_id) = self.map.get(&inode_num) {
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                node.inode = inode;
+                node.access_count = self.access_counter;
+            }
+            self.move_to_head(node_id);
             return;
         }
         
-        // If cache is full, remove FIFO (oldest) item
-        if self.cache.len() >= self.max_size {
-            if let Some(oldest_key) = self.order.first().copied() {
-                self.cache.remove(&oldest_key);
-                self.order.remove(0);
+        // If cache is full, remove LRU (tail) item - O(1)
+        if self.nodes.len() >= self.max_size {
+            self.remove_tail();
+        }
+        
+        // Create new node and add to head - O(1)
+        let new_node_id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        
+        let new_node = InodeLruNode {
+            inode_num,
+            inode,
+            access_count: self.access_counter,
+            prev: None,
+            next: self.head,
+        };
+        
+        self.nodes.insert(new_node_id, new_node);
+        self.map.insert(inode_num, new_node_id);
+        
+        // Update existing head's prev pointer
+        if let Some(old_head) = self.head {
+            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
+                old_head_node.prev = Some(new_node_id);
             }
         }
         
-        // Insert new item
-        self.cache.insert(inode_num, inode);
-        self.order.push(inode_num);
+        // Update head/tail pointers
+        self.head = Some(new_node_id);
+        if self.tail.is_none() {
+            self.tail = Some(new_node_id);
+        }
     }
 
+    /// O(1) remove operation
     fn remove(&mut self, inode_num: u32) {
-        if self.cache.remove(&inode_num).is_some() {
-            // Remove from order tracking
-            if let Some(pos) = self.order.iter().position(|&x| x == inode_num) {
-                self.order.remove(pos);
+        if let Some(&node_id) = self.map.get(&inode_num) {
+            self.remove_node(node_id);
+            self.map.remove(&inode_num);
+        }
+    }
+
+    /// O(1) move node to head of LRU list
+    fn move_to_head(&mut self, node_id: NodeId) {
+        // If already head, nothing to do
+        if self.head == Some(node_id) {
+            return;
+        }
+        
+        // Remove from current position
+        self.remove_node_from_list(node_id);
+        
+        // Add to head
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.prev = None;
+            node.next = self.head;
+        }
+        
+        // Update old head's prev pointer
+        if let Some(old_head) = self.head {
+            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
+                old_head_node.prev = Some(node_id);
+            }
+        }
+        
+        self.head = Some(node_id);
+        
+        // If this was the only node, it's also the tail
+        if self.tail.is_none() {
+            self.tail = Some(node_id);
+        }
+    }
+
+    /// O(1) remove tail (LRU) node
+    fn remove_tail(&mut self) {
+        if let Some(tail_id) = self.tail {
+            if let Some(tail_node) = self.nodes.get(&tail_id) {
+                let inode_num = tail_node.inode_num;
+                self.map.remove(&inode_num);
+            }
+            self.remove_node(tail_id);
+        }
+    }
+
+    /// O(1) remove node completely
+    fn remove_node(&mut self, node_id: NodeId) {
+        self.remove_node_from_list(node_id);
+        self.nodes.remove(&node_id);
+    }
+
+    /// O(1) remove node from doubly-linked list (but keep in nodes map)
+    fn remove_node_from_list(&mut self, node_id: NodeId) {
+        if let Some(node) = self.nodes.get(&node_id) {
+            let prev_id = node.prev;
+            let next_id = node.next;
+            
+            // Update prev node's next pointer
+            if let Some(prev_id) = prev_id {
+                if let Some(prev_node) = self.nodes.get_mut(&prev_id) {
+                    prev_node.next = next_id;
+                }
+            } else {
+                // This was the head
+                self.head = next_id;
+            }
+            
+            // Update next node's prev pointer
+            if let Some(next_id) = next_id {
+                if let Some(next_node) = self.nodes.get_mut(&next_id) {
+                    next_node.prev = prev_id;
+                }
+            } else {
+                // This was the tail
+                self.tail = prev_id;
             }
         }
     }
 
     fn len(&self) -> usize {
-        self.cache.len()
+        self.nodes.len()
     }
 
     /// Get cache statistics for debugging and performance analysis
     fn get_stats(&self) -> (u64, u64, usize) {
-        (self.hits, self.misses, self.cache.len())
+        (self.hits, self.misses, self.nodes.len())
     }
 
     /// Print cache statistics
@@ -358,17 +488,36 @@ impl InodeLruCache {
         let total = self.hits + self.misses;
         let hit_rate = if total > 0 { (self.hits * 100) / total } else { 0 };
         crate::early_println!("[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%", 
-            cache_name, self.hits, self.misses, self.cache.len(), hit_rate);
+            cache_name, self.hits, self.misses, self.nodes.len(), hit_rate);
     }
 }
 
 
-/// Efficient O(log n) FIFO cache implementation for blocks
+/// Node ID type for the LRU cache
+type NodeId = u32;
+
+/// Node in doubly-linked list for O(1) LRU operations
+#[derive(Debug)]
+struct LruNode {
+    block_num: u64,
+    data: Vec<u8>,
+    prev: Option<NodeId>,
+    next: Option<NodeId>,
+}
+
+/// O(1) LRU cache implementation using HashMap + doubly-linked list
+/// This implementation uses indices instead of raw pointers to be thread-safe
 struct BlockLruCache {
-    /// Map from block number to block data
-    cache: BTreeMap<u64, Vec<u8>>,
-    /// Insertion order queue for FIFO eviction
-    order: Vec<u64>,
+    /// Map from block number to node ID
+    map: HashMap<u64, NodeId>,
+    /// Storage for all nodes
+    nodes: HashMap<NodeId, LruNode>,
+    /// Head of doubly-linked list (most recently used)
+    head: Option<NodeId>,
+    /// Tail of doubly-linked list (least recently used)  
+    tail: Option<NodeId>,
+    /// Next available node ID
+    next_id: NodeId,
     /// Maximum cache size
     max_size: usize,
     /// Cache statistics
@@ -379,8 +528,11 @@ struct BlockLruCache {
 impl BlockLruCache {
     fn new(max_size: usize) -> Self {
         Self {
-            cache: BTreeMap::new(),
-            order: Vec::with_capacity(max_size + 1),
+            map: HashMap::new(),
+            nodes: HashMap::new(),
+            head: None,
+            tail: None,
+            next_id: 0,
             max_size,
             hits: 0,
             misses: 0,
@@ -388,51 +540,134 @@ impl BlockLruCache {
     }
 
     fn get(&mut self, block_num: u64) -> Option<Vec<u8>> {
-        if let Some(block_data) = self.cache.get(&block_num) {
+        if let Some(&node_id) = self.map.get(&block_num) {
             self.hits += 1;
-            Some(block_data.clone())
+            // Move to head (most recently used)
+            self.move_to_head(node_id);
+            // Return cloned data
+            self.nodes.get(&node_id).map(|node| node.data.clone())
         } else {
             self.misses += 1;
             None
         }
     }
 
+    /// Move node to head of LRU list (O(1))
+    fn move_to_head(&mut self, node_id: NodeId) {
+        if Some(node_id) == self.head {
+            return; // Already at head
+        }
+
+        // Remove from current position
+        self.remove_from_list(node_id);
+        
+        // Add to head
+        self.add_to_head(node_id);
+    }
+
+    /// Remove node from doubly-linked list (O(1))
+    fn remove_from_list(&mut self, node_id: NodeId) {
+        if let Some(node) = self.nodes.get(&node_id) {
+            let prev = node.prev;
+            let next = node.next;
+
+            // Update prev node's next pointer
+            if let Some(prev_id) = prev {
+                if let Some(prev_node) = self.nodes.get_mut(&prev_id) {
+                    prev_node.next = next;
+                }
+            } else {
+                // This was the head
+                self.head = next;
+            }
+
+            // Update next node's prev pointer
+            if let Some(next_id) = next {
+                if let Some(next_node) = self.nodes.get_mut(&next_id) {
+                    next_node.prev = prev;
+                }
+            } else {
+                // This was the tail
+                self.tail = prev;
+            }
+        }
+    }
+
+    /// Add node to head of list (O(1))
+    fn add_to_head(&mut self, node_id: NodeId) {
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.prev = None;
+            node.next = self.head;
+        }
+
+        if let Some(old_head) = self.head {
+            if let Some(old_head_node) = self.nodes.get_mut(&old_head) {
+                old_head_node.prev = Some(node_id);
+            }
+        } else {
+            // List was empty
+            self.tail = Some(node_id);
+        }
+
+        self.head = Some(node_id);
+    }
+
     fn insert(&mut self, block_num: u64, block_data: Vec<u8>) {
-        // If already exists, just update
-        if self.cache.contains_key(&block_num) {
-            self.cache.insert(block_num, block_data);
+        // If already exists, update and move to head
+        if let Some(&existing_id) = self.map.get(&block_num) {
+            if let Some(existing_node) = self.nodes.get_mut(&existing_id) {
+                existing_node.data = block_data;
+            }
+            self.move_to_head(existing_id);
             return;
         }
         
-        // If cache is full, remove FIFO (oldest) item
-        if self.cache.len() >= self.max_size {
-            if let Some(oldest_key) = self.order.first().copied() {
-                self.cache.remove(&oldest_key);
-                self.order.remove(0);
+        // If cache is full, remove LRU (tail) item
+        if self.nodes.len() >= self.max_size {
+            if let Some(tail_id) = self.tail {
+                if let Some(tail_node) = self.nodes.get(&tail_id) {
+                    let tail_block_num = tail_node.block_num;
+                    self.map.remove(&tail_block_num);
+                }
+                self.remove_from_list(tail_id);
+                self.nodes.remove(&tail_id);
             }
         }
         
-        // Insert new item
-        self.cache.insert(block_num, block_data);
-        self.order.push(block_num);
+        // Create new node
+        let node_id = self.next_id;
+        self.next_id += 1;
+        
+        let new_node = LruNode {
+            block_num,
+            data: block_data,
+            prev: None,
+            next: None,
+        };
+        
+        // Insert into data structures
+        self.nodes.insert(node_id, new_node);
+        self.map.insert(block_num, node_id);
+        
+        // Add to head of list
+        self.add_to_head(node_id);
     }
 
     fn remove(&mut self, block_num: u64) {
-        if self.cache.remove(&block_num).is_some() {
-            // Remove from order tracking
-            if let Some(pos) = self.order.iter().position(|&x| x == block_num) {
-                self.order.remove(pos);
-            }
+        if let Some(&node_id) = self.map.get(&block_num) {
+            self.map.remove(&block_num);
+            self.remove_from_list(node_id);
+            self.nodes.remove(&node_id);
         }
     }
 
     fn len(&self) -> usize {
-        self.cache.len()
+        self.nodes.len()
     }
 
     /// Get cache statistics for debugging and performance analysis
     fn get_stats(&self) -> (u64, u64, usize) {
-        (self.hits, self.misses, self.cache.len())
+        (self.hits, self.misses, self.nodes.len())
     }
 
     /// Print cache statistics
@@ -440,7 +675,7 @@ impl BlockLruCache {
         let total = self.hits + self.misses;
         let hit_rate = if total > 0 { (self.hits * 100) / total } else { 0 };
         crate::early_println!("[ext2] {} Cache Stats: hits={}, misses={}, size={}, hit_rate={}%", 
-            cache_name, self.hits, self.misses, self.cache.len(), hit_rate);
+            cache_name, self.hits, self.misses, self.nodes.len(), hit_rate);
     }
 }
 
@@ -638,10 +873,12 @@ impl Ext2FileSystem {
             cache.insert(inode_num, inode);
         }
 
-        // Print inode cache stats periodically (every 50th call)
-        static mut INODE_CALL_COUNT: u64 = 0;
+
+        #[cfg(test)]
         unsafe {
+            static mut INODE_CALL_COUNT: u64 = 0;
             INODE_CALL_COUNT += 1;
+            // Print inode cache stats periodically (every 50th call)
             if INODE_CALL_COUNT % 50 == 0 {
                 let cache = self.inode_cache.lock();
                 cache.print_stats("Inode");
@@ -1205,6 +1442,7 @@ impl Ext2FileSystem {
     fn allocate_block_in_group(&self, group: u32) -> Result<u64, FileSystemError> {
         profile_scope!("ext2::allocate_block_in_group");
         
+        #[cfg(test)]
         crate::early_println!("[ext2] allocate_block_in_group: Starting OPTIMIZED allocation for group {}", group);
         
         // Read block group descriptor
@@ -1304,6 +1542,7 @@ impl Ext2FileSystem {
                 // OPTIMIZATION: Batch bitmap + BGD updates
                 bitmap_data[byte_index] |= 1 << bit_index;
                 
+                #[cfg(test)]
                 crate::early_println!("[ext2] allocate_block_in_group: Found free block {}, batching metadata updates", block_num);
                 
                 // Enqueue bitmap write
@@ -1336,6 +1575,7 @@ impl Ext2FileSystem {
                 self.block_device.enqueue_request(bgd_write);
                 
                 // Process both writes in one batch
+                #[cfg(test)]
                 crate::early_println!("[ext2] allocate_block_in_group: Processing 2 writes in batch (bitmap + BGD)");
                 let write_results = self.block_device.process_requests();
                 
@@ -1349,6 +1589,7 @@ impl Ext2FileSystem {
                 // Update superblock (separate for now - could be batched too)
                 self.update_superblock_counts(-1, 0, 0)?;
                 
+                #[cfg(test)]
                 crate::early_println!("[ext2] allocate_block_in_group: Successfully allocated block {} (OPTIMIZED: reduced I/O ops)", block_num);
                 return Ok(block_num as u64);
             }
@@ -1364,6 +1605,7 @@ impl Ext2FileSystem {
     fn allocate_blocks_contiguous_in_group(&self, group: u32, count: u32) -> Result<Vec<u64>, FileSystemError> {
         profile_scope!("ext2::allocate_blocks_contiguous_in_group");
         
+        #[cfg(test)]
         crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Starting allocation for {} blocks in group {}", count, group);
         
         // Read block group descriptor
@@ -1486,6 +1728,7 @@ impl Ext2FileSystem {
                     allocated_blocks.push(block_num as u64);
                 }
                 
+                #[cfg(test)]
                 crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Found {} contiguous blocks starting at {}, batching updates", count, start_block);
                 
                 // OPTIMIZATION: Batch bitmap + BGD updates
@@ -1520,6 +1763,7 @@ impl Ext2FileSystem {
                 self.block_device.enqueue_request(bgd_write);
                 
                 // Process both writes in one batch
+                #[cfg(test)]
                 crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Processing 2 writes in batch for {} blocks", count);
                 let write_results = self.block_device.process_requests();
                 
@@ -1533,6 +1777,7 @@ impl Ext2FileSystem {
                 // Update superblock (batch this in the future)
                 self.update_superblock_counts(-(count as i32), 0, 0)?;
                 
+                #[cfg(test)]
                 crate::early_println!("[ext2] allocate_blocks_contiguous_in_group: Successfully allocated {} blocks starting at {} (MAJOR OPTIMIZATION: reduced from {} to ~3 I/O ops)", count, start_block, count * 5);
                 return Ok(allocated_blocks);
             }
@@ -1564,6 +1809,7 @@ impl Ext2FileSystem {
         for group in 0..group_count {
             match self.allocate_blocks_contiguous_in_group(group, count) {
                 Ok(blocks) => {
+                    #[cfg(test)]
                     crate::early_println!("ext2: Allocated {} contiguous blocks starting at {} in group {}", 
                            count, blocks[0], group);
                     return Ok(blocks);
@@ -1600,6 +1846,7 @@ impl Ext2FileSystem {
                     for group in 0..group_count {
                         match self.allocate_blocks_contiguous_in_group(group, chunk_size) {
                             Ok(mut chunk_blocks) => {
+                                #[cfg(test)]
                                 crate::early_println!("ext2: Allocated {} contiguous blocks (chunk) starting at {} in group {}", 
                                        chunk_size, chunk_blocks[0], group);
                                 allocated_blocks.append(&mut chunk_blocks);
@@ -1683,6 +1930,7 @@ impl Ext2FileSystem {
             }
         }
         
+        #[cfg(test)]
         crate::early_println!("ext2: Allocated {} blocks individually as fallback", count);
         Ok(blocks)
     }
@@ -2365,6 +2613,7 @@ impl Ext2FileSystem {
         
         // Write all content blocks in one batch
         if !write_blocks.is_empty() {
+            #[cfg(test)]
             crate::early_println!("[ext2] write_file_content: batch writing {} content blocks", write_blocks.len());
             self.write_blocks_cached(&write_blocks)?;
         }
@@ -2917,6 +3166,7 @@ impl Ext2FileSystem {
         
         // Batch allocate all needed indirect blocks
         let allocated_indirect_blocks = if needed_indirect_blocks > 0 {
+            #[cfg(test)]
             crate::early_println!("[ext2] set_inode_blocks_simple_batch: Pre-allocating {} indirect blocks", needed_indirect_blocks);
             self.allocate_blocks_contiguous(needed_indirect_blocks)?
         } else {
@@ -3299,25 +3549,42 @@ impl Ext2FileSystem {
     }
 
     /// Read multiple filesystem blocks with improved LRU cache and batching
-    /// Optimized to enqueue all requests first, then process them in one batch
+    /// Optimized for fast path when all blocks are cached
     fn read_blocks_cached(&self, block_nums: &[u64]) -> Result<Vec<Vec<u8>>, FileSystemError> {
         profile_scope!("ext2::read_blocks_cached");
 
-        let mut results = BTreeMap::new();
+        // Fast path: if only one block, try cache-only first
+        if block_nums.len() == 1 {
+            let block_num = block_nums[0];
+            let mut cache = self.block_cache.lock();
+            if let Some(data) = cache.get(block_num) {
+                return Ok(vec![data]);
+            }
+            drop(cache);
+        }
+
+        // Slower path: multiple blocks or cache miss
+        let mut results = Vec::with_capacity(block_nums.len());
         let mut missing_blocks = Vec::new();
         let mut cache = self.block_cache.lock();
 
-        // Check cache for existing blocks
+        // Check cache for existing blocks, maintain order
         for &block_num in block_nums {
             if let Some(data) = cache.get(block_num) {
-                results.insert(block_num, data);
+                results.push((block_num, data));
             } else {
                 missing_blocks.push(block_num);
+                results.push((block_num, Vec::new())); // Placeholder
             }
         }
         
         // Drop the lock before I/O
         drop(cache);
+
+        // If all blocks were cached, return immediately
+        if missing_blocks.is_empty() {
+            return Ok(results.into_iter().map(|(_, data)| data).collect());
+        }
 
         if !missing_blocks.is_empty() {
             // Sort missing blocks to find contiguous ranges
@@ -3370,6 +3637,8 @@ impl Ext2FileSystem {
 
             // Process results and update cache
             let mut cache = self.block_cache.lock();
+            let mut missing_data = HashMap::new();
+            
             for (result_idx, result) in read_results.iter().enumerate() {
                 if result.result.is_err() {
                     return Err(FileSystemError::new(
@@ -3384,26 +3653,11 @@ impl Ext2FileSystem {
                 // Validate buffer size matches expectations
                 let expected_size = count * self.block_size as usize;
                 if data.len() != expected_size {
-                    crate::early_println!("[ext2] DEBUG: Buffer size mismatch details:");
-                    crate::early_println!("[ext2] DEBUG: - Buffer size: {} bytes", data.len());
-                    crate::early_println!("[ext2] DEBUG: - Expected size: {} bytes", expected_size);
-                    crate::early_println!("[ext2] DEBUG: - Block count: {}", count);
-                    crate::early_println!("[ext2] DEBUG: - Block size: {}", self.block_size);
-                    crate::early_println!("[ext2] DEBUG: - Start block: {}", start_block);
-                    crate::early_println!("[ext2] DEBUG: - Result index: {}", result_idx);
-                    crate::early_println!("[ext2] DEBUG: - Request ranges len: {}", request_ranges.len());
-                    crate::early_println!("[ext2] DEBUG: - Original request - sector: {}, sector_count: {}", 
-                        self.block_to_sector(start_block), count * self.sectors_per_block() as usize);
-                    
                     // Try to handle gracefully - truncate or pad buffer to expected size
                     let mut corrected_data = data.clone();
                     if data.len() > expected_size {
-                        crate::early_println!("[ext2] WARNING: Truncating buffer from {} to {} bytes", 
-                            data.len(), expected_size);
                         corrected_data.truncate(expected_size);
                     } else {
-                        crate::early_println!("[ext2] WARNING: Padding buffer from {} to {} bytes", 
-                            data.len(), expected_size);
                         corrected_data.resize(expected_size, 0);
                     }
                     
@@ -3415,10 +3669,9 @@ impl Ext2FileSystem {
                         
                         if end_offset <= corrected_data.len() {
                             let block_data = corrected_data[offset..end_offset].to_vec();
-                            results.insert(current_block, block_data.clone());
+                            missing_data.insert(current_block, block_data.clone());
                             cache.insert(current_block, block_data);
                         } else {
-                            crate::early_println!("[ext2] ERROR: Cannot extract block {} from corrected buffer", j);
                             return Err(FileSystemError::new(
                                 FileSystemErrorKind::DeviceError, 
                                 "Buffer corruption detected"
@@ -3434,26 +3687,37 @@ impl Ext2FileSystem {
                     let end_offset = offset + self.block_size as usize;
                     
                     let block_data = data[offset..end_offset].to_vec();
-                    results.insert(current_block, block_data.clone());
+                    missing_data.insert(current_block, block_data.clone());
                     cache.insert(current_block, block_data);
+                }
+            }
+            
+            // Update results with missing data
+            for i in 0..results.len() {
+                let (block_num, ref data) = results[i];
+                if data.is_empty() { // This was a placeholder for missing block
+                    if let Some(fetched_data) = missing_data.get(&block_num) {
+                        results[i] = (block_num, fetched_data.clone());
+                    }
                 }
             }
         }
 
-        // Return results in the order of original block_nums
-        let result = Ok(block_nums.iter().map(|b| results.get(b).unwrap().clone()).collect());
-        
-        // Print cache stats periodically (every 100th call)
-        static mut CALL_COUNT: u64 = 0;
+        // Return results in the order of original block_nums, extracting data only
+        let result: Vec<Vec<u8>> = results.into_iter().map(|(_, data)| data).collect();
+    
+        #[cfg(test)]    
         unsafe {
+            static mut CALL_COUNT: u64 = 0;
             CALL_COUNT += 1;
+            // Print cache stats periodically (every 100th call)
             if CALL_COUNT % 100 == 0 {
                 let cache = self.block_cache.lock();
                 cache.print_stats("Block");
             }
         }
         
-        result
+        Ok(result)
     }
 
     /// Write multiple filesystem blocks with write-through to device and cache update
@@ -3464,6 +3728,7 @@ impl Ext2FileSystem {
             return Ok(());
         }
 
+        #[cfg(test)]
         crate::early_println!("[ext2] write_blocks_cached: {} blocks to write", blocks.len());
         
         // Debug: Check for invalid block numbers
@@ -3513,6 +3778,7 @@ impl Ext2FileSystem {
         }
 
         // Process all enqueued requests in one batch
+        #[cfg(test)]
         crate::early_println!("[ext2] write_blocks_cached: Processing {} requests in batch", request_ranges.len());
         let write_results = self.block_device.process_requests();
 
@@ -3562,6 +3828,7 @@ impl Ext2FileSystem {
         
         // Check for reasonable upper bound (e.g., filesystem shouldn't have more than 2^30 blocks)
         if block_num > (1u64 << 30) {
+            #[cfg(test)]
             crate::early_println!("[ext2] WARNING: block_to_sector called with very large block_num: {}", block_num);
         }
         
