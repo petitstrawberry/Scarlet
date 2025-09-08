@@ -347,11 +347,12 @@ impl VirtioBlockDevice {
         let read_count = requests.iter().filter(|r| matches!(r.request_type, BlockIORequestType::Read)).count();
         let write_count = requests.iter().filter(|r| matches!(r.request_type, BlockIORequestType::Write)).count();
         
-        // Add batch size tracking for debugging
-        static BATCH_SIZES: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
-        static CALL_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
-        
+   
+        #[cfg(test)]
         {
+            // Add batch size tracking for debugging
+            static BATCH_SIZES: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
+            static CALL_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
             let mut sizes = BATCH_SIZES.lock();
             let mut count = CALL_COUNT.lock();
             sizes.push(requests.len());
@@ -367,21 +368,6 @@ impl VirtioBlockDevice {
                     (single_requests as f64 / sizes.len() as f64) * 100.0);
             }
         }
-        
-        // if requests.len() > 1 {
-        //     crate::early_println!("[virtio_blk] process_requests_batch: {} requests (R:{} W:{})", requests.len(), read_count, write_count);
-            
-        //     // Validate all requests first
-        //     for (i, req) in requests.iter().enumerate() {
-        //         assert!(req.sector_count > 0, 
-        //             "Invalid BlockIORequest[{}]: sector_count=0 for sector={}", i, req.sector);
-        //     }
-            
-        //     let first_sector = requests[0].sector;
-        //     let last_request = &requests[requests.len() - 1];
-        //     let last_sector = last_request.sector + last_request.sector_count - 1;
-        //     crate::early_println!("[virtio_blk] Batch range: sectors {}-{}", first_sector, last_sector);
-        // }
         
         let batch_size = requests.len();
         let mut results = vec![Err("Not processed"); batch_size];
