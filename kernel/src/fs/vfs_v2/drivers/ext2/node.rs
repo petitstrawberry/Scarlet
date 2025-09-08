@@ -175,7 +175,7 @@ impl VfsNode for Ext2Node {
             }
             
             // Read the block containing the target path
-            let block_sector = (first_block * 2) as u64;
+            let block_sector = ext2_fs.block_to_sector(first_block as u64);
             let request = Box::new(crate::device::block::request::BlockIORequest {
                 request_type: crate::device::block::request::BlockIORequestType::Read,
                 sector: block_sector as usize,

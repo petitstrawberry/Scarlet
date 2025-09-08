@@ -798,12 +798,16 @@ impl Ext2FileSystem {
         let local_inode = (inode_num - 1) % self.superblock.inodes_per_group;
         
         // Read block group descriptor
-        let bgd_block_sector = ((group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
-                       if self.block_size == 1024 { 2 } else { 1 }) * 2; // Convert block to sector
+        // BGD table starts after the superblock
+        // For 1KB blocks: superblock is at block 1, so BGD starts at block 2
+        // For 2KB+ blocks: superblock is at block 0, so BGD starts at block 1
+        let bgd_table_start_block = if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_block = bgd_table_start_block + (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size;
+        let bgd_block_sector = self.block_to_sector(bgd_block as u64);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_block_sector as usize,
+            sector: bgd_block_sector,
             sector_count: (self.block_size / 512) as usize,
             head: 0,
             cylinder: 0,
@@ -836,11 +840,15 @@ impl Ext2FileSystem {
         let inode_block = bgd.inode_table + (local_inode * inode_size) / self.block_size;
         let inode_offset = (local_inode * inode_size) % self.block_size;
 
+        #[cfg(test)]
+        crate::early_println!("[ext2] read_inode: Reading inode {} from block {}, offset {}, inode_size={}", 
+                             inode_num, inode_block, inode_offset, inode_size);
+
         // Read inode
-        let inode_sector = (inode_block * 2) as u64; // Convert block to sector
+        let inode_sector = self.block_to_sector(inode_block as u64);
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: inode_sector as usize,
+            sector: inode_sector,
             sector_count: (self.block_size / 512) as usize,
             head: 0,
             cylinder: 0,
@@ -1259,7 +1267,7 @@ impl Ext2FileSystem {
         let inode_offset_in_block = (inode_index % inodes_per_block) * inode_size;
         
         let target_block = inode_table_block + block_offset;
-        let target_sector = target_block * 2; // Convert block to sector
+        let target_sector = self.block_to_sector(target_block as u64);
         
         // Read the current block containing the inode
         let read_request = Box::new(crate::device::block::request::BlockIORequest {
@@ -1382,7 +1390,7 @@ impl Ext2FileSystem {
         block_data[dotdot_offset + 9] = b'.';
         
         // Write the block to disk
-        let block_sector = (block_number * 2) as u64;
+        let block_sector = self.block_to_sector(block_number as u64);
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Write,
             sector: block_sector as usize,
@@ -1447,7 +1455,7 @@ impl Ext2FileSystem {
         
         // Read block group descriptor
         let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
-        let bgd_sector = bgd_block * 2; // Convert to sector
+        let bgd_sector = self.block_to_sector(bgd_block);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -1488,7 +1496,7 @@ impl Ext2FileSystem {
         }
 
         // Read block bitmap
-        let bitmap_sector = bgd.block_bitmap * 2; // Convert block to sector
+        let bitmap_sector = self.block_to_sector(bgd.block_bitmap as u64);
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
             sector: bitmap_sector as usize,
@@ -1610,7 +1618,7 @@ impl Ext2FileSystem {
         
         // Read block group descriptor
         let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
-        let bgd_sector = bgd_block * 2;
+        let bgd_sector = self.block_to_sector(bgd_block);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -1652,7 +1660,7 @@ impl Ext2FileSystem {
         }
 
         // Read block bitmap
-        let bitmap_sector = bgd.block_bitmap * 2;
+        let bitmap_sector = self.block_to_sector(bgd.block_bitmap as u64);
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
             sector: bitmap_sector as usize,
@@ -1943,7 +1951,8 @@ impl Ext2FileSystem {
         let group = 0;
         
         // Read block group descriptor for group 0
-        let bgd_block_sector = if self.block_size == 1024 { 2 * 2 } else { 1 * 2 }; // Block 2 in sectors
+        let bgd_block = if self.block_size == 1024 { 2 } else { 1 }; // BGD in block 1 or 2
+        let bgd_block_sector = self.block_to_sector(bgd_block);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -1983,7 +1992,7 @@ impl Ext2FileSystem {
         }
 
         // Read inode bitmap
-        let bitmap_sector = bgd.inode_bitmap * 2; // Convert block to sector
+        let bitmap_sector = self.block_to_sector(bgd.inode_bitmap as u64);
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
             sector: bitmap_sector as usize,
@@ -2315,8 +2324,9 @@ impl Ext2FileSystem {
         let local_inode = (inode_number - 1) % self.superblock.get_inodes_per_group();
         
         // Read block group descriptor to find inode bitmap location
-        let bgd_block_sector = ((group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
-                       if self.block_size == 1024 { 2 } else { 1 }) * 2; // Convert block to sector
+        let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
+                       if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_block_sector = self.block_to_sector(bgd_block as u64);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -2350,7 +2360,7 @@ impl Ext2FileSystem {
 
         // Read the inode bitmap
         let inode_bitmap_block = bgd.get_inode_bitmap();
-        let bitmap_sector = (inode_bitmap_block * 2) as u64; // Convert block to sector
+        let bitmap_sector = self.block_to_sector(inode_bitmap_block as u64);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -2754,8 +2764,9 @@ impl Ext2FileSystem {
         let local_block = (block_number - 1) % self.superblock.get_blocks_per_group();
         
         // Read block group descriptor
-        let bgd_block_sector = ((group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
-                       if self.block_size == 1024 { 2 } else { 1 }) * 2;
+        let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
+                       if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_block_sector = self.block_to_sector(bgd_block as u64);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -2789,7 +2800,7 @@ impl Ext2FileSystem {
 
         // Read the block bitmap
         let block_bitmap_block = bgd.get_block_bitmap();
-        let bitmap_sector = (block_bitmap_block * 2) as u64;
+        let bitmap_sector = self.block_to_sector(block_bitmap_block as u64);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -2949,7 +2960,7 @@ impl Ext2FileSystem {
                 let clear_data = vec![0u8; self.block_size as usize];
                 let clear_request = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Write,
-                    sector: (double_indirect_block * 2) as usize,
+                    sector: self.block_to_sector(double_indirect_block as u64),
                     sector_count: (self.block_size / 512) as usize,
                     head: 0,
                     cylinder: 0,
@@ -2961,7 +2972,7 @@ impl Ext2FileSystem {
             }
             
             let double_indirect_block = inode.block[13];
-            let double_indirect_sector = (double_indirect_block * 2) as u64;
+            let double_indirect_sector = self.block_to_sector(double_indirect_block as u64);
             
             // Read the double indirect block
             let request = Box::new(crate::device::block::request::BlockIORequest {
@@ -3040,7 +3051,7 @@ impl Ext2FileSystem {
                 let clear_data = vec![0u8; self.block_size as usize];
                 let clear_request = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Write,
-                    sector: (first_indirect_ptr * 2) as usize,
+                    sector: self.block_to_sector(first_indirect_ptr as u64),
                     sector_count: (self.block_size / 512) as usize,
                     head: 0,
                     cylinder: 0,
@@ -3052,7 +3063,7 @@ impl Ext2FileSystem {
             }
             
             // Read the first level indirect block
-            let first_indirect_sector = (first_indirect_ptr * 2) as u64;
+            let first_indirect_sector = self.block_to_sector(first_indirect_ptr as u64);
             let request = Box::new(crate::device::block::request::BlockIORequest {
                 request_type: crate::device::block::request::BlockIORequestType::Read,
                 sector: first_indirect_sector as usize,
@@ -3385,8 +3396,9 @@ impl Ext2FileSystem {
 
     /// Update group descriptor on disk
     fn update_group_descriptor(&self, group: u32, bgd: &Ext2BlockGroupDescriptor) -> Result<(), FileSystemError> {
-        let bgd_block_sector = ((group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
-                       if self.block_size == 1024 { 2 } else { 1 }) * 2;
+        let bgd_block = (group * mem::size_of::<Ext2BlockGroupDescriptor>() as u32) / self.block_size + 
+                       if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_block_sector = self.block_to_sector(bgd_block as u64);
         
         let request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -4129,7 +4141,7 @@ impl FileSystemOperations for Ext2FileSystem {
                 
                 let write_request = Box::new(crate::device::block::request::BlockIORequest {
                     request_type: crate::device::block::request::BlockIORequestType::Write,
-                    sector: (block_number * 2) as usize,
+                    sector: self.block_to_sector(block_number as u64),
                     sector_count: (self.block_size / 512) as usize,
                     head: 0,
                     cylinder: 0,
@@ -4185,7 +4197,8 @@ impl FileSystemOperations for Ext2FileSystem {
             
             // Update group descriptor to reflect one more directory
             let group = 0; // For now, we only use group 0
-            let bgd_block_sector = if self.block_size == 1024 { 2 * 2 } else { 1 * 2 };
+            let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
+            let bgd_block_sector = self.block_to_sector(bgd_block);
             
             let request = Box::new(crate::device::block::request::BlockIORequest {
                 request_type: crate::device::block::request::BlockIORequestType::Read,
