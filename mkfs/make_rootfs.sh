@@ -6,6 +6,10 @@ cd "$(dirname "$0")" || exit 1
 # Create ext2 image from rootfs directory
 ROOTFS_DIR="rootfs"
 EXT2_IMAGE="dist/rootfs.img"
+EXT2_BLOCK_SIZE=4096
+
+# Block size (can be overridden by environment variable)
+BLOCK_SIZE=${EXT2_BLOCK_SIZE:-1024}
 
 if [ ! -d "$ROOTFS_DIR" ]; then
     echo "Error: $ROOTFS_DIR directory not found"
@@ -23,9 +27,10 @@ fi
 
 echo "Creating ext2 image: $EXT2_IMAGE (${EXT2_SIZE_KB}KB)"
 
-# Create ext2 filesystem with 1024-byte blocks (required by our driver)
-dd if=/dev/zero of="$EXT2_IMAGE" bs=1024 count=$EXT2_SIZE_KB
-mke2fs -F -t ext2 -b 1024 -L "SCARLET_ROOT" "$EXT2_IMAGE"
+# Create ext2 filesystem with variable block size (default 1024)
+echo "Using block size: ${BLOCK_SIZE} bytes"
+dd if=/dev/zero of="$EXT2_IMAGE" bs=$BLOCK_SIZE count=$((EXT2_SIZE_KB * 1024 / BLOCK_SIZE))
+mke2fs -F -t ext2 -b $BLOCK_SIZE -L "SCARLET_ROOT" "$EXT2_IMAGE"
 
 # Mount and copy files using debugfs (works without loop devices)
 echo "Copying files to ext2 image using debugfs..."
