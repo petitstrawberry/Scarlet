@@ -6,10 +6,9 @@ cd "$(dirname "$0")" || exit 1
 # Create ext2 image from rootfs directory
 ROOTFS_DIR="rootfs"
 EXT2_IMAGE="dist/rootfs.img"
-EXT2_BLOCK_SIZE=4096
 
 # Block size (can be overridden by environment variable)
-BLOCK_SIZE=${EXT2_BLOCK_SIZE:-1024}
+BLOCK_SIZE=${EXT2_BLOCK_SIZE:-4096}
 
 if [ ! -d "$ROOTFS_DIR" ]; then
     echo "Error: $ROOTFS_DIR directory not found"
