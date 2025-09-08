@@ -3489,12 +3489,11 @@ impl Ext2FileSystem {
             
             let (start_block, count) = request_ranges[result_idx];
             
-            // Update cache for successfully written blocks
+            // Invalidate cache for successfully written blocks (write-through cache)
+            // No need to update cache with written data since it's already on disk
             for j in 0..count {
                 let current_block = start_block + j as u64;
-                if let Some(data) = blocks.get(&current_block) {
-                    cache.insert(current_block, data.clone());
-                }
+                cache.remove(current_block);
             }
         }
         
