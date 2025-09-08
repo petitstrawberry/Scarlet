@@ -2876,13 +2876,54 @@ impl Ext2FileSystem {
     fn set_inode_blocks_simple_batch(&self, inode: &mut Ext2Inode, assignments: &[(u64, u32)]) -> Result<(), FileSystemError> {
         profile_scope!("ext2::set_inode_blocks_simple_batch");
         
-        // crate::early_println!("[ext2] set_inode_blocks_simple_batch: processing {} assignments", assignments.len());
-        
         let blocks_per_indirect = self.block_size / 4;
         let mut indirect_blocks_cache = alloc::collections::BTreeMap::new();
         let mut double_indirect_cache = alloc::collections::BTreeMap::new();
-        let mut batched_writes = 0;
-        let mut new_indirect_blocks = Vec::new(); // Track newly allocated indirect blocks
+        let mut _batched_writes = 0;
+        let mut new_indirect_blocks = Vec::new();
+        
+        // PRE-ALLOCATE: Calculate needed indirect blocks and allocate in batch
+        let mut needed_indirect_blocks = 0u32;
+        let mut needed_first_level_indirects = alloc::collections::BTreeSet::new();
+        let mut need_single_indirect = false;
+        let mut need_double_indirect = false;
+        
+        for &(logical_block, _) in assignments {
+            if logical_block >= 12 && logical_block < 12 + blocks_per_indirect as u64 {
+                if inode.block[12] == 0 {
+                    need_single_indirect = true;
+                }
+            } else if logical_block >= 12 + blocks_per_indirect as u64 {
+                if inode.block[13] == 0 {
+                    need_double_indirect = true;
+                }
+                
+                // Calculate which first-level indirect blocks we need
+                let double_base = 12 + blocks_per_indirect as u64;
+                let double_offset = logical_block - double_base;
+                let first_indirect_index = double_offset / blocks_per_indirect as u64;
+                needed_first_level_indirects.insert(first_indirect_index);
+            }
+        }
+        
+        // Count total needed indirect blocks
+        if need_single_indirect {
+            needed_indirect_blocks += 1;
+        }
+        if need_double_indirect {
+            needed_indirect_blocks += 1;
+        }
+        needed_indirect_blocks += needed_first_level_indirects.len() as u32;
+        
+        // Batch allocate all needed indirect blocks
+        let allocated_indirect_blocks = if needed_indirect_blocks > 0 {
+            crate::early_println!("[ext2] set_inode_blocks_simple_batch: Pre-allocating {} indirect blocks", needed_indirect_blocks);
+            self.allocate_blocks_contiguous(needed_indirect_blocks)?
+        } else {
+            Vec::new()
+        };
+        
+        let mut indirect_block_index = 0;
         
         for &(logical_block, block_number) in assignments {
             // crate::early_println!("[ext2] DEBUG: Processing assignment: logical_block={}, block_number={}", logical_block, block_number);
@@ -2896,17 +2937,19 @@ impl Ext2FileSystem {
                 
                 // Ensure indirect block exists
                 if inode.block[12] == 0 {
-                    let indirect_block_u64 = self.allocate_block()?;
-                    if indirect_block_u64 > u32::MAX as u64 {
+                    let indirect_block = if indirect_block_index < allocated_indirect_blocks.len() {
+                        let block = allocated_indirect_blocks[indirect_block_index] as u32;
+                        indirect_block_index += 1;
+                        block
+                    } else {
                         return Err(FileSystemError::new(
-                            FileSystemErrorKind::InvalidData,
-                            "Block number too large for u32 cast"
+                            FileSystemErrorKind::NoSpace,
+                            "Not enough pre-allocated indirect blocks"
                         ));
-                    }
-                    let indirect_block = indirect_block_u64 as u32;
+                    };
+                    
                     inode.block[12] = indirect_block;
                     new_indirect_blocks.push(indirect_block);
-                    // crate::early_println!("[ext2] DEBUG: Allocated new indirect block {} (defer write)", indirect_block);
                     indirect_blocks_cache.insert(indirect_block, vec![0u8; self.block_size as usize]);
                 }
                 
@@ -2930,7 +2973,7 @@ impl Ext2FileSystem {
                     let offset = index as usize * 4;
                     let block_bytes = block_number.to_le_bytes();
                     indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
-                    batched_writes += 1;
+                    _batched_writes += 1;
                 }
             } else if logical_block < 12 + blocks_per_indirect as u64 + blocks_per_indirect as u64 * blocks_per_indirect as u64 {
                 // Double indirect blocks - OPTIMIZE THIS TOO!
@@ -2954,17 +2997,19 @@ impl Ext2FileSystem {
                 
                 // Ensure double indirect block exists
                 if inode.block[13] == 0 {
-                    let double_indirect_block_u64 = self.allocate_block()?;
-                    if double_indirect_block_u64 > u32::MAX as u64 {
+                    let double_indirect_block = if indirect_block_index < allocated_indirect_blocks.len() {
+                        let block = allocated_indirect_blocks[indirect_block_index] as u32;
+                        indirect_block_index += 1;
+                        block
+                    } else {
                         return Err(FileSystemError::new(
-                            FileSystemErrorKind::InvalidData,
-                            "Double indirect block number too large for u32 cast"
+                            FileSystemErrorKind::NoSpace,
+                            "Not enough pre-allocated double indirect blocks"
                         ));
-                    }
-                    let double_indirect_block = double_indirect_block_u64 as u32;
+                    };
+                    
                     inode.block[13] = double_indirect_block;
                     new_indirect_blocks.push(double_indirect_block);
-                    // crate::early_println!("[ext2] DEBUG: Allocated new double indirect block {} (defer write)", double_indirect_block);
                     double_indirect_cache.insert(double_indirect_block, vec![0u8; self.block_size as usize]);
                 }
                 
@@ -2996,16 +3041,18 @@ impl Ext2FileSystem {
                 
                 // Allocate first level indirect block if needed
                 let first_indirect_block = if first_indirect_ptr == 0 {
-                    let new_block_u64 = self.allocate_block()?;
-                    if new_block_u64 > u32::MAX as u64 {
+                    let new_block = if indirect_block_index < allocated_indirect_blocks.len() {
+                        let block = allocated_indirect_blocks[indirect_block_index] as u32;
+                        indirect_block_index += 1;
+                        block
+                    } else {
                         return Err(FileSystemError::new(
-                            FileSystemErrorKind::InvalidData,
-                            "First-level indirect block number too large for u32 cast"
+                            FileSystemErrorKind::NoSpace,
+                            "Not enough pre-allocated first-level indirect blocks"
                         ));
-                    }
-                    let new_block = new_block_u64 as u32;
+                    };
+                    
                     new_indirect_blocks.push(new_block);
-                    // crate::early_println!("[ext2] DEBUG: Allocated new first-level indirect block {} (defer write)", new_block);
                     
                     // Update double indirect block in cache
                     if let Some(double_data) = double_indirect_cache.get_mut(&double_indirect_block) {
@@ -3037,7 +3084,7 @@ impl Ext2FileSystem {
                     let offset = second_indirect_index as usize * 4;
                     let block_bytes = block_number.to_le_bytes();
                     indirect_data[offset..offset + 4].copy_from_slice(&block_bytes);
-                    batched_writes += 1;
+                    _batched_writes += 1;
                 }
             } else {
                 // Triple indirect and beyond - fall back to individual calls
