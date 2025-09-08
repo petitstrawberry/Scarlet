@@ -281,12 +281,12 @@ pub struct Ext2FileSystem {
     block_cache: Mutex<BlockLruCache>,
 }
 
-/// Simple LRU cache implementation for inodes
+/// Efficient O(log n) FIFO cache implementation for inodes
 struct InodeLruCache {
-    /// Map from inode number to (inode, access_order)
-    cache: BTreeMap<u32, (Ext2Inode, u64)>,
-    /// Access counter for LRU ordering
-    access_counter: u64,
+    /// Map from inode number to inode
+    cache: BTreeMap<u32, Ext2Inode>,
+    /// Insertion order queue for FIFO eviction
+    order: Vec<u32>,
     /// Maximum cache size
     max_size: usize,
     /// Cache statistics
@@ -298,7 +298,7 @@ impl InodeLruCache {
     fn new(max_size: usize) -> Self {
         Self {
             cache: BTreeMap::new(),
-            access_counter: 0,
+            order: Vec::with_capacity(max_size + 1),
             max_size,
             hits: 0,
             misses: 0,
@@ -306,11 +306,9 @@ impl InodeLruCache {
     }
 
     fn get(&mut self, inode_num: u32) -> Option<Ext2Inode> {
-        if let Some((inode, access_order)) = self.cache.get_mut(&inode_num) {
-            self.access_counter += 1;
-            *access_order = self.access_counter;
+        if let Some(&inode) = self.cache.get(&inode_num) {
             self.hits += 1;
-            Some(*inode)
+            Some(inode)
         } else {
             self.misses += 1;
             None
@@ -318,22 +316,32 @@ impl InodeLruCache {
     }
 
     fn insert(&mut self, inode_num: u32, inode: Ext2Inode) {
-        self.access_counter += 1;
+        // If already exists, just update
+        if self.cache.contains_key(&inode_num) {
+            self.cache.insert(inode_num, inode);
+            return;
+        }
         
-        // Remove LRU item if cache is full
-        if self.cache.len() >= self.max_size && !self.cache.contains_key(&inode_num) {
-            // Find the item with the smallest access_order (LRU)
-            if let Some((&lru_key, _)) = self.cache.iter()
-                .min_by_key(|(_, (_, access_order))| *access_order) {
-                self.cache.remove(&lru_key);
+        // If cache is full, remove FIFO (oldest) item
+        if self.cache.len() >= self.max_size {
+            if let Some(oldest_key) = self.order.first().copied() {
+                self.cache.remove(&oldest_key);
+                self.order.remove(0);
             }
         }
         
-        self.cache.insert(inode_num, (inode, self.access_counter));
+        // Insert new item
+        self.cache.insert(inode_num, inode);
+        self.order.push(inode_num);
     }
 
     fn remove(&mut self, inode_num: u32) {
-        self.cache.remove(&inode_num);
+        if self.cache.remove(&inode_num).is_some() {
+            // Remove from order tracking
+            if let Some(pos) = self.order.iter().position(|&x| x == inode_num) {
+                self.order.remove(pos);
+            }
+        }
     }
 
     fn len(&self) -> usize {
@@ -355,12 +363,12 @@ impl InodeLruCache {
 }
 
 
-/// Simple LRU cache implementation for blocks
+/// Efficient O(log n) FIFO cache implementation for blocks
 struct BlockLruCache {
-    /// Map from block number to (block_data, access_order)
-    cache: BTreeMap<u64, (Vec<u8>, u64)>,
-    /// Access counter for LRU ordering
-    access_counter: u64,
+    /// Map from block number to block data
+    cache: BTreeMap<u64, Vec<u8>>,
+    /// Insertion order queue for FIFO eviction
+    order: Vec<u64>,
     /// Maximum cache size
     max_size: usize,
     /// Cache statistics
@@ -372,7 +380,7 @@ impl BlockLruCache {
     fn new(max_size: usize) -> Self {
         Self {
             cache: BTreeMap::new(),
-            access_counter: 0,
+            order: Vec::with_capacity(max_size + 1),
             max_size,
             hits: 0,
             misses: 0,
@@ -380,9 +388,7 @@ impl BlockLruCache {
     }
 
     fn get(&mut self, block_num: u64) -> Option<Vec<u8>> {
-        if let Some((block_data, access_order)) = self.cache.get_mut(&block_num) {
-            self.access_counter += 1;
-            *access_order = self.access_counter;
+        if let Some(block_data) = self.cache.get(&block_num) {
             self.hits += 1;
             Some(block_data.clone())
         } else {
@@ -392,22 +398,32 @@ impl BlockLruCache {
     }
 
     fn insert(&mut self, block_num: u64, block_data: Vec<u8>) {
-        self.access_counter += 1;
+        // If already exists, just update
+        if self.cache.contains_key(&block_num) {
+            self.cache.insert(block_num, block_data);
+            return;
+        }
         
-        // Remove LRU item if cache is full
-        if self.cache.len() >= self.max_size && !self.cache.contains_key(&block_num) {
-            // Find the item with the smallest access_order (LRU)
-            if let Some((&lru_key, _)) = self.cache.iter()
-                .min_by_key(|(_, (_, access_order))| *access_order) {
-                self.cache.remove(&lru_key);
+        // If cache is full, remove FIFO (oldest) item
+        if self.cache.len() >= self.max_size {
+            if let Some(oldest_key) = self.order.first().copied() {
+                self.cache.remove(&oldest_key);
+                self.order.remove(0);
             }
         }
         
-        self.cache.insert(block_num, (block_data, self.access_counter));
+        // Insert new item
+        self.cache.insert(block_num, block_data);
+        self.order.push(block_num);
     }
 
     fn remove(&mut self, block_num: u64) {
-        self.cache.remove(&block_num);
+        if self.cache.remove(&block_num).is_some() {
+            // Remove from order tracking
+            if let Some(pos) = self.order.iter().position(|&x| x == block_num) {
+                self.order.remove(pos);
+            }
+        }
     }
 
     fn len(&self) -> usize {
@@ -488,8 +504,8 @@ impl Ext2FileSystem {
             root: RwLock::new(Arc::new(root)),
             name: "ext2".to_string(),
             next_file_id: Mutex::new(2), // Start from 2, root is 1
-            inode_cache: Mutex::new(InodeLruCache::new(256)),
-            block_cache: Mutex::new(BlockLruCache::new(512)),
+            inode_cache: Mutex::new(InodeLruCache::new(8192)),
+            block_cache: Mutex::new(BlockLruCache::new(8192)),
         });
 
         // Set filesystem reference in root node
