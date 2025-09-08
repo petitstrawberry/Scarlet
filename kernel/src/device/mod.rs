@@ -88,6 +88,30 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps {
     fn as_network_device(&self) -> Option<&dyn network::NetworkDevice> {
         None
     }
+    
+    /// Cast Arc<Self> to Arc<dyn BlockDevice> if this device is a block device
+    /// This allows direct ownership of the block device for efficient I/O operations
+    fn into_block_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn block::BlockDevice>> {
+        None
+    }
+    
+    /// Cast Arc<Self> to Arc<dyn CharDevice> if this device is a character device
+    /// This allows direct ownership of the char device for efficient I/O operations
+    fn into_char_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn char::CharDevice>> {
+        None
+    }
+    
+    /// Cast Arc<Self> to Arc<dyn GraphicsDevice> if this device is a graphics device
+    /// This allows direct ownership of the graphics device for efficient operations
+    fn into_graphics_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn graphics::GraphicsDevice>> {
+        None
+    }
+    
+    /// Cast Arc<Self> to Arc<dyn NetworkDevice> if this device is a network device
+    /// This allows direct ownership of the network device for efficient operations
+    fn into_network_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn network::NetworkDevice>> {
+        None
+    }
 }
 
 pub struct GenericDevice {

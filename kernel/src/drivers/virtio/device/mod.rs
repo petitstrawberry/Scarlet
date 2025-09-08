@@ -1,11 +1,16 @@
 //! Virtio device driver interface module.
 //! 
 
-use core::result::Result;
+use core::{result::Result, sync::atomic::{AtomicUsize, Ordering}};
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{boxed::Box, format, sync::Arc, vec};
 
 use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::{block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice, network::virtio_net::VirtioNetDevice, virtio::queue}};
+
+// Static counters for device naming
+static BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static NET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register enum for Virtio devices
 /// 
@@ -707,19 +712,25 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     
     match device_type {
         VirtioDeviceType::Block => {
-            crate::early_println!("[Virtio] Detected Virtio Block Device at {:#x}", base_addr);
+            let id = BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let name = format!("vblk{}", id);
+            crate::early_println!("[Virtio] Detected Virtio Block Device at {:#x}, registering as {}", base_addr, name);
             let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new(base_addr));
-            DeviceManager::get_mut_manager().register_device(dev);
+            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Net => {
-            crate::early_println!("[Virtio] Detected Virtio Network Device at {:#x}", base_addr);
+            let id = NET_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let name = format!("veth{}", id);
+            crate::early_println!("[Virtio] Detected Virtio Network Device at {:#x}, registering as {}", base_addr, name);
             let dev: Arc<dyn Device> = Arc::new(VirtioNetDevice::new(base_addr));
-            DeviceManager::get_mut_manager().register_device(dev);
+            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::GPU => {
-            crate::early_println!("[Virtio] Detected Virtio GPU Device at {:#x}", base_addr);
+            let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let name = format!("vfb{}", id);
+            crate::early_println!("[Virtio] Detected Virtio GPU Device at {:#x}, registering as {}", base_addr, name);
             let dev: Arc<dyn Device> = Arc::new(VirtioGpuDevice::new(base_addr));
-            DeviceManager::get_mut_manager().register_device(dev);
+            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         _ => {
             // Unsupported device type

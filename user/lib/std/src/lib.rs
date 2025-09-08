@@ -80,6 +80,20 @@ pub mod ffi;
 pub mod env;
 pub mod handle;
 
+/// Debug/profiler utilities
+pub mod profiler {
+    use crate::syscall::{syscall0, Syscall};
+    
+    /// Dump profiler statistics from the kernel
+    /// 
+    /// This function calls the kernel's profiler dump system call to output
+    /// performance statistics collected during execution. Only available
+    /// when the kernel is built with profiler support.
+    pub fn dump_profiler_stats() {
+        syscall0(Syscall::ProfilerDump);
+    }
+}
+
 pub use core_exports::*;
 pub use alloc_exports::*;
 

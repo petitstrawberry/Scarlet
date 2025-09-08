@@ -80,6 +80,24 @@ use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap
 #[macro_use]
 mod macros;
 
+/// Debug/Profiler system call to dump profiler statistics
+#[cfg(feature = "profiler")]
+fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    crate::profiler::print_profiling_results();
+    0
+}
+
+/// Stub implementation when profiler feature is disabled
+#[cfg(not(feature = "profiler"))]
+fn sys_profiler_dump(_tf: &mut Trapframe) -> usize {
+    use crate::task::mytask;
+    tf.increment_pc_next(mytask().unwrap());
+    crate::println!("[Profiler] Not available (feature disabled)");
+    0
+}
+
 syscall_table! {
     Invalid = 0 => |_: &mut Trapframe| {
         0
@@ -151,4 +169,7 @@ syscall_table! {
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
     
     // === Task Event Operations ===
+    
+    // === Debug/Profiler Operations ===
+    ProfilerDump = 999 => sys_profiler_dump, // Dump profiler statistics (debug only)
 }

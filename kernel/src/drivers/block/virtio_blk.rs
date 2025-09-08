@@ -23,7 +23,7 @@
 //! Requests are processed through the VirtIO descriptor chain mechanism, with proper
 //! memory management using Box allocations to ensure data remains valid during transfers.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec::Vec, collections::VecDeque};
 use alloc::vec;
 use spin::{Mutex, RwLock};
 
@@ -107,19 +107,24 @@ pub struct VirtioBlockDevice {
     sector_size: RwLock<u32>,
     features: RwLock<u32>,
     read_only: RwLock<bool>,
-    request_queue: Mutex<Vec<Box<BlockIORequest>>>,
+    request_queue: Mutex<VecDeque<Box<BlockIORequest>>>,
 }
 
 impl VirtioBlockDevice {
     pub fn new(base_addr: usize) -> Self {
         let mut device = Self {
             base_addr,
-            virtqueues: Mutex::new([VirtQueue::new(8)]),
+            // Minimal but sufficient queue size based on real usage:
+            // - Average batch: 1.15 requests (85.2% are single requests)
+            // - Observed max: <5 requests per batch typically
+            // - Each request uses 3 descriptors (header + data + status)  
+            // 32 descriptors = ~10 concurrent requests (5x typical usage)
+            virtqueues: Mutex::new([VirtQueue::new(32)]),
             capacity: RwLock::new(0),
             sector_size: RwLock::new(512), // Default sector size
             features: RwLock::new(0),
             read_only: RwLock::new(false),
-            request_queue: Mutex::new(Vec::new()),
+            request_queue: Mutex::new(VecDeque::new()),
         };
         
         // Initialize the device
@@ -155,6 +160,7 @@ impl VirtioBlockDevice {
     }
     
     fn process_request(&self, req: &mut BlockIORequest) -> Result<(), &'static str> {
+        crate::profile_scope!("virtio_blk::process_request");
         // Allocate memory for request header, data, and status
         let header = Box::new(VirtioBlkReqHeader {
             type_: match req.request_type {
@@ -305,6 +311,222 @@ impl VirtioBlockDevice {
         
         result
     }
+
+    /// Process multiple requests in a true batch manner
+    /// All requests are submitted first, then we wait for all completions
+    fn process_requests_batch(&self, requests: &mut [Box<BlockIORequest>]) -> Vec<Result<(), &'static str>> {
+        crate::profile_scope!("virtio_blk::process_requests_batch");
+        
+        if requests.is_empty() {
+            return Vec::new();
+        }
+
+        // Safety check: Limit batch size to prevent virtqueue overflow
+        // Based on real usage: avg 1.15 requests/batch, 85.2% single requests
+        // Each request uses 3 descriptors, queue has 32 descriptors
+        // Conservative limit: 10 requests = 30 descriptors (2 descriptors reserved)
+        const MAX_BATCH_SIZE: usize = 10;
+        
+        if requests.len() > MAX_BATCH_SIZE {
+            crate::early_println!("[virtio_blk] WARNING: Batch size {} exceeds safe limit {}, processing in chunks", 
+                requests.len(), MAX_BATCH_SIZE);
+                
+            // Process in chunks
+            let mut all_results = Vec::with_capacity(requests.len());
+            let chunks = requests.chunks_mut(MAX_BATCH_SIZE);
+            
+            for chunk in chunks {
+                let mut chunk_results = self.process_requests_batch(chunk);
+                all_results.append(&mut chunk_results);
+            }
+            
+            return all_results;
+        }
+
+        // Debug: Log batch size with read/write breakdown
+        let read_count = requests.iter().filter(|r| matches!(r.request_type, BlockIORequestType::Read)).count();
+        let write_count = requests.iter().filter(|r| matches!(r.request_type, BlockIORequestType::Write)).count();
+        
+   
+        #[cfg(test)]
+        {
+            // Add batch size tracking for debugging
+            static BATCH_SIZES: spin::Mutex<alloc::vec::Vec<usize>> = spin::Mutex::new(alloc::vec::Vec::new());
+            static CALL_COUNT: spin::Mutex<usize> = spin::Mutex::new(0);
+            let mut sizes = BATCH_SIZES.lock();
+            let mut count = CALL_COUNT.lock();
+            sizes.push(requests.len());
+            *count += 1;
+            
+            // Print statistics every 100 calls
+            if *count % 100 == 0 {
+                let total_requests: usize = sizes.iter().sum();
+                let avg_batch_size = total_requests as f64 / sizes.len() as f64;
+                let single_requests = sizes.iter().filter(|&&size| size == 1).count();
+                crate::early_println!("[virtio_blk] Batch stats: {} calls, avg_batch={:.2}, single_req={}/{} ({:.1}%)", 
+                    sizes.len(), avg_batch_size, single_requests, sizes.len(),
+                    (single_requests as f64 / sizes.len() as f64) * 100.0);
+            }
+        }
+        
+        let batch_size = requests.len();
+        let mut results = vec![Err("Not processed"); batch_size];
+        let mut request_data = Vec::new();
+        
+        // Lock the virtqueues for the entire batch
+        let mut virtqueues = self.virtqueues.lock();
+        
+        // First pass: Submit all requests
+        for (idx, req) in requests.iter_mut().enumerate() {
+            // Allocate memory for request header, data, and status
+            let header = Box::new(VirtioBlkReqHeader {
+                type_: match req.request_type {
+                    BlockIORequestType::Read => VIRTIO_BLK_T_IN,
+                    BlockIORequestType::Write => VIRTIO_BLK_T_OUT,
+                },
+                reserved: 0,
+                sector: req.sector as u64,
+            });
+            let data = vec![0u8; req.buffer.len()].into_boxed_slice();
+            let status = Box::new(0u8);
+            
+            let header_ptr = Box::into_raw(header);
+            let data_ptr = Box::into_raw(data) as *mut [u8];
+            let status_ptr = Box::into_raw(status);
+            
+            // Copy data for write requests
+            if let BlockIORequestType::Write = req.request_type {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        req.buffer.as_ptr(),
+                        data_ptr as *mut u8,
+                        req.buffer.len()
+                    );
+                }
+            }
+            
+            // Try to allocate descriptors
+            if let (Some(header_desc), Some(data_desc), Some(status_desc)) = (
+                virtqueues[0].alloc_desc(),
+                virtqueues[0].alloc_desc(),
+                virtqueues[0].alloc_desc(),
+            ) {
+                // Set up descriptors
+                virtqueues[0].desc[header_desc].addr = (header_ptr as usize) as u64;
+                virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
+                virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
+                virtqueues[0].desc[header_desc].next = data_desc as u16;
+                
+                virtqueues[0].desc[data_desc].addr = (data_ptr as *mut u8 as usize) as u64;
+                virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
+                
+                match req.request_type {
+                    BlockIORequestType::Read => {
+                        DescriptorFlag::Next.set(&mut virtqueues[0].desc[data_desc].flags);
+                        DescriptorFlag::Write.set(&mut virtqueues[0].desc[data_desc].flags);
+                    },
+                    BlockIORequestType::Write => {
+                        DescriptorFlag::Next.set(&mut virtqueues[0].desc[data_desc].flags);
+                    }
+                }
+                
+                virtqueues[0].desc[data_desc].next = status_desc as u16;
+                
+                virtqueues[0].desc[status_desc].addr = (status_ptr as usize) as u64;
+                virtqueues[0].desc[status_desc].len = 1;
+                virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
+                
+                // Submit the request
+                if virtqueues[0].push(header_desc).is_ok() {
+                    request_data.push((idx, header_desc, data_desc, status_desc, header_ptr, data_ptr, status_ptr));
+                } else {
+                    // Clean up on push failure
+                    virtqueues[0].free_desc(status_desc);
+                    virtqueues[0].free_desc(data_desc);
+                    virtqueues[0].free_desc(header_desc);
+                    unsafe {
+                        drop(Box::from_raw(header_ptr));
+                        drop(Box::from_raw(data_ptr));
+                        drop(Box::from_raw(status_ptr));
+                    }
+                    results[idx] = Err("Failed to submit request");
+                }
+            } else {
+                // Descriptor allocation failure - should be very rare with 256 queue size
+                crate::early_println!("[virtio_blk] ERROR: Failed to allocate descriptors for request {} (batch size: {})", 
+                    idx, batch_size);
+                    
+                // Clean up on descriptor allocation failure
+                unsafe {
+                    drop(Box::from_raw(header_ptr));
+                    drop(Box::from_raw(data_ptr));
+                    drop(Box::from_raw(status_ptr));
+                }
+                results[idx] = Err("Virtqueue descriptor allocation failed - queue may be full");
+            }
+        }
+        
+        // Notify the device once for all requests
+        if !request_data.is_empty() {
+            self.notify(0);
+        }
+        
+        // Second pass: Wait for all completions (true batch processing)
+        use alloc::collections::BTreeMap;
+        let mut pending_requests: BTreeMap<usize, (usize, usize, usize, *mut VirtioBlkReqHeader, *mut [u8], *mut u8)> = BTreeMap::new();
+        
+        // Map descriptor IDs to request data
+        for (req_idx, header_desc, data_desc, status_desc, header_ptr, data_ptr, status_ptr) in request_data {
+            pending_requests.insert(header_desc, (req_idx, data_desc, status_desc, header_ptr, data_ptr, status_ptr));
+        }
+        
+        // Process all completions until everything is done
+        while !pending_requests.is_empty() {
+            // Wait for something to complete
+            while virtqueues[0].is_busy() {}
+            
+            // Process all completed requests in this round
+            while let Some(desc_idx) = virtqueues[0].pop() {
+                if let Some((req_idx, data_desc, status_desc, header_ptr, data_ptr, status_ptr)) = pending_requests.remove(&desc_idx) {
+                    // Check status
+                    let status_val = unsafe { *status_ptr };
+                    results[req_idx] = match status_val {
+                        VIRTIO_BLK_S_OK => {
+                            // For read requests, copy data back to the buffer
+                            if let BlockIORequestType::Read = requests[req_idx].request_type {
+                                unsafe {
+                                    requests[req_idx].buffer.clear();
+                                    requests[req_idx].buffer.extend_from_slice(core::slice::from_raw_parts(
+                                        data_ptr as *const u8,
+                                        virtqueues[0].desc[data_desc].len as usize
+                                    ));
+                                }
+                            }
+                            Ok(())
+                        },
+                        VIRTIO_BLK_S_IOERR => Err("I/O error"),
+                        VIRTIO_BLK_S_UNSUPP => Err("Unsupported request"),
+                        _ => Err("Unknown error"),
+                    };
+                    
+                    // Clean up descriptors and memory for this completed request
+                    virtqueues[0].free_desc(status_desc);
+                    virtqueues[0].free_desc(data_desc);
+                    virtqueues[0].free_desc(desc_idx); // header_desc
+                    unsafe {
+                        drop(Box::from_raw(header_ptr));
+                        drop(Box::from_raw(data_ptr));
+                        drop(Box::from_raw(status_ptr));
+                    }
+                } else {
+                    // Unexpected descriptor - this shouldn't happen but handle gracefully
+                    crate::early_println!("[virtio-blk] Warning: Unexpected descriptor completion: {}", desc_idx);
+                }
+            }
+        }
+        
+        results
+    }
 }
 
 impl MemoryMappingOps for VirtioBlockDevice {
@@ -344,6 +566,10 @@ impl Device for VirtioBlockDevice {
     }
     
     fn as_block_device(&self) -> Option<&dyn crate::device::block::BlockDevice> {
+        Some(self)
+    }
+    
+    fn into_block_device(self: alloc::sync::Arc<Self>) -> Option<alloc::sync::Arc<dyn crate::device::block::BlockDevice>> {
         Some(self)
     }
 }
@@ -418,20 +644,32 @@ impl BlockDevice for VirtioBlockDevice {
     
     fn enqueue_request(&self, request: Box<BlockIORequest>) {
         // Enqueue the request
-        self.request_queue.lock().push(request);
+        self.request_queue.lock().push_back(request);
     }
     
     fn process_requests(&self) -> Vec<BlockIOResult> {
-        let mut results = Vec::new();
+        crate::profile_scope!("virtio_blk::process_requests");
         let mut queue = self.request_queue.lock();
-        while let Some(mut request) = queue.pop() {
-            drop(queue); // Release the lock before processing
-            let result = self.process_request(&mut *request);
-            results.push(BlockIOResult { request, result });
-            queue = self.request_queue.lock(); // Reacquire the lock
+        
+        // Collect all requests first
+        let mut requests = Vec::new();
+        while let Some(request) = queue.pop_front() {
+            requests.push(request);
+        }
+        drop(queue); // Release the lock early
+        
+        if requests.is_empty() {
+            return Vec::new();
         }
         
-        results
+        // Process all requests in true batch
+        let batch_results = self.process_requests_batch(&mut requests);
+        
+        // Convert results back to the expected format
+        requests.into_iter()
+            .zip(batch_results.into_iter())
+            .map(|(request, result)| BlockIOResult { request, result })
+            .collect()
     }
 }
 

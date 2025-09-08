@@ -27,8 +27,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Create ext2 filesystem with 1024-byte blocks (required by our driver)
-mkfs.ext2 -F -L "SCARLET" -b 1024 "$IMAGE_PATH" >/dev/null 2>&1
+# Create ext2 filesystem with 4096-byte blocks (4KB blocks for testing variable block size)
+mkfs.ext2 -F -L "SCARLET" -b 4096 "$IMAGE_PATH" >/dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create ext2 filesystem"
     rm -f "$IMAGE_PATH"
@@ -59,8 +59,11 @@ echo "Small file" > "$TEMP_DIR/test_files/small.txt"
 # Create 1KB file
 head -c 1024 /dev/urandom | base64 > "$TEMP_DIR/test_files/1kb.txt"
 
-# Create 4KB file (one block)
+# Create 4KB file (one block with 4KB block size)
 head -c 4096 /dev/urandom | base64 > "$TEMP_DIR/test_files/4kb.txt"
+
+# Create 8KB file (two blocks with 4KB block size)
+head -c 8192 /dev/urandom | base64 > "$TEMP_DIR/test_files/8kb.txt"
 
 # Create files in subdirectories
 echo "Document content" > "$TEMP_DIR/documents/doc1.txt"
@@ -104,6 +107,7 @@ write $TEMP_DIR/test_files/numbers.txt numbers.txt
 write $TEMP_DIR/test_files/small.txt small.txt
 write $TEMP_DIR/test_files/1kb.txt 1kb.txt
 write $TEMP_DIR/test_files/4kb.txt 4kb.txt
+write $TEMP_DIR/test_files/8kb.txt 8kb.txt
 cd /documents
 write $TEMP_DIR/documents/doc1.txt doc1.txt
 cd /bin

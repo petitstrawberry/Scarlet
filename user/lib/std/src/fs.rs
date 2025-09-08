@@ -866,6 +866,88 @@ pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
     }
 }
 
+/// Remove a file
+/// 
+/// This function removes a file at the specified path.
+/// 
+/// # Arguments
+/// * `path` - Path to the file to remove
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs::remove_file;
+/// 
+/// remove_file("old_file.txt")?;
+/// ```
+/// 
+/// # Errors
+/// 
+/// Returns `Err` if the remove operation fails, such as:
+/// - File not found
+/// - Permission denied
+/// - Filesystem is read-only
+pub fn remove_file<P: AsRef<str>>(path: P) -> Result<()> {
+    use crate::syscall::{syscall1, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let path_c = str_to_cstr_bytes(path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let result = syscall1(
+        Syscall::VfsRemove,
+        path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "remove file failed"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove a directory
+/// 
+/// This function removes a directory at the specified path.
+/// The directory must be empty to be removed successfully.
+/// 
+/// # Arguments
+/// * `path` - Path to the directory to remove
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs::remove_directory;
+/// 
+/// remove_directory("empty_dir")?;
+/// ```
+/// 
+/// # Errors
+/// 
+/// Returns `Err` if the remove operation fails, such as:
+/// - Directory not found
+/// - Directory not empty
+/// - Permission denied
+/// - Filesystem is read-only
+pub fn remove_directory<P: AsRef<str>>(path: P) -> Result<()> {
+    use crate::syscall::{syscall1, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let path_c = str_to_cstr_bytes(path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let result = syscall1(
+        Syscall::VfsRemove,
+        path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "remove directory failed"))
+    } else {
+        Ok(())
+    }
+}
+
 /// Raw Directory entry structure (must match kernel definition)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
