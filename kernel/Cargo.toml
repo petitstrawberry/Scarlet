@@ -15,5 +15,5 @@ hashbrown = "0.16.0"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"], optional = true }
 
 [features]
-default = ["profiler"]
+default = []
 profiler = ["dep:lazy_static"]

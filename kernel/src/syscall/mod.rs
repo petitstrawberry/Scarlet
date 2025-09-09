@@ -91,7 +91,7 @@ fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
 
 /// Stub implementation when profiler feature is disabled
 #[cfg(not(feature = "profiler"))]
-fn sys_profiler_dump(_tf: &mut Trapframe) -> usize {
+fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
     tf.increment_pc_next(mytask().unwrap());
     crate::println!("[Profiler] Not available (feature disabled)");
