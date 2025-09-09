@@ -11,6 +11,8 @@
 //! - **overlayfs**: Union/overlay filesystem combining multiple layers
 //! - **initramfs**: Helper module for mounting initramfs during boot
 //! - **devfs**: Device filesystem that automatically exposes all registered devices
+//! - **fat32**: FAT32 filesystem driver for block devices
+//! - **ext2**: ext2 filesystem driver for block devices
 //!
 //! ## Adding New Drivers
 //!
@@ -31,3 +33,5 @@ pub mod cpiofs;
 pub mod tmpfs;
 pub mod initramfs;
 pub mod devfs;
+pub mod fat32;
+pub mod ext2;

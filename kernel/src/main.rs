@@ -245,6 +245,7 @@ pub mod fs;
 pub mod object;
 pub mod ipc;
 pub mod executor;
+pub mod profiler;
 
 #[cfg(test)]
 pub mod test;
@@ -265,7 +266,6 @@ use timer::get_kernel_timer;
 use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
 use crate::{device::graphics::manager::GraphicsManager, fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
 use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
-
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -345,9 +345,6 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
 
-    #[cfg(test)]
-    test_main();
-
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
@@ -378,6 +375,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     }
     
     fence(Ordering::SeqCst); // Ensure graphics devices are discovered before proceeding
+
+    #[cfg(test)]
+    test_main();
     
     /* Initcalls */
     call_initcalls();
@@ -452,5 +452,6 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
+
     loop {}
 }

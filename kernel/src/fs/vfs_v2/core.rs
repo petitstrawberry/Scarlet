@@ -262,6 +262,9 @@ pub trait FileSystemOperations: Send + Sync {
         false
     }
 
+    /// Access to Any trait for downcasting
+    fn as_any(&self) -> &dyn Any;
+
     /// Create a hard link to an existing file
     /// 
     /// This method creates a hard link from `link_name` in `link_parent` to the existing

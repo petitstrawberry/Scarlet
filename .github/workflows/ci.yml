@@ -45,4 +45,4 @@ jobs:
       
     - name: Test scarlet kernel
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test
-      timeout-minutes: 1
+      timeout-minutes: 5
