@@ -148,14 +148,17 @@ impl Ext2Superblock {
             ));
         }
 
-        // Use heap allocation to avoid stack overflow
-        // Create data on heap and transmute directly without going through stack
-        let aligned_data = data[..1024].to_vec().into_boxed_slice();
+        // Safe approach: create zeroed superblock on heap, then copy data
+        let mut superblock = Box::new(unsafe { core::mem::zeroed::<Self>() });
         
-        let superblock = unsafe {
-            // Directly convert Box<[u8]> to Box<Self> without stack copy
-            Box::from_raw(Box::into_raw(aligned_data) as *mut Self)
-        };
+        // Copy data safely
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                superblock.as_mut() as *mut Self as *mut u8,
+                core::mem::size_of::<Self>().min(1024)
+            );
+        }
 
         // Validate magic number to ensure we have a valid ext2 superblock
         if u16::from_le(superblock.magic) != EXT2_SUPER_MAGIC {
