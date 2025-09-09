@@ -264,8 +264,8 @@ impl FileSystemParams for Ext2Params {
 pub struct Ext2FileSystem {
     /// Reference to the underlying block device
     block_device: Arc<dyn BlockDevice>,
-    /// Superblock information
-    superblock: Ext2Superblock,
+    /// Superblock information (heap allocated to avoid stack overflow)
+    superblock: Box<Ext2Superblock>,
     /// Block size in bytes
     block_size: u32,
     /// Root directory inode
@@ -710,8 +710,8 @@ impl Ext2FileSystem {
             ));
         };
 
-        // Parse superblock
-        let superblock = Ext2Superblock::from_bytes(&superblock_data)?;
+        // Parse superblock and move to heap to avoid stack overflow
+        let superblock = Ext2Superblock::from_bytes_boxed(&superblock_data)?;
         
         // Validate this is an ext2 filesystem
         if superblock.magic != EXT2_SUPER_MAGIC {
@@ -819,7 +819,7 @@ impl Ext2FileSystem {
         
         let bgd_data = if let Some(result) = results.first() {
             match &result.result {
-                Ok(_) => result.request.buffer.clone(),
+                Ok(_) => &result.request.buffer,
                 Err(_) => return Err(FileSystemError::new(
                     FileSystemErrorKind::IoError,
                     "Failed to read block group descriptor"
@@ -860,7 +860,7 @@ impl Ext2FileSystem {
         
         let inode_data = if let Some(result) = results.first() {
             match &result.result {
-                Ok(_) => result.request.buffer.clone(),
+                Ok(_) => &result.request.buffer,
                 Err(_) => return Err(FileSystemError::new(
                     FileSystemErrorKind::IoError,
                     "Failed to read inode"

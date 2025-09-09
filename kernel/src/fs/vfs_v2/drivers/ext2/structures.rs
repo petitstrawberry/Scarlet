@@ -4,7 +4,7 @@
 //! All structures are packed and follow the ext2 filesystem specification.
 
 use core::mem;
-use alloc::{vec::Vec, string::String, format, string::ToString};
+use alloc::{boxed::Box, vec::Vec, string::String, format, string::ToString};
 use crate::fs::{FileSystemError, FileSystemErrorKind};
 
 /// ext2 magic number
@@ -125,6 +125,36 @@ impl Ext2Superblock {
             let mut aligned_data = [0u8; 1024];
             aligned_data[..1024].copy_from_slice(&data[..1024]);
             *(aligned_data.as_ptr() as *const Self)
+        };
+
+        // Validate magic number to ensure we have a valid ext2 superblock
+        if u16::from_le(superblock.magic) != EXT2_SUPER_MAGIC {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid ext2 magic number"
+            ));
+        }
+
+        Ok(superblock)
+    }
+
+    /// Parse superblock from raw bytes and return as Box to avoid stack overflow
+    pub fn from_bytes_boxed(data: &[u8]) -> Result<Box<Self>, FileSystemError> {
+        // Standard ext2 superblock is 1024 bytes, but our struct might be slightly larger due to alignment
+        if data.len() < 1024 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                format!("Insufficient data for ext2 superblock: got {} bytes, need at least 1024 bytes", data.len())
+            ));
+        }
+
+        // Use heap allocation to avoid stack overflow
+        // Create data on heap and transmute directly without going through stack
+        let aligned_data = data[..1024].to_vec().into_boxed_slice();
+        
+        let superblock = unsafe {
+            // Directly convert Box<[u8]> to Box<Self> without stack copy
+            Box::from_raw(Box::into_raw(aligned_data) as *mut Self)
         };
 
         // Validate magic number to ensure we have a valid ext2 superblock
