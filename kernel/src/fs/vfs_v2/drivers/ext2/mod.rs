@@ -712,14 +712,6 @@ impl Ext2FileSystem {
 
         // Parse superblock and move to heap to avoid stack overflow
         let superblock = Ext2Superblock::from_bytes_boxed(&superblock_data)?;
-        
-        // Validate this is an ext2 filesystem
-        if superblock.magic != EXT2_SUPER_MAGIC {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Invalid ext2 magic number"
-            ));
-        }
 
         let block_size = superblock.get_block_size();
         let root_inode = EXT2_ROOT_INO;
