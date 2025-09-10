@@ -146,7 +146,7 @@ args = ["doc", "--no-deps", "--document-private-items"]
 description = "Generate user library documentation"
 cwd = "user/lib"
 command = "cargo"
-args = ["doc", "--no-deps"]
+args = ["make", "doc"]
 
 [tasks.build-initramfs]
 description = "Create initramfs archive (default: debug)"

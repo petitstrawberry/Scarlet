@@ -84,6 +84,8 @@
 //!
 //! - **TmpFS**: Memory-based temporary filesystem with optional size limits
 //! - **CpioFS**: Read-only CPIO archive filesystem for initramfs
+//! - **ext2**: Full ext2 filesystem implementation for persistent storage
+//! - **FAT32**: Complete FAT32 filesystem support with read/write operations
 //! - **OverlayFS**: Union/overlay filesystem combining multiple layers
 //! - **InitramFS**: Special handling for initial ramdisk mounting
 //!

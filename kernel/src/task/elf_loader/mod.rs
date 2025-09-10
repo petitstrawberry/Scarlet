@@ -1,21 +1,31 @@
 //! ELF Loading Module
 //!
 //! This module provides functionality for loading ELF (Executable and Linkable Format)
-//! executables into a task's memory space. It supports 64-bit ELF files and handles
-//! the parsing of ELF headers and program headers, as well as the mapping of loadable
-//! segments into memory.
+//! executables into a task's memory space. It supports 64-bit ELF files with full dynamic
+//! linking capabilities and handles the parsing of ELF headers and program headers, as well
+//! as the mapping of loadable segments into memory.
 //!
 //! # Components
 //!
 //! - `ElfHeader`: Represents the ELF file header which contains metadata about the file
 //! - `ProgramHeader`: Represents a program header which describes a segment in the ELF file
 //! - `LoadedSegment`: Represents a segment after it has been loaded into memory
+//! - Dynamic linking support for shared libraries and position-independent executables
 //! - Error types for handling various failure scenarios during ELF parsing and loading
 //!
 //! # Main Functions
 //!
 //! - `load_elf_into_task`: Loads an ELF file from a file object into a task's memory space
 //! - `map_elf_segment`: Maps an ELF segment into a task's virtual memory
+//! - Dynamic linker integration for shared library resolution
+//!
+//! # Dynamic Linking Support
+//!
+//! The module now includes comprehensive dynamic linking capabilities:
+//! - Dynamic symbol resolution
+//! - Shared library loading and linking
+//! - Position-independent executable (PIE) support
+//! - Runtime relocation handling
 //!
 //! # Constants
 //!
