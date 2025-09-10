@@ -432,7 +432,7 @@ impl AbiModule for LinuxRiscv64Abi {
 
                         // Build auxiliary vector based on the ELF loading result
                         use crate::task::elf_loader::build_auxiliary_vector;
-                        let auxv = build_auxiliary_vector(&load_result, load_result.interpreter_base);
+                        let auxv = build_auxiliary_vector(&load_result);
                         
                         // --- Calculate total size needed for structured data ---
                         let auxv_size = auxv.len() * 16; // Each auxv entry is 16 bytes
