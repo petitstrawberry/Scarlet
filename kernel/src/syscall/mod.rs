@@ -37,7 +37,7 @@
 //! - FileSeek (300), FileTruncate (301), FileMetadata (302)
 //! 
 //! ### VFS Operations (400-499)
-//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405)
+//! - VfsOpen (400), VfsRemove (401), VfsCreateFile (402), VfsCreateDirectory (403), VfsChangeDirectory (404), VfsTruncate (405), VfsCreateSymlink (406), VfsReadlink (407)
 //! 
 //! ### Filesystem Operations (500-599)
 //! - FsMount (500), FsUmount (501), FsPivotRoot (502)
@@ -69,7 +69,7 @@
 //! 
 
 use crate::arch::Trapframe;
-use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate};
+use crate::fs::vfs_v2::syscall::{sys_vfs_remove, sys_vfs_open, sys_vfs_create_file, sys_vfs_create_directory, sys_vfs_change_directory, sys_fs_mount, sys_fs_umount, sys_fs_pivot_root, sys_vfs_truncate, sys_vfs_create_symlink, sys_vfs_readlink};
 use crate::task::syscall::{sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid, sys_putchar, sys_sbrk, sys_sleep, sys_waitpid};
 use crate::ipc::syscall::{sys_pipe, sys_event_channel_create, sys_event_subscribe, sys_event_unsubscribe, sys_event_publish, sys_event_handler_register, sys_event_send_direct};
 use crate::object::handle::syscall::{sys_handle_query, sys_handle_set_role, sys_handle_close, sys_handle_duplicate, sys_handle_control};
@@ -146,6 +146,8 @@ syscall_table! {
     VfsCreateDirectory = 403 => sys_vfs_create_directory, // Create directories through VFS
     VfsChangeDirectory = 404 => sys_vfs_change_directory, // Change current working directory
     VfsTruncate = 405 => sys_vfs_truncate,     // Truncate file by path
+    VfsCreateSymlink = 406 => sys_vfs_create_symlink, // Create symbolic links through VFS
+    VfsReadlink = 407 => sys_vfs_readlink,     // Read symbolic link target through VFS
     
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

@@ -209,6 +209,9 @@ fn copy_dir(src: &str, dest: &str) -> bool {
                 } else if entry.is_file() {
                     // Copy file
                     copy_file(&src_path, &dest_path);
+                } else if entry.is_symlink() {
+                    // Copy symbolic link
+                    copy_symlink(&src_path, &dest_path);
                 } else {
                     println!("init: Skipping special file: {}", src_path);
                 }
@@ -274,6 +277,33 @@ fn copy_file(src: &str, dest: &str) -> bool {
         }
         Err(_) => {
             println!("init: Failed to open source file: {}", src);
+            false
+        }
+    }
+}
+
+fn copy_symlink(src: &str, dest: &str) -> bool {
+    use std::fs::{read_link, create_symlink};
+    
+    println!("init: Copying symlink from {} to {}", src, dest);
+    
+    // Read the target of the source symlink
+    match read_link(src) {
+        Ok(target) => {
+            // Create a new symlink at the destination pointing to the same target
+            match create_symlink(dest, &target) {
+                Ok(_) => {
+                    println!("init: Successfully copied symlink {} -> {} (target: {})", src, dest, target);
+                    true
+                }
+                Err(e) => {
+                    println!("init: Failed to create symlink {}: {}", dest, e);
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            println!("init: Failed to read symlink target {}: {}", src, e);
             false
         }
     }

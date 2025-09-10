@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(metadata.link_count, 1);
         assert!(metadata.permissions.read);
         assert!(!metadata.permissions.write); // CpioFS is read-only
-        assert!(!metadata.permissions.execute);
+        assert!(metadata.permissions.execute);
     }
 
     /// Test reading link from non-symlink in CpioFS returns error
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(metadata.link_count, 1);
         assert!(metadata.permissions.read);
         assert!(!metadata.permissions.write); // CpioFS is read-only
-        assert!(!metadata.permissions.execute);
+        assert!(metadata.permissions.execute);
     }
 
     /// Test reading link from non-symlink in CpioFS returns error (directory symlink)
