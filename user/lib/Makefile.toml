@@ -36,3 +36,10 @@ script = [
     "cd std && cargo test",
     "cd ../framebuffer && cargo test"
 ]
+
+[tasks.doc]
+description = "Generate documentation for all user libraries"
+script = [
+    "cd std && cargo doc --no-deps",
+    "cd ../framebuffer && cargo doc --no-deps"
+]
