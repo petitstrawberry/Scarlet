@@ -142,16 +142,8 @@ impl AbiModule for ScarletAbi {
                                 // Dynamic linking - setup auxiliary vector and jump to interpreter
                                 crate::println!("Scarlet ABI: Using dynamic linker at {}", interpreter_path);
                                 
-                                // Calculate interpreter base address from entry point
-                                let interpreter_base = if let Some(base) = elf_result.base_address {
-                                    // For PIE executables, we need the interpreter base
-                                    Some(elf_result.entry_point - base) // This calculation might need adjustment
-                                } else {
-                                    None
-                                };
-                                
                                 // Build auxiliary vector for dynamic linking
-                                let auxv = build_auxiliary_vector(&elf_result, interpreter_base);
+                                let auxv = build_auxiliary_vector(&elf_result);
                                 
                                 // Setup auxiliary vector on stack
                                 match setup_auxiliary_vector_on_stack(task, &auxv) {

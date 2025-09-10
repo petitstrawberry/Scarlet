@@ -91,31 +91,6 @@ impl Default for LoadStrategy {
     }
 }
 
-/// Choose base address for ELF loading based on type and target
-fn choose_base_address(elf_type: u16, target: LoadTarget) -> u64 {
-    match (elf_type, target) {
-        // ET_EXEC: Use absolute addresses from ELF file (no base offset)
-        (ET_EXEC, _) => 0,
-        
-        // ET_DYN: Choose appropriate base address for relocation
-        (ET_DYN, LoadTarget::MainProgram) => {
-            // PIE main program: low memory area
-            0x10000  // 64KB - avoid null pointer region
-        },
-        (ET_DYN, LoadTarget::Interpreter) => {
-            // Dynamic linker: high memory area to avoid conflicts
-            0x40000000  // 1GB - separate from main program space
-        },
-        (ET_DYN, LoadTarget::SharedLib) => {
-            // Shared libraries: medium memory area
-            0x50000000  // 1.25GB - between interpreter and heap
-        },
-        
-        // Unknown type: fallback to main program strategy
-        _ => 0x10000,
-    }
-}
-
 /// Execution mode determined by ELF analysis
 #[derive(Debug, Clone)]
 pub enum ExecutionMode {
@@ -568,11 +543,22 @@ pub fn analyze_and_load_elf_with_strategy(
             let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
             let entry_point = load_elf_into_task_static(&header, file_obj, task, strategy)?;
             
-            // For static executables, program headers are still available for debugging/profiling
-            let phdr_info = ProgramHeadersInfo {
-                phdr_addr: base_address + header.e_phoff,
-                phdr_size: header.e_phentsize as u64,
-                phdr_count: header.e_phnum as u64,
+            // For static executables, load program headers into memory if needed
+            let phdr_info = if needs_relocation {
+                // PIE static executable - program headers are loaded with the executable
+                ProgramHeadersInfo {
+                    phdr_addr: base_address + header.e_phoff,
+                    phdr_size: header.e_phentsize as u64,
+                    phdr_count: header.e_phnum as u64,
+                }
+            } else {
+                // Traditional static executable - load program headers into memory
+                let phdr_mem_addr = load_program_headers_into_memory(&header, file_obj, task)?;
+                ProgramHeadersInfo {
+                    phdr_addr: phdr_mem_addr,
+                    phdr_size: header.e_phentsize as u64,
+                    phdr_count: header.e_phnum as u64,
+                }
             };
             
             Ok(LoadElfResult {
@@ -899,6 +885,80 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
     Ok(final_entry_point)
 }
 
+/// Load program headers into task memory for static executables
+/// 
+/// This function allocates memory space for program headers and copies them
+/// from the ELF file, returning the virtual address where they are loaded.
+/// This is needed for static executables where program headers are not
+/// automatically loaded as part of any segment.
+/// 
+/// # Arguments
+/// 
+/// * `header`: The parsed ELF header containing program header information
+/// * `file_obj`: The file object to read program header data from
+/// * `task`: The task to load program headers into
+/// 
+/// # Returns
+/// 
+/// * `Result<u64, ElfLoaderError>`: Virtual address where program headers are loaded
+/// 
+fn load_program_headers_into_memory(
+    header: &ElfHeader,
+    file_obj: &dyn FileObject,
+    task: &mut Task,
+) -> Result<u64, ElfLoaderError> {
+    // Calculate total size of program headers
+    let phdr_table_size = (header.e_phentsize as u64) * (header.e_phnum as u64);
+    
+    if phdr_table_size == 0 {
+        return Err(ElfLoaderError {
+            message: "No program headers to load".to_string(),
+        });
+    }
+    
+    // Find a suitable virtual address for program headers
+    // Place them after the highest loaded segment to avoid conflicts
+    // For simplicity, use a fixed address in the upper memory region
+    let phdr_vaddr = 0x70000000u64; // 1.75GB - safe region for program headers
+    
+    // Calculate page-aligned size
+    let page_aligned_size = ((phdr_table_size as usize) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    
+    // Map memory for program headers (read-only for security)
+    map_elf_segment(task, phdr_vaddr as usize, page_aligned_size, PAGE_SIZE, PF_R).map_err(|e| ElfLoaderError {
+        message: format!("Failed to map memory for program headers: {}", e),
+    })?;
+    
+    // Read program headers from file
+    file_obj.seek(SeekFrom::Start(header.e_phoff)).map_err(|e| ElfLoaderError {
+        message: format!("Failed to seek to program headers: {:?}", e),
+    })?;
+    
+    let mut phdr_data = vec![0u8; phdr_table_size as usize];
+    file_obj.read(&mut phdr_data).map_err(|e| ElfLoaderError {
+        message: format!("Failed to read program headers: {:?}", e),
+    })?;
+    
+    // Copy program headers to task memory
+    match task.vm_manager.translate_vaddr(phdr_vaddr as usize) {
+        Some(paddr) => {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    phdr_data.as_ptr(),
+                    paddr as *mut u8,
+                    phdr_table_size as usize,
+                );
+            }
+        },
+        None => {
+            return Err(ElfLoaderError {
+                message: format!("Failed to translate program headers virtual address {:#x}", phdr_vaddr),
+            });
+        }
+    }    
+    Ok(phdr_vaddr)
+}
+
 fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, flags: u32) -> Result<(), &'static str> {
     // Ensure alignment is greater than zero
     if align == 0 {
@@ -987,7 +1047,6 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
 /// Build auxiliary vector for dynamic linking
 pub fn build_auxiliary_vector(
     load_result: &LoadElfResult,
-    interpreter_base: Option<u64>,
 ) -> alloc::vec::Vec<AuxVec> {
     use crate::environment::PAGE_SIZE;
     
