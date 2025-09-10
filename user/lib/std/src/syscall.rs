@@ -57,6 +57,9 @@ pub enum Syscall {
     // === Memory Mapping Operations ===
     MemoryMap = 700,        // Memory map operation (mmap)
     MemoryUnmap = 701,      // Memory unmap operation (munmap)
+    
+    // === Debug/Profiler Operations ===
+    ProfilerDump = 999,     // Dump profiler statistics (debug only)
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

@@ -1,0 +1,758 @@
+//! ext2 VFS Node Implementation
+//!
+//! This module implements the VFS node interface for ext2 filesystem nodes,
+//! providing file and directory objects that integrate with the VFS v2 architecture.
+
+use alloc::{sync::{Arc, Weak}, string::String, vec::Vec, vec, boxed::Box};
+use spin::{RwLock, Mutex};
+use core::{any::Any, fmt::Debug};
+
+use crate::{
+    fs::{
+        FileObject, FileSystemError, FileSystemErrorKind, FileType, SeekFrom,
+        FileMetadata, FilePermission
+    },
+    object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError}
+};
+
+use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations};
+use super::{Ext2FileSystem, structures::{Ext2Inode, EXT2_S_IFMT, EXT2_S_IFREG, EXT2_S_IFDIR}};
+
+/// ext2 VFS Node
+///
+/// Represents a file or directory in the ext2 filesystem. This node
+/// implements the VfsNode trait and provides access to ext2-specific
+/// file operations.
+#[derive(Debug)]
+pub struct Ext2Node {
+    /// Inode number in the ext2 filesystem
+    inode_number: u32,
+    /// File type (directory, regular file, etc.)
+    file_type: FileType,
+    /// Unique file ID for VFS
+    file_id: u64,
+    /// Weak reference to the filesystem
+    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+}
+
+impl Ext2Node {
+    /// Create a new ext2 node
+    pub fn new(inode_number: u32, file_type: FileType, file_id: u64) -> Self {
+        Self {
+            inode_number,
+            file_type,
+            file_id,
+            filesystem: RwLock::new(None),
+        }
+    }
+
+    /// Get the inode number
+    pub fn inode_number(&self) -> u32 {
+        self.inode_number
+    }
+
+    /// Set the filesystem reference
+    pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
+        *self.filesystem.write() = Some(fs);
+    }
+
+    /// Get the filesystem reference
+    pub fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
+        self.filesystem.read().clone()
+    }
+}
+
+impl VfsNode for Ext2Node {
+    fn id(&self) -> u64 {
+        self.file_id
+    }
+
+    fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
+        self.filesystem.read().clone()
+    }
+
+    fn file_type(&self) -> Result<FileType, FileSystemError> {
+        Ok(self.file_type.clone())
+    }
+
+    fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
+        crate::profile_scope!("ext2::node::metadata");
+        
+        // Read the actual inode to get real metadata
+        let filesystem = self.filesystem()
+            .and_then(|weak_fs| weak_fs.upgrade())
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem not available"
+            ))?;
+        
+        let ext2_fs = filesystem.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid filesystem type"
+            ))?;
+        
+        let inode = ext2_fs.read_inode(self.inode_number)?;
+        
+        // Convert inode mode to permissions
+        let mode = inode.get_mode();
+        let permissions = FilePermission {
+            read: (mode & 0o444) != 0,
+            write: (mode & 0o222) != 0,
+            execute: (mode & 0o111) != 0,
+        };
+        
+        Ok(FileMetadata {
+            file_type: self.file_type.clone(),
+            size: inode.get_size() as usize,
+            permissions,
+            created_time: inode.get_ctime() as u64,
+            modified_time: inode.get_mtime() as u64,
+            accessed_time: 0,
+            file_id: self.file_id,
+            link_count: 1,
+        })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        // Check if this is actually a symbolic link
+        if !matches!(self.file_type, FileType::SymbolicLink(_)) {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link"
+            ));
+        }
+
+        // Get filesystem reference
+        let filesystem = self.filesystem()
+            .and_then(|weak_fs| weak_fs.upgrade())
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem not available"
+            ))?;
+        
+        let ext2_fs = filesystem.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Invalid filesystem type"
+            ))?;
+        
+        // Read the inode to get symlink data
+        let inode = ext2_fs.read_inode(self.inode_number)?;
+        let size = inode.get_size() as usize;
+        
+        if size <= 60 {
+            // Fast symlink: target path is stored in inode.block array
+            let inode_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &inode as *const Ext2Inode as *const u8,
+                    core::mem::size_of::<Ext2Inode>()
+                )
+            };
+            // Block array starts at offset 40 in the inode structure
+            let block_start_offset = 40;
+            let block_bytes = &inode_bytes[block_start_offset..block_start_offset + 60];
+            let target_bytes = &block_bytes[..size];
+            
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid UTF-8 in symlink target"
+            ))
+        } else {
+            // Slow symlink: target path is stored in data blocks
+            let first_block = u32::from_le(inode.block[0]);
+            if first_block == 0 {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Symlink has no data block"
+                ));
+            }
+            
+            // Read the block containing the target path
+            let block_sector = ext2_fs.block_to_sector(first_block as u64);
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: block_sector as usize,
+                sector_count: (ext2_fs.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; ext2_fs.block_size as usize],
+            });
+            
+            ext2_fs.block_device.enqueue_request(request);
+            let results = ext2_fs.block_device.process_requests();
+            
+            let block_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read symlink data block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from symlink data block read"
+                ));
+            };
+            
+            let target_bytes = &block_data[..size];
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid UTF-8 in symlink target"
+            ))
+        }
+    }
+}
+
+/// ext2 File Object
+///
+/// Handles file operations for regular files in the ext2 filesystem.
+#[derive(Debug)]
+pub struct Ext2FileObject {
+    /// Inode number of the file
+    inode_number: u32,
+    /// File ID
+    file_id: u64,
+    /// Current position in the file
+    position: Mutex<u64>,
+    /// Weak reference to the filesystem
+    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    /// Cached file content in memory (lazily loaded)
+    cached_content: RwLock<Option<Vec<u8>>>,
+    /// Whether the cached content has been modified
+    is_dirty: RwLock<bool>,
+}
+
+impl Ext2FileObject {
+    /// Create a new ext2 file object
+    pub fn new(inode_number: u32, file_id: u64) -> Self {
+        Self {
+            inode_number,
+            file_id,
+            position: Mutex::new(0),
+            filesystem: RwLock::new(None),
+            cached_content: RwLock::new(None),
+            is_dirty: RwLock::new(false),
+        }
+    }
+
+    /// Set the filesystem reference
+    pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
+        *self.filesystem.write() = Some(fs);
+    }
+
+    /// Get the file ID
+    pub fn file_id(&self) -> u64 {
+        self.file_id
+    }
+
+    /// Load file content from disk into cache if not already loaded
+    fn ensure_content_loaded(&self) -> Result<(), StreamError> {
+        crate::profile_scope!("ext2::node::ensure_content_loaded");
+        
+        let mut cached = self.cached_content.write();
+        
+        // If already loaded, nothing to do
+        if cached.is_some() {
+            return Ok(());
+        }
+        
+        // Get filesystem reference
+        let fs = self.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        
+        // Downcast to Ext2FileSystem
+        let ext2_fs = fs.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        // Read inode to get file size
+        let inode = ext2_fs.read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?;
+        
+        // Read entire file content from disk
+        let content = if inode.size > 0 {
+            ext2_fs.read_file_content(self.inode_number, inode.size as usize)
+                .map_err(|_| StreamError::IoError)?
+        } else {
+            Vec::new()
+        };
+        
+        *cached = Some(content);
+        Ok(())
+    }
+
+    /// Sync cached content to disk
+    fn sync_to_disk(&self) -> Result<(), StreamError> {
+        crate::profile_scope!("ext2::node::sync_to_disk");
+        
+        let is_dirty = *self.is_dirty.read();
+        if !is_dirty {
+            return Ok(());
+        }
+
+        #[cfg(test)]
+        crate::early_println!("[ext2] sync_to_disk: Starting sync for inode {}", self.inode_number);
+
+        // Get filesystem reference
+        let fs = self.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        
+        // Downcast to Ext2FileSystem
+        let ext2_fs = fs.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        // Get cached content
+        let cached = self.cached_content.read();
+        let content = cached.as_ref().ok_or(StreamError::IoError)?;
+        
+        #[cfg(test)]
+        crate::early_println!("[ext2] sync_to_disk: Writing {} bytes to inode {}", content.len(), self.inode_number);
+        
+        // Write content to disk
+        ext2_fs.write_file_content(self.inode_number, content)
+            .map_err(|_e| {
+                #[cfg(test)]
+                crate::early_println!("[ext2] sync_to_disk: Error writing to disk: {:?}", _e);
+                StreamError::IoError
+            })?;
+        
+        // Mark as clean
+        *self.is_dirty.write() = false;
+        #[cfg(test)]
+        crate::early_println!("[ext2] sync_to_disk: Successfully synced inode {}", self.inode_number);
+        Ok(())
+    }
+}
+
+impl StreamOps for Ext2FileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        // Ensure file content is loaded into cache
+        self.ensure_content_loaded()?;
+        
+        let content = self.cached_content.read();
+        let content = content.as_ref().ok_or(StreamError::IoError)?;
+        
+        let mut position_guard = self.position.lock();
+        let current_pos = *position_guard as usize;
+        
+        // If position is beyond file size, return 0 bytes read
+        if current_pos >= content.len() {
+            return Ok(0);
+        }
+        
+        // Calculate how many bytes to read
+        let bytes_available = content.len() - current_pos;
+        let bytes_to_read = core::cmp::min(buffer.len(), bytes_available);
+        
+        // Copy data from cached content to buffer
+        buffer[..bytes_to_read].copy_from_slice(&content[current_pos..current_pos + bytes_to_read]);
+        
+        // Update position
+        *position_guard += bytes_to_read as u64;
+        
+        Ok(bytes_to_read)
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        // Ensure content is loaded into cache
+        self.ensure_content_loaded()?;
+        
+        let pos = *self.position.lock() as usize;
+        let mut cached = self.cached_content.write();
+        let content = cached.as_mut().ok_or(StreamError::IoError)?;
+        
+        // Calculate new size
+        let new_size = core::cmp::max(content.len(), pos + buffer.len());
+        
+        // Extend content if needed
+        if new_size > content.len() {
+            content.resize(new_size, 0);
+        }
+        
+        // Write new data to cached content
+        content[pos..pos + buffer.len()].copy_from_slice(buffer);
+        
+        // Mark as dirty
+        *self.is_dirty.write() = true;
+        
+        // Update position
+        {
+            let mut position = self.position.lock();
+            *position += buffer.len() as u64;
+        }
+        
+        Ok(buffer.len())
+    }
+}
+
+impl ControlOps for Ext2FileObject {
+}
+
+impl MemoryMappingOps for Ext2FileObject {
+    fn get_mapping_info(&self, offset: usize, length: usize) -> Result<(usize, usize, bool), &'static str> {
+        // Ensure content is loaded into cache
+        self.ensure_content_loaded().map_err(|_| "Failed to load file content")?;
+        
+        let cached = self.cached_content.read();
+        let content = cached.as_ref().ok_or("No cached content available")?;
+        
+        // Check bounds
+        if offset >= content.len() {
+            return Err("Offset beyond file size");
+        }
+        
+        let available_length = content.len() - offset;
+        if length > available_length {
+            return Err("Length extends beyond file size");
+        }
+        
+        // Return the virtual address of the cached content as the physical address
+        // This is a simplified implementation - in a real OS, this would involve
+        // proper virtual-to-physical address translation
+        let content_ptr = content.as_ptr() as usize;
+        let paddr = content_ptr + offset;
+        
+        // Return read/write permissions (0x3 = read | write)
+        // Not shared between processes (false)
+        Ok((paddr, 0x3, false))
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // For a simple implementation, we don't need to track mappings
+        // In a more complex system, we might track active mappings here
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // For a simple implementation, we don't need to track unmappings
+        // In a more complex system, we might want to sync dirty pages here
+        
+        // Optionally sync to disk when unmapped
+        let _ = self.sync_to_disk();
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        true
+    }
+}
+
+impl FileObject for Ext2FileObject {
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        // Get filesystem reference
+        let fs = self.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        
+        // Downcast to Ext2FileSystem
+        let ext2_fs = fs.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        // Read inode metadata
+        let inode = ext2_fs.read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?;
+        
+        // Convert inode permissions to FilePermission
+        let permissions = FilePermission {
+            read: (inode.mode & 0o444) != 0,
+            write: (inode.mode & 0o222) != 0,
+            execute: (inode.mode & 0o111) != 0,
+        };
+        
+        // Determine file type from inode mode
+        let file_type = if (inode.mode & EXT2_S_IFMT) == EXT2_S_IFREG {
+            FileType::RegularFile
+        } else if (inode.mode & EXT2_S_IFMT) == EXT2_S_IFDIR {
+            FileType::Directory
+        } else {
+            FileType::RegularFile // Default fallback
+        };
+        
+        Ok(FileMetadata {
+            file_type,
+            size: inode.size as usize,
+            permissions,
+            created_time: inode.ctime as u64,
+            modified_time: inode.mtime as u64,
+            accessed_time: inode.atime as u64,
+            file_id: self.file_id,
+            link_count: inode.links_count as u32,
+        })
+    }
+
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        let mut pos = self.position.lock();
+        
+        match whence {
+            SeekFrom::Start(offset) => {
+                *pos = offset;
+                Ok(*pos)
+            },
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    *pos += offset as u64;
+                } else {
+                    let abs_offset = (-offset) as u64;
+                    if abs_offset > *pos {
+                        *pos = 0;
+                    } else {
+                        *pos -= abs_offset;
+                    }
+                }
+                Ok(*pos)
+            },
+            SeekFrom::End(_offset) => {
+                // TODO: Get actual file size from inode
+                Err(StreamError::IoError)
+            }
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// ext2 Directory Object
+///
+/// Handles directory operations for directories in the ext2 filesystem.
+#[derive(Debug)]
+pub struct Ext2DirectoryObject {
+    /// Inode number of the directory
+    inode_number: u32,
+    /// File ID
+    file_id: u64,
+    /// Current position in directory listing
+    position: Mutex<u64>,
+    /// Weak reference to the filesystem
+    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+}
+
+impl Ext2DirectoryObject {
+    /// Create a new ext2 directory object
+    pub fn new(inode_number: u32, file_id: u64) -> Self {
+        Self {
+            inode_number,
+            file_id,
+            position: Mutex::new(0),
+            filesystem: RwLock::new(None),
+        }
+    }
+
+    /// Set the filesystem reference
+    pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
+        *self.filesystem.write() = Some(fs);
+    }
+}
+
+impl StreamOps for Ext2DirectoryObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        // Get the filesystem reference
+        let filesystem = self.filesystem.read()
+            .as_ref()
+            .and_then(|weak_fs| weak_fs.upgrade())
+            .ok_or(StreamError::IoError)?;
+        
+        let ext2_fs = filesystem.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::IoError)?;
+        
+        // Read directory entries using the existing read_directory_entries method
+        let current_inode = match ext2_fs.read_inode(self.inode_number) {
+            Ok(inode) => inode,
+            Err(_) => return Ok(0), // Error reading inode
+        };
+        
+        let entries = match ext2_fs.read_directory_entries(&current_inode) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(0), // EOF or error
+        };
+        
+        // position is the entry index
+        let position = *self.position.lock() as usize;
+        
+        // Create a vector to store all entries including "." and ".."
+        let mut all_entries = Vec::new();
+        
+        // Add "." entry (current directory)
+        let current_inode = match ext2_fs.read_inode(self.inode_number) {
+            Ok(inode) => inode,
+            Err(_) => return Ok(0),
+        };
+        
+        all_entries.push(crate::fs::DirectoryEntryInternal {
+            name: String::from("."),
+            file_type: FileType::Directory,
+            size: current_inode.get_size() as usize,
+            file_id: self.file_id,
+            metadata: None,
+        });
+        
+        // Add ".." entry (parent directory) - simplified to point to current for now
+        all_entries.push(crate::fs::DirectoryEntryInternal {
+            name: String::from(".."),
+            file_type: FileType::Directory,
+            size: current_inode.get_size() as usize,
+            file_id: self.file_id,
+            metadata: None,
+        });
+        
+        // Add regular directory entries
+        let mut regular_entries = Vec::new();
+        for entry in entries {
+            let file_type = if entry.entry.inode != 0 {
+                match ext2_fs.read_inode(entry.entry.inode) {
+                    Ok(inode) => {
+                        if inode.is_dir() {
+                            FileType::Directory
+                        } else if inode.is_file() {
+                            FileType::RegularFile
+                        } else {
+                            FileType::RegularFile // Default fallback
+                        }
+                    },
+                    Err(_) => FileType::RegularFile,
+                }
+            } else {
+                continue; // Skip deleted entries
+            };
+            
+            regular_entries.push(crate::fs::DirectoryEntryInternal {
+                name: entry.name,
+                file_type,
+                size: 0, // Size not immediately available
+                file_id: entry.entry.inode as u64,
+                metadata: None,
+            });
+        }
+        
+        // Sort regular entries by file_id
+        regular_entries.sort_by_key(|entry| entry.file_id);
+        
+        // Append sorted regular entries to the result
+        all_entries.extend(regular_entries);
+        
+        if position >= all_entries.len() {
+            return Ok(0); // EOF
+        }
+        
+        // Get current entry
+        let internal_entry = &all_entries[position];
+        
+        // Convert to binary format
+        let dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
+        
+        // Calculate actual entry size
+        let entry_size = dir_entry.entry_size();
+        
+        // Check buffer size
+        if buffer.len() < entry_size {
+            return Err(StreamError::InvalidArgument); // Buffer too small
+        }
+        
+        // Treat struct as byte array
+        let entry_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &dir_entry as *const _ as *const u8,
+                entry_size
+            )
+        };
+        
+        // Copy to buffer
+        buffer[..entry_size].copy_from_slice(entry_bytes);
+        
+        // Move to next entry
+        *self.position.lock() += 1;
+        
+        Ok(entry_size)
+    }
+
+    fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::IoError)
+    }
+}
+
+impl ControlOps for Ext2DirectoryObject {
+}
+
+impl MemoryMappingOps for Ext2DirectoryObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for directories")
+    }
+}
+
+impl FileObject for Ext2DirectoryObject {
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        // Get filesystem reference
+        let fs = self.filesystem.read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        
+        // Downcast to Ext2FileSystem
+        let ext2_fs = fs.as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        
+        // Read inode metadata
+        let inode = ext2_fs.read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?;
+        
+        // Convert inode permissions to FilePermission
+        let permissions = FilePermission {
+            read: (inode.mode & 0o444) != 0,
+            write: (inode.mode & 0o222) != 0,
+            execute: (inode.mode & 0o111) != 0,
+        };
+        
+        Ok(FileMetadata {
+            file_type: FileType::Directory,
+            size: inode.size as usize,
+            permissions,
+            created_time: inode.ctime as u64,
+            modified_time: inode.mtime as u64,
+            accessed_time: inode.atime as u64,
+            file_id: self.file_id,
+            link_count: inode.links_count as u32,
+        })
+    }
+
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        let mut pos = self.position.lock();
+        
+        match whence {
+            SeekFrom::Start(offset) => {
+                *pos = offset;
+                Ok(*pos)
+            },
+            _ => Err(StreamError::IoError)
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl Drop for Ext2FileObject {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        crate::early_println!("[ext2] Drop: syncing inode {} to disk", self.inode_number);
+        // Sync to disk when the file object is dropped
+        let _ = self.sync_to_disk();
+    }
+}

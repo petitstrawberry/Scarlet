@@ -29,6 +29,23 @@ INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs.cpio"
 
 echo "Test runner starting..."
 
+# Generate fresh FAT32 test image before each test run
+echo "Generating fresh FAT32 test image..."
+KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
+"$KERNEL_DIR/tools/create-fat32-image.sh"
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create FAT32 test image"
+    exit 1
+fi
+
+# Generate fresh ext2 test image before each test run
+echo "Generating fresh ext2 test image..."
+"$KERNEL_DIR/tools/create-ext2-image.sh"
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create ext2 test image"
+    exit 1
+fi
+
 # Create symbolic link for VSCode debugging
 if [ -n "$KERNEL_BINARY" ]; then
     LINK_PATH="$(dirname "$KERNEL_BINARY")/../test-kernel"
@@ -54,8 +71,10 @@ if [ "$DEBUG_MODE" = true ]; then
         -serial mon:stdio \
         --no-reboot \
         -global virtio-mmio.force-legacy=false \
-        -drive id=x0,file=test.txt,format=raw,if=none \
+        -drive id=x0,file="$KERNEL_DIR/fat32-test.img",format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        -drive id=x1,file="$KERNEL_DIR/ext2-test.img",format=raw,if=none \
+        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.5 \
         -display vnc=:0 \
         -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
         -netdev user,id=net0 \
@@ -77,8 +96,10 @@ else
         -serial mon:stdio \
         --no-reboot \
         -global virtio-mmio.force-legacy=false \
-        -drive id=x0,file=test.txt,format=raw,if=none \
+        -drive id=x0,file="$KERNEL_DIR/fat32-test.img",format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+        -drive id=x1,file="$KERNEL_DIR/ext2-test.img",format=raw,if=none \
+        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.5 \
         -display vnc=:0 \
         -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
         -netdev user,id=net0 \

@@ -23,6 +23,12 @@ fn panic(info: &PanicInfo) -> ! {
     early_println!("[Scarlet Kernel] panic: {}", info);
     early_println!("[Test Runner] Test failed");
 
+    #[cfg(feature = "profiler")]
+    {
+        use crate::profiler;
+        profiler::print_profiling_results();
+    }
+
     crate::arch::shutdown_with_code(1);
 }
 
@@ -36,5 +42,12 @@ pub fn test_runner(tests: &[&dyn TestableFn]) {
     }
 
     early_println!("[Test Runner] All {} tests passed", tests.len());
+
+    #[cfg(feature = "profiler")]
+    {
+        use crate::profiler;
+        crate::early_println!("[Profiler] Printing profiling results:");
+        profiler::print_profiling_results();
+    }
     crate::arch::shutdown_with_code(0);
 }
