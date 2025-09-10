@@ -2,8 +2,8 @@
 //!
 //! Scarlet is an operating system kernel written in Rust that implements a transparent ABI 
 //! conversion layer for executing binaries across different operating systems and architectures. 
-//! The kernel provides a universal container runtime environment with strong isolation capabilities 
-//! and comprehensive filesystem support.
+//! The kernel provides a universal container runtime environment with strong isolation capabilities,
+//! comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
 //!
 //! ## Multi-ABI Execution System
 //!
@@ -20,14 +20,16 @@
 //!   ensuring consistent behavior and efficient resource utilization
 //! - **Native Implementation**: Each ABI provides full syscall implementation using underlying
 //!   kernel abstractions, enabling complete OS compatibility
+//! - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 //!
 //! ### Supported ABIs
 //!
 //! - **Scarlet Native ABI**: Direct kernel interface with optimal performance, featuring:
 //!   - Handle-based resource management with capability-based security
 //!   - Modern VFS operations with namespace isolation
-//!   - Advanced IPC mechanisms including pipes and shared memory
+//!   - Advanced IPC mechanisms including pipes and event-driven communication
 //!   - Container-native filesystem operations
+//!   - Dynamic linking support
 //!
 //! - **Linux Compatibility ABI** *(in development)*: Full POSIX syscall implementation
 //! - **xv6 Compatibility ABI** *(in development)*: Educational OS syscall implementation
@@ -65,6 +67,8 @@
 //!
 //! - **TmpFS**: High-performance memory-based filesystem with configurable size limits
 //! - **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs and embedded data
+//! - **ext2**: Full ext2 filesystem implementation with complete read/write support for persistent storage
+//! - **FAT32**: Complete FAT32 filesystem implementation with directory and file operations
 //! - **OverlayFS**: Advanced union filesystem with copy-up semantics and whiteout support
 //! - **DevFS**: Device file system providing controlled hardware access
 //!
