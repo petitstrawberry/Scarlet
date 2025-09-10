@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use super::{CharDevice, super::{Device, DeviceType}};
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 /// Mock character device for testing
 pub struct MockCharDevice {
@@ -89,5 +90,31 @@ impl CharDevice for MockCharDevice {
 
     fn can_write(&self) -> bool {
         true // Mock device can always write
+    }
+}
+
+impl ControlOps for MockCharDevice {
+    // Mock character devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for MockCharDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by mock character device")
+    }
+
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Mock implementation - no operation
+    }
+
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Mock implementation - no operation
+    }
+
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }

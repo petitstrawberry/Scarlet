@@ -10,7 +10,7 @@ use crate::{
         char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
             resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo
         }, Device, DeviceInfo, DeviceType
-    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial
+    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial, object::capability::{ControlOps, MemoryMappingOps}
 };
 
 pub struct Uart {
@@ -162,6 +162,25 @@ impl Serial for Uart {
     }
 }
 
+impl MemoryMappingOps for Uart {
+     fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                        -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for UART")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // UART devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // UART devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
 impl Device for Uart {
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
@@ -204,6 +223,13 @@ impl CharDevice for Uart {
         self.can_write()
     }
     
+}
+
+impl ControlOps for Uart {
+    // UART devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
+    }
 }
 
 impl Write for Uart {

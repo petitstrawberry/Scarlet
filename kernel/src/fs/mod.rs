@@ -84,6 +84,8 @@
 //!
 //! - **TmpFS**: Memory-based temporary filesystem with optional size limits
 //! - **CpioFS**: Read-only CPIO archive filesystem for initramfs
+//! - **ext2**: Full ext2 filesystem implementation for persistent storage
+//! - **FAT32**: Complete FAT32 filesystem support with read/write operations
 //! - **OverlayFS**: Union/overlay filesystem combining multiple layers
 //! - **InitramFS**: Special handling for initial ramdisk mounting
 //!
@@ -452,7 +454,7 @@ pub trait FileSystemDriver: Send + Sync {
     /// * `_block_device` - The block device to use for creating the file system
     /// * `_block_size` - The block size of the device
     /// 
-    fn create_from_block(&self, _block_device: Box<dyn BlockDevice>, _block_size: usize) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
+    fn create_from_block(&self, _block_device: Arc<dyn BlockDevice>, _block_size: usize) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
         if self.filesystem_type() == FileSystemType::Memory || self.filesystem_type() == FileSystemType::Virtual {
             return Err(FileSystemError {
                 kind: FileSystemErrorKind::NotSupported,
@@ -734,7 +736,7 @@ impl FileSystemDriverManager {
     pub fn create_from_block(
         &self,
         driver_name: &str,
-        block_device: Box<dyn BlockDevice>,
+        block_device: Arc<dyn BlockDevice>,
         block_size: usize,
     ) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
         let binding = self.drivers.read();

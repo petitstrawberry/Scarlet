@@ -12,7 +12,9 @@ use spin::RwLock;
 use core::{any::Any, fmt::Debug};
 use core::fmt;
 
-use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType};
+use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, SeekFrom};
+use crate::object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError};
+use super::mount_tree::MountPoint;
 
 /// DirectoryEntry structure used by readdir
 #[derive(Debug, Clone)]
@@ -260,6 +262,9 @@ pub trait FileSystemOperations: Send + Sync {
         false
     }
 
+    /// Access to Any trait for downcasting
+    fn as_any(&self) -> &dyn Any;
+
     /// Create a hard link to an existing file
     /// 
     /// This method creates a hard link from `link_name` in `link_parent` to the existing
@@ -301,5 +306,110 @@ impl fmt::Debug for dyn FileSystemOperations {
             .field("name", &self.name())
             .field("root", &self.root_node())
             .finish()
+    }
+}
+
+/// VfsFileObject wraps a filesystem-specific FileObject with VFS-layer information
+///
+/// This wrapper provides the VFS layer with access to path hierarchy information
+/// while delegating actual file operations to the underlying FileSystem implementation.
+pub struct VfsFileObject {
+    /// The underlying FileObject from the filesystem implementation
+    inner: Arc<dyn FileObject>,
+    /// The VfsEntry this FileObject was created from (for *at syscalls)
+    vfs_entry: Arc<VfsEntry>,
+    /// The mount point containing this VfsEntry
+    mount_point: Arc<MountPoint>,
+    /// The original path used to open this file (for debugging/logging)
+    original_path: String,
+}
+
+impl VfsFileObject {
+    /// Create a new VfsFileObject
+    pub fn new(
+        inner: Arc<dyn FileObject>,
+        vfs_entry: Arc<VfsEntry>,
+        mount_point: Arc<MountPoint>,
+        original_path: String,
+    ) -> Self {
+        Self {
+            inner,
+            vfs_entry,
+            mount_point,
+            original_path,
+        }
+    }
+    
+    /// Get the VfsEntry this FileObject was created from
+    pub fn get_vfs_entry(&self) -> &Arc<VfsEntry> {
+        &self.vfs_entry
+    }
+    
+    /// Get the mount point containing this VfsEntry
+    pub fn get_mount_point(&self) -> &Arc<MountPoint> {
+        &self.mount_point
+    }
+    
+    /// Get the original path used to open this file
+    pub fn get_original_path(&self) -> &str {
+        &self.original_path
+    }
+    
+    /// Enable downcasting for VfsFileObject detection
+    pub fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl StreamOps for VfsFileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.inner.read(buffer)
+    }
+    
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.inner.write(buffer)
+    }
+}
+
+impl ControlOps for VfsFileObject {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        self.inner.control(command, arg)
+    }
+}
+
+impl MemoryMappingOps for VfsFileObject {
+    fn get_mapping_info(&self, offset: usize, length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        self.inner.get_mapping_info(offset, length)
+    }
+    
+    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+        self.inner.on_mapped(vaddr, paddr, length, offset);
+    }
+    
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        self.inner.on_unmapped(vaddr, length);
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        self.inner.supports_mmap()
+    }
+}
+
+impl FileObject for VfsFileObject {
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        self.inner.seek(whence)
+    }
+    
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        self.inner.metadata()
+    }
+    
+    fn truncate(&self, size: u64) -> Result<(), StreamError> {
+        self.inner.truncate(size)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

@@ -210,14 +210,14 @@ mod tests {
         vfs.create_symlink("/symlink.txt", "/target.txt").unwrap();
         
         // Use no_follow option to get the symlink itself, not the target
-        let symlink_entry = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
         
         // Debug output
         let metadata = symlink_node.metadata().unwrap();
-        crate::println!("Debug: symlink metadata: {:?}", metadata);
+        crate::early_println!("Debug: symlink metadata: {:?}", metadata);
         let file_type = symlink_node.file_type().unwrap();
-        crate::println!("Debug: symlink file_type: {:?}", file_type);
+        crate::early_println!("Debug: symlink file_type: {:?}", file_type);
         
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(target, "/target.txt");
         
         // Also test that normal resolution follows the symlink
-        let target_entry = vfs.resolve_path("/symlink.txt").unwrap();
+        let (target_entry, _) = vfs.resolve_path("/symlink.txt").unwrap();
         let target_node = target_entry.node();
         assert_eq!(target_node.file_type().unwrap(), FileType::RegularFile);
     }
@@ -249,7 +249,7 @@ mod tests {
         vfs.create_symlink("/subdir/link_to_target.txt", "target.txt").unwrap();
         
         // Use no_follow to get the symlink itself
-        let symlink_entry = vfs.resolve_path_with_options("/subdir/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs.resolve_path_with_options("/subdir/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
         
         // Verify it's a symbolic link
@@ -260,7 +260,7 @@ mod tests {
         assert_eq!(target, "target.txt");
         
         // Test that normal resolution follows the symlink
-        let target_entry = vfs.resolve_path("/subdir/link_to_target.txt").unwrap();
+        let (target_entry, _) = vfs.resolve_path("/subdir/link_to_target.txt").unwrap();
         let target_node = target_entry.node();
         assert_eq!(target_node.file_type().unwrap(), FileType::RegularFile);
     }
@@ -279,7 +279,7 @@ mod tests {
         vfs.create_symlink("/symlink.txt", &target_path).unwrap();
         
         // Use no_follow to get the symlink itself
-        let symlink_entry = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs.resolve_path_with_options("/symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
         let metadata = symlink_node.metadata().unwrap();
 
@@ -405,7 +405,7 @@ mod tests {
         vfs.create_symlink("/dir2/link_to_target.txt", "/dir1/target.txt").unwrap();
         
         // Use no_follow to get the symlink itself, not the target
-        let symlink_entry = vfs.resolve_path_with_options("/dir2/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_entry, _) = vfs.resolve_path_with_options("/dir2/link_to_target.txt", &PathResolutionOptions::no_follow()).unwrap();
         let symlink_node = symlink_entry.node();
         
         // Verify it's a symlink and get target
@@ -432,9 +432,9 @@ mod tests {
         
         // Debug output
         let metadata = symlink_node.metadata().unwrap();
-        crate::println!("Debug: direct tmpfs symlink metadata: {:?}", metadata);
+        crate::early_println!("Debug: direct tmpfs symlink metadata: {:?}", metadata);
         let file_type = symlink_node.file_type().unwrap();
-        crate::println!("Debug: direct tmpfs symlink file_type: {:?}", file_type);
+        crate::early_println!("Debug: direct tmpfs symlink file_type: {:?}", file_type);
         
         // Verify it's a symbolic link
         assert!(symlink_node.is_symlink().unwrap());
@@ -461,7 +461,7 @@ mod tests {
         vfs.create_symlink("/symlink_dir", "/real_dir").unwrap();
         
         // Verify we can access file through symlink directory
-        let file_through_symlink = vfs.resolve_path("/symlink_dir/file.txt").unwrap();
+        let (file_through_symlink, _) = vfs.resolve_path("/symlink_dir/file.txt").unwrap();
         assert_eq!(file_through_symlink.node().file_type().unwrap(), FileType::RegularFile);
         
         // Remove file through symlink directory path
@@ -473,7 +473,7 @@ mod tests {
         assert!(result.is_err(), "File should be removed from real directory");
         
         // Verify symlink directory still exists
-        let symlink_dir = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_dir, _) = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
         assert!(symlink_dir.node().is_symlink().unwrap(), "Symlink directory should still exist");
     }
 
@@ -496,7 +496,7 @@ mod tests {
         vfs.create_symlink("/real_dir/link_to_target", "target.txt").unwrap();
         
         // Verify we can access the symlink through symlink directory
-        let symlink_through_dir = vfs.resolve_path_with_options("/symlink_dir/link_to_target", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_through_dir, _) = vfs.resolve_path_with_options("/symlink_dir/link_to_target", &PathResolutionOptions::no_follow()).unwrap();
         assert!(symlink_through_dir.node().is_symlink().unwrap());
         
         // Remove the symlink through symlink directory path
@@ -508,11 +508,11 @@ mod tests {
         assert!(result.is_err(), "Symlink should be removed from real directory");
         
         // Verify target file still exists
-        let target_file = vfs.resolve_path("/real_dir/target.txt").unwrap();
+        let (target_file, _) = vfs.resolve_path("/real_dir/target.txt").unwrap();
         assert_eq!(target_file.node().file_type().unwrap(), FileType::RegularFile);
         
         // Verify symlink directory still exists
-        let symlink_dir = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink_dir, _) = vfs.resolve_path_with_options("/symlink_dir", &PathResolutionOptions::no_follow()).unwrap();
         assert!(symlink_dir.node().is_symlink().unwrap());
     }
 
@@ -532,11 +532,11 @@ mod tests {
         vfs.create_file("/symlink_dir/new_file.txt", FileType::RegularFile).unwrap();
         
         // Verify file exists in real directory
-        let file_in_real = vfs.resolve_path("/real_dir/new_file.txt").unwrap();
+        let (file_in_real, _) = vfs.resolve_path("/real_dir/new_file.txt").unwrap();
         assert_eq!(file_in_real.node().file_type().unwrap(), FileType::RegularFile);
         
         // Verify file is accessible through symlink
-        let file_through_symlink = vfs.resolve_path("/symlink_dir/new_file.txt").unwrap();
+        let (file_through_symlink, _) = vfs.resolve_path("/symlink_dir/new_file.txt").unwrap();
         assert_eq!(file_through_symlink.node().file_type().unwrap(), FileType::RegularFile);
         
         // Both paths should resolve to the same node
@@ -594,7 +594,7 @@ mod tests {
         vfs.create_symlink("/file_symlink.txt", "/target.txt").unwrap();
         
         // Verify symlink exists
-        let symlink = vfs.resolve_path_with_options("/file_symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
+        let (symlink, _) = vfs.resolve_path_with_options("/file_symlink.txt", &PathResolutionOptions::no_follow()).unwrap();
         assert!(symlink.node().is_symlink().unwrap());
         
         // Remove the symlink (not the target)
@@ -605,7 +605,7 @@ mod tests {
         assert!(result.is_err(), "Symlink should be removed");
         
         // Verify target file still exists
-        let target = vfs.resolve_path("/target.txt").unwrap();
+        let (target, _) = vfs.resolve_path("/target.txt").unwrap();
         assert_eq!(target.node().file_type().unwrap(), FileType::RegularFile);
     }
 
@@ -667,7 +667,7 @@ mod tests {
         vfs.create_symlink("/level1/link_level2", "level2").unwrap(); // Relative path
         
         // Access file through multiple symlinks: /link_level1/link_level2/deep_file.txt
-        let deep_file = vfs.resolve_path("/link_level1/link_level2/deep_file.txt").unwrap();
+        let (deep_file, _) = vfs.resolve_path("/link_level1/link_level2/deep_file.txt").unwrap();
         assert_eq!(deep_file.node().file_type().unwrap(), FileType::RegularFile);
         
         // Write data through nested symlink path
@@ -688,7 +688,7 @@ mod tests {
         vfs.create_file("/link_level1/link_level2/new_deep_file.txt", FileType::RegularFile).unwrap();
         
         // Verify file exists in real location
-        let new_file = vfs.resolve_path("/level1/level2/new_deep_file.txt").unwrap();
+        let (new_file, _) = vfs.resolve_path("/level1/level2/new_deep_file.txt").unwrap();
         assert_eq!(new_file.node().file_type().unwrap(), FileType::RegularFile);
     }
 }

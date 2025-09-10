@@ -3,7 +3,11 @@
 //! This module provides system calls and traits for FileObject capability,
 //! which extends StreamOps with file-specific operations like seek and metadata.
 
+use core::any::Any;
+
 use crate::object::capability::stream::{StreamOps, StreamError};
+use crate::object::capability::control::ControlOps;
+use crate::object::capability::memory_mapping::MemoryMappingOps;
 
 pub mod syscall;
 
@@ -22,10 +26,11 @@ pub enum SeekFrom {
 
 /// Trait for file objects
 /// 
-/// This trait represents a file-like object that supports both stream operations
-/// and file-specific operations like seeking and metadata access.
+/// This trait represents a file-like object that supports stream operations,
+/// file-specific operations like seeking and metadata access, control
+/// operations for device-specific functionality, and memory mapping operations.
 /// Directory reading is handled through normal read() operations.
-pub trait FileObject: StreamOps {
+pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps {
     /// Seek to a position in the file stream
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
     
@@ -53,4 +58,25 @@ pub trait FileObject: StreamOps {
         let _ = size;
         Err(StreamError::NotSupported)
     }
+    
+    /// Synchronize file content to storage
+    /// 
+    /// This method ensures that any buffered changes to the file are written
+    /// to the underlying storage device. This is important for filesystems
+    /// that cache file content in memory.
+    /// 
+    /// # Returns
+    /// 
+    /// * `Result<(), StreamError>` - Ok if the sync was successful
+    /// 
+    /// # Errors
+    /// 
+    /// * `StreamError` - If the sync operation fails or is not supported
+    fn sync(&self) -> Result<(), StreamError> {
+        // Default implementation does nothing - files that don't cache content
+        // don't need to sync
+        Ok(())
+    }
+    
+    fn as_any(&self) -> &dyn Any;
 }

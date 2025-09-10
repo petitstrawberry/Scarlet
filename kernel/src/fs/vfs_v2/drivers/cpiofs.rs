@@ -12,11 +12,11 @@ use alloc::sync::Weak;
 
 use crate::{driver_initcall, fs::{core::DirectoryEntryInternal, get_fs_driver_manager, vfs_v2::core::{
     FileSystemOperations, VfsNode
-}, FileSystemDriver, FileSystemType}, vm::vmem::MemoryArea};
+}, FileSystemDriver, FileSystemType}, object::capability::MemoryMappingOps, vm::vmem::MemoryArea};
 use crate::fs::{
     FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, FilePermission
 };
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError, ControlOps};
 
 /// CPIO filesystem implementation
 pub struct CpioFS {
@@ -119,7 +119,7 @@ impl VfsNode for CpioNode {
             permissions: FilePermission {
                 read: true,
                 write: false,
-                execute: false,
+                execute: true,
             },
             file_id: self.file_id as u64,
             link_count: 1,
@@ -310,6 +310,9 @@ impl FileSystemOperations for CpioFS {
             FileType::Directory => {
                 Ok(Arc::new(CpioDirectoryObject::new(Arc::clone(node))))
             },
+            FileType::SymbolicLink(_) => {
+                Ok(Arc::new(CpioSymlinkObject::new(Arc::clone(node))))
+            },
             _ => Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Unsupported file type"
@@ -398,6 +401,10 @@ impl FileSystemOperations for CpioFS {
         
         Ok(entries)
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// File object for CPIO regular files
@@ -441,6 +448,32 @@ impl StreamOps for CpioFileObject {
     }
 }
 
+impl ControlOps for CpioFileObject {
+    // CPIO files are read-only and don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on CPIO files")
+    }
+}
+
+impl MemoryMappingOps for CpioFileObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for CPIO files")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // CPIO files don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // CPIO files don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
 impl FileObject for CpioFileObject {
     fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         let cpio_node = self.node.as_any()
@@ -478,6 +511,10 @@ impl FileObject for CpioFileObject {
     
     fn truncate(&self, _size: u64) -> Result<(), StreamError> {
         Err(StreamError::PermissionDenied)
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -561,6 +598,32 @@ impl StreamOps for CpioDirectoryObject {
     }
 }
 
+impl ControlOps for CpioDirectoryObject {
+    // CPIO directories don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on CPIO directories")
+    }
+}
+
+impl MemoryMappingOps for CpioDirectoryObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for directories")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
 impl FileObject for CpioDirectoryObject {
     fn seek(&self, _whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         // Seeking in directories not supported
@@ -576,6 +639,126 @@ impl FileObject for CpioDirectoryObject {
             FileSystemErrorKind::ReadOnly,
             "CPIO filesystem is read-only"
         )))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Symbolic link object for CPIO symbolic links
+pub struct CpioSymlinkObject {
+    node: Arc<dyn VfsNode>,
+    position: RwLock<u64>,
+}
+
+impl CpioSymlinkObject {
+    pub fn new(node: Arc<dyn VfsNode>) -> Self {
+        Self {
+            node,
+            position: RwLock::new(0),
+        }
+    }
+}
+
+impl StreamOps for CpioSymlinkObject {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, StreamError> {
+        // Reading a symlink returns the target path
+        let target = self.node.read_link()
+            .map_err(|e| StreamError::FileSystemError(e))?;
+        
+        let target_bytes = target.as_bytes();
+        let mut pos = self.position.write();
+        let start = *pos as usize;
+        
+        if start >= target_bytes.len() {
+            return Ok(0); // EOF
+        }
+        
+        let end = (start + buf.len()).min(target_bytes.len());
+        let bytes_to_read = end - start;
+        buf[..bytes_to_read].copy_from_slice(&target_bytes[start..end]);
+        *pos += bytes_to_read as u64;
+        
+        Ok(bytes_to_read)
+    }
+    
+    fn write(&self, _buf: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::FileSystemError(FileSystemError::new(
+            FileSystemErrorKind::ReadOnly,
+            "CPIO filesystem is read-only"
+        )))
+    }
+}
+
+impl ControlOps for CpioSymlinkObject {
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on CPIO symbolic links")
+    }
+}
+
+impl MemoryMappingOps for CpioSymlinkObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for symbolic links")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Symbolic links don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Symbolic links don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
+impl FileObject for CpioSymlinkObject {
+    fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
+        let target = self.node.read_link()
+            .map_err(|e| StreamError::FileSystemError(e))?;
+        let target_size = target.len() as u64;
+        
+        let mut pos = self.position.write();
+        
+        let new_pos = match whence {
+            crate::fs::SeekFrom::Start(offset) => offset,
+            crate::fs::SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    *pos + offset as u64
+                } else {
+                    pos.saturating_sub((-offset) as u64)
+                }
+            },
+            crate::fs::SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    target_size + offset as u64
+                } else {
+                    target_size.saturating_sub((-offset) as u64)
+                }
+            }
+        };
+        
+        *pos = new_pos.min(target_size);
+        Ok(*pos)
+    }
+    
+    fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError> {
+        self.node.metadata().map_err(StreamError::from)
+    }
+    
+    fn truncate(&self, _size: u64) -> Result<(), StreamError> {
+        Err(StreamError::FileSystemError(FileSystemError::new(
+            FileSystemErrorKind::ReadOnly,
+            "CPIO filesystem is read-only"
+        )))
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

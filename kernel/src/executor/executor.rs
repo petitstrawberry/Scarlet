@@ -35,8 +35,8 @@ impl TaskStateBackup {
         let mut backup_pages = Vec::new();
         backup_pages.append(&mut task.managed_pages);
         
-        // Backup VM mapping
-        let backup_vm_mapping = task.vm_manager.remove_all_memory_maps();
+        // Backup VM mapping - collect iterator into Vec for storage
+        let backup_vm_mapping = task.vm_manager.remove_all_memory_maps().collect();
         
         Self {
             managed_pages: backup_pages,
@@ -254,22 +254,7 @@ impl TransparentExecutor {
     /// be handled by VFS layer for consistency and better error handling.
     fn open_file(path: &str, task: &Task) -> ExecutorResult<crate::object::KernelObject> {
         if let Some(vfs) = task.get_vfs() {
-            
-            // FIXME: This manual path resolution should be moved to VFS layer
-            // Convert relative path to absolute path if necessary
-            let absolute_path = if path.starts_with('/') {
-                // Already absolute path
-                path.to_string()
-            } else {
-                // Relative path - combine with current working directory
-                let default_cwd = "/".to_string();
-                let cwd = task.cwd.as_ref().unwrap_or(&default_cwd);
-                if cwd.ends_with('/') {
-                    alloc::format!("{}{}", cwd, path)
-                } else {
-                    alloc::format!("{}/{}", cwd, path)
-                }
-            };
+            let absolute_path = vfs.resolve_path_to_absolute(path);
             
             match vfs.open(&absolute_path, 0) { // O_RDONLY
                 Ok(obj) => {
@@ -353,8 +338,10 @@ impl TransparentExecutor {
             }
         }
         
-        // Set default working directory for the ABI
-        task.cwd = Some(abi.get_default_cwd().to_string());
+        // Set default working directory for the ABI via VfsManager
+        if let Some(vfs) = &task.vfs {
+            let _ = vfs.set_cwd_by_path(abi.get_default_cwd());
+        }
         
         // Let ABI module handle conversion from previous ABI (handles, etc.)
         abi.initialize_from_existing_handles(task)

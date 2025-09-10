@@ -1,0 +1,12 @@
+#!/bin/sh
+# Scarlet Shell Initialization Script
+
+# Set environment variables
+export PATH=/bin
+
+echo "Welcome to Scarlet Shell!"
+echo "PATH is set to: $PATH"
+
+# Other initializations can go here
+
+echo "Shell initialized successfully"

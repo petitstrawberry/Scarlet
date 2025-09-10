@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(metadata.link_count, 1);
         assert!(metadata.permissions.read);
         assert!(!metadata.permissions.write); // CpioFS is read-only
-        assert!(!metadata.permissions.execute);
+        assert!(metadata.permissions.execute);
     }
 
     /// Test reading link from non-symlink in CpioFS returns error
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(metadata.link_count, 1);
         assert!(metadata.permissions.read);
         assert!(!metadata.permissions.write); // CpioFS is read-only
-        assert!(!metadata.permissions.execute);
+        assert!(metadata.permissions.execute);
     }
 
     /// Test reading link from non-symlink in CpioFS returns error (directory symlink)
@@ -487,7 +487,7 @@ mod tests {
         let result = vfs.resolve_path("/linkdir/file.txt");
         assert!(result.is_ok(), "Should be able to resolve file through directory symlink");
         
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         let metadata = entry.node().metadata().unwrap();
         assert_eq!(metadata.file_type, FileType::RegularFile);
         
@@ -499,7 +499,7 @@ mod tests {
         let result = vfs.resolve_path("/linkdir");
         assert!(result.is_ok(), "Should be able to resolve directory symlink");
         
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // The resolved entry should point to the target directory, not the symlink itself
         assert_eq!(entry.node().file_type().unwrap(), FileType::Directory);
     }
@@ -556,14 +556,14 @@ mod tests {
         // Test normal resolution (follows symlinks)
         let result = vfs.resolve_path("/link.txt");
         assert!(result.is_ok(), "Should be able to resolve symlink normally");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should resolve to the target file
         assert_eq!(entry.node().file_type().unwrap(), FileType::RegularFile);
         
         // Test no-follow resolution (doesn't follow symlinks)
         let result = vfs.resolve_path_with_options("/link.txt", &PathResolutionOptions::no_follow());
         assert!(result.is_ok(), "Should be able to resolve symlink with no_follow");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should return the symlink itself, not the target
         assert!(matches!(entry.node().file_type().unwrap(), FileType::SymbolicLink(_)));
         
@@ -589,15 +589,98 @@ mod tests {
         // First test: linkdir itself (final component is a symlink)
         let result = vfs.resolve_path_with_options("/linkdir", &PathResolutionOptions::no_follow());
         assert!(result.is_ok(), "Should be able to resolve directory symlink with no_follow");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should return the symlink itself
         assert!(matches!(entry.node().file_type().unwrap(), FileType::SymbolicLink(_)));
         
         // Second test: normal resolution for comparison
         let result = vfs.resolve_path("/linkdir");
         assert!(result.is_ok(), "Should be able to resolve directory symlink normally");
-        let entry = result.unwrap();
+        let (entry, _mount_point) = result.unwrap();
         // Should resolve to the target directory
         assert_eq!(entry.node().file_type().unwrap(), FileType::Directory);
+    }
+
+    /// Test opening symbolic links directly
+    #[test_case]
+    fn test_cpiofs_open_symlink() {
+        let cpio_data = create_test_cpio_with_symlink();
+        let cpiofs = CpioFS::new("test_cpiofs".to_string(), &cpio_data).unwrap();
+        
+        let root_node = cpiofs.root_node();
+        let symlink_node = cpiofs.lookup(&root_node, &"link.txt".to_string()).unwrap();
+        
+        // Verify it's a symbolic link
+        assert!(matches!(symlink_node.file_type().unwrap(), FileType::SymbolicLink(_)));
+        
+        // Open the symbolic link
+        let symlink_file = cpiofs.open(&symlink_node, 0).unwrap();
+        
+        // Read from the symbolic link (should return the target path)
+        let mut buffer = [0u8; 64];
+        let bytes_read = symlink_file.read(&mut buffer).unwrap();
+        let content = core::str::from_utf8(&buffer[..bytes_read]).unwrap();
+        assert_eq!(content, "file.txt");
+        
+        // Verify metadata
+        let metadata = symlink_file.metadata().unwrap();
+        assert!(matches!(metadata.file_type, FileType::SymbolicLink(_)));
+        assert_eq!(metadata.size, 8); // Length of "file.txt"
+    }
+
+    /// Test opening directory symbolic links directly  
+    #[test_case]
+    fn test_cpiofs_open_dir_symlink() {
+        let cpio_data = create_test_cpio_with_dir_symlink();
+        let cpiofs = CpioFS::new("test_cpiofs".to_string(), &cpio_data).unwrap();
+        
+        let root_node = cpiofs.root_node();
+        let dir_symlink_node = cpiofs.lookup(&root_node, &"linkdir".to_string()).unwrap();
+        
+        // Verify it's a symbolic link
+        assert!(matches!(dir_symlink_node.file_type().unwrap(), FileType::SymbolicLink(_)));
+        
+        // Open the directory symbolic link
+        let symlink_file = cpiofs.open(&dir_symlink_node, 0).unwrap();
+        
+        // Read from the symbolic link (should return the target path)
+        let mut buffer = [0u8; 64];
+        let bytes_read = symlink_file.read(&mut buffer).unwrap();
+        let content = core::str::from_utf8(&buffer[..bytes_read]).unwrap();
+        assert_eq!(content, "testdir");
+        
+        // Verify metadata
+        let metadata = symlink_file.metadata().unwrap();
+        assert!(matches!(metadata.file_type, FileType::SymbolicLink(_)));
+        assert_eq!(metadata.size, 7); // Length of "testdir"
+    }
+
+    /// Test seek operations on symbolic links
+    #[test_case]
+    fn test_cpiofs_symlink_seek() {
+        let cpio_data = create_test_cpio_with_symlink();
+        let cpiofs = CpioFS::new("test_cpiofs".to_string(), &cpio_data).unwrap();
+        
+        let root_node = cpiofs.root_node();
+        let symlink_node = cpiofs.lookup(&root_node, &"link.txt".to_string()).unwrap();
+        let symlink_file = cpiofs.open(&symlink_node, 0).unwrap();
+        
+        // Test seeking to start
+        let pos = symlink_file.seek(crate::fs::SeekFrom::Start(0)).unwrap();
+        assert_eq!(pos, 0);
+        
+        // Test seeking to end
+        let pos = symlink_file.seek(crate::fs::SeekFrom::End(0)).unwrap();
+        assert_eq!(pos, 8); // Length of "file.txt"
+        
+        // Test seeking relative
+        let pos = symlink_file.seek(crate::fs::SeekFrom::Current(-4)).unwrap();
+        assert_eq!(pos, 4);
+        
+        // Read from middle
+        let mut buffer = [0u8; 4];
+        let bytes_read = symlink_file.read(&mut buffer).unwrap();
+        let content = core::str::from_utf8(&buffer[..bytes_read]).unwrap();
+        assert_eq!(content, ".txt");
     }
 }

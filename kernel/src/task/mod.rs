@@ -10,26 +10,26 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE}, fs::VfsManager, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::get_scheduler, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch, KernelContext}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{event::ProcessControlType, EventContent}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::{get_scheduler, Scheduler}, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
-static TASK_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
 /// Global registry of parent task wakers for waitpid(-1) operations
 /// Each parent task has a waker that gets triggered when any of its children exit
-static PARENT_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
+static PARENT_WAITPID_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
 
-/// Initialize the task wakers registry
-fn init_task_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+/// Initialize the waitpid wakers registry
+fn init_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
-/// Initialize the parent waker registry
-fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
+/// Initialize the parent waitpid waker registry
+fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
@@ -45,8 +45,8 @@ fn init_parent_wakers() -> Mutex<BTreeMap<usize, Waker>> {
 /// # Returns
 /// 
 /// A reference to the waker for the specified task
-pub fn get_task_waker(task_id: usize) -> &'static Waker {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     if !wakers.contains_key(&task_id) {
         let waker_name = alloc::format!("task_{}", task_id);
@@ -74,8 +74,8 @@ pub fn get_task_waker(task_id: usize) -> &'static Waker {
 /// # Returns
 /// 
 /// A reference to the parent waker
-pub fn get_parent_waker(parent_id: usize) -> &'static Waker {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+pub fn get_parent_waitpid_waker(parent_id: usize) -> &'static Waker {
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     
     // Create a new waker if it doesn't exist
@@ -103,7 +103,7 @@ pub fn get_parent_waker(parent_id: usize) -> &'static Waker {
 /// 
 /// * `task_id` - The ID of the task that has exited
 pub fn wake_task_waiters(task_id: usize) {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let wakers = wakers_mutex.lock();
     if let Some(waker) = wakers.get(&task_id) {
         waker.wake_all();
@@ -118,7 +118,7 @@ pub fn wake_task_waiters(task_id: usize) {
 /// 
 /// * `parent_id` - The ID of the parent task
 pub fn wake_parent_waiters(parent_id: usize) {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let wakers = wakers_mutex.lock();
     if let Some(waker) = wakers.get(&parent_id) {
         waker.wake_all();
@@ -134,7 +134,7 @@ pub fn wake_parent_waiters(parent_id: usize) {
 /// 
 /// * `task_id` - The ID of the task to clean up
 pub fn cleanup_task_waker(task_id: usize) {
-    let wakers_mutex = TASK_WAKERS.call_once(init_task_wakers);
+    let wakers_mutex = WAITPID_WAKERS.call_once(init_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&task_id);
 }
@@ -147,7 +147,7 @@ pub fn cleanup_task_waker(task_id: usize) {
 /// 
 /// * `parent_id` - The ID of the parent task to clean up
 pub fn cleanup_parent_waker(parent_id: usize) {
-    let wakers_mutex = PARENT_WAKERS.call_once(init_parent_wakers);
+    let wakers_mutex = PARENT_WAITPID_WAKERS.call_once(init_parent_waitpid_wakers);
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&parent_id);
 }
@@ -182,6 +182,8 @@ pub struct Task {
     pub name: String,
     pub priority: u32,
     pub vcpu: Vcpu,
+    /// Kernel context for context switching
+    pub kernel_context: KernelContext,
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
@@ -203,9 +205,6 @@ pub struct Task {
 
     /// Dynamic ABI
     pub abi: Option<Box<dyn AbiModule>>,
-
-    // Current working directory
-    pub cwd: Option<String>,
 
     /// Virtual File System Manager
     /// 
@@ -232,10 +231,16 @@ pub struct Task {
     /// All internal operations use RwLock for concurrent access protection.
     pub vfs: Option<Arc<VfsManager>>,
 
-
-
     // KernelObject table
     pub handle_table: HandleTable,
+    /// Time slice (in ticks) for round-robin scheduling. Decremented every tick; when it reaches 0, the scheduler is invoked.
+    pub time_slice: u32,
+    /// Software timer handlers
+    pub software_timers_handlers: Vec<Arc<dyn TimerHandler>>,
+    /// Task-local event queue with priority ordering
+    pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
+    /// Event processing enabled flag (similar to interrupt enable/disable)
+    pub events_enabled: Mutex<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -293,6 +298,7 @@ static TASK_ID: Mutex<usize> = Mutex::new(1);
 impl Task {
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
         let mut taskid = TASK_ID.lock();
+        
         let task = Task {
             id: *taskid,
             name,
@@ -301,6 +307,7 @@ impl Task {
                 TaskType::Kernel => crate::arch::vcpu::Mode::Kernel,
                 TaskType::User => crate::arch::vcpu::Mode::User,
             }),
+            kernel_context: KernelContext::new(),
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
@@ -317,9 +324,12 @@ impl Task {
             children: Vec::new(),
             exit_status: None,
             abi: Some(Box::new(ScarletAbi::default())), // Default ABI
-            cwd: None,
             vfs: None,
             handle_table: HandleTable::new(),
+            time_slice: 10, // Assign 10 ticks by default
+            software_timers_handlers: Vec::new(),
+            event_queue: spin::Mutex::new(crate::ipc::event::TaskEventQueue::new()),
+            events_enabled: spin::Mutex::new(true), // Events enabled by default
         };
 
         *taskid += 1;
@@ -327,22 +337,29 @@ impl Task {
     }
     
     pub fn init(&mut self) {
+        // Initialize kernel context with the task's entry point
+        // The kernel stack is allocated within the KernelContext
+        self.kernel_context = KernelContext::new();
+
         match self.task_type {
             TaskType::Kernel => {
                 user_kernel_vm_init(self);
                 /* Set sp to the top of the kernel stack */
                 self.vcpu.set_sp(KERNEL_VM_STACK_END + 1);
-
+                /* Set pc to the task's entry point */
+                self.vcpu.set_pc(self.entry as u64);
             },
             TaskType::User => { 
                 user_vm_init(self);
                 /* Set sp to the top of the user stack */
-                self.vcpu.set_sp(0xffff_ffff_ffff_f000);
+                self.vcpu.set_sp(USER_STACK_END);
+                /* PC will be set when loading the ELF binary */
             }
         }
         
         /* Set the task state to Ready */
         self.state = TaskState::Ready;
+        self.time_slice = 1;
     }
 
     pub fn get_id(&self) -> usize {
@@ -466,8 +483,9 @@ impl Task {
             },
             permissions,
             is_shared: false, // Default to not shared for task-allocated pages
+            owner: None,
         };
-        self.vm_manager.add_memory_map(mmap).map_err(|e| panic!("Failed to add memory map: {}", e))?;
+        self.vm_manager.add_memory_map(mmap.clone()).map_err(|e| panic!("Failed to add memory map: {}", e))?;
 
         for i in 0..num_of_pages {
             let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
@@ -491,9 +509,8 @@ impl Task {
         let page = vaddr / PAGE_SIZE;
         for p in 0..num_of_pages {
             let vaddr = (page + p) * PAGE_SIZE;
-            match self.vm_manager.search_memory_map_idx(vaddr) {
-                Some(idx) => {
-                    let mmap = self.vm_manager.remove_memory_map(idx).unwrap();
+            match self.vm_manager.remove_memory_map_by_addr(vaddr) {
+                Some(mmap) => {
                     if p == 0 && mmap.vmarea.start < vaddr {
                         /* Re add the first part of the memory map */
                         let size = vaddr - mmap.vmarea.start;
@@ -509,6 +526,7 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            owner: mmap.owner.clone(),
                         };
                         self.vm_manager.add_memory_map(mmap1)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
@@ -530,6 +548,7 @@ impl Task {
                             },
                             permissions: mmap.permissions,
                             is_shared: mmap.is_shared,
+                            owner: mmap.owner.clone(),
                         };
                         self.vm_manager.add_memory_map(mmap2)
                             .map_err(|e| panic!("Failed to add memory map: {}", e)).unwrap();
@@ -540,7 +559,7 @@ impl Task {
                     // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
 
                     if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        free_boxed_page(free_page);
+                        free_boxed_page(free_page.page);
                     }
                     
                     // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
@@ -549,10 +568,11 @@ impl Task {
             }
         }
         /* Unmap pages */
+        let asid = self.vm_manager.get_asid();
         let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
         for p in 0..num_of_pages {
             let vaddr = (page + p) * PAGE_SIZE;
-            root_pagetable.unmap(vaddr);
+            root_pagetable.unmap(asid, vaddr);
         }
     }
 
@@ -677,6 +697,7 @@ impl Task {
             },
             permissions,
             is_shared: VirtualMemoryRegion::Guard.is_shareable(), // Guard pages can be shared
+            owner: None,
         };
         Ok(mmap)
     }
@@ -719,11 +740,11 @@ impl Task {
     /// # Returns
     /// The removed managed page if found, otherwise None
     /// 
-    fn remove_managed_page(&mut self, vaddr: usize) -> Option<Box<Page>> {
+    pub fn remove_managed_page(&mut self, vaddr: usize) -> Option<crate::task::ManagedPage> {
         for i in 0..self.managed_pages.len() {
             if self.managed_pages[i].vaddr == vaddr {
                 let page = self.managed_pages.remove(i);
-                return Some(page.page);
+                return Some(page);
             }
         }
         None
@@ -842,7 +863,7 @@ impl Task {
         
         if !flags.is_set(CloneFlagsDef::Vm) {
             // Copy or share memory maps from parent to child
-            for mmap in self.vm_manager.get_memmap() {
+            for mmap in self.vm_manager.memmap_iter() {
                 let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
                 let vaddr = mmap.vmarea.start;
                 
@@ -854,9 +875,10 @@ impl Task {
                             vmarea: mmap.vmarea, // Same virtual addresses
                             permissions: mmap.permissions,
                             is_shared: true,
+                            owner: mmap.owner.clone(),
                         };
                         // Add the shared memory map directly to the child task
-                        child.vm_manager.add_memory_map(shared_mmap)
+                        child.vm_manager.add_memory_map(shared_mmap.clone())
                             .map_err(|_| "Failed to add shared memory map to child task")?;
 
                         // TODO: Add logic to determine if the memory map is a trampoline
@@ -884,6 +906,7 @@ impl Task {
                             },
                             permissions,
                             is_shared: false,
+                            owner: mmap.owner.clone(),
                         };
                         
                         // Copy the contents of the original memory (including stack contents)
@@ -942,11 +965,9 @@ impl Task {
             // Clone the filesystem manager
             if let Some(vfs) = &self.vfs {
                 child.vfs = Some(vfs.clone());
-                // Copy the current working directory
-                child.cwd = self.cwd.clone();
+                // Current working directory is managed within VfsManager
             } else {
                 child.vfs = None;
-                child.cwd = None; // No filesystem manager, no current working directory
             }
         }
 
@@ -957,6 +978,8 @@ impl Task {
             child.abi = None; // No ABI set
         }
 
+        // Initialize kernel context
+        child.kernel_context = KernelContext::new();
         // Set the state to Ready
         child.state = self.state;
 
@@ -972,9 +995,7 @@ impl Task {
     /// # Arguments
     /// * `status` - The exit status
     /// 
-    pub fn exit(&mut self, status: i32) {
-        // crate::println!("Task {} ({}) exiting with status {}", self.id, self.name, status);
-        
+    pub fn exit(&mut self, status: i32) {        
         // Close all open handles when task exits
         self.handle_table.close_all();
         
@@ -988,6 +1009,8 @@ impl Task {
                 /* Set the exit status */
                 self.set_exit_status(status);
                 self.state = TaskState::Zombie;
+                
+                // TODO: Notify parent via ABI-specific mechanism
                 // crate::println!("Task {}: Set to Zombie state, parent {}", self.id, parent_id);
             },
             None => {
@@ -996,6 +1019,11 @@ impl Task {
                 self.state = TaskState::Terminated;
             }
         }
+        
+        // Task cleanup completed - ABI module handles event cleanup
+
+        // The scheduler will handle saving the current task state internally
+        get_scheduler().schedule(get_cpu());
     }
 
     /// Wait for a child task to exit and collect its status
@@ -1007,6 +1035,7 @@ impl Task {
     /// The exit status of the child task, or an error if the child is not found or not in Zombie state
     pub fn wait(&mut self, child_id: usize) -> Result<i32, WaitError> {
         if !self.children.contains(&child_id) {
+            crate::println!("[Task {}] wait: No such child task: {}", self.id, child_id);
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
         }
 
@@ -1024,6 +1053,44 @@ impl Task {
         }
     }
 
+    /// Sleep the current task for the specified number of ticks.
+    /// This blocks the task and registers a timer to wake it up.
+    /// 
+    /// # Arguments
+    /// * `cpu` - The CPU context to store current task state
+    /// * `ticks` - The number of ticks to sleep
+    /// 
+    pub fn sleep(&mut self, cpu: &mut Arch, ticks: u64) {
+
+        struct SleepWakerHandler {
+            task_id: usize,
+            start_tick: u64,
+        }
+
+        impl TimerHandler for SleepWakerHandler {
+            fn on_timer_expired(self: Arc<Self>, _context: usize) {
+                if let Some(task) = get_scheduler().get_task_by_id(self.task_id) {
+                    let handler: Arc<dyn TimerHandler> = self.clone();
+                    task.remove_software_timer_handler(&handler);
+                    // crate::println!("Task {} woke up after {} ticks", self.task_id, get_tick() - self.start_tick);
+                    let waker = get_waitpid_waker(self.task_id);
+                    waker.wake_all();
+                }
+            }
+        }
+
+        let wake_tick = get_tick() + ticks;
+        let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(SleepWakerHandler {
+            task_id: self.id,
+            start_tick: get_tick(),
+        });
+        add_timer(wake_tick, &handler, 0);
+
+        self.add_software_timer_handler(handler);
+        let waker = get_waitpid_waker(self.id);
+        waker.wait(self.get_id(), cpu);
+    }
+
     // VFS Helper Methods
     
     /// Set the VFS manager
@@ -1039,14 +1106,148 @@ impl Task {
         self.vfs.as_ref()
     }
 
-    /// Set the current working directory
-    pub fn set_cwd(&mut self, cwd: String) {
-        self.cwd = Some(cwd);
+    pub fn add_software_timer_handler(&mut self, timer: Arc<dyn TimerHandler>) {
+        self.software_timers_handlers.push(timer);
     }
 
-    /// Get the current working directory
-    pub fn get_cwd(&self) -> Option<&String> {
-        self.cwd.as_ref()
+    pub fn remove_software_timer_handler(&mut self, timer: &Arc<dyn TimerHandler>) {
+        if let Some(pos) = self.software_timers_handlers.iter().position(|x| Arc::ptr_eq(x, timer)) {
+            self.software_timers_handlers.remove(pos);
+        }
+    }
+
+    /// Enable event processing for this task (similar to enabling interrupts)
+    pub fn enable_events(&self) {
+        let mut enabled = self.events_enabled.lock();
+        *enabled = true;
+    }
+    
+    /// Disable event processing for this task (similar to disabling interrupts) 
+    pub fn disable_events(&self) {
+        let mut enabled = self.events_enabled.lock();
+        *enabled = false;
+    }
+    
+    /// Check if events are enabled for this task
+    pub fn events_enabled(&self) -> bool {
+        *self.events_enabled.lock()
+    }
+
+        
+    /// Process pending events if events are enabled
+    /// This should be called by the scheduler before resuming the task
+    /// 
+    /// Following signal-like semantics:
+    /// - Process a limited number of events per scheduler cycle to avoid starvation
+    /// - Critical events (like KILL) are processed immediately
+    /// - Normal events are batched and processed in priority order
+    pub fn process_pending_events(&self) -> Result<(), &'static str> {
+        // Check if events are enabled
+        if !self.events_enabled() {
+            return Ok(()); // Events disabled, skip processing
+        }
+        
+        // Delegate to ABI module for event processing
+        if let Some(abi) = &self.abi {
+            const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
+            let mut processed_count = 0;
+            
+            // Process events with limits to prevent infinite loops
+            while processed_count < MAX_EVENTS_PER_CYCLE {
+                let event = {
+                    let mut queue = self.event_queue.lock();
+                    queue.dequeue()
+                };
+                
+                match event {
+                    Some(event) => {
+                        processed_count += 1;
+                        
+                        // Check if this is a critical event that requires immediate attention
+                        let is_critical = self.is_critical_event(&event);
+                        
+                        // Let ABI handle the event
+                        abi.handle_event(event, self.id as u32)?;
+                        
+                        // Check if events were disabled during handling
+                        if !self.events_enabled() {
+                            break;
+                        }
+                        
+                        // If we processed a critical event, we can stop here
+                        // to allow the ABI module to take appropriate action
+                        if is_critical {
+                            break;
+                        }
+                    }
+                    None => break, // No more events
+                }
+            }
+            
+            // If we hit the limit and there are still events, the scheduler
+            // will call us again on the next cycle
+            if processed_count == MAX_EVENTS_PER_CYCLE {
+                let queue = self.event_queue.lock();
+                if !queue.is_empty() {
+                    // Log that we're deferring events to next cycle
+                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle", 
+                    //                      self.id, queue.len());
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Check if an event is critical and should be processed immediately
+    /// Critical events typically cannot be ignored and affect task state directly
+    fn is_critical_event(&self, event: &crate::ipc::event::Event) -> bool {
+        use crate::ipc::event::EventPriority;
+        
+        // High/Critical priority events are always considered critical
+        match event.metadata.priority {
+            EventPriority::Critical => return true,
+            EventPriority::High => {
+                // Some high priority events are critical depending on content
+                match &event.content {
+                    EventContent::ProcessControl(ProcessControlType::Kill) => true,
+                    EventContent::Custom { event_id, .. } => {
+                        // Could map specific event IDs to critical signals
+                        *event_id == 9 // SIGKILL-like event
+                    }
+                    _ => false
+                }
+            }
+            _ => false
+        }
+    }
+    
+    /// Get a mutable reference to the kernel context for context switching
+    pub fn get_kernel_context_mut(&mut self) -> &mut KernelContext {
+        &mut self.kernel_context
+    }
+
+    /// Get a reference to the kernel context
+    pub fn get_kernel_context(&self) -> &KernelContext {
+        &self.kernel_context
+    }
+
+    /// Get the kernel stack bottom address for this task
+    ///
+    /// # Returns
+    /// The kernel stack bottom address as u64, or 0 if no kernel stack is allocated
+    pub fn get_kernel_stack_bottom(&self) -> u64 {
+        self.kernel_context.get_kernel_stack_bottom()
+    }
+
+    /// Get the kernel stack memory area for this task
+    /// 
+    /// # Returns
+    /// The kernel stack memory area as a MemoryArea, or None if no kernel stack is
+    /// allocated
+    /// 
+    pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
+        self.kernel_context.get_kernel_stack_memory_area()
     }
 }
 
@@ -1094,29 +1295,87 @@ pub fn new_user_task(name: String, priority: u32) -> Task {
     Task::new(name, priority, TaskType::User)
 }
 
+#[cfg(test)]
+static mut MOCK_CURRENT_TASK: Option<*mut Task> = None;
+
+#[cfg(test)]
+/// Set a mock current task for testing purposes
+/// 
+/// This function allows tests to override the return value of mytask()
+/// for controlled testing scenarios.
+/// 
+/// # Arguments
+/// * `task` - The task to return from mytask()
+/// 
+/// # Safety
+/// The caller must ensure the task pointer remains valid for the duration
+/// of the test and that clear_mock_current_task() is called when done.
+/// This function is only safe to call in single-threaded test environments.
+pub unsafe fn set_mock_current_task(task: &'static mut Task) {
+    unsafe {
+        MOCK_CURRENT_TASK = Some(task as *mut Task);
+    }
+}
+
+#[cfg(test)]
+/// Clear the mock current task, reverting to normal scheduler behavior
+/// 
+/// # Safety
+/// This function is only safe to call in single-threaded test environments.
+pub unsafe fn clear_mock_current_task() {
+    unsafe {
+        MOCK_CURRENT_TASK = None;
+    }
+}
+
 /// Get the current task.
 /// 
 /// # Returns
 /// The current task if it exists.
 pub fn mytask() -> Option<&'static mut Task> {
+    #[cfg(test)]
+    {
+        unsafe {
+            if let Some(task_ptr) = MOCK_CURRENT_TASK {
+                return Some(&mut *task_ptr);
+            }
+        }
+    }
+    
     let cpu = get_cpu();
     get_scheduler().get_current_task(cpu.get_cpuid())
 }
 
-/// Set the current working directory for the current task
+/// Set the current working directory for the current task via VfsManager
+/// 
+/// This function sets the current working directory of the calling task
+/// using the VfsManager's path-based API.
 /// 
 /// # Arguments
-/// * `cwd` - New current working directory path
+/// * `path` - The new working directory path
 /// 
 /// # Returns
-/// * `true` if successful, `false` if no current task
-pub fn set_current_task_cwd(cwd: String) -> bool {
+/// * `true` if successful, `false` if no current task or VfsManager
+pub fn set_current_task_cwd(path: String) -> bool {
     if let Some(task) = mytask() {
-        task.set_cwd(cwd);
-        true
+        if let Some(vfs) = &task.vfs {
+            // Use VfsManager to set current working directory
+            vfs.set_cwd_by_path(&path).is_ok()
+        } else {
+            false // No VfsManager available
+        }
     } else {
         false
     }
+}
+
+/// Internal function to perform kernel context switch between tasks
+/// This function is called when a task is first scheduled.
+pub fn task_initial_kernel_entrypoint() -> ! {
+    let cpu = get_cpu();
+    let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
+    Scheduler::setup_task_execution(cpu, current_task);
+    arch_switch_to_user_space(cpu.get_trapframe());
 }
 
 #[cfg(test)]
@@ -1195,14 +1454,14 @@ mod tests {
         }
 
         // Get parent memory map count before cloning
-        let parent_memmap_count = parent_task.vm_manager.get_memmap().len();
+        let parent_memmap_count = parent_task.vm_manager.memmap_len();
         let parent_id = parent_task.get_id();
 
         // Clone the parent task
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Get child memory map count after cloning
-        let child_memmap_count = child_task.vm_manager.get_memmap().len();
+        let child_memmap_count = child_task.vm_manager.memmap_len();
 
         // Verify that the number of memory maps are identical
         assert_eq!(child_memmap_count, parent_memmap_count, 
@@ -1219,14 +1478,12 @@ mod tests {
         assert_eq!(child_task.text_size, parent_task.text_size);
 
         // Find the corresponding memory map in child that matches our test allocation
-        let child_memmaps = child_task.vm_manager.get_memmap();
-        let child_mmap = child_memmaps.iter()
+        let child_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
             .expect("Test memory map not found in child task");
 
         // Verify that our specific memory region exists in both parent and child
-        let parent_memmaps = parent_task.vm_manager.get_memmap();
-        let parent_test_mmap = parent_memmaps.iter()
+        let parent_test_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
             .expect("Test memory map not found in parent task");
 
@@ -1284,11 +1541,11 @@ mod tests {
         parent_task.init();
 
         // Find the stack memory map in parent
-        let stack_mmap = parent_task.vm_manager.get_memmap().iter()
+        let stack_mmap = parent_task.vm_manager.memmap_iter()
             .find(|mmap| {
-                // Stack should be near USER_STACK_TOP and have stack permissions
+                // Stack should be near USER_STACK_END and have stack permissions
                 use crate::vm::vmem::VirtualMemoryRegion;
-                mmap.vmarea.end == crate::environment::USER_STACK_TOP - 1 && 
+                mmap.vmarea.end == crate::environment::USER_STACK_END - 1 && 
                 mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
             })
             .expect("Stack memory map not found in parent task")
@@ -1308,7 +1565,7 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the corresponding stack memory map in child
-        let child_stack_mmap = child_task.vm_manager.get_memmap().iter()
+        let child_stack_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| {
                 use crate::vm::vmem::VirtualMemoryRegion;
                 mmap.vmarea.start == stack_mmap.vmarea.start &&
@@ -1381,10 +1638,11 @@ mod tests {
             },
             permissions: VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
             is_shared: true, // This should be shared between parent and child
+            owner: None,
         };
         
         // Add shared memory map to parent
-        parent_task.vm_manager.add_memory_map(shared_mmap).unwrap();
+        parent_task.vm_manager.add_memory_map(shared_mmap.clone()).unwrap();
         
         // Write test data to shared memory
         let test_data: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
@@ -1397,7 +1655,7 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the shared memory map in child
-        let child_shared_mmap = child_task.vm_manager.get_memmap().iter()
+        let child_shared_mmap = child_task.vm_manager.memmap_iter()
             .find(|mmap| mmap.vmarea.start == shared_vaddr && mmap.is_shared)
             .expect("Shared memory map not found in child task");
 

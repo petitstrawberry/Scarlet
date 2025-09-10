@@ -3,12 +3,20 @@
 version = 4
 
 [[package]]
+name = "framebuffer"
+version = "0.14.0"
+dependencies = [
+ "scarlet_std",
+]
+
+[[package]]
 name = "scarlet_std"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "userprogram"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
+ "framebuffer",
  "scarlet_std",
 ]

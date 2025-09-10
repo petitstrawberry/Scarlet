@@ -10,6 +10,10 @@ which implements a transparent ABI conversion layer for executing binaries acros
 Use the docker container of ` scarlet-dev` for development to ensure a consistent environment.
 If the image is not available, you can build it using the provided Dockerfile in the repository.
 
+❗️ Before installing additional package such as cargo-make, qemu, etc., please **make sure** that the scarlet-dev image is available in your environment!
+If the image is available, use the following command
+- docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev cargo make build`.
+
 Executing commands in the Docker container at the root of the repository:
 - Build: `cargo make build`
 
@@ -28,3 +32,6 @@ Ensure all tests pass before committing changes to maintain code integrity.
 - Comment rust-doc style for public functions and modules to maintain clarity.
 - Write tests for new features or changes to ensure they work as expected. This project is `no_std`, so tests should be written in a way that does not rely on the standard library and their tests should be written as `#[test_case]` to ensure compatibility with `no_std`.
 - Commit changes frequently to avoid large, unwieldy commits.
+
+## Repository Info
+This repository is hosted at https://github.com/petitstrawberry/Scarlet. You can retrieve information (issues, etc.) remotely from the repository.

@@ -2,8 +2,8 @@
 //!
 //! Scarlet is an operating system kernel written in Rust that implements a transparent ABI 
 //! conversion layer for executing binaries across different operating systems and architectures. 
-//! The kernel provides a universal container runtime environment with strong isolation capabilities 
-//! and comprehensive filesystem support.
+//! The kernel provides a universal container runtime environment with strong isolation capabilities,
+//! comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
 //!
 //! ## Multi-ABI Execution System
 //!
@@ -20,14 +20,16 @@
 //!   ensuring consistent behavior and efficient resource utilization
 //! - **Native Implementation**: Each ABI provides full syscall implementation using underlying
 //!   kernel abstractions, enabling complete OS compatibility
+//! - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 //!
 //! ### Supported ABIs
 //!
 //! - **Scarlet Native ABI**: Direct kernel interface with optimal performance, featuring:
 //!   - Handle-based resource management with capability-based security
 //!   - Modern VFS operations with namespace isolation
-//!   - Advanced IPC mechanisms including pipes and shared memory
+//!   - Advanced IPC mechanisms including pipes and event-driven communication
 //!   - Container-native filesystem operations
+//!   - Dynamic linking support
 //!
 //! - **Linux Compatibility ABI** *(in development)*: Full POSIX syscall implementation
 //! - **xv6 Compatibility ABI** *(in development)*: Educational OS syscall implementation
@@ -65,6 +67,8 @@
 //!
 //! - **TmpFS**: High-performance memory-based filesystem with configurable size limits
 //! - **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs and embedded data
+//! - **ext2**: Full ext2 filesystem implementation with complete read/write support for persistent storage
+//! - **FAT32**: Complete FAT32 filesystem implementation with directory and file operations
 //! - **OverlayFS**: Advanced union filesystem with copy-up semantics and whiteout support
 //! - **DevFS**: Device file system providing controlled hardware access
 //!
@@ -245,6 +249,7 @@ pub mod fs;
 pub mod object;
 pub mod ipc;
 pub mod executor;
+pub mod profiler;
 
 #[cfg(test)]
 pub mod test;
@@ -263,9 +268,8 @@ use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
-use crate::{fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
+use crate::{device::graphics::manager::GraphicsManager, fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
 use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
-
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -274,6 +278,12 @@ fn panic(info: &PanicInfo) -> ! {
     use arch::instruction::idle;
 
     crate::early_println!("[Scarlet Kernel] panic: {}", info);
+
+    // if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+    //     task.exit(1); // Exit the task with error code 1
+    //     get_scheduler().schedule(get_cpu());
+    // }
+
     loop {
         idle();
     }
@@ -285,11 +295,17 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
     early_println!("[Scarlet Kernel] Initializing .bss section...");
     init_bss();
+    fence(Ordering::SeqCst); // Ensure .bss is initialized before proceeding
+
     early_println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
+    fence(Ordering::SeqCst); // Ensure architecture initialization is complete before proceeding
+
     /* Initializing FDT subsystem */
     early_println!("[Scarlet Kernel] Initializing FDT...");
     init_fdt();
+    fence(Ordering::SeqCst); // Ensure FDT is initialized before proceeding
+
     /* Get DRAM area from FDT */
     let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
     early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
@@ -298,6 +314,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
     let dest_ptr = fdt_reloc_start as *mut u8;
     relocate_fdt(dest_ptr);
+    fence(Ordering::SeqCst); // Ensure FDT relocation is complete before proceeding
+    
     /* Calculate usable memory area */
     let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
     let mut usable_area = MemoryArea::new(kernel_end, dram_area.end);
@@ -331,9 +349,6 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
 
-    #[cfg(test)]
-    test_main();
-
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
@@ -343,36 +358,69 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* Initialize (populate) devices */
     early_println!("[Scarlet Kernel] Initializing devices...");
     DeviceManager::get_mut_manager().populate_devices();
+    fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
     /* After this point, we can use the device manager */
     /* Serial console also works */
     
+    /* Initialize Graphics Manager and discover graphics devices */
+    early_println!("[Scarlet Kernel] Initializing graphics subsystem...");
+    
+    // Add extra safety measures for optimized builds
+    fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
+    
+    // Verify that devices are actually registered before attempting graphics initialization
+    let device_count = DeviceManager::get_manager().get_devices_count();
+    early_println!("[Scarlet Kernel] Found {} devices before graphics initialization", device_count);
+    
+    if device_count > 0 {
+        GraphicsManager::get_mut_manager().discover_graphics_devices();
+    } else {
+        early_println!("[Scarlet Kernel] Warning: No devices found, skipping graphics initialization");
+    }
+    
+    fence(Ordering::SeqCst); // Ensure graphics devices are discovered before proceeding
+
+    #[cfg(test)]
+    test_main();
+    
     /* Initcalls */
     call_initcalls();
+
+    fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
     /* Initialize interrupt management system */
     println!("[Scarlet Kernel] Initializing interrupt system...");
     InterruptManager::get_manager().init();
 
+    fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
+
     /* Initialize timer */
     println!("[Scarlet Kernel] Initializing timer...");
     get_kernel_timer().init();
 
+    fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
+
     /* Initialize scheduler */
     println!("[Scarlet Kernel] Initializing scheduler...");
     let scheduler = get_scheduler();
+    fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
+
     /* Initialize global VFS */
     println!("[Scarlet Kernel] Initializing global VFS...");
     let manager = init_global_vfs_manager();
     /* Initialize initramfs */
     println!("[Scarlet Kernel] Initializing initramfs...");
     init_initramfs(&manager);
+
+    fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
+
     /* Make init task */
     println!("[Scarlet Kernel] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();
     task.vfs = Some(manager.clone());
-    task.cwd = Some("/".to_string());
+    task.vfs.as_ref().unwrap().set_cwd_by_path("/").expect("Failed to set initial working directory");
     let file_obj = match task.vfs.as_ref().unwrap().open("/system/scarlet/bin/init", 0) {
         Ok(kernel_obj) => kernel_obj,
         Err(e) => {
@@ -387,7 +435,7 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 
     match load_elf_into_task(file_ref, &mut task) {
         Ok(_) => {
-            for map in task.vm_manager.get_memmap() {
+            for map in task.vm_manager.memmap_iter() {
                 early_println!("[Scarlet Kernel] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);
             }
             early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
@@ -395,6 +443,8 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
         }
         Err(e) => early_println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
     }
+
+    fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
 
     println!("[Scarlet Kernel] Scheduler will start...");
     scheduler.start_scheduler();
@@ -406,5 +456,6 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
+
     loop {}
 }

@@ -1,0 +1,11 @@
+[package]
+name = "framebuffer"
+version = "0.14.0"
+edition = "2021"
+
+[dependencies]
+scarlet_std = { path = "../std" }
+
+[lib]
+name = "framebuffer"
+path = "src/lib.rs"

@@ -1,7 +1,8 @@
 {
     "rust-analyzer.linkedProjects": [
         "kernel/Cargo.toml",
-        "user/lib/Cargo.toml",
+        "user/lib/std/Cargo.toml",
+        "user/lib/framebuffer/Cargo.toml",
         "user/bin/Cargo.toml",
     ]
 }

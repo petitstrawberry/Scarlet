@@ -289,6 +289,7 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                         // trapframe.epc = epc;
                         // task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
                         get_scheduler().schedule(trapframe); // Yield to the scheduler
+                        return usize::MAX; // Unreadable state, return -1
                     },
                     _ => {
                         trapframe.increment_pc_next(task);
@@ -312,7 +313,10 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                         trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
                         0 // EOF
                     },
-                    StreamError::WouldBlock => get_scheduler().schedule(trapframe), // Yield to the scheduler
+                    StreamError::WouldBlock => {
+                        get_scheduler().schedule(trapframe); // Yield to the scheduler
+                        return usize::MAX; // Unreadable state, return -1
+                    },
                     _ => {
                         // Other errors, return -1
                         trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
@@ -575,22 +579,8 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let cwd = task.cwd.clone().ok_or(())?;
-        let mut absolute_path = cwd;
-        if !absolute_path.ends_with('/') {
-            absolute_path.push('/');
-        }
-        absolute_path.push_str(path);
-        // Simple normalization (removes "//", ".", etc.)
-        let mut components = Vec::new();
-        for comp in absolute_path.split('/') {
-            match comp {
-                "" | "." => {},
-                ".." => { components.pop(); },
-                _ => components.push(comp),
-            }
-        }
-        Ok("/".to_string() + &components.join("/"))
+        let vfs = task.vfs.as_ref().ok_or(())?;
+        Ok(vfs.resolve_path_to_absolute(path))
     }
 }
 

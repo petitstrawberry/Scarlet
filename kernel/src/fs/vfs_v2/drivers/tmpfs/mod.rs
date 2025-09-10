@@ -12,8 +12,8 @@ use core::{any::Any, fmt::Debug};
 
 use crate::{device::{Device, DeviceType}, driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType
-}};
-use crate::object::capability::{StreamOps, StreamError};
+}, object::capability::MemoryMappingOps};
+use crate::object::capability::{StreamOps, StreamError, ControlOps};
 use crate::device::manager::DeviceManager;
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
@@ -443,6 +443,10 @@ impl FileSystemOperations for TmpFS {
     
     fn name(&self) -> &str {
         &self.name
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -1017,6 +1021,58 @@ impl StreamOps for TmpFileObject {
     }
 }
 
+impl ControlOps for TmpFileObject {
+    // Temporary files don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on temporary files")
+    }
+}
+
+impl MemoryMappingOps for TmpFileObject {
+    fn get_mapping_info(&self, offset: usize, length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        let content = self.node.content.read();
+        
+        // Check bounds
+        if offset >= content.len() {
+            return Err("Offset beyond file size");
+        }
+        
+        let available_length = content.len() - offset;
+        let actual_length = core::cmp::min(length, available_length);
+        
+        if actual_length == 0 {
+            return Err("Requested length is zero or beyond file size");
+        }
+        
+        // For tmpfs, we provide the physical address of the data in memory
+        let data_ptr = content.as_ptr().wrapping_add(offset);
+        let physical_addr = data_ptr as usize;
+
+        // Set permissions: 0x7 = read + write + execute, adjust based on file permissions if needed
+        let permissions = 0x7; // Read, write, and execute permissions
+
+        // tmpfs mappings are shared (changes are visible to all processes)
+        let is_shared = true;
+        
+        Ok((physical_addr, permissions, is_shared))
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // For tmpfs, no special action needed when mapped
+        // The data is already in memory
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // For tmpfs, no special action needed when unmapped
+        // The data remains in memory
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        true
+    }
+}
+
 impl FileObject for TmpFileObject {
     fn seek(&self, pos: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         use crate::fs::SeekFrom;
@@ -1084,6 +1140,10 @@ impl FileObject for TmpFileObject {
         self.node.update_size(size);
         
         Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

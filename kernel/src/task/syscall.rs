@@ -12,6 +12,8 @@
 //! - Bind mount operations enable controlled sharing between isolated namespaces
 //! - All filesystem operations are thread-safe and handle concurrent access properly
 
+use core::usize;
+
 use alloc::vec::Vec;
 
 use crate::abi::MAX_ABI_LENGTH;
@@ -22,7 +24,8 @@ use crate::library::std::string::{parse_c_string_from_userspace, parse_string_ar
 
 use crate::arch::{get_cpu, Trapframe};
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{get_parent_waker, get_task_waker, CloneFlags, WaitError};
+use crate::task::{get_parent_waitpid_waker, get_waitpid_waker, CloneFlags, WaitError};
+use crate::timer::{get_tick, ms_to_ticks, ns_to_ticks};
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 
@@ -96,8 +99,7 @@ pub fn sys_exit(trapframe: &mut Trapframe) -> usize {
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
-    // The scheduler will handle saving the current task state internally
-    get_scheduler().schedule(get_cpu());
+    usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
 pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
@@ -107,12 +109,17 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     parent_task.vcpu.store(trapframe);
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
 
+    // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
+
     /* Clone the task */
     match parent_task.clone_task(clone_flags) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
+            // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}", 
+            //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.regs.reg[10] = 0; /* Set the return value to 0 in the child task */
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
+            // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
             /* Return the child task ID to the parent task */
             child_id
         },
@@ -125,6 +132,8 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     
+    // crate::println!("[EXECVE] Task {} starting execve", task.get_id());
+    
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
     
@@ -136,19 +145,37 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
-        Ok(path) => path,
-        Err(_) => return usize::MAX, // Path parsing error
+        Ok(path) => {
+            // crate::println!("[EXECVE] Task {}: Executing path: {}", task.get_id(), path);
+            path
+        },
+        Err(_) => {
+            // crate::println!("[EXECVE] Task {}: Path parsing error", task.get_id());
+            return usize::MAX; // Path parsing error
+        }
     };
     
     // Parse argv and envp
     let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(args) => args,
-        Err(_) => return usize::MAX, // argv parsing error
+        Ok(args) => {
+            // crate::println!("[EXECVE] Task {}: argv count: {}", task.get_id(), args.len());
+            args
+        },
+        Err(_) => {
+            // crate::println!("[EXECVE] Task {}: argv parsing error", task.get_id());
+            return usize::MAX; // argv parsing error
+        }
     };
     
     let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(env) => env,
-        Err(_) => return usize::MAX, // envp parsing error
+        Ok(env) => {
+            // crate::println!("[EXECVE] Task {}: envp count: {}", task.get_id(), env.len());
+            env
+        },
+        Err(_) => {
+            // crate::println!("[EXECVE] Task {}: envp parsing error", task.get_id());
+            return usize::MAX; // envp parsing error
+        }
     };
     
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
@@ -158,15 +185,19 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     // Check if force ABI rebuild is requested
     let force_abi_rebuild = (flags & EXECVE_FORCE_ABI_REBUILD) != 0;
     
+    // crate::println!("[EXECVE] Task {}: Starting TransparentExecutor::execute_binary", task.get_id());
+    
     // Use TransparentExecutor for cross-ABI execution
     match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe, force_abi_rebuild) {
         Ok(_) => {
+            // crate::println!("[EXECVE] Task {}: execute_binary succeeded", task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0
             trapframe.get_return_value()
         },
         Err(_) => {
+            // crate::println!("[EXECVE] Task {}: execute_binary failed", task.get_id());
             // Execution failed - return error code
             // The trap handler will automatically set trapframe return value from our return
             usize::MAX // Error return value
@@ -247,69 +278,75 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     let status_ptr = trapframe.get_arg(1) as *mut i32;
     let _options = trapframe.get_arg(2) as i32; // Not used in this implementation
 
-    if pid == -1 {
-        // Wait for any child process
-        for pid in task.get_children().clone() {
-            match task.wait(pid) {
-                Ok(status) => {
-                    // Child has exited, return the status
-                    if status_ptr != core::ptr::null_mut() {
-                        let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
-                        unsafe {
-                            *status_ptr = status;
+    // Loop until a child exits or an error occurs
+    loop {
+        if pid == -1 {
+            // Wait for any child process
+            for child_pid in task.get_children().clone() {
+                match task.wait(child_pid) {
+                    Ok(status) => {
+                        // Child has exited, return the status
+                        if status_ptr != core::ptr::null_mut() {
+                            let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                            unsafe {
+                                *status_ptr = status;
+                            }
+                        }
+                        trapframe.increment_pc_next(task);
+                        return child_pid;
+                    },
+                    Err(error) => {
+                        match error {
+                            WaitError::ChildNotExited(_) => continue,
+                            _ => {
+                                trapframe.increment_pc_next(task);
+                                return usize::MAX;
+                            },
                         }
                     }
-                    trapframe.increment_pc_next(task);
-                    return pid;
-                },
-                Err(error) => {
-                    match error {
-                        WaitError::ChildNotExited(_) => continue,
-                        _ => {
-                            trapframe.increment_pc_next(task);
-                            return usize::MAX;
-                        },
-                    }
                 }
             }
+            
+            // No child has exited yet, block until one does
+            let parent_waker = get_parent_waitpid_waker(task.get_id());
+            parent_waker.wait(task.get_id(), trapframe);
+            // Continue the loop to re-check after waking up
+            continue;
         }
         
-        // No child has exited yet, block until one does
-        // We wait on the parent's waker since we're waiting for any child (-1)
-        // This is different from waiting for a specific child
-        let parent_waker = get_parent_waker(task.get_id());
-        parent_waker.wait(task, trapframe);
-    }
-    
-    // Wait for specific child process
-    match task.wait(pid as usize) {
-        Ok(status) => {
-            // Child has exited, return the status
-            if status_ptr != core::ptr::null_mut() {
-                let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
-                unsafe {
-                    *status_ptr = status;
+        // Wait for specific child process
+        match task.wait(pid as usize) {
+            Ok(status) => {
+                // Child has exited, return the status
+                if status_ptr != core::ptr::null_mut() {
+                    let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                    unsafe {
+                        *status_ptr = status;
+                    }
                 }
+                trapframe.increment_pc_next(task);
+                return pid as usize;
             }
-            trapframe.increment_pc_next(task);
-            return pid as usize;
-        }
-        Err(error) => {
-            match error {
-                WaitError::NoSuchChild(_) => {
-                    trapframe.increment_pc_next(task);
-                    return usize::MAX;
-                },
-                WaitError::ChildTaskNotFound(_) => {
-                    trapframe.increment_pc_next(task);
-                    crate::print!("Child task with PID {} not found", pid);
-                    return usize::MAX;
-                },
-                WaitError::ChildNotExited(_) => {
-                    // If the child task is not exited, we need to wait for it
-                    let child_waker = get_task_waker(pid as usize);
-                    child_waker.wait(task, trapframe);
-                },
+            Err(error) => {
+                match error {
+                    WaitError::NoSuchChild(_) => {
+                        trapframe.increment_pc_next(task);
+                        return usize::MAX;
+                    },
+                    WaitError::ChildTaskNotFound(_) => {
+                        trapframe.increment_pc_next(task);
+                        crate::print!("Child task with PID {} not found", pid);
+                        return usize::MAX;
+                    },
+                    WaitError::ChildNotExited(_) => {
+                        // If the child task is not exited, we need to wait for it
+                        let child_waker = get_waitpid_waker(pid as usize);
+                        child_waker.wait(task.get_id(), trapframe);
+                        assert_eq!(mytask().unwrap().get_id(), task.get_id());
+                        // Continue the loop to re-check after waking up
+                        continue;
+                    },
+                }
             }
         }
     }
@@ -325,5 +362,22 @@ pub fn sys_getppid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     task.get_parent_id().unwrap_or(task.get_id()) as usize
+}
+
+pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
+    let nanosecs = trapframe.get_arg(0) as u64;
+    let task = mytask().unwrap();
+
+    let ticks = ns_to_ticks(nanosecs);
+    crate::early_println!("[syscall] Sleeping for {} ticks ({} ns)", ticks, nanosecs);
+
+    // Increment PC before sleeping to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Call the blocking sleep method - this will return when sleep completes
+    task.sleep(trapframe, ticks);
+
+    // Set return value to 0 for successful sleep
+    0
 }
 

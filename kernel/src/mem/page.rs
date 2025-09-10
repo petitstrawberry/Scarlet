@@ -35,7 +35,7 @@ pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
 /// * `num_of_pages` - The number of pages to free
 pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
     unsafe {
-        let boxed_pages = Box::from_raw(core::slice::from_raw_parts_mut(pages, num_of_pages));
+        let boxed_pages = Box::from_raw(core::ptr::slice_from_raw_parts_mut(pages, num_of_pages));
         free_boxed_pages(boxed_pages);
     }
 }
@@ -49,8 +49,22 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
 /// A boxed slice of the allocated pages.
 /// 
 pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
-    let boxed_pages = alloc::vec![Page::new(); num_of_pages].into_boxed_slice();
-    boxed_pages
+    // Allocate raw memory and initialize it
+    use alloc::alloc::{alloc_zeroed, Layout};
+    use core::ptr;
+    
+    let layout = Layout::array::<Page>(num_of_pages).expect("Layout calculation failed");
+    
+    unsafe {
+        let ptr = alloc_zeroed(layout) as *mut Page;
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        
+        // Convert raw pointer to Box<[Page]>
+        let slice = ptr::slice_from_raw_parts_mut(ptr, num_of_pages);
+        Box::from_raw(slice)
+    }
 }
 
 /// Frees a boxed slice of pages.

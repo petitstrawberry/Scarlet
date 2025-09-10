@@ -4,7 +4,7 @@
 //! It includes the data structures and methods to manage the Virtio Queue.
 //! 
 
-use core::{alloc::Layout, mem};
+use core::{alloc::Layout, mem::{self, swap}, sync::atomic::compiler_fence};
 use alloc::{alloc::alloc_zeroed, vec::Vec};
 
 // struct RawVirtQueue {
@@ -27,13 +27,20 @@ use alloc::{alloc::alloc_zeroed, vec::Vec};
 /// * `used`: The used ring.
 /// * `free_head`: The index of the next free descriptor.
 /// * `last_used_idx`: The index of the last used descriptor.
+/// * `ptr`: A raw pointer to the start of the virtqueue memory.
+/// * `layout`: The layout of the virtqueue memory.
 pub struct VirtQueue<'a> {
     pub desc: &'a mut [Descriptor],
     pub avail: AvailableRing<'a>,
     pub used: UsedRing<'a>,
     pub free_descriptors: Vec<usize>,
-    pub last_used_idx: usize,
+    pub last_used_idx: u16,
+    ptr: *mut u8,
+    layout: Layout,
 }
+
+unsafe impl<'a> Send for VirtQueue<'a> {}
+unsafe impl<'a> Sync for VirtQueue<'a> {}
 
 impl<'a> VirtQueue<'a> {
     pub fn new(queue_size: usize) -> Self {
@@ -81,8 +88,7 @@ impl<'a> VirtQueue<'a> {
             free_descriptors.push(i);
         }
         let last_used_idx = 0;
-        
-        Self { desc, avail, used, free_descriptors, last_used_idx }
+        Self { desc, avail, used, free_descriptors, last_used_idx, ptr, layout }
     }
 
     /// Initialize the virtqueue
@@ -134,6 +140,10 @@ impl<'a> VirtQueue<'a> {
         let align_size = (desc_size + avail_size + 3) & !3;
         let padding_size = align_size - (desc_size + avail_size);
         desc_size + avail_size + used_size + padding_size
+    }
+
+    pub fn get_queue_size(&self) -> usize {
+        self.desc.len()
     }
 
     /// Allocate a descriptor
@@ -225,9 +235,13 @@ impl<'a> VirtQueue<'a> {
                 break;
             }
             let next = self.desc[idx].next;
+            let flags = self.desc[idx].flags;
+
+            compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
             self.free_desc(idx);
 
-            if !DescriptorFlag::Next.is_set(self.desc[idx].flags) {
+            if !DescriptorFlag::Next.is_set(flags) {
                 break;
             }
             idx = next as usize;
@@ -242,7 +256,9 @@ impl<'a> VirtQueue<'a> {
     /// 
     /// bool: True if the virtqueue is busy, false otherwise.
     pub fn is_busy(&self) -> bool {
-        self.last_used_idx != *self.used.idx as usize
+        // Volatile read to ensure we get the latest value
+        let used_idx = unsafe { core::ptr::read_volatile(self.used.idx) };
+        self.last_used_idx == used_idx
     }
 
     /// Push a descriptor index to the available ring
@@ -261,9 +277,12 @@ impl<'a> VirtQueue<'a> {
         if desc_idx >= self.desc.len() {
             return Err("Invalid descriptor index");
         }
-        
-        self.avail.ring[*self.avail.idx as usize] = desc_idx as u16;
-        *self.avail.idx = (*self.avail.idx + 1) % self.avail.size as u16;
+
+        let ring_ptr = &mut self.avail.ring[(*self.avail.idx as usize) % self.avail.size] as *mut u16;
+        unsafe {
+            core::ptr::write_volatile(ring_ptr, desc_idx as u16);
+        }
+        *self.avail.idx = (*self.avail.idx).wrapping_add(1);
         Ok(())
     }
 
@@ -278,19 +297,28 @@ impl<'a> VirtQueue<'a> {
     ///
     pub fn pop(&mut self) -> Option<usize> {
         // Check if there are any used buffers available
-        if self.last_used_idx == *self.used.idx as usize {
+        if self.last_used_idx == *self.used.idx {
             return None;
         }
         
         // Calculate the index in the used ring
-        let used_idx = self.last_used_idx % self.desc.len();
+        let used_idx = self.last_used_idx as usize % self.desc.len();
         
         // Retrieve the descriptor index from the used ring
         let desc_idx = self.used.ring[used_idx].id as usize;
         // Update the last used index
-        self.last_used_idx = (self.last_used_idx + 1) % self.used.ring.len();
+        // self.last_used_idx = (self.last_used_idx + 1) % self.used.ring.len();
+        self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
         Some(desc_idx)
+    }
+}
+
+impl<'a> Drop for VirtQueue<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            alloc::alloc::dealloc(self.ptr, self.layout);
+        }
     }
 }
 

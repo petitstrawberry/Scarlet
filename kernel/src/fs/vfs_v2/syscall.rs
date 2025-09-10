@@ -636,11 +636,13 @@ pub fn sys_vfs_change_directory(trapframe: &mut Trapframe) -> usize {
     
     // Check if the path exists and is a directory
     match vfs.resolve_path(&absolute_path) {
-        Ok(entry) => {
+        Ok((entry, _mount_point)) => {
             if entry.node().file_type().unwrap() == FileType::Directory {
-                // Update the task's current working directory
-                task.set_cwd(absolute_path);
-                0 // Success
+                // Update the current working directory via VfsManager
+                match vfs.set_cwd_by_path(&absolute_path) {
+                    Ok(()) => 0, // Success
+                    Err(_) => usize::MAX, // Failed to set cwd
+                }
             } else {
                 usize::MAX // Not a directory
             }
@@ -703,27 +705,133 @@ pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+/// Create a symbolic link (VfsCreateSymlink)
+/// 
+/// This system call creates a symbolic link at the specified path pointing to the target.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to symlink path (where to create the symlink)
+/// * `trapframe.get_arg(1)` - Pointer to target path (what the symlink points to)
+/// 
+/// # Returns
+/// 
+/// * `0` on success
+/// * `usize::MAX` on error (path already exists, permission denied, etc.)
+pub fn sys_vfs_create_symlink(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let symlink_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let target_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *const u8;
+    
+    trapframe.increment_pc_next(task);
 
-// Use a local path normalization function
+    // Convert symlink path bytes to string
+    let symlink_path_str = match cstring_to_string(symlink_path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    // Convert target path bytes to string (target can be relative, don't convert to absolute)
+    let target_path_str = match cstring_to_string(target_path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => s,
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+    
+    match vfs.create_symlink(&symlink_path_str, &target_path_str) {
+        Ok(_) => 0,
+        Err(_) => usize::MAX, // -1
+    }
+}
+
+/// Read symbolic link target (VfsReadlink)
+/// 
+/// This system call reads the target of a symbolic link.
+/// 
+/// # Arguments
+/// 
+/// * `trapframe.get_arg(0)` - Pointer to symlink path
+/// * `trapframe.get_arg(1)` - Pointer to buffer to store target path
+/// * `trapframe.get_arg(2)` - Buffer size
+/// 
+/// # Returns
+/// 
+/// * Number of bytes written to buffer on success
+/// * `usize::MAX` on error (not a symlink, permission denied, etc.)
+pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let symlink_path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
+    let buffer_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(1)).unwrap() as *mut u8;
+    let buffer_size = trapframe.get_arg(2);
+    
+    trapframe.increment_pc_next(task);
+
+    // Convert symlink path bytes to string
+    let symlink_path_str = match cstring_to_string(symlink_path_ptr, MAX_PATH_LENGTH) {
+        Ok((s, _)) => match to_absolute_path_v2(&task, &s) {
+            Ok(abs_path) => abs_path,
+            Err(_) => return usize::MAX,
+        },
+        Err(_) => return usize::MAX, // Invalid UTF-8
+    };
+    
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX, // VFS not initialized
+    };
+    
+    // Open the symlink entry with no_follow to avoid following the link
+    let options = crate::fs::vfs_v2::PathResolutionOptions::no_follow();
+    let entry = match vfs.resolve_path_with_options(&symlink_path_str, &options) {
+        Ok((entry, _)) => entry,
+        Err(_) => return usize::MAX, // Path not found or error
+    };
+    
+    // Check if it's actually a symlink
+    let node = entry.node();
+    let is_symlink = match node.is_symlink() {
+        Ok(is_link) => is_link,
+        Err(_) => return usize::MAX, // Error checking file type
+    };
+    
+    if !is_symlink {
+        return usize::MAX; // Not a symlink
+    }
+    
+    // Read the symlink target
+    let target = match node.read_link() {
+        Ok(target) => target,
+        Err(_) => return usize::MAX, // Error reading symlink
+    };
+    
+    let target_bytes = target.as_bytes();
+    let bytes_to_copy = core::cmp::min(target_bytes.len(), buffer_size);
+    
+    // Copy target to user buffer
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            target_bytes.as_ptr(),
+            buffer_ptr,
+            bytes_to_copy
+        );
+    }
+    
+    bytes_to_copy
+}
+
+// Use VfsManager-based path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let cwd = task.cwd.clone().ok_or(())?;
-        let mut absolute_path = cwd;
-        if !absolute_path.ends_with('/') {
-            absolute_path.push('/');
-        }
-        absolute_path.push_str(path);
-        // Simple normalization (removes "//", ".", etc.)
-        let mut components = Vec::new();
-        for comp in absolute_path.split('/') {
-            match comp {
-                "" | "." => {},
-                ".." => { components.pop(); },
-                _ => components.push(comp),
-            }
-        }
-        Ok("/".to_string() + &components.join("/"))
+        let vfs = task.vfs.as_ref().ok_or(())?;
+        Ok(vfs.resolve_path_to_absolute(path))
     }
 }

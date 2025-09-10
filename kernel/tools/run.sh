@@ -1,6 +1,48 @@
 #!/bin/bash
 
-echo Starting qemu...
+# Check for debug mode environment variable or command line argument
+DEBUG_MODE=${SCARLET_DEBUG_MODE:-false}
+KERNEL_PATH=""
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --debug)
+            DEBUG_MODE=true
+            shift
+            ;;
+        *)
+            # This should be the kernel binary path
+            KERNEL_PATH="$1"
+            shift
+            ;;
+    esac
+done
+
+# If no kernel path provided, try to find the default build
+if [ -z "$KERNEL_PATH" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    KERNEL_DIR="$(dirname "$SCRIPT_DIR")"
+    
+    if [ "$DEBUG_MODE" = "true" ]; then
+        KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/kernel"
+    else
+        # For release mode or default run
+        if [ -f "$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/kernel" ]; then
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/release/kernel"
+        else
+            KERNEL_PATH="$KERNEL_DIR/target/riscv64gc-unknown-none-elf/debug/kernel"
+        fi
+    fi
+fi
+
+if [ "$DEBUG_MODE" = "true" ]; then
+    echo "Starting qemu in debug mode with gdb server..."
+    DEBUG_FLAGS="-gdb tcp::12345 -S"
+else
+    echo "Starting qemu..."
+    DEBUG_FLAGS=""
+fi
 
 # Find the project root by looking for Makefile.toml
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,18 +56,30 @@ TEMP_OUTPUT=$(mktemp)
 qemu-system-riscv64 \
     -machine virt \
     -bios default \
-    -m 2G \
+    -m 4G \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
     -global virtio-mmio.force-legacy=false \
-    -drive id=x0,file=test.txt,format=raw,if=none \
+    -drive id=x0,file=../mkfs/dist/rootfs.img,format=raw,if=none \
     -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+    -display vnc=:0 \
+    -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
+    -netdev user,id=net0 \
+    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
+    $DEBUG_FLAGS \
     -initrd "$INITRAMFS_PATH" \
-    -kernel $1 | tee "$TEMP_OUTPUT"
+    -kernel "$KERNEL_PATH" | tee "$TEMP_OUTPUT"
 
 # Capture QEMU exit code
 QEMU_EXIT_CODE=$?
+
+# In debug mode, don't check for test patterns since we're debugging
+if [ "$DEBUG_MODE" = "true" ]; then
+    echo "Debug session ended"
+    rm -f "$TEMP_OUTPUT"
+    exit 0
+fi
 
 # Check for test failure patterns in output
 if grep -q "\[Test Runner\] Test failed" "$TEMP_OUTPUT"; then

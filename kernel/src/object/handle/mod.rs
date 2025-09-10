@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec, vec};
 
 use crate::object::{introspection, KernelObject};
 
@@ -10,12 +10,11 @@ mod tests;
 /// Handle type for referencing kernel objects
 pub type Handle = u32;
 
-#[derive(Clone)]
 pub struct HandleTable {
-    /// Fixed-size handle table
-    handles: [Option<KernelObject>; Self::MAX_HANDLES],
-    /// Metadata for each handle
-    metadata: [Option<HandleMetadata>; Self::MAX_HANDLES],
+    /// Fixed-size handle table allocated on heap to avoid stack overflow (Allocate directly on heap avoiding stack overflow)
+    handles: Box<[Option<KernelObject>; Self::MAX_HANDLES]>,
+    /// Metadata for each handle allocated on heap to avoid stack overflow (Allocate directly on heap avoiding stack overflow)
+    metadata: Box<[Option<HandleMetadata>; Self::MAX_HANDLES]>,
     /// Stack of available handle numbers for O(1) allocation
     free_handles: Vec<Handle>,
 }
@@ -23,19 +22,28 @@ pub struct HandleTable {
 impl HandleTable {
     const MAX_HANDLES: usize = 1024; // POSIX standard limit (fd)
     
-    pub fn new() -> Self {
-        // Initialize free handle stack in forward order (0 will be allocated first)
-        let mut free_handles = Vec::with_capacity(Self::MAX_HANDLES);
-        for handle in (0..Self::MAX_HANDLES as Handle).rev() {
-            free_handles.push(handle);
-        }
-        
-        Self {
-            handles: [const { None }; Self::MAX_HANDLES],
-            metadata: [const { None }; Self::MAX_HANDLES],
-            free_handles,
-        }
+pub fn new() -> Self {
+    // Initialize free handle stack in forward order (0 will be allocated first)
+    let mut free_handles = Vec::new();
+    for handle in (0..Self::MAX_HANDLES as Handle).rev() {
+        free_handles.push(handle);
     }
+
+    // Allocate handles and metadata as boxed slices to avoid stack overflow
+    let handles = vec![None; Self::MAX_HANDLES]
+        .try_into()
+        .unwrap_or_else(|_| panic!("Failed to create boxed slice for handles"));
+
+    let metadata = vec![None; Self::MAX_HANDLES]
+        .try_into()
+        .unwrap_or_else(|_| panic!("Failed to create boxed slice for metadata"));
+
+    Self {
+        handles,
+        metadata,
+        free_handles,
+    }
+}
     
     /// O(1) allocation with automatic metadata inference
     pub fn insert(&mut self, obj: KernelObject) -> Result<Handle, &'static str> {
@@ -71,6 +79,14 @@ impl HandleTable {
                 // insert_with_metadata() to specify specific roles like
                 // ConfigFile, LogOutput, etc.
                 HandleType::Regular
+            }
+            KernelObject::EventChannel(_) => {
+                // Event channels are used for pub/sub communication
+                HandleType::EventChannel
+            }
+            KernelObject::EventSubscription(_) => {
+                // Event subscriptions are used for receiving events
+                HandleType::EventSubscription
             }
         };
 
@@ -189,6 +205,12 @@ impl HandleTable {
                 KernelObject::Pipe(_) => {
                     Some(introspection::KernelObjectInfo::for_pipe(handle_role, readable, writable))
                 }
+                KernelObject::EventChannel(_) => {
+                    Some(introspection::KernelObjectInfo::for_event_channel(handle_role))
+                }
+                KernelObject::EventSubscription(_) => {
+                    Some(introspection::KernelObjectInfo::for_event_subscription(handle_role))
+                }
             }
         } else {
             None
@@ -234,6 +256,29 @@ impl Default for HandleTable {
 ///     }
 /// )?;
 /// ```
+
+impl Clone for HandleTable {
+    fn clone(&self) -> Self {
+        let handles_clone = {
+            let vec: Vec<Option<KernelObject>> = self.handles.to_vec();
+            vec.try_into()
+                .unwrap_or_else(|_| panic!("slice with incorrect length"))
+        };
+
+        let metadata_clone = {
+            let vec: Vec<Option<HandleMetadata>> = self.metadata.to_vec();
+            vec.try_into()
+                .unwrap_or_else(|_| panic!("slice with incorrect length"))
+        };
+
+        Self {
+            handles: handles_clone,
+            metadata: metadata_clone,
+            free_handles: self.free_handles.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HandleMetadata {
     pub handle_type: HandleType,
@@ -251,6 +296,10 @@ pub enum HandleType {
     StandardInputOutput(StandardInputOutput),
     /// Inter-process communication channel
     IpcChannel,
+    /// Event channel for pub/sub communication
+    EventChannel,
+    /// Event subscription for receiving events
+    EventSubscription,
     /// Default/generic usage
     Regular,
 }

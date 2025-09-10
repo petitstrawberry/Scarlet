@@ -1,7 +1,9 @@
 /kernel/target
-/user/lib/target
+/user/lib/*/target
 /user/bin/target
 /mkfs/initramfs/bin/*
 /mkfs/initramfs/system/scarlet/bin/*
 /mkfs/*.cpio
 dist/
+/kernel/fat32-test.img
+/kernel/ext2-test.img

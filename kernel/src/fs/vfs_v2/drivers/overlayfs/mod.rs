@@ -47,7 +47,7 @@ use core::any::Any;
 use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal, VfsEntry};
 use crate::fs::{get_fs_driver_manager, FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType, SeekFrom, VfsManager};
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::vm::vmem::MemoryArea;
 
@@ -154,6 +154,14 @@ impl VfsNode for OverlayNode {
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
         if let Some(ref fs) = *self.overlay_fs.read() {
             fs.get_metadata_for_path(&self.path)
+        } else {
+            Err(FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))
+        }
+    }
+
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        if let Some(ref fs) = *self.overlay_fs.read() {
+            fs.read_link_for_path(&self.path)
         } else {
             Err(FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))
         }
@@ -360,6 +368,43 @@ impl OverlayFS {
         }
 
         Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File not found in any layer"))
+    }
+
+    /// Read the target of a symbolic link at the specified path
+    ///
+    /// This method searches through the overlay layers to find a symbolic link
+    /// at the given path and returns its target. It follows the same priority
+    /// order as other operations: upper layer first, then lower layers.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the symbolic link to read
+    ///
+    /// # Returns
+    ///
+    /// Returns the target path of the symbolic link, or an error if the path
+    /// is not found or is not a symbolic link.
+    fn read_link_for_path(&self, path: &str) -> Result<String, FileSystemError> {
+        // Check for whiteout first
+        if self.is_whiteout(path) {
+            return Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File is hidden by whiteout"));
+        }
+
+        // Check upper layer first
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if let Ok(node) = self.resolve_in_layer(upper_fs, upper_node, path) {
+                return node.read_link();
+            }
+        }
+
+        // Check lower layers
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if let Ok(node) = self.resolve_in_layer(lower_fs, lower_node, path) {
+                return node.read_link();
+            }
+        }
+
+        Err(FileSystemError::new(FileSystemErrorKind::NotFound, "Symbolic link not found in any layer"))
     }
 
     /// Resolve a path in a specific layer, starting from the given node
@@ -884,6 +929,10 @@ impl FileSystemOperations for OverlayFS {
         entries.sort_by(|a, b| a.file_id.cmp(&b.file_id)); // Sort entries by file_id
         Ok(entries)
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 /// File object for OverlayFS directory operations
@@ -1091,6 +1140,32 @@ impl StreamOps for OverlayDirectoryObject {
     }
 }
 
+impl ControlOps for OverlayDirectoryObject {
+    // Overlay directories don't support control operations
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on overlay directories")
+    }
+}
+
+impl MemoryMappingOps for OverlayDirectoryObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for directories")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
 impl FileObject for OverlayDirectoryObject {
     fn seek(&self, _whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         // Seeking in directories not supported for now
@@ -1107,6 +1182,10 @@ impl FileObject for OverlayDirectoryObject {
             FileSystemErrorKind::IsADirectory,
             "Cannot truncate directory"
         )))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

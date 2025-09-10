@@ -25,11 +25,11 @@ fn test_cross_vfs_bind_mount_basic() {
     ).expect("cross-vfs bind mount failed");
 
     // Check if files under the bind mount can be accessed from the target side
-    let entry  = target_vfs.resolve_path("/mnt/file.txt").expect("resolve_path failed");
+    let (entry, _) = target_vfs.resolve_path("/mnt/file.txt").expect("resolve_path failed");
     assert_eq!(entry.name(), "file.txt");
 
     // Check that .. from the bind mount root does not escape ("/mnt/.." should return to the parent on the target side)
-    let entry = target_vfs.resolve_path("/mnt/../root_file.txt").expect("resolve_path failed");
+    let (entry, _) = target_vfs.resolve_path("/mnt/../root_file.txt").expect("resolve_path failed");
     assert_eq!(entry.name(), "root_file.txt");
 }
 
@@ -48,7 +48,7 @@ fn test_cross_vfs_bind_mount_file_create_delete() {
     // Create file from target side
     target_vfs.create_file("/mnt/newfile.txt", FileType::RegularFile).unwrap();
     // Should be visible from source side
-    let entry = source_vfs.resolve_path("/srcdir/newfile.txt").expect("file not visible from source");
+    let (entry, _) = source_vfs.resolve_path("/srcdir/newfile.txt").expect("file not visible from source");
     assert_eq!(entry.name(), "newfile.txt");
 
     // Delete file from source side
@@ -72,7 +72,7 @@ fn test_cross_vfs_bind_mount_recursive() {
     target_vfs.bind_mount_from(&source_vfs, "/a", "/mnt").unwrap();
 
     // Recursively access file
-    let entry = target_vfs.resolve_path("/mnt/b/file.txt").expect("recursive bind mount failed");
+    let (entry, _) = target_vfs.resolve_path("/mnt/b/file.txt").expect("recursive bind mount failed");
     assert_eq!(entry.name(), "file.txt");
 }
 
@@ -93,8 +93,8 @@ fn test_cross_vfs_bind_mount_multiple() {
     target.create_dir("/mnt2").unwrap();
     target.bind_mount_from(&source1, "/d1", "/mnt1").unwrap();
     target.bind_mount_from(&source2, "/d2", "/mnt2").unwrap();
-    let e1 = target.resolve_path("/mnt1/f1").expect("mnt1 failed");
-    let e2 = target.resolve_path("/mnt2/f2").expect("mnt2 failed");
+    let (e1, _) = target.resolve_path("/mnt1/f1").expect("mnt1 failed");
+    let (e2, _) = target.resolve_path("/mnt2/f2").expect("mnt2 failed");
     assert_eq!(e1.name(), "f1");
     assert_eq!(e2.name(), "f2");
 }
@@ -113,7 +113,7 @@ fn test_cross_vfs_bind_mount_parent_traversal() {
     target.create_file("/outside", FileType::RegularFile).unwrap();
     target.bind_mount_from(&source, "/d", "/mnt").unwrap();
     // .. from inside bind mount should not escape to source VFS
-    let e = target.resolve_path("/mnt/../outside").expect("parent traversal failed");
+    let (e, _) = target.resolve_path("/mnt/../outside").expect("parent traversal failed");
     assert_eq!(e.name(), "outside");
     // .. from inside bind mount root should not escape to source VFS
     assert!(target.resolve_path("/mnt/../../d/f").is_err());

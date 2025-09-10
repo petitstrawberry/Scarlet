@@ -99,30 +99,34 @@ impl Waker {
     /// 2. Sets the task state to `Blocked(self.block_type)`
     /// 3. Adds the task ID to the wait queue
     /// 4. Calls the scheduler to yield CPU to other tasks
+    /// 5. Returns when the task is woken up and rescheduled
     /// 
     /// # Note
     /// 
-    /// This function never returns normally. The task will be blocked and only
-    /// resume execution when the entire syscall is restarted after being woken up.
-    /// The `!` return type indicates this function diverges (never returns).
-    pub fn wait(&self, task: &mut Task, cpu: &mut Arch) -> ! {
-        let task_id = task.get_id();
+    /// This function returns when the task is woken up by another part of the system.
+    /// The calling code can then continue execution, typically to re-check the
+    /// condition that caused the wait.
+    pub fn wait(&self, task_id: usize, cpu: &mut Arch) {
+        // crate::println!("[WAKER] Task {} waiting on waker '{}'", task_id, self.name);
                 
         // Add task to wait queue first
         {
             let mut queue = self.wait_queue.lock();
             queue.push_back(task_id);
         }
-        
-        // Set task state to blocked
-        task.set_state(TaskState::Blocked(self.block_type));
 
-        // Store current CPU state to task before yielding
-        task.vcpu.store(cpu);
+        if let Some(task) = get_scheduler().get_task_by_id(task_id) {
+            // Set task state to blocked
+            task.set_state(TaskState::Blocked(self.block_type));
+        } else {
+            panic!("[WAKER] Task ID {} not found in scheduler", task_id);
+        }
 
-        // Yield CPU to scheduler - this never returns
-        // The scheduler will handle saving the current task state internally
+        // Yield CPU to scheduler - this will return when the task is woken up
         get_scheduler().schedule(cpu);
+        
+        // When we reach here, the task has been woken up and rescheduled
+        // crate::println!("[WAKER] Task {} woken up from waker '{}'", task_id, self.name);
     }
 
     /// Wake up one waiting task

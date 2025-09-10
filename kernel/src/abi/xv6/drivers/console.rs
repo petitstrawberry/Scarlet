@@ -1,6 +1,6 @@
 use core::any::Any;
 
-use crate::{device::{char::CharDevice, manager::DeviceManager, Device, DeviceType}};
+use crate::{device::{char::CharDevice, manager::DeviceManager, Device, DeviceType}, object::capability::{ControlOps, MemoryMappingOps}};
 
 /// Character device for xv6 console that bridges to TTY
 pub struct ConsoleDevice {
@@ -82,6 +82,32 @@ impl CharDevice for ConsoleDevice {
                 return char_device.can_write();
             }
         }
+        false
+    }
+}
+
+impl ControlOps for ConsoleDevice {
+    // Console devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for ConsoleDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by console device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Console devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Console devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
         false
     }
 }

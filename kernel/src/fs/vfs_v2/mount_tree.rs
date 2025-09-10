@@ -336,36 +336,107 @@ impl MountTree {
         }
     }
 
-    /// Resolve a path to a VFS entry, handling mount boundaries
+    /// Resolve a path to a VFS entry (automatically handles absolute/relative)
     pub fn resolve_path(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        self.resolve_path_internal(path, false, &PathResolutionOptions { no_follow: false })
+        self.resolve_path_from(None, None, path)
+    }
+
+        /// Resolve a path with specified options
+    pub fn resolve_path_with_options(&self, path: &str, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_path_from_with_options(None, None, path, options)
+    }
+
+
+    // /// Resolve a path from a base entry and mount point
+    pub fn resolve_path_from(
+        &self,
+        base_entry: Option<&VfsEntryRef>,
+        base_mount: Option<&Arc<MountPoint>>,
+        path: &str,
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_path_from_with_options(base_entry, base_mount, path, &PathResolutionOptions::default())
+    }
+
+    /// Unified path resolution from an optional base directory with options
+    pub fn resolve_path_from_with_options(
+        &self,
+        base_entry: Option<&VfsEntryRef>,
+        base_mount: Option<&Arc<MountPoint>>,
+        path: &str,
+        options: &PathResolutionOptions
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        if path.starts_with('/') {
+            // Absolute path - ignore base and resolve from root
+            self.resolve_path_internal(path,false, options)
+        } else if let (Some(entry), Some(mount)) = (base_entry, base_mount) {
+            // Relative path with explicit base
+            self.resolve_path_from_internal(entry, mount, path, false, options)
+        } else {
+            Err(vfs_error(FileSystemErrorKind::InvalidPath, "Relative path resolution requires base entry and mount"))
+        }
     }
 
     /// Resolve a path to the mount point entry (not the mounted content)
     /// This is used for unmount operations where we need the actual mount point
     pub fn resolve_mount_point(&self, path: &str) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        self.resolve_path_internal(path, true, &PathResolutionOptions { no_follow: false })
-    }
-
-    /// Resolve a path with specified options
-    pub fn resolve_path_with_options(&self, path: &str, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        self.resolve_path_internal(path, false, options)
+        // Use the same resolution logic but ensure we resolve to the mount point
+        self.resolve_mount_point_with_options(path, &PathResolutionOptions::default())
     }
 
     /// Resolve a path to the mount point entry with options
     pub fn resolve_mount_point_with_options(&self, path: &str, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        self.resolve_path_internal(path, true, options)
+        self.resolve_mount_point_from_with_options(None, None, path, options)
+    }
+
+    pub fn resolve_mount_point_from(
+        &self,
+        base_entry: &VfsEntryRef,
+        base_mount: &Arc<MountPoint>,
+        path: &str,
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        self.resolve_mount_point_from_with_options(Some(base_entry), Some(base_mount), path, &PathResolutionOptions::default())
+    }
+
+    pub fn resolve_mount_point_from_with_options(
+        &self,
+        base_entry: Option<&VfsEntryRef>,
+        base_mount: Option<&Arc<MountPoint>>,
+        path: &str,
+        options: &PathResolutionOptions
+    ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        if path.starts_with('/') {
+            // Absolute path - ignore base and resolve from root
+            self.resolve_path_internal(path,true, options)
+        } else if let (Some(entry), Some(mount)) = (base_entry, base_mount) {
+            // Relative path with explicit base
+            self.resolve_path_from_internal(entry, mount, path, true, options)
+        } else {
+            Err(vfs_error(FileSystemErrorKind::InvalidPath, "Relative path resolution requires base entry and mount"))
+        }
     }
 
     fn resolve_path_internal(&self, path: &str, resolve_mount: bool, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        if path.is_empty() || path == "/" {
+        // Check the path is a valid absolute path
+        assert!(path.starts_with('/'), "resolve_path_internal: Path must be absolute, got '{}'", path);
+
+        let root_mount = self.root_mount.read();
+        let root_entry = root_mount.root.clone();
+        self.resolve_path_from_internal(&root_entry, &root_mount, path, resolve_mount, options)
+    }
+        
+
+    fn resolve_path_from_internal(&self, base_entry: &VfsEntryRef, base_mount: &Arc<MountPoint>, path: &str, resolve_mount: bool, options: &PathResolutionOptions) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        if path.is_empty() {
+            return Ok((base_entry.clone(), base_mount.clone()));
+        } else if path == "/" {
+            // Special case for root path,
             return Ok((self.root_mount.read().root.clone(), self.root_mount.read().clone()));
         }
 
         let components = self.parse_path(path);
-        let mut current_mount = self.root_mount.read().clone();
-        let mut current_entry = current_mount.root.clone();
-        
+        let mut current_mount = base_mount.clone();
+        let mut current_entry = base_entry.clone();
+
         let mut resolved_path = String::new();
         for (i, component) in components.iter().enumerate() {
             let is_final_component = i == components.len() - 1;
@@ -497,6 +568,20 @@ impl MountTree {
         } else {
             format!("/{}", components.join("/"))
         }
+    }
+
+    /// Get the full absolute path of a mount point
+    /// 
+    /// This method constructs the complete absolute path for a given mount point
+    /// by traversing the mount tree hierarchy.
+    /// 
+    /// # Arguments
+    /// * `mount` - The mount point to get the path for
+    /// 
+    /// # Returns
+    /// A `String` containing the absolute mount path
+    pub fn get_mount_absolute_path(&self, mount: &Arc<MountPoint>) -> String {
+        self.get_mount_path(mount)
     }
 
     /// Resolve a single path component within a VFS entry

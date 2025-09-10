@@ -33,9 +33,9 @@ use core::any::Any;
 use crate::{driver_initcall, fs::{
     get_fs_driver_manager, DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver, 
     FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SeekFrom
-}};
+}, object::capability::MemoryMappingOps};
 use crate::device::{manager::DeviceManager, DeviceType, Device};
-use crate::object::capability::{StreamOps, StreamError};
+use crate::object::capability::{StreamOps, StreamError, ControlOps};
 
 use super::super::core::{VfsNode, FileSystemOperations, DirectoryEntryInternal};
 
@@ -188,6 +188,10 @@ impl FileSystemOperations for DevFS {
             FileSystemErrorKind::ReadOnly,
             "DevFS is read-only: cannot remove files"
         ))
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -411,25 +415,29 @@ impl DevFileObject {
         }
     }
 
-    /// Read from the underlying device
+    /// Read from the underlying device at current position
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
+            let position = *self.position.read();
             
             match device_guard_ref.device_type() {
                 DeviceType::Char => {
                     if let Some(char_device) = device_guard_ref.as_char_device() {
-                        let mut bytes_read = 0;
-                        for byte in buffer.iter_mut() {
-                            match char_device.read_byte() {
-                                Some(b) => {
-                                    *byte = b;
-                                    bytes_read += 1;
-                                },
-                                None => break,
+                        // Use read_at for position-based read
+                        match char_device.read_at(position, buffer) {
+                            Ok(bytes_read) => {
+                                // Update position after successful read
+                                *self.position.write() += bytes_read as u64;
+                                Ok(bytes_read)
+                            },
+                            Err(e) => {
+                                Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    format!("Character device read failed: {}", e)
+                                ))
                             }
                         }
-                        return Ok(bytes_read);
                     } else {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
@@ -491,22 +499,29 @@ impl DevFileObject {
         }
     }
 
-    /// Write to the underlying device
+    /// Write to the underlying device at current position
     fn write_device(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
+            let position = *self.position.read();
             
             match device_guard_ref.device_type() {
                 DeviceType::Char => {
                     if let Some(char_device) = device_guard_ref.as_char_device() {
-                        let mut bytes_written = 0;
-                        for &byte in buffer {
-                            match char_device.write_byte(byte) {
-                                Ok(_) => bytes_written += 1,
-                                Err(_) => break,
+                        // Use write_at for position-based write
+                        match char_device.write_at(position, buffer) {
+                            Ok(bytes_written) => {
+                                // Update position after successful write
+                                *self.position.write() += bytes_written as u64;
+                                Ok(bytes_written)
+                            },
+                            Err(e) => {
+                                Err(FileSystemError::new(
+                                    FileSystemErrorKind::IoError,
+                                    format!("Character device write failed: {}", e)
+                                ))
                             }
                         }
-                        return Ok(bytes_written);
                     } else {
                         return Err(FileSystemError::new(
                             FileSystemErrorKind::DeviceError,
@@ -573,10 +588,69 @@ impl StreamOps for DevFileObject {
     }
 }
 
+impl ControlOps for DevFileObject {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        // For device files, delegate control operations to the underlying device
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            // Device trait now inherits from ControlOps, so we can delegate directly
+            device_guard_ref.control(command, arg)
+        } else {
+            Err("No device available for control operations")
+        }
+    }
+    
+    fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
+        // For device files, delegate to the underlying device
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.supported_control_commands()
+        } else {
+            alloc::vec![]
+        }
+    }
+}
+
+impl MemoryMappingOps for DevFileObject {
+    fn get_mapping_info(&self, offset: usize, length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        // For device files, delegate to the underlying device if it supports memory mapping
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.get_mapping_info(offset, length)
+        } else {
+            Err("No device associated with this DevFileObject")
+        }
+    }
+    
+    fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.on_mapped(vaddr, paddr, length, offset);
+        }
+    }
+    
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.on_unmapped(vaddr, length);
+        }
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        if let Some(ref device_guard) = self.device_guard {
+            let device_guard_ref = device_guard.as_ref();
+            device_guard_ref.supports_mmap()
+        } else {
+            false
+        }
+    }
+}
+
 impl FileObject for DevFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut position = self.position.write();
-        
+
         let new_pos = match whence {
             SeekFrom::Start(offset) => offset,
             SeekFrom::Current(offset) => {
@@ -585,11 +659,15 @@ impl FileObject for DevFileObject {
                 } else {
                     position.saturating_sub((-offset) as u64)
                 }
-            },
-            SeekFrom::End(_) => {
-                // For device files, seeking from end is not well-defined
-                // Return current position
-                *position
+            }
+            SeekFrom::End(offset) => {
+                // For devices, we can't easily determine the "end" position
+                // Most devices don't have a fixed size, so seeking from end is not meaningful
+                // We'll treat this as an error for now
+                return Err(StreamError::from(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Seek from end not supported for device files"
+                )));
             }
         };
         
@@ -607,6 +685,10 @@ impl FileObject for DevFileObject {
             FileSystemErrorKind::NotSupported,
             "Cannot truncate device files"
         )))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -684,6 +766,32 @@ impl StreamOps for DevDirectoryObject {
     }
 }
 
+impl ControlOps for DevDirectoryObject {
+    // Directory objects don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported on directories")
+    }
+}
+
+impl MemoryMappingOps for DevDirectoryObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported for directories")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Directories don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
 impl FileObject for DevDirectoryObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         // Get directory entries to know the count
@@ -723,6 +831,10 @@ impl FileObject for DevDirectoryObject {
             FileSystemErrorKind::ReadOnly,
             "Cannot truncate directory in devfs"
         )))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

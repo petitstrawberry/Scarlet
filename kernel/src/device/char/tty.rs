@@ -17,6 +17,7 @@ use crate::drivers::uart;
 use crate::sync::waker::Waker;
 use crate::late_initcall;
 use crate::task::mytask;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 /// TTY subsystem initialization
 fn init_tty_subsystem() {
@@ -200,6 +201,25 @@ impl DeviceEventListener for TtyDevice {
     }
 }
 
+impl MemoryMappingOps for TtyDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by TTY device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // TTY devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // TTY devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+}
+
 impl Device for TtyDevice {
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
@@ -224,21 +244,29 @@ impl Device for TtyDevice {
 
 impl CharDevice for TtyDevice {
     fn read_byte(&self) -> Option<u8> {
-        let mut input_buffer = self.input_buffer.lock();
-        if let Some(byte) = input_buffer.pop_front() {
-            return Some(byte);
-        }
-        drop(input_buffer);
-        
-        // No data available, block the current task
-        if let Some(mut task) = mytask() {
-            let mut cpu = get_cpu();
+        // Loop until data becomes available
+        loop {
+            let mut input_buffer = self.input_buffer.lock();
+            if let Some(byte) = input_buffer.pop_front() {
+                return Some(byte);
+            }
+            drop(input_buffer);
+            
+            // No data available, block the current task
+            if let Some(mut task) = mytask() {
+                let mut cpu = get_cpu();
 
-            // This never returns - the syscall will be restarted when the task is woken up
-            self.input_waker.wait(&mut task, &mut cpu);
+                // Wait for input to become available
+                // This will return when the task is woken up by input_waker.wake_all()
+                self.input_waker.wait(task.get_id(), &mut cpu);
+                
+                // Continue the loop to re-check if data is available
+                continue;
+            } else {
+                // No current task context, return None
+                return None;
+            }
         }
-
-        None
     }
     
     fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
@@ -274,5 +302,12 @@ impl CharDevice for TtyDevice {
             }
         }
         false
+    }
+}
+
+impl ControlOps for TtyDevice {
+    // TTY devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
     }
 }

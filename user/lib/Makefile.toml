@@ -1,0 +1,45 @@
+[env]
+CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
+
+[config]
+default_task = "build-userlib"
+skip_core_tasks = true
+
+[tasks.build-userlib]
+description = "Build all user libraries (default: debug)"
+dependencies = ["build-userlib-debug"]
+
+[tasks.build-userlib-debug]
+description = "Build all user libraries in debug mode"
+script = [
+    "cd std && cargo build",
+    "cd ../framebuffer && cargo build"
+]
+
+[tasks.build-userlib-release]
+description = "Build all user libraries in release mode"
+script = [
+    "cd std && cargo build --release",
+    "cd ../framebuffer && cargo build --release"
+]
+
+[tasks.clean]
+description = "Clean all user library build artifacts"
+script = [
+    "cd std && cargo clean",
+    "cd ../framebuffer && cargo clean"
+]
+
+[tasks.test]
+description = "Test all user libraries"
+script = [
+    "cd std && cargo test",
+    "cd ../framebuffer && cargo test"
+]
+
+[tasks.doc]
+description = "Generate documentation for all user libraries"
+script = [
+    "cd std && cargo doc --no-deps",
+    "cd ../framebuffer && cargo doc --no-deps"
+]

@@ -4,31 +4,16 @@ use crate::{
     fs::FileType, 
     library::std::string::cstring_to_string,
     sched::scheduler::get_scheduler, 
-    task::{get_parent_waker, mytask, CloneFlags, WaitError}
+    task::{get_parent_waitpid_waker, mytask, CloneFlags, WaitError}
 };
 
-/// VFS v2 helper function for path absolutization
-/// TODO: Move this to a shared helper module when VFS v2 provides public API
+/// VFS v2 helper function for path absolutization using VfsManager
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {
         Ok(path.to_string())
     } else {
-        let cwd = task.cwd.clone().ok_or(())?;
-        let mut absolute_path = cwd;
-        if !absolute_path.ends_with('/') {
-            absolute_path.push('/');
-        }
-        absolute_path.push_str(path);
-        // Simple normalization (removes "//", ".", etc.)
-        let mut components = alloc::vec::Vec::new();
-        for comp in absolute_path.split('/') {
-            match comp {
-                "" | "." => {},
-                ".." => { components.pop(); },
-                _ => components.push(comp),
-            }
-        }
-        Ok("/".to_string() + &components.join("/"))
+        let vfs = task.vfs.as_ref().ok_or(())?;
+        Ok(vfs.resolve_path_to_absolute(path))
     }
 }
 
@@ -68,46 +53,70 @@ pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
     get_scheduler().schedule(get_cpu());
+    usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
 pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let status_ptr = trapframe.get_arg(0) as *mut i32;
 
-    for pid in task.get_children().clone() {
-        match task.wait(pid) {
-            Ok(status) => {
-                // If the child proc is exited, we can return the status
-                if status_ptr != core::ptr::null_mut() {
-                    let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
-                    unsafe {
-                        *status_ptr = status;
+    // Loop until a child exits or an error occurs
+    loop {
+        // Wait for any child process
+        for child_pid in task.get_children().clone() {
+            match task.wait(child_pid) {
+                Ok(status) => {
+                    // Child has exited, return the status
+                    if status_ptr != core::ptr::null_mut() {
+                        let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                        unsafe {
+                            *status_ptr = status;
+                        }
                     }
-                }
-                trapframe.increment_pc_next(task);
-                return pid;
-            },
-            Err(error) => {
-                match error {
-                    WaitError::ChildNotExited(_) => continue,
-                    _ => {
-                        return trapframe.get_return_value();
-                    },
+                    trapframe.increment_pc_next(task);
+                    return child_pid;
+                },
+                Err(error) => {
+                    match error {
+                        WaitError::ChildNotExited(_) => continue,
+                        _ => {
+                            trapframe.increment_pc_next(task);
+                            return usize::MAX;
+                        },
+                    }
                 }
             }
         }
+        
+        // No child has exited yet, block until one does
+        let parent_waker = get_parent_waitpid_waker(task.get_id());
+        parent_waker.wait(task.get_id(), trapframe);
+        // Continue the loop to re-check after waking up
+        continue;
     }
-    
-    // No child has exited yet, block until one does
-    // xv6's wait() is equivalent to waitpid(-1), so we use the parent waker
-    let parent_waker = get_parent_waker(task.get_id());
-    parent_waker.wait(task, trapframe);
 }
 
-pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, _trapframe: &mut Trapframe) -> usize {
-    // Implement the kill syscall
-    // This syscall is not yet implemented. Returning ENOSYS error code (-1).
-    usize::MAX
+pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let pid = trapframe.get_arg(0) as usize;
+    let signal = trapframe.get_arg(1) as i32;
+
+    trapframe.increment_pc_next(task);
+
+    // For xv6 compatibility, only signal 9 (SIGKILL) is implemented for now
+    if signal != 9 {
+        return usize::MAX; // -1 (unsupported signal)
+    }
+
+    // Find the target task via scheduler
+    let scheduler = get_scheduler();
+    if let Some(target_task) = scheduler.get_task_by_id(pid) {
+        // For xv6 compatibility, immediately terminate the target task
+        target_task.exit(9); // SIGKILL equivalent - exit with signal 9
+        0 // Success
+    } else {
+        usize::MAX // -1 (no such process)
+    }
 }
 
 pub fn sys_sbrk(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -149,7 +158,10 @@ pub fn sys_chdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
         return usize::MAX; // -1
     }
 
-    task.cwd = Some(path); // Update the current working directory
+    // Update the current working directory via VfsManager
+    if let Some(vfs) = &task.vfs {
+        let _ = vfs.set_cwd_by_path(&path);
+    }
 
     0
 }

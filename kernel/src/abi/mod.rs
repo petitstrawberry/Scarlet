@@ -176,6 +176,37 @@ pub trait AbiModule: 'static {
         trapframe: &mut Trapframe
     ) -> Result<(), &'static str>;
 
+    /// Choose base address for ELF loading (ABI-specific strategy)
+    /// 
+    /// This method allows each ABI to define its own memory layout preferences
+    /// for different types of ELF objects. The ELF loader will use these
+    /// addresses when loading binaries for this ABI.
+    /// 
+    /// # Arguments
+    /// * `elf_type` - ELF file type (ET_EXEC, ET_DYN, etc.)
+    /// * `target` - Target component being loaded
+    /// 
+    /// # Returns
+    /// Base address where the component should be loaded, or None to use
+    /// kernel default strategy
+    fn choose_load_address(&self, _elf_type: u16, _target: crate::task::elf_loader::LoadTarget) -> Option<u64> {
+        None // Default: use kernel default strategy
+    }
+    
+    /// Override interpreter path (for ABI compatibility)
+    /// 
+    /// This method allows each ABI to specify which dynamic linker should
+    /// be used when a binary requires dynamic linking (has PT_INTERP).
+    /// 
+    /// # Arguments
+    /// * `requested_interpreter` - Interpreter path from PT_INTERP segment
+    /// 
+    /// # Returns
+    /// The interpreter path to actually use (may be different from requested)
+    fn get_interpreter_path(&self, requested_interpreter: &str) -> String {
+        requested_interpreter.to_string() // Default: use requested interpreter as-is
+    }
+
     /// Get default working directory for this ABI
     fn get_default_cwd(&self) -> &str {
         "/" // Default: root directory
@@ -237,6 +268,26 @@ pub trait AbiModule: 'static {
         //     .map_err(|_| "Failed to bind mount /data/shared")?;
         // target_vfs.bind_mount_from(&base_vfs, "/", "/scarlet") // Read-onlyは未サポート
         //     .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
+        Ok(())
+    }
+    
+    /// Handle incoming event from EventManager
+    /// 
+    /// This method is called when an event is delivered to a task using this ABI.
+    /// Each ABI can implement its own event handling strategy:
+    /// - Scarlet ABI: Handle-based queuing with EventSubscription objects
+    /// - xv6 ABI: POSIX-like signals and pipe notifications
+    /// - Other ABIs: Custom event processing mechanisms
+    /// 
+    /// # Arguments
+    /// * `event` - The event to be delivered
+    /// * `target_task_id` - ID of the task that should receive the event
+    /// 
+    /// # Returns
+    /// * `Ok(())` if the event was successfully handled
+    /// * `Err(message)` if event delivery failed
+    fn handle_event(&self, _event: crate::ipc::Event, _target_task_id: u32) -> Result<(), &'static str> {
+        // Default implementation: ignore events
         Ok(())
     }
 }

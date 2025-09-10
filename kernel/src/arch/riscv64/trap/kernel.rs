@@ -148,22 +148,36 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         }
         /* Load/Store page fault */
         13 | 15 => {
-            let vaddr;
+            let mut vaddr;
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
+
+            // For kernel addresses, check if they are valid
             let manager = get_kernel_vm_manager();
-            match manager.search_memory_map(vaddr) {
-                Some(mmap) => {
-                    match manager.get_root_page_table() {
-                        Some(root_page_table) => {
-                            let paddr = mmap.get_paddr(vaddr).unwrap();
-                            root_page_table.map(manager.get_asid(), vaddr, paddr, mmap.permissions);
-                        }
-                        None => panic!("Root page table is not found"),
+            loop {
+                crate::println!("[kernel] Handling page fault at vaddr: {:#x}", vaddr);
+                
+                // Additional validation for suspicious addresses
+                if vaddr == 0 || vaddr == usize::MAX {
+                    print_traplog(trapframe);
+                    panic!("Invalid memory access at vaddr: {:#x}", vaddr);
+                }
+                
+                match manager.lazy_map_page(vaddr) {
+                    Ok(_) => (),
+                    Err(_) => {
+                        print_traplog(trapframe);
+                        panic!("Not found memory map matched with kernel vaddr: {:#x}", vaddr);
                     }
                 }
-                None => panic!("Not found memory map matched with vaddr: {:#x}", vaddr),
+                crate::println!("Mapped page at vaddr: {:#x}", vaddr);
+
+                if vaddr & 0b11 == 0 {
+                    // If the address is aligned, we can stop
+                    break;
+                }
+                vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
             }
         },
         _ => {

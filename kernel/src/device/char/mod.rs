@@ -1,8 +1,20 @@
 use core::any::Any;
 
 use super::Device;
+use crate::object::capability::{ControlOps, MemoryMappingOps};
 
 extern crate alloc;
+
+/// Seek operations for character device positioning
+#[derive(Debug, Clone, Copy)]
+pub enum SeekFrom {
+    /// Seek from the beginning of the device
+    Start(u64),
+    /// Seek relative to the current position
+    Current(i64),
+    /// Seek relative to the end of the device
+    End(i64),
+}
 
 /// Character device interface
 /// 
@@ -76,6 +88,54 @@ pub trait CharDevice: Device {
     
     /// Check if the device is ready for writing
     fn can_write(&self) -> bool;
+    
+    /// Read data from a specific position in the device
+    /// 
+    /// Default implementation falls back to sequential read for stream devices.
+    /// Devices that support random access (like framebuffer, memory devices) should override this.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `position` - Byte offset to read from
+    /// * `buffer` - Buffer to read data into
+    /// 
+    /// # Returns
+    /// 
+    /// Result containing the number of bytes read or an error
+    fn read_at(&self, _position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        // Default: use sequential read for stream devices
+        Ok(self.read(buffer))
+    }
+    
+    /// Write data to a specific position in the device
+    /// 
+    /// Default implementation falls back to sequential write for stream devices.
+    /// Devices that support random access (like framebuffer, memory devices) should override this.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `position` - Byte offset to write to
+    /// * `buffer` - Buffer containing data to write
+    /// 
+    /// # Returns
+    /// 
+    /// Result containing the number of bytes written or an error
+    fn write_at(&self, _position: u64, buffer: &[u8]) -> Result<usize, &'static str> {
+        // Default: use sequential write for stream devices
+        self.write(buffer)
+    }
+    
+    /// Check if this device supports seek operations
+    /// 
+    /// Default implementation returns false for stream devices.
+    /// Devices that support seeking should override this.
+    /// 
+    /// # Returns
+    /// 
+    /// True if the device supports seek operations
+    fn can_seek(&self) -> bool {
+        false
+    }
 }
 
 /// A generic implementation of a character device
@@ -142,6 +202,32 @@ impl CharDevice for GenericCharDevice {
 
     fn can_write(&self) -> bool {
         (self.can_write_fn)()
+    }
+}
+
+impl ControlOps for GenericCharDevice {
+    // Generic character devices don't support control operations by default
+    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
+        Err("Control operations not supported")
+    }
+}
+
+impl MemoryMappingOps for GenericCharDevice {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+                       -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported by this character device")
+    }
+    
+    fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
+        // Generic character devices don't support memory mapping
+    }
+    
+    fn on_unmapped(&self, _vaddr: usize, _length: usize) {
+        // Generic character devices don't support memory mapping
+    }
+    
+    fn supports_mmap(&self) -> bool {
+        false
     }
 }
 
