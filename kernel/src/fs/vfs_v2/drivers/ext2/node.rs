@@ -3,16 +3,17 @@
 //! This module implements the VFS node interface for ext2 filesystem nodes,
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
-use alloc::{sync::{Arc, Weak}, string::String, vec::Vec, vec, boxed::Box};
+use alloc::{sync::Weak, string::String, vec::Vec, vec, boxed::Box};
 use spin::{RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
 
 use crate::{
     fs::{
         FileObject, FileSystemError, FileSystemErrorKind, FileType, SeekFrom,
-        FileMetadata, FilePermission
+        FileMetadata, FilePermission, DeviceFileInfo
     },
-    object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError}
+    object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError},
+    DeviceManager
 };
 
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations};
@@ -527,6 +528,15 @@ impl FileObject for Ext2FileObject {
     }
 }
 
+impl Drop for Ext2FileObject {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        crate::early_println!("[ext2] Drop: syncing inode {} to disk", self.inode_number);
+        // Sync to disk when the file object is dropped
+        let _ = self.sync_to_disk();
+    }
+}
+
 /// ext2 Directory Object
 ///
 /// Handles directory operations for directories in the ext2 filesystem.
@@ -748,11 +758,174 @@ impl FileObject for Ext2DirectoryObject {
     }
 }
 
-impl Drop for Ext2FileObject {
-    fn drop(&mut self) {
+/// ext2 Character Device File Object
+///
+/// Handles character device operations through ext2 device files.
+#[derive(Debug)]
+pub struct Ext2CharDeviceFileObject {
+    /// Device file info
+    device_info: DeviceFileInfo,
+    /// File ID
+    file_id: u64,
+    /// Current position in the device (for seekable devices)
+    position: Mutex<u64>,
+    /// Weak reference to the filesystem
+    filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+}
+
+impl Ext2CharDeviceFileObject {
+    /// Create a new ext2 character device file object
+    pub fn new(device_info: DeviceFileInfo, file_id: u64) -> Self {
+        Self {
+            device_info,
+            file_id,
+            position: Mutex::new(0),
+            filesystem: RwLock::new(None),
+        }
+    }
+
+    /// Set the filesystem reference
+    pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
+        *self.filesystem.write() = Some(fs);
+    }
+}
+
+impl StreamOps for Ext2CharDeviceFileObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         #[cfg(test)]
-        crate::early_println!("[ext2] Drop: syncing inode {} to disk", self.inode_number);
-        // Sync to disk when the file object is dropped
-        let _ = self.sync_to_disk();
+        crate::early_println!("[ext2] CharDevice read: device_id={}", self.device_info.device_id);
+        
+        // Get the device from device manager
+        let device = DeviceManager::get_manager()
+            .get_device(self.device_info.device_id)
+            .ok_or_else(|| {
+                #[cfg(test)]
+                crate::early_println!("[ext2] CharDevice: Device with ID {} not found in DeviceManager", self.device_info.device_id);
+                StreamError::NotSupported
+            })?;
+
+        #[cfg(test)]
+        crate::early_println!("[ext2] CharDevice: Found device with ID {}", self.device_info.device_id);
+
+        // Try to cast to CharDevice
+        if let Some(char_device) = device.as_char_device() {
+            #[cfg(test)]
+            crate::early_println!("[ext2] CharDevice: Successfully cast to CharDevice");
+            // Use the CharDevice read method
+            Ok(char_device.read(buffer))
+        } else {
+            #[cfg(test)]
+            crate::early_println!("[ext2] CharDevice: Device is not a CharDevice");
+            Err(StreamError::NotSupported)
+        }
+    }
+
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        #[cfg(test)]
+        crate::early_println!("[ext2] CharDevice write: device_id={}, buffer_len={}", self.device_info.device_id, buffer.len());
+        
+        // Get the device from device manager
+        let device = DeviceManager::get_manager()
+            .get_device(self.device_info.device_id)
+            .ok_or_else(|| {
+                #[cfg(test)]
+                crate::early_println!("[ext2] CharDevice: Device with ID {} not found in DeviceManager", self.device_info.device_id);
+                StreamError::NotSupported
+            })?;
+
+        #[cfg(test)]
+        crate::early_println!("[ext2] CharDevice: Found device with ID {}", self.device_info.device_id);
+
+        // Try to cast to CharDevice
+        if let Some(char_device) = device.as_char_device() {
+            #[cfg(test)]
+            crate::early_println!("[ext2] CharDevice: Successfully cast to CharDevice");
+            // Use the CharDevice write method
+            char_device.write(buffer).map_err(|err| {
+                #[cfg(test)]
+                let _ = err;
+                #[cfg(test)]
+                crate::early_println!("[ext2] CharDevice write error");
+                StreamError::IoError
+            })
+        } else {
+            #[cfg(test)]
+            crate::early_println!("[ext2] CharDevice: Device is not a CharDevice");
+            Err(StreamError::NotSupported)
+        }
+    }
+}
+
+impl ControlOps for Ext2CharDeviceFileObject {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        // Character devices can support control operations
+        // For now, return not supported
+        let _ = (command, arg);
+        Err("Control operation not supported")
+    }
+}
+
+impl MemoryMappingOps for Ext2CharDeviceFileObject {
+    fn get_mapping_info(&self, _offset: usize, _length: usize) -> Result<(usize, usize, bool), &'static str> {
+        // Most character devices don't support memory mapping
+        Err("Memory mapping not supported")
+    }
+}
+
+impl FileObject for Ext2CharDeviceFileObject {
+    fn metadata(&self) -> Result<FileMetadata, StreamError> {
+        Ok(FileMetadata {
+            file_type: FileType::CharDevice(self.device_info),
+            size: 0, // Character devices don't have a meaningful size
+            permissions: FilePermission {
+                read: true,
+                write: true,
+                execute: false,
+            },
+            created_time: 0,
+            modified_time: 0,
+            accessed_time: 0,
+            file_id: self.file_id,
+            link_count: 1,
+        })
+    }
+
+    fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        // Get the device to check if it supports seeking
+        let device = DeviceManager::get_manager()
+            .get_device(self.device_info.device_id)
+            .ok_or(StreamError::NotSupported)?;
+
+        if let Some(char_device) = device.as_char_device() {
+            if char_device.can_seek() {
+                let mut pos = self.position.lock();
+                match whence {
+                    SeekFrom::Start(offset) => {
+                        *pos = offset;
+                        Ok(*pos)
+                    },
+                    SeekFrom::Current(offset) => {
+                        if offset >= 0 {
+                            *pos = (*pos).saturating_add(offset as u64);
+                        } else {
+                            *pos = (*pos).saturating_sub((-offset) as u64);
+                        }
+                        Ok(*pos)
+                    },
+                    SeekFrom::End(_) => {
+                        // Most character devices don't have a meaningful end
+                        Err(StreamError::NotSupported)
+                    }
+                }
+            } else {
+                Err(StreamError::NotSupported)
+            }
+        } else {
+            Err(StreamError::NotSupported)
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
