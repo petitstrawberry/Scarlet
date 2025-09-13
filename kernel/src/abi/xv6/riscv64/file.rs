@@ -278,25 +278,7 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                 }
                 0 // EOF or no valid directory entry
             },
-            Err(e) => {
-                match e {
-                    StreamError::EndOfStream => {
-                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
-                        0 // EOF
-                    },
-                    StreamError::WouldBlock => {
-                        // If the stream would block, we need to set the trapframe's EPC
-                        // trapframe.epc = epc;
-                        // task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
-                        get_scheduler().schedule(trapframe); // Yield to the scheduler
-                        return usize::MAX; // Unreadable state, return -1
-                    },
-                    _ => {
-                        trapframe.increment_pc_next(task);
-                        usize::MAX // Other errors
-                    }
-                }
-            }
+            Err(_) => usize::MAX, // Read error
         }
     } else {
         // For regular files, use the user-provided buffer directly
@@ -307,23 +289,7 @@ pub fn sys_read(abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &m
                 trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
                 n
             }, // Return original read size for regular files
-            Err(e) => {
-                match e {
-                    StreamError::EndOfStream => {
-                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
-                        0 // EOF
-                    },
-                    StreamError::WouldBlock => {
-                        get_scheduler().schedule(trapframe); // Yield to the scheduler
-                        return usize::MAX; // Unreadable state, return -1
-                    },
-                    _ => {
-                        // Other errors, return -1
-                        trapframe.increment_pc_next(task); // Increment PC to avoid infinite loop
-                        usize::MAX
-                    }
-                }
-            }
+            Err(_) => usize::MAX, // Read error
         }
     }
 }

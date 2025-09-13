@@ -7,7 +7,7 @@ mod pipe;
 
 // pub mod drivers;
 
-use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 use proc::{sys_exit, sys_fork, sys_wait, sys_getpid, sys_kill};
@@ -373,9 +373,22 @@ impl AbiModule for Xv6Riscv64Abi {
         }
     }
 
-    fn initialize_from_existing_handles(&self, task: &mut crate::task::Task) -> Result<(), &'static str> {
+    fn initialize_from_existing_handles(&mut self, task: &mut crate::task::Task) -> Result<(), &'static str> {
         task.handle_table.close_all();
         Ok(())
+    }
+    
+    fn choose_load_address(&self, _elf_type: u16, _target: crate::task::elf_loader::LoadTarget) -> Option<u64> {
+        // xv6 ABI does not support dynamic linking - all binaries should be static
+        // Return None to use kernel default (which will only work for static ELF files)
+        None
+    }
+    
+    fn get_interpreter_path(&self, _requested_interpreter: &str) -> String {
+        // xv6 ABI does not support dynamic linking
+        // This should never be called since xv6 binaries should not have PT_INTERP
+        // But if it happens, we'll return an error path
+        "/dev/null".to_string()  // Invalid path to ensure failure
     }
 }
 

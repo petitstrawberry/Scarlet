@@ -119,7 +119,7 @@ impl VfsNode for CpioNode {
             permissions: FilePermission {
                 read: true,
                 write: false,
-                execute: false,
+                execute: true,
             },
             file_id: self.file_id as u64,
             link_count: 1,

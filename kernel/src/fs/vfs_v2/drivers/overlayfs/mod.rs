@@ -159,6 +159,14 @@ impl VfsNode for OverlayNode {
         }
     }
 
+    fn read_link(&self) -> Result<String, FileSystemError> {
+        if let Some(ref fs) = *self.overlay_fs.read() {
+            fs.read_link_for_path(&self.path)
+        } else {
+            Err(FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference"))
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -360,6 +368,43 @@ impl OverlayFS {
         }
 
         Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File not found in any layer"))
+    }
+
+    /// Read the target of a symbolic link at the specified path
+    ///
+    /// This method searches through the overlay layers to find a symbolic link
+    /// at the given path and returns its target. It follows the same priority
+    /// order as other operations: upper layer first, then lower layers.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the symbolic link to read
+    ///
+    /// # Returns
+    ///
+    /// Returns the target path of the symbolic link, or an error if the path
+    /// is not found or is not a symbolic link.
+    fn read_link_for_path(&self, path: &str) -> Result<String, FileSystemError> {
+        // Check for whiteout first
+        if self.is_whiteout(path) {
+            return Err(FileSystemError::new(FileSystemErrorKind::NotFound, "File is hidden by whiteout"));
+        }
+
+        // Check upper layer first
+        if let Some((ref upper_fs, ref upper_node)) = self.upper {
+            if let Ok(node) = self.resolve_in_layer(upper_fs, upper_node, path) {
+                return node.read_link();
+            }
+        }
+
+        // Check lower layers
+        for (lower_fs, lower_node) in &self.lower_layers {
+            if let Ok(node) = self.resolve_in_layer(lower_fs, lower_node, path) {
+                return node.read_link();
+            }
+        }
+
+        Err(FileSystemError::new(FileSystemErrorKind::NotFound, "Symbolic link not found in any layer"))
     }
 
     /// Resolve a path in a specific layer, starting from the given node

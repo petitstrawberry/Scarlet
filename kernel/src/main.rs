@@ -2,8 +2,8 @@
 //!
 //! Scarlet is an operating system kernel written in Rust that implements a transparent ABI 
 //! conversion layer for executing binaries across different operating systems and architectures. 
-//! The kernel provides a universal container runtime environment with strong isolation capabilities 
-//! and comprehensive filesystem support.
+//! The kernel provides a universal container runtime environment with strong isolation capabilities,
+//! comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
 //!
 //! ## Multi-ABI Execution System
 //!
@@ -20,14 +20,16 @@
 //!   ensuring consistent behavior and efficient resource utilization
 //! - **Native Implementation**: Each ABI provides full syscall implementation using underlying
 //!   kernel abstractions, enabling complete OS compatibility
+//! - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 //!
 //! ### Supported ABIs
 //!
 //! - **Scarlet Native ABI**: Direct kernel interface with optimal performance, featuring:
 //!   - Handle-based resource management with capability-based security
 //!   - Modern VFS operations with namespace isolation
-//!   - Advanced IPC mechanisms including pipes and shared memory
+//!   - Advanced IPC mechanisms including pipes and event-driven communication
 //!   - Container-native filesystem operations
+//!   - Dynamic linking support
 //!
 //! - **Linux Compatibility ABI** *(in development)*: Full POSIX syscall implementation
 //! - **xv6 Compatibility ABI** *(in development)*: Educational OS syscall implementation
@@ -65,6 +67,8 @@
 //!
 //! - **TmpFS**: High-performance memory-based filesystem with configurable size limits
 //! - **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs and embedded data
+//! - **ext2**: Full ext2 filesystem implementation with complete read/write support for persistent storage
+//! - **FAT32**: Complete FAT32 filesystem implementation with directory and file operations
 //! - **OverlayFS**: Advanced union filesystem with copy-up semantics and whiteout support
 //! - **DevFS**: Device file system providing controlled hardware access
 //!
@@ -245,6 +249,7 @@ pub mod fs;
 pub mod object;
 pub mod ipc;
 pub mod executor;
+pub mod profiler;
 
 #[cfg(test)]
 pub mod test;
@@ -265,7 +270,6 @@ use timer::get_kernel_timer;
 use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
 use crate::{device::graphics::manager::GraphicsManager, fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
 use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
-
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -345,9 +349,6 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     fence(Ordering::SeqCst); // Ensure early initcalls are completed before proceeding
     driver_initcall_call();
 
-    #[cfg(test)]
-    test_main();
-
     early_println!("[Scarlet Kernel] Initializing Virtual Memory...");
     let kernel_start =  unsafe { &__KERNEL_SPACE_START as *const usize as usize };
     kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
@@ -378,6 +379,9 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     }
     
     fence(Ordering::SeqCst); // Ensure graphics devices are discovered before proceeding
+
+    #[cfg(test)]
+    test_main();
     
     /* Initcalls */
     call_initcalls();
@@ -452,5 +456,6 @@ pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
     init_arch(cpu_id);
+
     loop {}
 }

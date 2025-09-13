@@ -92,6 +92,18 @@ pub fn get_tick() -> u64 {
     TICK_COUNT.load(Ordering::Relaxed)
 }
 
+pub fn get_time_ns() -> u64 {
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    let timer = get_kernel_timer();
+    timer.get_time_us(cpu_id) * 1_000
+}
+
+pub fn get_time_us() -> u64 {
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    let timer = get_kernel_timer();
+    timer.get_time_us(cpu_id)
+}
+
 /// Trait for timer expiration callback
 pub trait TimerHandler: Send + Sync {
     fn on_timer_expired(self: Arc<Self>, context: usize);

@@ -13,11 +13,11 @@ dependencies = ["build-debug"]
 
 [tasks.build-debug]
 description = "Build all components in debug mode"
-dependencies = ["build-kernel-debug", "build-userlib-debug", "build-userbin-debug", "build-initramfs-debug"]
+dependencies = ["build-kernel-debug", "build-userlib-debug", "build-userbin-debug", "build-initramfs-debug", "build-rootfs"]
 
 [tasks.build-release]
 description = "Build all components in release mode"
-dependencies = ["build-kernel-release", "build-userlib-release", "build-userbin-release", "build-initramfs-release"]
+dependencies = ["build-kernel-release", "build-userlib-release", "build-userbin-release", "build-initramfs-release", "build-rootfs"]
 
 [tasks.build-kernel]
 description = "Build the kernel (default: debug)"
@@ -71,7 +71,7 @@ dependencies = ["build-userlib-release"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
-dependencies = ["clean-kernel", "clean-userlib", "clean-userbin", "clean-initramfs"]
+dependencies = ["clean-kernel", "clean-userlib", "clean-userbin", "clean-initramfs", "clean-rootfs"]
 
 [tasks.clean-kernel]
 description = "Clean kernel build artifacts"
@@ -83,7 +83,7 @@ args = ["clean"]
 description = "Clean user library build artifacts"
 cwd = "user/lib"
 command = "cargo"
-args = ["clean", "--workspace"]
+args = ["make", "clean"]
 
 [tasks.clean-userbin]
 description = "Clean user program build artifacts"
@@ -203,7 +203,7 @@ args = ["doc", "--no-deps", "--document-private-items"]
 description = "Generate user library documentation"
 cwd = "user/lib"
 command = "cargo"
-args = ["doc", "--no-deps"]
+args = ["make", "doc"]
 
 [tasks.build-initramfs]
 description = "Create initramfs archive (default: debug)"
@@ -231,3 +231,16 @@ description = "Clean initramfs archive"
 cwd = "mkfs"
 command = "sh"
 args = ["clean_initramfs.sh"]
+
+[tasks.build-rootfs]
+description = "Create rootfs.img if it doesn't exist"
+cwd = "mkfs"
+command = "sh"
+args = ["make_rootfs.sh"]
+condition = { files_not_exist = ["${CARGO_MAKE_WORKING_DIRECTORY}/mkfs/dist/rootfs.img"] }
+
+[tasks.clean-rootfs]
+description = "Clean rootfs.img"
+cwd = "mkfs"
+command = "sh"
+args = ["clean_rootfs.sh"]

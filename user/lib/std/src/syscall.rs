@@ -43,6 +43,8 @@ pub enum Syscall {
     VfsCreateDirectory = 403, // Create directories through VFS
     VfsChangeDirectory = 404, // Change current working directory
     VfsTruncate = 405,      // Truncate files by path
+    VfsCreateSymlink = 406, // Create symbolic links through VFS
+    VfsReadlink = 407,      // Read symbolic link target through VFS
     
     // === Filesystem Operations (mount management) ===
     FsMount = 500,
@@ -55,6 +57,9 @@ pub enum Syscall {
     // === Memory Mapping Operations ===
     MemoryMap = 700,        // Memory map operation (mmap)
     MemoryUnmap = 701,      // Memory unmap operation (munmap)
+    
+    // === Debug/Profiler Operations ===
+    ProfilerDump = 999,     // Dump profiler statistics (debug only)
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {

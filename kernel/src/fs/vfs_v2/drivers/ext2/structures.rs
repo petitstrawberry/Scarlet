@@ -4,7 +4,7 @@
 //! All structures are packed and follow the ext2 filesystem specification.
 
 use core::mem;
-use alloc::{vec::Vec, string::String, format, string::ToString};
+use alloc::{boxed::Box, vec::Vec, string::String, format, string::ToString};
 use crate::fs::{FileSystemError, FileSystemErrorKind};
 
 /// ext2 magic number
@@ -126,6 +126,39 @@ impl Ext2Superblock {
             aligned_data[..1024].copy_from_slice(&data[..1024]);
             *(aligned_data.as_ptr() as *const Self)
         };
+
+        // Validate magic number to ensure we have a valid ext2 superblock
+        if u16::from_le(superblock.magic) != EXT2_SUPER_MAGIC {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid ext2 magic number"
+            ));
+        }
+
+        Ok(superblock)
+    }
+
+    /// Parse superblock from raw bytes and return as Box to avoid stack overflow
+    pub fn from_bytes_boxed(data: &[u8]) -> Result<Box<Self>, FileSystemError> {
+        // Standard ext2 superblock is 1024 bytes, but our struct might be slightly larger due to alignment
+        if data.len() < 1024 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                format!("Insufficient data for ext2 superblock: got {} bytes, need at least 1024 bytes", data.len())
+            ));
+        }
+
+        // Safe approach: create zeroed superblock on heap, then copy data
+        let mut superblock = Box::new(unsafe { core::mem::zeroed::<Self>() });
+        
+        // Copy data safely
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                superblock.as_mut() as *mut Self as *mut u8,
+                core::mem::size_of::<Self>().min(1024)
+            );
+        }
 
         // Validate magic number to ensure we have a valid ext2 superblock
         if u16::from_le(superblock.magic) != EXT2_SUPER_MAGIC {

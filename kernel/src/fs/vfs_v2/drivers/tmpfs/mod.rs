@@ -1029,21 +1029,47 @@ impl ControlOps for TmpFileObject {
 }
 
 impl MemoryMappingOps for TmpFileObject {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
+    fn get_mapping_info(&self, offset: usize, length: usize) 
                        -> Result<(usize, usize, bool), &'static str> {
-        Err("Memory mapping not supported for temporary files")
+        let content = self.node.content.read();
+        
+        // Check bounds
+        if offset >= content.len() {
+            return Err("Offset beyond file size");
+        }
+        
+        let available_length = content.len() - offset;
+        let actual_length = core::cmp::min(length, available_length);
+        
+        if actual_length == 0 {
+            return Err("Requested length is zero or beyond file size");
+        }
+        
+        // For tmpfs, we provide the physical address of the data in memory
+        let data_ptr = content.as_ptr().wrapping_add(offset);
+        let physical_addr = data_ptr as usize;
+
+        // Set permissions: 0x7 = read + write + execute, adjust based on file permissions if needed
+        let permissions = 0x7; // Read, write, and execute permissions
+
+        // tmpfs mappings are shared (changes are visible to all processes)
+        let is_shared = true;
+        
+        Ok((physical_addr, permissions, is_shared))
     }
     
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
-        // Temporary files don't support memory mapping
+        // For tmpfs, no special action needed when mapped
+        // The data is already in memory
     }
     
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
-        // Temporary files don't support memory mapping
+        // For tmpfs, no special action needed when unmapped
+        // The data remains in memory
     }
     
     fn supports_mmap(&self) -> bool {
-        false
+        true
     }
 }
 

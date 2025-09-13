@@ -23,16 +23,23 @@ script = [
     "cd ../framebuffer && cargo build --release"
 ]
 
-[tasks.clean-userlib]
+[tasks.clean]
 description = "Clean all user library build artifacts"
 script = [
     "cd std && cargo clean",
     "cd ../framebuffer && cargo clean"
 ]
 
-[tasks.test-userlib]
+[tasks.test]
 description = "Test all user libraries"
 script = [
     "cd std && cargo test",
     "cd ../framebuffer && cargo test"
+]
+
+[tasks.doc]
+description = "Generate documentation for all user libraries"
+script = [
+    "cd std && cargo doc --no-deps",
+    "cd ../framebuffer && cargo doc --no-deps"
 ]

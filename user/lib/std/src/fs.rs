@@ -866,6 +866,88 @@ pub fn change_directory<P: AsRef<str>>(path: P) -> Result<()> {
     }
 }
 
+/// Remove a file
+/// 
+/// This function removes a file at the specified path.
+/// 
+/// # Arguments
+/// * `path` - Path to the file to remove
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs::remove_file;
+/// 
+/// remove_file("old_file.txt")?;
+/// ```
+/// 
+/// # Errors
+/// 
+/// Returns `Err` if the remove operation fails, such as:
+/// - File not found
+/// - Permission denied
+/// - Filesystem is read-only
+pub fn remove_file<P: AsRef<str>>(path: P) -> Result<()> {
+    use crate::syscall::{syscall1, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let path_c = str_to_cstr_bytes(path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let result = syscall1(
+        Syscall::VfsRemove,
+        path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "remove file failed"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove a directory
+/// 
+/// This function removes a directory at the specified path.
+/// The directory must be empty to be removed successfully.
+/// 
+/// # Arguments
+/// * `path` - Path to the directory to remove
+/// 
+/// # Examples
+/// 
+/// ```
+/// use scarlet::fs::remove_directory;
+/// 
+/// remove_directory("empty_dir")?;
+/// ```
+/// 
+/// # Errors
+/// 
+/// Returns `Err` if the remove operation fails, such as:
+/// - Directory not found
+/// - Directory not empty
+/// - Permission denied
+/// - Filesystem is read-only
+pub fn remove_directory<P: AsRef<str>>(path: P) -> Result<()> {
+    use crate::syscall::{syscall1, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+
+    let path_c = str_to_cstr_bytes(path.as_ref())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "path contains null byte"))?;
+
+    let result = syscall1(
+        Syscall::VfsRemove,
+        path_c.as_ptr() as usize,
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "remove directory failed"))
+    } else {
+        Ok(())
+    }
+}
+
 /// Raw Directory entry structure (must match kernel definition)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -970,6 +1052,11 @@ impl DirectoryEntry {
     /// Check if this entry is a regular file
     pub fn is_file(&self) -> bool {
         self.file_type == 0 // FileType::RegularFile as u8
+    }
+    
+    /// Check if this entry is a symbolic link
+    pub fn is_symlink(&self) -> bool {
+        self.file_type == 2 // FileType::SymbolicLink as u8
     }
 }
 
@@ -1103,4 +1190,91 @@ pub fn count_directory_entries(path: &str) -> Result<(usize, usize)> {
     }
 
     Ok((file_count, dir_count))
+}
+
+/// Create a symbolic link at the specified path pointing to the target
+///
+/// # Arguments
+/// * `symlink_path` - The path where the symbolic link will be created
+/// * `target_path` - The path that the symbolic link will point to
+///
+/// # Returns
+/// * `Ok(())` - If the symbolic link was created successfully
+/// * `Err(Error)` - If the symbolic link could not be created
+///
+/// # Example
+/// ```
+/// use scarlet::fs::create_symlink;
+/// 
+/// create_symlink("/path/to/symlink", "/path/to/target")?;
+/// ```
+pub fn create_symlink(symlink_path: &str, target_path: &str) -> Result<()> {
+    use crate::syscall::{syscall4, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+    
+    let symlink_path_c = str_to_cstr_bytes(symlink_path)
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "symlink_path contains null byte"))?;
+    let target_path_c = str_to_cstr_bytes(target_path)
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "target_path contains null byte"))?;
+    
+    let result = syscall4(
+        Syscall::VfsCreateSymlink,
+        symlink_path_c.as_ptr() as usize,
+        target_path_c.as_ptr() as usize,
+        0,
+        0
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "Failed to create symbolic link"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Read the target of a symbolic link
+///
+/// # Arguments
+/// * `symlink_path` - The path to the symbolic link
+///
+/// # Returns
+/// * `Ok(String)` - The target path that the symbolic link points to
+/// * `Err(Error)` - If the symbolic link could not be read
+///
+/// # Example
+/// ```
+/// use scarlet::fs::read_link;
+/// 
+/// let target = read_link("/path/to/symlink")?;
+/// println!("Symbolic link points to: {}", target);
+/// ```
+pub fn read_link(symlink_path: &str) -> Result<String> {
+    use crate::syscall::{syscall3, Syscall};
+    use crate::ffi::str_to_cstr_bytes;
+    
+    let symlink_path_c = str_to_cstr_bytes(symlink_path)
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "symlink_path contains null byte"))?;
+    
+    // Allocate buffer for target path (PATH_MAX = 4096)
+    let mut buffer = [0u8; 4096];
+    
+    let result = syscall3(
+        Syscall::VfsReadlink,
+        symlink_path_c.as_ptr() as usize,
+        buffer.as_mut_ptr() as usize,
+        buffer.len()
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(ErrorKind::Other, "Failed to read symbolic link"))
+    } else if result == 0 {
+        Err(Error::new(ErrorKind::Other, "Empty symbolic link target"))
+    } else {
+        // Convert bytes to string (assuming UTF-8)
+        let target_bytes = &buffer[..result];
+        match core::str::from_utf8(target_bytes) {
+            Ok(target_str) => Ok(String::from(target_str)),
+            Err(_) => Err(Error::new(ErrorKind::Other, "Invalid UTF-8 in symbolic link target"))
+        }
+    }
 }
