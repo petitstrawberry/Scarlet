@@ -1811,3 +1811,146 @@ fn test_ext2_device_file_creation() {
         }
     }
 }
+
+#[test_case]
+fn test_ext2_directory_entry_byte_order() {
+    //! Test to verify that the fix for directory entry byte order handling works correctly.
+    //! This test specifically verifies that "." and ".." entries are parsed correctly and that
+    //! inode numbers are properly converted from little-endian format.
+    
+    use crate::drivers::block::virtio_blk::VirtioBlockDevice;
+    
+    let fs_driver_manager = get_fs_driver_manager();
+    
+    // Get VirtIO block device for ext2-test.img
+    let base_addr = 0x10006000; // Standard virtio-blk address for QEMU bus.5
+    let virtio_device = VirtioBlockDevice::new(base_addr);
+    let block_device_arc = Arc::new(virtio_device);
+    
+    match fs_driver_manager.create_from_block("ext2", block_device_arc, 512) {
+        Ok(fs) => {
+            early_println!("[Test] Starting ext2 directory entry byte order test");
+            
+            let root_node = fs.root_node();
+            
+            // Test 1: Read root directory entries and verify basic structure
+            match fs.readdir(&root_node) {
+                Ok(entries) => {
+                    early_println!("[Test] Root directory contains {} entries", entries.len());
+                    
+                    let mut dot_count = 0;
+                    let mut dotdot_count = 0;
+                    let mut dot_inode = 0u64;
+                    let mut dotdot_inode = 0u64;
+                    
+                    for entry in &entries {
+                        match entry.name.as_str() {
+                            "." => {
+                                dot_count += 1;
+                                dot_inode = entry.file_id;
+                                // "." should point to the current directory (root inode = 2)
+                                assert_eq!(entry.file_id, 2, "Root '.' entry should have inode 2");
+                                assert_eq!(entry.file_type, FileType::Directory);
+                                early_println!("[Test] Found '.' entry with inode {}", entry.file_id);
+                            },
+                            ".." => {
+                                dotdot_count += 1;
+                                dotdot_inode = entry.file_id;
+                                // ".." should also point to root directory in this case (since root's parent is itself)
+                                assert_eq!(entry.file_id, 2, "Root '..' entry should have inode 2");
+                                assert_eq!(entry.file_type, FileType::Directory);
+                                early_println!("[Test] Found '..' entry with inode {}", entry.file_id);
+                            },
+                            other => {
+                                early_println!("[Test] Found other entry: {} (inode: {}, type: {:?})", 
+                                             other, entry.file_id, entry.file_type);
+                            }
+                        }
+                    }
+                    
+                    // Verify we have exactly one of each
+                    assert_eq!(dot_count, 1, "Should have exactly one '.' entry, found {}", dot_count);
+                    assert_eq!(dotdot_count, 1, "Should have exactly one '..' entry, found {}", dotdot_count);
+                    assert_eq!(dot_inode, dotdot_inode, "'.' and '..' should both point to root inode in root directory");
+                    
+                    early_println!("[Test] ✓ Root directory entries parsed correctly");
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to read root directory: {:?}", e);
+                }
+            }
+            
+            // Test 2: Create a subdirectory and verify its "." and ".." entries
+            early_println!("[Test] Creating subdirectory to test directory entry parsing...");
+            let subdir_name = "test_subdir".to_string();
+            match fs.create(&root_node, &subdir_name, FileType::Directory, 0o755) {
+                Ok(subdir_node) => {
+                    early_println!("[Test] Created subdirectory: {}", subdir_name);
+                    
+                    // Read subdirectory entries
+                    match fs.readdir(&subdir_node) {
+                        Ok(entries) => {
+                            early_println!("[Test] Subdirectory contains {} entries", entries.len());
+                            
+                            let mut dot_count = 0;
+                            let mut dotdot_count = 0;
+                            let mut subdir_inode = 0u64;
+                            
+                            for entry in &entries {
+                                match entry.name.as_str() {
+                                    "." => {
+                                        dot_count += 1;
+                                        subdir_inode = entry.file_id;
+                                        // "." should point to the subdirectory's own inode
+                                        assert_eq!(entry.file_type, FileType::Directory);
+                                        early_println!("[Test] Subdirectory '.' entry has inode {}", entry.file_id);
+                                    },
+                                    ".." => {
+                                        dotdot_count += 1;
+                                        // ".." should point to the parent directory (root = inode 2)
+                                        assert_eq!(entry.file_id, 2, "Subdirectory '..' should point to root (inode 2)");
+                                        assert_eq!(entry.file_type, FileType::Directory);
+                                        early_println!("[Test] Subdirectory '..' entry has inode {}", entry.file_id);
+                                    },
+                                    other => {
+                                        early_println!("[Test] Found other entry in subdirectory: {} (inode: {})", 
+                                                     other, entry.file_id);
+                                    }
+                                }
+                            }
+                            
+                            // Verify subdirectory entries
+                            assert_eq!(dot_count, 1, "Subdirectory should have exactly one '.' entry");
+                            assert_eq!(dotdot_count, 1, "Subdirectory should have exactly one '..' entry");
+                            assert_ne!(subdir_inode, 2, "Subdirectory '.' should not point to root inode");
+                            assert!(subdir_inode > 2, "Subdirectory inode should be > 2 (greater than root)");
+                            
+                            early_println!("[Test] ✓ Subdirectory entries parsed correctly");
+                        },
+                        Err(e) => {
+                            panic!("[Test] Failed to read subdirectory: {:?}", e);
+                        }
+                    }
+                    
+                    // Clean up: remove the test subdirectory
+                    match fs.remove(&root_node, &subdir_name) {
+                        Ok(_) => {
+                            early_println!("[Test] ✓ Test subdirectory removed successfully");
+                        },
+                        Err(e) => {
+                            early_println!("[Test] Warning: Failed to remove test subdirectory: {:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    panic!("[Test] Failed to create test subdirectory: {:?}", e);
+                }
+            }
+            
+            early_println!("[Test] ✓ ext2 directory entry byte order test completed successfully");
+        },
+        Err(e) => {
+            panic!("Failed to create ext2 filesystem from virtio-blk device: {:?}", e);
+        }
+    }
+}
