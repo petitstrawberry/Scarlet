@@ -926,16 +926,16 @@ impl Ext2FileSystem {
                 }
 
                 let entry = Ext2DirectoryEntry::from_bytes(&block_data[offset..])?;
-                if entry.entry.inode == 0 {
+                if entry.entry.get_inode() == 0 {
                     // In ext2, an inode of 0 can mean an unused entry, but not necessarily the end.
                     // The record length should still be valid.
-                    let rec_len = entry.entry.rec_len;
+                    let rec_len = entry.entry.get_rec_len();
                     if rec_len == 0 { break; }
                     offset += rec_len as usize;
                     continue;
                 }
 
-                let rec_len = entry.entry.rec_len;
+                let rec_len = entry.entry.get_rec_len();
                 entries.push(entry);
                 offset += rec_len as usize;
 
@@ -3961,15 +3961,16 @@ impl FileSystemOperations for Ext2FileSystem {
         let mut result = Vec::new();
         for entry in entries {
             let name = entry.name_str()?;
-            let child_inode = self.read_inode(entry.entry.inode)?;
+            let inode_number = entry.entry.get_inode();
+            let child_inode = self.read_inode(inode_number)?;
             
             // Use file_type_from_inode to get the correct file type including device files
-            let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
+            let file_type = self.file_type_from_inode(&child_inode, inode_number)?;
 
             result.push(DirectoryEntryInternal {
                 name,
                 file_type,
-                file_id: entry.entry.inode as u64,
+                file_id: inode_number as u64,
             });
         }
 
