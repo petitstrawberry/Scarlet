@@ -48,6 +48,12 @@ SECTIONS {
         *(COMMON)
         __BSS_END = .;
     } > RAM
+    .fdt_reserved : {
+        . = ALIGN(0x1000);
+        __FDT_RESERVED_START = .;
+        . += 256K; /* Reserve 256KiB for FDT relocation */
+        __FDT_RESERVED_END = .;
+    } > RAM
     . = ALIGN(16);
     __KERNEL_SPACE_END = .;
     /DISCARD/ : {
