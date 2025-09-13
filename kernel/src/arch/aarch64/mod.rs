@@ -22,6 +22,7 @@ pub mod vm;
 
 pub use earlycon::*;
 pub use registers::Registers;
+pub use context::KernelContext;
 
 pub type Arch = Aarch64;
 pub type Trapframe = Aarch64;
@@ -193,4 +194,29 @@ pub fn enable_interrupt() {
     // TODO: Implement enabling interrupts for AArch64
     // This would involve clearing the interrupt mask bits in DAIF
     early_println!("[aarch64] TODO: enable_interrupt");
+}
+
+pub fn get_cpu() -> &'static mut Aarch64 {
+    // TODO: Implement proper CPU identification for AArch64
+    // For now, return CPU 0's trapframe
+    unsafe { &mut TRAPFRAME[0] }
+}
+
+pub fn set_next_mode(mode: vcpu::Mode) {
+    // TODO: Implement mode switching for AArch64
+    // This would involve setting SPSR_EL1 appropriately
+    match mode {
+        vcpu::Mode::User => {
+            early_println!("[aarch64] TODO: set_next_mode to User");
+        }
+        vcpu::Mode::Kernel => {
+            early_println!("[aarch64] TODO: set_next_mode to Kernel");
+        }
+    }
+}
+
+pub fn early_putc(c: u8) {
+    // TODO: Implement early console output for AArch64
+    // For now, just ignore
+    let _ = c;
 }

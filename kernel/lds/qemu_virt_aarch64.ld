@@ -27,7 +27,13 @@ SECTIONS {
       *(.initcall.late)
       __INITCALL_END = .;
     } > RAM
-    .trampoline : { *(.trampoline .trampoline.*) } > RAM
+    .trampoline : { 
+        . = ALIGN(0x1000);
+        __TRAMPOLINE_START = .;
+        *(.trampoline .trampoline.*) 
+        . = ALIGN(0x1000);
+        __TRAMPOLINE_END = .;
+    } > RAM
     .rodata : { *(.rodata .rodata.*) } > RAM
     .rodata.device_tree : {
         __DEVICE_TREE_START = .;

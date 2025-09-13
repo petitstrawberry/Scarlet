@@ -21,3 +21,8 @@ impl Instruction {
         4
     }
 }
+
+pub fn idle() {
+    // TODO: Implement WFI (Wait For Interrupt) for AArch64
+    // This should use the WFI instruction to put the CPU into low power state
+}

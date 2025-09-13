@@ -16,3 +16,21 @@ pub fn enable_interrupts() {
 pub fn disable_interrupts() {
     // TODO: Disable AArch64 interrupts
 }
+
+pub fn enable_external_interrupts() {
+    // TODO: Enable external interrupts for AArch64
+}
+
+pub fn with_interrupts_disabled<F, R>(f: F) -> R 
+where
+    F: FnOnce() -> R,
+{
+    // TODO: Implement interrupt disabling/enabling for AArch64
+    // For now, just call the function
+    f()
+}
+
+pub fn are_interrupts_enabled() -> bool {
+    // TODO: Check if interrupts are enabled in DAIF register
+    false
+}
