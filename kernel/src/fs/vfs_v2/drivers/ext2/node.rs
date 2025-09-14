@@ -598,29 +598,6 @@ impl StreamOps for Ext2DirectoryObject {
         // Create a vector to store all entries including "." and ".."
         let mut all_entries = Vec::new();
         
-        // Add "." entry (current directory)
-        let current_inode = match ext2_fs.read_inode(self.inode_number) {
-            Ok(inode) => inode,
-            Err(_) => return Ok(0),
-        };
-        
-        all_entries.push(crate::fs::DirectoryEntryInternal {
-            name: String::from("."),
-            file_type: FileType::Directory,
-            size: current_inode.get_size() as usize,
-            file_id: self.file_id,
-            metadata: None,
-        });
-        
-        // Add ".." entry (parent directory) - simplified to point to current for now
-        all_entries.push(crate::fs::DirectoryEntryInternal {
-            name: String::from(".."),
-            file_type: FileType::Directory,
-            size: current_inode.get_size() as usize,
-            file_id: self.file_id,
-            metadata: None,
-        });
-        
         // Add regular directory entries
         let mut regular_entries = Vec::new();
         for entry in entries {
