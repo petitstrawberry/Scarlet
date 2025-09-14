@@ -221,6 +221,54 @@ fn test_ext2_directory_entry_parsing() {
 }
 
 #[test_case]
+fn test_ext2_dot_entries_byte_order() {
+    use super::structures::*;
+    
+    // Create a test directory entry for "." with specific byte patterns
+    // that would reveal byte order issues
+    let name = ".";
+    let mut entry_data = vec![0u8; 8 + name.len()];
+    
+    // Test with a known inode number that has different little-endian vs big-endian representation
+    let test_inode = 0x12345678u32;  // This will be different when byte-swapped
+    let test_rec_len = 0x0100u16;     // This should be 256 in little-endian, 1 in big-endian
+    
+    // Set up directory entry header in little-endian format
+    entry_data[0..4].copy_from_slice(&test_inode.to_le_bytes()); // inode
+    entry_data[4..6].copy_from_slice(&test_rec_len.to_le_bytes()); // rec_len
+    entry_data[6] = name.len() as u8; // name_len
+    entry_data[7] = 2; // file_type (directory)
+    
+    // Copy name
+    entry_data[8..8 + name.len()].copy_from_slice(name.as_bytes());
+    
+    // Test directory entry parsing
+    let result = Ext2DirectoryEntry::from_bytes(&entry_data);
+    assert!(result.is_ok(), "Should be able to parse valid directory entry");
+    
+    let entry = result.unwrap();
+    
+    // Test that proper accessor methods give correct values
+    let inode = entry.entry.get_inode();
+    let rec_len = entry.entry.get_rec_len();
+    let name_parsed = &entry.name;
+    
+    assert_eq!(inode, test_inode, "Inode should match when using proper accessor");
+    assert_eq!(rec_len, test_rec_len, "Record length should match when using proper accessor");
+    assert_eq!(name_parsed, ".", "Name should be parsed correctly");
+    
+    // Verify that direct field access would give wrong results on big-endian
+    // (though this test runs on little-endian, we can at least document the issue)
+    let raw_inode = entry.entry.inode;
+    let raw_rec_len = entry.entry.rec_len;
+    
+    // On little-endian systems, these should be equal
+    // On big-endian systems, they would be different
+    assert_eq!(u32::from_le(raw_inode), test_inode);
+    assert_eq!(u16::from_le(raw_rec_len), test_rec_len);
+}
+
+#[test_case]
 fn test_ext2_block_group_descriptor_parsing() {
     use super::structures::*;
     
