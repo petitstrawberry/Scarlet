@@ -1,6 +1,8 @@
 /// Advanced VFS v2 tests for complex scenarios
 
-use crate::fs::vfs_v2::{ manager::VfsManager, drivers::tmpfs::TmpFS, }; use crate::fs::FileType;
+use crate::fs::vfs_v2::{ manager::VfsManager, drivers::tmpfs::TmpFS, }; 
+use crate::fs::FileType;
+use alloc::vec::Vec;
 
 
 #[test_case]
@@ -202,4 +204,72 @@ fn test_bind_mount_path_traversal() {
     let result = vfs.metadata("/fs2/mount_point/../../root_content.txt");
     assert!(result.is_ok(), "Cannot access root_content.txt from bind mount!");
 
+}
+
+#[test_case]
+fn test_bind_mount_readdir_no_duplicates() {
+    // Test that bind mounts don't show duplicate directory entries
+    // This reproduces the issue seen with /scarlet bind mount
+    
+    // 1. Setup: Create a filesystem with existing content
+    let vfs = VfsManager::new();
+    let tmpfs1 = TmpFS::new(0);
+    let tmpfs2 = TmpFS::new(0);
+    
+    vfs.create_dir("/source").unwrap();
+    vfs.create_dir("/target").unwrap();
+    vfs.mount(tmpfs1, "/source", 0).unwrap();
+    vfs.mount(tmpfs2, "/target", 0).unwrap();
+    
+    // 2. Create content in the source directory (like the root filesystem)
+    vfs.create_file("/source/file1.txt", FileType::RegularFile).unwrap();
+    vfs.create_file("/source/file2.txt", FileType::RegularFile).unwrap();
+    vfs.create_dir("/source/subdir").unwrap();
+    
+    // 3. Create content in the target directory before bind mounting (like ext2 /scarlet)
+    vfs.create_file("/target/existing_file.txt", FileType::RegularFile).unwrap();
+    vfs.create_dir("/target/existing_dir").unwrap();
+    
+    // 4. Perform bind mount - source onto target
+    vfs.bind_mount("/source", "/target").unwrap();
+    
+    // Debug: Check what resolve_path returns for /target after bind mount
+    let (resolved_entry, resolved_mount) = vfs.resolve_path("/target").unwrap();
+    crate::println!("Resolved entry for /target: name='{}', id={}", 
+                    resolved_entry.name(), resolved_entry.node().id());
+    crate::println!("Resolved mount for /target: path='{}'", resolved_mount.path);
+    
+    // 5. Read directory entries from the bind mount
+    let entries = vfs.readdir("/target").unwrap();
+    
+    // Debug: Print all entries to understand what's happening
+    crate::println!("Bind mount /target entries:");
+    for entry in &entries {
+        crate::println!("  - {} (type: {}, id: {})", entry.name, entry.file_type as u8, entry.file_id);
+    }
+    
+    // 6. Verify no duplicate "." and ".." entries
+    let dot_entries: Vec<_> = entries.iter().filter(|e| e.name == ".").collect();
+    let dotdot_entries: Vec<_> = entries.iter().filter(|e| e.name == "..").collect();
+    
+    assert!(dot_entries.len() > 0, "Should have at least one '.' entry, found {}", dot_entries.len());
+    assert!(dotdot_entries.len() > 0, "Should have at least one '..' entry, found {}", dotdot_entries.len());
+    assert_eq!(dot_entries.len(), 1, "Should have exactly one '.' entry, found {}", dot_entries.len());
+    assert_eq!(dotdot_entries.len(), 1, "Should have exactly one '..' entry, found {}", dotdot_entries.len());
+    
+    // 7. Verify that the bind mount content is shown (from /source)
+    let file1_entries: Vec<_> = entries.iter().filter(|e| e.name == "file1.txt").collect();
+    let file2_entries: Vec<_> = entries.iter().filter(|e| e.name == "file2.txt").collect();
+    let subdir_entries: Vec<_> = entries.iter().filter(|e| e.name == "subdir").collect();
+    
+    assert_eq!(file1_entries.len(), 1, "Should see file1.txt from bind mount source");
+    assert_eq!(file2_entries.len(), 1, "Should see file2.txt from bind mount source");
+    assert_eq!(subdir_entries.len(), 1, "Should see subdir from bind mount source");
+    
+    // 8. Verify that the original target content is masked (not shown)
+    let existing_file_entries: Vec<_> = entries.iter().filter(|e| e.name == "existing_file.txt").collect();
+    let existing_dir_entries: Vec<_> = entries.iter().filter(|e| e.name == "existing_dir").collect();
+    
+    assert_eq!(existing_file_entries.len(), 0, "Original target content should be masked by bind mount");
+    assert_eq!(existing_dir_entries.len(), 0, "Original target content should be masked by bind mount");
 }

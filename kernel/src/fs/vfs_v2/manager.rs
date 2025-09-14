@@ -470,8 +470,11 @@ impl VfsManager {
     /// the filesystem cannot be resolved.
     /// 
     pub fn readdir(&self, path: &str) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
-        // Resolve path to VfsEntry
-        let entry = self.resolve_path(path)?.0;
+        // Resolve path to VfsEntry and MountPoint
+        let (entry, mount_point) = self.resolve_path(path)?;
+        
+        // Check if this is a bind mount
+        let is_bind_mount = matches!(mount_point.mount_type, super::mount_tree::MountType::Bind);
         
         // Get VfsNode
         let node = entry.node();
@@ -498,7 +501,16 @@ impl VfsManager {
             ))?;
         
         // Call filesystem's readdir
-        filesystem.readdir(&node)
+        let mut entries = filesystem.readdir(&node)?;
+        
+        // For bind mounts, ensure we only return unique entries
+        // This prevents any potential duplication issues
+        if is_bind_mount {
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            entries.dedup_by(|a, b| a.name == b.name);
+        }
+        
+        Ok(entries)
     }
     
     /// Set current working directory by path
