@@ -563,16 +563,31 @@ impl Ext2DirectoryObject {
                 3 => {
                     // EXT2_FT_CHRDEV - Character device
                     // For device files, we need device information
-                    // For now, use a placeholder device ID
+                    // Extract device ID from inode's block array
+                    let device_id = match ext2_fs.read_inode(inode_num) {
+                        Ok(inode) => {
+                            // ext2 stores device ID in block[0] for special files
+                            inode.block[0] as usize
+                        }
+                        Err(_) => 0,
+                    };
                     FileType::CharDevice(DeviceFileInfo {
-                        device_id: inode_num as usize, // Use copied inode as device ID for now
+                        device_id,
                         device_type: crate::device::DeviceType::Char,
                     })
                 },
                 4 => {
                     // EXT2_FT_BLKDEV - Block device
+                    // Extract device ID from inode's block array
+                    let device_id = match ext2_fs.read_inode(inode_num) {
+                        Ok(inode) => {
+                            // ext2 stores device ID in block[0] for special files
+                            inode.block[0] as usize
+                        }
+                        Err(_) => 0,
+                    };
                     FileType::BlockDevice(DeviceFileInfo {
-                        device_id: inode_num as usize, // Use copied inode as device ID for now
+                        device_id,
                         device_type: crate::device::DeviceType::Block,
                     })
                 },
