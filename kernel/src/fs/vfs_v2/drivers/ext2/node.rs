@@ -550,6 +550,10 @@ pub struct Ext2DirectoryObject {
     position: Mutex<u64>,
     /// Weak reference to the filesystem
     filesystem: RwLock<Option<Weak<dyn FileSystemOperations>>>,
+    /// Cached directory entries to avoid re-reading on every access
+    cached_entries: Mutex<Option<Vec<crate::fs::DirectoryEntryInternal>>>,
+    /// Cache generation (based on directory modification time) to detect stale cache
+    cache_generation: Mutex<u32>,
 }
 
 impl Ext2DirectoryObject {
@@ -560,6 +564,8 @@ impl Ext2DirectoryObject {
             file_id,
             position: Mutex::new(0),
             filesystem: RwLock::new(None),
+            cached_entries: Mutex::new(None),
+            cache_generation: Mutex::new(0),
         }
     }
 
@@ -567,11 +573,9 @@ impl Ext2DirectoryObject {
     pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
         *self.filesystem.write() = Some(fs);
     }
-}
 
-impl StreamOps for Ext2DirectoryObject {
-    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        // Get the filesystem reference
+    /// Get cached directory entries or read them if not cached
+    fn get_cached_entries(&self) -> Result<Vec<crate::fs::DirectoryEntryInternal>, StreamError> {
         let filesystem = self.filesystem.read()
             .as_ref()
             .and_then(|weak_fs| weak_fs.upgrade())
@@ -580,45 +584,48 @@ impl StreamOps for Ext2DirectoryObject {
         let ext2_fs = filesystem.as_any()
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::IoError)?;
-        
-        // Read directory entries using the existing read_directory_entries method
+
+        // Get current directory inode to check modification time
         let current_inode = match ext2_fs.read_inode(self.inode_number) {
             Ok(inode) => inode,
-            Err(_) => return Ok(0), // Error reading inode
+            Err(_) => return Err(StreamError::IoError),
         };
         
+        let current_generation = current_inode.mtime;
+        
+        // Check if we have cached entries and if they're still valid
+        {
+            let cached = self.cached_entries.lock();
+            let cache_gen = *self.cache_generation.lock();
+            if let Some(ref entries) = *cached {
+                if cache_gen == current_generation {
+                    return Ok(entries.clone());
+                }
+            }
+        }
+
+        // Read directory entries
         let entries = match ext2_fs.read_directory_entries(&current_inode) {
             Ok(entries) => entries,
-            Err(_) => return Ok(0), // EOF or error
+            Err(_) => return Err(StreamError::IoError),
         };
         
-        // position is the entry index
-        let position = *self.position.lock() as usize;
-        
-        // Create a vector to store all entries including "." and ".."
+        // Convert to internal directory entries with simplified file type detection
         let mut all_entries = Vec::new();
         
-        // Add regular directory entries
-        let mut regular_entries = Vec::new();
         for entry in entries {
-            let file_type = if entry.entry.inode != 0 {
-                match ext2_fs.read_inode(entry.entry.inode) {
-                    Ok(inode) => {
-                        if inode.is_dir() {
-                            FileType::Directory
-                        } else if inode.is_file() {
-                            FileType::RegularFile
-                        } else {
-                            FileType::RegularFile // Default fallback
-                        }
-                    },
-                    Err(_) => FileType::RegularFile,
-                }
-            } else {
+            if entry.entry.inode == 0 {
                 continue; // Skip deleted entries
+            }
+            
+            // Simple file type detection: check if it's a directory, otherwise treat as regular file
+            let file_type = if entry.entry.file_type == 2 { // EXT2_FT_DIR
+                FileType::Directory
+            } else {
+                FileType::RegularFile // Default for all other types
             };
             
-            regular_entries.push(crate::fs::DirectoryEntryInternal {
+            all_entries.push(crate::fs::DirectoryEntryInternal {
                 name: entry.name,
                 file_type,
                 size: 0, // Size not immediately available
@@ -627,11 +634,28 @@ impl StreamOps for Ext2DirectoryObject {
             });
         }
         
-        // Sort regular entries by file_id
-        regular_entries.sort_by_key(|entry| entry.file_id);
+        // Sort entries by file_id for consistent ordering
+        all_entries.sort_by_key(|entry| entry.file_id);
         
-        // Append sorted regular entries to the result
-        all_entries.extend(regular_entries);
+        // Cache the entries with current generation
+        {
+            let mut cached = self.cached_entries.lock();
+            let mut cache_gen = self.cache_generation.lock();
+            *cached = Some(all_entries.clone());
+            *cache_gen = current_generation;
+        }
+        
+        Ok(all_entries)
+    }
+}
+
+impl StreamOps for Ext2DirectoryObject {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        // Use cached entries to avoid re-reading directory on every call
+        let all_entries = self.get_cached_entries()?;
+        
+        // position is the entry index
+        let position = *self.position.lock() as usize;
         
         if position >= all_entries.len() {
             return Ok(0); // EOF
@@ -818,9 +842,7 @@ impl StreamOps for Ext2CharDeviceFileObject {
             #[cfg(test)]
             crate::early_println!("[ext2] CharDevice: Successfully cast to CharDevice");
             // Use the CharDevice write method
-            char_device.write(buffer).map_err(|err| {
-                #[cfg(test)]
-                let _ = err;
+            char_device.write(buffer).map_err(|_err| {
                 #[cfg(test)]
                 crate::early_println!("[ext2] CharDevice write error");
                 StreamError::IoError
