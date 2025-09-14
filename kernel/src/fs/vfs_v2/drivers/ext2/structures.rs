@@ -4,7 +4,7 @@
 //! All structures are packed and follow the ext2 filesystem specification.
 
 use core::mem;
-use alloc::{boxed::Box, vec::Vec, string::String, format, string::ToString};
+use alloc::{boxed::Box, vec, string::String, format};
 use crate::fs::{FileSystemError, FileSystemErrorKind};
 
 /// ext2 magic number
@@ -481,6 +481,94 @@ impl Ext2Inode {
             Some((major, minor))
         } else {
             None
+        }
+    }
+
+    /// Read symbolic link target from inode
+    /// 
+    /// This method handles both fast symlinks (target stored in block array)
+    /// and slow symlinks (target stored in data blocks).
+    /// 
+    /// # Arguments
+    /// 
+    /// * `filesystem` - Reference to the ext2 filesystem for block reading
+    /// 
+    /// # Returns
+    /// 
+    /// The target path of the symbolic link, or an error if this is not a symlink
+    /// or if the target cannot be read.
+    pub fn read_symlink_target(&self, filesystem: &super::Ext2FileSystem) -> Result<String, FileSystemError> {
+        // Check if this is actually a symbolic link
+        if !self.is_symlink() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Not a symbolic link"
+            ));
+        }
+
+        let size = self.get_size() as usize;
+        
+        if size <= 60 {
+            // Fast symlink: target path is stored in inode.block array
+            let inode_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    self as *const Self as *const u8,
+                    core::mem::size_of::<Self>()
+                )
+            };
+            // Block array starts at offset 40 in the inode structure
+            let block_start_offset = 40;
+            let block_bytes = &inode_bytes[block_start_offset..block_start_offset + 60];
+            let target_bytes = &block_bytes[..size];
+            
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid UTF-8 in symlink target"
+            ))
+        } else {
+            // Slow symlink: target path is stored in data blocks
+            let first_block = u32::from_le(self.block[0]);
+            if first_block == 0 {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Symlink has no data block"
+                ));
+            }
+            
+            // Read the block containing the target path
+            let block_sector = filesystem.block_to_sector(first_block as u64);
+            let request = Box::new(crate::device::block::request::BlockIORequest {
+                request_type: crate::device::block::request::BlockIORequestType::Read,
+                sector: block_sector as usize,
+                sector_count: (filesystem.block_size / 512) as usize,
+                head: 0,
+                cylinder: 0,
+                buffer: vec![0u8; filesystem.block_size as usize],
+            });
+            
+            filesystem.block_device.enqueue_request(request);
+            let results = filesystem.block_device.process_requests();
+            
+            let block_data = if let Some(result) = results.first() {
+                match &result.result {
+                    Ok(_) => result.request.buffer.clone(),
+                    Err(_) => return Err(FileSystemError::new(
+                        FileSystemErrorKind::IoError,
+                        "Failed to read symlink data block"
+                    )),
+                }
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::IoError,
+                    "No result from symlink data block read"
+                ));
+            };
+            
+            let target_bytes = &block_data[..size];
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "Invalid UTF-8 in symlink target"
+            ))
         }
     }
 }

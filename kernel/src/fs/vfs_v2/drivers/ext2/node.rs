@@ -3,7 +3,7 @@
 //! This module implements the VFS node interface for ext2 filesystem nodes,
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
-use alloc::{sync::Weak, string::String, vec::Vec, vec, boxed::Box};
+use alloc::{sync::Weak, string::String, vec::Vec, format};
 use spin::{RwLock, Mutex};
 use core::{any::Any, fmt::Debug};
 
@@ -17,7 +17,7 @@ use crate::{
 };
 
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations};
-use super::{Ext2FileSystem, structures::{Ext2Inode, EXT2_S_IFMT, EXT2_S_IFREG, EXT2_S_IFDIR}};
+use super::{Ext2FileSystem, structures::{EXT2_S_IFMT, EXT2_S_IFREG, EXT2_S_IFDIR}};
 
 /// ext2 VFS Node
 ///
@@ -144,72 +144,9 @@ impl VfsNode for Ext2Node {
                 "Invalid filesystem type"
             ))?;
         
-        // Read the inode to get symlink data
+        // Read the inode and use the new read_symlink_target method
         let inode = ext2_fs.read_inode(self.inode_number)?;
-        let size = inode.get_size() as usize;
-        
-        if size <= 60 {
-            // Fast symlink: target path is stored in inode.block array
-            let inode_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &inode as *const Ext2Inode as *const u8,
-                    core::mem::size_of::<Ext2Inode>()
-                )
-            };
-            // Block array starts at offset 40 in the inode structure
-            let block_start_offset = 40;
-            let block_bytes = &inode_bytes[block_start_offset..block_start_offset + 60];
-            let target_bytes = &block_bytes[..size];
-            
-            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Invalid UTF-8 in symlink target"
-            ))
-        } else {
-            // Slow symlink: target path is stored in data blocks
-            let first_block = u32::from_le(inode.block[0]);
-            if first_block == 0 {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::InvalidData,
-                    "Symlink has no data block"
-                ));
-            }
-            
-            // Read the block containing the target path
-            let block_sector = ext2_fs.block_to_sector(first_block as u64);
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: block_sector as usize,
-                sector_count: (ext2_fs.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; ext2_fs.block_size as usize],
-            });
-            
-            ext2_fs.block_device.enqueue_request(request);
-            let results = ext2_fs.block_device.process_requests();
-            
-            let block_data = if let Some(result) = results.first() {
-                match &result.result {
-                    Ok(_) => result.request.buffer.clone(),
-                    Err(_) => return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read symlink data block"
-                    )),
-                }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from symlink data block read"
-                ));
-            };
-            
-            let target_bytes = &block_data[..size];
-            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Invalid UTF-8 in symlink target"
-            ))
-        }
+        inode.read_symlink_target(ext2_fs)
     }
 }
 
@@ -610,7 +547,7 @@ impl Ext2DirectoryObject {
             Err(_) => return Err(StreamError::IoError),
         };
         
-        // Convert to internal directory entries with simplified file type detection
+        // Convert to internal directory entries with detailed file type detection
         let mut all_entries = Vec::new();
         
         for entry in entries {
@@ -618,18 +555,50 @@ impl Ext2DirectoryObject {
                 continue; // Skip deleted entries
             }
             
-            // Simple file type detection: check if it's a directory, otherwise treat as regular file
-            let file_type = if entry.entry.file_type == 2 { // EXT2_FT_DIR
-                FileType::Directory
-            } else {
-                FileType::RegularFile // Default for all other types
+            // Detailed file type detection based on ext2 file_type field
+            let inode_num = entry.entry.inode; // Copy to avoid alignment issues
+            let file_type = match entry.entry.file_type {
+                1 => FileType::RegularFile,     // EXT2_FT_REG_FILE
+                2 => FileType::Directory,       // EXT2_FT_DIR
+                3 => {
+                    // EXT2_FT_CHRDEV - Character device
+                    // For device files, we need device information
+                    // For now, use a placeholder device ID
+                    FileType::CharDevice(DeviceFileInfo {
+                        device_id: inode_num as usize, // Use copied inode as device ID for now
+                        device_type: crate::device::DeviceType::Char,
+                    })
+                },
+                4 => {
+                    // EXT2_FT_BLKDEV - Block device
+                    FileType::BlockDevice(DeviceFileInfo {
+                        device_id: inode_num as usize, // Use copied inode as device ID for now
+                        device_type: crate::device::DeviceType::Block,
+                    })
+                },
+                5 => FileType::Pipe,            // EXT2_FT_FIFO
+                6 => FileType::Socket,          // EXT2_FT_SOCK
+                7 => {
+                    // EXT2_FT_SYMLINK - Symbolic link
+                    // Read the actual symlink target from the inode using the new method
+                    let target = match ext2_fs.read_inode(inode_num) {
+                        Ok(inode) => {
+                            inode.read_symlink_target(ext2_fs).unwrap_or_else(|_| {
+                                format!("<symlink:{}>", inode_num)
+                            })
+                        }
+                        Err(_) => String::new(),
+                    };
+                    FileType::SymbolicLink(target)
+                },
+                _ => FileType::Unknown,         // Unknown file type
             };
             
             all_entries.push(crate::fs::DirectoryEntryInternal {
                 name: entry.name,
                 file_type,
                 size: 0, // Size not immediately available
-                file_id: entry.entry.inode as u64,
+                file_id: inode_num as u64, // Use copied inode number
                 metadata: None,
             });
         }
