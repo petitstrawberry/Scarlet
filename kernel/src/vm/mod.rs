@@ -114,7 +114,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     manager.add_memory_map(dev_map.clone()).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
-    early_println!("Kernel space mapeed       : {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
+    early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
     early_println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
     early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
 
