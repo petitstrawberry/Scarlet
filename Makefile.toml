@@ -237,7 +237,7 @@ description = "Create rootfs.img if it doesn't exist"
 cwd = "mkfs"
 command = "sh"
 args = ["make_rootfs.sh"]
-condition = { files_not_exist = ["${CARGO_MAKE_WORKING_DIRECTORY}/mkfs/dist/rootfs.img"] }
+condition = { files_not_exist = ["dist/rootfs.img"] }
 
 [tasks.clean-rootfs]
 description = "Clean rootfs.img"

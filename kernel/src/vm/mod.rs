@@ -95,7 +95,6 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     manager.add_memory_map(kernel_map.clone()).map_err(|e| panic!("Failed to add kernel memory map: {}", e)).unwrap();
     /* Pre-map the kernel space */
-    crate::early_println!("Mapping kernel space: {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
     root_page_table.map_memory_area(asid, kernel_map).map_err(|e| panic!("Failed to map kernel memory area: {}", e)).unwrap();
 
     let dev_map = VirtualMemoryMap {
@@ -115,6 +114,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     };
     manager.add_memory_map(dev_map.clone()).map_err(|e| panic!("Failed to add device memory map: {}", e)).unwrap();
 
+    early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_area.start, kernel_area.end);
     early_println!("Device space mapped       : {:#018x} - {:#018x}", dev_map.vmarea.start, dev_map.vmarea.end);
     early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
 

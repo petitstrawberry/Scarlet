@@ -42,9 +42,7 @@ use fdt::{Fdt, FdtError};
 
 use crate::early_println;
 use crate::vm::vmem::MemoryArea;
-
-#[unsafe(link_section = ".data")]
-static mut FDT_ADDR: usize = 0;
+use crate::{BootInfo, DeviceSource};
 
 static mut MANAGER: FdtManager = FdtManager::new();
 
@@ -52,6 +50,7 @@ static mut MANAGER: FdtManager = FdtManager::new();
 pub struct FdtManager<'a> {
     fdt: Option<Fdt<'a>>,
     relocated: bool,
+    original_addr: Option<usize>,
 }
 
 impl<'a> FdtManager<'a> {
@@ -59,6 +58,7 @@ impl<'a> FdtManager<'a> {
         FdtManager {
             fdt: None,
             relocated: false,
+            original_addr: None,
         }
     }
 
@@ -66,33 +66,14 @@ impl<'a> FdtManager<'a> {
         match unsafe { Fdt::from_ptr(ptr) } {
             Ok(fdt) => {
                 self.fdt = Some(fdt);
+                self.original_addr = Some(ptr as usize);
             }
             Err(e) => return Err(e),
         }
         Ok(())
     }
 
-    /// Sets the FDT address.
-    /// 
-    /// # Safety
-    /// This function modifies a static variable that holds the FDT address.
-    /// Ensure that this function is called before any other FDT-related functions
-    /// to avoid undefined behavior.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `addr`: The address of the FDT.
-    /// 
-    /// # Notes
-    /// 
-    /// This function must be called before initializing the FDT manager.
-    /// After once FdtManager is initialized, you cannot change the address.
-    /// 
-    pub unsafe fn set_fdt_addr(addr: usize) {
-        unsafe {
-            FDT_ADDR = addr;
-        }
-    }
+
     
     pub fn get_fdt(&self) -> Option<&Fdt<'a>> {
         self.fdt.as_ref()
@@ -141,8 +122,9 @@ impl<'a> FdtManager<'a> {
             panic!("FDT already relocated");
         }
         // Copy the FDT to the new address
-        let size = self.get_fdt().unwrap().total_size();
-        let old_ptr = unsafe { FDT_ADDR } as *const u8;
+        let fdt = self.get_fdt().unwrap();
+        let size = fdt.total_size();
+        let old_ptr = self.original_addr.expect("Original FDT address not recorded") as *const u8;
         unsafe { core::ptr::copy_nonoverlapping(old_ptr, ptr, size) };
 
         // Reinitialize the FDT with the new address
@@ -264,15 +246,10 @@ impl<'a> FdtManager<'a> {
                 return None;
             }
             
-            let size = end - start;
-            early_println!("[InitRamFS] Found initramfs: start={:#x}, end={:#x}, size={} bytes", 
-                start, end, size);
-            
             let memory_area = MemoryArea::new(start, end - 1);
             return Some(memory_area);
         }
         
-        early_println!("[InitRamFS] No initramfs found in device tree");
         None
     }
 
@@ -313,10 +290,20 @@ impl<'a> FdtManager<'a> {
 
 }
 
-/// Initializes the FDT subsystem.
-pub fn init_fdt() {
+/// Initializes the FDT subsystem with the given address.
+/// 
+/// # Arguments
+/// 
+/// * `addr`: The address of the FDT.
+/// 
+/// # Safety
+/// 
+/// This function modifies a static variable that holds the FDT address.
+/// Ensure that this function is called before any other FDT-related functions
+/// to avoid undefined behavior.
+pub fn init_fdt(addr: usize) {
     let fdt_manager = unsafe { FdtManager::get_mut_manager() };
-    let fdt_ptr = unsafe { FDT_ADDR as *const u8 };
+    let fdt_ptr = addr as *const u8;
     match fdt_manager.init(fdt_ptr) {
         Ok(_) => {
             early_println!("FDT initialized");
@@ -352,4 +339,54 @@ pub fn relocate_fdt(dest_ptr: *mut u8) -> MemoryArea {
     let size = fdt_manager.get_fdt().unwrap().total_size();
     unsafe { fdt_manager.relocate_fdt(dest_ptr) };
     MemoryArea::new(dest_ptr as usize, dest_ptr as usize + size - 1) // return the memory area
+}
+
+/// Create BootInfo from FDT data
+/// 
+/// This function creates a BootInfo structure by extracting information from the FDT.
+/// It is architecture-agnostic and can be used by any architecture that uses FDT
+/// (RISC-V, ARM, AArch64, etc.).
+/// 
+/// # Arguments
+/// 
+/// * `cpu_id` - ID of the current CPU/Hart
+/// * `relocated_fdt_addr` - Address of the relocated FDT
+/// 
+/// # Returns
+/// 
+/// A BootInfo structure containing system information extracted from the FDT
+/// 
+pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> BootInfo {
+    let fdt_manager = FdtManager::get_manager();
+    
+    // Get DRAM area
+    let dram_area = fdt_manager.get_dram_memoryarea().expect("Memory area not found");
+    
+    // Calculate usable memory area (simplified for now)
+    let kernel_end = unsafe { &crate::mem::__KERNEL_SPACE_END as *const usize as usize };
+    let mut usable_memory = MemoryArea::new(kernel_end, dram_area.end);
+    
+    // Relocate initramfs
+    crate::early_println!("Relocating initramfs...");
+    
+    let relocated_initramfs = match crate::fs::vfs_v2::drivers::initramfs::relocate_initramfs(&mut usable_memory) {
+        Ok(area) => {
+            Some(area)
+        },
+        Err(_e) => {
+            None
+        }
+    };
+    
+    // Get command line
+    let cmdline = fdt_manager.get_fdt()
+        .and_then(|fdt| fdt.chosen().bootargs());
+    
+    BootInfo::new(
+        cpu_id,
+        usable_memory,
+        relocated_initramfs,
+        cmdline,
+        DeviceSource::Fdt(relocated_fdt_addr),
+    )
 }
