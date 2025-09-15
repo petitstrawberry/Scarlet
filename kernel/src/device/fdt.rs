@@ -42,6 +42,7 @@ use fdt::{Fdt, FdtError};
 
 use crate::early_println;
 use crate::vm::vmem::MemoryArea;
+use crate::{BootInfo, DeviceSource};
 
 static mut MANAGER: FdtManager = FdtManager::new();
 
@@ -338,4 +339,54 @@ pub fn relocate_fdt(dest_ptr: *mut u8) -> MemoryArea {
     let size = fdt_manager.get_fdt().unwrap().total_size();
     unsafe { fdt_manager.relocate_fdt(dest_ptr) };
     MemoryArea::new(dest_ptr as usize, dest_ptr as usize + size - 1) // return the memory area
+}
+
+/// Create BootInfo from FDT data
+/// 
+/// This function creates a BootInfo structure by extracting information from the FDT.
+/// It is architecture-agnostic and can be used by any architecture that uses FDT
+/// (RISC-V, ARM, AArch64, etc.).
+/// 
+/// # Arguments
+/// 
+/// * `cpu_id` - ID of the current CPU/Hart
+/// * `relocated_fdt_addr` - Address of the relocated FDT
+/// 
+/// # Returns
+/// 
+/// A BootInfo structure containing system information extracted from the FDT
+/// 
+pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> BootInfo {
+    let fdt_manager = FdtManager::get_manager();
+    
+    // Get DRAM area
+    let dram_area = fdt_manager.get_dram_memoryarea().expect("Memory area not found");
+    
+    // Calculate usable memory area (simplified for now)
+    let kernel_end = unsafe { &crate::mem::__KERNEL_SPACE_END as *const usize as usize };
+    let mut usable_memory = MemoryArea::new(kernel_end, dram_area.end);
+    
+    // Relocate initramfs
+    crate::early_println!("Relocating initramfs...");
+    
+    let relocated_initramfs = match crate::fs::vfs_v2::drivers::initramfs::relocate_initramfs(&mut usable_memory) {
+        Ok(area) => {
+            Some(area)
+        },
+        Err(_e) => {
+            None
+        }
+    };
+    
+    // Get command line
+    let cmdline = fdt_manager.get_fdt()
+        .and_then(|fdt| fdt.chosen().bootargs());
+    
+    BootInfo::new(
+        cpu_id,
+        usable_memory,
+        relocated_initramfs,
+        cmdline,
+        DeviceSource::Fdt(relocated_fdt_addr),
+    )
 }
