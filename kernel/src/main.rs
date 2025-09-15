@@ -377,7 +377,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* We will also be restricted to the kernel address space */
 
     /* Populate devices from BootInfo device source */
-    early_println!("[Scarlet Kernel] Populating devices from {:?}...", boot_info.device_source);
+    early_println!("[Scarlet Kernel] Populating devices...");
     let device_manager = DeviceManager::get_mut_manager();
     device_manager.populate_devices_from_source(&boot_info.device_source, None);
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
