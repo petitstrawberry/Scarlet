@@ -8,7 +8,8 @@
 //! at the root ("/") mount point.
 
 use core::ptr;
-use alloc::string::ToString;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use crate::device::fdt::FdtManager;
 use crate::fs::VfsManager;
@@ -16,16 +17,12 @@ use crate::early_println;
 use crate::fs::FileSystemError;
 use crate::vm::vmem::MemoryArea;
 
-static mut INITRAMFS_AREA: Option<MemoryArea> = None;
-
 /// Relocate initramfs to heap memory
-pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static str> {
-    early_println!("[InitRamFS] Relocating initramfs to {:#x}", usable_area.start as usize);
+pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<MemoryArea, &'static str> {
     let fdt_manager = FdtManager::get_manager();
     let original_area = fdt_manager.get_initramfs()
         .ok_or("Failed to get initramfs from device tree")?;
     let size = original_area.size();
-    early_println!("[InitRamFS] Original initramfs at {:#x}, size: {} bytes", original_area.start, size);
     
     // Validate parameters before proceeding
     if size == 0 || size > 0x10000000 {
@@ -39,9 +36,6 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
     let raw_ptr = usable_area.start as *mut u8;
     let aligned_ptr = ((raw_ptr as usize + 7) & !7) as *mut u8;
     let aligned_addr = aligned_ptr as usize;
-    
-    early_println!("[InitRamFS] Copying from {:#x} to {:#x} (aligned), size: {} bytes", 
-                   original_area.start, aligned_addr, size);
     
     // Validate destination memory bounds
     if aligned_addr + size > usable_area.end {
@@ -76,10 +70,8 @@ pub fn relocate_initramfs(usable_area: &mut MemoryArea) -> Result<(), &'static s
     
     // Update usable_area start AFTER copying, with alignment
     usable_area.start = (aligned_addr + size + 7) & !7;
-    early_println!("[InitRamFS] Relocated initramfs to {:#x}, next usable: {:#x}", 
-                   new_area.start, usable_area.start);
-    unsafe { INITRAMFS_AREA = Some(new_area) };
-    Ok(())
+    
+   Ok(new_area)
 }
 
 fn mount_initramfs(manager: &Arc<VfsManager>, initramfs: MemoryArea) -> Result<(), FileSystemError> {
@@ -96,15 +88,11 @@ fn mount_initramfs(manager: &Arc<VfsManager>, initramfs: MemoryArea) -> Result<(
 }
 
 #[allow(static_mut_refs)]
-pub fn init_initramfs(manager: &Arc<VfsManager>) {
-    let initramfs_ptr = unsafe { INITRAMFS_AREA.as_ref().map(|area| area.start as *const u8).unwrap_or(core::ptr::null()) };
-    if !initramfs_ptr.is_null() {
-        let initramfs = unsafe { *INITRAMFS_AREA.as_ref().unwrap() };
-        if let Err(e) = mount_initramfs(manager, initramfs.clone()) {
-            early_println!("[InitRamFS] Warning: Could not mount initramfs: {:?}", e);
-            return;
+pub fn init_initramfs(manager: &Arc<VfsManager>, initramfs: MemoryArea) -> Result<(), String> {
+    match mount_initramfs(manager, initramfs) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            Err(format!("Failed to mount initramfs: {:?}", e))
         }
-    } else {
-        early_println!("[InitRamFS] Warning: Initramfs relocation failed, cannot mount");
     }
 }
