@@ -20,12 +20,12 @@
   },
   "panic-strategy": "abort",
   "pre-link-args": {
-      "ld.lld": ["-T", "lds/qemu_virt.ld"]
+      "ld.lld": ["-T", "lds/riscv64_qemu_virt.ld"]
     },
   "relocation-model": "static",
   "supported-sanitizers": [
     "shadow-call-stack",
     "kernel-address"
   ],
-  "target-pointer-width": 64
+  "target-pointer-width": "64"
 }

@@ -11,7 +11,7 @@ opt-level = 0
 runner = "tools/run.sh"
 
 [target.aarch64-unknown-none]
-rustflags = ["-T", "lds/qemu_virt_aarch64.ld"]
+rustflags = ["-T", "lds/aarch64_qemu_virt.ld"]
 runner = "tools/run_aarch64.sh"
 
 [target.aarch64-unknown-none-elf]
