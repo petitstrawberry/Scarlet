@@ -293,7 +293,7 @@ pub enum DeviceSource {
     Fdt(usize),  // FDTアドレス
     Uefi,
     Acpi,
-    None,        // デバイス情報なし
+    None,        // No device information
 }
 
 pub struct BootInfo {
