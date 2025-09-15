@@ -1210,14 +1210,15 @@ impl Ext2FileSystem {
         let inode_index = (inode_number - 1) % inodes_per_group;
         
         // Read the block group descriptor to get the inode table location
-        let bgd_sector = 4; // Block group descriptors start at block 2 (sector 4)
+        let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_sector = self.block_to_sector(bgd_block);
         let bgd_request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_sector,
-            sector_count: 2, // Read one block worth of BGDs
+            sector: bgd_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
             head: 0,
             cylinder: 0,
-            buffer: vec![0u8; 1024],
+            buffer: vec![0u8; self.block_size as usize],
         });
         
         self.block_device.enqueue_request(bgd_request);
