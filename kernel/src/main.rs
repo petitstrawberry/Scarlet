@@ -256,20 +256,19 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::ToString;
-use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
+use device::manager::DeviceManager;
 use environment::PAGE_SIZE;
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
-use arch::{get_cpu, init_arch};
+use arch::get_cpu;
 use task::{elf_loader::load_elf_into_task, new_user_task};
 use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
-use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
+use mem::{allocator::init_heap, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
-use crate::{device::graphics::manager::GraphicsManager, fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
-use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
+use crate::{device::graphics::manager::GraphicsManager, fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager}, interrupt::InterruptManager};
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -289,44 +288,66 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
-    early_println!("Hello, I'm Scarlet kernel!");
-    early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
-    early_println!("[Scarlet Kernel] Initializing .bss section...");
-    init_bss();
-    fence(Ordering::SeqCst); // Ensure .bss is initialized before proceeding
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceSource {
+    Fdt(usize),  // FDTアドレス
+    Uefi,
+    Acpi,
+    None,        // デバイス情報なし
+}
 
-    early_println!("[Scarlet Kernel] Initializing arch...");
-    init_arch(cpu_id);
-    fence(Ordering::SeqCst); // Ensure architecture initialization is complete before proceeding
+pub struct BootInfo {
+    pub cpu_id: usize,
+    pub usable_memory: MemoryArea,
+    pub initramfs: Option<MemoryArea>,
+    pub cmdline: Option<&'static str>,
+    pub device_source: DeviceSource,
+}
 
-    /* Initializing FDT subsystem */
-    early_println!("[Scarlet Kernel] Initializing FDT...");
-    init_fdt();
-    fence(Ordering::SeqCst); // Ensure FDT is initialized before proceeding
-
-    /* Get DRAM area from FDT */
-    let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
-    early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
-    /* Relocate FDT to usable memory area */
-    early_println!("[Scarlet Kernel] Relocating FDT...");
-    let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
-    let dest_ptr = fdt_reloc_start as *mut u8;
-    relocate_fdt(dest_ptr);
-    fence(Ordering::SeqCst); // Ensure FDT relocation is complete before proceeding
-    
-    /* Calculate usable memory area */
-    let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
-    let mut usable_area = MemoryArea::new(kernel_end, dram_area.end);
-    early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
-    /* Relocate initramfs to usable memory area */
-    early_println!("[Scarlet Kernel] Relocating initramfs...");
-    if let Err(e) = relocate_initramfs(&mut usable_area) {
-        early_println!("[Scarlet Kernel] Failed to relocate initramfs: {}", e);
+impl BootInfo {
+    pub fn new(cpu_id: usize, usable_memory: MemoryArea, initramfs: Option<MemoryArea>, cmdline: Option<&'static str>, device_source: DeviceSource) -> Self {
+        Self {
+            cpu_id,
+            usable_memory,
+            initramfs,
+            cmdline,
+            device_source,
+        }
     }
-    early_println!("[Scarlet Kernel] Updated Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
-    /* Initialize heap with the usable memory area after FDT */
+
+    pub fn get_cmdline(&self) -> &str {
+        if let Some(cmdline) = self.cmdline {
+            cmdline
+        } else {
+            ""
+        }
+    }
+
+    pub fn get_initramfs(&self) -> Option<MemoryArea> {
+        self.initramfs
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
+    let cpu_id = boot_info.cpu_id;
+
+    early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
+    early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    /* Use usable memory area from BootInfo */
+    let usable_area = boot_info.usable_memory;
+    early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
+    
+    /* Handle initramfs if available in BootInfo */
+    if let Some(initramfs_area) = boot_info.initramfs {
+        early_println!("[Scarlet Kernel] InitramFS available: {:#x} - {:#x}", 
+                      initramfs_area.start, initramfs_area.end);
+        // Note: initramfs already relocated by arch-specific boot code
+    } else {
+        early_println!("[Scarlet Kernel] No initramfs found");
+    }
+    
+    /* Initialize heap with the usable memory area */
     early_println!("[Scarlet Kernel] Initializing heap...");
     let heap_start = (usable_area.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let heap_size = ((usable_area.end - heap_start + 1) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
@@ -355,9 +376,10 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
-    /* Initialize (populate) devices */
-    early_println!("[Scarlet Kernel] Initializing devices...");
-    DeviceManager::get_mut_manager().populate_devices();
+    /* Populate devices from BootInfo device source */
+    early_println!("[Scarlet Kernel] Populating devices from {:?}...", boot_info.device_source);
+    let device_manager = DeviceManager::get_mut_manager();
+    device_manager.populate_devices_from_source(&boot_info.device_source, None);
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
     /* After this point, we can use the device manager */
     /* Serial console also works */
@@ -408,9 +430,16 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* Initialize global VFS */
     println!("[Scarlet Kernel] Initializing global VFS...");
     let manager = init_global_vfs_manager();
-    /* Initialize initramfs */
-    println!("[Scarlet Kernel] Initializing initramfs...");
-    init_initramfs(&manager);
+    
+    /* Initialize initramfs from BootInfo if available */
+    if let Some(initramfs_area) = boot_info.initramfs {
+        println!("[Scarlet Kernel] Initializing initramfs from BootInfo...");
+        if let Err(e) = init_initramfs(&manager, initramfs_area) {
+            println!("[Scarlet Kernel] Warning: Failed to initialize initramfs: {}", e);
+        }
+    } else {
+        println!("[Scarlet Kernel] No initramfs found in BootInfo");
+    }
 
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
 
@@ -455,7 +484,6 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
     println!("[Scarlet Kernel] Initializing arch...");
-    init_arch(cpu_id);
 
     loop {}
 }

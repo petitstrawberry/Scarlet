@@ -43,15 +43,13 @@ use fdt::{Fdt, FdtError};
 use crate::early_println;
 use crate::vm::vmem::MemoryArea;
 
-#[unsafe(link_section = ".data")]
-static mut FDT_ADDR: usize = 0;
-
 static mut MANAGER: FdtManager = FdtManager::new();
 
 
 pub struct FdtManager<'a> {
     fdt: Option<Fdt<'a>>,
     relocated: bool,
+    original_addr: Option<usize>,
 }
 
 impl<'a> FdtManager<'a> {
@@ -59,6 +57,7 @@ impl<'a> FdtManager<'a> {
         FdtManager {
             fdt: None,
             relocated: false,
+            original_addr: None,
         }
     }
 
@@ -66,33 +65,14 @@ impl<'a> FdtManager<'a> {
         match unsafe { Fdt::from_ptr(ptr) } {
             Ok(fdt) => {
                 self.fdt = Some(fdt);
+                self.original_addr = Some(ptr as usize);
             }
             Err(e) => return Err(e),
         }
         Ok(())
     }
 
-    /// Sets the FDT address.
-    /// 
-    /// # Safety
-    /// This function modifies a static variable that holds the FDT address.
-    /// Ensure that this function is called before any other FDT-related functions
-    /// to avoid undefined behavior.
-    /// 
-    /// # Arguments
-    /// 
-    /// * `addr`: The address of the FDT.
-    /// 
-    /// # Notes
-    /// 
-    /// This function must be called before initializing the FDT manager.
-    /// After once FdtManager is initialized, you cannot change the address.
-    /// 
-    pub unsafe fn set_fdt_addr(addr: usize) {
-        unsafe {
-            FDT_ADDR = addr;
-        }
-    }
+
     
     pub fn get_fdt(&self) -> Option<&Fdt<'a>> {
         self.fdt.as_ref()
@@ -141,8 +121,9 @@ impl<'a> FdtManager<'a> {
             panic!("FDT already relocated");
         }
         // Copy the FDT to the new address
-        let size = self.get_fdt().unwrap().total_size();
-        let old_ptr = unsafe { FDT_ADDR } as *const u8;
+        let fdt = self.get_fdt().unwrap();
+        let size = fdt.total_size();
+        let old_ptr = self.original_addr.expect("Original FDT address not recorded") as *const u8;
         unsafe { core::ptr::copy_nonoverlapping(old_ptr, ptr, size) };
 
         // Reinitialize the FDT with the new address
@@ -264,15 +245,10 @@ impl<'a> FdtManager<'a> {
                 return None;
             }
             
-            let size = end - start;
-            early_println!("[InitRamFS] Found initramfs: start={:#x}, end={:#x}, size={} bytes", 
-                start, end, size);
-            
             let memory_area = MemoryArea::new(start, end - 1);
             return Some(memory_area);
         }
         
-        early_println!("[InitRamFS] No initramfs found in device tree");
         None
     }
 
@@ -313,10 +289,20 @@ impl<'a> FdtManager<'a> {
 
 }
 
-/// Initializes the FDT subsystem.
-pub fn init_fdt() {
+/// Initializes the FDT subsystem with the given address.
+/// 
+/// # Arguments
+/// 
+/// * `addr`: The address of the FDT.
+/// 
+/// # Safety
+/// 
+/// This function modifies a static variable that holds the FDT address.
+/// Ensure that this function is called before any other FDT-related functions
+/// to avoid undefined behavior.
+pub fn init_fdt(addr: usize) {
     let fdt_manager = unsafe { FdtManager::get_mut_manager() };
-    let fdt_ptr = unsafe { FDT_ADDR as *const u8 };
+    let fdt_ptr = addr as *const u8;
     match fdt_manager.init(fdt_ptr) {
         Ok(_) => {
             early_println!("FDT initialized");
