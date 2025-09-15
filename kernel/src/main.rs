@@ -483,7 +483,6 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
-    println!("[Scarlet Kernel] Initializing arch...");
 
     loop {}
 }
