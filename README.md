@@ -4,7 +4,7 @@
   
 **A kernel in Rust designed to provide a universal, multi-ABI container runtime.**
 
-[![Version](https://img.shields.io/badge/version-0.13.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
+[![Version](https://img.shields.io/badge/version-0.15.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
@@ -13,7 +13,7 @@
 
 ## Overview
 
-Scarlet is an operating system kernel written in Rust that implements native ABI support for executing binaries across different operating systems and architectures. The kernel provides a universal container runtime environment with strong isolation capabilities and comprehensive filesystem support.
+Scarlet is an operating system kernel written in Rust that implements native ABI support for executing binaries across different operating systems and architectures. The kernel provides a universal container runtime environment with strong isolation capabilities, comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
 
 ## Quick Start
 
@@ -82,9 +82,12 @@ This demonstrates **real Cross-ABI execution** - the xv6 environment can execute
 
 - **Multi-ABI Support**: Transparent execution of binaries from different operating systems
 - **Container Runtime**: Complete filesystem isolation with namespace support
-- **Advanced VFS**: Modern virtual filesystem with overlay, bind mount, and device file support
+- **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
+- **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
+- **Graphics Support**: Framebuffer device support with graphics hardware abstraction
 - **System Integration**: TTY devices, interrupt handling, and comprehensive device management
 - **Task Management**: Full task lifecycle with environment variables and IPC pipes
+- **Event System**: Advanced IPC with event-driven communication and synchronization
 - **Memory Safety**: Built with Rust's safety guarantees for reliable system operation
 - **RISC-V Ready**: Native support for RISC-V 64-bit architecture
 
@@ -122,7 +125,7 @@ The xv6 RISC-V 64-bit ABI implementation is currently available as an experiment
 
 ## Architecture Support
 
-Currently supports RISC-V 64-bit architecture with plans for additional architectures. The kernel includes hardware abstraction layers for interrupt handling, memory management, and device drivers.
+Currently supports RISC-V 64-bit architecture with plans for additional architectures. The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers.
 
 ## Filesystem Support
 
@@ -132,6 +135,8 @@ Scarlet implements a modern Virtual File System (VFS v2) with support for multip
 
 - **TmpFS**: Memory-based temporary filesystem
 - **CpioFS**: Read-only CPIO archive filesystem for initramfs
+- **ext2**: Full ext2 filesystem implementation for persistent storage
+- **FAT32**: Complete FAT32 filesystem support
 - **OverlayFS**: Union filesystem combining multiple layers
 - **DevFS**: Device file system for hardware access
 

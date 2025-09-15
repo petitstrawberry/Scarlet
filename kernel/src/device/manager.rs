@@ -56,7 +56,7 @@ use crate::device::platform::resource::PlatformDeviceResourceType;
 use crate::device::platform::PlatformDeviceInfo;
 use crate::early_println;
 
-use super::fdt::FdtManager;
+use crate::DeviceSource;
 use super::Device;
 use super::DeviceDriver;
 use super::DeviceInfo;
@@ -280,17 +280,52 @@ impl DeviceManager {
     /// For each child node, it checks if there is a compatible driver registered.
     /// If a matching driver is found, it probes the device using the driver's `probe` method.
     /// If the probe is successful, the device is registered with the driver.
+    /// 
+    /// # Deprecated
+    /// Use `populate_devices_from_source` with `DeviceSource::Fdt` instead.
     pub fn populate_devices(&mut self) {
-        // Use all priority levels in order
-        self.populate_devices_by_priority(None);
+        use super::fdt::FdtManager;
+        
+        let fdt_manager = unsafe { FdtManager::get_mut_manager() };
+        let fdt = fdt_manager.get_fdt();
+        if fdt.is_none() {
+            early_println!("FDT not initialized");
+            return;
+        }
+        
+        self.populate_devices_from_fdt(None);
     }
 
-    /// Populate devices using drivers of specific priority levels
+    /// Populate devices using a specific device source
     /// 
     /// # Arguments
     /// 
+    /// * `device_source` - The source of device information (FDT, UEFI, ACPI, etc.)
     /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
-    pub fn populate_devices_by_priority(&mut self, priorities: Option<&[DriverPriority]>) {
+    pub fn populate_devices_from_source(&mut self, device_source: &DeviceSource, priorities: Option<&[DriverPriority]>) {
+        match device_source {
+            DeviceSource::Fdt(_addr) => {
+                early_println!("Populating devices from FDT...");
+                self.populate_devices_from_fdt(priorities);
+            }
+            DeviceSource::Uefi => {
+                early_println!("Populating devices from UEFI...");
+                self.populate_devices_from_uefi(priorities);
+            }
+            DeviceSource::Acpi => {
+                early_println!("Populating devices from ACPI...");
+                self.populate_devices_from_acpi(priorities);
+            }
+            DeviceSource::None => {
+                early_println!("No device source available - skipping device population");
+            }
+        }
+    }
+
+    /// Populate devices from FDT
+    fn populate_devices_from_fdt(&mut self, priorities: Option<&[DriverPriority]>) {
+        use super::fdt::FdtManager;
+        
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
         if fdt.is_none() {
@@ -420,6 +455,54 @@ impl DeviceManager {
                 }
             }
         }
+    }
+
+    /// Populate devices from UEFI (stub implementation)
+    /// 
+    /// # Arguments
+    /// 
+    /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
+    /// 
+    /// # Note
+    /// 
+    /// This is currently a stub implementation. UEFI device discovery will be implemented
+    /// when UEFI boot support is added.
+    fn populate_devices_from_uefi(&mut self, _priorities: Option<&[DriverPriority]>) {
+        early_println!("UEFI device discovery not yet implemented");
+        // TODO: Implement UEFI device discovery
+        // - Enumerate UEFI protocols
+        // - Create PlatformDeviceInfo from UEFI device handles
+        // - Probe devices with matching drivers
+    }
+
+    /// Populate devices from ACPI (stub implementation)
+    /// 
+    /// # Arguments
+    /// 
+    /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
+    /// 
+    /// # Note
+    /// 
+    /// This is currently a stub implementation. ACPI device discovery will be implemented
+    /// when x86 support is added.
+    fn populate_devices_from_acpi(&mut self, _priorities: Option<&[DriverPriority]>) {
+        early_println!("ACPI device discovery not yet implemented");
+        // TODO: Implement ACPI device discovery
+        // - Parse ACPI tables (DSDT, etc.)
+        // - Create PlatformDeviceInfo from ACPI device objects
+        // - Probe devices with matching drivers
+    }
+
+    /// Populate devices using drivers of specific priority levels
+    /// 
+    /// # Arguments
+    /// 
+    /// * `priorities` - Optional slice of priority levels to use. If None, uses all priorities in order.
+    /// 
+    /// # Deprecated
+    /// Use `populate_devices_from_source` instead.
+    pub fn populate_devices_by_priority(&mut self, priorities: Option<&[DriverPriority]>) {
+        self.populate_devices_from_fdt(priorities);
     }
 
     /// Registers a device driver with the device manager.

@@ -2,8 +2,8 @@
 //!
 //! Scarlet is an operating system kernel written in Rust that implements a transparent ABI 
 //! conversion layer for executing binaries across different operating systems and architectures. 
-//! The kernel provides a universal container runtime environment with strong isolation capabilities 
-//! and comprehensive filesystem support.
+//! The kernel provides a universal container runtime environment with strong isolation capabilities,
+//! comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
 //!
 //! ## Multi-ABI Execution System
 //!
@@ -20,14 +20,16 @@
 //!   ensuring consistent behavior and efficient resource utilization
 //! - **Native Implementation**: Each ABI provides full syscall implementation using underlying
 //!   kernel abstractions, enabling complete OS compatibility
+//! - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 //!
 //! ### Supported ABIs
 //!
 //! - **Scarlet Native ABI**: Direct kernel interface with optimal performance, featuring:
 //!   - Handle-based resource management with capability-based security
 //!   - Modern VFS operations with namespace isolation
-//!   - Advanced IPC mechanisms including pipes and shared memory
+//!   - Advanced IPC mechanisms including pipes and event-driven communication
 //!   - Container-native filesystem operations
+//!   - Dynamic linking support
 //!
 //! - **Linux Compatibility ABI** *(in development)*: Full POSIX syscall implementation
 //! - **xv6 Compatibility ABI** *(in development)*: Educational OS syscall implementation
@@ -65,6 +67,8 @@
 //!
 //! - **TmpFS**: High-performance memory-based filesystem with configurable size limits
 //! - **CpioFS**: Read-only CPIO archive filesystem optimized for initramfs and embedded data
+//! - **ext2**: Full ext2 filesystem implementation with complete read/write support for persistent storage
+//! - **FAT32**: Complete FAT32 filesystem implementation with directory and file operations
 //! - **OverlayFS**: Advanced union filesystem with copy-up semantics and whiteout support
 //! - **DevFS**: Device file system providing controlled hardware access
 //!
@@ -80,19 +84,43 @@
 //!
 //! ## Boot Process
 //!
-//! Scarlet follows a structured initialization sequence:
+//! Scarlet follows a structured, architecture-agnostic initialization sequence
+//! built around the BootInfo structure for unified system startup:
 //!
-//! 1. **Early Architecture Init**: CPU feature detection, interrupt vector setup
-//! 2. **FDT Parsing**: Hardware discovery from Flattened Device Tree
-//! 3. **Memory Subsystem**: Heap allocator initialization, virtual memory setup
-//! 4. **Device Discovery**: Platform device enumeration and driver binding
-//! 5. **Interrupt Setup**: CLINT/PLIC initialization for timer and external interrupts
-//! 6. **VFS Initialization**: Mount root filesystem, initialize global VFS manager
-//! 7. **Task System**: Scheduler setup, initial task creation
-//! 8. **User Space Transition**: Load initial programs and switch to user mode
+//! ### Architecture-Specific Boot Phase
 //!
-//! Each stage validates successful completion before proceeding, with detailed logging
-//! available through the early console interface.
+//! 1. **Low-level Initialization**: CPU feature detection, trap vector setup
+//! 2. **Hardware Discovery**: Parse firmware-provided hardware description (FDT/UEFI/ACPI)
+//! 3. **Memory Layout**: Determine usable memory areas and relocate critical data
+//! 4. **BootInfo Creation**: Consolidate boot parameters into unified structure
+//! 5. **Kernel Handoff**: Call `start_kernel()` with complete BootInfo
+//!
+//! ### Unified Kernel Initialization
+//!
+//! 6. **Early Memory Setup**: Heap allocator initialization using BootInfo memory areas
+//! 7. **Early Subsystems**: Critical kernel subsystem initialization via early initcalls
+//! 8. **Driver Framework**: Device driver registration and basic driver initcalls
+//! 9. **Virtual Memory**: Kernel virtual memory management and address space setup
+//! 10. **Device Discovery**: Hardware enumeration from BootInfo device source
+//! 11. **Graphics Subsystem**: Framebuffer and graphics device initialization
+//! 12. **Interrupt Infrastructure**: Interrupt controller setup and handler registration
+//! 13. **Timer Subsystem**: Kernel timer initialization for scheduling and timekeeping
+//! 14. **Virtual File System**: VFS initialization and root filesystem mounting
+//! 15. **Initial Filesystem**: Initramfs processing if provided in BootInfo
+//! 16. **Initial Process**: Create and load first userspace task (/system/scarlet/bin/init)
+//! 17. **Scheduler Activation**: Begin task scheduling and enter normal operation
+//!
+//! ### BootInfo Integration Benefits
+//!
+//! - **Architecture Abstraction**: Unified interface across RISC-V, ARM, x86 platforms
+//! - **Modular Design**: Clean separation between arch-specific and generic initialization
+//! - **Memory Safety**: Structured memory area management prevents overlaps and corruption
+//! - **Extensibility**: Easy addition of new boot parameters without breaking existing code
+//! - **Debugging**: Centralized boot information for diagnostics and troubleshooting
+//!
+//! Each stage validates successful completion before proceeding, with comprehensive
+//! logging available through the early console interface. The BootInfo structure
+//! ensures all necessary information is available throughout the initialization process.
 //!
 //! ## System Integration
 //!
@@ -252,20 +280,19 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::ToString;
-use device::{fdt::{init_fdt, relocate_fdt, FdtManager}, manager::DeviceManager};
+use device::manager::DeviceManager;
 use environment::PAGE_SIZE;
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
 
-use arch::{get_cpu, init_arch};
+use arch::get_cpu;
 use task::{elf_loader::load_elf_into_task, new_user_task};
 use vm::{kernel_vm_init, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
-use mem::{allocator::init_heap, init_bss, __FDT_RESERVED_START, __KERNEL_SPACE_END, __KERNEL_SPACE_START};
+use mem::{allocator::init_heap, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
 use core::{panic::PanicInfo, sync::atomic::{fence, Ordering}};
-use crate::{device::graphics::manager::GraphicsManager, fs::vfs_v2::manager::init_global_vfs_manager, interrupt::InterruptManager};
-use crate::fs::vfs_v2::drivers::initramfs::{init_initramfs, relocate_initramfs};
+use crate::{device::graphics::manager::GraphicsManager, fs::{drivers::initramfs::init_initramfs, vfs_v2::manager::init_global_vfs_manager}, interrupt::InterruptManager};
 
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
@@ -285,44 +312,205 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
-    early_println!("Hello, I'm Scarlet kernel!");
-    early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
-    early_println!("[Scarlet Kernel] Initializing .bss section...");
-    init_bss();
-    fence(Ordering::SeqCst); // Ensure .bss is initialized before proceeding
+/// Represents the source of device information during boot
+/// 
+/// Different boot protocols provide hardware information through various mechanisms.
+/// This enum captures the source and relevant parameters for device discovery.
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceSource {
+    /// Flattened Device Tree (FDT) source with relocated FDT address
+    /// Used by RISC-V, ARM, and other architectures that support device trees
+    Fdt(usize),
+    /// Unified Extensible Firmware Interface (UEFI) source
+    /// Modern firmware interface providing comprehensive hardware information  
+    Uefi,
+    /// Advanced Configuration and Power Interface (ACPI) source
+    /// x86/x86_64 standard for hardware configuration and power management
+    Acpi,
+    /// No device information available
+    /// Fallback when no hardware description is provided by firmware
+    None,
+}
 
-    early_println!("[Scarlet Kernel] Initializing arch...");
-    init_arch(cpu_id);
-    fence(Ordering::SeqCst); // Ensure architecture initialization is complete before proceeding
+/// Boot information structure containing essential system parameters
+/// 
+/// This structure is created during the early boot process and contains
+/// all necessary information for kernel initialization. It abstracts
+/// architecture-specific boot protocols into a common interface.
+/// 
+/// # Architecture Integration
+/// 
+/// Different architectures populate this structure from their respective
+/// boot protocols:
+/// - **RISC-V**: Created from FDT (Flattened Device Tree) data
+/// - **ARM/AArch64**: Created from FDT or UEFI
+/// - **x86/x86_64**: Created from ACPI tables or legacy BIOS structures
+/// 
+/// # Usage
+/// 
+/// The BootInfo is passed to `start_kernel()` as the primary parameter
+/// and provides all essential information needed for kernel initialization:
+/// 
+/// ```rust
+/// #[no_mangle]
+/// pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
+///     // Use boot_info for system initialization
+///     let memory = boot_info.usable_memory;
+///     let cpu_id = boot_info.cpu_id;
+///     // ...
+/// }
+/// ```
+pub struct BootInfo {
+    /// CPU/Hart ID of the boot processor
+    /// Used for multicore initialization and per-CPU data structures
+    pub cpu_id: usize,
+    /// Usable memory area available for kernel allocation
+    /// Excludes reserved regions, firmware areas, and kernel image
+    pub usable_memory: MemoryArea,
+    /// Optional initramfs memory area if available
+    /// Contains initial root filesystem for early userspace programs
+    pub initramfs: Option<MemoryArea>,
+    /// Optional kernel command line parameters
+    /// Boot arguments passed by bootloader for kernel configuration
+    pub cmdline: Option<&'static str>,
+    /// Source of device information for hardware discovery
+    /// Determines how the kernel will enumerate and initialize devices
+    pub device_source: DeviceSource,
+}
 
-    /* Initializing FDT subsystem */
-    early_println!("[Scarlet Kernel] Initializing FDT...");
-    init_fdt();
-    fence(Ordering::SeqCst); // Ensure FDT is initialized before proceeding
-
-    /* Get DRAM area from FDT */
-    let dram_area = FdtManager::get_manager().get_dram_memoryarea().expect("Memory area not found");
-    early_println!("[Scarlet Kernel] DRAM area          : {:#x} - {:#x}", dram_area.start, dram_area.end);
-    /* Relocate FDT to usable memory area */
-    early_println!("[Scarlet Kernel] Relocating FDT...");
-    let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
-    let dest_ptr = fdt_reloc_start as *mut u8;
-    relocate_fdt(dest_ptr);
-    fence(Ordering::SeqCst); // Ensure FDT relocation is complete before proceeding
-    
-    /* Calculate usable memory area */
-    let kernel_end =  unsafe { &__KERNEL_SPACE_END as *const usize as usize };
-    let mut usable_area = MemoryArea::new(kernel_end, dram_area.end);
-    early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
-    /* Relocate initramfs to usable memory area */
-    early_println!("[Scarlet Kernel] Relocating initramfs...");
-    if let Err(e) = relocate_initramfs(&mut usable_area) {
-        early_println!("[Scarlet Kernel] Failed to relocate initramfs: {}", e);
+impl BootInfo {
+    /// Creates a new BootInfo instance with the specified parameters
+    /// 
+    /// # Arguments
+    /// 
+    /// * `cpu_id` - ID of the boot processor/hart
+    /// * `usable_memory` - Memory area available for kernel allocation
+    /// * `initramfs` - Optional initramfs memory area
+    /// * `cmdline` - Optional kernel command line parameters
+    /// * `device_source` - Source of device information for hardware discovery
+    /// 
+    /// # Returns
+    /// 
+    /// A new BootInfo instance containing the specified boot parameters
+    pub fn new(cpu_id: usize, usable_memory: MemoryArea, initramfs: Option<MemoryArea>, cmdline: Option<&'static str>, device_source: DeviceSource) -> Self {
+        Self {
+            cpu_id,
+            usable_memory,
+            initramfs,
+            cmdline,
+            device_source,
+        }
     }
-    early_println!("[Scarlet Kernel] Updated Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
-    /* Initialize heap with the usable memory area after FDT */
+
+    /// Returns the kernel command line arguments
+    /// 
+    /// Provides access to boot parameters passed by the bootloader.
+    /// Returns an empty string if no command line was provided.
+    /// 
+    /// # Returns
+    /// 
+    /// Command line string slice, or empty string if none available
+    pub fn get_cmdline(&self) -> &str {
+        if let Some(cmdline) = self.cmdline {
+            cmdline
+        } else {
+            ""
+        }
+    }
+
+    /// Returns the initramfs memory area if available
+    /// 
+    /// The initramfs contains an initial root filesystem that can be used
+    /// during early boot before mounting the real root filesystem.
+    /// 
+    /// # Returns
+    /// 
+    /// Optional memory area containing the initramfs data
+    pub fn get_initramfs(&self) -> Option<MemoryArea> {
+        self.initramfs
+    }
+}
+
+/// Main kernel entry point for the boot processor
+/// 
+/// This function is called by architecture-specific boot code and performs
+/// the complete kernel initialization sequence using information provided
+/// in the BootInfo structure.
+/// 
+/// # Boot Sequence
+/// 
+/// The kernel initialization follows this structured sequence:
+/// 
+/// 1. **Early System Setup**: Extract boot parameters from BootInfo
+/// 2. **Memory Initialization**: Set up heap allocator with usable memory
+/// 3. **Early Initcalls**: Initialize critical early subsystems
+/// 4. **Driver Initcalls**: Load and initialize device drivers
+/// 5. **Virtual Memory**: Set up kernel virtual memory management
+/// 6. **Device Discovery**: Enumerate hardware from BootInfo device source
+/// 7. **Graphics Initialization**: Initialize graphics subsystem and framebuffer
+/// 8. **Interrupt System**: Set up interrupt controllers and handlers
+/// 9. **Timer Subsystem**: Initialize kernel timer and scheduling infrastructure
+/// 10. **VFS Setup**: Initialize virtual filesystem and mount root
+/// 11. **Initramfs Processing**: Mount initramfs if provided in BootInfo
+/// 12. **Initial Task**: Create and load initial userspace process
+/// 13. **Scheduler Start**: Begin task scheduling and enter normal operation
+/// 
+/// # Architecture Integration
+/// 
+/// This function is architecture-agnostic and relies on the BootInfo structure
+/// to abstract hardware-specific details. Architecture-specific boot code is
+/// responsible for creating a properly initialized BootInfo before calling
+/// this function.
+/// 
+/// # Arguments
+/// 
+/// * `boot_info` - Comprehensive boot information structure containing:
+///   - CPU ID for multicore initialization
+///   - Usable memory area for heap allocation
+///   - Optional initramfs location and size
+///   - Kernel command line parameters
+///   - Device information source (FDT/UEFI/ACPI)
+/// 
+/// # Memory Layout
+/// 
+/// The function expects the following memory layout:
+/// - Kernel image loaded and executable
+/// - BootInfo.usable_memory available for allocation
+/// - Hardware description (FDT/ACPI) accessible via device_source
+/// - Optional initramfs data at specified location
+/// 
+/// # Safety
+/// 
+/// This function assumes:
+/// - Architecture-specific initialization has completed successfully
+/// - BootInfo contains valid memory areas and addresses
+/// - Basic CPU features (MMU, interrupts) are available
+/// - Memory protection allows kernel operation
+/// 
+/// # Returns
+/// 
+/// This function never returns - it transitions to the scheduler and
+/// enters normal kernel operation mode.
+#[unsafe(no_mangle)]
+pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
+    let cpu_id = boot_info.cpu_id;
+
+    early_println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
+    early_println!("[Scarlet Kernel] Boot on CPU {}", cpu_id);
+    /* Use usable memory area from BootInfo */
+    let usable_area = boot_info.usable_memory;
+    early_println!("[Scarlet Kernel] Usable memory area : {:#x} - {:#x}", usable_area.start, usable_area.end);
+    
+    /* Handle initramfs if available in BootInfo */
+    if let Some(initramfs_area) = boot_info.initramfs {
+        early_println!("[Scarlet Kernel] InitramFS available: {:#x} - {:#x}", 
+                      initramfs_area.start, initramfs_area.end);
+        // Note: initramfs already relocated by arch-specific boot code
+    } else {
+        early_println!("[Scarlet Kernel] No initramfs found");
+    }
+    
+    /* Initialize heap with the usable memory area */
     early_println!("[Scarlet Kernel] Initializing heap...");
     let heap_start = (usable_area.start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let heap_size = ((usable_area.end - heap_start + 1) / MIN_HEAP_SIZE) * MIN_HEAP_SIZE;
@@ -351,9 +539,10 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
 
-    /* Initialize (populate) devices */
-    early_println!("[Scarlet Kernel] Initializing devices...");
-    DeviceManager::get_mut_manager().populate_devices();
+    /* Populate devices from BootInfo device source */
+    early_println!("[Scarlet Kernel] Populating devices...");
+    let device_manager = DeviceManager::get_mut_manager();
+    device_manager.populate_devices_from_source(&boot_info.device_source, None);
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
     /* After this point, we can use the device manager */
     /* Serial console also works */
@@ -404,9 +593,16 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
     /* Initialize global VFS */
     println!("[Scarlet Kernel] Initializing global VFS...");
     let manager = init_global_vfs_manager();
-    /* Initialize initramfs */
-    println!("[Scarlet Kernel] Initializing initramfs...");
-    init_initramfs(&manager);
+    
+    /* Initialize initramfs from BootInfo if available */
+    if let Some(initramfs_area) = boot_info.initramfs {
+        println!("[Scarlet Kernel] Initializing initramfs from BootInfo...");
+        if let Err(e) = init_initramfs(&manager, initramfs_area) {
+            println!("[Scarlet Kernel] Warning: Failed to initialize initramfs: {}", e);
+        }
+    } else {
+        println!("[Scarlet Kernel] No initramfs found in BootInfo");
+    }
 
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
 
@@ -450,8 +646,6 @@ pub extern "C" fn start_kernel(cpu_id: usize) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn start_ap(cpu_id: usize) {
     println!("[Scarlet Kernel] CPU {} is up and running", cpu_id);
-    println!("[Scarlet Kernel] Initializing arch...");
-    init_arch(cpu_id);
 
     loop {}
 }

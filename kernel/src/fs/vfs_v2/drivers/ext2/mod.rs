@@ -44,8 +44,11 @@ pub mod driver;
 #[cfg(test)]
 pub mod tests;
 
+#[cfg(test)]
+pub mod char_device_tests;
+
 pub use structures::*;
-pub use node::{Ext2Node, Ext2FileObject, Ext2DirectoryObject};
+pub use node::{Ext2Node, Ext2FileObject, Ext2DirectoryObject, Ext2CharDeviceFileObject};
 pub use driver::Ext2Driver;
 
 /// ext2 filesystem parameters for mount options
@@ -1207,14 +1210,15 @@ impl Ext2FileSystem {
         let inode_index = (inode_number - 1) % inodes_per_group;
         
         // Read the block group descriptor to get the inode table location
-        let bgd_sector = 4; // Block group descriptors start at block 2 (sector 4)
+        let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
+        let bgd_sector = self.block_to_sector(bgd_block);
         let bgd_request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_sector,
-            sector_count: 2, // Read one block worth of BGDs
+            sector: bgd_sector as usize,
+            sector_count: (self.block_size / 512) as usize,
             head: 0,
             cylinder: 0,
-            buffer: vec![0u8; 1024],
+            buffer: vec![0u8; self.block_size as usize],
         });
         
         self.block_device.enqueue_request(bgd_request);
@@ -3900,15 +3904,9 @@ impl FileSystemOperations for Ext2FileSystem {
                 // Read the inode for this entry
                 let child_inode = self.read_inode(entry.entry.inode)?;
                 
-                // Determine file type
-                let file_type = if child_inode.mode & EXT2_S_IFMT == EXT2_S_IFDIR {
-                    FileType::Directory
-                } else if child_inode.mode & EXT2_S_IFMT == EXT2_S_IFREG {
-                    FileType::RegularFile
-                } else {
-                    FileType::Unknown
-                };
-
+                // Use file_type_from_inode to get the correct file type including device files
+                let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
+                
                 // Generate new file ID
                 let file_id = {
                     let mut next_id = self.next_file_id.lock();
@@ -3981,8 +3979,19 @@ impl FileSystemOperations for Ext2FileSystem {
         node: &Arc<dyn VfsNode>,
         _flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
-        match node.file_type()? {
+        #[cfg(test)]
+        crate::early_println!("[ext2] open: Starting open operation");
+        
+        let file_type = node.file_type()?;
+        
+        #[cfg(test)]
+        crate::early_println!("[ext2] open: File type = {:?}", file_type);
+        
+        match file_type {
             FileType::RegularFile => {
+                #[cfg(test)]
+                crate::early_println!("[ext2] open: Opening regular file");
+                
                 let ext2_node = node.as_any().downcast_ref::<Ext2Node>()
                     .ok_or_else(|| FileSystemError::new(
                         FileSystemErrorKind::InvalidOperation,
@@ -3998,6 +4007,9 @@ impl FileSystemOperations for Ext2FileSystem {
                 Ok(file_obj)
             },
             FileType::Directory => {
+                #[cfg(test)]
+                crate::early_println!("[ext2] open: Opening directory");
+                
                 let ext2_node = node.as_any().downcast_ref::<Ext2Node>()
                     .ok_or_else(|| FileSystemError::new(
                         FileSystemErrorKind::InvalidOperation,
@@ -4012,10 +4024,36 @@ impl FileSystemOperations for Ext2FileSystem {
                 
                 Ok(dir_obj)
             },
-            _ => Err(FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Unsupported file type for open operation"
-            ))
+            FileType::CharDevice(device_info) => {
+                #[cfg(test)]
+                crate::early_println!("[ext2] Opening character device file: device_id={}", device_info.device_id);
+                
+                let ext2_node = node.as_any().downcast_ref::<Ext2Node>()
+                    .ok_or_else(|| FileSystemError::new(
+                        FileSystemErrorKind::InvalidOperation,
+                        "Node is not an Ext2Node"
+                    ))?;
+                let char_device_obj = Arc::new(Ext2CharDeviceFileObject::new(device_info, ext2_node.id()));
+                
+                // Set filesystem reference
+                if let Some(fs_weak) = ext2_node.filesystem() {
+                    char_device_obj.set_filesystem(fs_weak);
+                }
+                
+                #[cfg(test)]
+                crate::early_println!("[ext2] Character device file object created successfully");
+                
+                Ok(char_device_obj)
+            },
+            _ => {
+                #[cfg(test)]
+                crate::early_println!("[ext2] open: Unsupported file type: {:?}", file_type);
+                
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Unsupported file type for open operation"
+                ))
+            }
         }
     }
 
@@ -4214,7 +4252,7 @@ impl FileSystemOperations for Ext2FileSystem {
                 }
             }
         }
-        
+
         // Create new node
         let new_node = match &file_type {
             FileType::RegularFile => {

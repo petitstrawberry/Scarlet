@@ -48,13 +48,6 @@ pub struct Riscv64 {
     kernel_trap: u64,
 }
 
-pub fn init_arch(cpu_id: usize) {
-    early_println!("[riscv64] Hart {}: Initializing core....", cpu_id);
-    // Get raw Riscv64 struct
-    let riscv: &mut Riscv64 = unsafe { transmute(&TRAPFRAME[cpu_id] as *const _ as usize ) };
-    trap_init(riscv);
-}
-
 impl Riscv64 {
     pub const fn new(cpu_id: usize) -> Self {
         Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new(), kernel_stack: 0, kernel_trap: 0, satp: 0 }
@@ -151,22 +144,15 @@ pub fn get_user_trap_handler() -> usize {
 }
 
 #[allow(static_mut_refs)]
-fn trap_init(riscv: &mut Riscv64) {
-    early_println!("[riscv64] Hart {}: Initializing trap....", riscv.hartid);
-    
+fn trap_init(riscv: &mut Riscv64) {    
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size =  STACK_SIZE;
 
     let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
-    early_println!("[riscv64] Hart {}: Trap stack area    : {:#x} - {:#x}", riscv.hartid, trap_stack - stack_size, trap_stack - 1);
-    early_println!("[riscv64] Hart {}: Trap stack size    : {:#x}", riscv.hartid, stack_size);
-    early_println!("[riscv64] Hart {}: Trap stack pointer : {:#x}", riscv.hartid, trap_stack);
-    early_println!("[riscv64] Hart {}: Setting up scratch space....", riscv.hartid);
     riscv.kernel_stack = trap_stack as u64;
     riscv.kernel_trap = arch_kernel_trap_handler as u64;
-    
     let scratch_addr = riscv as *const _ as usize;
-    early_println!("[riscv64] Hart {}: Scratch address    : {:#x}", riscv.hartid, scratch_addr);
+
     let sie: usize = 0x20;
     unsafe {
         asm!("
@@ -180,6 +166,11 @@ fn trap_init(riscv: &mut Riscv64) {
         in(reg) scratch_addr,
         );
     }
+
+    // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
+    // early_println!("Trap stack size    : {:#x}", stack_size);
+    // early_println!("Trap stack pointer : {:#x}", trap_stack);
+    // early_println!("Scratch address    : {:#x}", scratch_addr);
 }
 
 pub fn set_trapvector(addr: usize) {

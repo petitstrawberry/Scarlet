@@ -342,7 +342,7 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
             }) {
                 crate::early_println!("Failed to register UART interrupt device: {}", e);
             } else {
-                crate::early_println!("UART interrupt device registered using trait-based system");
+                crate::early_println!("UART interrupt device registered");
             }
         }
     } else {
