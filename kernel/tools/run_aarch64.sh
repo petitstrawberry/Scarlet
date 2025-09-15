@@ -51,6 +51,8 @@ INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs.cpio"
 
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
+# aarch64-linux-gnu-objcopy -O binary "$KERNEL_PATH" "${KERNEL_PATH}.bin"
+
 
 # Run QEMU for aarch64 and capture output
 qemu-system-aarch64 \
@@ -60,16 +62,8 @@ qemu-system-aarch64 \
     -nographic \
     -serial mon:stdio \
     --no-reboot \
-    -global virtio-mmio.force-legacy=false \
-    -drive id=x0,file=test.txt,format=raw,if=none \
-    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-    -display vnc=:0 \
-    -device virtio-gpu-device,bus=virtio-mmio-bus.1 \
-    -netdev user,id=net0 \
-    -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
     $DEBUG_FLAGS \
-    -initrd "$INITRAMFS_PATH" \
-    -kernel "$KERNEL_PATH" | tee "$TEMP_OUTPUT"
+    -kernel "${KERNEL_PATH}" | tee "$TEMP_OUTPUT"
 
 # Capture QEMU exit code
 QEMU_EXIT_CODE=$?

@@ -23,12 +23,13 @@ pub mod vm;
 pub use earlycon::*;
 pub use registers::Registers;
 pub use context::KernelContext;
+pub use earlycon::early_putc;
 
 pub type Arch = Aarch64;
 pub type Trapframe = Aarch64;
 
 #[unsafe(link_section = ".trampoline.data")]
-static mut TRAPFRAME: [Aarch64; NUM_OF_CPUS] = [const { Aarch64::new(0) }; NUM_OF_CPUS];
+pub static mut TRAPFRAME: [Aarch64; NUM_OF_CPUS] = [const { Aarch64::new(0) }; NUM_OF_CPUS];
 
 #[repr(align(4))]
 #[derive(Debug, Clone)]
@@ -158,7 +159,7 @@ pub fn get_user_trap_handler() -> usize {
 }
 
 #[allow(static_mut_refs)]
-fn trap_init(aarch64: &mut Aarch64) {
+pub fn trap_init(aarch64: &mut Aarch64) {
     early_println!("[aarch64] CPU {}: Initializing trap....", aarch64.cpuid);
     
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
@@ -177,7 +178,16 @@ fn trap_init(aarch64: &mut Aarch64) {
     
     // TODO: Set up AArch64 exception handling registers
     // This would involve setting VBAR_EL1, TPIDR_EL1, etc.
-    early_println!("[aarch64] TODO: Complete trap initialization");
+    
+    // Set up thread pointer register to point to our trapframe
+    unsafe {
+        asm!(
+            "msr tpidr_el1, {0}",
+            in(reg) scratch_addr,
+        );
+    }
+    
+    early_println!("[aarch64] CPU {}: Trap initialization complete", aarch64.cpuid);
 }
 
 pub fn set_trapvector(addr: usize) {
@@ -186,20 +196,61 @@ pub fn set_trapvector(addr: usize) {
 }
 
 pub fn set_trapframe(addr: usize) {
-    // TODO: Implement setting thread pointer for AArch64
-    early_println!("[aarch64] TODO: set_trapframe to {:#x}", addr);
-}
-
-pub fn enable_interrupt() {
-    // TODO: Implement enabling interrupts for AArch64
-    // This would involve clearing the interrupt mask bits in DAIF
-    early_println!("[aarch64] TODO: enable_interrupt");
+    // Set TPIDR_EL1 to point to the trapframe
+    unsafe {
+        asm!(
+            "msr tpidr_el1, {0}",
+            in(reg) addr,
+        );
+    }
 }
 
 pub fn get_cpu() -> &'static mut Aarch64 {
-    // TODO: Implement proper CPU identification for AArch64
-    // For now, return CPU 0's trapframe
-    unsafe { &mut TRAPFRAME[0] }
+    // Get the trapframe address from TPIDR_EL1
+    let scratch_addr: usize;
+    unsafe {
+        asm!(
+            "mrs {0}, tpidr_el1",
+            out(reg) scratch_addr,
+        );
+    }
+    
+    if scratch_addr == 0 {
+        // Fallback: get CPU ID from MPIDR_EL1 and use that trapframe
+        let core_id = get_current_cpu_id();
+        early_println!("[aarch64] Warning: TPIDR_EL1 not set, using MPIDR_EL1 core {}", core_id);
+        unsafe { &mut TRAPFRAME[core_id] }
+    } else {
+        unsafe { transmute(scratch_addr) }
+    }
+}
+
+/// Get current CPU core ID from MPIDR_EL1 register
+/// 
+/// The MPIDR_EL1 (Multiprocessor Affinity Register) contains the CPU core
+/// identification information. For simple systems, Aff0 contains the core ID.
+pub fn get_current_cpu_id() -> usize {
+    let mpidr: u64;
+    unsafe {
+        asm!(
+            "mrs {0}, MPIDR_EL1",
+            out(reg) mpidr,
+        );
+    }
+    // Extract Aff0 field (bits 7:0) which contains the core ID
+    (mpidr & 0xFF) as usize
+}
+
+/// Set TPIDR_EL0 for thread-local storage (if needed for userspace)
+/// 
+/// Note: This is different from TPIDR_EL1 which we use for kernel per-CPU data
+pub fn set_thread_pointer_el0(ptr: usize) {
+    unsafe {
+        asm!(
+            "msr tpidr_el0, {0}",
+            in(reg) ptr,
+        );
+    }
 }
 
 pub fn set_next_mode(mode: vcpu::Mode) {
@@ -215,8 +266,39 @@ pub fn set_next_mode(mode: vcpu::Mode) {
     }
 }
 
-pub fn early_putc(c: u8) {
-    // TODO: Implement early console output for AArch64
-    // For now, just ignore
-    let _ = c;
+pub fn enable_interrupt() {
+    unsafe {
+        asm!("msr daifclr, #0xf");
+    }
+}
+
+pub fn disable_interrupt() {
+    unsafe {
+        asm!("msr daifset, #0xf");
+    }
+}
+
+pub fn shutdown() -> ! {
+    // TODO: Implement PSCI shutdown for AArch64
+    early_println!("[aarch64] Shutdown requested - entering infinite loop");
+    loop {
+        unsafe {
+            asm!("wfi");
+        }
+    }
+}
+
+pub fn shutdown_with_code(exit_code: u32) -> ! {
+    early_println!("[aarch64] Shutdown with exit code {} requested", exit_code);
+    shutdown()
+}
+
+pub fn reboot() -> ! {
+    // TODO: Implement PSCI reboot for AArch64
+    early_println!("[aarch64] Reboot requested - entering infinite loop");
+    loop {
+        unsafe {
+            asm!("wfi");
+        }
+    }
 }
