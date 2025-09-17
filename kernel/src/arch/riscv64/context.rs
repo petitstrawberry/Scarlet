@@ -15,7 +15,7 @@ use crate::vm::vmem::MemoryArea;
 /// 
 /// Contains callee-saved registers that need to be preserved across
 /// function calls and context switches in kernel mode, as well as
-/// the kernel stack information.
+/// the kernel stack information and FPU state.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct KernelContext {
@@ -25,6 +25,10 @@ pub struct KernelContext {
     pub ra: u64,
     /// Saved registers s0-s11 (callee-saved)
     pub s: [u64; 12],
+    /// FPU registers f0-f31 (saved for multicore support)
+    pub f: [u64; 32],
+    /// FPU control and status register
+    pub fcsr: u64,
     /// Kernel stack for this context (None = uninitialized)
     /// Using Box<[u8]> to directly allocate on heap without stack overflow
     pub kernel_stack: Option<Box<[u8]>>,
@@ -44,6 +48,8 @@ impl KernelContext {
             sp: stack_top,
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
+            f: [0; 32],
+            fcsr: 0,
             kernel_stack: Some(kernel_stack),
         }
     }

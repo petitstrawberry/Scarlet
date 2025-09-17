@@ -167,6 +167,17 @@ fn trap_init(riscv: &mut Riscv64) {
         );
     }
 
+    // Enable FPU by setting FS field in sstatus to Initial (0b01)
+    // FS is at bits 13-14, so we set bit 13 to enable the FPU
+    let fs_initial: usize = 0x2000; // Bit 13 set for FS=01 (Initial)
+    unsafe {
+        asm!("
+        csrs sstatus, {0}
+        ",
+        in(reg) fs_initial,
+        );
+    }
+
     // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
     // early_println!("Trap stack size    : {:#x}", stack_size);
     // early_println!("Trap stack pointer : {:#x}", trap_stack);
