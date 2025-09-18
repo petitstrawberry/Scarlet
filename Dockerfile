@@ -24,6 +24,12 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 # Install cargo tools
 RUN cargo install cargo-make
 
+# Build xv6 and the user programs
+RUN git clone https://github.com/mit-pdos/xv6-riscv.git /opt/xv6-riscv && \
+    cd /opt/xv6-riscv && \
+    git checkout 2a39c5af63906b3dbd0db58b9f6846ad70f4315d && \
+    make fs.img
+
 # Download and configure busybox
 RUN mkdir -p /opt && cd /opt && \
     git clone https://git.busybox.net/busybox && \
@@ -36,10 +42,24 @@ RUN mkdir -p /opt && cd /opt && \
     make CROSS_COMPILE=riscv64-linux-gnu- all && \
     make CROSS_COMPILE=riscv64-linux-gnu- install
 
-# Build xv6 and the user programs
-RUN git clone https://github.com/mit-pdos/xv6-riscv.git /opt/xv6-riscv && \
-    cd /opt/xv6-riscv && \
-    git checkout 2a39c5af63906b3dbd0db58b9f6846ad70f4315d && \
-    make fs.img
+# Install dependencies for Buildroot
+RUN apt update && \
+    apt install -y libncurses5-dev wget unzip rsync
+
+# Download and set up Buildroot
+RUN cd /opt && \
+    wget https://buildroot.org/downloads/buildroot-2025.02.6.tar.gz && \
+    tar -xvf buildroot-2025.02.6.tar.gz && \
+    rm buildroot-2025.02.6.tar.gz && \
+    mv buildroot-2025.02.6 buildroot
+
+# Copy configuration files for Buildroot
+COPY docker/.config /opt/buildroot/.config
+
+# Get source code 
+RUN cd /opt/buildroot && \
+    make source
+
+# Patch 
 
 WORKDIR /workspaces/Scarlet
