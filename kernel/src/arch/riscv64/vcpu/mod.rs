@@ -4,6 +4,8 @@
 //! architecture. The VCPU is responsible for executing instructions and managing
 //! the state of the CPU.
 
+use crate::arch::Trapframe;
+
 use super::{Registers, Riscv64};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,13 +52,13 @@ impl Vcpu {
         self.mode
     }
 
-    pub fn store(&mut self, riscv64: &Riscv64) {
-        self.regs = riscv64.regs;
-        self.pc = riscv64.epc;
+    pub fn store(&mut self, trapframe: &Trapframe) {
+        self.regs = trapframe.regs;
+        self.pc = trapframe.epc;
     }
 
-    pub fn switch(&mut self, riscv64: &mut Riscv64) {
-        riscv64.regs = self.regs;
-        riscv64.epc = self.pc;
+    pub fn switch(&mut self, trapframe: &mut Trapframe) {
+        trapframe.regs = self.regs;
+        trapframe.epc = self.pc;
     }
 }

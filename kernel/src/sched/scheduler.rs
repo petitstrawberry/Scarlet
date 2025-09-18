@@ -18,7 +18,7 @@ use core::panic;
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 use hashbrown::HashMap;
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_next_mode, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
 use crate::println;
 use crate::print;
 
@@ -110,7 +110,7 @@ impl Scheduler {
     /// 
     /// # Returns
     /// * `(old_task_id, new_task_id)` - Tuple of old and new task IDs
-    fn run(&mut self, cpu: &mut Arch) -> (Option<usize>, Option<usize>) {
+    fn run(&mut self, cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let cpu_id = cpu.get_cpuid();
         let old_current_task_id = self.current_task_id[cpu_id];
 
@@ -229,7 +229,7 @@ impl Scheduler {
 
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
-    pub fn on_tick(&mut self, cpu_id: usize) {
+    pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = self.task_pool.get_task(task_id) {
                 if task.time_slice > 0 {
@@ -237,13 +237,11 @@ impl Scheduler {
                 }
                 if task.time_slice == 0 {
                     // Time slice expired, trigger reschedule
-                    let cpu = get_cpu();
-                    self.schedule(cpu);
+                    self.schedule(trapframe);
                 }
             }
         } else {
-            let cpu = get_cpu();
-            self.schedule(cpu);
+            self.schedule(trapframe);
         }
     }
 
@@ -255,7 +253,8 @@ impl Scheduler {
     /// 
     /// # Arguments
     /// * `cpu` - The CPU architecture state
-    pub fn schedule(&mut self, cpu: &mut Arch) {
+    pub fn schedule(&mut self, trapframe: &mut Trapframe) {
+        let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
         // Step 1: Run scheduling algorithm to get current and next task IDs
@@ -281,7 +280,7 @@ impl Scheduler {
             // Store current task's user state to VCPU
             if let Some(current_task_id) = current_task_id {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                current_task.vcpu.store(cpu);
+                current_task.vcpu.store(trapframe);
 
                 // Perform kernel context switch
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
@@ -289,11 +288,11 @@ impl Scheduler {
 
                 // Restore trapframe of same task
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                Self::setup_task_execution(cpu, current_task);
+                Self::setup_task_execution(get_cpu(), current_task);
             } else {            // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
-                Self::setup_task_execution(cpu, next_task);
+                Self::setup_task_execution(get_cpu(), next_task);
             }
         }
 
@@ -314,12 +313,11 @@ impl Scheduler {
         timer.stop(cpu_id);
 
         let trap_vector = get_trampoline_trap_vector();
-        let trapframe = get_trampoline_trapframe(cpu_id);
+        let arch = get_trampoline_arch(cpu_id);
         set_trapvector(trap_vector);
-        set_trapframe(trapframe);
-        let trapframe = cpu.get_trapframe();
-        trapframe.set_trap_handler(get_user_trap_handler());
-        trapframe.set_next_address_space(get_kernel_vm_manager().get_asid());
+        set_arch(arch);
+        cpu.set_trap_handler(get_user_trap_handler());
+        cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
 
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);
@@ -465,19 +463,16 @@ impl Scheduler {
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
+        let trapframe = cpu.get_trapframe();
+        task.vcpu.switch(trapframe);
+
+        cpu.set_kernel_stack(task.get_kernel_stack_bottom());
+        cpu.set_trap_handler(get_user_trap_handler());
+        cpu.set_next_address_space(task.vm_manager.get_asid());
+        set_next_mode(task.vcpu.get_mode());
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());
 
-        // Setup trapframe for hardware
-        let trapframe = cpu.get_trapframe();
-        trapframe.set_trap_handler(get_user_trap_handler());
-        trapframe.set_next_address_space(task.vm_manager.get_asid());
-        trapframe.set_kernel_stack(task.get_kernel_stack_bottom());
-
-        task.vcpu.switch(cpu);
-
-        set_next_mode(task.vcpu.get_mode());
-        
         // Note: User context (VCPU) will be restored in schedule() after run() returns
     }
 }

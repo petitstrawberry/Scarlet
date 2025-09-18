@@ -6,6 +6,7 @@ use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
 use crate::arch::{get_kernel_trapvector_paddr, set_trapvector, trap, Trapframe};
+use crate::initcall::early;
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
@@ -18,66 +19,77 @@ pub extern "C" fn _user_trap_entry() {
         .align 8
                 /* Disable the interrupt */
                 csrci   sstatus, 0x2
-                /* Save the current a0 to sscratch and load the trapframe pointer */
+
+                /* Save a0 to sscratch and load the Riscv64 struct pointer */
                 csrrw   a0, sscratch, a0
-                /* Save the context of the current hart */
-                sd      x0, 0(a0)
-                sd      x1, 8(a0)
-                sd      x2, 16(a0)
-                sd      x3, 24(a0)
-                sd      x4, 32(a0)
-                sd      x5, 40(a0)
-                sd      x6, 48(a0)
-                sd      x7, 56(a0)
-                sd      x8, 64(a0)
-                sd      x9, 72(a0)
-                // sd      x10, 80(a0)
-                sd      x11, 88(a0)
-                sd      x12, 96(a0)
-                sd      x13, 104(a0)
-                sd      x14, 112(a0)
-                sd      x15, 120(a0)
-                sd      x16, 128(a0)
-                sd      x17, 136(a0)
-                sd      x18, 144(a0)
-                sd      x19, 152(a0)
-                sd      x20, 160(a0)
-                sd      x21, 168(a0)
-                sd      x22, 176(a0)
-                sd      x23, 184(a0)
-                sd      x24, 192(a0)
-                sd      x25, 200(a0)
-                sd      x26, 208(a0)
-                sd      x27, 216(a0)
-                sd      x28, 224(a0)
-                sd      x29, 232(a0)
-                sd      x30, 240(a0)
-                sd      x31, 248(a0)
-                csrr    t0, sepc
-                sd      t0, 256(a0)
+                /* Store sp to Riscv64.scratch */
+                sd      sp, 0(a0)
 
-                // Load and store a0 to trapframe
-                csrr    t0, sscratch
-                // Restore sscratch from a0
-                csrw   sscratch, a0
-
-                sd      t0, 80(a0)
-
-                /* Load the satp for the kernel space from trapframe */
-                ld      t0, 272(a0)
+                /* Load the satp for the kernel space from Riscv64.satp */
+                ld      sp, 16(a0) // sp = Riscv64.satp
                 /* Switch to kernel memory space */
-                csrrw   t0, satp, t0
+                csrrw   sp, satp, sp
                 sfence.vma zero, zero
                 /* Store the user memory space */
-                sd      t0, 272(a0)
+                sd      sp, 16(a0) // Riscv64.satp = sp
+                
+                /* Load kernel stack pointer from Riscv64.kernel_stack */
+                ld      sp, 24(a0)
 
-                // Load kernel stack pointer
-                ld      sp, 280(a0)
+                /* Allocate space on the kernel stack for saving user context */
+                addi    sp, sp, -264 /* sizeof(Trapframe) = 264 bytes */
+
+                /* Save the context of the current hart */
+                sd      x0, 0(sp)
+                sd      x1, 8(sp)
+                // sd      x2, 16(sp) (x2 is sp, which we are modifying)
+                sd      x3, 24(sp)
+                sd      x4, 32(sp)
+                sd      x5, 40(sp)
+                sd      x6, 48(sp)
+                sd      x7, 56(sp)
+                sd      x8, 64(sp)
+                sd      x9, 72(sp)
+                // sd      x10, 80(sp) (x10 is a0, which we are modifying)
+                sd      x11, 88(sp)
+                sd      x12, 96(sp)
+                sd      x13, 104(sp)
+                sd      x14, 112(sp)
+                sd      x15, 120(sp)
+                sd      x16, 128(sp)
+                sd      x17, 136(sp)
+                sd      x18, 144(sp)
+                sd      x19, 152(sp)
+                sd      x20, 160(sp)
+                sd      x21, 168(sp)
+                sd      x22, 176(sp)
+                sd      x23, 184(sp)
+                sd      x24, 192(sp)
+                sd      x25, 200(sp)
+                sd      x26, 208(sp)
+                sd      x27, 216(sp)
+                sd      x28, 224(sp)
+                sd      x29, 232(sp)
+                sd      x30, 240(sp)
+                sd      x31, 248(sp)
+                csrr    t0, sepc
+                sd      t0, 256(sp)
+
+                // Load sp from Riscv64.scratch and store sp to trapframe
+                ld      t0, 0(a0)  // t0 = Riscv64.scratch (old sp)
+                sd      t0, 16(sp) // trapframe.sp = t0
+
+                // Restore sscratch from a0 and save a0 to trapframe
+                csrw   sscratch, a0
+                sd      a0, 80(sp)
 
                 /* Call the user trap handler */
-                /* Load the function pointer from the trapframe */
-                ld      ra, 288(a0)
-                jr      ra
+                /* Load the function pointer from Riscv64.kernel_trap */
+                ld      ra, 32(a0)
+
+                /* Pass the trapframe pointer as the first argument */
+                mv      a0, sp
+                jr      ra // Riscv64.kernel_trap(a0: &mut Trapframe)
             "
         );
     }
@@ -93,21 +105,14 @@ pub extern "C" fn _user_trap_exit(trapframe: &mut Trapframe) -> ! {
         .option norvc
         .option norelax
         .align 8
-                /* Restore the user memory space */
-                ld     t0, 272(a0)
-                csrrw  t0, satp, t0
-                sfence.vma zero, zero
-                /* Restore the kernel memory space to the trapframe */
-                sd     t0, 272(a0)
-
-                /* Restore the context of the current hart */ 
+                /* Restore the context of the current hart from trapframe */ 
                 /* epc */
                 ld     t0, 256(a0)
                 csrw   sepc, t0
                 /* Register */
                 ld     x0, 0(a0)
                 ld     x1, 8(a0)
-                ld     x2, 16(a0)
+                // ld     x2, 16(a0) (x2 is sp, which we are modifying)
                 ld     x3, 24(a0)
                 ld     x4, 32(a0)
                 ld     x5, 40(a0)
@@ -115,7 +120,7 @@ pub extern "C" fn _user_trap_exit(trapframe: &mut Trapframe) -> ! {
                 ld     x7, 56(a0)
                 ld     x8, 64(a0)
                 ld     x9, 72(a0)
-                // ld     x10, 80(a0)
+                // ld     x10, 80(a0) (x10 is a0, which we are modifying)
                 ld     x11, 88(a0)
                 ld     x12, 96(a0)
                 ld     x13, 104(a0)
@@ -139,8 +144,18 @@ pub extern "C" fn _user_trap_exit(trapframe: &mut Trapframe) -> ! {
                 ld     x31, 248(a0)
 
                 /* Restore a0 from trapframe */
-                csrrw  zero, sscratch, a0
                 ld     a0, 80(a0)
+
+                /* Get the Riscv64 struct pointer from sscratch */
+                csrr   sp, sscratch
+
+                /* Restore the user memory space */
+                ld     sp, 16(sp)  // t0 = Riscv64.satp (user satp)
+                csrw   satp, sp
+                sfence.vma zero, zero
+
+                /* Restore the user stack pointer */
+                ld     sp, 0(sp)  // sp = Riscv64.scratch (user sp)
 
                 sret
             "
@@ -189,9 +204,12 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     
     // Get the trampoline address for _user_trap_exit
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
+    crate::early_println!("_user_trap_entry: {:#x}, _user_trap_exit: {:#x}, offset: {:#x}", _user_trap_entry as usize, _user_trap_exit as usize, trap_exit_offset);
     let trampoline_base = crate::vm::get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base + trap_exit_offset;
     set_trapvector(trampoline_base);
+
+    crate::early_println!("trap_exit_addr: {:#x}, trapframe: {:#x}", trap_exit_addr, addr);
 
     unsafe {
         asm!(

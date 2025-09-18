@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch, KernelContext}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{event::ProcessControlType, EventContent}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::{get_scheduler, Scheduler}, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{Arch, KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{EventContent, event::ProcessControlType}, mem::page::{Page, allocate_raw_pages, free_boxed_page}, object::handle::HandleTable, sched::scheduler::{Scheduler, get_scheduler}, timer::{TimerHandler, add_timer, get_tick}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -1022,8 +1022,13 @@ impl Task {
         
         // Task cleanup completed - ABI module handles event cleanup
 
+        if mytask().is_none() || mytask().unwrap().get_id() != self.id {
+            // Not the current task, nothing more to do
+            return;
+        }
+
         // The scheduler will handle saving the current task state internally
-        get_scheduler().schedule(get_cpu());
+        get_scheduler().schedule(get_cpu().get_trapframe());
     }
 
     /// Wait for a child task to exit and collect its status
@@ -1057,10 +1062,10 @@ impl Task {
     /// This blocks the task and registers a timer to wake it up.
     /// 
     /// # Arguments
-    /// * `cpu` - The CPU context to store current task state
+    /// * `trapframe` - The trapframe of the current CPU state
     /// * `ticks` - The number of ticks to sleep
     /// 
-    pub fn sleep(&mut self, cpu: &mut Arch, ticks: u64) {
+    pub fn sleep(&mut self, trapframe: &mut Trapframe, ticks: u64) {
 
         struct SleepWakerHandler {
             task_id: usize,
@@ -1088,7 +1093,7 @@ impl Task {
 
         self.add_software_timer_handler(handler);
         let waker = get_waitpid_waker(self.id);
-        waker.wait(self.get_id(), cpu);
+        waker.wait(self.get_id(), trapframe);
     }
 
     // VFS Helper Methods

@@ -199,7 +199,7 @@ pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
 }
 
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
-static mut TRAMPOLINE_TRAPFRAME: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
+static mut TRAMPOLINE_ARCH: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
 
 pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trampoline_start = unsafe { &__TRAMPOLINE_START as *const usize as usize };
@@ -211,20 +211,21 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trampoline_vaddr_end = VMMAX;
 
     let trap_entry_paddr = get_user_trapvector_paddr();
-    let trapframe_paddr = arch.get_trapframe_paddr();
+    // let trapframe_paddr = arch.get_trapframe_paddr();
+    let arch_paddr = arch as *const Arch as usize;
     let trap_entry_offset = trap_entry_paddr - trampoline_start;
-    let trapframe_offset = trapframe_paddr - trampoline_start;
+    let arch_offset = arch_paddr - trampoline_start;
 
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
-    let trapframe_vaddr = trampoline_vaddr_start + trapframe_offset;
+    let arch_vaddr = trampoline_vaddr_start + arch_offset;
     
-    // println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    // println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
-    // println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
-    // println!("  Trap frame paddr  : {:#x}", trapframe_paddr);
-    // println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    // println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
-    // println!("  Trap frame vaddr  : {:#x}", trapframe_vaddr);
+    early_println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    early_println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
+    early_println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
+    early_println!("  Arch paddr        : {:#x}", arch_paddr);
+    early_println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    early_println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
+    early_println!("  Arch vaddr        : {:#x}", arch_vaddr);
     
     let trampoline_map = VirtualMemoryMap {
         vmarea: MemoryArea {
@@ -250,7 +251,7 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
         .map_err(|e| panic!("Failed to map trampoline memory area: {}", e)).unwrap();
 
     set_trampoline_trap_vector(trap_entry_vaddr);
-    set_trampoline_trapframe(arch.get_cpuid(), trapframe_vaddr);
+    set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
 }
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
@@ -268,15 +269,15 @@ pub fn get_trampoline_trap_vector() -> usize {
     }
 }
 
-pub fn set_trampoline_trapframe(cpu_id: usize, trap_frame: usize) {
+pub fn set_trampoline_arch(cpu_id: usize, arch: usize) {
     unsafe {
-        TRAMPOLINE_TRAPFRAME[cpu_id] = Some(trap_frame);
+        TRAMPOLINE_ARCH[cpu_id] = Some(arch);
     }
 }
 
-pub fn get_trampoline_trapframe(cpu_id: usize) -> usize {
+pub fn get_trampoline_arch(cpu_id: usize) -> usize {
     unsafe {
-        match TRAMPOLINE_TRAPFRAME[cpu_id] {
+        match TRAMPOLINE_ARCH[cpu_id] {
             Some(v) => v,
             None => panic!("Trampoline is not initialized"),
         }

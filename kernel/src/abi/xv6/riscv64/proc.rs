@@ -52,7 +52,7 @@ pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
-    get_scheduler().schedule(get_cpu());
+    get_scheduler().schedule(trapframe);
     usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 

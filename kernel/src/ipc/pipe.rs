@@ -157,7 +157,7 @@ impl StreamOps for PipeEndpoint {
                 use crate::arch::get_cpu;
                 if let Some(task) = mytask() {
                     let mut cpu = get_cpu();
-                    state.read_waker.wait(task.get_id(), &mut cpu);
+                    state.read_waker.wait(task.get_id(), cpu.get_trapframe());
                     
                     // After waking up, retry the read operation
                     return self.read(buffer);
@@ -204,7 +204,7 @@ impl StreamOps for PipeEndpoint {
             use crate::arch::get_cpu;
             if let Some(task) = mytask() {
                 let mut cpu = get_cpu();
-                state.write_waker.wait(task.get_id(), &mut cpu);
+                state.write_waker.wait(task.get_id(), cpu.get_trapframe());
                 
                 // After waking up, retry the write operation
                 return self.write(buffer);

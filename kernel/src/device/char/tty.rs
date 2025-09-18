@@ -253,12 +253,12 @@ impl CharDevice for TtyDevice {
             drop(input_buffer);
             
             // No data available, block the current task
-            if let Some(mut task) = mytask() {
-                let mut cpu = get_cpu();
+            if let Some(task) = mytask() {
+                let cpu = get_cpu();
 
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
-                self.input_waker.wait(task.get_id(), &mut cpu);
+                self.input_waker.wait(task.get_id(), cpu.get_trapframe());
                 
                 // Continue the loop to re-check if data is available
                 continue;

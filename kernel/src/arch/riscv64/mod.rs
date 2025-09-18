@@ -32,25 +32,24 @@ pub use earlycon::*;
 pub use registers::Registers;
 
 pub type Arch = Riscv64;
-pub type Trapframe = Riscv64;
 
 #[unsafe(link_section = ".trampoline.data")]
-static mut TRAPFRAME: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
+static mut CPUS: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];
 
 #[repr(align(4))]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Riscv64 {
-    pub regs: Registers,
-    pub epc: u64,
-    pub hartid: u64,
-    satp: u64,
-    kernel_stack: u64,
-    kernel_trap: u64,
+    scratch: u64, // offeset: 0
+    pub hartid: u64, // offset: 8
+    satp: u64, // offset: 16
+    kernel_stack: u64, // offset: 24
+    kernel_trap: u64, // offset: 32
 }
 
 impl Riscv64 {
     pub const fn new(cpu_id: usize) -> Self {
-        Riscv64 { hartid: cpu_id as u64, epc: 0, regs: Registers::new(), kernel_stack: 0, kernel_trap: 0, satp: 0 }
+        Riscv64 { scratch: 0, hartid: cpu_id as u64,kernel_stack: 0, kernel_trap: 0, satp: 0 }
     }
 
     pub fn get_cpuid(&self) -> usize {
@@ -58,17 +57,21 @@ impl Riscv64 {
     }
 
     pub fn get_trapframe_paddr(&self) -> usize {
-        /* Get pointer of TRAP_FRAME[hartid] */
-        let addr = unsafe { &raw mut TRAPFRAME[self.hartid as usize] } as *const _ as usize;
+        /* Get pointer of the trapframe, which is located at the top of the kernel stack */
+        let addr =  self.kernel_stack as usize - core::mem::size_of::<Trapframe>();
         addr
     }
 
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
-        self
+        unsafe {
+            &mut *(self.get_trapframe_paddr() as *mut Trapframe)
+        }
     }
-}
 
-impl Trapframe {
+     pub fn set_kernel_stack(&mut self, initial_top: u64) {
+        self.kernel_stack = initial_top;
+    }
+
     pub fn set_trap_handler(&mut self, addr: usize) {
         self.kernel_trap = addr as u64;
     }
@@ -79,12 +82,23 @@ impl Trapframe {
         let satp = root_pagetable.get_val_for_satp(asid);
         self.satp = satp as u64;
     }
+}
 
-    pub fn set_kernel_stack(&mut self, initial_top: u64) {
-        self.kernel_stack = initial_top;
+#[repr(align(4))]
+#[derive(Debug, Clone)]
+pub struct Trapframe {
+    pub regs: Registers,
+    pub epc: u64,
+}
+
+impl Trapframe {
+    pub fn new() -> Self {
+        Trapframe {
+            regs: Registers::new(),
+            epc: 0,
+        }
     }
-
-
+    
     pub fn get_syscall_number(&self) -> usize {
         self.regs.reg[17] // a7
     }
@@ -183,7 +197,7 @@ pub fn set_trapvector(addr: usize) {
     }
 }
 
-pub fn set_trapframe(addr: usize) {
+pub fn set_arch(addr: usize) {
     unsafe {
         asm!("
         csrw sscratch, {0}
