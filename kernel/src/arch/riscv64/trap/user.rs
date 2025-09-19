@@ -79,9 +79,12 @@ pub extern "C" fn _user_trap_entry() {
                 ld      t0, 0(a0)  // t0 = Riscv64.scratch (old sp)
                 sd      t0, 16(sp) // trapframe.sp = t0
 
-                // Restore sscratch from a0 and save a0 to trapframe
+                // Save original a0 (currently in sscratch) to trapframe
+                csrr    t0, sscratch  // t0 = original a0 value
+                sd      t0, 80(sp)    // trapframe.a0 = original a0
+
+                // Restore sscratch to Riscv64 pointer
                 csrw   sscratch, a0
-                sd      a0, 80(sp)
 
                 /* Call the user trap handler */
                 /* Load the function pointer from Riscv64.kernel_trap */
