@@ -18,7 +18,7 @@ use core::panic;
 use alloc::{collections::vec_deque::VecDeque, string::ToString};
 use hashbrown::HashMap;
 
-use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
+use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector, trap::{self, user::arch_switch_to_user_space}}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
 use crate::println;
 use crate::print;
 
@@ -293,6 +293,7 @@ impl Scheduler {
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
+                arch_switch_to_user_space(get_cpu().get_trapframe()); // Force switch to user space
             }
         }
 
@@ -463,15 +464,25 @@ impl Scheduler {
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-        let trapframe = cpu.get_trapframe();
-        task.vcpu.switch(trapframe);
+
+        // crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
+        // crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
+        // let trapframe = cpu.get_trapframe();
+        // crate::early_println!("[SCHED]   before Trapframe {:#x?}", trapframe);
 
         cpu.set_kernel_stack(task.get_kernel_stack_bottom());
+        let trappframe = cpu.get_trapframe();
+
+        task.vcpu.switch(trappframe);
+
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(task.vm_manager.get_asid());
         set_next_mode(task.vcpu.get_mode());
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());
+
+        // crate::early_println!("[SCHED]   after  CPU {:#x?}", cpu);
+        // crate::early_println!("[SCHED]   after  Trapframe {:#x?}", cpu.get_trapframe());
 
         // Note: User context (VCPU) will be restored in schedule() after run() returns
     }

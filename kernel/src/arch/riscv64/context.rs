@@ -6,9 +6,8 @@
 
 use core::arch::naked_asm;
 use alloc::boxed::Box;
-use alloc::vec;
 
-use crate::arch::trap::user;
+use crate::arch::Trapframe;
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for RISC-V 64-bit
@@ -41,7 +40,7 @@ impl KernelContext {
         let stack_top = kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64; // Initial stack top = stack bottom
 
         Self {
-            sp: stack_top,
+            sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
             kernel_stack: Some(kernel_stack),

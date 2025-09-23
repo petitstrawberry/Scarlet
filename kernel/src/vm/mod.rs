@@ -206,7 +206,7 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
     let trampoline_size = trampoline_end - trampoline_start;
 
-    let arch = get_cpu();
+    let arch = get_cpu().as_paddr_cpu();
     let trampoline_vaddr_start = VMMAX - trampoline_size;
     let trampoline_vaddr_end = VMMAX;
 
@@ -219,13 +219,13 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
     let arch_vaddr = trampoline_vaddr_start + arch_offset;
     
-    early_println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    early_println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
-    early_println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
-    early_println!("  Arch paddr        : {:#x}", arch_paddr);
-    early_println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    early_println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
-    early_println!("  Arch vaddr        : {:#x}", arch_vaddr);
+    // early_println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    // early_println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
+    // early_println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
+    // early_println!("  Arch paddr        : {:#x}", arch_paddr);
+    // early_println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
+    // early_println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
+    // early_println!("  Arch vaddr        : {:#x}", arch_vaddr);
     
     let trampoline_map = VirtualMemoryMap {
         vmarea: MemoryArea {

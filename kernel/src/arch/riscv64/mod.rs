@@ -82,6 +82,12 @@ impl Riscv64 {
         let satp = root_pagetable.get_val_for_satp(asid);
         self.satp = satp as u64;
     }
+
+    pub fn as_paddr_cpu(&mut self) -> &mut Riscv64 {
+        unsafe {
+            &mut CPUS[self.hartid as usize]
+        }
+    }
 }
 
 #[repr(align(4))]
