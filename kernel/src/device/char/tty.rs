@@ -8,7 +8,6 @@ use core::any::Any;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
-use crate::arch::get_cpu;
 use crate::device::{Device, DeviceType};
 use crate::device::char::CharDevice;
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
@@ -254,11 +253,9 @@ impl CharDevice for TtyDevice {
             
             // No data available, block the current task
             if let Some(task) = mytask() {
-                let cpu = get_cpu();
-
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
-                self.input_waker.wait(task.get_id(), cpu.get_trapframe());
+                self.input_waker.wait(task.get_id(), task.get_trapframe().unwrap());
                 
                 // Continue the loop to re-check if data is available
                 continue;

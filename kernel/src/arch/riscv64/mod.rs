@@ -62,12 +62,6 @@ impl Riscv64 {
         addr
     }
 
-    pub fn get_trapframe(&mut self) -> &mut Trapframe {
-        unsafe {
-            &mut *(self.get_trapframe_paddr() as *mut Trapframe)
-        }
-    }
-
      pub fn set_kernel_stack(&mut self, initial_top: u64) {
         self.kernel_stack = initial_top;
     }

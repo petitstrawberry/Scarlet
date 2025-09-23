@@ -1028,7 +1028,9 @@ impl Task {
         }
 
         // The scheduler will handle saving the current task state internally
-        get_scheduler().schedule(get_cpu().get_trapframe());
+        if let Some(current_task) = mytask() {
+            get_scheduler().schedule(current_task.get_trapframe().unwrap());
+        }
     }
 
     /// Wait for a child task to exit and collect its status
@@ -1254,6 +1256,18 @@ impl Task {
     pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
         self.kernel_context.get_kernel_stack_memory_area()
     }
+
+    /// Get a mutable reference to the trapframe for this task
+    /// 
+    /// The trapframe contains the user-space register state and is located
+    /// at the top of the kernel stack. This provides access to modify the
+    /// user context during system calls, interrupts, and context switches.
+    /// 
+    /// # Returns
+    /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
+    pub fn get_trapframe(&mut self) -> Option<&mut Trapframe> {
+        self.kernel_context.get_trapframe()
+    }
 }
 
 #[derive(Debug)]
@@ -1380,7 +1394,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
     Scheduler::setup_task_execution(cpu, current_task);
-    arch_switch_to_user_space(cpu.get_trapframe());
+    arch_switch_to_user_space(current_task.get_trapframe().unwrap());
 }
 
 #[cfg(test)]

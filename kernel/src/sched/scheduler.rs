@@ -334,7 +334,7 @@ impl Scheduler {
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user_space(get_cpu().get_trapframe()); // Force switch to user space
+                arch_switch_to_user_space(next_task.get_trapframe().unwrap()); // Force switch to user space
             }
         }
 
@@ -512,9 +512,14 @@ impl Scheduler {
         // crate::early_println!("[SCHED]   before Trapframe {:#x?}", trapframe);
 
         cpu.set_kernel_stack(task.get_kernel_stack_bottom());
-        let trappframe = cpu.get_trapframe();
-
-        task.vcpu.switch(trappframe);
+        
+        // Handle trapframe and vcpu switching - use raw pointer to avoid borrow checker issues
+        // This is safe because we're accessing different fields of the same struct
+        let task_ptr = task as *mut Task;
+        unsafe {
+            let trapframe = (*task_ptr).get_trapframe().unwrap();
+            (*task_ptr).vcpu.switch(trapframe);
+        }
 
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(task.vm_manager.get_asid());

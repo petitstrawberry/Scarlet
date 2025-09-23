@@ -95,6 +95,26 @@ impl KernelContext {
     pub fn get_entry_point(&self) -> u64 {
         self.ra
     }
+
+    /// Get a mutable reference to the trapframe
+    /// 
+    /// The trapframe is located at the top of the kernel stack, reserved during
+    /// context creation. This provides access to the user-space register state.
+    /// 
+    /// # Returns
+    /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
+    pub fn get_trapframe(&mut self) -> Option<&mut Trapframe> {
+        match &mut self.kernel_stack {
+            Some(stack) => {
+                let stack_top = stack.as_ptr() as usize + stack.len();
+                let trapframe_addr = stack_top - core::mem::size_of::<Trapframe>();
+                unsafe {
+                    Some(&mut *(trapframe_addr as *mut Trapframe))
+                }
+            }
+            None => None,
+        }
+    }
 }
 
 /// Switch from current context to target context
