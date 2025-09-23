@@ -15,7 +15,7 @@ extern crate alloc;
 
 use core::panic;
 
-use alloc::{collections::vec_deque::VecDeque, string::ToString};
+use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
 use hashbrown::HashMap;
 
 use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector, trap::{self, user::arch_switch_to_user_space}}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
@@ -25,33 +25,66 @@ use crate::print;
 use crate::task::Task;
 
 /// Task pool that stores tasks in fixed positions
+const MAX_TASKS: usize = 1024;
+
 struct TaskPool {
-    tasks: HashMap<usize, Task>,
+    // Fixed-length slice on heap
+    tasks: Box<[Option<Task>]>,
+    id_to_index: HashMap<usize, usize>,
+    free_indices: Vec<usize>,
+    next_free_index: usize,
 }
 
 impl TaskPool {
     fn new() -> Self {
+        // Create fixed-length slice on heap
+        let tasks: Box<[Option<Task>]> = (0..MAX_TASKS)
+            .map(|_| None)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        
         TaskPool {
-            tasks: HashMap::new(),
+            tasks,
+            id_to_index: HashMap::new(),
+            free_indices: Vec::new(),
+            next_free_index: 0,
         }
     }
 
-    fn add_task(&mut self, task: Task) {
+    fn add_task(&mut self, task: Task) -> Result<(), &'static str> {
         let task_id = task.get_id();
-        self.tasks.insert(task_id, task);
+        
+        // Find available index
+        let index = if let Some(free_idx) = self.free_indices.pop() {
+            free_idx
+        } else if self.next_free_index < self.tasks.len() {
+            let idx = self.next_free_index;
+            self.next_free_index += 1;
+            idx
+        } else {
+            return Err("Task pool full");
+        };
+        
+        self.tasks[index] = Some(task);
+        self.id_to_index.insert(task_id, index);
+        Ok(())
     }
 
     fn get_task(&mut self, task_id: usize) -> Option<&mut Task> {
-        self.tasks.get_mut(&task_id)
+        let index = *self.id_to_index.get(&task_id)?;
+        self.tasks.get_mut(index)?.as_mut()
     }
 
     fn remove_task(&mut self, task_id: usize) -> Option<Task> {
-        self.tasks.remove(&task_id)
+        let index = self.id_to_index.remove(&task_id)?;
+        let task = self.tasks[index].take()?;
+        self.free_indices.push(index);
+        Some(task)
     }
 
     #[allow(dead_code)]
     fn contains_task(&self, task_id: usize) -> bool {
-        self.tasks.contains_key(&task_id)
+        self.id_to_index.contains_key(&task_id)
     }
 }
 
@@ -95,7 +128,9 @@ impl Scheduler {
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
         let task_id = task.get_id();
         // Add task to the task pool
-        self.task_pool.add_task(task);
+        if let Err(e) = self.task_pool.add_task(task) {
+            panic!("Failed to add task {}: {}", task_id, e);
+        }
         // Add task state info to ready queue
         self.ready_queue[cpu_id].push_back(task_id);
     }
