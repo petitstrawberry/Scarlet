@@ -25,6 +25,8 @@ use crate::print;
 use crate::task::Task;
 
 /// Task pool that stores tasks in fixed positions
+/// Current limit should be sufficient for most embedded/real-time use cases
+/// TODO: Consider making this configurable or dynamically expandable for general-purpose use
 const MAX_TASKS: usize = 1024;
 
 struct TaskPool {
