@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space, Arch, KernelContext}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{event::ProcessControlType, EventContent}, mem::page::{allocate_raw_pages, free_boxed_page, Page}, object::handle::HandleTable, sched::scheduler::{get_scheduler, Scheduler}, timer::{add_timer, get_tick, TimerHandler}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{Arch, KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{EventContent, event::ProcessControlType}, mem::page::{Page, allocate_raw_pages, free_boxed_page}, object::handle::HandleTable, sched::scheduler::{Scheduler, get_scheduler}, timer::{TimerHandler, add_timer, get_tick}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -935,7 +935,7 @@ impl Task {
         }
 
         // Copy register states
-        child.vcpu.regs = self.vcpu.regs.clone();
+        self.vcpu.copy_iregs_to(&mut child.vcpu.iregs);
         
         // Set the ABI
         if let Some(abi) = &self.abi {
@@ -1022,8 +1022,15 @@ impl Task {
         
         // Task cleanup completed - ABI module handles event cleanup
 
+        if mytask().is_none() || mytask().unwrap().get_id() != self.id {
+            // Not the current task, nothing more to do
+            return;
+        }
+
         // The scheduler will handle saving the current task state internally
-        get_scheduler().schedule(get_cpu());
+        if let Some(current_task) = mytask() {
+            get_scheduler().schedule(current_task.get_trapframe());
+        }
     }
 
     /// Wait for a child task to exit and collect its status
@@ -1057,10 +1064,10 @@ impl Task {
     /// This blocks the task and registers a timer to wake it up.
     /// 
     /// # Arguments
-    /// * `cpu` - The CPU context to store current task state
+    /// * `trapframe` - The trapframe of the current CPU state
     /// * `ticks` - The number of ticks to sleep
     /// 
-    pub fn sleep(&mut self, cpu: &mut Arch, ticks: u64) {
+    pub fn sleep(&mut self, trapframe: &mut Trapframe, ticks: u64) {
 
         struct SleepWakerHandler {
             task_id: usize,
@@ -1088,7 +1095,7 @@ impl Task {
 
         self.add_software_timer_handler(handler);
         let waker = get_waitpid_waker(self.id);
-        waker.wait(self.get_id(), cpu);
+        waker.wait(self.get_id(), trapframe);
     }
 
     // VFS Helper Methods
@@ -1243,11 +1250,22 @@ impl Task {
     /// Get the kernel stack memory area for this task
     /// 
     /// # Returns
-    /// The kernel stack memory area as a MemoryArea, or None if no kernel stack is
-    /// allocated
+    /// The kernel stack memory area as a MemoryArea
     /// 
-    pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
+    pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
         self.kernel_context.get_kernel_stack_memory_area()
+    }
+
+    /// Get a mutable reference to the trapframe for this task
+    /// 
+    /// The trapframe contains the user-space register state and is located
+    /// at the top of the kernel stack. This provides access to modify the
+    /// user context during system calls, interrupts, and context switches.
+    /// 
+    /// # Returns
+    /// A mutable reference to the Trapframe
+    pub fn get_trapframe(&mut self) -> &mut Trapframe {
+        self.kernel_context.get_trapframe()
     }
 }
 
@@ -1375,7 +1393,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
     Scheduler::setup_task_execution(cpu, current_task);
-    arch_switch_to_user_space(cpu.get_trapframe());
+    arch_switch_to_user_space(current_task.get_trapframe());
 }
 
 #[cfg(test)]

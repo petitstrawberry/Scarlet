@@ -4,6 +4,7 @@
 //! managing the system timer and scheduling tasks based on time intervals.
 //! 
 
+use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
 use crate::environment::NUM_OF_CPUS;
 use crate::sched::scheduler::get_scheduler;
@@ -74,7 +75,7 @@ impl KernelTimer {
 static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Increment the global tick counter. Call this from the timer interrupt handler.
-pub fn tick() {
+pub fn tick(trapframe: &mut Trapframe) {
     let cpu_id = crate::arch::get_cpu().get_cpuid();
     let timer = get_kernel_timer();
     timer.set_interval_us(cpu_id, TICK_INTERVAL_US);
@@ -84,7 +85,7 @@ pub fn tick() {
     // Call scheduler tick handler to manage time slices
     let scheduler = get_scheduler();
     // crate::println!("[timer] Tick: {}, CPU: {}", now, cpu_id);
-    scheduler.on_tick(cpu_id);
+    scheduler.on_tick(cpu_id, trapframe);
 }
 
 /// Get the current tick count (monotonic, since boot)

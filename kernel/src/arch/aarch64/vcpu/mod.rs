@@ -2,7 +2,9 @@
 //!
 //! Virtual CPU functionality for AArch64 architecture.
 
-use super::{Registers, Aarch64};
+use crate::arch::Trapframe;
+
+use super::IntRegisters;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -12,7 +14,7 @@ pub enum Mode {
 
 #[derive(Debug, Clone)]
 pub struct Vcpu {
-    pub regs: Registers,
+    pub iregs: IntRegisters,
     pc: u64,
     asid: usize,
     mode: Mode,
@@ -21,7 +23,7 @@ pub struct Vcpu {
 impl Vcpu {
     pub fn new(mode: Mode) -> Self {
         Vcpu {
-            regs: Registers::new(),
+            iregs: IntRegisters::new(),
             pc: 0,
             asid: 0,
             mode,
@@ -41,25 +43,33 @@ impl Vcpu {
     }
 
     pub fn set_sp(&mut self, sp: usize) {
-        // SP is X31 in AArch64
-        self.regs.sp = sp;
+        // SP is register 31 in AArch64 (index 31 in our array)
+        self.iregs.reg[31] = sp;
     }
 
     pub fn get_mode(&self) -> Mode {
         self.mode
     }
 
-    pub fn store(&mut self, aarch64: &Aarch64) {
-        self.regs = aarch64.regs.clone();
-        self.pc = aarch64.elr;
+    pub fn reset_iregs(&mut self) {
+        self.iregs = IntRegisters::new();
     }
 
-    pub fn switch(&mut self, aarch64: &mut Aarch64) {
-        aarch64.regs = self.regs.clone();
-        aarch64.elr = self.pc;
+    pub fn copy_iregs_to(&self, iregs: &mut IntRegisters) {
+        *iregs = self.iregs;
     }
-}
 
-pub fn vcpu_init() {
-    // TODO: Initialize AArch64 vCPU
+    pub fn copy_iregs_from(&mut self, iregs: &IntRegisters) {
+        self.iregs = *iregs;
+    }
+
+    pub fn store(&mut self, trapframe: &Trapframe) {
+        self.iregs = trapframe.regs;
+        self.pc = trapframe.epc;
+    }
+
+    pub fn switch(&mut self, trapframe: &mut Trapframe) {
+        trapframe.regs = self.iregs;
+        trapframe.epc = self.pc;
+    }
 }

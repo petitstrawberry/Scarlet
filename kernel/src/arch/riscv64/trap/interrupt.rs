@@ -1,4 +1,4 @@
-use crate::arch::Trapframe;
+use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
 use crate::interrupt::InterruptManager;
 
@@ -25,14 +25,14 @@ fn handle_software_interrupt() {
 }
 
 /// Handle timer interrupt from CLINT
-fn handle_timer_interrupt(_trapframe: &mut Trapframe) {
+fn handle_timer_interrupt(trapframe: &mut Trapframe) {
     // Increment the global tick counter
-    crate::timer::tick();
+    crate::timer::tick(trapframe);
 }
 
 /// Handle external interrupt from PLIC
 fn handle_external_interrupt(trapframe: &mut Trapframe) {
-    let cpu_id = trapframe.get_cpuid() as u32;
+    let cpu_id = get_cpu().get_cpuid() as u32;
 
     // Claim and handle external interrupt through PLIC
     match InterruptManager::with_manager(|mgr| {

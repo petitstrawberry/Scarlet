@@ -8,7 +8,7 @@ use core::{arch::naked_asm, mem::transmute};
 use core::arch::asm;
 
 use crate::{
-    arch::{Aarch64, aarch64::{TRAPFRAME, trap_init}}, 
+    arch::{Aarch64, aarch64::{CPUS, trap_init}}, 
     device::fdt::{init_fdt, relocate_fdt, create_bootinfo_from_fdt}, 
     environment::STACK_SIZE, 
     mem::{__FDT_RESERVED_START, init_bss}, 
@@ -200,7 +200,7 @@ pub extern "C" fn arch_start_kernel(core_id: usize, dtb_ptr: usize) {
     crate::early_println!("[aarch64] Core {}: Initializing architecture support...", core_id);
     
     // Get raw Aarch64 struct
-    let aarch64: &mut Aarch64 = unsafe { transmute(&TRAPFRAME[core_id] as *const _ as usize) };
+    let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[core_id] as *const _ as usize) };
     trap_init(aarch64);
 
     start_kernel(&bootinfo);

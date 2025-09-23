@@ -84,19 +84,43 @@
 //!
 //! ## Boot Process
 //!
-//! Scarlet follows a structured initialization sequence:
+//! Scarlet follows a structured, architecture-agnostic initialization sequence
+//! built around the BootInfo structure for unified system startup:
 //!
-//! 1. **Early Architecture Init**: CPU feature detection, interrupt vector setup
-//! 2. **FDT Parsing**: Hardware discovery from Flattened Device Tree
-//! 3. **Memory Subsystem**: Heap allocator initialization, virtual memory setup
-//! 4. **Device Discovery**: Platform device enumeration and driver binding
-//! 5. **Interrupt Setup**: CLINT/PLIC initialization for timer and external interrupts
-//! 6. **VFS Initialization**: Mount root filesystem, initialize global VFS manager
-//! 7. **Task System**: Scheduler setup, initial task creation
-//! 8. **User Space Transition**: Load initial programs and switch to user mode
+//! ### Architecture-Specific Boot Phase
 //!
-//! Each stage validates successful completion before proceeding, with detailed logging
-//! available through the early console interface.
+//! 1. **Low-level Initialization**: CPU feature detection, trap vector setup
+//! 2. **Hardware Discovery**: Parse firmware-provided hardware description (FDT/UEFI/ACPI)
+//! 3. **Memory Layout**: Determine usable memory areas and relocate critical data
+//! 4. **BootInfo Creation**: Consolidate boot parameters into unified structure
+//! 5. **Kernel Handoff**: Call `start_kernel()` with complete BootInfo
+//!
+//! ### Unified Kernel Initialization
+//!
+//! 6. **Early Memory Setup**: Heap allocator initialization using BootInfo memory areas
+//! 7. **Early Subsystems**: Critical kernel subsystem initialization via early initcalls
+//! 8. **Driver Framework**: Device driver registration and basic driver initcalls
+//! 9. **Virtual Memory**: Kernel virtual memory management and address space setup
+//! 10. **Device Discovery**: Hardware enumeration from BootInfo device source
+//! 11. **Graphics Subsystem**: Framebuffer and graphics device initialization
+//! 12. **Interrupt Infrastructure**: Interrupt controller setup and handler registration
+//! 13. **Timer Subsystem**: Kernel timer initialization for scheduling and timekeeping
+//! 14. **Virtual File System**: VFS initialization and root filesystem mounting
+//! 15. **Initial Filesystem**: Initramfs processing if provided in BootInfo
+//! 16. **Initial Process**: Create and load first userspace task (/system/scarlet/bin/init)
+//! 17. **Scheduler Activation**: Begin task scheduling and enter normal operation
+//!
+//! ### BootInfo Integration Benefits
+//!
+//! - **Architecture Abstraction**: Unified interface across RISC-V, ARM, x86 platforms
+//! - **Modular Design**: Clean separation between arch-specific and generic initialization
+//! - **Memory Safety**: Structured memory area management prevents overlaps and corruption
+//! - **Extensibility**: Easy addition of new boot parameters without breaking existing code
+//! - **Debugging**: Centralized boot information for diagnostics and troubleshooting
+//!
+//! Each stage validates successful completion before proceeding, with comprehensive
+//! logging available through the early console interface. The BootInfo structure
+//! ensures all necessary information is available throughout the initialization process.
 //!
 //! ## System Integration
 //!
@@ -288,23 +312,86 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
+/// Represents the source of device information during boot
+/// 
+/// Different boot protocols provide hardware information through various mechanisms.
+/// This enum captures the source and relevant parameters for device discovery.
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceSource {
-    Fdt(usize),  // FDTアドレス
+    /// Flattened Device Tree (FDT) source with relocated FDT address
+    /// Used by RISC-V, ARM, and other architectures that support device trees
+    Fdt(usize),
+    /// Unified Extensible Firmware Interface (UEFI) source
+    /// Modern firmware interface providing comprehensive hardware information  
     Uefi,
+    /// Advanced Configuration and Power Interface (ACPI) source
+    /// x86/x86_64 standard for hardware configuration and power management
     Acpi,
-    None,        // No device information
+    /// No device information available
+    /// Fallback when no hardware description is provided by firmware
+    None,
 }
 
+/// Boot information structure containing essential system parameters
+/// 
+/// This structure is created during the early boot process and contains
+/// all necessary information for kernel initialization. It abstracts
+/// architecture-specific boot protocols into a common interface.
+/// 
+/// # Architecture Integration
+/// 
+/// Different architectures populate this structure from their respective
+/// boot protocols:
+/// - **RISC-V**: Created from FDT (Flattened Device Tree) data
+/// - **ARM/AArch64**: Created from FDT or UEFI
+/// - **x86/x86_64**: Created from ACPI tables or legacy BIOS structures
+/// 
+/// # Usage
+/// 
+/// The BootInfo is passed to `start_kernel()` as the primary parameter
+/// and provides all essential information needed for kernel initialization:
+/// 
+/// ```rust
+/// #[no_mangle]
+/// pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
+///     // Use boot_info for system initialization
+///     let memory = boot_info.usable_memory;
+///     let cpu_id = boot_info.cpu_id;
+///     // ...
+/// }
+/// ```
 pub struct BootInfo {
+    /// CPU/Hart ID of the boot processor
+    /// Used for multicore initialization and per-CPU data structures
     pub cpu_id: usize,
+    /// Usable memory area available for kernel allocation
+    /// Excludes reserved regions, firmware areas, and kernel image
     pub usable_memory: MemoryArea,
+    /// Optional initramfs memory area if available
+    /// Contains initial root filesystem for early userspace programs
     pub initramfs: Option<MemoryArea>,
+    /// Optional kernel command line parameters
+    /// Boot arguments passed by bootloader for kernel configuration
     pub cmdline: Option<&'static str>,
+    /// Source of device information for hardware discovery
+    /// Determines how the kernel will enumerate and initialize devices
     pub device_source: DeviceSource,
 }
 
 impl BootInfo {
+    /// Creates a new BootInfo instance with the specified parameters
+    /// 
+    /// # Arguments
+    /// 
+    /// * `cpu_id` - ID of the boot processor/hart
+    /// * `usable_memory` - Memory area available for kernel allocation
+    /// * `initramfs` - Optional initramfs memory area
+    /// * `cmdline` - Optional kernel command line parameters
+    /// * `device_source` - Source of device information for hardware discovery
+    /// 
+    /// # Returns
+    /// 
+    /// A new BootInfo instance containing the specified boot parameters
     pub fn new(cpu_id: usize, usable_memory: MemoryArea, initramfs: Option<MemoryArea>, cmdline: Option<&'static str>, device_source: DeviceSource) -> Self {
         Self {
             cpu_id,
@@ -315,6 +402,14 @@ impl BootInfo {
         }
     }
 
+    /// Returns the kernel command line arguments
+    /// 
+    /// Provides access to boot parameters passed by the bootloader.
+    /// Returns an empty string if no command line was provided.
+    /// 
+    /// # Returns
+    /// 
+    /// Command line string slice, or empty string if none available
     pub fn get_cmdline(&self) -> &str {
         if let Some(cmdline) = self.cmdline {
             cmdline
@@ -323,11 +418,79 @@ impl BootInfo {
         }
     }
 
+    /// Returns the initramfs memory area if available
+    /// 
+    /// The initramfs contains an initial root filesystem that can be used
+    /// during early boot before mounting the real root filesystem.
+    /// 
+    /// # Returns
+    /// 
+    /// Optional memory area containing the initramfs data
     pub fn get_initramfs(&self) -> Option<MemoryArea> {
         self.initramfs
     }
 }
 
+/// Main kernel entry point for the boot processor
+/// 
+/// This function is called by architecture-specific boot code and performs
+/// the complete kernel initialization sequence using information provided
+/// in the BootInfo structure.
+/// 
+/// # Boot Sequence
+/// 
+/// The kernel initialization follows this structured sequence:
+/// 
+/// 1. **Early System Setup**: Extract boot parameters from BootInfo
+/// 2. **Memory Initialization**: Set up heap allocator with usable memory
+/// 3. **Early Initcalls**: Initialize critical early subsystems
+/// 4. **Driver Initcalls**: Load and initialize device drivers
+/// 5. **Virtual Memory**: Set up kernel virtual memory management
+/// 6. **Device Discovery**: Enumerate hardware from BootInfo device source
+/// 7. **Graphics Initialization**: Initialize graphics subsystem and framebuffer
+/// 8. **Interrupt System**: Set up interrupt controllers and handlers
+/// 9. **Timer Subsystem**: Initialize kernel timer and scheduling infrastructure
+/// 10. **VFS Setup**: Initialize virtual filesystem and mount root
+/// 11. **Initramfs Processing**: Mount initramfs if provided in BootInfo
+/// 12. **Initial Task**: Create and load initial userspace process
+/// 13. **Scheduler Start**: Begin task scheduling and enter normal operation
+/// 
+/// # Architecture Integration
+/// 
+/// This function is architecture-agnostic and relies on the BootInfo structure
+/// to abstract hardware-specific details. Architecture-specific boot code is
+/// responsible for creating a properly initialized BootInfo before calling
+/// this function.
+/// 
+/// # Arguments
+/// 
+/// * `boot_info` - Comprehensive boot information structure containing:
+///   - CPU ID for multicore initialization
+///   - Usable memory area for heap allocation
+///   - Optional initramfs location and size
+///   - Kernel command line parameters
+///   - Device information source (FDT/UEFI/ACPI)
+/// 
+/// # Memory Layout
+/// 
+/// The function expects the following memory layout:
+/// - Kernel image loaded and executable
+/// - BootInfo.usable_memory available for allocation
+/// - Hardware description (FDT/ACPI) accessible via device_source
+/// - Optional initramfs data at specified location
+/// 
+/// # Safety
+/// 
+/// This function assumes:
+/// - Architecture-specific initialization has completed successfully
+/// - BootInfo contains valid memory areas and addresses
+/// - Basic CPU features (MMU, interrupts) are available
+/// - Memory protection allows kernel operation
+/// 
+/// # Returns
+/// 
+/// This function never returns - it transitions to the scheduler and
+/// enters normal kernel operation mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     let cpu_id = boot_info.cpu_id;

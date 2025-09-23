@@ -9,6 +9,6 @@ pub fn get_cpu() -> &'static crate::arch::Aarch64 {
     // TODO: Get current CPU context
     unsafe {
         let cpu_id = 0; // TODO: Get actual CPU ID
-        core::mem::transmute(&super::TRAPFRAME[cpu_id] as *const _ as usize)
+        core::mem::transmute(&super::CPUS[cpu_id] as *const _ as usize)
     }
 }

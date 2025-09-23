@@ -1,38 +1,97 @@
 //! Flattened Device Tree (FDT) management module.
 //! 
-//! This module provides functionality for managing the Flattened Device Tree (FDT),
-//! which is a data structure used to describe the hardware components of a system.
+//! This module provides comprehensive functionality for managing the Flattened Device Tree (FDT),
+//! which is a data structure used to describe the hardware components of a system in
+//! various architectures including RISC-V, ARM, and PowerPC.
 //!
 //! # Overview
 //!
-//! The FDT is passed by the bootloader to the kernel and contains information about
-//! the hardware configuration of the system. This module parses and provides access
-//! to that information.
+//! The FDT is passed by the bootloader to the kernel and contains critical information about
+//! the hardware configuration of the system. This module parses, relocates, and provides
+//! access to that information through a unified interface that integrates with the kernel's
+//! BootInfo structure.
 //!
 //! # Core Components
 //!
-//! - `FdtManager`: A singleton that manages access to the parsed FDT
-//! - `init_fdt()`: Function to initialize the FDT subsystem
+//! - **`FdtManager`**: A singleton that manages access to the parsed FDT with relocation support
+//! - **`init_fdt()`**: Function to initialize the FDT subsystem from bootloader-provided address
+//! - **`relocate_fdt()`**: Function to safely relocate FDT to kernel-managed memory
+//! - **`create_bootinfo_from_fdt()`**: Function to extract BootInfo from FDT data
+//!
+//! # Boot Integration
+//!
+//! The module integrates with the kernel boot process through the BootInfo structure:
+//!
+//! 1. **Initialization**: Architecture code calls `init_fdt()` with bootloader-provided address
+//! 2. **Relocation**: FDT is moved to safe memory using `relocate_fdt()`
+//! 3. **BootInfo Creation**: `create_bootinfo_from_fdt()` extracts system information
+//! 4. **Kernel Handoff**: BootInfo is passed to `start_kernel()` for unified initialization
+//!
+//! # Memory Management
+//!
+//! The module provides advanced memory management for FDT data:
+//! - **Safe Relocation**: Copies FDT to kernel-controlled memory to prevent corruption
+//! - **Initramfs Handling**: Automatically relocates initramfs to prevent memory conflicts
+//! - **Memory Area Calculation**: Computes usable memory areas excluding kernel and FDT regions
+//!
+//! # Architecture Support
+//!
+//! This module is architecture-agnostic and supports any platform using FDT:
+//! - **RISC-V**: Primary device tree platform
+//! - **ARM/AArch32**: Standard hardware description method
+//! - **AArch64**: Alternative to UEFI for hardware description
+//! - **PowerPC**: Traditional FDT usage
+//! - **Other FDT platforms**: Any architecture supporting device trees
 //!
 //! # Usage
 //!
-//! Before using the FDT functions, you must:
-//! 1. Set the FDT address using `FdtManager::set_fdt_addr()`
-//! 2. Call `init_fdt()` to parse the FDT
+//! ## Basic Initialization
 //!
-//! After initialization, you can access the FDT using the static manager:
+//! ```rust
+//! // Initialize FDT from bootloader-provided address
+//! init_fdt(fdt_addr);
+//! 
+//! // Relocate to safe memory
+//! let dest_ptr = safe_memory_area as *mut u8;
+//! let relocated_area = relocate_fdt(dest_ptr);
+//! 
+//! // Create BootInfo with FDT data
+//! let bootinfo = create_bootinfo_from_fdt(cpu_id, relocated_area.start);
 //! ```
+//!
+//! ## FDT Data Access
+//!
+//! ```rust
 //! let fdt_manager = FdtManager::get_manager();
 //! if let Some(fdt) = fdt_manager.get_fdt() {
-//!     // Use the FDT data
+//!     // Access FDT nodes and properties
+//!     let memory_node = fdt.find_node("/memory");
+//!     let chosen_node = fdt.find_node("/chosen");
 //! }
 //! ```
 //!
+//! # Hardware Information Extraction
+//!
+//! The module extracts essential hardware information:
+//! - **Memory Layout**: Total system memory from `/memory` nodes
+//! - **Initramfs Location**: Initial filesystem from `/chosen` node
+//! - **Command Line**: Boot arguments from `/chosen/bootargs`
+//! - **Device Tree**: Complete hardware description for device enumeration
+//!
+//! # Safety and Error Handling
+//!
+//! The module provides robust error handling:
+//! - **Validation**: All FDT operations include proper error checking
+//! - **Memory Safety**: Relocation prevents use-after-free and corruption
+//! - **Graceful Degradation**: Missing optional components (like initramfs) are handled gracefully
+//! - **Panic Conditions**: Clear documentation of when functions may panic
+//!
 //! # Implementation Details
 //!
-//! The module uses the `fdt` crate to parse the device tree. It maintains a static
-//! global manager instance to provide access throughout the kernel. The FDT address
-//! is stored in a static variable that must be set before initialization.
+//! The module uses the `fdt` crate for low-level parsing while providing high-level
+//! abstractions for kernel integration. It maintains a static global manager instance
+//! to provide access throughout the kernel, with careful synchronization to prevent
+//! data races during initialization.
 
 
 use core::panic;
@@ -343,18 +402,68 @@ pub fn relocate_fdt(dest_ptr: *mut u8) -> MemoryArea {
 
 /// Create BootInfo from FDT data
 /// 
-/// This function creates a BootInfo structure by extracting information from the FDT.
-/// It is architecture-agnostic and can be used by any architecture that uses FDT
-/// (RISC-V, ARM, AArch64, etc.).
+/// This function creates a comprehensive BootInfo structure by extracting essential
+/// system information from the Flattened Device Tree (FDT). It serves as the bridge
+/// between FDT-based boot protocols and the kernel's unified boot interface.
+/// 
+/// # Architecture Compatibility
+/// 
+/// This function is architecture-agnostic and can be used by any architecture that
+/// uses FDT for hardware description:
+/// - **RISC-V**: Primary boot protocol
+/// - **ARM/AArch32**: Standard boot method  
+/// - **AArch64**: Alternative to UEFI
+/// - **PowerPC**: Traditional FDT usage
+/// - **Other architectures**: Any FDT-capable platform
+/// 
+/// # Boot Information Extraction
+/// 
+/// The function extracts the following information from FDT:
+/// - **Memory Layout**: DRAM size and location from `/memory` node
+/// - **Usable Memory**: Calculates available memory excluding kernel image
+/// - **Initramfs**: Relocates and provides access to initial filesystem
+/// - **Command Line**: Extracts bootargs from `/chosen` node
+/// - **Device Source**: Creates FDT-based device source reference
+/// 
+/// # Memory Management
+/// 
+/// The function performs automatic memory management:
+/// 1. **DRAM Discovery**: Parses memory nodes to find total system memory
+/// 2. **Kernel Exclusion**: Calculates usable memory starting after kernel image
+/// 3. **Initramfs Relocation**: Moves initramfs to safe memory location
+/// 4. **Memory Area Updates**: Adjusts usable memory to account for relocations
+/// 
+/// # Initramfs Handling
+/// 
+/// If initramfs is present in the FDT `/chosen` node:
+/// - Automatically relocates to prevent overlap with kernel heap
+/// - Updates usable memory area to exclude relocated initramfs
+/// - Provides relocated address in BootInfo for VFS initialization
 /// 
 /// # Arguments
 /// 
-/// * `cpu_id` - ID of the current CPU/Hart
-/// * `relocated_fdt_addr` - Address of the relocated FDT
+/// * `cpu_id` - ID of the current CPU/Hart performing boot
+/// * `relocated_fdt_addr` - Physical address of the relocated FDT in memory
 /// 
 /// # Returns
 /// 
-/// A BootInfo structure containing system information extracted from the FDT
+/// A complete BootInfo structure containing all essential boot parameters
+/// extracted from the FDT, ready for use by `start_kernel()`.
+/// 
+/// # Panics
+/// 
+/// This function will panic if:
+/// - FDT manager is not properly initialized
+/// - Required memory nodes are missing from FDT
+/// - Memory layout is invalid or corrupted
+/// 
+/// # Example
+/// 
+/// ```rust
+/// // Called from architecture-specific boot code
+/// let bootinfo = create_bootinfo_from_fdt(hartid, relocated_fdt_area.start);
+/// start_kernel(&bootinfo);
+/// ```
 /// 
 pub fn create_bootinfo_from_fdt(cpu_id: usize, relocated_fdt_addr: usize) -> BootInfo {
     let fdt_manager = FdtManager::get_manager();

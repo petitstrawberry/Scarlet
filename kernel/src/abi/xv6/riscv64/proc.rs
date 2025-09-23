@@ -36,7 +36,7 @@ pub fn sys_fork(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     match parent_task.clone_task(CloneFlags::default()) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
-            child_task.vcpu.regs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
+            child_task.vcpu.iregs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             /* Return the child task ID as pid to the parent proc */
             child_id
@@ -52,7 +52,7 @@ pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
-    get_scheduler().schedule(get_cpu());
+    get_scheduler().schedule(trapframe);
     usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 

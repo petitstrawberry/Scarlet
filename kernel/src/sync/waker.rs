@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use spin::Mutex;
 use core::fmt;
-use crate::arch::Arch;
+use crate::arch::{Arch, Trapframe};
 use crate::task::{BlockedType, Task, TaskState};
 use crate::sched::scheduler::get_scheduler;
 
@@ -106,7 +106,7 @@ impl Waker {
     /// This function returns when the task is woken up by another part of the system.
     /// The calling code can then continue execution, typically to re-check the
     /// condition that caused the wait.
-    pub fn wait(&self, task_id: usize, cpu: &mut Arch) {
+    pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
         // crate::println!("[WAKER] Task {} waiting on waker '{}'", task_id, self.name);
                 
         // Add task to wait queue first
@@ -123,7 +123,7 @@ impl Waker {
         }
 
         // Yield CPU to scheduler - this will return when the task is woken up
-        get_scheduler().schedule(cpu);
+        get_scheduler().schedule(trapframe);
         
         // When we reach here, the task has been woken up and rescheduled
         // crate::println!("[WAKER] Task {} woken up from waker '{}'", task_id, self.name);

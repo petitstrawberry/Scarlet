@@ -5,18 +5,15 @@
 //! of the CPU.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Registers {
-    /// General-purpose registers X0-X30
-    pub reg: [usize; 31],
-    /// Stack pointer (SP)
-    pub sp: usize,
+pub struct IntRegisters {
+    /// General-purpose registers X0-X30 + SP (32 total to match RISC-V structure)
+    pub reg: [usize; 32],
 }
 
-impl Registers {
+impl IntRegisters {
     pub const fn new() -> Self {
-        Registers { 
-            reg: [0; 31],
-            sp: 0,
+        IntRegisters { 
+            reg: [0; 32],
         }
     }
 }
