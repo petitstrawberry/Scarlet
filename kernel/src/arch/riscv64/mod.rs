@@ -49,7 +49,7 @@ pub struct Riscv64 {
 
 impl Riscv64 {
     pub const fn new(cpu_id: usize) -> Self {
-        Riscv64 { scratch: 0, hartid: cpu_id as u64,kernel_stack: 0, kernel_trap: 0, satp: 0 }
+        Riscv64 { scratch: 0, hartid: cpu_id as u64, kernel_stack: 0, kernel_trap: 0, satp: 0 }
     }
 
     pub fn get_cpuid(&self) -> usize {
