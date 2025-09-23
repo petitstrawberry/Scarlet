@@ -1,12 +1,10 @@
 use core::arch::naked_asm;
-use core::sync::atomic::compiler_fence;
 use core::{arch::asm, mem::transmute};
 
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_interrupt_handler;
 
-use crate::arch::{get_kernel_trapvector_paddr, set_trapvector, trap, Trapframe};
-use crate::initcall::early;
+use crate::arch::{Trapframe, get_kernel_trapvector_paddr, set_trapvector};
 
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
@@ -216,10 +214,7 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 #[unsafe(export_name = "arch_switch_to_user_space")]
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
-    let cpu = crate::arch::get_cpu();
 
-    // crate::early_println!("CPU: {:#x?}", cpu);
-    
     // Get the trampoline address for _user_trap_exit
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
     // crate::early_println!("_user_trap_entry: {:#x}, _user_trap_exit: {:#x}, offset: {:#x}", _user_trap_entry as usize, _user_trap_exit as usize, trap_exit_offset);
