@@ -29,7 +29,7 @@ pub mod context;
 pub mod switch;
 
 pub use earlycon::*;
-pub use registers::Registers;
+pub use registers::IntRegisters;
 
 pub type Arch = Riscv64;
 
@@ -93,14 +93,14 @@ impl Riscv64 {
 #[repr(align(4))]
 #[derive(Debug, Clone)]
 pub struct Trapframe {
-    pub regs: Registers,
+    pub regs: IntRegisters,
     pub epc: u64,
 }
 
 impl Trapframe {
     pub fn new() -> Self {
         Trapframe {
-            regs: Registers::new(),
+            regs: IntRegisters::new(),
             epc: 0,
         }
     }

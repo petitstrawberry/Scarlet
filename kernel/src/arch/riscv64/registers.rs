@@ -5,12 +5,12 @@
 //! of the CPU.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Registers {
+pub struct IntRegisters {
     pub reg: [usize; 32],
 }
 
-impl Registers {
+impl IntRegisters {
     pub const fn new() -> Self {
-        Registers { reg: [0; 32] }
+        IntRegisters { reg: [0; 32] }
     }
 }

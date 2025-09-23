@@ -935,7 +935,7 @@ impl Task {
         }
 
         // Copy register states
-        child.vcpu.regs = self.vcpu.regs.clone();
+        self.vcpu.copy_iregs_to(&mut child.vcpu.iregs);
         
         // Set the ABI
         if let Some(abi) = &self.abi {
