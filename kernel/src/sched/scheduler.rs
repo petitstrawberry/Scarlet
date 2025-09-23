@@ -18,15 +18,19 @@ use core::panic;
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
 use hashbrown::HashMap;
 
-use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector, trap::{self, user::arch_switch_to_user_space}}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
+use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector, trap::{user::arch_switch_to_user_space}}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
 use crate::println;
 use crate::print;
 
 use crate::task::Task;
 
 /// Task pool that stores tasks in fixed positions
-/// Current limit should be sufficient for most embedded/real-time use cases
-/// TODO: Consider making this configurable or dynamically expandable for general-purpose use
+/// With each Task being 824 bytes, 1024 tasks consume approximately 824 KiB of memory,
+/// which is very reasonable for general-purpose systems.
+/// TODO: Refactor Task struct to use fine-grained Mutex on individual fields
+///       (e.g., state: Mutex<TaskState>, time_slice: Mutex<usize>) and change
+///       TaskPool to use Arc<Task> for safe sharing across threads/contexts.
+///       This would also eliminate the fixed-size limitation.
 const MAX_TASKS: usize = 1024;
 
 struct TaskPool {
