@@ -334,7 +334,7 @@ impl Scheduler {
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
-                arch_switch_to_user_space(next_task.get_trapframe().unwrap()); // Force switch to user space
+                arch_switch_to_user_space(next_task.get_trapframe()); // Force switch to user space
             }
         }
 
@@ -517,7 +517,7 @@ impl Scheduler {
         // This is safe because we're accessing different fields of the same struct
         let task_ptr = task as *mut Task;
         unsafe {
-            let trapframe = (*task_ptr).get_trapframe().unwrap();
+            let trapframe = (*task_ptr).get_trapframe();
             (*task_ptr).vcpu.switch(trapframe);
         }
 

@@ -1029,7 +1029,7 @@ impl Task {
 
         // The scheduler will handle saving the current task state internally
         if let Some(current_task) = mytask() {
-            get_scheduler().schedule(current_task.get_trapframe().unwrap());
+            get_scheduler().schedule(current_task.get_trapframe());
         }
     }
 
@@ -1250,10 +1250,9 @@ impl Task {
     /// Get the kernel stack memory area for this task
     /// 
     /// # Returns
-    /// The kernel stack memory area as a MemoryArea, or None if no kernel stack is
-    /// allocated
+    /// The kernel stack memory area as a MemoryArea
     /// 
-    pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
+    pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
         self.kernel_context.get_kernel_stack_memory_area()
     }
 
@@ -1264,8 +1263,8 @@ impl Task {
     /// user context during system calls, interrupts, and context switches.
     /// 
     /// # Returns
-    /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
-    pub fn get_trapframe(&mut self) -> Option<&mut Trapframe> {
+    /// A mutable reference to the Trapframe
+    pub fn get_trapframe(&mut self) -> &mut Trapframe {
         self.kernel_context.get_trapframe()
     }
 }
@@ -1394,7 +1393,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
     let cpu = get_cpu();
     let current_task = get_scheduler().get_current_task(cpu.get_cpuid()).unwrap();
     Scheduler::setup_task_execution(cpu, current_task);
-    arch_switch_to_user_space(current_task.get_trapframe().unwrap());
+    arch_switch_to_user_space(current_task.get_trapframe());
 }
 
 #[cfg(test)]

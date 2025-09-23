@@ -255,7 +255,7 @@ impl CharDevice for TtyDevice {
             if let Some(task) = mytask() {
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
-                self.input_waker.wait(task.get_id(), task.get_trapframe().unwrap());
+                self.input_waker.wait(task.get_id(), task.get_trapframe());
                 
                 // Continue the loop to re-check if data is available
                 continue;

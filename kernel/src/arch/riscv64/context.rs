@@ -24,9 +24,9 @@ pub struct KernelContext {
     pub ra: u64,
     /// Saved registers s0-s11 (callee-saved)
     pub s: [u64; 12],
-    /// Kernel stack for this context (None = uninitialized)
+    /// Kernel stack for this context
     /// Using Box<[u8]> to directly allocate on heap without stack overflow
-    pub kernel_stack: Option<Box<[u8]>>,
+    pub kernel_stack: Box<[u8]>,
 }
 
 impl KernelContext {
@@ -43,30 +43,21 @@ impl KernelContext {
             sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
-            kernel_stack: Some(kernel_stack),
+            kernel_stack,
         }
     }
 
     /// Get the bottom of the kernel stack
     pub fn get_kernel_stack_bottom(&self) -> u64 {
-        match &self.kernel_stack {
-            Some(stack) => stack.as_ptr() as u64 + stack.len() as u64,
-            None => 0,
-        }
+        self.kernel_stack.as_ptr() as u64 + self.kernel_stack.len() as u64
     }
 
-    pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
-        match &self.kernel_stack {
-            Some(stack) => Some(MemoryArea::new(stack.as_ptr() as usize, self.get_kernel_stack_bottom() as usize - 1)),
-            None => None,
-        }
+    pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
+        MemoryArea::new(self.kernel_stack.as_ptr() as usize, self.get_kernel_stack_bottom() as usize - 1)
     }
 
-    pub fn get_kernel_stack_ptr(&self) -> Option<*const u8> {
-        match &self.kernel_stack {
-            Some(stack) => Some(stack.as_ptr()),
-            None => None,
-        }
+    pub fn get_kernel_stack_ptr(&self) -> *const u8 {
+        self.kernel_stack.as_ptr()
     }
 
     /// Set the kernel stack for this context
@@ -74,7 +65,7 @@ impl KernelContext {
     /// * `stack` - Boxed slice representing the kernel stack memory
     /// 
     pub fn set_kernel_stack(&mut self, stack: Box<[u8]>) {
-        self.kernel_stack = Some(stack);
+        self.kernel_stack = stack;
         self.sp = self.get_kernel_stack_bottom();
     }
 
@@ -103,16 +94,11 @@ impl KernelContext {
     /// 
     /// # Returns
     /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
-    pub fn get_trapframe(&mut self) -> Option<&mut Trapframe> {
-        match &mut self.kernel_stack {
-            Some(stack) => {
-                let stack_top = stack.as_ptr() as usize + stack.len();
-                let trapframe_addr = stack_top - core::mem::size_of::<Trapframe>();
-                unsafe {
-                    Some(&mut *(trapframe_addr as *mut Trapframe))
-                }
-            }
-            None => None,
+    pub fn get_trapframe(&mut self) -> &mut Trapframe {
+        let stack_top = self.kernel_stack.as_ptr() as usize + self.kernel_stack.len();
+        let trapframe_addr = stack_top - core::mem::size_of::<Trapframe>();
+        unsafe {
+            &mut *(trapframe_addr as *mut Trapframe)
         }
     }
 }
