@@ -4,7 +4,9 @@
 //! architecture. The VCPU is responsible for executing instructions and managing
 //! the state of the CPU.
 
-use super::{Registers, Riscv64};
+use crate::arch::Trapframe;
+
+use super::{IntRegisters};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -14,7 +16,7 @@ pub enum Mode {
 
 #[derive(Debug, Clone)]
 pub struct Vcpu {
-    pub regs: Registers,
+    pub iregs: IntRegisters,
     pc: u64,
     asid: usize,
     mode: Mode,
@@ -23,7 +25,7 @@ pub struct Vcpu {
 impl Vcpu {
     pub fn new(mode: Mode) -> Self {
         Vcpu {
-            regs: Registers::new(),
+            iregs: IntRegisters::new(),
             pc: 0,
             asid: 0,
             mode,
@@ -43,20 +45,32 @@ impl Vcpu {
     }
 
     pub fn set_sp(&mut self, sp: usize) {
-        self.regs.reg[2] = sp;
+        self.iregs.reg[2] = sp;
     }
 
     pub fn get_mode(&self) -> Mode {
         self.mode
     }
 
-    pub fn store(&mut self, riscv64: &Riscv64) {
-        self.regs = riscv64.regs;
-        self.pc = riscv64.epc;
+    pub fn reset_iregs(&mut self) {
+        self.iregs = IntRegisters::new();
     }
 
-    pub fn switch(&mut self, riscv64: &mut Riscv64) {
-        riscv64.regs = self.regs;
-        riscv64.epc = self.pc;
+    pub fn copy_iregs_to(&self, iregs: &mut IntRegisters) {
+        *iregs = self.iregs;
+    }
+
+    pub fn copy_iregs_from(&mut self, iregs: &IntRegisters) {
+        self.iregs = *iregs;
+    }
+
+    pub fn store(&mut self, trapframe: &Trapframe) {
+        self.iregs = trapframe.regs;
+        self.pc = trapframe.epc;
+    }
+
+    pub fn switch(&mut self, trapframe: &mut Trapframe) {
+        trapframe.regs = self.iregs;
+        trapframe.epc = self.pc;
     }
 }

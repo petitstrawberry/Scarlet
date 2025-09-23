@@ -3,7 +3,7 @@ use core::panic;
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::trap::print_traplog;
-use crate::arch::Trapframe;
+use crate::arch::{Trapframe, get_cpu};
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
@@ -28,7 +28,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         12 => {
             let mut vaddr = trapframe.epc as usize;
-            let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
+            let task = get_scheduler().get_current_task(get_cpu().get_cpuid()).unwrap();
             let manager = &mut task.vm_manager;
             loop {
                 match manager.lazy_map_page(vaddr) {
@@ -52,7 +52,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let task = get_scheduler().get_current_task(trapframe.get_cpuid()).unwrap();
+            let task = get_scheduler().get_current_task(get_cpu().get_cpuid()).unwrap();
             let manager = &mut task.vm_manager;
             loop {
                 match manager.lazy_map_page(vaddr) {

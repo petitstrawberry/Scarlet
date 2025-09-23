@@ -15,7 +15,7 @@ use crate::arch::Trapframe;
 fn test_exec_backup_restore() {
     let mut task = new_user_task("BackupTestTask".to_string(), 1001);
     task.init();
-    let mut trapframe = Trapframe::new(0);
+    let mut trapframe = Trapframe::new();
     
     // Record original state
     let original_name = task.name.clone();
@@ -58,7 +58,7 @@ fn test_exec_backup_restore() {
 fn test_exec_parameter_validation() {
     let mut task = new_user_task("ParamTestTask".to_string(), 1002);
     task.init();
-    let mut trapframe = Trapframe::new(0);
+    let mut trapframe = Trapframe::new();
     
     // Test with empty arguments
     let result = TransparentExecutor::execute_binary(
@@ -92,7 +92,7 @@ fn test_exec_parameter_validation() {
 fn test_argv_array_handling() {
     let mut task = new_user_task("ArgvTestTask".to_string(), 1003);
     task.init();
-    let mut trapframe = Trapframe::new(0);
+    let mut trapframe = Trapframe::new();
     
     // Test with different argument patterns
     let mut test_cases = Vec::new();
@@ -123,7 +123,7 @@ fn test_argv_array_handling() {
 fn test_envp_array_handling() {
     let mut task = new_user_task("EnvpTestTask".to_string(), 1004);
     task.init();
-    let mut trapframe = Trapframe::new(0);
+    let mut trapframe = Trapframe::new();
     
     // Test with different environment variable patterns
     let mut test_cases = Vec::new();
