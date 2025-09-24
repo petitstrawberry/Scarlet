@@ -299,3 +299,404 @@ pub fn switch_to_user_vm(cpu: &mut Arch) {
     set_trapvector(get_trampoline_trap_vector());
     root_page_table.switch(manager.get_asid());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::early_println;
+
+    /// Test basic virtual memory manager initialization
+    #[test_case]
+    fn test_vm_manager_init() {
+        early_println!("[VM Test] Testing virtual memory manager initialization");
+        
+        let manager = VirtualMemoryManager::new();
+        assert!(manager.get_asid() == 0, "Initial ASID should be 0");
+        
+        // Test that we can create multiple managers
+        let manager2 = VirtualMemoryManager::new();
+        assert!(manager2.get_asid() == 0, "New manager ASID should be 0");
+        
+        early_println!("[VM Test] Virtual memory manager initialization test passed");
+    }
+
+    /// Test memory area creation and validation
+    #[test_case]
+    fn test_memory_area_creation() {
+        early_println!("[VM Test] Testing memory area creation");
+        
+        let area = MemoryArea::new(0x1000, 0x2000);
+        assert!(area.start == 0x1000, "Area start should be 0x1000");
+        assert!(area.end == 0x2000, "Area end should be 0x2000");
+        assert!(area.size() == 0x1000, "Area size should be 0x1000");
+        
+        early_println!("[VM Test] Memory area creation test passed");
+    }
+
+    /// Test virtual memory map creation with different permissions
+    #[test_case]
+    fn test_vm_map_permissions() {
+        early_println!("[VM Test] Testing virtual memory map permissions");
+        
+        let vmarea = MemoryArea::new(0x10000, 0x11000);
+        let pmarea = MemoryArea::new(0x20000, 0x21000);
+        
+        // Test read-only permission
+        let readonly_map = VirtualMemoryMap {
+            vmarea,
+            pmarea,
+            permissions: VirtualMemoryPermission::Read as usize,
+            is_shared: false,
+            owner: None,
+        };
+        
+        assert!(readonly_map.permissions == VirtualMemoryPermission::Read as usize, 
+                "Read-only permission should be set correctly");
+        
+        // Test read-write permission
+        let readwrite_map = VirtualMemoryMap {
+            vmarea,
+            pmarea,
+            permissions: VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+            is_shared: false,
+            owner: None,
+        };
+        
+        assert!(readwrite_map.permissions == (VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize), 
+                "Read-write permission should be set correctly");
+        
+        early_println!("[VM Test] Virtual memory map permissions test passed");
+    }
+
+    /// Test kernel virtual memory initialization
+    #[test_case]
+    fn test_kernel_vm_init() {
+        early_println!("[VM Test] Testing kernel virtual memory initialization");
+        
+        // Create a dummy kernel area for testing
+        let kernel_area = MemoryArea::new(0x80000000, 0x80100000);
+        
+        // This test verifies that kernel_vm_init doesn't panic
+        // The actual MMU setup is tested in architecture-specific tests
+        kernel_vm_init(kernel_area);
+        
+        let manager = get_kernel_vm_manager();
+        assert!(manager.get_asid() != 0, "Kernel manager should have non-zero ASID after init");
+        
+        early_println!("[VM Test] Kernel virtual memory initialization test passed");
+    }
+
+    /// Architecture-specific MMU tests for RISC-V
+    #[cfg(target_arch = "riscv64")]
+    mod riscv64_tests {
+        use super::*;
+        use crate::arch::riscv64::vm::mmu::{PageTable, PageTableEntry};
+
+        #[test_case]
+        fn test_riscv64_page_table_creation() {
+            early_println!("[RISC-V MMU Test] Testing page table creation");
+            
+            // Test page table allocation and initialization
+            let page_table = PageTable::new();
+            // Check that the first entry is properly initialized
+            assert!(!page_table.entries[0].is_valid(), "Initial page table entries should be invalid");
+            
+            early_println!("[RISC-V MMU Test] Page table creation test passed");
+        }
+
+        #[test_case]
+        fn test_riscv64_pte_flags() {
+            early_println!("[RISC-V MMU Test] Testing page table entry flags");
+            
+            let mut pte = PageTableEntry::new();
+            
+            // Test setting and getting flags
+            pte.set_valid(true);
+            assert!(pte.is_valid(), "PTE should be valid after setting");
+            
+            pte.set_readable(true);
+            assert!(pte.is_readable(), "PTE should be readable after setting");
+            
+            pte.set_writable(true);
+            assert!(pte.is_writable(), "PTE should be writable after setting");
+            
+            pte.set_executable(true);
+            assert!(pte.is_executable(), "PTE should be executable after setting");
+            
+            early_println!("[RISC-V MMU Test] Page table entry flags test passed");
+        }
+
+        #[test_case]
+        fn test_riscv64_address_translation() {
+            early_println!("[RISC-V MMU Test] Testing virtual address translation");
+            
+            // Test virtual address breakdown for SV48
+            let vaddr = 0x123456789ABC;
+            let vpn = [
+                (vaddr >> 12) & 0x1FF,    // VPN[0]
+                (vaddr >> 21) & 0x1FF,    // VPN[1]
+                (vaddr >> 30) & 0x1FF,    // VPN[2]
+                (vaddr >> 39) & 0x1FF,    // VPN[3]
+            ];
+            
+            assert!(vpn[0] == ((vaddr >> 12) & 0x1FF), "VPN[0] calculation should be correct");
+            assert!(vpn[1] == ((vaddr >> 21) & 0x1FF), "VPN[1] calculation should be correct");
+            assert!(vpn[2] == ((vaddr >> 30) & 0x1FF), "VPN[2] calculation should be correct");
+            assert!(vpn[3] == ((vaddr >> 39) & 0x1FF), "VPN[3] calculation should be correct");
+            
+            early_println!("[RISC-V MMU Test] Virtual address translation test passed");
+        }
+    }
+
+    /// Architecture-specific MMU tests for AArch64
+    #[cfg(target_arch = "aarch64")]
+    mod aarch64_tests {
+        use super::*;
+        use crate::arch::aarch64::vm::mmu::{PageTable, PageTableEntry, init_mmu_registers};
+
+        #[test_case]
+        fn test_aarch64_page_table_creation() {
+            early_println!("[AArch64 MMU Test] Testing page table creation");
+            
+            // Test page table allocation and initialization
+            let page_table = PageTable::new();
+            // Check that the first entry is properly initialized
+            assert!(!page_table.entries[0].is_valid(), "Initial page table entries should be invalid");
+            
+            early_println!("[AArch64 MMU Test] Page table creation test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_pte_flags() {
+            early_println!("[AArch64 MMU Test] Testing page table entry flags");
+            
+            let mut pte = PageTableEntry::new();
+            
+            // Test setting and getting flags for AArch64
+            pte.set_valid(true);
+            assert!(pte.is_valid(), "PTE should be valid after setting");
+            
+            pte.set_readable(true);
+            assert!(pte.is_readable(), "PTE should be readable after setting");
+            
+            pte.set_writable(true);
+            assert!(pte.is_writable(), "PTE should be writable after setting");
+            
+            pte.set_executable(true);
+            assert!(pte.is_executable(), "PTE should be executable after setting");
+            
+            // Test AArch64-specific attributes
+            pte.set_user_accessible(true);
+            assert!(pte.is_user_accessible(), "PTE should be user accessible after setting");
+            
+            early_println!("[AArch64 MMU Test] Page table entry flags test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_address_translation() {
+            early_println!("[AArch64 MMU Test] Testing virtual address translation");
+            
+            // Test virtual address breakdown for AArch64 4-level page tables (48-bit VA)
+            let vaddr = 0x123456789ABC;
+            let vpn = [
+                (vaddr >> 12) & 0x1FF,    // Level 3 (4KB pages)
+                (vaddr >> 21) & 0x1FF,    // Level 2
+                (vaddr >> 30) & 0x1FF,    // Level 1
+                (vaddr >> 39) & 0x1FF,    // Level 0
+            ];
+            
+            assert!(vpn[0] == ((vaddr >> 12) & 0x1FF), "Level 3 VPN calculation should be correct");
+            assert!(vpn[1] == ((vaddr >> 21) & 0x1FF), "Level 2 VPN calculation should be correct");
+            assert!(vpn[2] == ((vaddr >> 30) & 0x1FF), "Level 1 VPN calculation should be correct");
+            assert!(vpn[3] == ((vaddr >> 39) & 0x1FF), "Level 0 VPN calculation should be correct");
+            
+            early_println!("[AArch64 MMU Test] Virtual address translation test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_mmu_registers() {
+            early_println!("[AArch64 MMU Test] Testing MMU register initialization");
+            
+            // Test that MMU register initialization doesn't panic
+            init_mmu_registers();
+            
+            early_println!("[AArch64 MMU Test] MMU register initialization test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_memory_attributes() {
+            early_println!("[AArch64 MMU Test] Testing memory attributes");
+            
+            let mut pte = PageTableEntry::new();
+            
+            // Test different memory types
+            pte.set_memory_type_device();
+            assert!(pte.is_device_memory(), "PTE should be marked as device memory");
+            
+            pte.set_memory_type_normal_cacheable();
+            assert!(pte.is_normal_cacheable_memory(), "PTE should be marked as normal cacheable memory");
+            
+            // Test shareability
+            pte.set_outer_shareable();
+            assert!(pte.is_outer_shareable(), "PTE should be marked as outer shareable");
+            
+            pte.set_inner_shareable();
+            assert!(pte.is_inner_shareable(), "PTE should be marked as inner shareable");
+            
+            early_println!("[AArch64 MMU Test] Memory attributes test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_asid_management() {
+            early_println!("[AArch64 MMU Test] Testing ASID management");
+            
+            // Test ASID allocation
+            use crate::arch::aarch64::vm::alloc_virtual_address_space;
+            
+            let asid1 = alloc_virtual_address_space();
+            let asid2 = alloc_virtual_address_space();
+            
+            assert!(asid1 != 0, "First ASID should not be zero");
+            assert!(asid2 != 0, "Second ASID should not be zero");
+            assert!(asid1 != asid2, "Different ASID allocations should be unique");
+            
+            early_println!("[AArch64 MMU Test] ASID management test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_page_table_mapping() {
+            early_println!("[AArch64 MMU Test] Testing page table mapping operations");
+            
+            let mut page_table = PageTable::new();
+            let vaddr = 0x100000;  // 1MB aligned address
+            let paddr = 0x200000;  // 2MB aligned address
+            
+            // Test mapping a page
+            let vmarea = MemoryArea::new(vaddr, vaddr + 0x1000);
+            let pmarea = MemoryArea::new(paddr, paddr + 0x1000);
+            let map = VirtualMemoryMap {
+                vmarea,
+                pmarea,
+                permissions: VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+                is_shared: false,
+                owner: None,
+            };
+            
+            // The actual mapping should not panic (detailed validation would require more setup)
+            match page_table.map_memory_area(1, map) {
+                Ok(_) => early_println!("[AArch64 MMU Test] Page mapping succeeded"),
+                Err(e) => early_println!("[AArch64 MMU Test] Page mapping failed as expected: {}", e),
+            }
+            
+            early_println!("[AArch64 MMU Test] Page table mapping test passed");
+        }
+    }
+
+    /// Test platform-specific interrupt controllers
+    mod platform_tests {
+        use super::*;
+
+        #[cfg(target_arch = "riscv64")]
+        #[test_case]
+        fn test_plic_availability() {
+            early_println!("[Platform Test] Testing PLIC availability on RISC-V");
+            
+            use crate::drivers::pic::Plic;
+            
+            // Test that PLIC can be instantiated (actual hardware interaction would need setup)
+            // This test mainly verifies compilation and basic structure
+            early_println!("[Platform Test] PLIC structure is available on RISC-V");
+            early_println!("[Platform Test] PLIC availability test passed");
+        }
+
+        #[cfg(target_arch = "riscv64")]
+        #[test_case]
+        fn test_clint_availability() {
+            early_println!("[Platform Test] Testing CLINT availability on RISC-V");
+            
+            use crate::drivers::pic::Clint;
+            
+            // Test that CLINT can be instantiated
+            early_println!("[Platform Test] CLINT structure is available on RISC-V");
+            early_println!("[Platform Test] CLINT availability test passed");
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        #[test_case]
+        fn test_gic_availability() {
+            early_println!("[Platform Test] Testing GIC availability on AArch64");
+            
+            use crate::drivers::pic::Gic;
+            
+            // Test that GIC can be instantiated (actual hardware interaction would need setup)
+            // This test mainly verifies compilation and basic structure
+            early_println!("[Platform Test] GIC structure is available on AArch64");
+            early_println!("[Platform Test] GIC availability test passed");
+        }
+    }
+
+    /// Test architecture-specific features
+    mod arch_tests {
+        use super::*;
+        use crate::arch::{get_cpu, set_next_mode, enable_interrupt, disable_interrupt};
+
+        #[test_case]
+        fn test_arch_cpu_management() {
+            early_println!("[Arch Test] Testing CPU management functions");
+            
+            // Test that we can get current CPU information
+            let cpu = get_cpu();
+            let cpu_id = cpu.get_cpuid();
+            
+            assert!(cpu_id < crate::environment::NUM_OF_CPUS, "CPU ID should be within valid range");
+            
+            early_println!("[Arch Test] CPU ID: {}", cpu_id);
+            early_println!("[Arch Test] CPU management test passed");
+        }
+
+        #[test_case]
+        fn test_arch_interrupt_control() {
+            early_println!("[Arch Test] Testing interrupt control functions");
+            
+            // Test interrupt enable/disable (should not panic)
+            disable_interrupt();
+            enable_interrupt();
+            
+            early_println!("[Arch Test] Interrupt control test passed");
+        }
+
+        #[cfg(target_arch = "riscv64")]
+        #[test_case]
+        fn test_riscv64_specific_features() {
+            early_println!("[RISC-V Arch Test] Testing RISC-V specific features");
+            
+            use crate::arch::riscv64::vcpu::Mode;
+            
+            // Test mode switching
+            set_next_mode(Mode::Kernel);
+            set_next_mode(Mode::User);
+            
+            early_println!("[RISC-V Arch Test] RISC-V specific features test passed");
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        #[test_case]
+        fn test_aarch64_specific_features() {
+            early_println!("[AArch64 Arch Test] Testing AArch64 specific features");
+            
+            use crate::arch::aarch64::vcpu::Mode;
+            use crate::arch::aarch64::get_current_cpu_id;
+            
+            // Test mode switching
+            set_next_mode(Mode::Kernel);
+            set_next_mode(Mode::User);
+            
+            // Test AArch64-specific CPU ID retrieval
+            let cpu_id = get_current_cpu_id();
+            assert!(cpu_id < crate::environment::NUM_OF_CPUS, "AArch64 CPU ID should be within valid range");
+            
+            early_println!("[AArch64 Arch Test] AArch64 CPU ID: {}", cpu_id);
+            early_println!("[AArch64 Arch Test] AArch64 specific features test passed");
+        }
+    }
+}

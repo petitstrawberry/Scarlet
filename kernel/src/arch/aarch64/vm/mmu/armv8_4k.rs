@@ -153,6 +153,117 @@ impl PageTableEntry {
         self.entry |= sh_bits;
         self
     }
+
+    // Test helper methods
+    /// Set valid flag
+    pub fn set_valid(&mut self, valid: bool) {
+        if valid {
+            self.entry |= 1;
+        } else {
+            self.entry &= !1;
+        }
+    }
+
+    /// Set readable flag (for testing)
+    pub fn set_readable(&mut self, readable: bool) {
+        if readable {
+            self.readable();
+        } else {
+            self.entry |= 1 << 7; // Set AP[1] to deny read
+        }
+    }
+
+    /// Check if readable (for testing)
+    pub fn is_readable(&self) -> bool {
+        (self.entry >> 7) & 1 == 0 // AP[1] = 0 allows read
+    }
+
+    /// Set writable flag (for testing)
+    pub fn set_writable(&mut self, writable: bool) {
+        if writable {
+            self.writable();
+        } else {
+            self.entry |= 1 << 7; // Set AP[1] to make read-only
+        }
+    }
+
+    /// Check if writable (for testing)
+    pub fn is_writable(&self) -> bool {
+        (self.entry >> 7) & 1 == 0 // AP[1] = 0 allows write
+    }
+
+    /// Set executable flag (for testing)
+    pub fn set_executable(&mut self, executable: bool) {
+        if executable {
+            self.executable();
+        } else {
+            self.entry |= 1 << 54; // Set UXN (EL0 execute never)
+            self.entry |= 1 << 53; // Set PXN (EL1 execute never)
+        }
+    }
+
+    /// Check if executable (for testing)
+    pub fn is_executable(&self) -> bool {
+        (self.entry >> 54) & 1 == 0 && (self.entry >> 53) & 1 == 0
+    }
+
+    /// Set user accessible flag (for testing)
+    pub fn set_user_accessible(&mut self, accessible: bool) {
+        if accessible {
+            self.accessible_from_user();
+        } else {
+            self.entry &= !(1 << 6); // Clear AP[0] to deny EL0 access
+        }
+    }
+
+    /// Check if user accessible (for testing)
+    pub fn is_user_accessible(&self) -> bool {
+        (self.entry >> 6) & 1 == 1
+    }
+
+    /// Set memory type to device (for testing)
+    pub fn set_memory_type_device(&mut self) {
+        self.set_memory_attr(MemoryAttribute::Device as u8);
+    }
+
+    /// Check if device memory (for testing)
+    pub fn is_device_memory(&self) -> bool {
+        let attr_index = (self.entry >> 2) & 0x7;
+        attr_index == MemoryAttribute::Device as u64
+    }
+
+    /// Set memory type to normal cacheable (for testing)
+    pub fn set_memory_type_normal_cacheable(&mut self) {
+        self.set_memory_attr(MemoryAttribute::Normal as u8);
+    }
+
+    /// Check if normal cacheable memory (for testing)
+    pub fn is_normal_cacheable_memory(&self) -> bool {
+        let attr_index = (self.entry >> 2) & 0x7;
+        attr_index == MemoryAttribute::Normal as u64
+    }
+
+    /// Set outer shareable (for testing)
+    pub fn set_outer_shareable(&mut self) {
+        self.set_shareability(Shareability::OuterShareable);
+    }
+
+    /// Check if outer shareable (for testing)
+    pub fn is_outer_shareable(&self) -> bool {
+        let sh = (self.entry >> 8) & 0x3;
+        sh == Shareability::OuterShareable as u64
+    }
+
+    /// Set inner shareable (for testing)  
+    pub fn set_inner_shareable(&mut self) {
+        self.set_shareability(Shareability::InnerShareable);
+    }
+
+    /// Check if inner shareable (for testing)
+    pub fn is_inner_shareable(&self) -> bool {
+        let sh = (self.entry >> 8) & 0x3;
+        sh == Shareability::InnerShareable as u64
+    }
 }
 
 /// Shareability attributes for AArch64 page table entries
@@ -179,6 +290,13 @@ pub struct PageTable {
 }
 
 impl PageTable {
+    /// Create a new page table with all entries initialized to zero
+    pub fn new() -> Self {
+        PageTable {
+            entries: [PageTableEntry::new(); 512],
+        }
+    }
+
     /// Switch to this page table by updating TTBR0_EL1
     pub fn switch(&self, asid: u16) {
         let ttbr_val = self.get_val_for_ttbr(asid);

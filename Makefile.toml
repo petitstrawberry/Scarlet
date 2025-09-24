@@ -97,7 +97,7 @@ dependencies = ["test-kernel"]
 
 [tasks.test-kernel]
 description = "Run kernel tests"
-dependencies = ["test-kernel-riscv64"]
+dependencies = ["test-kernel-riscv64", "test-kernel-aarch64"]
 
 [tasks.test-kernel-riscv64]
 description = "Run kernel tests (RISC-V)"
