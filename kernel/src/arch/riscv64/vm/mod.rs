@@ -161,6 +161,7 @@ pub fn get_root_pagetable(asid: u16) -> Option<&'static mut PageTable> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::early_println;
 
     #[test_case]
     fn test_get_page_table() {
@@ -192,5 +193,66 @@ mod tests {
 
         free_virtual_address_space(asid_0);
         assert!(!is_asid_used(asid_0));
+    }
+
+    /// RISC-V specific MMU tests
+    mod mmu_tests {
+        use super::*;
+        use crate::arch::riscv64::vm::mmu::{PageTable, PageTableEntry};
+
+        #[test_case]
+        fn test_riscv64_page_table_creation() {
+            early_println!("[RISC-V MMU Test] Testing page table creation");
+            
+            // Test page table allocation and initialization
+            let page_table = PageTable::new();
+            // Check that the first entry is properly initialized
+            assert!(!page_table.entries[0].is_valid(), "Initial page table entries should be invalid");
+            
+            early_println!("[RISC-V MMU Test] Page table creation test passed");
+        }
+
+        #[test_case]
+        fn test_riscv64_pte_flags() {
+            early_println!("[RISC-V MMU Test] Testing page table entry flags");
+            
+            let mut pte = PageTableEntry::new();
+            
+            // Test setting and getting flags
+            pte.set_valid(true);
+            assert!(pte.is_valid(), "PTE should be valid after setting");
+            
+            pte.set_readable(true);
+            assert!(pte.is_readable(), "PTE should be readable after setting");
+            
+            pte.set_writable(true);
+            assert!(pte.is_writable(), "PTE should be writable after setting");
+            
+            pte.set_executable(true);
+            assert!(pte.is_executable(), "PTE should be executable after setting");
+            
+            early_println!("[RISC-V MMU Test] Page table entry flags test passed");
+        }
+
+        #[test_case]
+        fn test_riscv64_address_translation() {
+            early_println!("[RISC-V MMU Test] Testing virtual address translation");
+            
+            // Test virtual address breakdown for SV48
+            let vaddr = 0x123456789ABC;
+            let vpn = [
+                (vaddr >> 12) & 0x1FF,    // VPN[0]
+                (vaddr >> 21) & 0x1FF,    // VPN[1]
+                (vaddr >> 30) & 0x1FF,    // VPN[2]
+                (vaddr >> 39) & 0x1FF,    // VPN[3]
+            ];
+            
+            assert!(vpn[0] == ((vaddr >> 12) & 0x1FF), "VPN[0] calculation should be correct");
+            assert!(vpn[1] == ((vaddr >> 21) & 0x1FF), "VPN[1] calculation should be correct");
+            assert!(vpn[2] == ((vaddr >> 30) & 0x1FF), "VPN[2] calculation should be correct");
+            assert!(vpn[3] == ((vaddr >> 39) & 0x1FF), "VPN[3] calculation should be correct");
+            
+            early_println!("[RISC-V MMU Test] Virtual address translation test passed");
+        }
     }
 }

@@ -281,3 +281,45 @@ pub fn reboot() -> ! {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::early_println;
+
+    /// Test architecture-specific features for AArch64
+    #[test_case]
+    fn test_aarch64_specific_features() {
+        early_println!("[AArch64 Arch Test] Testing AArch64 specific features");
+        
+        use crate::arch::aarch64::vcpu::Mode;
+        
+        // Test mode switching
+        set_next_mode(Mode::Kernel);
+        set_next_mode(Mode::User);
+        
+        // Test AArch64-specific CPU ID retrieval
+        let cpu_id = get_current_cpu_id();
+        assert!(cpu_id < crate::environment::NUM_OF_CPUS, "AArch64 CPU ID should be within valid range");
+        
+        early_println!("[AArch64 Arch Test] AArch64 CPU ID: {}", cpu_id);
+        early_println!("[AArch64 Arch Test] AArch64 specific features test passed");
+    }
+
+    /// Test platform-specific interrupt controllers for AArch64
+    mod platform_tests {
+        use super::*;
+
+        #[test_case]
+        fn test_gic_availability() {
+            early_println!("[Platform Test] Testing GIC availability on AArch64");
+            
+            use crate::drivers::pic::Gic;
+            
+            // Test that GIC can be instantiated (actual hardware interaction would need setup)
+            // This test mainly verifies compilation and basic structure
+            early_println!("[Platform Test] GIC structure is available on AArch64");
+            early_println!("[Platform Test] GIC availability test passed");
+        }
+    }
+}

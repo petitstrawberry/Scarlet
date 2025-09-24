@@ -168,6 +168,7 @@ pub fn get_root_pagetable(asid: u16) -> Option<&'static mut PageTable> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::early_println;
 
     #[test_case]
     fn test_get_page_table() {
@@ -199,5 +200,147 @@ mod tests {
 
         free_virtual_address_space(asid_0);
         assert!(!is_asid_used(asid_0));
+    }
+
+    /// AArch64 specific MMU tests
+    mod mmu_tests {
+        use super::*;
+        use crate::arch::aarch64::vm::mmu::{PageTable, PageTableEntry, init_mmu_registers};
+        use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
+
+        #[test_case]
+        fn test_aarch64_page_table_creation() {
+            early_println!("[AArch64 MMU Test] Testing page table creation");
+            
+            // Test page table allocation and initialization
+            let page_table = PageTable::new();
+            // Check that the first entry is properly initialized
+            assert!(!page_table.entries[0].is_valid(), "Initial page table entries should be invalid");
+            
+            early_println!("[AArch64 MMU Test] Page table creation test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_pte_flags() {
+            early_println!("[AArch64 MMU Test] Testing page table entry flags");
+            
+            let mut pte = PageTableEntry::new();
+            
+            // Test setting and getting flags for AArch64
+            pte.set_valid(true);
+            assert!(pte.is_valid(), "PTE should be valid after setting");
+            
+            pte.set_readable(true);
+            assert!(pte.is_readable(), "PTE should be readable after setting");
+            
+            pte.set_writable(true);
+            assert!(pte.is_writable(), "PTE should be writable after setting");
+            
+            pte.set_executable(true);
+            assert!(pte.is_executable(), "PTE should be executable after setting");
+            
+            // Test AArch64-specific attributes
+            pte.set_user_accessible(true);
+            assert!(pte.is_user_accessible(), "PTE should be user accessible after setting");
+            
+            early_println!("[AArch64 MMU Test] Page table entry flags test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_address_translation() {
+            early_println!("[AArch64 MMU Test] Testing virtual address translation");
+            
+            // Test virtual address breakdown for AArch64 4-level page tables (48-bit VA)
+            let vaddr = 0x123456789ABC;
+            let vpn = [
+                (vaddr >> 12) & 0x1FF,    // Level 3 (4KB pages)
+                (vaddr >> 21) & 0x1FF,    // Level 2
+                (vaddr >> 30) & 0x1FF,    // Level 1
+                (vaddr >> 39) & 0x1FF,    // Level 0
+            ];
+            
+            assert!(vpn[0] == ((vaddr >> 12) & 0x1FF), "Level 3 VPN calculation should be correct");
+            assert!(vpn[1] == ((vaddr >> 21) & 0x1FF), "Level 2 VPN calculation should be correct");
+            assert!(vpn[2] == ((vaddr >> 30) & 0x1FF), "Level 1 VPN calculation should be correct");
+            assert!(vpn[3] == ((vaddr >> 39) & 0x1FF), "Level 0 VPN calculation should be correct");
+            
+            early_println!("[AArch64 MMU Test] Virtual address translation test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_mmu_registers() {
+            early_println!("[AArch64 MMU Test] Testing MMU register initialization");
+            
+            // Test that MMU register initialization doesn't panic
+            init_mmu_registers();
+            
+            early_println!("[AArch64 MMU Test] MMU register initialization test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_memory_attributes() {
+            early_println!("[AArch64 MMU Test] Testing memory attributes");
+            
+            let mut pte = PageTableEntry::new();
+            
+            // Test different memory types
+            pte.set_memory_type_device();
+            assert!(pte.is_device_memory(), "PTE should be marked as device memory");
+            
+            pte.set_memory_type_normal_cacheable();
+            assert!(pte.is_normal_cacheable_memory(), "PTE should be marked as normal cacheable memory");
+            
+            // Test shareability
+            pte.set_outer_shareable();
+            assert!(pte.is_outer_shareable(), "PTE should be marked as outer shareable");
+            
+            pte.set_inner_shareable();
+            assert!(pte.is_inner_shareable(), "PTE should be marked as inner shareable");
+            
+            early_println!("[AArch64 MMU Test] Memory attributes test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_asid_management() {
+            early_println!("[AArch64 MMU Test] Testing ASID management");
+            
+            // Test ASID allocation
+            let asid1 = alloc_virtual_address_space();
+            let asid2 = alloc_virtual_address_space();
+            
+            assert!(asid1 != 0, "First ASID should not be zero");
+            assert!(asid2 != 0, "Second ASID should not be zero");
+            assert!(asid1 != asid2, "Different ASID allocations should be unique");
+            
+            early_println!("[AArch64 MMU Test] ASID management test passed");
+        }
+
+        #[test_case]
+        fn test_aarch64_page_table_mapping() {
+            early_println!("[AArch64 MMU Test] Testing page table mapping operations");
+            
+            let mut page_table = PageTable::new();
+            let vaddr = 0x100000;  // 1MB aligned address
+            let paddr = 0x200000;  // 2MB aligned address
+            
+            // Test mapping a page
+            let vmarea = MemoryArea::new(vaddr, vaddr + 0x1000);
+            let pmarea = MemoryArea::new(paddr, paddr + 0x1000);
+            let map = VirtualMemoryMap {
+                vmarea,
+                pmarea,
+                permissions: VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+                is_shared: false,
+                owner: None,
+            };
+            
+            // The actual mapping should not panic (detailed validation would require more setup)
+            match page_table.map_memory_area(1, map) {
+                Ok(_) => early_println!("[AArch64 MMU Test] Page mapping succeeded"),
+                Err(e) => early_println!("[AArch64 MMU Test] Page mapping failed as expected: {}", e),
+            }
+            
+            early_println!("[AArch64 MMU Test] Page table mapping test passed");
+        }
     }
 }

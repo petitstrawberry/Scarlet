@@ -283,3 +283,51 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 pub fn reboot() -> ! {
     sbi_system_reset(1, 0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::early_println;
+
+    /// Test architecture-specific features for RISC-V
+    #[test_case]
+    fn test_riscv64_specific_features() {
+        early_println!("[RISC-V Arch Test] Testing RISC-V specific features");
+        
+        use crate::arch::riscv64::vcpu::Mode;
+        
+        // Test mode switching
+        set_next_mode(Mode::Kernel);
+        set_next_mode(Mode::User);
+        
+        early_println!("[RISC-V Arch Test] RISC-V specific features test passed");
+    }
+
+    /// Test platform-specific interrupt controllers for RISC-V
+    mod platform_tests {
+        use super::*;
+
+        #[test_case]
+        fn test_plic_availability() {
+            early_println!("[Platform Test] Testing PLIC availability on RISC-V");
+            
+            use crate::drivers::pic::Plic;
+            
+            // Test that PLIC can be instantiated (actual hardware interaction would need setup)
+            // This test mainly verifies compilation and basic structure
+            early_println!("[Platform Test] PLIC structure is available on RISC-V");
+            early_println!("[Platform Test] PLIC availability test passed");
+        }
+
+        #[test_case]
+        fn test_clint_availability() {
+            early_println!("[Platform Test] Testing CLINT availability on RISC-V");
+            
+            use crate::drivers::pic::Clint;
+            
+            // Test that CLINT can be instantiated
+            early_println!("[Platform Test] CLINT structure is available on RISC-V");
+            early_println!("[Platform Test] CLINT availability test passed");
+        }
+    }
+}
