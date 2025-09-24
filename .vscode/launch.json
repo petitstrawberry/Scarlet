@@ -2,7 +2,7 @@
     "version": "0.2.0",
      "configurations": [
         {
-            "name": "attach to kernel",
+            "name": "attach to kernel-riscv64",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/kernel/target/riscv64gc-unknown-none-elf/debug/kernel",
@@ -21,10 +21,10 @@
             ],
             "miDebuggerPath": "/usr/bin/gdb-multiarch",
             "miDebuggerServerAddress": "localhost:12345",
-            "preLaunchTask": "kernel"
+            "preLaunchTask": "kernel-riscv64"
         },
         {
-            "name": "attach to test",
+            "name": "attach to test-riscv64",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/kernel/target/riscv64gc-unknown-none-elf/debug/test-kernel",
@@ -43,7 +43,51 @@
             ],
             "miDebuggerPath": "/usr/bin/gdb-multiarch",
             "miDebuggerServerAddress": "localhost:12345",
-            "preLaunchTask": "test"
+            "preLaunchTask": "test-riscv64"
+        },
+        {
+            "name": "attach to kernel-aarch64",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/kernel/target/aarch64-unknown-none-elf/debug/kernel",
+            "args": [],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:12345",
+            "preLaunchTask": "kernel-aarch64"
+        },
+        {
+            "name": "attach to test-aarch64",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/kernel/target/aarch64-unknown-none-elf/debug/test-kernel",
+            "args": [],
+            "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:12345",
+            "preLaunchTask": "test-aarch64"
         },
      ]
 }

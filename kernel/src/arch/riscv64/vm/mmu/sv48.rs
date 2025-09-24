@@ -104,6 +104,13 @@ pub struct PageTable {
 }
 
 impl PageTable {
+    /// Create a new page table with all entries initialized to zero
+    pub fn new() -> Self {
+        PageTable {
+            entries: [PageTableEntry::new(); 512],
+        }
+    }
+
     pub fn switch(&self, asid: u16) {
         let satp = self.get_val_for_satp(asid);
         unsafe {
