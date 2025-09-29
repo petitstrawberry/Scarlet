@@ -17,6 +17,8 @@ use crate::{
     task::mytask, 
 };
 
+use super::errno;
+
 /// Linux stat structure for RISC-V 64-bit
 /// This structure matches the Linux kernel's definition for newstat on RISC-V 64-bit
 #[derive(Debug, Clone, Copy)]
@@ -273,10 +275,10 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     // Parse path from user space
     let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
         Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8
+        Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
-    // crate::println!("sys_openat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+    crate::println!("sys_openat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
 
     let vfs = task.vfs.as_ref().unwrap();
 
@@ -294,26 +296,31 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         // Use directory file descriptor as base
         let handle = match abi.get_handle(dirfd as usize) {
             Some(h) => h,
-            None => return usize::MAX,
+            None => return errno::to_result(errno::EBADF), // Bad file descriptor
         };
         let kernel_obj = match task.handle_table.get(handle) {
             Some(obj) => obj,
-            None => return usize::MAX,
+            None => return errno::to_result(errno::EBADF), // Bad file descriptor
         };
         let file_obj = match kernel_obj.as_file() {
             Some(f) => f,
-            None => return usize::MAX,
+            None => return errno::to_result(errno::ENOTDIR), // Not a directory
         };
         let vfs_file_obj = file_obj.as_any().downcast_ref::<VfsFileObject>().ok_or(()).unwrap();
         (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
     };
 
     // Open the file using VfsManager::open_relative
+    crate::println!("sys_openat: attempting to open '{}' with flags {:#o}", path_str, flags);
     let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
 
     let kernel_obj = match file {
-        Ok(obj) => obj,
-        Err(_e) => {
+        Ok(obj) => {
+            crate::println!("sys_openat: successfully opened '{}'", path_str);
+            obj
+        },
+        Err(e) => {
+            crate::println!("sys_openat: failed to open '{}': {:?}", path_str, e);
             // If open failed and O_CREAT flag is set, try to create the file
             if flags & O_CREAT != 0 {
                 // Build absolute path for file creation before getting mutable VFS reference
@@ -323,14 +330,14 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                     // Construct absolute path by resolving relative to current working directory
                     match to_absolute_path_v2(&task, &path_str) {
                         Ok(p) => p,
-                        Err(_) => return usize::MAX,
+                        Err(_) => return errno::to_result(errno::ENOENT), // Path resolution failed
                     }
                 };
                 
                 // Get mutable VFS reference for file creation
                 let vfs_mut = match task.vfs.as_mut() {
                     Some(v) => v,
-                    None => return usize::MAX,
+                    None => return errno::to_result(errno::EIO), // VFS not available
                 };
 
                 // Create the file (regular file type)
@@ -341,24 +348,24 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         let vfs = task.vfs.as_ref().unwrap();
                         match vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32) {
                             Ok(obj) => obj,
-                            Err(_) => return usize::MAX, // Failed to open newly created file
+                            Err(err) => return errno::to_result(errno::from_fs_error(&err)), // Failed to open newly created file
                         }
                     },
-                    Err(_) => {
+                    Err(create_err) => {
                         // Check if file already exists and O_EXCL is set
-                        if flags & O_EXCL != 0 {
-                            return usize::MAX; // File exists and O_EXCL is set
+                        if flags & O_EXCL != 0 && create_err.kind == crate::fs::FileSystemErrorKind::AlreadyExists {
+                            return errno::to_result(errno::EEXIST); // File exists and O_EXCL is set
                         }
                         // Try to open the existing file
                         let vfs = task.vfs.as_ref().unwrap();
                         match vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32) {
                             Ok(obj) => obj,
-                            Err(_) => return usize::MAX, // Still failed to open
+                            Err(open_err) => return errno::to_result(errno::from_fs_error(&open_err)), // Still failed to open
                         }
                     }
                 }
             } else {
-                return usize::MAX; // open_relative error and no O_CREAT
+                return errno::to_result(errno::from_fs_error(&e)); // Return appropriate error based on VFS error
             }
         }
     };
@@ -372,10 +379,10 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                     // crate::println!("sys_openat: opened fd={} for path='{}'", fd, path_str);
                     fd
                 }
-                Err(_) => usize::MAX, // Too many open files
+                Err(_) => errno::to_result(errno::EMFILE), // Too many open files
             }
         },
-        Err(_) => usize::MAX, // Handle table full
+        Err(_) => errno::to_result(errno::ENFILE), // Handle table full
     }
 }
 
@@ -393,16 +400,16 @@ pub fn sys_dup(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 Ok(new_handle) => {
                     match abi.allocate_fd(new_handle as u32) {
                         Ok(fd) => fd,
-                        Err(_) => usize::MAX, // Too many open files
+                        Err(_) => errno::to_result(errno::EMFILE), // Too many open files
                     }
                 },
-                Err(_) => usize::MAX, // Handle table full
+                Err(_) => errno::to_result(errno::ENFILE), // Handle table full
             }
         } else {
-            usize::MAX // Handle not found in handle table
+            errno::to_result(errno::EBADF) // Handle not found in handle table
         }
     } else {
-        usize::MAX // Invalid file descriptor
+        errno::to_result(errno::EBADF) // Invalid file descriptor
     }
 }
 
@@ -999,34 +1006,8 @@ pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     match vfs.create_hardlink(&src_path, &dst_path) {
         Ok(_) => 0, // Success
         Err(err) => {
-            use crate::fs::FileSystemErrorKind;
-            
             // Map VFS errors to appropriate errno values for Linux
-            match err.kind {
-                FileSystemErrorKind::NotFound => {
-                    // Source file doesn't exist
-                    2 // ENOENT
-                },
-                FileSystemErrorKind::FileExists => {
-                    // Destination already exists
-                    17 // EEXIST
-                },
-                FileSystemErrorKind::CrossDevice => {
-                    // Hard links across devices not supported
-                    18 // EXDEV
-                },
-                FileSystemErrorKind::InvalidOperation => {
-                    // Operation not supported (e.g., directory hardlink)
-                    1 // EPERM
-                },
-                FileSystemErrorKind::PermissionDenied => {
-                    13 // EACCES
-                },
-                _ => {
-                    // Other errors
-                    5 // EIO
-                }
-            }
+            errno::to_result(errno::from_fs_error(&err))
         }
     }
 }
