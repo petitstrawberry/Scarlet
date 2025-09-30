@@ -149,12 +149,37 @@ pub fn sys_kill(_abi: &mut LinuxRiscv64Abi, _trapframe: &mut Trapframe) -> usize
 
 pub fn sys_sbrk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let increment = trapframe.get_arg(0);
-    let brk = task.get_brk();
+    let increment = trapframe.get_arg(0) as isize;  // Treat as signed increment
+    let current_brk = task.get_brk();
     trapframe.increment_pc_next(task);
-    match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
-        Ok(_) => brk,
-        Err(_) => usize::MAX, /* -1 */
+    
+    // Handle increment of 0 (query current brk)
+    if increment == 0 {
+        return current_brk;
+    }
+    
+    let new_brk = if increment > 0 {
+        current_brk.checked_add(increment as usize)
+    } else {
+        // Handle negative increment (decrease brk)
+        current_brk.checked_sub((-increment) as usize)
+    };
+    
+    let new_brk = match new_brk {
+        Some(brk) => brk,
+        None => {
+            // Overflow/underflow
+            use super::errno;
+            return errno::to_result(errno::ENOMEM);
+        }
+    };
+    
+    match task.set_brk(new_brk) {
+        Ok(_) => current_brk,  // Return old brk value on success
+        Err(_) => {
+            use super::errno;
+            errno::to_result(errno::ENOMEM)  // Return proper errno on failure
+        }
     }
 }
 
@@ -163,9 +188,21 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let new_brk = trapframe.get_arg(0);
     trapframe.increment_pc_next(task);
     
+    // If new_brk is 0, just return current brk (query current brk)
+    if new_brk == 0 {
+        return task.get_brk();
+    }
+    
     match task.set_brk(new_brk) {
-        Ok(_) => new_brk,
-        Err(_) => usize::MAX, /* -1 */
+        Ok(_) => {
+            // Return the actual brk value (might be different from requested)
+            task.get_brk()
+        },
+        Err(_) => {
+            // On failure, return current brk value (not an error)
+            // This matches Linux behavior where brk() doesn't set errno
+            task.get_brk()
+        }
     }
 }
 
