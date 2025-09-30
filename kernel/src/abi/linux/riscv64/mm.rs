@@ -1,10 +1,5 @@
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi, 
-    arch::Trapframe, 
-    task::mytask, 
-    environment::PAGE_SIZE,
-    vm::vmem::{MemoryArea, VirtualMemoryMap},
-    mem::page::allocate_raw_pages,
+    abi::linux::riscv64::{LinuxRiscv64Abi, errno::{self, to_result}}, arch::Trapframe, environment::PAGE_SIZE, mem::page::allocate_raw_pages, task::mytask, vm::vmem::{MemoryArea, VirtualMemoryMap}
 };
 use alloc::boxed::Box;
 
@@ -51,7 +46,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     if (flags & MAP_ANONYMOUS) != 0 {
         if fd != -1 {
             crate::println!("sys_mmap: Anonymous mapping should not have file descriptor");
-            return usize::MAX; // -EINVAL
+            return to_result(errno::EINVAL);
         }
         return handle_anonymous_mapping(task, addr, aligned_length, num_pages, prot, flags);
     }
@@ -59,7 +54,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // Handle file-backed mappings
     if fd == -1 {
         crate::println!("sys_mmap: File-backed mapping requires valid file descriptor");
-        return usize::MAX; // -EINVAL
+        return to_result(errno::EINVAL);
     }
 
     // Get handle from Linux fd
@@ -67,7 +62,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(h) => h,
         None => {
             crate::println!("sys_mmap: Invalid file descriptor {}", fd);
-            return usize::MAX; // -EBADF
+            return to_result(errno::EBADF);
         }
     };
 
@@ -76,7 +71,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(obj) => obj,
         None => {
             crate::println!("sys_mmap: Invalid handle {}", handle);
-            return usize::MAX; // -EBADF
+            return to_result(errno::EBADF);
         }
     };
 
@@ -85,14 +80,14 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Some(mappable) => mappable,
         None => {
             crate::println!("sys_mmap: Object doesn't support memory mapping");
-            return usize::MAX; // -ENODEV
+            return to_result(errno::ENODEV);
         }
     };
 
     // Check if the object supports mmap
     if !memory_mappable.supports_mmap() {
         crate::println!("sys_mmap: Object doesn't support mmap operation");
-        return usize::MAX; // -ENODEV
+        return to_result(errno::ENODEV);
     }
 
     // Get mapping information from the object
@@ -100,7 +95,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         Ok(info) => info,
         Err(_) => {
             crate::println!("sys_mmap: Failed to get mapping info");
-            return usize::MAX; // -EINVAL
+            return to_result(errno::EINVAL);
         }
     };
 
@@ -110,13 +105,13 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
             Some(vaddr) => vaddr,
             None => {
                 crate::println!("sys_mmap: No suitable address found");
-                return usize::MAX; // -ENOMEM
+                return to_result(errno::ENOMEM);
             }
         }
     } else {
         if addr % PAGE_SIZE != 0 {
             crate::println!("sys_mmap: Address not page-aligned");
-            return usize::MAX; // -EINVAL
+            return to_result(errno::EINVAL);
         }
         addr
     };
