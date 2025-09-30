@@ -59,6 +59,15 @@ pub trait MemoryMappingOps: Send + Sync {
     fn supports_mmap(&self) -> bool {
         true
     }
+
+    /// Diagnostic helper: return a short owner name for logging
+    ///
+    /// Default implementation returns a generic "object" string. Implementers
+    /// (e.g. VfsFileObject) should override to provide more meaningful names
+    /// such as file paths.
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        alloc::string::String::from("object")
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +117,10 @@ mod tests {
 
         fn supports_mmap(&self) -> bool {
             !self.should_fail
+        }
+
+        fn mmap_owner_name(&self) -> alloc::string::String {
+            alloc::string::String::from("mock_object")
         }
     }
 

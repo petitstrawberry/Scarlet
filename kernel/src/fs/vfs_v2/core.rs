@@ -394,6 +394,10 @@ impl MemoryMappingOps for VfsFileObject {
     fn supports_mmap(&self) -> bool {
         self.inner.supports_mmap()
     }
+
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        alloc::format!("vfs:{}", self.get_original_path())
+    }
 }
 
 impl FileObject for VfsFileObject {
