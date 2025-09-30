@@ -7,6 +7,7 @@ mod time;
 mod signal;
 mod pipe;
 mod socket;
+mod errno;
 
 // pub mod drivers;
 
@@ -413,6 +414,18 @@ impl AbiModule for LinuxRiscv64Abi {
 
                         let mut env_vaddrs: Vec<u64> = Vec::new();
                         for &env in envp.iter() {
+                            crate::println!("Setting up env: {}", env);
+                            // Debug: Print raw bytes for LD_LIBRARY_PATH
+                            if env.starts_with("LD_LIBRARY_PATH=") {
+                                crate::println!("LD_LIBRARY_PATH env string length: {}", env.len());
+                                crate::println!("LD_LIBRARY_PATH raw bytes: {:?}", env.as_bytes());
+                                for (i, &byte) in env.as_bytes().iter().enumerate() {
+                                    if byte < 32 || byte > 126 {
+                                        crate::println!("  Non-printable byte at {}: 0x{:02x} ('{}' is printable)", 
+                                                      i, byte, (byte >= 32 && byte <= 126));
+                                    }
+                                }
+                            }
                             let len = env.len() + 1;
                             sp -= len;
                             let vaddr = sp;

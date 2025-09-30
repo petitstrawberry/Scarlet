@@ -278,7 +278,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
-    crate::println!("sys_openat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+    // crate::println!("sys_openat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
 
     let vfs = task.vfs.as_ref().unwrap();
 
@@ -311,16 +311,16 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Open the file using VfsManager::open_relative
-    crate::println!("sys_openat: attempting to open '{}' with flags {:#o}", path_str, flags);
+    // crate::println!("sys_openat: attempting to open '{}' with flags {:#o}", path_str, flags);
     let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
 
     let kernel_obj = match file {
         Ok(obj) => {
-            crate::println!("sys_openat: successfully opened '{}'", path_str);
+            // crate::println!("sys_openat: successfully opened '{}'", path_str);
             obj
         },
         Err(e) => {
-            crate::println!("sys_openat: failed to open '{}': {:?}", path_str, e);
+            // crate::println!("sys_openat: failed to open '{}': {:?}", path_str, e);
             // If open failed and O_CREAT flag is set, try to create the file
             if flags & O_CREAT != 0 {
                 // Build absolute path for file creation before getting mutable VFS reference
