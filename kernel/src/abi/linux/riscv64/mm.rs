@@ -168,8 +168,8 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
             final_vaddr
         }
         Err(_) => {
-            // crate::println!("sys_mmap: Failed to add memory mapping");
-            usize::MAX // -ENOMEM
+            crate::println!("sys_mmap: Failed to add memory mapping");
+            to_result(errno::ENOMEM)
         }
     }
 }
