@@ -496,3 +496,54 @@ pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         usize::MAX // No mapping found at this address
     }
 }
+
+// TODO: Migrate object-backed MAP_PRIVATE mappings to delayed Copy-On-Write (COW).
+// Motivation:
+// - Currently MAP_PRIVATE file-backed mappings in the Linux ABI handler may allocate
+//   private copies eagerly. For large mappings or read-mostly workloads this is
+//   inefficient. Delayed COW copies pages only on first write, saving memory and CPU.
+//
+// High-level plan (implementation checklist):
+// 1) Syscall layer (this file): when a user requests MAP_PRIVATE, mark the new
+//    VirtualMemoryMap with a `cow` flag and avoid performing an immediate copy.
+//    - Install the mapping with write permission cleared so stores will trap.
+//    - Keep the owner reference so reads can still source data from the object.
+//
+// 2) VM representation: ensure VirtualMemoryMap has a boolean `cow` field and
+//    the field is propagated to all mapping creation sites in the kernel.
+//
+// 3) Trap handling: modify the architecture trap/exception handler so that a
+//    store (write) page fault will check the `cow` flag on the mapping and call
+//    a dedicated per-page COW handler instead of the generic lazy mapping path.
+//
+// 4) Per-page COW handler (Task::handle_cow_page): allocate a new physical page,
+//    copy the contents from the original backing paddr into it, replace only the
+//    single faulting page in the mapping (e.g. via vm_manager.add_memory_map_fixed
+//    with a one-page mapping), map it immediately, and register it as a managed
+//    page of the task so it will be freed on exit.
+//
+// 5) Fork/clone semantics: preserve COW semantics across fork/clone so parent and
+//    child share pages until either writes; ensure managed_pages bookkeeping is
+//    adjusted so that only private copies are freed by the owner task.
+//
+// 6) Tests and validation:
+//    - Integration tests for two tasks mapping the same file MAP_PRIVATE and
+//      verifying that a write by one task creates a private copy while the other
+//      retains original contents.
+//    - Tests for fork/clone + MAP_PRIVATE behavior and corner cases (partial-page
+//      writes, overlapping mappings, munmap after COW).
+//
+// 7) Documentation: update rustdoc and design documents describing the `cow`
+//    flag, the runtime behavior, and which object types are eligible for COW.
+//
+// Acceptance criteria:
+// - MAP_PRIVATE mappings are created without eager copying (cow=true and write bit
+//   cleared).
+// - On first write to a page, only that page is copied and the writer receives a
+//   private writable page while others continue to see the original data.
+// - Tests pass and there are no page leaks.
+//
+// Notes:
+// - Some object types (device MMIO, special backing) cannot be COW'ed safely;
+//   in such cases the syscall should either fall back to eager copy, reject the
+//   mapping, or require explicit flags. Document these cases.

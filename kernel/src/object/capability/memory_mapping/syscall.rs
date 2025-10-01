@@ -377,3 +377,65 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
         usize::MAX // No mapping found at this address
     }
 }
+
+// TODO: Migrate object-backed MAP_PRIVATE mappings to delayed Copy-On-Write (COW).
+// Motivation:
+// - Currently MAP_PRIVATE file-backed mappings perform an eager (immediate) copy of
+//   the mapped region at mmap time. This can be wasteful for large mappings or when
+//   the mapping is only read by the process. Delayed COW preserves memory and CPU
+//   by copying only on the first write to a page.
+//
+// High-level plan (implementation checklist):
+// 1) Syscall layer: when a user requests MAP_PRIVATE for an object-backed mapping,
+//    set a `cow` flag on the VirtualMemoryMap and do NOT perform an immediate copy.
+//    - Ensure the mapping is installed with write permission cleared so stores trap.
+//    - Preserve the mapping owner (object) for read access until pages are copied.
+//
+// 2) VM representation: add/ensure a boolean `cow` field on VirtualMemoryMap to mark
+//    that the mapping uses copy-on-write semantics.
+//
+// 3) Exception/Trap handling: on store-page-faults, detect whether the faulting
+//    virtual address belongs to a mapping with cow == true. If so, invoke a per-page
+//    COW handler instead of the generic lazy mapping logic.
+//
+// 4) Task::handle_cow_page: implement a handler that:
+//    - Allocates a new physical page for the faulting virtual page.
+//    - Copies the contents from the original backing paddr (via the owner object
+//      or pmarea) to the newly allocated page.
+//    - Replaces only the single faulting page in the VM map by inserting a fixed
+//      one-page VirtualMemoryMap (owner = None) for that vaddr and maps it immediately
+//      (e.g., vm_manager.add_memory_map_fixed + vm_manager.lazy_map_page).
+//    - Registers the new page as a managed page of the current Task (so it will be
+//      freed on exit).
+//
+// 5) Fork/clone semantics: ensure that when a Task is cloned/forked, the child and parent
+//    share the same physical pages (do not eagerly copy) and the `cow` flag is preserved
+//    on the mapping entries so that subsequent writes by either side trigger COW.
+//    - Ensure managed_pages bookkeeping remains correct (only private copies are managed
+//      by the process that holds them).
+//
+// 6) Tests and validation:
+//    - Add unit/integration tests that map the same file in two tasks with MAP_PRIVATE,
+//      then write from one task and assert the other still sees original content.
+//    - Add tests for fork/clone + MAP_PRIVATE behavior.
+//    - Add tests for corner cases (partial-page offsets, overlapping mappings, munmap
+//      of pages that have been COW'ed).
+//
+// 7) Documentation: update rustdoc and design documentation to describe the COW
+//    semantics, the role of the `cow` flag, and the guarantees provided (ownership,
+//    notification behavior, and lifecycle of managed pages).
+//
+// Acceptance criteria:
+// - MAP_PRIVATE mappings are created without eager copying (vm_manager installs mapping
+//   with cow=true and write cleared).
+// - On first write to a page, only that page is copied and the writer gets a private
+//   writable page while others continue sharing the original page.
+// - All added tests pass in the dev environment (cargo make test) and resource leaks
+//   (pages) are not introduced.
+//
+// Notes & constraints:
+// - Some object types (e.g., device MMIO) cannot be safely COW'ed; sys_memory_map must
+//   detect such objects via supports_mmap / get_mapping_info and either fall back to
+//   eager-copy, reject the mapping, or require special flags. Document these cases.
+// - This change requires careful updates to trap handling and the Task-managed page
+//   bookkeeping; perform the work incrementally and add tests at each step.
