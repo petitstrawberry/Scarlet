@@ -23,7 +23,7 @@ impl AbiModule for ScarletAbi {
         Self::name().to_string()
     }
 
-    fn clone_boxed(&self) -> Box<dyn AbiModule> {
+    fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync> {
         Box::new(*self) // ScarletAbi is Copy, so we can dereference and copy
     }
 
@@ -31,7 +31,7 @@ impl AbiModule for ScarletAbi {
         syscall_handler(trapframe)
     }
 
-    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str, current_abi: Option<&dyn crate::abi::AbiModule>) -> Option<u8> {
+    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str, current_abi: Option<&(dyn crate::abi::AbiModule + Send + Sync)>) -> Option<u8> {
         // Stage 1: Basic format validation
         let magic_score = match file_object.as_file() {
             Some(file_obj) => {

@@ -14,6 +14,7 @@ use crate::{arch::{Arch, KernelContext, Trapframe, get_cpu, trap::user::arch_swi
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
+use core::ops::Range;
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -177,6 +178,12 @@ pub enum TaskType {
     User,
 }
 
+/// ABIゾーンを表す構造体。所有権を持つBoxを保持する。
+pub struct AbiZone {
+    pub range: Range<usize>,
+    pub abi: Box<dyn AbiModule + Send + Sync>,
+}
+
 pub struct Task {
     id: usize,
     pub name: String,
@@ -203,8 +210,11 @@ pub struct Task {
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
-    /// Dynamic ABI
-    pub abi: Option<Box<dyn AbiModule>>,
+    /// Default ABI for this task. Determined from ELF OSABI etc.
+    pub default_abi: Box<dyn AbiModule + Send + Sync>,
+
+    /// ABI zones map. Key is the start address of the range.
+    pub abi_zones: BTreeMap<usize, AbiZone>,
 
     /// Virtual File System Manager
     /// 
@@ -323,7 +333,8 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            abi: Some(Box::new(ScarletAbi::default())), // Default ABI
+            default_abi: Box::new(ScarletAbi::default()), // Default ABI
+            abi_zones: BTreeMap::new(),
             vfs: None,
             handle_table: HandleTable::new(),
             time_slice: 10, // Assign 10 ticks by default
@@ -822,6 +833,28 @@ impl Task {
         self.exit_status
     }
 
+    /// Resolve the ABI to use for the given address
+    /// 
+    /// This method returns a mutable reference to the ABI module that should be used
+    /// for a system call issued from the given address. It searches the ABI zones map
+    /// and returns the appropriate ABI, falling back to the default ABI if no zone matches.
+    /// 
+    /// # Arguments
+    /// * `addr` - The program counter address where the system call was issued
+    /// 
+    /// # Returns
+    /// A mutable reference to the ABI module to use
+    pub fn resolve_abi_mut(&mut self, addr: usize) -> &mut (dyn AbiModule + Send + Sync) {
+        // Search for the zone containing addr using efficient BTreeMap range query
+        if let Some((_start, zone)) = self.abi_zones.range_mut(..=addr).next_back() {
+            if zone.range.contains(&addr) {
+                return zone.abi.as_mut();
+            }
+        }
+        // No zone found, return default ABI
+        self.default_abi.as_mut()
+    }
+
     /// Get the file descriptor table
     /// 
     /// # Returns
@@ -937,11 +970,15 @@ impl Task {
         // Copy register states
         self.vcpu.copy_iregs_to(&mut child.vcpu.iregs);
         
-        // Set the ABI
-        if let Some(abi) = &self.abi {
-            child.abi = Some(abi.clone_boxed());
-        } else {
-            child.abi = None; // No ABI set
+        // Clone the default ABI and ABI zones
+        child.default_abi = self.default_abi.clone_boxed();
+        // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
+        for (start, zone) in &self.abi_zones {
+            let new_zone = AbiZone {
+                range: zone.range.clone(),
+                abi: zone.abi.clone_boxed(),
+            };
+            child.abi_zones.insert(*start, new_zone);
         }
         
         // Copy state such as data size
@@ -969,13 +1006,6 @@ impl Task {
             } else {
                 child.vfs = None;
             }
-        }
-
-        // Set the ABI
-        if let Some(abi) = &self.abi {
-            child.abi = Some(abi.clone_boxed());
-        } else {
-            child.abi = None; // No ABI set
         }
 
         // Initialize kernel context
@@ -1155,9 +1185,9 @@ impl Task {
         }
         
         // Delegate to ABI module for event processing
-        if let Some(abi) = &self.abi {
-            const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
-            let mut processed_count = 0;
+        let abi = &self.default_abi;
+        const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
+        let mut processed_count = 0;
             
             // Process events with limits to prevent infinite loops
             while processed_count < MAX_EVENTS_PER_CYCLE {
@@ -1201,7 +1231,6 @@ impl Task {
                     //                      self.id, queue.len());
                 }
             }
-        }
         
         Ok(())
     }

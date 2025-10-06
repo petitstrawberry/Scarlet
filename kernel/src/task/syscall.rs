@@ -381,3 +381,83 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     0
 }
 
+/// Register an ABI zone for a specific memory range
+/// 
+/// # Arguments
+/// * `start` - Start address of the memory range
+/// * `len` - Length of the memory range in bytes
+/// * `abi_name_ptr` - Pointer to null-terminated ABI name string in user space
+/// 
+/// # Returns
+/// * `0` on success
+/// * `usize::MAX` (-1) on failure
+pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let start = trapframe.get_arg(0);
+    let len = trapframe.get_arg(1);
+    let abi_name_ptr = trapframe.get_arg(2);
+    
+    trapframe.increment_pc_next(task);
+    
+    // Parse the ABI name from user space
+    let abi_name = match parse_c_string_from_userspace(task, abi_name_ptr, MAX_ABI_LENGTH) {
+        Ok(name) => name,
+        Err(_) => {
+            crate::early_println!("[syscall] Failed to parse ABI name from user space");
+            return usize::MAX; // -1
+        }
+    };
+    
+    crate::early_println!("[syscall] Registering ABI zone: start={:#x}, len={:#x}, abi={}", start, len, abi_name);
+    
+    // Instantiate the ABI module
+    let abi = match crate::abi::AbiRegistry::instantiate(&abi_name) {
+        Some(abi) => abi,
+        None => {
+            crate::early_println!("[syscall] ABI '{}' not found in registry", abi_name);
+            return usize::MAX; // -1
+        }
+    };
+    
+    // Create the ABI zone
+    let zone = crate::task::AbiZone {
+        range: start..(start + len),
+        abi,
+    };
+    
+    // Insert into the task's ABI zones map
+    task.abi_zones.insert(start, zone);
+    
+    crate::early_println!("[syscall] Successfully registered ABI zone");
+    0
+}
+
+/// Unregister an ABI zone
+/// 
+/// # Arguments
+/// * `start` - Start address of the memory range to unregister
+/// 
+/// # Returns
+/// * `0` on success
+/// * `usize::MAX` (-1) on failure (zone not found)
+pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let start = trapframe.get_arg(0);
+    
+    trapframe.increment_pc_next(task);
+    
+    crate::early_println!("[syscall] Unregistering ABI zone at start={:#x}", start);
+    
+    // Remove the ABI zone from the map
+    match task.abi_zones.remove(&start) {
+        Some(_) => {
+            crate::early_println!("[syscall] Successfully unregistered ABI zone");
+            0
+        }
+        None => {
+            crate::early_println!("[syscall] ABI zone not found at start={:#x}", start);
+            usize::MAX // -1
+        }
+    }
+}
+
