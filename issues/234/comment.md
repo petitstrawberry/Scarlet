@@ -1,6 +1,8 @@
 ---
 ## 詳細設計・計画 — 「ABIゾーン」管理機構の実装
 
+これはAIに雑に出させたものなので、間違いが含まれると予想されます。実装時は、実際の既存実装に合わせて適切に読み替えて実装する。
+
 ### アーキテクチャ
 TaskはBox<dyn AbiModule>としてABIインスタンスの所有権を持つ。ABIゾーンも同様に、AbiRegistryから生成されたBox<dyn AbiModule>インスタンスを所有する。カーネルはシステムコール時にsepcに基づき、Taskのゾーンマップから適用すべき&mut dyn AbiModuleへの参照を動的に解決する。
 
@@ -98,6 +100,8 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
 #### ステップ 4: 新規システムコールの実装 (kernel/src/abi/scarlet.rs)
 Scarlet Native ABIの`handle_syscall`内に、新しいシステムコールのロジックを追加します。
 
+たぶんここ実際の実装と違うので注意して。実際はマクロに追加でいけるはず。
+
 ```rust
 // in kernel/src/abi/scarlet.rs's handle_syscall
 // (擬似コード)
@@ -129,6 +133,4 @@ match syscall_id {
 ```
 
 ### Part 3: 初期テスト計画
-これは前回と同様ですが、システムコールの引数が`abi_id`ではなく`abi_name_ptr`になる点が異なります。テストプログラムは、登録したいABIの名前（例: "wasi"）を文字列としてカーネルに渡します。
-
-この計画であれば、あなたの既存のAbiRegistryと`Box<dyn AbiModule>`による所有権モデルを完全に活用し、その上に新機能をアドオンする形で、クリーンに実装を進めることができます.
+テストプログラムは、登録したいABIの名前（例: "wasi"）を文字列としてカーネルに渡します。
