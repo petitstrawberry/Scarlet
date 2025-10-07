@@ -143,7 +143,7 @@ impl AbiModule for Xv6Riscv64Abi {
         Self::name().to_string()
     }
 
-    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule> {
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule + Send + Sync> {
         Box::new(self.clone()) // Xv6Riscv64Abi is Copy, so we can dereference and copy
     }
     
@@ -155,7 +155,7 @@ impl AbiModule for Xv6Riscv64Abi {
         &self, 
         file_object: &crate::object::KernelObject, 
         file_path: &str,
-        current_abi: Option<&dyn AbiModule>
+        current_abi: Option<&(dyn AbiModule + Send + Sync)>
     ) -> Option<u8> {
         // Stage 1: Basic format validation (following implementation guidelines)
         let magic_score = match file_object.as_file() {
