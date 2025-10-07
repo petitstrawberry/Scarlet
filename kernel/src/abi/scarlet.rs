@@ -7,7 +7,7 @@
 
 use alloc::{boxed::Box, collections::btree_map::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec};
 
-use crate::{arch::{vm, Registers, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf_with_strategy, build_auxiliary_vector, ExecutionMode, LoadStrategy, LoadTarget, setup_auxiliary_vector_on_stack}, vm::{setup_trampoline, setup_user_stack}};
+use crate::{arch::{vm, IntRegisters, Trapframe}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, syscall::syscall_handler, task::elf_loader::{analyze_and_load_elf_with_strategy, build_auxiliary_vector, ExecutionMode, LoadStrategy, LoadTarget, setup_auxiliary_vector_on_stack}, vm::{setup_trampoline, setup_user_stack}};
 
 use super::AbiModule;
 
@@ -23,7 +23,7 @@ impl AbiModule for ScarletAbi {
         Self::name().to_string()
     }
 
-    fn clone_boxed(&self) -> Box<dyn AbiModule> {
+    fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync> {
         Box::new(*self) // ScarletAbi is Copy, so we can dereference and copy
     }
 
@@ -31,7 +31,7 @@ impl AbiModule for ScarletAbi {
         syscall_handler(trapframe)
     }
 
-    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str, current_abi: Option<&dyn crate::abi::AbiModule>) -> Option<u8> {
+    fn can_execute_binary(&self, file_object: &crate::object::KernelObject, file_path: &str, current_abi: Option<&(dyn crate::abi::AbiModule + Send + Sync)>) -> Option<u8> {
         // Stage 1: Basic format validation
         let magic_score = match file_object.as_file() {
             Some(file_obj) => {
@@ -161,7 +161,7 @@ impl AbiModule for ScarletAbi {
                         }
                         
                         // Reset task's registers for clean start
-                        task.vcpu.regs = Registers::new();
+                        task.vcpu.reset_iregs();
                         task.vcpu.set_sp(stack_pointer);
 
                         // Setup argv/envp on stack following Unix and RISC-V conventions
@@ -171,8 +171,8 @@ impl AbiModule for ScarletAbi {
                         // Set RISC-V calling convention registers
                         // a0 (reg[10]) = argc
                         // a1 (reg[11]) = argv pointer
-                        task.vcpu.regs.reg[10] = argv.len(); // argc
-                        task.vcpu.regs.reg[11] = argv_ptr; // argv array pointer
+                        task.vcpu.iregs.reg[10] = argv.len(); // argc
+                        task.vcpu.iregs.reg[11] = argv_ptr; // argv array pointer
 
                         // crate::println!("Executing binary: {} with entry point: {:#x}", task.name, entry_point);
                         // crate::println!("Arguments: {:?}", argv);

@@ -6,9 +6,8 @@
 
 use core::arch::naked_asm;
 use alloc::boxed::Box;
-use alloc::vec;
 
-use crate::arch::trap::user;
+use crate::arch::Trapframe;
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for RISC-V 64-bit
@@ -25,9 +24,9 @@ pub struct KernelContext {
     pub ra: u64,
     /// Saved registers s0-s11 (callee-saved)
     pub s: [u64; 12],
-    /// Kernel stack for this context (None = uninitialized)
+    /// Kernel stack for this context
     /// Using Box<[u8]> to directly allocate on heap without stack overflow
-    pub kernel_stack: Option<Box<[u8]>>,
+    pub kernel_stack: Box<[u8]>,
 }
 
 impl KernelContext {
@@ -41,33 +40,24 @@ impl KernelContext {
         let stack_top = kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64; // Initial stack top = stack bottom
 
         Self {
-            sp: stack_top,
+            sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
-            kernel_stack: Some(kernel_stack),
+            kernel_stack,
         }
     }
 
     /// Get the bottom of the kernel stack
     pub fn get_kernel_stack_bottom(&self) -> u64 {
-        match &self.kernel_stack {
-            Some(stack) => stack.as_ptr() as u64 + stack.len() as u64,
-            None => 0,
-        }
+        self.kernel_stack.as_ptr() as u64 + self.kernel_stack.len() as u64
     }
 
-    pub fn get_kernel_stack_memory_area(&self) -> Option<MemoryArea> {
-        match &self.kernel_stack {
-            Some(stack) => Some(MemoryArea::new(stack.as_ptr() as usize, self.get_kernel_stack_bottom() as usize - 1)),
-            None => None,
-        }
+    pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
+        MemoryArea::new(self.kernel_stack.as_ptr() as usize, self.get_kernel_stack_bottom() as usize - 1)
     }
 
-    pub fn get_kernel_stack_ptr(&self) -> Option<*const u8> {
-        match &self.kernel_stack {
-            Some(stack) => Some(stack.as_ptr()),
-            None => None,
-        }
+    pub fn get_kernel_stack_ptr(&self) -> *const u8 {
+        self.kernel_stack.as_ptr()
     }
 
     /// Set the kernel stack for this context
@@ -75,7 +65,7 @@ impl KernelContext {
     /// * `stack` - Boxed slice representing the kernel stack memory
     /// 
     pub fn set_kernel_stack(&mut self, stack: Box<[u8]>) {
-        self.kernel_stack = Some(stack);
+        self.kernel_stack = stack;
         self.sp = self.get_kernel_stack_bottom();
     }
 
@@ -95,6 +85,21 @@ impl KernelContext {
     /// Function address of the entry point
     pub fn get_entry_point(&self) -> u64 {
         self.ra
+    }
+
+    /// Get a mutable reference to the trapframe
+    /// 
+    /// The trapframe is located at the top of the kernel stack, reserved during
+    /// context creation. This provides access to the user-space register state.
+    /// 
+    /// # Returns
+    /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
+    pub fn get_trapframe(&mut self) -> &mut Trapframe {
+        let stack_top = self.kernel_stack.as_ptr() as usize + self.kernel_stack.len();
+        let trapframe_addr = stack_top - core::mem::size_of::<Trapframe>();
+        unsafe {
+            &mut *(trapframe_addr as *mut Trapframe)
+        }
     }
 }
 

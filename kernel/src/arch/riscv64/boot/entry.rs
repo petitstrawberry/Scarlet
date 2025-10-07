@@ -1,6 +1,6 @@
 use core::{arch::naked_asm, mem::transmute};
 
-use crate::{arch::{Riscv64, riscv64::{TRAPFRAME, trap_init}}, device::fdt::{init_fdt, relocate_fdt, create_bootinfo_from_fdt}, environment::STACK_SIZE, mem::{__FDT_RESERVED_START, init_bss}, start_kernel};
+use crate::{arch::{Riscv64, riscv64::{CPUS, trap_init}}, device::fdt::{init_fdt, relocate_fdt, create_bootinfo_from_fdt}, environment::STACK_SIZE, mem::{__FDT_RESERVED_START, init_bss}, start_kernel};
 
 /// Entry point for the primary core
 #[unsafe(link_section = ".init")]
@@ -74,7 +74,7 @@ pub extern "C" fn arch_start_kernel(hartid: usize, fdt_ptr: usize) {
 
     crate::early_println!("Hart {}: Initializing core....", hartid);
     // Get raw Riscv64 struct
-    let riscv: &mut Riscv64 = unsafe { transmute(&TRAPFRAME[hartid] as *const _ as usize ) };
+    let riscv: &mut Riscv64 = unsafe { transmute(&CPUS[hartid] as *const _ as usize ) };
     trap_init(riscv);
 
     start_kernel(&bootinfo);

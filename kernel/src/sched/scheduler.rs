@@ -15,43 +15,82 @@ extern crate alloc;
 
 use core::panic;
 
-use alloc::{collections::vec_deque::VecDeque, string::ToString};
+use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
 use hashbrown::HashMap;
 
-use crate::{arch::{enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_next_mode, set_trapframe, set_trapvector, Arch}, environment::NUM_OF_CPUS, task::{new_kernel_task, wake_parent_waiters, wake_task_waiters, BlockedType, TaskState}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_trap_vector, get_trampoline_trapframe}};
+use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector, trap::{user::arch_switch_to_user_space}}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
 use crate::println;
 use crate::print;
 
 use crate::task::Task;
 
 /// Task pool that stores tasks in fixed positions
+/// With each Task being 824 bytes, 1024 tasks consume approximately 824 KiB of memory,
+/// which is very reasonable for general-purpose systems.
+/// TODO: Refactor Task struct to use fine-grained Mutex on individual fields
+///       (e.g., state: Mutex<TaskState>, time_slice: Mutex<usize>) and change
+///       TaskPool to use Arc<Task> for safe sharing across threads/contexts.
+///       This would also eliminate the fixed-size limitation.
+const MAX_TASKS: usize = 1024;
+
 struct TaskPool {
-    tasks: HashMap<usize, Task>,
+    // Fixed-length slice on heap
+    tasks: Box<[Option<Task>]>,
+    id_to_index: HashMap<usize, usize>,
+    free_indices: Vec<usize>,
+    next_free_index: usize,
 }
 
 impl TaskPool {
     fn new() -> Self {
+        // Create fixed-length slice on heap
+        let tasks: Box<[Option<Task>]> = (0..MAX_TASKS)
+            .map(|_| None)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        
         TaskPool {
-            tasks: HashMap::new(),
+            tasks,
+            id_to_index: HashMap::new(),
+            free_indices: Vec::new(),
+            next_free_index: 0,
         }
     }
 
-    fn add_task(&mut self, task: Task) {
+    fn add_task(&mut self, task: Task) -> Result<(), &'static str> {
         let task_id = task.get_id();
-        self.tasks.insert(task_id, task);
+        
+        // Find available index
+        let index = if let Some(free_idx) = self.free_indices.pop() {
+            free_idx
+        } else if self.next_free_index < self.tasks.len() {
+            let idx = self.next_free_index;
+            self.next_free_index += 1;
+            idx
+        } else {
+            return Err("Task pool full");
+        };
+        
+        self.tasks[index] = Some(task);
+        self.id_to_index.insert(task_id, index);
+        Ok(())
     }
 
     fn get_task(&mut self, task_id: usize) -> Option<&mut Task> {
-        self.tasks.get_mut(&task_id)
+        let index = *self.id_to_index.get(&task_id)?;
+        self.tasks.get_mut(index)?.as_mut()
     }
 
     fn remove_task(&mut self, task_id: usize) -> Option<Task> {
-        self.tasks.remove(&task_id)
+        let index = self.id_to_index.remove(&task_id)?;
+        let task = self.tasks[index].take()?;
+        self.free_indices.push(index);
+        Some(task)
     }
 
     #[allow(dead_code)]
     fn contains_task(&self, task_id: usize) -> bool {
-        self.tasks.contains_key(&task_id)
+        self.id_to_index.contains_key(&task_id)
     }
 }
 
@@ -95,7 +134,9 @@ impl Scheduler {
     pub fn add_task(&mut self, task: Task, cpu_id: usize) {
         let task_id = task.get_id();
         // Add task to the task pool
-        self.task_pool.add_task(task);
+        if let Err(e) = self.task_pool.add_task(task) {
+            panic!("Failed to add task {}: {}", task_id, e);
+        }
         // Add task state info to ready queue
         self.ready_queue[cpu_id].push_back(task_id);
     }
@@ -110,7 +151,7 @@ impl Scheduler {
     /// 
     /// # Returns
     /// * `(old_task_id, new_task_id)` - Tuple of old and new task IDs
-    fn run(&mut self, cpu: &mut Arch) -> (Option<usize>, Option<usize>) {
+    fn run(&mut self, cpu: &Arch) -> (Option<usize>, Option<usize>) {
         let cpu_id = cpu.get_cpuid();
         let old_current_task_id = self.current_task_id[cpu_id];
 
@@ -229,7 +270,7 @@ impl Scheduler {
 
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
-    pub fn on_tick(&mut self, cpu_id: usize) {
+    pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = self.task_pool.get_task(task_id) {
                 if task.time_slice > 0 {
@@ -237,13 +278,11 @@ impl Scheduler {
                 }
                 if task.time_slice == 0 {
                     // Time slice expired, trigger reschedule
-                    let cpu = get_cpu();
-                    self.schedule(cpu);
+                    self.schedule(trapframe);
                 }
             }
         } else {
-            let cpu = get_cpu();
-            self.schedule(cpu);
+            self.schedule(trapframe);
         }
     }
 
@@ -255,7 +294,8 @@ impl Scheduler {
     /// 
     /// # Arguments
     /// * `cpu` - The CPU architecture state
-    pub fn schedule(&mut self, cpu: &mut Arch) {
+    pub fn schedule(&mut self, trapframe: &mut Trapframe) {
+        let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
         // Step 1: Run scheduling algorithm to get current and next task IDs
@@ -281,7 +321,7 @@ impl Scheduler {
             // Store current task's user state to VCPU
             if let Some(current_task_id) = current_task_id {
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                current_task.vcpu.store(cpu);
+                current_task.vcpu.store(trapframe);
 
                 // Perform kernel context switch
                 self.kernel_context_switch(cpu_id, current_task_id, next_task_id);
@@ -289,11 +329,12 @@ impl Scheduler {
 
                 // Restore trapframe of same task
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
-                Self::setup_task_execution(cpu, current_task);
+                Self::setup_task_execution(get_cpu(), current_task);
             } else {            // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
-                Self::setup_task_execution(cpu, next_task);
+                Self::setup_task_execution(get_cpu(), next_task);
+                arch_switch_to_user_space(next_task.get_trapframe()); // Force switch to user space
             }
         }
 
@@ -314,12 +355,11 @@ impl Scheduler {
         timer.stop(cpu_id);
 
         let trap_vector = get_trampoline_trap_vector();
-        let trapframe = get_trampoline_trapframe(cpu_id);
+        let arch = get_trampoline_arch(cpu_id);
         set_trapvector(trap_vector);
-        set_trapframe(trapframe);
-        let trapframe = cpu.get_trapframe();
-        trapframe.set_trap_handler(get_user_trap_handler());
-        trapframe.set_next_address_space(get_kernel_vm_manager().get_asid());
+        set_arch(arch);
+        cpu.set_trap_handler(get_user_trap_handler());
+        cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
 
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);
@@ -394,16 +434,6 @@ impl Scheduler {
         false
     }
 
-    pub fn block_task(&mut self, task_id: usize, blocked_type: BlockedType) -> Result<(), &'static str> {
-        let task = self.get_task_by_id(task_id);
-        if let Some(task) = task {
-            task.state = TaskState::Blocked(blocked_type);
-            Ok(())
-        } else {
-            Err("Task not found")
-        }
-    }
-    
     /// Get IDs of all tasks across ready, blocked, and zombie queues
     ///
     /// This helper is used by subsystems (e.g., event broadcast) that need
@@ -475,19 +505,31 @@ impl Scheduler {
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
+
+        // crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
+        // crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
+        // let trapframe = cpu.get_trapframe();
+        // crate::early_println!("[SCHED]   before Trapframe {:#x?}", trapframe);
+
+        cpu.set_kernel_stack(task.get_kernel_stack_bottom());
+        
+        // Handle trapframe and vcpu switching - use raw pointer to avoid borrow checker issues
+        // This is safe because we're accessing different fields of the same struct
+        let task_ptr = task as *mut Task;
+        unsafe {
+            let trapframe = (*task_ptr).get_trapframe();
+            (*task_ptr).vcpu.switch(trapframe);
+        }
+
+        cpu.set_trap_handler(get_user_trap_handler());
+        cpu.set_next_address_space(task.vm_manager.get_asid());
+        set_next_mode(task.vcpu.get_mode());
         // Setup trap vector
         set_trapvector(get_trampoline_trap_vector());
 
-        // Setup trapframe for hardware
-        let trapframe = cpu.get_trapframe();
-        trapframe.set_trap_handler(get_user_trap_handler());
-        trapframe.set_next_address_space(task.vm_manager.get_asid());
-        trapframe.set_kernel_stack(task.get_kernel_stack_bottom());
+        // crate::early_println!("[SCHED]   after  CPU {:#x?}", cpu);
+        // crate::early_println!("[SCHED]   after  Trapframe {:#x?}", cpu.get_trapframe());
 
-        task.vcpu.switch(cpu);
-
-        set_next_mode(task.vcpu.get_mode());
-        
         // Note: User context (VCPU) will be restored in schedule() after run() returns
     }
 }

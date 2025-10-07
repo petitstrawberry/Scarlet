@@ -16,7 +16,7 @@ use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec::Vec};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
-    abi::AbiModule, arch::{self, Registers, Trapframe}, early_initcall, environment::PAGE_SIZE, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::{analyze_and_load_elf_with_strategy, ExecutionMode, LoadStrategy, LoadTarget}, vm::{setup_trampoline, setup_user_stack}
+    abi::AbiModule, arch::{self, Trapframe, IntRegisters}, early_initcall, fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, register_abi, task::elf_loader::{analyze_and_load_elf_with_strategy, ExecutionMode, LoadStrategy, LoadTarget}, vm::{setup_trampoline, setup_user_stack}
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -220,8 +220,8 @@ impl AbiModule for LinuxRiscv64Abi {
         Self::name().to_string()
     }
 
-    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule> {
-        Box::new(self.clone()) // LinuxRiscv64Abi is Copy, so we can dereference and copy
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule + Send + Sync> {
+        Box::new(self.clone())
     }
     
     fn handle_syscall(&mut self, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
@@ -264,7 +264,7 @@ impl AbiModule for LinuxRiscv64Abi {
         &self, 
         file_object: &crate::object::KernelObject, 
         file_path: &str,
-        current_abi: Option<&dyn AbiModule>
+        current_abi: Option<&(dyn AbiModule + Send + Sync)>
     ) -> Option<u8> {
         // Stage 1: Basic format validation (following implementation guidelines)
         let magic_score = match file_object.as_file() {
@@ -523,11 +523,11 @@ impl AbiModule for LinuxRiscv64Abi {
                         // }
 
                         task.set_entry_point(load_result.entry_point as usize);
-                        task.vcpu.regs = Registers::new(); // Clear registers
+                        task.vcpu.iregs = IntRegisters::new(); // Clear registers
                         task.vcpu.set_sp(sp); // Set stack pointer
 
                         // Initialize trapframe with clean state
-                        trapframe.regs = task.vcpu.regs;
+                        trapframe.regs = task.vcpu.iregs;
                         trapframe.epc = load_result.entry_point;
                         crate::println!("DEBUG: Set trapframe.epc to {:#x}", trapframe.epc);
 

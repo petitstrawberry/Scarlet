@@ -21,7 +21,7 @@ use crate::{
         }, 
         AbiModule
     }, 
-    arch::{self, Registers}, 
+    arch::{self, IntRegisters}, 
     early_initcall, 
     fs::{drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager}, 
     register_abi, 
@@ -143,7 +143,7 @@ impl AbiModule for Xv6Riscv64Abi {
         Self::name().to_string()
     }
 
-    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule> {
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule + Send + Sync> {
         Box::new(self.clone()) // Xv6Riscv64Abi is Copy, so we can dereference and copy
     }
     
@@ -155,7 +155,7 @@ impl AbiModule for Xv6Riscv64Abi {
         &self, 
         file_object: &crate::object::KernelObject, 
         file_path: &str,
-        current_abi: Option<&dyn AbiModule>
+        current_abi: Option<&(dyn AbiModule + Send + Sync)>
     ) -> Option<u8> {
         // Stage 1: Basic format validation (following implementation guidelines)
         let magic_score = match file_object.as_file() {
@@ -268,11 +268,11 @@ impl AbiModule for Xv6Riscv64Abi {
                         task.set_entry_point(entry_point as usize);
                         
                         // Reset task's registers (except for those needed for arguments)
-                        task.vcpu.regs = Registers::new();
+                        task.vcpu.iregs = IntRegisters::new();
                         // Set the stack pointer
                         task.vcpu.set_sp(stack_pointer);
-                        task.vcpu.regs.reg[11] = stack_pointer as usize; // Set the return value (a0) to 0 in the new proc
-                        task.vcpu.regs.reg[10] = argc; // Set argc in a0
+                        task.vcpu.iregs.reg[11] = stack_pointer as usize; // Set the return value (a0) to 0 in the new proc
+                        task.vcpu.iregs.reg[10] = argc; // Set argc in a0
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);

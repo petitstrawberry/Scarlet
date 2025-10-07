@@ -8,8 +8,6 @@ use core::any::Any;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use spin::Mutex;
-use core::sync::atomic::{AtomicBool, Ordering};
-use crate::arch::get_cpu;
 use crate::device::{Device, DeviceType, DeviceCapability};
 use crate::device::char::{CharDevice, TtyControl};
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
@@ -18,6 +16,7 @@ use crate::sync::waker::Waker;
 use crate::late_initcall;
 use crate::task::mytask;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Scarlet-private, OS-agnostic control opcodes for TTY devices.
 /// These are stable only within Scarlet and must be mapped by ABI adapters.
@@ -282,12 +281,10 @@ impl CharDevice for TtyDevice {
             drop(input_buffer);
             
             // No data available, block the current task
-            if let Some(mut task) = mytask() {
-                let mut cpu = get_cpu();
-
+            if let Some(task) = mytask() {
                 // Wait for input to become available
                 // This will return when the task is woken up by input_waker.wake_all()
-                self.input_waker.wait(task.get_id(), &mut cpu);
+                self.input_waker.wait(task.get_id(), task.get_trapframe());
                 
                 // Continue the loop to re-check if data is available
                 continue;

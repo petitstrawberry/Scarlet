@@ -26,7 +26,7 @@ pub const MAX_ABI_LENGTH: usize = 64;
 /// Each ABI module must implement Clone to support task cloning with
 /// independent ABI state per task.
 /// 
-pub trait AbiModule: 'static {
+pub trait AbiModule: Send + Sync + 'static {
     fn name() -> &'static str
     where
         Self: Sized;
@@ -37,7 +37,7 @@ pub trait AbiModule: 'static {
     /// 
     /// This method enables cloning ABI modules as trait objects,
     /// allowing each task to have its own independent ABI instance.
-    fn clone_boxed(&self) -> Box<dyn AbiModule>;
+    fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync>;
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
     
@@ -91,7 +91,7 @@ pub trait AbiModule: 'static {
     /// 
     /// Some(confidence.min(100))
     /// ```
-    fn can_execute_binary(&self, _file_object: &crate::object::KernelObject, _file_path: &str, _current_abi: Option<&dyn AbiModule>) -> Option<u8> {
+    fn can_execute_binary(&self, _file_object: &crate::object::KernelObject, _file_path: &str, _current_abi: Option<&(dyn AbiModule + Send + Sync)>) -> Option<u8> {
         // Default implementation: cannot determine
         None
     }
@@ -299,7 +299,7 @@ pub trait AbiModule: 'static {
 /// of ABI modules in the Scarlet kernel.
 /// 
 pub struct AbiRegistry {
-    factories: HashMap<String, fn() -> Box<dyn AbiModule>>,
+    factories: HashMap<String, fn() -> Box<dyn AbiModule + Send + Sync>>,
 }
 
 impl AbiRegistry {
@@ -336,7 +336,7 @@ impl AbiRegistry {
             .insert(T::name().to_string(), || Box::new(T::default()));
     }
 
-    pub fn instantiate(name: &str) -> Option<Box<dyn AbiModule>> {
+    pub fn instantiate(name: &str) -> Option<Box<dyn AbiModule + Send + Sync>> {
         let registry = Self::global().lock();
         if let Some(factory) = registry.factories.get(name) {
             let abi = factory();
@@ -363,7 +363,7 @@ impl AbiRegistry {
         
         // Get current task's ABI reference for inheritance consideration
         let current_abi = if let Some(task) = mytask() {
-            task.abi.as_ref().map(|abi| abi.as_ref())
+            Some(task.default_abi.as_ref() as &(dyn AbiModule + Send + Sync))
         } else {
             None
         };
@@ -392,7 +392,15 @@ macro_rules! register_abi {
 }
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+    // 1. Get the program counter (sepc) from trapframe
+    let pc = trapframe.epc as usize;
+    
+    // 2. Get mutable reference to current task
     let task = mytask().unwrap();
-    let abi = task.abi.as_mut().expect("ABI not set");
-    abi.handle_syscall(trapframe)
+    
+    // 3. Resolve the appropriate ABI based on PC address
+    let abi_module = task.resolve_abi_mut(pc);
+    
+    // 4. Handle the system call with the resolved ABI
+    abi_module.handle_syscall(trapframe)
 }

@@ -1,5 +1,5 @@
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi, arch::{get_cpu, Trapframe}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags}
+    abi::linux::riscv64::LinuxRiscv64Abi, arch::{Trapframe, get_cpu}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags}
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -76,21 +76,17 @@ pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
     task.exit(exit_code);
-    get_scheduler().schedule(get_cpu());
-    
-    usize::MAX // -1 (If exit is successful, this will not be reached)
+    get_scheduler().schedule(trapframe);
+    usize::MAX
 }
 
 pub fn sys_exit_group(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
-    // task.exit_group(exit_code);
-    // For now, we just exit the current task
     task.exit(exit_code);
-
-    get_scheduler().schedule(get_cpu());
-    usize::MAX // -1 (If exit is successful, this will not be reached)
+    get_scheduler().schedule(trapframe);
+    usize::MAX
 }
 
 pub fn sys_set_robust_list(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -450,7 +446,7 @@ pub fn sys_clone(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     match parent_task.clone_task(CloneFlags::default()) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
-            child_task.vcpu.regs.reg[10] = 0; // a0 = 0 in child
+            child_task.vcpu.iregs.reg[10] = 0; // a0 = 0 in child
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             child_id
         },
@@ -603,7 +599,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
             // No child has exited yet, block until one does
             // Use parent waker for waitpid(-1) semantics
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait(task.get_id(), get_cpu());
+            parent_waker.wait(task.get_id(), task.get_trapframe());
             crate::println!("Woke up from waitpid for any child");
             // Continue the loop to re-check after waking up
             continue;
@@ -652,7 +648,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                             // Child not exited yet, wait for it
                             use crate::task::get_waitpid_waker;
                             let child_waker = get_waitpid_waker(child_pid);
-                            child_waker.wait(task.get_id(), get_cpu());
+                            child_waker.wait(task.get_id(), task.get_trapframe());
                             crate::println!("Woke up from waitpid for child {}", child_pid);
                             // Continue the loop to re-check after waking up
                             continue;

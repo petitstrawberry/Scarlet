@@ -108,8 +108,6 @@ pub extern "C" fn _kernel_trap_entry() {
 #[unsafe(export_name = "arch_kernel_trap_handler")]
 pub extern "C" fn arch_kernel_trap_handler(addr: usize) {
     let trapframe: &mut Trapframe = unsafe { transmute(addr) };
-    let cpu = get_cpu();
-    trapframe.hartid = cpu.hartid;
 
     let cause: usize;
     unsafe {
