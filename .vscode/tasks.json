@@ -4,10 +4,10 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "kernel",
+            "label": "kernel-riscv64",
             "type": "shell",
             "isBackground": true,
-            "command": "cargo make debug",
+            "command": "cargo make debug-riscv64",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
@@ -26,10 +26,54 @@
             ],
         },
         {
-            "label": "test",
+            "label": "test-riscv64",
             "type": "shell",
             "isBackground": true,
-            "command": "cargo make debug-test",
+            "command": "cargo make debug-test-riscv64",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                {
+                    "pattern": {
+                    "regexp": "Starting",
+                    "line": 1,
+                    },
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "Starting",
+                        "endsPattern": "Starting"
+                    }
+                }
+            ]
+        },
+        {
+            "label": "kernel-aarch64",
+            "type": "shell",
+            "isBackground": true,
+            "command": "cargo make debug-aarch64",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                {
+                    "pattern": {
+                    "regexp": "Starting",
+                    "line": 1,
+                    },
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "Starting",
+                        "endsPattern": "Starting"
+                    }
+                }
+            ],
+        },
+        {
+            "label": "test-aarch64",
+            "type": "shell",
+            "isBackground": true,
+            "command": "cargo make debug-test-aarch64",
             "options": {
                 "cwd": "${workspaceFolder}"
             },

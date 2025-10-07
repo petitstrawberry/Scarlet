@@ -13,6 +13,7 @@ use crate::mem::page::allocate_raw_pages;
 use alloc::boxed::Box;
 
 // Memory mapping flags (MAP_*)
+#[allow(dead_code)]
 const MAP_SHARED: usize = 0x01;
 const MAP_ANONYMOUS: usize = 0x20;
 

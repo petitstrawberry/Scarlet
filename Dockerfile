@@ -12,7 +12,7 @@ RUN apt update && \
   mtools dosfstools sleuthkit
 
 # Install QEMU
-RUN apt install -y qemu-system-riscv64
+RUN apt install -y qemu-system-riscv64 qemu-system-arm
 
 # Install Rust and RISC-V target
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
