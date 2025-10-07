@@ -178,7 +178,7 @@ pub enum TaskType {
     User,
 }
 
-/// ABIゾーンを表す構造体。所有権を持つBoxを保持する。
+/// ABI Zone structure holding a memory range with an owned ABI module.
 pub struct AbiZone {
     pub range: Range<usize>,
     pub abi: Box<dyn AbiModule + Send + Sync>,
@@ -1188,49 +1188,49 @@ impl Task {
         let abi = &self.default_abi;
         const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
         let mut processed_count = 0;
+        
+        // Process events with limits to prevent infinite loops
+        while processed_count < MAX_EVENTS_PER_CYCLE {
+            let event = {
+                let mut queue = self.event_queue.lock();
+                queue.dequeue()
+            };
             
-            // Process events with limits to prevent infinite loops
-            while processed_count < MAX_EVENTS_PER_CYCLE {
-                let event = {
-                    let mut queue = self.event_queue.lock();
-                    queue.dequeue()
-                };
-                
-                match event {
-                    Some(event) => {
-                        processed_count += 1;
-                        
-                        // Check if this is a critical event that requires immediate attention
-                        let is_critical = self.is_critical_event(&event);
-                        
-                        // Let ABI handle the event
-                        abi.handle_event(event, self.id as u32)?;
-                        
-                        // Check if events were disabled during handling
-                        if !self.events_enabled() {
-                            break;
-                        }
-                        
-                        // If we processed a critical event, we can stop here
-                        // to allow the ABI module to take appropriate action
-                        if is_critical {
-                            break;
-                        }
+            match event {
+                Some(event) => {
+                    processed_count += 1;
+                    
+                    // Check if this is a critical event that requires immediate attention
+                    let is_critical = self.is_critical_event(&event);
+                    
+                    // Let ABI handle the event
+                    abi.handle_event(event, self.id as u32)?;
+                    
+                    // Check if events were disabled during handling
+                    if !self.events_enabled() {
+                        break;
                     }
-                    None => break, // No more events
+                    
+                    // If we processed a critical event, we can stop here
+                    // to allow the ABI module to take appropriate action
+                    if is_critical {
+                        break;
+                    }
                 }
+                None => break, // No more events
             }
-            
-            // If we hit the limit and there are still events, the scheduler
-            // will call us again on the next cycle
-            if processed_count == MAX_EVENTS_PER_CYCLE {
-                let queue = self.event_queue.lock();
-                if !queue.is_empty() {
-                    // Log that we're deferring events to next cycle
-                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle", 
-                    //                      self.id, queue.len());
-                }
+        }
+        
+        // If we hit the limit and there are still events, the scheduler
+        // will call us again on the next cycle
+        if processed_count == MAX_EVENTS_PER_CYCLE {
+            let queue = self.event_queue.lock();
+            if !queue.is_empty() {
+                // Log that we're deferring events to next cycle
+                // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle", 
+                //                      self.id, queue.len());
             }
+        }
         
         Ok(())
     }
