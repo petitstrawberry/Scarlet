@@ -8,7 +8,6 @@ use crate::arch::Trapframe;
 use crate::task::mytask;
 use crate::ipc::event::{Event, EventContent, ProcessControlType};
 use alloc::collections::BTreeMap;
-use spin::Mutex;
 
 /// Linux signal numbers (POSIX standard)
 #[repr(u32)]

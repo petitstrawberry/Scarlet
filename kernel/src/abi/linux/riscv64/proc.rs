@@ -59,7 +59,7 @@ use crate::{
 
 pub fn sys_set_tid_address(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let tid_ptr = trapframe.get_arg(0) as *mut i32;
+    let _tid_ptr = trapframe.get_arg(0) as *mut i32;
     
     // Store the TID address in the task's TID address field
     // TODO: Implement a proper TID management system
@@ -137,12 +137,14 @@ pub fn sys_set_robust_list(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe
 //     parent_waker.wait(task, trapframe);
 // }
 
+#[allow(dead_code)]
 pub fn sys_kill(_abi: &mut LinuxRiscv64Abi, _trapframe: &mut Trapframe) -> usize {
     // Implement the kill syscall
     // This syscall is not yet implemented. Returning ENOSYS error code (-1).
     usize::MAX
 }
 
+#[allow(dead_code)]
 pub fn sys_sbrk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0) as isize;  // Treat as signed increment
@@ -171,10 +173,15 @@ pub fn sys_sbrk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     };
     
     match task.set_brk(new_brk) {
-        Ok(_) => current_brk,  // Return old brk value on success
+        Ok(_) => {
+            let new_actual = task.get_brk();
+            crate::println!("[brk] sbrk inc={} old={:#x} new={:#x}", increment, current_brk, new_actual);
+            new_actual
+        },
         Err(_) => {
             use super::errno;
-            errno::to_result(errno::ENOMEM)  // Return proper errno on failure
+            crate::println!("[brk] sbrk fail inc={} old={:#x}", increment, current_brk);
+            errno::to_result(errno::ENOMEM)
         }
     }
 }
@@ -189,15 +196,17 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         return task.get_brk();
     }
     
+    let old = task.get_brk();
     match task.set_brk(new_brk) {
         Ok(_) => {
-            // Return the actual brk value (might be different from requested)
-            task.get_brk()
+            let actual = task.get_brk();
+            crate::println!("[brk] brk req={:#x} old={:#x} -> {:#x}", new_brk, old, actual);
+            actual
         },
         Err(_) => {
-            // On failure, return current brk value (not an error)
-            // This matches Linux behavior where brk() doesn't set errno
-            task.get_brk()
+            let cur = task.get_brk();
+            crate::println!("[brk] brk fail req={:#x} keep={:#x}", new_brk, cur);
+            cur
         }
     }
 }
