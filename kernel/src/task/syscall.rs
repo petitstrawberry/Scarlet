@@ -410,6 +410,31 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     
     crate::early_println!("[syscall] Registering ABI zone: start={:#x}, len={:#x}, abi={}", start, len, abi_name);
     
+    // Basic sanity
+    if len == 0 {
+        crate::early_println!("[syscall] Zero-length ABI zone");
+        return usize::MAX;
+    }
+
+    let end = start.saturating_add(len);
+
+    // Overlap check: find first zone with start <= new_end, then ensure non-overlap
+    // Since map keyed by start, we check predecessor and successor.
+    // Predecessor (zone with start <= new_start)
+    if let Some((_s, z)) = task.abi_zones.range(..=start).next_back() {
+        if z.range.end > start { // overlap
+            crate::early_println!("[syscall] Overlap with existing zone {:#x}..{:#x}", z.range.start, z.range.end);
+            return usize::MAX;
+        }
+    }
+    // Successor (first zone with start >= new_start)
+    if let Some((_s, z)) = task.abi_zones.range(start..).next() {
+        if z.range.start < end { // overlap
+            crate::early_println!("[syscall] Overlap with existing zone {:#x}..{:#x}", z.range.start, z.range.end);
+            return usize::MAX;
+        }
+    }
+
     // Instantiate the ABI module
     let abi = match crate::abi::AbiRegistry::instantiate(&abi_name) {
         Some(abi) => abi,
@@ -421,7 +446,7 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     
     // Create the ABI zone
     let zone = crate::task::AbiZone {
-        range: start..(start + len),
+        range: start..end,
         abi,
     };
     

@@ -5,17 +5,18 @@
 
 #[macro_use]
 mod macros;
+mod types; // new minimal WASI types module
+pub use types::*;
 
-use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use hashbrown::HashMap;
 
 use crate::{
     abi::AbiModule,
-    arch::{IntRegisters, Trapframe},
+    arch::Trapframe,
     early_initcall,
-    fs::{FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager},
+    fs::{SeekFrom},
     register_abi,
-    task::elf_loader::load_elf_into_task,
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
