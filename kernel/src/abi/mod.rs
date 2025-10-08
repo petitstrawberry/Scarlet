@@ -13,6 +13,7 @@ use spin::Mutex;
 
 pub mod scarlet;
 pub mod xv6;
+pub mod wasi;
 
 pub const MAX_ABI_LENGTH: usize = 64;
 
