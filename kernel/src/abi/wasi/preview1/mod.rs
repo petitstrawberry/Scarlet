@@ -278,3 +278,64 @@ fn register_wasi_preview1_abi() {
 }
 
 early_initcall!(register_wasi_preview1_abi);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi::AbiModule;
+
+    #[test_case]
+    fn test_wasi_abi_creation() {
+        let abi = WasiPreview1Abi::default();
+        assert_eq!(abi.get_name(), "wasi-preview1");
+        assert_eq!(abi.get_default_cwd(), "/");
+    }
+
+    #[test_case]
+    fn test_fd_allocation() {
+        let mut abi = WasiPreview1Abi::default();
+        
+        // Allocate a few file descriptors
+        let fd1 = abi.allocate_fd(100).unwrap();
+        let fd2 = abi.allocate_fd(101).unwrap();
+        let fd3 = abi.allocate_fd(102).unwrap();
+        
+        // Verify they were allocated in order (0, 1, 2)
+        assert_eq!(fd1, 0);
+        assert_eq!(fd2, 1);
+        assert_eq!(fd3, 2);
+        
+        // Verify we can get the handles back
+        assert_eq!(abi.get_handle(fd1), Some(100));
+        assert_eq!(abi.get_handle(fd2), Some(101));
+        assert_eq!(abi.get_handle(fd3), Some(102));
+    }
+
+    #[test_case]
+    fn test_fd_removal() {
+        let mut abi = WasiPreview1Abi::default();
+        
+        let fd = abi.allocate_fd(100).unwrap();
+        assert_eq!(abi.get_handle(fd), Some(100));
+        
+        // Remove the fd
+        let removed_handle = abi.remove_fd(fd);
+        assert_eq!(removed_handle, Some(100));
+        
+        // Verify it's gone
+        assert_eq!(abi.get_handle(fd), None);
+    }
+
+    #[test_case]
+    fn test_std_fds_initialization() {
+        let mut abi = WasiPreview1Abi::default();
+        
+        // Initialize standard file descriptors
+        abi.init_std_fds(10, 20, 30);
+        
+        // Verify they are set correctly
+        assert_eq!(abi.get_handle(0), Some(10)); // stdin
+        assert_eq!(abi.get_handle(1), Some(20)); // stdout
+        assert_eq!(abi.get_handle(2), Some(30)); // stderr
+    }
+}
