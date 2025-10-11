@@ -55,11 +55,12 @@ RUN cd /opt && \
 
 # Copy configuration files for Buildroot
 COPY docker/.config /opt/buildroot/.config
+# Create patches directory and copy LTP musl compatibility patch
+RUN mkdir -p /opt/buildroot/package/ltp-testsuite/patches
+COPY docker/0001-exclude-listmount-statmount-for-musl.patch /opt/buildroot/package/ltp-testsuite/patches/ 
 
 # Get source code 
 RUN cd /opt/buildroot && \
     make source
-
-# Patch 
 
 WORKDIR /workspaces/Scarlet
