@@ -446,25 +446,25 @@ impl Task {
             let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let num_of_pages = (addr - prev_addr) / PAGE_SIZE;
 
-            crate::println!("[set_brk] Expanding: prev_brk={:#x} -> brk={:#x}", prev_brk, brk);
-            crate::println!("[set_brk] Page allocation: prev_addr={:#x}, addr={:#x}, num_pages={}", 
-                prev_addr, addr, num_of_pages);
+            // crate::println!("[set_brk] Expanding: prev_brk={:#x} -> brk={:#x}", prev_brk, brk);
+            // crate::println!("[set_brk] Page allocation: prev_addr={:#x}, addr={:#x}, num_pages={}", 
+            //     prev_addr, addr, num_of_pages);
 
             if num_of_pages > 0 {
                 match self.vm_manager.search_memory_map(prev_addr) {
-                    Some(existing_map) => {
-                        crate::println!("[set_brk] Existing mapping found: VA {:#x}-{:#x}, skipping allocation", 
-                            existing_map.vmarea.start, existing_map.vmarea.end);
+                    Some(_existing_map) => {
+                        // crate::println!("[set_brk] Existing mapping found: VA {:#x}-{:#x}, skipping allocation", 
+                        //     existing_map.vmarea.start, existing_map.vmarea.end);
                     },
                     None => {
-                        crate::println!("[set_brk] No existing mapping, allocating {} pages at {:#x}", 
-                            num_of_pages, prev_addr);
+                        // crate::println!("[set_brk] No existing mapping, allocating {} pages at {:#x}", 
+                        //     num_of_pages, prev_addr);
                         match self.allocate_data_pages(prev_addr, num_of_pages) {
                             Ok(_) => {
-                                crate::println!("[set_brk] Successfully allocated {} pages", num_of_pages);
+                                // crate::println!("[set_brk] Successfully allocated {} pages", num_of_pages);
                             },
-                            Err(e) => {
-                                crate::println!("[set_brk] Failed to allocate pages: {}", e);
+                            Err(_e) => {
+                                // crate::println!("[set_brk] Failed to allocate pages: {}", e);
                                 return Err("Failed to allocate pages");
                             }
                         }

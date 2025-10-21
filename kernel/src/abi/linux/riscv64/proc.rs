@@ -175,12 +175,12 @@ pub fn sys_sbrk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     match task.set_brk(new_brk) {
         Ok(_) => {
             let new_actual = task.get_brk();
-            crate::println!("[brk] sbrk inc={} old={:#x} new={:#x}", increment, current_brk, new_actual);
+            // crate::println!("[brk] sbrk inc={} old={:#x} new={:#x}", increment, current_brk, new_actual);
             new_actual
         },
         Err(_) => {
             use super::errno;
-            crate::println!("[brk] sbrk fail inc={} old={:#x}", increment, current_brk);
+            // crate::println!("[brk] sbrk fail inc={} old={:#x}", increment, current_brk);
             errno::to_result(errno::ENOMEM)
         }
     }
@@ -196,16 +196,16 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         return task.get_brk();
     }
     
-    let old = task.get_brk();
+    let _old = task.get_brk();
     match task.set_brk(new_brk) {
         Ok(_) => {
             let actual = task.get_brk();
-            crate::println!("[brk] brk req={:#x} old={:#x} -> {:#x}", new_brk, old, actual);
+            // crate::println!("[brk] brk req={:#x} old={:#x} -> {:#x}", new_brk, old, actual);
             actual
         },
         Err(_) => {
             let cur = task.get_brk();
-            crate::println!("[brk] brk fail req={:#x} keep={:#x}", new_brk, cur);
+            // crate::println!("[brk] brk fail req={:#x} keep={:#x}", new_brk, cur);
             cur
         }
     }

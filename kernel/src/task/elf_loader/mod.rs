@@ -533,10 +533,19 @@ pub fn analyze_and_load_elf_with_strategy(
                 // TODO: Get actual interpreter base address from load_interpreter result
                 let interpreter_base = 0x40000000u64; // Hardcoded for now
                 
+                // Calculate original entry point correctly based on ELF type
+                // For ET_EXEC: e_entry is an absolute address
+                // For ET_DYN: e_entry is relative to base_address
+                let original_entry = if needs_relocation {
+                    base_address + header.e_entry
+                } else {
+                    header.e_entry
+                };
+                
                 Ok(LoadElfResult {
                     mode: ExecutionMode::Dynamic { interpreter_path: final_interp_path },
                     entry_point: interpreter_entry,
-                    original_entry_point: Some(base_address + header.e_entry),
+                    original_entry_point: Some(original_entry),
                     base_address: Some(base_address),
                     interpreter_base: Some(interpreter_base),
                     program_headers: phdr_info,
@@ -623,85 +632,45 @@ fn find_interpreter_path(header: &ElfHeader, file_obj: &dyn FileObject) -> Resul
 fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
     // Use strategy to determine base address
     let needs_relocation = header.e_type == ET_DYN;
+    // crate::println!("[ELF Loader] Main program: e_type={:#x}, needs_relocation={}, e_phoff={:#x}", 
+    //     header.e_type, needs_relocation, header.e_phoff);
     let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
+    // crate::println!("[ELF Loader] Chosen base_address={:#x}", base_address);
+    
+    // Track the actual load address of the first LOAD segment for program headers
+    let mut first_load_addr: Option<u64> = None;
+    let mut _load_segment_count = 0;
     
     // Load PT_LOAD segments using simplified approach
     for_each_program_header(header, file_obj, |_i, ph| {
         if ph.p_type == PT_LOAD {
             let segment_addr = base_address + ph.p_vaddr;
+            // crate::println!("[ELF Loader] PT_LOAD[{}]: p_vaddr={:#x}, p_memsz={:#x}, p_filesz={:#x}, p_flags={:#x} -> load_addr={:#x}", 
+            //     i, ph.p_vaddr, ph.p_memsz, ph.p_filesz, ph.p_flags, segment_addr);
+            if first_load_addr.is_none() {
+                first_load_addr = Some(segment_addr);
+                // crate::println!("[ELF Loader] First LOAD segment at {:#x}", segment_addr);
+            }
             load_elf_segment_at_address(ph, file_obj, task, segment_addr)?;
+            _load_segment_count += 1;
         }
         Ok(true) // Continue iteration
     })?;
     
-    // Add memory mapping for program headers so they can be accessed by the dynamic linker
-    let phdr_addr = base_address + header.e_phoff;
-    let phdr_size = (header.e_phnum as u64) * (header.e_phentsize as u64);
+    // crate::println!("[ELF Loader] Loaded {} PT_LOAD segments, e_entry={:#x}", _load_segment_count, header.e_entry);
     
-    // Align to page boundaries for memory mapping
-    use crate::environment::PAGE_SIZE;
-    let page_aligned_start = (phdr_addr as usize) & !(PAGE_SIZE - 1); // Round down to page boundary
-    let page_aligned_end = ((phdr_addr + phdr_size) as usize + PAGE_SIZE - 1) & !(PAGE_SIZE - 1); // Round up to page boundary
+    // Calculate phdr_addr based on actual load address
+    // Program headers are typically in the first LOAD segment
+    let actual_base = first_load_addr.unwrap_or(base_address);
     
-    // Allocate physical memory for program headers
-    let num_pages = (page_aligned_end - page_aligned_start) / PAGE_SIZE;
-    let pages = allocate_raw_pages(num_pages);
-    let phys_addr = pages as usize;
+    // Program headers are already loaded as part of the first LOAD segment
+    // (which typically includes the ELF header and program headers)
+    // No need to create a separate mapping - just return the address
+    // crate::println!("[ELF Loader] Program headers at {:#x} (actual_base={:#x} + e_phoff={:#x})", 
+    //     actual_base + header.e_phoff, actual_base, header.e_phoff);
     
-    // Read program headers from ELF file into physical memory
-    let phdr_offset_in_file = header.e_phoff;
-    let mut buffer = vec![0u8; phdr_size as usize];
-    file_obj.seek(SeekFrom::Start(phdr_offset_in_file)).map_err(|e| ElfLoaderError {
-        message: format!("Failed to seek to program headers in ELF file: {:?}", e),
-    })?;
-    file_obj.read(&mut buffer).map_err(|e| ElfLoaderError {
-        message: format!("Failed to read program headers from ELF file: {:?}", e),
-    })?;
-    
-    // Copy program headers to physical memory
-    unsafe {
-        let phys_ptr = (phys_addr + (phdr_addr as usize - page_aligned_start)) as *mut u8;
-        core::ptr::copy_nonoverlapping(buffer.as_ptr(), phys_ptr, phdr_size as usize);
-    }
-    
-    // Program headers are read-only for the dynamic linker
-    let permissions = VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::User as usize;
-    
-    // Create virtual memory areas
-    let vmarea = MemoryArea {
-        start: page_aligned_start,
-        end: page_aligned_end - 1, // end address should be inclusive
-    };
-    
-    // Physical memory area pointing to allocated pages
-    let pmarea = MemoryArea {
-        start: phys_addr,
-        end: phys_addr + (page_aligned_end - page_aligned_start) - 1,
-    };
-    
-    // Create and add the memory map
-    let phdr_map = VirtualMemoryMap {
-        pmarea,
-        vmarea,
-        permissions,
-        is_shared: false,
-        owner: None,
-    };
-    
-    // Add memory mapping for program headers
-    task.vm_manager.add_memory_map(phdr_map).map_err(|e| ElfLoaderError {
-        message: format!("Failed to map program headers: {}", e),
-    })?;
-    
-    // Manage program header pages in the task
-    for i in 0..num_pages {
-        task.add_managed_page(ManagedPage {
-            vaddr: (phdr_addr + (i * PAGE_SIZE) as u64) as usize,
-            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
-        });
-    }
-    
-    Ok(base_address)
+    // Return the actual base address where the first segment was loaded
+    Ok(actual_base)
 }
 
 /// Load interpreter (dynamic linker) into task memory  
@@ -904,7 +873,7 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
             let current_brk = task.brk.unwrap_or(0);
             if segment_end > current_brk {
                 task.brk = Some(segment_end);
-                crate::println!("[ELF loader] Updated brk to {:#x} (segment end at {:#x})", segment_end, mapping_addr);
+                // crate::println!("[ELF loader] Updated brk to {:#x} (segment end at {:#x})", segment_end, mapping_addr);
             }
             
             // Load segment data using common function (if there's file data)
@@ -1088,7 +1057,9 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     };
 
     // Check if the area is overlapping with existing mappings
-    if task.vm_manager.search_memory_map(vaddr).is_some() {
+    if let Some(_existing) = task.vm_manager.search_memory_map(vaddr) {
+        // crate::println!("[ELF Loader] ERROR: Memory area {:#x}-{:#x} overlaps with existing mapping {:#x}-{:#x}", 
+        //     vaddr, vaddr + size - 1, existing.vmarea.start, existing.vmarea.end);
         return Err("Memory area overlaps with existing mapping");
     }
 
@@ -1245,6 +1216,11 @@ fn load_elf_segment_at_address(
     let mapping_start = (segment_addr as usize) - page_offset;
     let mapping_size = (ph.p_memsz as usize) + page_offset;
     let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    
+    // crate::println!("[ELF Loader] Loading segment: vaddr={:#x}, memsz={:#x}, filesz={:#x}, flags={:#x}", 
+    //     segment_addr, ph.p_memsz, ph.p_filesz, ph.p_flags);
+    // crate::println!("[ELF Loader]   mapping: start={:#x}, size={:#x}, aligned_size={:#x}", 
+    //     mapping_start, mapping_size, aligned_size);
     
     // Map segment with proper page alignment
     map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {
