@@ -449,6 +449,35 @@ pub fn sys_clone(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     crate::println!("sys_clone: flags=0x{:x}, child_stack=0x{:x}, parent_tid_ptr={:p}, child_tid_ptr={:p}, tls={:x}", 
         flags, child_stack, parent_tid_ptr, child_tid_ptr, tls);
 
+    // Linux clone flags
+    const CLONE_VM: usize = 0x00000100;
+    const CLONE_FS: usize = 0x00000200;
+    const CLONE_FILES: usize = 0x00000400;
+    const CLONE_SIGHAND: usize = 0x00000800;
+    const CLONE_THREAD: usize = 0x00010000;
+    #[allow(dead_code)]
+    const CLONE_SETTLS: usize = 0x00080000;
+    #[allow(dead_code)]
+    const CLONE_PARENT_SETTID: usize = 0x00100000;
+    #[allow(dead_code)]
+    const CLONE_CHILD_CLEARTID: usize = 0x00200000;
+
+    // Check for thread creation flags - not yet supported
+    let thread_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
+    if (flags & thread_flags) != 0 {
+        crate::println!("sys_clone: ERROR - Thread creation not yet supported (flags=0x{:x})", flags);
+        crate::println!("  CLONE_VM={}, CLONE_FS={}, CLONE_FILES={}, CLONE_SIGHAND={}, CLONE_THREAD={}", 
+            (flags & CLONE_VM) != 0,
+            (flags & CLONE_FS) != 0,
+            (flags & CLONE_FILES) != 0,
+            (flags & CLONE_SIGHAND) != 0,
+            (flags & CLONE_THREAD) != 0);
+        
+        trapframe.increment_pc_next(parent_task);
+        use super::errno;
+        return errno::to_result(errno::ENOSYS); // Function not implemented
+    }
+
     trapframe.increment_pc_next(parent_task);
     parent_task.vcpu.store(trapframe);
     
@@ -671,4 +700,44 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
             return usize::MAX - 37; // -ENOSYS (function not implemented)
         }
     }
+}
+
+/// Linux sys_membarrier implementation (syscall 283)
+///
+/// Memory barrier system call for ensuring memory ordering between threads.
+/// This is a stub implementation that always succeeds.
+///
+/// Arguments:
+/// - cmd: membarrier command (various MEMBARRIER_CMD_* constants)
+/// - flags: flags for the command (usually 0)
+/// - cpu_id: CPU ID for per-CPU barriers (usually unused)
+///
+/// Returns:
+/// - 0 on success
+/// - Negative error code on failure
+///
+/// Note: This is a no-op stub. On a real system with multiple cores,
+/// this would issue appropriate memory barrier instructions to ensure
+/// memory ordering visibility across CPUs. For single-core or simple
+/// multi-core systems without complex memory reordering, this stub
+/// should be sufficient for most applications.
+pub fn sys_membarrier(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX - 1, // -EPERM
+    };
+
+    let _cmd = trapframe.get_arg(0);
+    let _flags = trapframe.get_arg(1);
+    let _cpu_id = trapframe.get_arg(2);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Issue a memory fence to ensure all memory operations are visible
+    // This is a basic implementation - real membarrier has multiple modes
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+    // Always succeed - stub implementation
+    0
 }
