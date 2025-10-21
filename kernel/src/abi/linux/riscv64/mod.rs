@@ -343,7 +343,7 @@ impl AbiModule for LinuxRiscv64Abi {
                     choose_base_address: |target, needs_relocation| {
                         match (target, needs_relocation) {
                             (LoadTarget::MainProgram, false) => 0,        // Static executables
-                            (LoadTarget::MainProgram, true) => 0,   // PIE executables
+                            (LoadTarget::MainProgram, true) => 0x40000000,   // PIE executables
                             (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
                             (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
                         }
@@ -373,6 +373,17 @@ impl AbiModule for LinuxRiscv64Abi {
                                 crate::println!("Binary uses dynamic linking with interpreter: {}", interpreter_path);
                             }
                         }
+                        
+                        // Print memory map for debugging
+                        crate::println!("=== Memory Map After ELF Load ===");
+                        crate::println!("Program segments:");
+                        for map in task.vm_manager.memmap_iter() {
+                            crate::println!("  VA: {:#x}-{:#x} -> PA: {:#x}-{:#x} (perm: {:#x}, shared: {})",
+                                map.vmarea.start, map.vmarea.end,
+                                map.pmarea.start, map.pmarea.end,
+                                map.permissions, map.is_shared);
+                        }
+                        crate::println!("=================================");
                         
                         // Clear page table entries
                         let idx = arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();

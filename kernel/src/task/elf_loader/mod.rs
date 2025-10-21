@@ -44,12 +44,12 @@ use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
+use crate::task::{Task, ManagedPage};
 use alloc::boxed::Box;
 use alloc::{format, vec};
 use alloc::string::{String, ToString};
-use crate::task::Task;
 
-use super::{ManagedPage, TaskType};
+use super::TaskType;
 
 // ELF Magic Number
 const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F', ];
@@ -634,6 +634,73 @@ fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObje
         Ok(true) // Continue iteration
     })?;
     
+    // Add memory mapping for program headers so they can be accessed by the dynamic linker
+    let phdr_addr = base_address + header.e_phoff;
+    let phdr_size = (header.e_phnum as u64) * (header.e_phentsize as u64);
+    
+    // Align to page boundaries for memory mapping
+    use crate::environment::PAGE_SIZE;
+    let page_aligned_start = (phdr_addr as usize) & !(PAGE_SIZE - 1); // Round down to page boundary
+    let page_aligned_end = ((phdr_addr + phdr_size) as usize + PAGE_SIZE - 1) & !(PAGE_SIZE - 1); // Round up to page boundary
+    
+    // Allocate physical memory for program headers
+    let num_pages = (page_aligned_end - page_aligned_start) / PAGE_SIZE;
+    let pages = allocate_raw_pages(num_pages);
+    let phys_addr = pages as usize;
+    
+    // Read program headers from ELF file into physical memory
+    let phdr_offset_in_file = header.e_phoff;
+    let mut buffer = vec![0u8; phdr_size as usize];
+    file_obj.seek(SeekFrom::Start(phdr_offset_in_file)).map_err(|e| ElfLoaderError {
+        message: format!("Failed to seek to program headers in ELF file: {:?}", e),
+    })?;
+    file_obj.read(&mut buffer).map_err(|e| ElfLoaderError {
+        message: format!("Failed to read program headers from ELF file: {:?}", e),
+    })?;
+    
+    // Copy program headers to physical memory
+    unsafe {
+        let phys_ptr = (phys_addr + (phdr_addr as usize - page_aligned_start)) as *mut u8;
+        core::ptr::copy_nonoverlapping(buffer.as_ptr(), phys_ptr, phdr_size as usize);
+    }
+    
+    // Program headers are read-only for the dynamic linker
+    let permissions = VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::User as usize;
+    
+    // Create virtual memory areas
+    let vmarea = MemoryArea {
+        start: page_aligned_start,
+        end: page_aligned_end - 1, // end address should be inclusive
+    };
+    
+    // Physical memory area pointing to allocated pages
+    let pmarea = MemoryArea {
+        start: phys_addr,
+        end: phys_addr + (page_aligned_end - page_aligned_start) - 1,
+    };
+    
+    // Create and add the memory map
+    let phdr_map = VirtualMemoryMap {
+        pmarea,
+        vmarea,
+        permissions,
+        is_shared: false,
+        owner: None,
+    };
+    
+    // Add memory mapping for program headers
+    task.vm_manager.add_memory_map(phdr_map).map_err(|e| ElfLoaderError {
+        message: format!("Failed to map program headers: {}", e),
+    })?;
+    
+    // Manage program header pages in the task
+    for i in 0..num_pages {
+        task.add_managed_page(ManagedPage {
+            vaddr: (phdr_addr + (i * PAGE_SIZE) as u64) as usize,
+            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+        });
+    }
+    
     Ok(base_address)
 }
 
@@ -829,6 +896,15 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
                         message: format!("Unknown segment type: {:#x}", ph.p_flags),
                     });
                 }
+            }
+            
+            // Update brk to track the end of the loaded program
+            // brk should be set to the maximum end address of all loaded segments
+            let segment_end = mapping_addr + aligned_size;
+            let current_brk = task.brk.unwrap_or(0);
+            if segment_end > current_brk {
+                task.brk = Some(segment_end);
+                crate::println!("[ELF loader] Updated brk to {:#x} (segment end at {:#x})", segment_end, mapping_addr);
             }
             
             // Load segment data using common function (if there's file data)
