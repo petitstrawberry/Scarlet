@@ -425,18 +425,18 @@ impl AbiModule for LinuxRiscv64Abi {
 
                         let mut env_vaddrs: Vec<u64> = Vec::new();
                         for &env in envp.iter() {
-                            crate::println!("Setting up env: {}", env);
+                            // crate::println!("Setting up env: {}", env);
                             // Debug: Print raw bytes for LD_LIBRARY_PATH
-                            if env.starts_with("LD_LIBRARY_PATH=") {
-                                crate::println!("LD_LIBRARY_PATH env string length: {}", env.len());
-                                crate::println!("LD_LIBRARY_PATH raw bytes: {:?}", env.as_bytes());
-                                for (i, &byte) in env.as_bytes().iter().enumerate() {
-                                    if byte < 32 || byte > 126 {
-                                        crate::println!("  Non-printable byte at {}: 0x{:02x} ('{}' is printable)", 
-                                                      i, byte, (byte >= 32 && byte <= 126));
-                                    }
-                                }
-                            }
+                            // if env.starts_with("LD_LIBRARY_PATH=") {
+                            //     crate::println!("LD_LIBRARY_PATH env string length: {}", env.len());
+                            //     crate::println!("LD_LIBRARY_PATH raw bytes: {:?}", env.as_bytes());
+                            //     for (i, &byte) in env.as_bytes().iter().enumerate() {
+                            //         if byte < 32 || byte > 126 {
+                            //             crate::println!("  Non-printable byte at {}: 0x{:02x} ('{}' is printable)", 
+                            //                           i, byte, (byte >= 32 && byte <= 126));
+                            //         }
+                            //     }
+                            // }
                             let len = env.len() + 1;
                             sp -= len;
                             let vaddr = sp;
@@ -507,10 +507,10 @@ impl AbiModule for LinuxRiscv64Abi {
                         current_pos += 8;
 
                         // --- 4. Auxiliary vector (auxv) ---
-                        crate::println!("Setting up auxiliary vector with {} entries:", auxv.len());
+                        // crate::println!("Setting up auxiliary vector with {} entries:", auxv.len());
                         for (i, auxv_entry) in auxv.iter().enumerate() {
-                            crate::println!("  auxv[{}]: type={:#x} value={:#x} @ sp={:#x}", 
-                                i, auxv_entry.a_type, auxv_entry.a_val, current_pos);
+                            // crate::println!("  auxv[{}]: type={:#x} value={:#x} @ sp={:#x}", 
+                            //     i, auxv_entry.a_type, auxv_entry.a_val, current_pos);
                             unsafe {
                                 let paddr = task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64;
                                 *paddr = auxv_entry.a_type;
@@ -540,7 +540,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         // Initialize trapframe with clean state
                         trapframe.regs = task.vcpu.iregs;
                         trapframe.epc = load_result.entry_point;
-                        crate::println!("DEBUG: Set trapframe.epc to {:#x}", trapframe.epc);
+                        // crate::println!("DEBUG: Set trapframe.epc to {:#x}", trapframe.epc);
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);
