@@ -287,7 +287,7 @@ use slab_allocator_rs::MIN_HEAP_SIZE;
 
 use arch::get_cpu;
 use task::{elf_loader::load_elf_into_task, new_user_task};
-use vm::{kernel_vm_init, vmem::MemoryArea};
+use vm::{kernel_vm_init, setup_kernel_stack_guard_pages, vmem::MemoryArea};
 use sched::scheduler::get_scheduler;
 use mem::{allocator::init_heap, __KERNEL_SPACE_START};
 use timer::get_kernel_timer;
@@ -538,6 +538,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     kernel_vm_init(MemoryArea::new(kernel_start, usable_area.end));
     /* After this point, we can use the heap and virtual memory */
     /* We will also be restricted to the kernel address space */
+    
+    /* Setup guard pages for per-core kernel stacks */
+    setup_kernel_stack_guard_pages();
 
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");

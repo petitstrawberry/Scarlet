@@ -26,45 +26,67 @@ pub struct KernelContext {
     pub s: [u64; 12],
     /// Kernel stack for this context
     /// Using Box<[u8]> to directly allocate on heap without stack overflow
+    /// This includes both the guard page and the actual stack
     pub kernel_stack: Box<[u8]>,
+    /// Guard page start address (first PAGE_SIZE bytes of kernel_stack)
+    pub guard_page_start: usize,
 }
 
 impl KernelContext {
-    /// Create a new kernel context with kernel stack
+    /// Create a new kernel context with kernel stack and guard page
     /// 
     /// # Returns
     /// A new KernelContext with allocated kernel stack ready for scheduling
     pub fn new() -> Self {
-        // Directly allocate on heap to avoid stack overflow
-        let kernel_stack = alloc::vec![0u8; crate::environment::TASK_KERNEL_STACK_SIZE].into_boxed_slice();
-        let stack_top = kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64; // Initial stack top = stack bottom
+        use crate::environment::PAGE_SIZE;
+        
+        // Allocate stack with an extra page for guard page
+        let total_size = PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE;
+        let kernel_stack = alloc::vec![0u8; total_size].into_boxed_slice();
+        
+        let guard_page_start = kernel_stack.as_ptr() as usize;
+        let stack_start = guard_page_start + PAGE_SIZE;
+        let stack_top = stack_start + crate::environment::TASK_KERNEL_STACK_SIZE;
 
         Self {
-            sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
+            sp: stack_top as u64 - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
             kernel_stack,
+            guard_page_start,
         }
     }
 
-    /// Get the bottom of the kernel stack
+    /// Get the bottom of the kernel stack (excluding guard page)
     pub fn get_kernel_stack_bottom(&self) -> u64 {
-        self.kernel_stack.as_ptr() as u64 + self.kernel_stack.len() as u64
+        use crate::environment::PAGE_SIZE;
+        let stack_start = self.kernel_stack.as_ptr() as u64 + PAGE_SIZE as u64;
+        stack_start + crate::environment::TASK_KERNEL_STACK_SIZE as u64
     }
 
     pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
-        MemoryArea::new(self.kernel_stack.as_ptr() as usize, self.get_kernel_stack_bottom() as usize - 1)
+        use crate::environment::PAGE_SIZE;
+        let stack_start = self.kernel_stack.as_ptr() as usize + PAGE_SIZE;
+        MemoryArea::new(stack_start, self.get_kernel_stack_bottom() as usize - 1)
+    }
+    
+    /// Get the guard page memory area
+    pub fn get_guard_page_memory_area(&self) -> MemoryArea {
+        use crate::environment::PAGE_SIZE;
+        MemoryArea::new(self.guard_page_start, self.guard_page_start + PAGE_SIZE - 1)
     }
 
     pub fn get_kernel_stack_ptr(&self) -> *const u8 {
-        self.kernel_stack.as_ptr()
+        use crate::environment::PAGE_SIZE;
+        unsafe { self.kernel_stack.as_ptr().add(PAGE_SIZE) }
     }
 
     /// Set the kernel stack for this context
     /// # Arguments
-    /// * `stack` - Boxed slice representing the kernel stack memory
+    /// * `stack` - Boxed slice representing the kernel stack memory (including guard page)
     /// 
     pub fn set_kernel_stack(&mut self, stack: Box<[u8]>) {
+        self.guard_page_start = stack.as_ptr() as usize;
         self.kernel_stack = stack;
         self.sp = self.get_kernel_stack_bottom();
     }

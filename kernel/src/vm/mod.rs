@@ -123,6 +123,91 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     root_page_table.switch(manager.get_asid());
 }
 
+/// Setup guard pages for per-core kernel stacks
+/// 
+/// This function adds guard pages at the bottom of each per-core kernel stack
+/// to detect stack overflow. The guard pages have no permissions, so any access
+/// will cause a page fault.
+#[allow(static_mut_refs)]
+pub fn setup_kernel_stack_guard_pages() {
+    use crate::environment::STACK_SIZE;
+    use crate::mem::KERNEL_STACK;
+    use vmem::VirtualMemoryRegion;
+    
+    let manager = get_kernel_vm_manager();
+    let stack_start = unsafe { KERNEL_STACK.start() };
+    
+    early_println!("Setting up kernel stack guard pages...");
+    
+    // Add a guard page at the bottom of each per-core stack
+    for cpu_id in 0..NUM_OF_CPUS {
+        let stack_base = stack_start + cpu_id * STACK_SIZE;
+        let guard_page_addr = stack_base;
+        
+        // Create a guard page mapping with no permissions
+        let guard_map = VirtualMemoryMap {
+            pmarea: MemoryArea {
+                start: 0,
+                end: 0,
+            },
+            vmarea: MemoryArea {
+                start: guard_page_addr,
+                end: guard_page_addr + PAGE_SIZE - 1,
+            },
+            permissions: VirtualMemoryRegion::Guard.default_permissions(), // 0 permissions
+            is_shared: VirtualMemoryRegion::Guard.is_shareable(),
+            owner: None,
+        };
+        
+        manager.add_memory_map(guard_map)
+            .map_err(|e| panic!("Failed to add guard page for CPU {}: {}", cpu_id, e))
+            .unwrap();
+        
+        early_println!("  CPU {}: Guard page at {:#018x}", cpu_id, guard_page_addr);
+    }
+    
+    early_println!("Kernel stack guard pages setup complete");
+}
+
+/// Register a task's kernel stack guard page with the kernel VM manager
+/// 
+/// This function registers the guard page at the bottom of a task's kernel stack
+/// so that stack overflow can be detected via page faults.
+/// 
+/// # Arguments
+/// * `guard_page_area` - The memory area of the guard page
+pub fn register_task_kernel_stack_guard_page(guard_page_area: MemoryArea) {
+    use vmem::VirtualMemoryRegion;
+    
+    let manager = get_kernel_vm_manager();
+    
+    // Create a guard page mapping with no permissions
+    let guard_map = VirtualMemoryMap {
+        pmarea: guard_page_area, // Physical address same as virtual for direct-mapped kernel memory
+        vmarea: guard_page_area,
+        permissions: VirtualMemoryRegion::Guard.default_permissions(), // 0 permissions
+        is_shared: VirtualMemoryRegion::Guard.is_shareable(),
+        owner: None,
+    };
+    
+    manager.add_memory_map(guard_map)
+        .map_err(|e| panic!("Failed to register task kernel stack guard page at {:#x}: {}", guard_page_area.start, e))
+        .unwrap();
+}
+
+/// Unregister a task's kernel stack guard page from the kernel VM manager
+/// 
+/// This function removes the guard page mapping when a task is destroyed.
+/// 
+/// # Arguments
+/// * `guard_page_start` - The start address of the guard page
+pub fn unregister_task_kernel_stack_guard_page(guard_page_start: usize) {
+    let manager = get_kernel_vm_manager();
+    
+    // Remove the guard page mapping
+    let _ = manager.remove_memory_map_by_addr(guard_page_start);
+}
+
 pub fn user_vm_init(task: &mut Task) {
     let asid = alloc_virtual_address_space();
     task.vm_manager.set_asid(asid);

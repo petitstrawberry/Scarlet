@@ -162,6 +162,15 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     panic!("Invalid memory access at vaddr: {:#x}", vaddr);
                 }
                 
+                // Check if this is a guard page access
+                if let Some(memory_map) = manager.search_memory_map(vaddr) {
+                    if memory_map.permissions == 0 {
+                        // This is a guard page - kernel stack overflow detected!
+                        print_traplog(trapframe);
+                        panic!("KERNEL STACK OVERFLOW: Guard page accessed at vaddr: {:#x}\nThis indicates the kernel stack has overflowed.", vaddr);
+                    }
+                }
+                
                 match manager.lazy_map_page(vaddr) {
                     Ok(_) => (),
                     Err(_) => {

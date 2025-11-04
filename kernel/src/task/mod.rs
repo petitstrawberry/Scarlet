@@ -351,6 +351,10 @@ impl Task {
         // Initialize kernel context with the task's entry point
         // The kernel stack is allocated within the KernelContext
         self.kernel_context = KernelContext::new();
+        
+        // Register the guard page for this task's kernel stack
+        let guard_area = self.kernel_context.get_guard_page_memory_area();
+        crate::vm::register_task_kernel_stack_guard_page(guard_area);
 
         match self.task_type {
             TaskType::Kernel => {
@@ -1010,6 +1014,11 @@ impl Task {
 
         // Initialize kernel context
         child.kernel_context = KernelContext::new();
+        
+        // Register the guard page for the child task's kernel stack
+        let guard_area = child.kernel_context.get_guard_page_memory_area();
+        crate::vm::register_task_kernel_stack_guard_page(guard_area);
+        
         // Set the state to Ready
         child.state = self.state;
 
@@ -1025,7 +1034,11 @@ impl Task {
     /// # Arguments
     /// * `status` - The exit status
     /// 
-    pub fn exit(&mut self, status: i32) {        
+    pub fn exit(&mut self, status: i32) {
+        // Unregister the guard page for this task's kernel stack
+        let guard_page_start = self.kernel_context.guard_page_start;
+        crate::vm::unregister_task_kernel_stack_guard_page(guard_page_start);
+        
         // Close all open handles when task exits
         self.handle_table.close_all();
         
