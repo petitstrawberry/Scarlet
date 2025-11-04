@@ -159,10 +159,17 @@ pub fn get_user_trap_handler() -> usize {
 
 #[allow(static_mut_refs)]
 fn trap_init(riscv: &mut Riscv64) {    
+    use crate::environment::PAGE_SIZE;
+    
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
-    let stack_size =  STACK_SIZE;
+    let stack_with_guard_size = STACK_SIZE + PAGE_SIZE;
 
-    let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
+    // Each CPU gets (STACK_SIZE + PAGE_SIZE) bytes
+    // Layout: [PAGE_SIZE guard][STACK_SIZE usable stack]
+    // Stack top = start + (hartid + 1) * (STACK_SIZE + PAGE_SIZE) - PAGE_SIZE
+    let cpu_area_start = trap_stack_start + (riscv.hartid as usize) * stack_with_guard_size;
+    let trap_stack = cpu_area_start + stack_with_guard_size - PAGE_SIZE;
+    
     riscv.kernel_stack = trap_stack as u64;
     riscv.kernel_trap = arch_kernel_trap_handler as u64;
     let scratch_addr = riscv as *const _ as usize;
@@ -181,9 +188,10 @@ fn trap_init(riscv: &mut Riscv64) {
         );
     }
 
-    // early_println!("Trap stack area    : {:#x} - {:#x}", trap_stack - stack_size, trap_stack - 1);
-    // early_println!("Trap stack size    : {:#x}", stack_size);
+    // early_println!("Trap stack area    : {:#x} - {:#x}", cpu_area_start + PAGE_SIZE, trap_stack - 1);
+    // early_println!("Trap stack size    : {:#x}", STACK_SIZE);
     // early_println!("Trap stack pointer : {:#x}", trap_stack);
+    // early_println!("Guard page         : {:#x} - {:#x}", cpu_area_start, cpu_area_start + PAGE_SIZE - 1);
     // early_println!("Scratch address    : {:#x}", scratch_addr);
 }
 

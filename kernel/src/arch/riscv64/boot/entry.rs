@@ -1,6 +1,6 @@
 use core::{arch::naked_asm, mem::transmute};
 
-use crate::{arch::{Riscv64, riscv64::{CPUS, trap_init}}, device::fdt::{init_fdt, relocate_fdt, create_bootinfo_from_fdt}, environment::STACK_SIZE, mem::{__FDT_RESERVED_START, init_bss}, start_kernel};
+use crate::{arch::{Riscv64, riscv64::{CPUS, trap_init}}, device::fdt::{init_fdt, relocate_fdt, create_bootinfo_from_fdt}, environment::{PAGE_SIZE, STACK_SIZE}, mem::{__FDT_RESERVED_START, init_bss}, start_kernel};
 
 /// Entry point for the primary core
 #[unsafe(link_section = ".init")]
@@ -14,16 +14,20 @@ pub extern "C" fn _entry() {
         .option norelax
         .align 8
                 // a0 = hartid     
+                // Each CPU gets (STACK_SIZE + PAGE_SIZE) bytes
+                // Layout: [PAGE_SIZE guard][STACK_SIZE usable stack]
                 li      t0, {}
                 mv      t1, a0
                 addi    t1, t1, 1
-                mul     t1, t1, a0          
+                mul     t1, t1, t0
+                li      t2, {}
+                sub     t1, t1, t2
                 la      sp, KERNEL_STACK
-                add     sp, sp, t0
+                add     sp, sp, t1
 
                 la     t0, arch_start_kernel
                 jr      t0
-        ", const STACK_SIZE
+        ", const STACK_SIZE + PAGE_SIZE, const PAGE_SIZE
         );
     }
 }
@@ -40,17 +44,21 @@ pub extern "C" fn _entry_ap() {
         .option norelax
         .align 8
                 // a0 = hartid     
+                // Each CPU gets (STACK_SIZE + PAGE_SIZE) bytes
+                // Layout: [PAGE_SIZE guard][STACK_SIZE usable stack]
                 li      t0, {}
                 mv      t1, a0
                 addi    t1, t1, 1
-                mul     t1, t1, a0          
+                mul     t1, t1, t0
+                li      t2, {}
+                sub     t1, t1, t2
                 la      sp, KERNEL_STACK
-                add     sp, sp, t0
+                add     sp, sp, t1
 
                 // Use indirect jump to avoid JAL range limitation
                 la      t0, start_ap
                 jr      t0
-        ", const STACK_SIZE
+        ", const STACK_SIZE + PAGE_SIZE, const PAGE_SIZE
         );
     }
 }

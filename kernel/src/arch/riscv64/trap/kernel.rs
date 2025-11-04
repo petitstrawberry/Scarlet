@@ -162,12 +162,33 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     panic!("Invalid memory access at vaddr: {:#x}", vaddr);
                 }
                 
-                // Check if this is a guard page access
+                // Check if this is a per-core kernel stack guard page access
+                // Per-core stacks: the first page of each stack area is a guard page
+                #[allow(static_mut_refs)]
+                {
+                    use crate::environment::{STACK_SIZE, NUM_OF_CPUS};
+                    use crate::mem::KERNEL_STACK;
+                    let stack_start = unsafe { crate::mem::KERNEL_STACK.start() };
+                    let stack_with_guard_size = STACK_SIZE + crate::environment::PAGE_SIZE;
+                    
+                    for cpu_id in 0..NUM_OF_CPUS {
+                        let cpu_area_start = stack_start + cpu_id * stack_with_guard_size;
+                        let guard_page_start = cpu_area_start;
+                        let guard_page_end = guard_page_start + crate::environment::PAGE_SIZE - 1;
+                        
+                        if vaddr >= guard_page_start && vaddr <= guard_page_end {
+                            print_traplog(trapframe);
+                            panic!("KERNEL STACK OVERFLOW (CPU {}): Guard page accessed at vaddr: {:#x}\nThe per-core kernel stack has overflowed.", cpu_id, vaddr);
+                        }
+                    }
+                }
+                
+                // Check if this is a per-task kernel stack guard page access
                 if let Some(memory_map) = manager.search_memory_map(vaddr) {
                     if memory_map.permissions == 0 {
-                        // This is a guard page - kernel stack overflow detected!
+                        // This is a guard page - task kernel stack overflow detected!
                         print_traplog(trapframe);
-                        panic!("KERNEL STACK OVERFLOW: Guard page accessed at vaddr: {:#x}\nThis indicates the kernel stack has overflowed.", vaddr);
+                        panic!("KERNEL STACK OVERFLOW (Task): Guard page accessed at vaddr: {:#x}\nThis indicates a per-task kernel stack has overflowed.", vaddr);
                     }
                 }
                 
