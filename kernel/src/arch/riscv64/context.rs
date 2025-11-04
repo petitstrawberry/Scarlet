@@ -10,6 +10,82 @@ use alloc::boxed::Box;
 use crate::arch::Trapframe;
 use crate::vm::vmem::MemoryArea;
 
+/// Guarded kernel stack
+/// 
+/// A kernel stack with a virtual guard page to detect stack overflow.
+/// The guard page is a virtual address space reservation only - no physical
+/// memory is allocated for it.
+#[derive(Debug, Clone)]
+pub struct GuardedKernelStack {
+    /// The actual kernel stack (physical memory allocated)
+    stack: Box<[u8]>,
+    /// Virtual guard page start address (no physical memory)
+    guard_page_start: usize,
+}
+
+impl GuardedKernelStack {
+    /// Create a new guarded kernel stack
+    /// 
+    /// Allocates a continuous memory block that includes both the guard page space
+    /// and the actual stack. The first page is reserved as guard, followed by the usable stack.
+    pub fn new(size: usize) -> Self {
+        use crate::environment::PAGE_SIZE;
+        
+        // Allocate guard page space + actual stack as one continuous block
+        let total_size = PAGE_SIZE + size;
+        let stack = alloc::vec![0u8; total_size].into_boxed_slice();
+        
+        // The first PAGE_SIZE bytes are the guard page
+        let guard_page_start = stack.as_ptr() as usize;
+        
+        Self {
+            stack,
+            guard_page_start,
+        }
+    }
+    
+    /// Get the stack bottom (top address, where stack grows down from)
+    pub fn stack_bottom(&self) -> usize {
+        self.stack.as_ptr() as usize + self.stack.len()
+    }
+    
+    /// Get the stack start address (after the guard page)
+    pub fn stack_start(&self) -> usize {
+        use crate::environment::PAGE_SIZE;
+        self.stack.as_ptr() as usize + PAGE_SIZE
+    }
+    
+    /// Get the usable stack size in bytes (excluding guard page)
+    pub fn stack_size(&self) -> usize {
+        use crate::environment::PAGE_SIZE;
+        self.stack.len() - PAGE_SIZE
+    }
+    
+    /// Get the guard page start address
+    pub fn guard_page_start(&self) -> usize {
+        self.guard_page_start
+    }
+    
+    /// Get the guard page memory area
+    pub fn guard_page_area(&self) -> MemoryArea {
+        use crate::environment::PAGE_SIZE;
+        MemoryArea::new(self.guard_page_start, self.guard_page_start + PAGE_SIZE - 1)
+    }
+    
+    /// Get the stack memory area (excluding guard page)
+    pub fn stack_area(&self) -> MemoryArea {
+        use crate::environment::PAGE_SIZE;
+        let stack_start = self.stack_start();
+        MemoryArea::new(stack_start, self.stack_bottom() - 1)
+    }
+    
+    /// Get a pointer to the usable stack data (after guard page)
+    pub fn as_ptr(&self) -> *const u8 {
+        use crate::environment::PAGE_SIZE;
+        unsafe { self.stack.as_ptr().add(PAGE_SIZE) }
+    }
+}
+
 /// Kernel context for RISC-V 64-bit
 /// 
 /// Contains callee-saved registers that need to be preserved across
@@ -24,71 +100,59 @@ pub struct KernelContext {
     pub ra: u64,
     /// Saved registers s0-s11 (callee-saved)
     pub s: [u64; 12],
-    /// Kernel stack for this context
-    /// Using Box<[u8]> to directly allocate on heap without stack overflow
-    /// This includes both the guard page and the actual stack
-    pub kernel_stack: Box<[u8]>,
-    /// Guard page start address (first PAGE_SIZE bytes of kernel_stack)
-    pub guard_page_start: usize,
+    /// Guarded kernel stack for this context
+    pub kernel_stack: GuardedKernelStack,
 }
 
 impl KernelContext {
-    /// Create a new kernel context with kernel stack and guard page
+    /// Create a new kernel context with guarded kernel stack
     /// 
     /// # Returns
     /// A new KernelContext with allocated kernel stack ready for scheduling
     pub fn new() -> Self {
-        use crate::environment::PAGE_SIZE;
+        use crate::environment::TASK_KERNEL_STACK_SIZE;
         
-        // Allocate stack with an extra page for guard page
-        let total_size = PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE;
-        let kernel_stack = alloc::vec![0u8; total_size].into_boxed_slice();
-        
-        let guard_page_start = kernel_stack.as_ptr() as usize;
-        let stack_start = guard_page_start + PAGE_SIZE;
-        let stack_top = stack_start + crate::environment::TASK_KERNEL_STACK_SIZE;
+        let kernel_stack = GuardedKernelStack::new(TASK_KERNEL_STACK_SIZE);
+        let stack_top = kernel_stack.stack_bottom();
 
         Self {
             sp: stack_top as u64 - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
             kernel_stack,
-            guard_page_start,
         }
     }
 
-    /// Get the bottom of the kernel stack (excluding guard page)
+    /// Get the bottom of the kernel stack
     pub fn get_kernel_stack_bottom(&self) -> u64 {
-        use crate::environment::PAGE_SIZE;
-        let stack_start = self.kernel_stack.as_ptr() as u64 + PAGE_SIZE as u64;
-        stack_start + crate::environment::TASK_KERNEL_STACK_SIZE as u64
+        self.kernel_stack.stack_bottom() as u64
     }
 
     pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
-        use crate::environment::PAGE_SIZE;
-        let stack_start = self.kernel_stack.as_ptr() as usize + PAGE_SIZE;
-        MemoryArea::new(stack_start, self.get_kernel_stack_bottom() as usize - 1)
+        self.kernel_stack.stack_area()
     }
     
-    /// Get the guard page memory area
+    /// Get the guard page memory area (virtual address space only)
     pub fn get_guard_page_memory_area(&self) -> MemoryArea {
-        use crate::environment::PAGE_SIZE;
-        MemoryArea::new(self.guard_page_start, self.guard_page_start + PAGE_SIZE - 1)
+        self.kernel_stack.guard_page_area()
+    }
+    
+    /// Get the guard page start address for cleanup
+    pub fn guard_page_start(&self) -> usize {
+        self.kernel_stack.guard_page_start()
     }
 
     pub fn get_kernel_stack_ptr(&self) -> *const u8 {
-        use crate::environment::PAGE_SIZE;
-        unsafe { self.kernel_stack.as_ptr().add(PAGE_SIZE) }
+        self.kernel_stack.as_ptr()
     }
 
     /// Set the kernel stack for this context
     /// # Arguments
-    /// * `stack` - Boxed slice representing the kernel stack memory (including guard page)
+    /// * `stack` - GuardedKernelStack to use
     /// 
-    pub fn set_kernel_stack(&mut self, stack: Box<[u8]>) {
-        self.guard_page_start = stack.as_ptr() as usize;
+    pub fn set_kernel_stack(&mut self, stack: GuardedKernelStack) {
+        self.sp = stack.stack_bottom() as u64;
         self.kernel_stack = stack;
-        self.sp = self.get_kernel_stack_bottom();
     }
 
     /// Set entry point for this context
@@ -117,7 +181,7 @@ impl KernelContext {
     /// # Returns
     /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
-        let stack_top = self.kernel_stack.as_ptr() as usize + self.kernel_stack.len();
+        let stack_top = self.kernel_stack.stack_bottom();
         let trapframe_addr = stack_top - core::mem::size_of::<Trapframe>();
         unsafe {
             &mut *(trapframe_addr as *mut Trapframe)

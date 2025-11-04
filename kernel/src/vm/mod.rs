@@ -119,8 +119,102 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     early_println!("Kernel space mapped       : {:#018x} - {:#018x}", kernel_start, kernel_end);
 
     setup_trampoline(manager);
+    
+    /* Setup guard pages for per-core kernel stacks */
+    setup_kernel_stack_guard_pages();
 
     root_page_table.switch(manager.get_asid());
+}
+
+/// Setup guard pages for per-core kernel stacks
+/// 
+/// This function uses add_memory_map_fixed to overwrite the guard page regions
+/// with mappings that have no permissions, causing page faults on access.
+#[allow(static_mut_refs)]
+fn setup_kernel_stack_guard_pages() {
+    use crate::environment::STACK_SIZE;
+    use crate::mem::KERNEL_STACK;
+    use vmem::VirtualMemoryRegion;
+    
+    let manager = get_kernel_vm_manager();
+    let stack_start = unsafe { KERNEL_STACK.start() };
+    let stack_with_guard_size = STACK_SIZE + PAGE_SIZE;
+    
+    early_println!("Setting up kernel stack guard pages...");
+    
+    // Create guard page mappings with no permissions for each CPU
+    for cpu_id in 0..NUM_OF_CPUS {
+        let cpu_area_start = stack_start + cpu_id * stack_with_guard_size;
+        let guard_page_start = cpu_area_start;
+        let guard_page_end = guard_page_start + PAGE_SIZE - 1;
+        
+        // Create guard page mapping with no permissions
+        // add_memory_map_fixed will split the existing kernel mapping and unmap this region from MMU
+        let guard_map = VirtualMemoryMap {
+            pmarea: MemoryArea {
+                start: guard_page_start,
+                end: guard_page_end,
+            },
+            vmarea: MemoryArea {
+                start: guard_page_start,
+                end: guard_page_end,
+            },
+            permissions: VirtualMemoryRegion::Guard.default_permissions(), // 0 permissions
+            is_shared: VirtualMemoryRegion::Guard.is_shareable(),
+            owner: None,
+        };
+        
+        match manager.add_memory_map_fixed(guard_map) {
+            Ok(_) => {
+                early_println!("  CPU {}: Guard page at {:#018x} - {:#018x}", cpu_id, guard_page_start, guard_page_end);
+            }
+            Err(e) => {
+                panic!("Failed to setup guard page for CPU {}: {}", cpu_id, e);
+            }
+        }
+    }
+    
+    early_println!("Kernel stack guard pages setup complete");
+}
+
+/// Register a per-task kernel stack guard page
+/// 
+/// This function uses add_memory_map_fixed on the kernel VM manager to register
+/// the guard page with no permissions, causing page faults on access.
+/// 
+/// # Arguments
+/// * `guard_page_area` - The memory area of the guard page
+pub fn register_task_kernel_stack_guard_page(guard_page_area: MemoryArea) {
+    use vmem::VirtualMemoryRegion;
+    
+    let manager = get_kernel_vm_manager();
+    
+    // Create guard page mapping with no permissions
+    let guard_map = VirtualMemoryMap {
+        pmarea: guard_page_area,
+        vmarea: guard_page_area,
+        permissions: VirtualMemoryRegion::Guard.default_permissions(), // 0 permissions
+        is_shared: VirtualMemoryRegion::Guard.is_shareable(),
+        owner: None,
+    };
+    
+    // Use add_memory_map_fixed to split existing mappings and register the guard page
+    manager.add_memory_map_fixed(guard_map)
+        .map_err(|e| panic!("Failed to register task kernel stack guard page at {:#x}: {}", guard_page_area.start, e))
+        .unwrap();
+}
+
+/// Unregister a per-task kernel stack guard page
+/// 
+/// This function removes the guard page mapping when a task is destroyed.
+/// 
+/// # Arguments
+/// * `guard_page_start` - The start address of the guard page
+pub fn unregister_task_kernel_stack_guard_page(guard_page_start: usize) {
+    let manager = get_kernel_vm_manager();
+    
+    // Remove the guard page mapping
+    let _ = manager.remove_memory_map_by_addr(guard_page_start);
 }
 
 pub fn user_vm_init(task: &mut Task) {
