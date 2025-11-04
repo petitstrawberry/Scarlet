@@ -184,11 +184,24 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 }
                 
                 // Check if this is a per-task kernel stack guard page access
+                // Per-task stacks: first PAGE_SIZE bytes are guard page
+                {
+                    use crate::sched::scheduler::get_scheduler;
+                    if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+                        let guard_area = task.kernel_context.get_guard_page_memory_area();
+                        if vaddr >= guard_area.start && vaddr <= guard_area.end {
+                            print_traplog(trapframe);
+                            panic!("KERNEL STACK OVERFLOW (Task {}): Guard page accessed at vaddr: {:#x}\nThe per-task kernel stack has overflowed.", task.get_id(), vaddr);
+                        }
+                    }
+                }
+                
+                // Check if this is a guard page in VM manager (for user stacks, etc.)
                 if let Some(memory_map) = manager.search_memory_map(vaddr) {
                     if memory_map.permissions == 0 {
-                        // This is a guard page - task kernel stack overflow detected!
+                        // This is a guard page
                         print_traplog(trapframe);
-                        panic!("KERNEL STACK OVERFLOW (Task): Guard page accessed at vaddr: {:#x}\nThis indicates a per-task kernel stack has overflowed.", vaddr);
+                        panic!("GUARD PAGE ACCESS: Guard page accessed at vaddr: {:#x}", vaddr);
                     }
                 }
                 
