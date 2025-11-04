@@ -183,18 +183,21 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     }
                 }
                 
+                // TODO: Per-task guard page check disabled
+                // Problem: Heap-allocated stacks in straight-mapped space cause conflicts
+                // when guard pages are registered and memory is reused after task exit.
                 // Check if this is a per-task kernel stack guard page access
                 // Per-task stacks: first PAGE_SIZE bytes are guard page
-                {
-                    use crate::sched::scheduler::get_scheduler;
-                    if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
-                        let guard_area = task.kernel_context.get_guard_page_memory_area();
-                        if vaddr >= guard_area.start && vaddr <= guard_area.end {
-                            print_traplog(trapframe);
-                            panic!("KERNEL STACK OVERFLOW (Task {}): Guard page accessed at vaddr: {:#x}\nThe per-task kernel stack has overflowed.", task.get_id(), vaddr);
-                        }
-                    }
-                }
+                // {
+                //     use crate::sched::scheduler::get_scheduler;
+                //     if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+                //         let guard_area = task.kernel_context.get_guard_page_memory_area();
+                //         if vaddr >= guard_area.start && vaddr <= guard_area.end {
+                //             print_traplog(trapframe);
+                //             panic!("KERNEL STACK OVERFLOW (Task {}): Guard page accessed at vaddr: {:#x}\nThe per-task kernel stack has overflowed.", task.get_id(), vaddr);
+                //         }
+                //     }
+                // }
                 
                 // Check if this is a guard page in VM manager (for user stacks, etc.)
                 if let Some(memory_map) = manager.search_memory_map(vaddr) {

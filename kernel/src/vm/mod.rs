@@ -189,6 +189,9 @@ pub fn register_task_kernel_stack_guard_page(guard_page_area: MemoryArea) {
     
     let manager = get_kernel_vm_manager();
     
+    // Debug: Print guard page registration
+    early_println!("Registering per-task guard page: {:#x} - {:#x}", guard_page_area.start, guard_page_area.end);
+    
     // Create guard page mapping with no permissions
     let guard_map = VirtualMemoryMap {
         pmarea: guard_page_area,
@@ -199,22 +202,59 @@ pub fn register_task_kernel_stack_guard_page(guard_page_area: MemoryArea) {
     };
     
     // Use add_memory_map_fixed to split existing mappings and register the guard page
-    manager.add_memory_map_fixed(guard_map)
-        .map_err(|e| panic!("Failed to register task kernel stack guard page at {:#x}: {}", guard_page_area.start, e))
-        .unwrap();
+    match manager.add_memory_map_fixed(guard_map) {
+        Ok(overwritten) => {
+            early_println!("  Guard page registered successfully, overwritten {} mappings", overwritten.len());
+        }
+        Err(e) => {
+            panic!("Failed to register task kernel stack guard page at {:#x}: {}", guard_page_area.start, e);
+        }
+    }
 }
 
 /// Unregister a per-task kernel stack guard page
 /// 
-/// This function removes the guard page mapping when a task is destroyed.
+/// This function removes the guard page mapping when a task is destroyed and
+/// restores the original kernel mapping so the memory can be reused.
 /// 
 /// # Arguments
 /// * `guard_page_start` - The start address of the guard page
 pub fn unregister_task_kernel_stack_guard_page(guard_page_start: usize) {
+    use vmem::VirtualMemoryPermission;
+    
     let manager = get_kernel_vm_manager();
     
+    early_println!("Unregistering per-task guard page: {:#x}", guard_page_start);
+    
     // Remove the guard page mapping
-    let _ = manager.remove_memory_map_by_addr(guard_page_start);
+    if let Some(_) = manager.remove_memory_map_by_addr(guard_page_start) {
+        // Restore the original kernel mapping for this memory region
+        let kernel_area = unsafe { KERNEL_AREA.unwrap() };
+        
+        // Only restore if the guard page was in kernel space
+        if guard_page_start >= kernel_area.start && guard_page_start <= kernel_area.end {
+            let restore_map = VirtualMemoryMap {
+                vmarea: MemoryArea {
+                    start: guard_page_start,
+                    end: guard_page_start + PAGE_SIZE - 1,
+                },
+                pmarea: MemoryArea {
+                    start: guard_page_start,
+                    end: guard_page_start + PAGE_SIZE - 1,
+                },
+                permissions: 
+                    VirtualMemoryPermission::Read as usize |
+                    VirtualMemoryPermission::Write as usize |
+                    VirtualMemoryPermission::Execute as usize,
+                is_shared: true,
+                owner: None,
+            };
+            
+            // Use add_memory_map_fixed to restore the mapping
+            let _ = manager.add_memory_map_fixed(restore_map);
+            early_println!("  Restored kernel mapping for {:#x}", guard_page_start);
+        }
+    }
 }
 
 pub fn user_vm_init(task: &mut Task) {

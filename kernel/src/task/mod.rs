@@ -352,9 +352,15 @@ impl Task {
         // The kernel stack is allocated within the KernelContext
         self.kernel_context = KernelContext::new();
         
+        // TODO: Per-task guard pages are disabled due to fundamental design issue
+        // Problem: Task kernel stacks are heap-allocated in straight-mapped kernel space.
+        // When we register a guard page, it affects the physical memory itself.
+        // After task exit, even if we restore the mapping, heap reuse causes conflicts.
+        // Solution: Move task kernel stacks to dedicated virtual address space (large refactor)
+        // 
         // Register the guard page for this task's kernel stack
-        let guard_area = self.kernel_context.get_guard_page_memory_area();
-        crate::vm::register_task_kernel_stack_guard_page(guard_area);
+        // let guard_area = self.kernel_context.get_guard_page_memory_area();
+        // crate::vm::register_task_kernel_stack_guard_page(guard_area);
 
         match self.task_type {
             TaskType::Kernel => {
@@ -1015,9 +1021,10 @@ impl Task {
         // Initialize kernel context
         child.kernel_context = KernelContext::new();
         
+        // TODO: Per-task guard pages disabled (see Task::init for explanation)
         // Register the guard page for the child task's kernel stack
-        let guard_area = child.kernel_context.get_guard_page_memory_area();
-        crate::vm::register_task_kernel_stack_guard_page(guard_area);
+        // let guard_area = child.kernel_context.get_guard_page_memory_area();
+        // crate::vm::register_task_kernel_stack_guard_page(guard_area);
         
         // Set the state to Ready
         child.state = self.state;
@@ -1035,9 +1042,10 @@ impl Task {
     /// * `status` - The exit status
     /// 
     pub fn exit(&mut self, status: i32) {
+        // TODO: Per-task guard pages disabled (see Task::init for explanation)
         // Unregister the guard page for this task's kernel stack
-        let guard_page_start = self.kernel_context.guard_page_start();
-        crate::vm::unregister_task_kernel_stack_guard_page(guard_page_start);
+        // let guard_page_start = self.kernel_context.guard_page_start();
+        // crate::vm::unregister_task_kernel_stack_guard_page(guard_page_start);
         
         // Close all open handles when task exits
         self.handle_table.close_all();
