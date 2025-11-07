@@ -378,6 +378,18 @@ impl VirtualMemoryManager {
     /// * `Ok(())` - Successfully mapped the page
     /// * `Err(&'static str)` - Failed to map (no mapping found or MMU error)
     pub fn lazy_map_page(&mut self, vaddr: usize) -> Result<(), &'static str> {
+        // Backward-compat shim: default to Load with unknown size
+        let access = crate::object::capability::memory_mapping::AccessKind { 
+            op: crate::object::capability::memory_mapping::AccessOp::Load,
+            vaddr,
+            size: None,
+        };
+        self.lazy_map_page_with(access)
+    }
+
+    /// Lazy map with access context (instruction/load/store and optional size)
+    pub fn lazy_map_page_with(&mut self, access: crate::object::capability::memory_mapping::AccessKind) -> Result<(), &'static str> {
+        let vaddr = access.vaddr;
         // Find the memory mapping for this virtual address
         let memory_map = match self.search_memory_map(vaddr) {
             Some(map) => map,
@@ -387,11 +399,31 @@ impl VirtualMemoryManager {
         // Calculate the page-aligned virtual and physical addresses
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
         let offset_in_mapping = page_vaddr - memory_map.vmarea.start;
-        let page_paddr = memory_map.pmarea.start + offset_in_mapping;
+        let mut page_paddr = memory_map.pmarea.start + offset_in_mapping;
+        let mut perms = memory_map.permissions;
+
+        // If there is an owner, allow it to adjust mapping and tell if this is a tail page
+        if let Some(owner_weak) = &memory_map.owner {
+            if let Some(owner) = owner_weak.upgrade() {
+                match owner.resolve_fault(&access, &memory_map) {
+                    Ok(res) => {
+                        page_paddr = res.paddr_page_base;
+                        if res.is_tail {
+                            // Drop Read and Write for tail page
+                            perms &= !0x1; // Read
+                            perms &= !0x2; // Write
+                        }
+                    }
+                    Err(_e) => {
+                        return Err("Owner failed to resolve fault");
+                    }
+                }
+            }
+        }
         
         // Map this single page to the MMU
         if let Some(root_pagetable) = self.get_root_page_table() {
-            root_pagetable.map(self.asid, page_vaddr, page_paddr, memory_map.permissions);
+            root_pagetable.map(self.asid, page_vaddr, page_paddr, perms);
             Ok(())
         } else {
             Err("No root page table available")
