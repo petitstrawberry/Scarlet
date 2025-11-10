@@ -271,6 +271,16 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
 
     // Record base for later SP and teardown
     task.set_kernel_stack_window_base(Some((slot_idx, base)));
+
+    // Debug verification in test / debug builds: ensure guard page is unmapped
+    #[cfg(any(debug_assertions, test))]
+    {
+        if verify_task_kernel_stack_guard(task) {
+            early_println!("Kernel stack guard OK (slot {})", slot_idx);
+        } else {
+            early_println!("WARN: Kernel stack guard mapping anomaly (slot {})", slot_idx);
+        }
+    }
     Ok(())
 }
 
@@ -301,6 +311,37 @@ pub fn unmap_task_kernel_stack_window(task: &mut Task) {
         kstack_alloc().lock().free_slot(slot_idx);
         task.set_kernel_stack_window_base(None);
     }
+}
+
+/// Verify that a task's kernel stack guard page is unmapped and stack pages are mapped.
+/// Returns true if the guard page has no associated memory map and a sample stack address is mapped.
+pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
+    let (slot_idx, base) = match task.get_kernel_stack_window_base() {
+        Some(v) => v,
+        None => return false,
+    };
+    let guard_start = base;
+    let guard_sample = guard_start; // Any address in guard page
+    let stack_first = base + PAGE_SIZE; // First mapped byte of stack window
+    let stack_sample = stack_first + (PAGE_SIZE / 2); // Sample inside first page
+
+    let kman = get_kernel_vm_manager();
+    let guard_map = kman.search_memory_map(guard_sample);
+    let stack_map = kman.search_memory_map(stack_sample);
+
+    let guard_ok = guard_map.is_none();
+    let stack_ok = stack_map.map(|m| m.vmarea.start <= stack_sample && stack_sample <= m.vmarea.end).unwrap_or(false);
+
+    if !(guard_ok && stack_ok) {
+        early_println!(
+            "[verify_kstack_guard] slot {} guard_ok={} stack_ok={} guard_map_start={:?}",
+            slot_idx,
+            guard_ok,
+            stack_ok,
+            guard_map.map(|m| m.vmarea.start)
+        );
+    }
+    guard_ok && stack_ok
 }
 
 pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {

@@ -518,6 +518,8 @@ impl Scheduler {
         } else {
             task.get_kernel_stack_bottom()
         };
+
+        // crate::early_println!("[SCHED]   Setting kernel stack to {:#x}", sp);
         cpu.set_kernel_stack(sp);
         
         // Handle trapframe and vcpu switching - use raw pointer to avoid borrow checker issues

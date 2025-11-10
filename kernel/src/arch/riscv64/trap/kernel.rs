@@ -5,6 +5,8 @@ use crate::arch::trap::print_traplog;
 use crate::arch::{get_cpu, Trapframe};
 use crate::println;
 use crate::vm::get_kernel_vm_manager;
+use crate::sched::scheduler::get_scheduler;
+use crate::environment::PAGE_SIZE;
 
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
@@ -149,6 +151,19 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             let mut vaddr;
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
+            }
+
+            // Detect kernel stack overflow via guard-page hit
+            if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+                if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+                    if vaddr >= base && vaddr < base + PAGE_SIZE {
+                        print_traplog(trapframe);
+                        panic!(
+                            "Kernel stack overflow detected: guard page hit at vaddr={:#x} (base={:#x})",
+                            vaddr, base
+                        );
+                    }
+                }
             }
 
             // For kernel addresses, check if they are valid

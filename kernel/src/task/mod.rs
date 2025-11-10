@@ -1311,7 +1311,7 @@ impl Task {
     }
 
     /// Get kernel stack window base (slot index and base vaddr)
-    pub fn get_kernel_stack_window_base(&mut self) -> Option<(usize, usize)> {
+    pub fn get_kernel_stack_window_base(&self) -> Option<(usize, usize)> {
         self.kernel_stack_window_base
     }
 }
