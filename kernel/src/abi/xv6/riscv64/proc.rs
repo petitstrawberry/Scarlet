@@ -171,3 +171,17 @@ pub fn sys_getpid(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe:
     trapframe.increment_pc_next(task);
     task.get_id()
 }
+
+pub fn sys_sleep(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let ticks = trapframe.get_arg(0) as u64;
+    let task = mytask().unwrap();
+
+    // Increment PC before sleeping to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Call the blocking sleep method - this will return when sleep completes
+    task.sleep(trapframe, ticks);
+
+    // Set return value to 0 for successful sleep
+    0
+}

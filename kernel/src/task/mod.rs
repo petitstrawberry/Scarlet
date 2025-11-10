@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{Arch, KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{EventContent, event::ProcessControlType}, mem::page::{Page, allocate_raw_pages, free_boxed_page}, object::handle::HandleTable, sched::scheduler::{Scheduler, get_scheduler}, timer::{TimerHandler, add_timer, get_tick}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{EventContent, event::ProcessControlType}, mem::page::{Page, allocate_raw_pages, free_boxed_page}, object::handle::HandleTable, sched::scheduler::{Scheduler, get_scheduler}, timer::{TimerHandler, add_timer, get_tick}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}, map_task_kernel_stack_window}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -259,6 +259,9 @@ pub struct Task {
     pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
     /// Event processing enabled flag (similar to interrupt enable/disable)
     pub events_enabled: Mutex<bool>,
+
+    /// Kernel stack window base in shared kernel PT: (slot_index, base_vaddr)
+    kernel_stack_window_base: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -351,6 +354,7 @@ impl Task {
             sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             event_queue: spin::Mutex::new(crate::ipc::event::TaskEventQueue::new()),
             events_enabled: spin::Mutex::new(true), // Events enabled by default
+            kernel_stack_window_base: None,
         };
 
         *taskid += 1;
@@ -377,6 +381,10 @@ impl Task {
                 /* PC will be set when loading the ELF binary */
             }
         }
+
+        // Map kernel stack into shared kernel PT at unique high VA window
+        // This must be done after VM initialization so kernel PT is ready
+        map_task_kernel_stack_window(self).expect("Failed to map kernel stack window");
         
         /* Set the task state to Ready */
         self.state = TaskState::Ready;
@@ -1315,6 +1323,16 @@ impl Task {
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
         self.kernel_context.get_trapframe()
     }
+
+    /// Internal: set kernel stack window base (slot index and base vaddr)
+    pub fn set_kernel_stack_window_base(&mut self, base: Option<(usize, usize)>) {
+        self.kernel_stack_window_base = base;
+    }
+
+    /// Get kernel stack window base (slot index and base vaddr)
+    pub fn get_kernel_stack_window_base(&self) -> Option<(usize, usize)> {
+        self.kernel_stack_window_base
+    }
 }
 
 #[derive(Debug)]
@@ -1331,6 +1349,13 @@ impl WaitError {
             WaitError::ChildNotExited(msg) => msg,
             WaitError::ChildTaskNotFound(msg) => msg,
         }
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        // Best-effort teardown of kernel stack window mapping
+        crate::vm::unmap_task_kernel_stack_window(self);
     }
 }
 

@@ -1,6 +1,6 @@
-FROM ubuntu:24.04
+FROM ubuntu:25.04
 
-ENV PATH=/root/.cargo/bin:$PATH
+ENV PATH=/root/.cargo/bin:/opt/bin:$PATH
 ENV MAKEFLAGS=-j$(($(nproc)-2))
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
@@ -8,11 +8,22 @@ ENV DEBIAN_FRONTEND noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
-	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 gdb-multiarch gcc-riscv64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
-  mtools dosfstools sleuthkit
+	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
+    mtools dosfstools sleuthkit libslirp-dev
 
-# Install QEMU
-RUN apt install -y qemu-system-riscv64
+# # # Install QEMU
+# RUN apt install -y qemu-system-riscv64
+
+RUN apt update && \
+    apt install -y pkg-config libglib2.0-dev libmount-dev python3 python3-venv python3-pip python3-dev git libssl-dev libffi-dev build-essential automake libfreetype6-dev libtheora-dev libtool libvorbis-dev pkg-config texinfo zlib1g-dev unzip cmake yasm libx264-dev libmp3lame-dev libopus-dev libvorbis-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev pkg-config texinfo wget zlib1g-dev ninja-build libpixman-1-dev
+RUN cd /opt && \
+    wget https://download.qemu.org/qemu-10.1.2.tar.xz && \
+	tar xvJf qemu-10.1.2.tar.xz && \
+	rm qemu-10.1.2.tar.xz && \
+	cd qemu-10.1.2 && \
+    ./configure --target-list=riscv32-softmmu,riscv64-softmmu --prefix=/opt --enable-slirp --python=/usr/bin/python3 && \
+	make -j 8 && \
+	make install
 
 # Install Rust and RISC-V target
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
