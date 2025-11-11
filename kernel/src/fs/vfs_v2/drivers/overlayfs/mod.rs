@@ -788,7 +788,15 @@ impl FileSystemOperations for OverlayFS {
         }
         let upper_parent = self.resolve_in_layer(&upper.0, &upper.1, &overlay_parent.path)?;
         let fs = Self::fs_from_mount(&upper.0)?;
-        let new_node = fs.create(&upper_parent, name, file_type, mode)?;
+        // let new_node = fs.create(&upper_parent, name, file_type, mode)?;
+        let new_node = match fs.create(&upper_parent, name, file_type, mode) {
+            Ok(node) => node,
+            Err(e) => {
+                crate::println!("OverlayFS: Failed to create file '{}' in upper layer: {}", name, e.message);
+                return Err(e);
+            }
+        };
+
         // Return overlay node
         let metadata = new_node.metadata()?;
         let overlay_node = OverlayNode::new(name.clone(), child_path, metadata.file_type, metadata.file_id);
