@@ -521,7 +521,7 @@ pub fn analyze_and_load_elf_with_strategy(
             if let Some(final_interp_path) = actual_interpreter {
                 crate::println!("Using interpreter: {}", final_interp_path);
                 let base_address = load_elf_segments_for_interpreter(&header, file_obj, task, strategy)?;
-                let interpreter_entry = load_interpreter(&final_interp_path, task, strategy)?;
+                let (interpreter_entry, interpreter_base) = load_interpreter(&final_interp_path, task, strategy)?;
                 
                 // Prepare program headers info for auxiliary vector
                 let phdr_info = ProgramHeadersInfo {
@@ -529,9 +529,6 @@ pub fn analyze_and_load_elf_with_strategy(
                     phdr_size: header.e_phentsize as u64,
                     phdr_count: header.e_phnum as u64,
                 };
-                
-                // TODO: Get actual interpreter base address from load_interpreter result
-                let interpreter_base = 0x40000000u64; // Hardcoded for now
                 
                 // Calculate original entry point correctly based on ELF type
                 // For ET_EXEC: e_entry is an absolute address
@@ -677,12 +674,12 @@ fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObje
 /// Maximum recursion depth for interpreter loading to prevent infinite loops
 const MAX_INTERPRETER_DEPTH: usize = 5;
 
-fn load_interpreter(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
+fn load_interpreter(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy) -> Result<(u64, u64), ElfLoaderError> {
     load_interpreter_recursive(interpreter_path, task, strategy, 0)
 }
 
 /// Recursive interpreter loading with depth limiting
-fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy, depth: usize) -> Result<u64, ElfLoaderError> {
+fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy, depth: usize) -> Result<(u64, u64), ElfLoaderError> {
     // Check recursion depth to prevent infinite loops
     if depth >= MAX_INTERPRETER_DEPTH {
         return Err(ElfLoaderError {
@@ -739,7 +736,7 @@ fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy:
     
     // Step 3: Check if this interpreter itself has an interpreter (recursive case)
     let nested_interpreter_path = find_interpreter_path(&interp_header, file_object)?;
-    let final_entry_point = if let Some(nested_path) = nested_interpreter_path {
+    let (final_entry_point, final_base) = if let Some(nested_path) = nested_interpreter_path {
         let resolved_nested_path = (strategy.resolve_interpreter)(Some(&nested_path))
             .unwrap_or(nested_path);
         crate::println!("Interpreter {} requests nested interpreter: {}", interpreter_path, resolved_nested_path);
@@ -750,23 +747,50 @@ fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy:
         // No nested interpreter, load this interpreter normally
         let interp_needs_relocation = interp_header.e_type == ET_DYN;
         
-        // Use strategy to determine base address for interpreter
-        let interpreter_base = (strategy.choose_base_address)(LoadTarget::Interpreter, interp_needs_relocation);
-        crate::println!("Interpreter base address: {:#x}", interpreter_base);
-        
-        // Load interpreter segments with specific base address
-        load_elf_segments_with_base(&interp_header, file_object, task, interpreter_base)?;
-        
-        // Calculate actual entry point
-        if interp_needs_relocation {
-            interpreter_base + interp_header.e_entry as u64
+        // Determine total span of PT_LOAD segments to avoid overlap
+        let mut min_vaddr: u64 = u64::MAX;
+        let mut max_end: u64 = 0;
+        for_each_program_header(&interp_header, file_object, |_i, ph| {
+            if ph.p_type == PT_LOAD {
+                if ph.p_vaddr < min_vaddr { min_vaddr = ph.p_vaddr; }
+                let end = ph.p_vaddr.saturating_add(ph.p_memsz);
+                if end > max_end { max_end = end; }
+            }
+            Ok(true)
+        })?;
+
+        if min_vaddr == u64::MAX {
+            return Err(ElfLoaderError { message: "Interpreter has no PT_LOAD segments".to_string() });
+        }
+
+        let span = max_end.saturating_sub(min_vaddr) as usize;
+        let align = crate::environment::PAGE_SIZE;
+        let span_aligned = (span + align - 1) & !(align - 1);
+
+        // Prefer the strategy's hint, but pick an actually free area in the task's VM
+        let _preferred = (strategy.choose_base_address)(LoadTarget::Interpreter, interp_needs_relocation);
+        let start = task.vm_manager
+            .find_unmapped_area(span_aligned, align)
+            .ok_or_else(|| ElfLoaderError { message: "No unmapped area available for interpreter".to_string() })? as u64;
+
+        // Compute additive base so that the lowest PT_LOAD maps to `start`
+        let interpreter_base_add = start.saturating_sub(min_vaddr);
+        crate::println!("Interpreter base address: {:#x} (mapped span: {:#x} bytes)", interpreter_base_add, span_aligned);
+
+        // Load interpreter segments with this base
+        load_elf_segments_with_base(&interp_header, file_object, task, interpreter_base_add)?;
+
+        // Calculate actual entry point and return base used for relocations/AT_BASE
+        let entry = if interp_needs_relocation {
+            interpreter_base_add + interp_header.e_entry as u64
         } else {
             interp_header.e_entry
-        }
+        };
+        (entry, interpreter_base_add)
     };
     
     crate::println!("Interpreter entry point (depth {}): {:#x}", depth, final_entry_point);
-    Ok(final_entry_point)
+    Ok((final_entry_point, final_base))
 }
 
 /// Load ELF segments for interpreter with specified base address
