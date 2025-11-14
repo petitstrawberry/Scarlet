@@ -453,9 +453,22 @@ impl FileObject for Ext2FileObject {
                 }
                 Ok(*pos)
             },
-            SeekFrom::End(_offset) => {
-                // TODO: Get actual file size from inode
-                Err(StreamError::IoError)
+            SeekFrom::End(offset) => {
+                let file_size = self.metadata()?.size as u64;
+
+                let new_pos = if offset >= 0 {
+                    file_size.saturating_add(offset as u64)
+                } else {
+                    let abs_offset = (-offset) as u64;
+                    if abs_offset > file_size {
+                        0
+                    } else {
+                        file_size - abs_offset
+                    }
+                };
+
+                *pos = new_pos;
+                Ok(*pos)
             }
         }
     }
