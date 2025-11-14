@@ -401,6 +401,14 @@ impl MemoryMappingOps for VfsFileObject {
 }
 
 impl FileObject for VfsFileObject {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.inner.write_at(offset, buffer)
+    }
+
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         self.inner.seek(whence)
     }

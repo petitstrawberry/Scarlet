@@ -37,6 +37,26 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps {
     /// Get metadata about the file
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
 
+    /// Read data from a specific offset without changing internal position
+    ///
+    /// This method performs a random-access read operation that must not
+    /// modify the file's current seek position. Filesystems that cannot
+    /// support position-independent reads may return `StreamError::NotSupported`.
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let _ = (offset, buffer);
+        Err(StreamError::NotSupported)
+    }
+
+    /// Write data to a specific offset without changing internal position
+    ///
+    /// Similar to [`read_at`], this operation must not adjust the file's
+    /// internal cursor. Implementations can default to returning
+    /// `StreamError::NotSupported` when random-access writes are unavailable.
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        let _ = (offset, buffer);
+        Err(StreamError::NotSupported)
+    }
+
     /// Truncate the file to the specified size
     /// 
     /// This method changes the size of the file to the specified length.

@@ -475,6 +475,27 @@ impl MemoryMappingOps for CpioFileObject {
 }
 
 impl FileObject for CpioFileObject {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let cpio_node = self.node.as_any()
+            .downcast_ref::<CpioNode>()
+            .ok_or(StreamError::IoError)?;
+
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        if offset >= cpio_node.content.len() {
+            return Ok(0);
+        }
+
+        let end = core::cmp::min(offset + buffer.len(), cpio_node.content.len());
+        let bytes_to_read = end - offset;
+        buffer[..bytes_to_read].copy_from_slice(&cpio_node.content[offset..end]);
+
+        Ok(bytes_to_read)
+    }
+
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::PermissionDenied)
+    }
+
     fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         let cpio_node = self.node.as_any()
             .downcast_ref::<CpioNode>()

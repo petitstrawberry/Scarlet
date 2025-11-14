@@ -1074,6 +1074,44 @@ impl MemoryMappingOps for TmpFileObject {
 }
 
 impl FileObject for TmpFileObject {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if self.node.file_type() != FileType::RegularFile {
+            return Err(StreamError::NotSupported);
+        }
+
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        let content = self.node.content.read();
+
+        if offset >= content.len() {
+            return Ok(0);
+        }
+
+        let available = content.len() - offset;
+        let to_read = core::cmp::min(buffer.len(), available);
+        buffer[..to_read].copy_from_slice(&content[offset..offset + to_read]);
+
+        Ok(to_read)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        if self.node.file_type() != FileType::RegularFile {
+            return Err(StreamError::NotSupported);
+        }
+
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        let mut content = self.node.content.write();
+
+        let required = offset.saturating_add(buffer.len());
+        if required > content.len() {
+            content.resize(required, 0);
+        }
+
+        content[offset..offset + buffer.len()].copy_from_slice(buffer);
+        self.node.update_size(content.len() as u64);
+
+        Ok(buffer.len())
+    }
+
     fn seek(&self, pos: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         use crate::fs::SeekFrom;
         

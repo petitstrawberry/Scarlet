@@ -432,6 +432,42 @@ impl FileObject for Ext2FileObject {
         })
     }
 
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.ensure_content_loaded()?;
+
+        let content = self.cached_content.read();
+        let content = content.as_ref().ok_or(StreamError::IoError)?;
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+
+        if offset >= content.len() {
+            return Ok(0);
+        }
+
+        let bytes_available = content.len() - offset;
+        let bytes_to_read = core::cmp::min(buffer.len(), bytes_available);
+        buffer[..bytes_to_read].copy_from_slice(&content[offset..offset + bytes_to_read]);
+
+        Ok(bytes_to_read)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.ensure_content_loaded()?;
+
+        let mut cached = self.cached_content.write();
+        let content = cached.as_mut().ok_or(StreamError::IoError)?;
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+
+        let required_size = offset.saturating_add(buffer.len());
+        if required_size > content.len() {
+            content.resize(required_size, 0);
+        }
+
+        content[offset..offset + buffer.len()].copy_from_slice(buffer);
+        *self.is_dirty.write() = true;
+
+        Ok(buffer.len())
+    }
+
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut pos = self.position.lock();
         

@@ -451,6 +451,42 @@ impl MemoryMappingOps for Fat32FileObject {
 }
 
 impl FileObject for Fat32FileObject {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.ensure_content_loaded()?;
+
+        let cached = self.cached_content.read();
+        let content = cached.as_ref().ok_or(StreamError::IoError)?;
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+
+        if offset >= content.len() {
+            return Ok(0);
+        }
+
+        let remaining = content.len() - offset;
+        let to_read = core::cmp::min(buffer.len(), remaining);
+        buffer[..to_read].copy_from_slice(&content[offset..offset + to_read]);
+
+        Ok(to_read)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.ensure_content_loaded()?;
+
+        let mut cached = self.cached_content.write();
+        let content = cached.as_mut().ok_or(StreamError::IoError)?;
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+
+        let required_size = offset.saturating_add(buffer.len());
+        if required_size > content.len() {
+            content.resize(required_size, 0);
+        }
+
+        content[offset..offset + buffer.len()].copy_from_slice(buffer);
+        *self.is_dirty.write() = true;
+
+        Ok(buffer.len())
+    }
+
     fn seek(&self, from: SeekFrom) -> Result<u64, StreamError> {
         let metadata = self.node.metadata.read();
         let file_size = metadata.size;
