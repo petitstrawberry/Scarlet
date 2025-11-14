@@ -626,6 +626,178 @@ pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
+pub fn sys_pread64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let buf_addr = trapframe.get_arg(1);
+    let count = trapframe.get_arg(2) as usize;
+    let position = trapframe.get_arg(3) as i64;
+
+    if position < 0 {
+        trapframe.increment_pc_next(task);
+        return errno::to_result(errno::EINVAL);
+    }
+
+    if count == 0 {
+        trapframe.increment_pc_next(task);
+        return 0;
+    }
+
+    let buf_ptr = match task.vm_manager.translate_vaddr(buf_addr) {
+        Some(ptr) => ptr as *mut u8,
+        None => {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EFAULT);
+        }
+    };
+
+    if buf_ptr.is_null() {
+        trapframe.increment_pc_next(task);
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EBADF);
+        }
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EBADF);
+        }
+    };
+
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => {
+            trapframe.increment_pc_next(task);
+            if kernel_obj.as_stream().is_some() {
+                return errno::to_result(errno::ESPIPE);
+            }
+            return errno::to_result(errno::EBADF);
+        }
+    };
+
+    let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+
+    match file.read_at(position as u64, &mut buffer) {
+        Ok(n) => {
+            trapframe.increment_pc_next(task);
+            n
+        }
+        Err(StreamError::EndOfStream) => {
+            trapframe.increment_pc_next(task);
+            0
+        }
+        Err(StreamError::WouldBlock) => {
+            get_scheduler().schedule(trapframe);
+            usize::MAX
+        }
+        Err(err) => {
+            trapframe.increment_pc_next(task);
+            errno::to_result(stream_error_to_errno(err))
+        }
+    }
+}
+
+pub fn sys_pwrite64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0) as usize;
+    let buf_addr = trapframe.get_arg(1);
+    let count = trapframe.get_arg(2) as usize;
+    let position = trapframe.get_arg(3) as i64;
+
+    if position < 0 {
+        trapframe.increment_pc_next(task);
+        return errno::to_result(errno::EINVAL);
+    }
+
+    if count == 0 {
+        trapframe.increment_pc_next(task);
+        return 0;
+    }
+
+    let buf_ptr = match task.vm_manager.translate_vaddr(buf_addr) {
+        Some(ptr) => ptr as *const u8,
+        None => {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EFAULT);
+        }
+    };
+
+    if buf_ptr.is_null() {
+        trapframe.increment_pc_next(task);
+        return errno::to_result(errno::EFAULT);
+    }
+
+    let handle = match abi.get_handle(fd) {
+        Some(h) => h,
+        None => {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EBADF);
+        }
+    };
+
+    let kernel_obj = match task.handle_table.get(handle) {
+        Some(obj) => obj,
+        None => {
+            trapframe.increment_pc_next(task);
+            return errno::to_result(errno::EBADF);
+        }
+    };
+
+    let file = match kernel_obj.as_file() {
+        Some(file) => file,
+        None => {
+            trapframe.increment_pc_next(task);
+            if kernel_obj.as_stream().is_some() {
+                return errno::to_result(errno::ESPIPE);
+            }
+            return errno::to_result(errno::EBADF);
+        }
+    };
+
+    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
+
+    match file.write_at(position as u64, buffer) {
+        Ok(n) => {
+            trapframe.increment_pc_next(task);
+            n
+        }
+        Err(StreamError::WouldBlock) => {
+            get_scheduler().schedule(trapframe);
+            usize::MAX
+        }
+        Err(err) => {
+            trapframe.increment_pc_next(task);
+            errno::to_result(stream_error_to_errno(err))
+        }
+    }
+}
+
+fn stream_error_to_errno(err: StreamError) -> usize {
+    match err {
+        StreamError::EndOfStream => errno::SUCCESS,
+        StreamError::WouldBlock => errno::EAGAIN,
+        StreamError::IoError => errno::EIO,
+        StreamError::Closed => errno::EBADF,
+        StreamError::InvalidArgument => errno::EINVAL,
+        StreamError::Interrupted => errno::EINTR,
+        StreamError::PermissionDenied => errno::EACCES,
+        StreamError::DeviceError => errno::EIO,
+        StreamError::NotSupported | StreamError::SeekError => errno::ESPIPE,
+        StreamError::NoSpace => errno::ENOSPC,
+        StreamError::BrokenPipe => errno::EPIPE,
+        StreamError::FileSystemError(fs_err) => errno::from_fs_error(&fs_err),
+        StreamError::Other(_) => errno::EIO,
+    }
+}
+
 /// Linux writev system call implementation
 /// 
 /// This system call writes data from multiple buffers (I/O vectors) to a file descriptor.

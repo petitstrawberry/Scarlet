@@ -695,6 +695,8 @@ syscall_table! {
     Write = 64 => fs::sys_write,
     Readv = 65 => fs::sys_readv,
     Writev = 66 => fs::sys_writev,
+    Pread64 = 67 => fs::sys_pread64,
+    Pwrite64 = 68 => fs::sys_pwrite64,
     NewFstAtAt = 79 => fs::sys_newfstatat,
     NewFstat = 80 => fs::sys_newfstat,
     ReadLinkAt = 78 => fs::sys_readlinkat,
