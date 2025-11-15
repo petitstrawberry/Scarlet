@@ -333,7 +333,23 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Open the file using VfsManager::open_relative
-    crate::println!("sys_openat: attempting to open '{}' with flags {:#o} (dirfd={})", path_str, flags, dirfd);
+    // Apply a few Linux-compat path translations for devices
+    let mapped_path = if path_str == "/dev/tty" {
+        "/dev/tty0".to_string()
+    } else if let Some(rest) = path_str.strip_prefix("/dev/vc/") {
+        // Map /dev/vc/N -> /dev/ttyN; if ttyN doesn't exist, we may further alias below
+        alloc::format!("/dev/tty{}", rest)
+    } else if let Some(n) = path_str.strip_prefix("/dev/tty") {
+        // If requesting a numbered tty other than 0, alias to tty0 for minimal support
+        // This is a compatibility shim until multiple VTs are implemented
+        if n != "0" && n.chars().all(|c| c.is_ascii_digit()) {
+            "/dev/tty0".to_string()
+        } else {
+            path_str.clone()
+        }
+    } else {
+        path_str.clone()
+    };
 
     // // Log flags details
     // let flags_table = [
