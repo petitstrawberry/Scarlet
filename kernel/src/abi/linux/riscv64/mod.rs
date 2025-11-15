@@ -8,6 +8,7 @@ mod signal;
 mod pipe;
 mod socket;
 mod errno;
+mod futex;
 
 // pub mod drivers;
 
@@ -21,6 +22,16 @@ use crate::{
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
 
+#[derive(Clone, Default)]
+pub struct LinuxThreadState {
+    pub parent_tid_ptr: Option<usize>,
+    pub child_tid_ptr: Option<usize>,
+    pub clear_child_tid_ptr: Option<usize>,
+    pub robust_list_head: Option<usize>,
+    pub robust_list_len: usize,
+    pub tls_pointer: Option<usize>,
+}
+
 #[derive(Clone)]
 pub struct LinuxRiscv64Abi {
     /// File descriptor to handle mapping table (fd -> handle)
@@ -32,6 +43,8 @@ pub struct LinuxRiscv64Abi {
     free_fds: Vec<usize>,
     /// Signal handling state
     pub signal_state: Arc<spin::Mutex<signal::SignalState>>,
+    /// Linux-specific per-task thread state (isolated inside ABI)
+    thread_state: LinuxThreadState,
 }
 
 impl Default for LinuxRiscv64Abi {
@@ -45,11 +58,14 @@ impl Default for LinuxRiscv64Abi {
             fd_flags: [0; MAX_FDS],
             free_fds,
             signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
+            thread_state: LinuxThreadState::default(),
         }
     }
 }
 
 impl LinuxRiscv64Abi {
+    pub fn thread_state(&self) -> &LinuxThreadState { &self.thread_state }
+    pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState { &mut self.thread_state }
     /// Allocate a new file descriptor and map it to a handle
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
         let fd = if let Some(freed_fd) = self.free_fds.pop() {
@@ -258,6 +274,31 @@ impl AbiModule for LinuxRiscv64Abi {
         
         // For non-signal events, just acknowledge
         Ok(())
+    }
+
+    fn on_task_cloned(
+        &mut self,
+        _parent_task: &crate::task::Task,
+        _child_task: &mut crate::task::Task,
+        _flags: crate::task::CloneFlags,
+    ) -> Result<(), &'static str> {
+        // Reset child thread state. Linux will set pointers via sys_clone/sys_set_tid_address later.
+        self.thread_state = LinuxThreadState::default();
+        Ok(())
+    }
+
+    fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // Linux semantics: if clear_child_tid is set, write 0 and FUTEX_WAKE.
+        if let Some(ptr) = self.thread_state.clear_child_tid_ptr {
+            if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
+                unsafe {
+                    *(paddr as *mut i32) = 0;
+                }
+                // Wake one waiter on the TID address as per Linux semantics
+                futex::wake_address(ptr, 1);
+            }
+        }
+        // TODO: robust list-based wakeups for owned mutexes at thread exit.
     }
 
     fn can_execute_binary(
@@ -508,7 +549,7 @@ impl AbiModule for LinuxRiscv64Abi {
 
                         // --- 4. Auxiliary vector (auxv) ---
                         // crate::println!("Setting up auxiliary vector with {} entries:", auxv.len());
-                        for (i, auxv_entry) in auxv.iter().enumerate() {
+                        for auxv_entry in auxv.iter() {
                             // crate::println!("  auxv[{}]: type={:#x} value={:#x} @ sp={:#x}", 
                             //     i, auxv_entry.a_type, auxv_entry.a_val, current_pos);
                             unsafe {
@@ -701,9 +742,10 @@ syscall_table! {
     NewFstat = 80 => fs::sys_newfstat,
     ReadLinkAt = 78 => fs::sys_readlinkat,
     Fsync = 82 => fs::sys_fsync,
-    SetTidAddress = 96 => proc::sys_set_tid_address,
     Exit = 93 => proc::sys_exit,
     ExitGroup = 94 => proc::sys_exit_group,
+    SetTidAddress = 96 => proc::sys_set_tid_address,
+    Futex = 98 => futex::sys_futex,
     SetRobustList = 99 => proc::sys_set_robust_list,
     Nanosleep = 101 => time::sys_nanosleep,
     ClockGettime = 113 => time::sys_clock_gettime,

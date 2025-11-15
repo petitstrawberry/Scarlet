@@ -57,18 +57,17 @@ use crate::{
 //     }
 // }
 
-pub fn sys_set_tid_address(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_set_tid_address(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let _tid_ptr = trapframe.get_arg(0) as *mut i32;
-    
-    // Store the TID address in the task's TID address field
-    // TODO: Implement a proper TID management system
-    
-    // Increment the program counter
+    let tid_ptr = trapframe.get_arg(0);
+
+    let tid_opt = (tid_ptr != 0).then_some(tid_ptr);
+    abi.thread_state_mut().clear_child_tid_ptr = tid_opt;
+
     trapframe.increment_pc_next(task);
 
-    // Return 0 on success
-    0
+    // Return current task ID (Linux exposes caller TID from set_tid_address)
+    task.get_id()
 }
 
 pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -89,17 +88,18 @@ pub fn sys_exit_group(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     usize::MAX
 }
 
-pub fn sys_set_robust_list(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_set_robust_list(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let _robust_list_ptr = trapframe.get_arg(0) as *mut u8;
-    
-    // Store the robust list pointer in the task's robust list field
-    // TODO: Implement a proper robust list management system
+    let head = trapframe.get_arg(0);
+    let len = trapframe.get_arg(1);
 
-    // Increment the program counter
+    let head_opt = (head != 0).then_some(head);
+    let state = abi.thread_state_mut();
+    state.robust_list_head = head_opt;
+    state.robust_list_len = len as usize;
+
     trapframe.increment_pc_next(task);
 
-    // Return 0 on success
     0
 }
 
@@ -434,7 +434,7 @@ pub fn sys_uname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 /// - parent_tid: pointer to store parent TID (for CLONE_PARENT_SETTID)
 /// - child_tid: pointer to store child TID (for CLONE_CHILD_SETTID/CLONE_CHILD_CLEARTID)
 /// - tls: TLS (Thread Local Storage) pointer
-pub fn sys_clone(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let parent_task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -448,6 +448,20 @@ pub fn sys_clone(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     crate::println!("sys_clone: flags=0x{:x}, child_stack=0x{:x}, parent_tid_ptr={:p}, child_tid_ptr={:p}, tls={:x}", 
         flags, child_stack, parent_tid_ptr, child_tid_ptr, tls);
+
+    let parent_tid_opt = (!parent_tid_ptr.is_null()).then_some(parent_tid_ptr as usize);
+    let child_tid_opt = (!child_tid_ptr.is_null()).then_some(child_tid_ptr as usize);
+    {
+        let state = abi.thread_state_mut();
+        state.parent_tid_ptr = parent_tid_opt;
+        state.child_tid_ptr = child_tid_opt;
+        if (flags & CLONE_CHILD_CLEARTID) != 0 {
+            state.clear_child_tid_ptr = child_tid_opt;
+        }
+        if (flags & CLONE_SETTLS) != 0 {
+            state.tls_pointer = Some(tls);
+        }
+    }
 
     // Linux clone flags
     const CLONE_VM: usize = 0x00000100;
