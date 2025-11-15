@@ -74,6 +74,7 @@ pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let task = mytask().unwrap();
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
+
     task.exit(exit_code);
     get_scheduler().schedule(trapframe);
     usize::MAX
@@ -435,8 +436,8 @@ pub fn sys_uname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
 /// Linux sys_clone implementation for RISC-V64 ABI
 /// 
-/// RISC-V64 follows the x86-64 argument order:
-/// long clone(unsigned long flags, void *stack, int *parent_tid, int *child_tid, unsigned long tls);
+/// RISC-V64 clone argument order (Linux ABI):
+/// long clone(unsigned long flags, void *stack, int *parent_tid, unsigned long tls, int *child_tid);
 ///
 /// Arguments:
 /// - flags: clone flags (CLONE_VM, CLONE_FS, etc.)
@@ -452,12 +453,9 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 
     let flags = trapframe.get_arg(0);
     let child_stack = trapframe.get_arg(1);
-    let parent_tid_ptr = trapframe.get_arg(2) as *mut i32;
-    let child_tid_ptr = trapframe.get_arg(3) as *mut i32;
-    let tls = trapframe.get_arg(4);
-
-    crate::println!("sys_clone: flags=0x{:x}, child_stack=0x{:x}, parent_tid_ptr={:p}, child_tid_ptr={:p}, tls={:x}", 
-        flags, child_stack, parent_tid_ptr, child_tid_ptr, tls);
+    let parent_tid_ptr = trapframe.get_arg(2) as *mut i32; // a2
+    let tls = trapframe.get_arg(3);                        // a3 (RISC-V: TLS here)
+    let child_tid_ptr = trapframe.get_arg(4) as *mut i32;  // a4
 
     let parent_tid_opt = (!parent_tid_ptr.is_null()).then_some(parent_tid_ptr as usize);
     let child_tid_opt = (!child_tid_ptr.is_null()).then_some(child_tid_ptr as usize);
@@ -483,6 +481,9 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     const CLONE_THREAD:  usize = 0x00010000;
     #[allow(dead_code)]
     const CLONE_SETTLS: usize = 0x00080000;
+    /// Set child's TID at child_tid_ptr in child's memory
+    #[allow(dead_code)]
+    const CLONE_CHILD_SETTID: usize = 0x01000000;
     #[allow(dead_code)]
     const CLONE_PARENT_SETTID: usize = 0x00100000;
     #[allow(dead_code)]
@@ -517,17 +518,23 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             if (flags & CLONE_SETTLS) != 0 {
                 child_task.vcpu.iregs.reg[4] = tls; // x4 = tp
             }
-            // Handle parent/child TID stores if pointers are provided
-            if !parent_tid_ptr.is_null() {
+            // Do not modify user pthread list; musl manages linkage. No safety-net writes.
+            // Handle parent TID store when CLONE_PARENT_SETTID is requested
+            if (flags & CLONE_PARENT_SETTID) != 0 && !parent_tid_ptr.is_null() {
                 if let Some(paddr) = parent_task.vm_manager.translate_vaddr(parent_tid_ptr as usize) {
                     unsafe { *(paddr as *mut i32) = child_id as i32; }
                 }
             }
-            if !child_tid_ptr.is_null() {
+            // IMPORTANT: Only write child TID when CLONE_CHILD_SETTID is set.
+            // For CLONE_CHILD_CLEARTID, the pointer is a futex lock to clear on exit.
+            if (flags & CLONE_CHILD_SETTID) != 0 && !child_tid_ptr.is_null() {
                 if let Some(paddr) = child_task.vm_manager.translate_vaddr(child_tid_ptr as usize) {
                     unsafe { *(paddr as *mut i32) = child_id as i32; }
                 }
             }
+            // No kernel-side TLS scanning/resolution. Linux simply sets tp from tls;
+            // user-space (libc) owns pthread/TLS layout and synchronization.
+            // Now that we're done using child_task by reference, enqueue it.
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             child_id
         },
@@ -634,7 +641,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         return usize::MAX - 9; // -ECHILD (no child processes)
     }
 
-    crate::println!("sys_wait4: pid={}, wstatus={:p}, options={:x}, rusage={:x}", pid, wstatus, _options, _rusage);
+    // Minimal implementation; no verbose logging.
 
     // Loop until a child exits or an error occurs
     loop {
@@ -685,7 +692,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
             // Use parent waker for waitpid(-1) semantics
             let parent_waker = get_parent_waitpid_waker(task.get_id());
             parent_waker.wait(task.get_id(), task.get_trapframe());
-            crate::println!("Woke up from waitpid for any child");
+            // Woken by child exit; re-check children.
             // Continue the loop to re-check after waking up
             continue;
         } else if pid > 0 {
@@ -734,7 +741,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                             use crate::task::get_waitpid_waker;
                             let child_waker = get_waitpid_waker(child_pid);
                             child_waker.wait(task.get_id(), task.get_trapframe());
-                            crate::println!("Woke up from waitpid for child {}", child_pid);
+                            // Woken by specific child exit; re-check.
                             // Continue the loop to re-check after waking up
                             continue;
                         },
