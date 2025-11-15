@@ -47,21 +47,22 @@ fn init_tty_subsystem() {
 fn try_init_tty_subsystem() -> Result<(), &'static str> {
     let device_manager = DeviceManager::get_manager();
 
-    // Search explicitly for a UART-backed char device by downcasting
+    // Prefer a Char device that advertises Serial capability (and is not itself a TTY)
     let devices_count = device_manager.get_devices_count();
-    let mut uart_device_id: Option<usize> = None;
+    let mut serial_device_id: Option<usize> = None;
     for id in 1..=devices_count {
         if let Some(dev) = device_manager.get_device(id) {
-            if dev.device_type() == DeviceType::Char {
-                if dev.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>().is_some() {
-                    uart_device_id = Some(id);
-                    break;
-                }
+            if dev.device_type() == DeviceType::Char
+                && dev.capabilities().contains(&DeviceCapability::Serial)
+                && !dev.capabilities().contains(&DeviceCapability::Tty)
+            {
+                serial_device_id = Some(id);
+                break;
             }
         }
     }
 
-    let uart_device_id = uart_device_id.ok_or("No UART device found for TTY initialization")?;
+    let uart_device_id = serial_device_id.ok_or("No Serial-capable char device found for TTY initialization")?;
 
     // Create TTY device with the resolved UART device ID
     let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));

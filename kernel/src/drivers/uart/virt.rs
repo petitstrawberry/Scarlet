@@ -181,6 +181,8 @@ impl MemoryMappingOps for Uart {
     }
 }
 
+static UART_CAPS: [crate::device::DeviceCapability; 1] = [crate::device::DeviceCapability::Serial];
+
 impl Device for Uart {
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
@@ -200,6 +202,10 @@ impl Device for Uart {
     
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
         Some(self)
+    }
+
+    fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
+        &UART_CAPS
     }
 }
 

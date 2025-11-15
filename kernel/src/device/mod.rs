@@ -25,6 +25,8 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub enum DeviceCapability {
     /// Device behaves like a terminal/TTY (byte stream with line discipline hooks)
     Tty,
+    /// Device provides raw serial I/O (low-level byte stream, no line discipline)
+    Serial,
 }
 
 pub trait DeviceInfo {
