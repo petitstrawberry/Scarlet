@@ -46,31 +46,39 @@ fn init_tty_subsystem() {
 
 fn try_init_tty_subsystem() -> Result<(), &'static str> {
     let device_manager = DeviceManager::get_manager();
-    
-    // Find the first UART device and use its ID for TTY initialization
-    if let Some(uart_device_id) = device_manager.get_first_device_by_type(crate::device::DeviceType::Char) {
-        // Create TTY device with UART device ID for lookup
-        let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
-        let uart_device = device_manager.get_device(uart_device_id).ok_or("UART device not found")?;
-        
-        // Register TTY device as event listener for UART
-        if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
-            let weak_tty = Arc::downgrade(&tty_device);
-            // Register TTY as event listener for UART input events
-            uart.register_event_listener(weak_tty);
-            crate::early_println!("TTY registered as UART event listener");
-        } else {
-            crate::early_println!("Failed to cast UART device to specific type");
+
+    // Search explicitly for a UART-backed char device by downcasting
+    let devices_count = device_manager.get_devices_count();
+    let mut uart_device_id: Option<usize> = None;
+    for id in 1..=devices_count {
+        if let Some(dev) = device_manager.get_device(id) {
+            if dev.device_type() == DeviceType::Char {
+                if dev.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>().is_some() {
+                    uart_device_id = Some(id);
+                    break;
+                }
+            }
         }
-        
-        // Register TTY device with device manager
-        let _tty_id = device_manager.register_device_with_name("tty0".into(), tty_device);
-        
-        crate::early_println!("TTY subsystem initialized successfully");
-        Ok(())
-    } else {
-        Err("No UART device found for TTY initialization")
     }
+
+    let uart_device_id = uart_device_id.ok_or("No UART device found for TTY initialization")?;
+
+    // Create TTY device with the resolved UART device ID
+    let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
+    let uart_device = device_manager.get_device(uart_device_id).ok_or("UART device not found")?;
+
+    // Register TTY device as event listener for UART input events
+    if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
+        let weak_tty = Arc::downgrade(&tty_device);
+        uart.register_event_listener(weak_tty);
+        crate::early_println!("TTY registered as UART event listener");
+    }
+
+    // Register TTY device with device manager under name tty0
+    let _tty_id = device_manager.register_device_with_name(alloc::string::String::from("tty0"), tty_device);
+
+    crate::early_println!("TTY subsystem initialized successfully");
+    Ok(())
 }
 
 late_initcall!(init_tty_subsystem);
