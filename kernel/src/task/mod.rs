@@ -937,6 +937,9 @@ impl Task {
                     // to avoid creating new stack that would overwrite parent's stack content
                     let asid = alloc_virtual_address_space();
                     child.vm_manager.set_asid(asid);
+                } else {
+                    // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
+                    child.vm_manager = self.vm_manager.clone();
                 }
             }
         }
@@ -1844,5 +1847,35 @@ mod tests {
                     "Shared memory data should be identical from both parent and child views");
             }
         }
+    }
+
+    #[test_case]
+    fn test_clone_task_with_clone_vm_shares_address_space() {
+        use crate::environment::PAGE_SIZE;
+
+        let mut parent = super::new_user_task("ParentCloneVm".to_string(), 0);
+        parent.init();
+
+        // Allocate one page initially in the parent
+        let base_vaddr = 0x4000;
+        parent.allocate_data_pages(base_vaddr, 1).unwrap();
+        let parent_len_before = parent.vm_manager.memmap_len();
+
+        // Clone with CLONE_VM flag (share the address space only)
+        let mut flags = super::CloneFlags::new();
+        flags.set(super::CloneFlagsDef::Vm);
+        let child = parent.clone_task(flags).unwrap();
+
+        // Indirectly verify that both share the same ASID/address space
+        assert_eq!(child.vm_manager.get_asid(), parent.vm_manager.get_asid());
+        assert_eq!(child.vm_manager.memmap_len(), parent_len_before);
+
+        // Adding another page in the parent should be immediately visible to the child
+        parent.allocate_data_pages(base_vaddr + PAGE_SIZE, 1).unwrap();
+        assert_eq!(child.vm_manager.memmap_len(), parent.vm_manager.memmap_len());
+
+        // Managed pages are per-task; child should not acquire new managed pages
+        // when sharing VM (physical memory isn't privately managed by the child)
+        assert!(child.managed_pages.len() <= parent.managed_pages.len());
     }
 }
