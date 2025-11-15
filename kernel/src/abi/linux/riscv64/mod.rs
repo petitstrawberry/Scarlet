@@ -64,6 +64,7 @@ impl Default for LinuxRiscv64Abi {
             free_fds,
             signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
+            
         }
     }
 }
@@ -216,6 +217,8 @@ impl LinuxRiscv64Abi {
         let mut signal_state = self.signal_state.lock();
         signal::process_pending_signals_with_state(&mut *signal_state, trapframe)
     }
+
+    // No pthread/TLS probing helpers; user space owns pthread layout.
     
     /// Handle incoming event from Scarlet event system and convert to signal if applicable
     pub fn handle_event_direct(&self, event: &crate::ipc::event::Event) {
@@ -287,27 +290,32 @@ impl AbiModule for LinuxRiscv64Abi {
         _child_task: &mut crate::task::Task,
         _flags: crate::task::CloneFlags,
     ) -> Result<(), &'static str> {
-        // Child ABI state is cloned from parent prior to this hook.
-        // Capture parent's TGID and pending thread clone flag before reset.
-        let parent_tgid = self.thread_state.tgid;
-        let is_thread = self.thread_state.pending_clone_is_thread;
+        // Child ABI state is a clone of parent's state (including pointers set in sys_clone).
+        // Preserve child-specific fields (child_tid_ptr, clear_child_tid_ptr, tls_pointer),
+        // and only update TGID and transient flags.
+        let mut ts = self.thread_state.clone();
+        let parent_tgid = ts.tgid;
+        let is_thread = ts.pending_clone_is_thread;
 
-        // Reset child thread state. Linux will set pointers via sys_clone/sys_set_tid_address later.
-        self.thread_state = LinuxThreadState::default();
         // Initialize child's TGID based on whether this was a thread (CLONE_THREAD) or a process clone.
-        if is_thread {
-            // Inherit parent's TGID; if parent TGID was not set, use parent's TID
-            self.thread_state.tgid = if parent_tgid != 0 { parent_tgid } else { _parent_task.get_id() };
+        ts.tgid = if is_thread {
+            if parent_tgid != 0 { parent_tgid } else { _parent_task.get_id() }
         } else {
-            // New process: TGID becomes the child's own TID
-            self.thread_state.tgid = _child_task.get_id();
-        }
-        // Clear any transient flags in the child
-        self.thread_state.pending_clone_is_thread = false;
+            _child_task.get_id()
+        };
+
+        // Clear transient flag in the child copy
+        ts.pending_clone_is_thread = false;
+
+        // No debug dump or futex watch arming.
+
+        // Commit updated thread state
+        self.thread_state = ts;
         Ok(())
     }
 
     fn on_task_exit(&mut self, task: &mut crate::task::Task) {
+        // No pthread/TLS structure probing at exit; user space owns pthread list.
         // Linux semantics: if clear_child_tid is set, write 0 and FUTEX_WAKE.
         if let Some(ptr) = self.thread_state.clear_child_tid_ptr {
             if let Some(paddr) = task.vm_manager.translate_vaddr(ptr) {
@@ -315,7 +323,7 @@ impl AbiModule for LinuxRiscv64Abi {
                     *(paddr as *mut i32) = 0;
                 }
                 // Wake one waiter on the TID address as per Linux semantics
-                futex::wake_address(ptr, 1);
+                let _ = futex::wake_address(ptr, 1);
             }
         }
         // TODO: robust list-based wakeups for owned mutexes at thread exit.
@@ -424,19 +432,7 @@ impl AbiModule for LinuxRiscv64Abi {
                     Ok(load_result) => {
                         // Set the name
                         task.name = argv.get(0).map_or("linux".to_string(), |s| s.to_string());
-                        crate::println!("Executing Linux binary: {} with entry point {:#x}", task.name, load_result.entry_point);
-                        
-                        match &load_result.mode {
-                            ExecutionMode::Static => {
-                                crate::println!("Binary uses static linking");
-                            },
-                            ExecutionMode::Dynamic { interpreter_path } => {
-                                crate::println!("Binary uses dynamic linking with interpreter: {}", interpreter_path);
-                            }
-                        }
-                        
-                        // Print memory map for debugging
-                        crate::println!("=== Memory Map After ELF Load ===");
+                // Do not resolve pthread/TLS or arm futex-based watches in kernel.
                         crate::println!("Program segments:");
                         task.vm_manager.with_memmaps(|mm| {
                             for map in mm.values() {
