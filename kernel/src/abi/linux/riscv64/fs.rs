@@ -44,6 +44,7 @@ pub struct LinuxStat {
 }
 
 // Linux file type constants for st_mode field
+#[allow(dead_code)]
 pub const S_IFMT: u32 = 0o170000;   // Bit mask for the file type bit field
 pub const S_IFSOCK: u32 = 0o140000; // Socket
 pub const S_IFLNK: u32 = 0o120000;  // Symbolic link
@@ -54,16 +55,21 @@ pub const S_IFCHR: u32 = 0o020000;  // Character device
 pub const S_IFIFO: u32 = 0o010000;  // FIFO
 
 // Linux permission constants
+#[allow(dead_code)]
 pub const S_IRWXU: u32 = 0o0700;    // User (file owner) has read, write, and execute permission
 pub const S_IRUSR: u32 = 0o0400;    // User has read permission
 pub const S_IWUSR: u32 = 0o0200;    // User has write permission
 pub const S_IXUSR: u32 = 0o0100;    // User has execute permission
+#[allow(dead_code)]
 pub const S_IRWXG: u32 = 0o0070;    // Group has read, write, and execute permission
 pub const S_IRGRP: u32 = 0o0040;    // Group has read permission
+#[allow(dead_code)]
 pub const S_IWGRP: u32 = 0o0020;    // Group has write permission
 pub const S_IXGRP: u32 = 0o0010;    // Group has execute permission
+#[allow(dead_code)]
 pub const S_IRWXO: u32 = 0o0007;    // Others have read, write, and execute permission
 pub const S_IROTH: u32 = 0o0004;    // Others have read permission
+#[allow(dead_code)]
 pub const S_IWOTH: u32 = 0o0002;    // Others have write permission
 pub const S_IXOTH: u32 = 0o0001;    // Others have execute permission
 
@@ -89,25 +95,39 @@ pub const F_DUPFD_CLOEXEC: u32 = 1030; // Duplicate with close-on-exec
 pub const FD_CLOEXEC: u32 = 1;          // Close-on-exec flag
 
 // Linux open flags
+#[allow(dead_code)]
 pub const O_RDONLY: i32 = 0o0;        // Read only
+#[allow(dead_code)]
 pub const O_WRONLY: i32 = 0o1;        // Write only  
+#[allow(dead_code)]
 pub const O_RDWR: i32 = 0o2;          // Read and write
 pub const O_CREAT: i32 = 0o100;       // Create file if it doesn't exist
 pub const O_EXCL: i32 = 0o200;        // Fail if file exists (with O_CREAT)
+#[allow(dead_code)]
 pub const O_NOCTTY: i32 = 0o400;      // Don't assign controlling terminal
 pub const O_TRUNC: i32 = 0o1000;      // Truncate file to zero length
 pub const O_APPEND: i32 = 0o2000;     // Append mode
+#[allow(dead_code)]
 pub const O_NONBLOCK: i32 = 0o4000;   // Non-blocking mode
+#[allow(dead_code)]
 pub const O_DSYNC: i32 = 0o10000;     // Data sync
+#[allow(dead_code)]
 pub const O_ASYNC: i32 = 0o20000;     // Asynchronous I/O
+#[allow(dead_code)]
 pub const O_DIRECT: i32 = 0o40000;    // Direct I/O
+#[allow(dead_code)]
 pub const O_LARGEFILE: i32 = 0o100000; // Large file support
 pub const O_DIRECTORY: i32 = 0o200000; // Must be a directory
+#[allow(dead_code)]
 pub const O_NOFOLLOW: i32 = 0o400000; // Don't follow symlinks
+#[allow(dead_code)]
 pub const O_NOATIME: i32 = 0o1000000; // Don't update access time
 pub const O_CLOEXEC: i32 = 0o2000000; // Close-on-exec
+#[allow(dead_code)]
 pub const O_SYNC: i32 = O_DSYNC;       // Data and metadata sync
+#[allow(dead_code)]
 pub const O_PATH: i32 = 0o10000000;   // Path-based operations only
+#[allow(dead_code)]
 pub const O_TMPFILE: i32 = 0o20000000; // Create temporary file
 
 use crate::device::DeviceCapability;
@@ -196,6 +216,7 @@ const MAX_ARG_COUNT: usize = 64;
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
+#[allow(dead_code)]
 pub fn sys_exec(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     
@@ -241,6 +262,7 @@ pub fn sys_exec(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 }
 
 #[repr(i32)]
+#[allow(dead_code)]
 enum OpenMode {
     ReadOnly  = 0x000,
     WriteOnly = 0x001,
@@ -278,7 +300,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
-    // crate::println!("sys_openat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+    // crate::println!("sys_openat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.epc, dirfd, path_str, flags);
 
     let vfs = task.vfs.as_ref().unwrap();
 
@@ -311,7 +333,26 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Open the file using VfsManager::open_relative
-    // crate::println!("sys_openat: attempting to open '{}' with flags {:#o}", path_str, flags);
+    crate::println!("sys_openat: attempting to open '{}' with flags {:#o} (dirfd={})", path_str, flags, dirfd);
+
+    // // Log flags details
+    // let flags_table = [
+    //     (O_RDONLY, "O_RDONLY"),
+    //     (O_WRONLY, "O_WRONLY"),
+    //     (O_RDWR, "O_RDWR"),
+    //     (O_CREAT, "O_CREAT"),
+    //     (O_EXCL, "O_EXCL"),
+    //     (O_TRUNC, "O_TRUNC"),
+    //     (O_APPEND, "O_APPEND"),
+    //     (O_DIRECTORY, "O_DIRECTORY"),
+    //     (O_CLOEXEC, "O_CLOEXEC"),
+    // ];
+    // for (flag, name) in flags_table.iter() {
+    //     if (flags & *flag) != 0 {
+    //         crate::println!("  Flag set: {}", name);
+    //     }
+    // }
+
     let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
 
     let kernel_obj = match file {
@@ -320,9 +361,10 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
             obj
         },
         Err(e) => {
-            // crate::println!("sys_openat: failed to open '{}': {:?}", path_str, e);
+            // crate::println!("sys_openat: failed to open '{}' -> {:?}", path_str, e);
             // If open failed and O_CREAT flag is set, try to create the file
             if flags & O_CREAT != 0 {
+                // crate::println!("sys_openat: O_CREAT flag set, attempting to create file '{}'", path_str);
                 // Build absolute path for file creation before getting mutable VFS reference
                 let absolute_path = if path_str.starts_with('/') {
                     path_str.to_string()
@@ -358,7 +400,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         }
                         // Try to open the existing file
                         let vfs = task.vfs.as_ref().unwrap();
-                        match vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32) {
+                        let reopen_flags = (flags as u32) & !((O_CREAT | O_EXCL) as u32);
+                        match vfs.open_from(&base_entry, &base_mount, &path_str, reopen_flags) {
                             Ok(obj) => obj,
                             Err(open_err) => return errno::to_result(errno::from_fs_error(&open_err)), // Still failed to open
                         }
@@ -370,13 +413,30 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         }
     };
 
+    // Post-open flag handling (O_DIRECTORY, O_TRUNC, O_APPEND)
+    if let Some(file_obj) = kernel_obj.as_file() {
+        if (flags & O_DIRECTORY) != 0 {
+            if let Ok(meta) = file_obj.metadata() {
+                if !matches!(meta.file_type, FileType::Directory) {
+                    return errno::to_result(errno::ENOTDIR);
+                }
+            }
+        }
+        if (flags & O_TRUNC) != 0 {
+            let _ = file_obj.truncate(0);
+        }
+        if (flags & O_APPEND) != 0 {
+            let _ = file_obj.seek(SeekFrom::End(0));
+        }
+    }
+
     // Register the file with the task using HandleTable
     let handle = task.handle_table.insert(kernel_obj);
     match handle {
         Ok(handle) => {
             match abi.allocate_fd(handle as u32) {
                 Ok(fd) => {
-                    // crate::println!("sys_openat: opened fd={} for path='{}'", fd, path_str);
+                    // crate::println!("sys_openat: allocated fd {} for '{}'", fd, path_str);
                     fd
                 }
                 Err(_) => errno::to_result(errno::EMFILE), // Too many open files
@@ -941,8 +1001,13 @@ pub fn sys_lseek(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     };
 
     match file.seek(whence) {
-        Ok(pos) => pos as usize,
-        Err(_) => usize::MAX, // Lseek error
+        Ok(pos) => {
+            pos as usize
+        }
+        Err(e) => {
+            crate::println!("sys_lseek: seek error: {:?}", e);
+            usize::MAX // Seek error
+        }
     }
 }
 
@@ -1121,6 +1186,7 @@ pub fn sys_newfstatat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
     }
 }
 
+#[allow(dead_code)]
 pub fn sys_mkdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -1139,6 +1205,7 @@ pub fn sys_mkdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     }
 }
 
+#[allow(dead_code)]
 pub fn sys_unlink(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -1157,6 +1224,7 @@ pub fn sys_unlink(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
     }
 }
 
+#[allow(dead_code)]
 pub fn sys_link(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
@@ -1271,7 +1339,7 @@ pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Determine base directory for new path resolution
-    let (new_base_entry, new_base_mount) = if newdirfd == AT_FDCWD {
+    let (_new_base_entry, _new_base_mount) = if newdirfd == AT_FDCWD {
         // Use current working directory as base
         vfs.get_cwd().unwrap_or_else(|| {
             let root_mount = vfs.mount_tree.root_mount.read().clone();
@@ -1305,7 +1373,7 @@ pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     // since VFS v2 may not have direct hard link support yet
     
     // Convert paths to absolute paths
-    let old_absolute_path = if oldpath_str.starts_with('/') {
+    let _old_absolute_path = if oldpath_str.starts_with('/') {
         oldpath_str.to_string()
     } else {
         match to_absolute_path_v2(&task, &oldpath_str) {
@@ -1314,7 +1382,7 @@ pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         }
     };
 
-    let new_absolute_path = if newpath_str.starts_with('/') {
+    let _new_absolute_path = if newpath_str.starts_with('/') {
         newpath_str.to_string()
     } else {
         match to_absolute_path_v2(&task, &newpath_str) {
@@ -1324,7 +1392,7 @@ pub fn sys_linkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     };
 
     // Get mutable VFS reference for link creation
-    let vfs_mut = match task.vfs.as_mut() {
+    let _vfs_mut = match task.vfs.as_mut() {
         Some(v) => v,
         None => return usize::MAX,
     };
@@ -1852,7 +1920,7 @@ pub fn sys_faccessat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut crate::arch::Tr
         Err(_) => return usize::MAX,
     };
 
-    crate::println!("sys_faccessat: dirfd={}, path='{}', flags={:#o}", dirfd, path_str, flags);
+    crate::println!("sys_faccessat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.epc, dirfd, path_str, flags);
 
     0
 }
@@ -2388,7 +2456,7 @@ pub fn sys_readlinkat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
         Err(_) => return usize::MAX,
     };
 
-    crate::println!("sys_readlinkat: dirfd={}, path='{}', bufsiz={}", dirfd, path_str, bufsiz);
+    // crate::println!("sys_readlinkat: dirfd={}, path='{}', bufsiz={}", dirfd, path_str, bufsiz);
 
     // Convert to absolute path for logging
     let absolute_path = if path_str.starts_with('/') {
@@ -2588,6 +2656,7 @@ pub fn sys_chdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 // renameat2 flags
 const RENAME_NOREPLACE: u32 = 1 << 0;  // Don't overwrite target
 const RENAME_EXCHANGE: u32 = 1 << 1;   // Exchange source and target
+#[allow(dead_code)]
 const RENAME_WHITEOUT: u32 = 1 << 2;   // Create whiteout object
 
 /// Linux sys_renameat2 system call implementation (syscall 276)
