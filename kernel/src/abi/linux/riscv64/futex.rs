@@ -4,9 +4,13 @@ use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
 use spin::{Mutex, Once};
 
-// Minimal FUTEX op codes
+// Minimal FUTEX op codes (match Linux)
 const FUTEX_WAIT: u32 = 0;
 const FUTEX_WAKE: u32 = 1;
+// Extended ops commonly used by musl
+const FUTEX_WAIT_BITSET: u32 = 9;
+const FUTEX_WAKE_BITSET: u32 = 10;
+const FUTEX_CMD_MASK: u32 = 0x3f; // per Linux uapi
 
 // Global registry of futex wakers keyed by user address
 static FUTEX_WAKERS: Once<Mutex<BTreeMap<usize, Waker>>> = Once::new();
@@ -61,18 +65,18 @@ pub fn sys_futex(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     // args: uaddr, op, val, timeout, uaddr2, val3
     let uaddr = trapframe.get_arg(0) as usize;
-    let op = trapframe.get_arg(1) as u32;
+    let op_raw = trapframe.get_arg(1) as u32;
     let val = trapframe.get_arg(2) as i32;
     let _timeout = trapframe.get_arg(3) as usize; // TODO: implement timeout
     let _uaddr2 = trapframe.get_arg(4) as usize;
-    let _val3 = trapframe.get_arg(5) as u32;
+    let _val3 = trapframe.get_arg(5) as u32; // e.g., bitset for *_BITSET ops
 
     // Always advance PC to avoid re-executing syscall on resume
     trapframe.increment_pc_next(task);
 
-    let cmd = op & 0xF; // minimal decode
+    let cmd = op_raw & FUTEX_CMD_MASK; // strip PRIVATE/other flags
     match cmd {
-        FUTEX_WAIT => {
+        FUTEX_WAIT | FUTEX_WAIT_BITSET => {
             // Validate user address and expected value
             let paddr = match task.vm_manager.translate_vaddr(uaddr) {
                 Some(pa) => pa,
@@ -80,6 +84,7 @@ pub fn sys_futex(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
             };
             let cur_val = unsafe { *(paddr as *const i32) };
             if cur_val != val {
+                // Expected value mismatch -> EAGAIN (common benign fast-path)
                 return super::errno::to_result(super::errno::EAGAIN);
             }
 
@@ -90,7 +95,7 @@ pub fn sys_futex(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
             // When resumed, report success (Linux may report -EINTR if interrupted; TBD)
             0
         }
-        FUTEX_WAKE => {
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => {
             let max = if val < 0 { 0 } else { val as usize };
             let woken = wake_address(uaddr, max);
             // Return number of woken tasks
