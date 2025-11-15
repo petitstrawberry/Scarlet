@@ -1075,6 +1075,9 @@ impl Task {
     pub fn exit(&mut self, status: i32) {        
         // Close all open handles when task exits
         self.handle_table.close_all();
+        // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
+        // Use take/restore to avoid aliasing &mut self and &mut field
+        self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
         
         match self.parent_id {
             Some(parent_id) => {

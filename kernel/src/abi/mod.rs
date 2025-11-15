@@ -6,7 +6,7 @@
 //! interfaces.
 //! 
 
-use crate::{arch::Trapframe, fs::{drivers::overlayfs::OverlayFS, VfsManager}, task::mytask};
+use crate::{arch::Trapframe, fs::{drivers::overlayfs::OverlayFS, VfsManager}, task::{mytask, CloneFlags}};
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
 use spin::Mutex;
@@ -40,6 +40,22 @@ pub trait AbiModule: Send + Sync + 'static {
     fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync>;
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
+
+    /// Hook invoked after Task::clone_task creates the child
+    fn on_task_cloned(
+        &mut self,
+        _parent_task: &crate::task::Task,
+        _child_task: &mut crate::task::Task,
+        _flags: CloneFlags,
+    ) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    /// Hook invoked as part of Task::exit cleanup for the current task
+    ///
+    /// ABI modules can perform per-ABI teardown such as waking futex waiters,
+    /// clearing TLS/robust-list pointers, or delivering exit-related signals.
+    fn on_task_exit(&mut self, _task: &mut crate::task::Task) {}
     
     /// Determine if a binary can be executed by this ABI and return confidence
     /// 
@@ -228,10 +244,10 @@ pub trait AbiModule: Send + Sync + 'static {
     /// * `config_path` - Path to writable persistence layer (e.g., "/data/config/scarlet")
     fn setup_overlay_environment(
         &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-        system_path: &str,
-        config_path: &str,
+        _target_vfs: &Arc<VfsManager>,
+        _base_vfs: &Arc<VfsManager>,
+        _system_path: &str,
+        _config_path: &str,
     ) -> Result<(), &'static str> {
         // cross-vfs overlay_mount_fromはv2では未サポートのため一旦コメントアウト
         // let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
