@@ -329,11 +329,11 @@ impl CharDevice for TtyDevice {
     }
     
     fn can_write(&self) -> bool {
-        // Check if UART device is available
+        // Check if backend char device is available and writable
         let device_manager = DeviceManager::get_manager();
-        if let Some(uart_device) = device_manager.get_device(self.uart_device_id) {
-            if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
-                return uart.can_write();
+        if let Some(dev) = device_manager.get_device(self.uart_device_id) {
+            if let Some(cdev) = dev.as_char_device() {
+                return cdev.can_write();
             }
         }
         false

@@ -413,7 +413,7 @@ impl CharDevice for FramebufferCharDevice {
 impl ControlOps for FramebufferCharDevice {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         use framebuffer_commands::*;
-        
+
         match command {
             FBIOGET_VSCREENINFO => {
                 self.handle_get_vscreeninfo(arg)
@@ -489,35 +489,18 @@ impl MemoryMappingOps for FramebufferCharDevice {
 }
 
 impl FramebufferCharDevice {
-    /// Handle FBIOGET_VSCREENINFO control command
-    fn handle_get_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
-        if arg == 0 {
-            return Err("Invalid argument pointer");
-        }
-        
-        // Try to get current task for user pointer translation
-        // If no task (kernel context), use pointer directly
-        let target_ptr = if let Some(current_task) = crate::task::mytask() {
-            // User space: translate virtual address to physical
-            current_task.vm_manager.translate_vaddr(arg)
-                .ok_or("Invalid user pointer - not mapped")?
-        } else {
-            // Kernel space: use pointer directly
-            arg
-        };
-        
+    /// Build a FbVarScreenInfo reflecting the current framebuffer configuration
+    fn current_var_info(&self) -> FbVarScreenInfo {
         let fb_resource = &self.fb_resource;
         let config = &fb_resource.config;
-        
-        // Create variable screen info structure
+
         let mut var_info = FbVarScreenInfo::default();
         var_info.xres = config.width;
         var_info.yres = config.height;
         var_info.xres_virtual = config.width;
         var_info.yres_virtual = config.height;
         var_info.bits_per_pixel = (config.format.bytes_per_pixel() * 8) as u32;
-        
-        // Set color bitfields based on format
+
         match config.format {
             super::PixelFormat::RGBA8888 => {
                 var_info.red = FbBitfield { offset: 0, length: 8, msb_right: 0 };
@@ -544,7 +527,29 @@ impl FramebufferCharDevice {
                 var_info.transp = FbBitfield { offset: 0, length: 0, msb_right: 0 };
             }
         }
+
+        var_info
+    }
+
+    /// Handle FBIOGET_VSCREENINFO control command
+    fn handle_get_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
+        if arg == 0 {
+            return Err("Invalid argument pointer");
+        }
         
+        // Try to get current task for user pointer translation
+        // If no task (kernel context), use pointer directly
+        let target_ptr = if let Some(current_task) = crate::task::mytask() {
+            // User space: translate virtual address to physical
+            current_task.vm_manager.translate_vaddr(arg)
+                .ok_or("Invalid user pointer - not mapped")?
+        } else {
+            // Kernel space: use pointer directly
+            arg
+        };
+        
+        let var_info = self.current_var_info();
+
         // Safely copy to user space using translated physical address
         unsafe {
             let user_ptr = target_ptr as *mut FbVarScreenInfo;
@@ -658,11 +663,32 @@ impl FramebufferCharDevice {
     }
     
     /// Handle FBIOPUT_VSCREENINFO control command  
-    fn handle_put_vscreeninfo(&self, _arg: usize) -> Result<i32, &'static str> {
-        // Setting screen info is not supported in this basic implementation
-        // In a real implementation, this would validate and apply new settings
-        // Err("Setting screen information not supported")
-        // TODO: Implement real handling if needed
+    fn handle_put_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
+        // Basic validation of user pointer
+        if arg == 0 {
+            return Ok(-22); // EINVAL
+        }
+
+        // Translate user-space pointer if available
+        let target_ptr = if let Some(current_task) = crate::task::mytask() {
+            match current_task.vm_manager.translate_vaddr(arg) {
+                Some(p) => p,
+                None => return Ok(-14), // EFAULT
+            }
+        } else {
+            arg
+        } as *mut FbVarScreenInfo;
+
+        // Read the requested settings (not strictly required, but useful for future validation)
+        let _req = unsafe { core::ptr::read(target_ptr as *const FbVarScreenInfo) };
+
+        // We currently do not support mode switching. Acknowledge the request
+        // and write back the actually supported mode so userland can proceed.
+        let accepted = self.current_var_info();
+        unsafe {
+            core::ptr::write(target_ptr, accepted);
+        }
+
         Ok(0)
     }
 }
