@@ -246,14 +246,24 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_getpid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    // Return TGID for Linux semantics; fallback to Task ID if unset
+    let tgid = _abi.thread_state().tgid;
     trapframe.increment_pc_next(task);
-    task.get_id()
+    if tgid != 0 { tgid } else { task.get_id() }
 }
 
 pub fn sys_getppid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     task.get_parent_id().unwrap_or(1) // Return parent PID or 1 if none
+}
+
+/// Linux gettid system call implementation
+/// Returns the calling thread ID (TID). For now, this equals Scarlet Task ID.
+pub fn sys_gettid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(task);
+    task.get_id()
 }
 
 pub fn sys_setpgid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -467,8 +477,10 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     const CLONE_VM: usize = 0x00000100;
     const CLONE_FS: usize = 0x00000200;
     const CLONE_FILES: usize = 0x00000400;
+    // Thread-related flags (accepted but not fully implemented yet)
+    #[allow(dead_code)]
     const CLONE_SIGHAND: usize = 0x00000800;
-    const CLONE_THREAD: usize = 0x00010000;
+    const CLONE_THREAD:  usize = 0x00010000;
     #[allow(dead_code)]
     const CLONE_SETTLS: usize = 0x00080000;
     #[allow(dead_code)]
@@ -476,13 +488,12 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     #[allow(dead_code)]
     const CLONE_CHILD_CLEARTID: usize = 0x00200000;
 
-    // For now, support CLONE_VM/CLONE_FS/CLONE_FILES without CLONE_THREAD semantics.
-    // If CLONE_THREAD is specified, return ENOSYS until thread groups are implemented.
-    if (flags & CLONE_THREAD) != 0 || (flags & CLONE_SIGHAND) != 0 {
-        crate::println!("sys_clone: Thread-group semantics not supported yet (flags=0x{:x})", flags);
-        trapframe.increment_pc_next(parent_task);
-        use super::errno;
-        return errno::to_result(errno::ENOSYS);
+    // Accept CLONE_THREAD/CLONE_SIGHAND for minimal thread support.
+    // Note: signal handler sharing and full thread group semantics are partial.
+    // Stash CLONE_THREAD intent so on_task_cloned can initialize child's TGID.
+    {
+        let state = abi.thread_state_mut();
+        state.pending_clone_is_thread = (flags & CLONE_THREAD) != 0;
     }
 
     trapframe.increment_pc_next(parent_task);
@@ -494,7 +505,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     if (flags & CLONE_FS) != 0 { cflags.set(crate::task::CloneFlagsDef::Fs); }
     if (flags & CLONE_FILES) != 0 { cflags.set(crate::task::CloneFlagsDef::Files); }
 
-    match parent_task.clone_task(cflags) {
+    let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
             child_task.vcpu.iregs.reg[10] = 0; // a0 = 0 in child
@@ -521,7 +532,11 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             child_id
         },
         Err(_) => usize::MAX,
-    }
+    };
+
+    // Clear pending flag in parent after clone completes
+    abi.thread_state_mut().pending_clone_is_thread = false;
+    ret
 }
 
 /// Linux sys_setgid implementation (syscall 144)

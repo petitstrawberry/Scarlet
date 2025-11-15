@@ -30,6 +30,11 @@ pub struct LinuxThreadState {
     pub robust_list_head: Option<usize>,
     pub robust_list_len: usize,
     pub tls_pointer: Option<usize>,
+    /// Linux Thread Group ID (TGID). For processes, TGID == PID of group leader.
+    /// 0 means uninitialized and should fall back to Task ID.
+    pub tgid: usize,
+    /// Internal: set by sys_clone prior to cloning to indicate CLONE_THREAD semantics
+    pub pending_clone_is_thread: bool,
 }
 
 #[derive(Clone)]
@@ -282,8 +287,23 @@ impl AbiModule for LinuxRiscv64Abi {
         _child_task: &mut crate::task::Task,
         _flags: crate::task::CloneFlags,
     ) -> Result<(), &'static str> {
+        // Child ABI state is cloned from parent prior to this hook.
+        // Capture parent's TGID and pending thread clone flag before reset.
+        let parent_tgid = self.thread_state.tgid;
+        let is_thread = self.thread_state.pending_clone_is_thread;
+
         // Reset child thread state. Linux will set pointers via sys_clone/sys_set_tid_address later.
         self.thread_state = LinuxThreadState::default();
+        // Initialize child's TGID based on whether this was a thread (CLONE_THREAD) or a process clone.
+        if is_thread {
+            // Inherit parent's TGID; if parent TGID was not set, use parent's TID
+            self.thread_state.tgid = if parent_tgid != 0 { parent_tgid } else { _parent_task.get_id() };
+        } else {
+            // New process: TGID becomes the child's own TID
+            self.thread_state.tgid = _child_task.get_id();
+        }
+        // Clear any transient flags in the child
+        self.thread_state.pending_clone_is_thread = false;
         Ok(())
     }
 
@@ -707,6 +727,8 @@ impl AbiModule for LinuxRiscv64Abi {
             1, // stdout handle
             2, // stderr handle
         );
+        // Initialize TGID for the task at ABI attach time
+        self.thread_state.tgid = _task.get_id();
         Ok(())
     }
 }
@@ -766,6 +788,7 @@ syscall_table! {
     GetEuid = 175 => proc::sys_geteuid,
     GetGid = 176 => proc::sys_getgid,
     GetEgid = 177 => proc::sys_getegid,
+    GetTid = 178 => proc::sys_gettid,
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
     Clone = 220 => proc::sys_clone,
