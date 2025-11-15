@@ -4,6 +4,7 @@
     "version": "2.0.0",
     "tasks": [
         {
+            // NOTE: Copilot must NOT run this task. Use "cargo make run" in terminal to run the kernel.
             "label": "kernel",
             "type": "shell",
             "isBackground": true,
@@ -26,6 +27,7 @@
             ],
         },
         {
+            // NOTE: Copilot must NOT run this task. Use "cargo make test" in terminal to run the test kernel.
             "label": "test",
             "type": "shell",
             "isBackground": true,
