@@ -167,17 +167,10 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
             
             // Check if the requested range overlaps with any existing mapping
             let requested_end = addr + aligned_length - 1;
-            let mut has_overlap = false;
-            for map in task.vm_manager.memmap_iter() {
-                if !(requested_end < map.vmarea.start || addr > map.vmarea.end) {
-                    // Overlaps with existing mapping
-                    has_overlap = true;
-                    // crate::println!("sys_mmap: Hint address {:#x} overlaps with existing mapping at {:#x}-{:#x}", 
-                    //     addr, map.vmarea.start, map.vmarea.end);
-                    break;
-                }
-            }
-            
+            let has_overlap = task.vm_manager.with_memmaps(|mm| {
+                mm.values().any(|map| !(requested_end < map.vmarea.start || addr > map.vmarea.end))
+            });
+
             if has_overlap {
                 // Find alternative address
                 // crate::println!("sys_mmap: Step 18 - Finding alternative unmapped area");
@@ -445,13 +438,9 @@ fn handle_anonymous_mapping(
         if !is_fixed {
             // Check if the requested range is available
             let requested_end = vaddr + aligned_length - 1;
-            let mut has_overlap = false;
-            for map in task.vm_manager.memmap_iter() {
-                if !(requested_end < map.vmarea.start || vaddr > map.vmarea.end) {
-                    has_overlap = true;
-                    break;
-                }
-            }
+            let has_overlap = task.vm_manager.with_memmaps(|mm| {
+                mm.values().any(|map| !(requested_end < map.vmarea.start || vaddr > map.vmarea.end))
+            });
             
             if has_overlap {
                 match task.vm_manager.find_unmapped_area(aligned_length, PAGE_SIZE) {

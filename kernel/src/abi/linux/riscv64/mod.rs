@@ -418,12 +418,14 @@ impl AbiModule for LinuxRiscv64Abi {
                         // Print memory map for debugging
                         crate::println!("=== Memory Map After ELF Load ===");
                         crate::println!("Program segments:");
-                        for map in task.vm_manager.memmap_iter() {
-                            crate::println!("  VA: {:#x}-{:#x} -> PA: {:#x}-{:#x} (perm: {:#x}, shared: {})",
-                                map.vmarea.start, map.vmarea.end,
-                                map.pmarea.start, map.pmarea.end,
-                                map.permissions, map.is_shared);
-                        }
+                        task.vm_manager.with_memmaps(|mm| {
+                            for map in mm.values() {
+                                crate::println!("  VA: {:#x}-{:#x} -> PA: {:#x}-{:#x} (perm: {:#x}, shared: {})",
+                                    map.vmarea.start, map.vmarea.end,
+                                    map.pmarea.start, map.pmarea.end,
+                                    map.permissions, map.is_shared);
+                            }
+                        });
                         crate::println!("=================================");
                         
                         // Clear page table entries

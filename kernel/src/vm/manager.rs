@@ -37,6 +37,8 @@
 
 extern crate alloc;
 use alloc::{sync::Arc, vec::Vec, collections::BTreeMap};
+use alloc::collections::btree_map::Values;
+use spin::RwLock;
 
 use crate::{arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable}, environment::PAGE_SIZE};
 
@@ -44,13 +46,15 @@ use super::vmem::{VirtualMemoryMap, MemoryArea};
 
 #[derive(Debug, Clone)]
 pub struct VirtualMemoryManager {
-    memmap: BTreeMap<usize, VirtualMemoryMap>, // start_addr -> VirtualMemoryMap
+    inner: Arc<RwLock<InnerVmm>>, // shared, internally synchronized
+}
+
+#[derive(Debug, Clone)]
+struct InnerVmm {
+    memmap: BTreeMap<usize, VirtualMemoryMap>,
     asid: u16,
-    mmap_base: usize,        // Mmap from this base address
+    mmap_base: usize,
     page_tables: Vec<Arc<PageTable>>,
-    
-    /// Cache for the last searched memory map to accelerate repeated accesses
-    /// Format: (start_addr, end_addr, map_start_key)
     last_search_cache: Option<(usize, usize, usize)>,
 }
 
@@ -60,69 +64,76 @@ impl VirtualMemoryManager {
     /// # Returns
     /// A new virtual memory manager with default values.
     pub fn new() -> Self {
-        VirtualMemoryManager {
+        let inner = InnerVmm {
             memmap: BTreeMap::new(),
             asid: 0,
             mmap_base: 0x40000000, // 1 GB base address for mmap (Default)
             page_tables: Vec::new(),
             last_search_cache: None,
-        }
+        };
+        VirtualMemoryManager { inner: Arc::new(RwLock::new(inner)) }
     }
 
     /// Sets the ASID (Address Space ID) for the virtual memory manager.
     /// 
     /// # Arguments
     /// * `asid` - The ASID to set
-    pub fn set_asid(&mut self, asid: u16) {
-        if self.asid == asid {
-            return; // No change needed
+    pub fn set_asid(&self, asid: u16) {
+        let mut g = self.inner.write();
+        if g.asid == asid { return; }
+        if g.asid != 0 && is_asid_used(g.asid) {
+            free_virtual_address_space(g.asid);
         }
-        if self.asid != 0 && is_asid_used(self.asid) {
-            // Free the previous address space if it exists
-            free_virtual_address_space(self.asid);
-        }
-        self.asid = asid;
+        g.asid = asid;
     }
 
     /// Returns the ASID (Address Space ID) for the virtual memory manager.
     /// 
     /// # Returns
     /// The ASID for the virtual memory manager.
-    pub fn get_asid(&self) -> u16 {
-        self.asid
-    }
-
-    /// Returns an iterator over all memory maps.
-    /// This is the preferred way to iterate over memory maps.
-    /// 
-    /// # Returns
-    /// An iterator over references to all memory maps.
-    pub fn memmap_iter(&self) -> impl Iterator<Item = &VirtualMemoryMap> {
-        self.memmap.values()
-    }
+    pub fn get_asid(&self) -> u16 { self.inner.read().asid }
 
     /// Returns a mutable iterator over all memory maps.
     /// 
     /// # Returns
     /// A mutable iterator over references to all memory maps.
-    pub fn memmap_iter_mut(&mut self) -> impl Iterator<Item = &mut VirtualMemoryMap> {
-        self.memmap.values_mut()
-    }
+    // Mutable iterator is removed in favor of snapshot-based API.
 
     /// Returns the number of memory maps.
     /// 
     /// # Returns
     /// The number of memory maps.
-    pub fn memmap_len(&self) -> usize {
-        self.memmap.len()
-    }
+    pub fn memmap_len(&self) -> usize { self.inner.read().memmap.len() }
 
     /// Returns true if there are no memory maps.
     /// 
     /// # Returns
     /// True if there are no memory maps.
-    pub fn memmap_is_empty(&self) -> bool {
-        self.memmap.is_empty()
+    pub fn memmap_is_empty(&self) -> bool { self.inner.read().memmap.is_empty() }
+
+    /// Execute a read-only operation while holding a read lock on memmaps.
+    /// This avoids cloning and provides high-performance access.
+    pub fn with_memmaps<R>(&self, f: impl FnOnce(&BTreeMap<usize, VirtualMemoryMap>) -> R) -> R {
+        let g = self.inner.read();
+        f(&g.memmap)
+    }
+
+    /// Execute a mutable operation while holding a write lock on memmaps.
+    /// Prefer using provided APIs; expose for advanced use-cases.
+    pub fn with_memmaps_mut<R>(&self, f: impl FnOnce(&mut BTreeMap<usize, VirtualMemoryMap>) -> R) -> R {
+        let mut g = self.inner.write();
+        f(&mut g.memmap)
+    }
+
+    /// Execute a read-only iteration over memory maps while holding the lock.
+    /// This returns an iterator of `&VirtualMemoryMap` valid only inside the closure.
+    pub fn memmaps_iter_with<R, F>(&self, f: F) -> R
+    where
+        F: for<'a> FnOnce(Values<'a, usize, VirtualMemoryMap>) -> R,
+    {
+        let g = self.inner.read();
+        let iter = g.memmap.values();
+        f(iter)
     }
 
     /// Gets a memory map by its start address.
@@ -132,8 +143,8 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The memory map with the given start address, if it exists.
-    pub fn get_memory_map_by_addr(&self, start_addr: usize) -> Option<&VirtualMemoryMap> {
-        self.memmap.get(&start_addr)
+    pub fn get_memory_map_by_addr(&self, start_addr: usize) -> Option<VirtualMemoryMap> {
+        self.inner.read().memmap.get(&start_addr).cloned()
     }
 
     /// Gets a mutable memory map by its start address.
@@ -143,9 +154,7 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The mutable memory map with the given start address, if it exists.
-    pub fn get_memory_map_by_addr_mut(&mut self, start_addr: usize) -> Option<&mut VirtualMemoryMap> {
-        self.memmap.get_mut(&start_addr)
-    }
+    // Removed: use snapshot + fixed update methods instead
 
     /// Adds a memory map to the virtual memory manager with overlap checking.
     /// 
@@ -163,38 +172,25 @@ impl VirtualMemoryManager {
     /// # Returns
     /// A result indicating success or failure.
     /// 
-    pub fn add_memory_map(&mut self, map: VirtualMemoryMap) -> Result<(), &'static str> {
+    pub fn add_memory_map(&self, map: VirtualMemoryMap) -> Result<(), &'static str> {
         // Check if the address and size is aligned
         if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
             map.vmarea.size() % PAGE_SIZE != 0 || map.pmarea.size() % PAGE_SIZE != 0 {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
 
-        // Optimal overlap detection using BTreeMap's ordered nature
-        // Check only the directly adjacent maps (at most 2 maps) for O(log n) performance
-        
-        // 1. Check the map that starts immediately before the new map
-        if let Some((_, prev_map)) = self.memmap.range(..map.vmarea.start).next_back() {
-            // If the previous map extends into our range, there's an overlap
-            if prev_map.vmarea.end > map.vmarea.start {
-                return Err("Memory mapping overlaps with a preceding map");
-            }
+        let mut g = self.inner.write();
+        // 1. prev adjacency check
+        if let Some((_, prev_map)) = g.memmap.range(..map.vmarea.start).next_back() {
+            if prev_map.vmarea.end > map.vmarea.start { return Err("Memory mapping overlaps with a preceding map"); }
         }
-        
-        // 2. Check the map that starts at or after the new map's start position
-        if let Some((_, next_map)) = self.memmap.range(map.vmarea.start..).next() {
-            // If the next map starts before our range ends, there's an overlap
-            if next_map.vmarea.start < map.vmarea.end {
-                return Err("Memory mapping overlaps with a succeeding map");
-            }
+        // 2. next adjacency check
+        if let Some((_, next_map)) = g.memmap.range(map.vmarea.start..).next() {
+            if next_map.vmarea.start < map.vmarea.end { return Err("Memory mapping overlaps with a succeeding map"); }
         }
 
-        // Clear cache as the memory layout has changed
-        self.last_search_cache = None;
-        
-        // Insert the new mapping (MMU mapping will be done lazily on page fault)
-        self.memmap.insert(map.vmarea.start, map);
-        
+        g.last_search_cache = None;
+        g.memmap.insert(map.vmarea.start, map);
         Ok(())
     }
 
@@ -207,24 +203,20 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The removed memory map, if it exists.
-    pub fn remove_memory_map_by_addr(&mut self, vaddr: usize) -> Option<VirtualMemoryMap> {
-        // Use our efficient search to find the memory map
-        let start_addr = self.find_memory_map_with_cache_update(vaddr)?;
-        
-        // Clear cache since we're removing this memory map
-        if let Some((_, _, cache_key)) = self.last_search_cache {
-            if cache_key == start_addr {
-                self.last_search_cache = None;
-            }
+    pub fn remove_memory_map_by_addr(&self, vaddr: usize) -> Option<VirtualMemoryMap> {
+        let mut g = self.inner.write();
+        let start_addr = find_memory_map_key_with_cache_update(&mut *g, vaddr)?;
+        if let Some((_, _, cache_key)) = g.last_search_cache {
+            if cache_key == start_addr { g.last_search_cache = None; }
         }
-        
-        // Remove the memory map
-        let removed_map = self.memmap.remove(&start_addr)?;
-        
-        // Remove the mapping from MMU (page table) to prevent stale TLB entries
-        self.unmap_range_from_mmu(removed_map.vmarea.start, removed_map.vmarea.end);
-        
-        Some(removed_map)
+        let removed_map = g.memmap.remove(&start_addr);
+        drop(g);
+        if let Some(m) = removed_map {
+            self.unmap_range_from_mmu(m.vmarea.start, m.vmarea.end);
+            Some(m)
+        } else {
+            None
+        }
     }
 
     /// Removes all memory maps.
@@ -234,11 +226,10 @@ impl VirtualMemoryManager {
     /// 
     /// # Note
     /// This method returns an iterator instead of a cloned Vec for efficiency.
-    pub fn remove_all_memory_maps(&mut self) -> impl Iterator<Item = VirtualMemoryMap> {
-        // Clear cache since all mappings are being removed
-        self.last_search_cache = None;
-        
-        let memmap = core::mem::take(&mut self.memmap);
+    pub fn remove_all_memory_maps(&self) -> impl Iterator<Item = VirtualMemoryMap> {
+        let mut g = self.inner.write();
+        g.last_search_cache = None;
+        let memmap = core::mem::take(&mut g.memmap);
         memmap.into_values()
     }
 
@@ -250,7 +241,7 @@ impl VirtualMemoryManager {
     /// # Returns
     /// A result indicating success or failure.
     /// 
-    pub fn restore_memory_maps<I>(&mut self, maps: I) -> Result<(), &'static str> 
+    pub fn restore_memory_maps<I>(&self, maps: I) -> Result<(), &'static str> 
     where 
         I: IntoIterator<Item = VirtualMemoryMap>
     {
@@ -270,17 +261,23 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The memory map containing the given virtual address, if it exists.
-    pub fn search_memory_map(&self, vaddr: usize) -> Option<&VirtualMemoryMap> {
-        // Optimization: Check cache first (O(1))
-        if let Some((cache_start, cache_end, cache_key)) = self.last_search_cache {
+    pub fn search_memory_map(&self, vaddr: usize) -> Option<VirtualMemoryMap> {
+        let mut g = self.inner.write();
+        if let Some((cache_start, cache_end, cache_key)) = g.last_search_cache {
             if cache_start <= vaddr && vaddr <= cache_end {
-                // Cache hit! Return the cached result
-                return self.memmap.get(&cache_key);
+                return g.memmap.get(&cache_key).cloned();
             }
         }
-        
-        // Cache miss: Use BTreeMap's efficient range search (O(log n))
-        self.find_memory_map_optimized(vaddr)
+        if let Some((_k, map)) = g.memmap.range(..=vaddr).next_back() {
+            if vaddr <= map.vmarea.end {
+                let start = map.vmarea.start;
+                let end = map.vmarea.end;
+                let out = map.clone();
+                g.last_search_cache = Some((start, end, start));
+                return Some(out);
+            }
+        }
+        None
     }
     
     /// Efficient memory map search using BTreeMap's ordered nature
@@ -293,21 +290,7 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The memory map containing the address, if found
-    fn find_memory_map_optimized(&self, vaddr: usize) -> Option<&VirtualMemoryMap> {
-        // Strategy: Use BTreeMap's range() to find the memory map that could contain vaddr
-        // Since the key is vmarea.start, we need to find the map where:
-        // vmarea.start <= vaddr <= vmarea.end
-        
-        // Find the map with the largest start address <= vaddr
-        if let Some((_, map)) = self.memmap.range(..=vaddr).next_back() {
-            // Check if vaddr is within this map's range
-            if vaddr <= map.vmarea.end {
-                return Some(map);
-            }
-        }
-        
-        None
-    }
+    // Removed: replaced by search_memory_map with caching in write lock
     
     /// Searches for a memory map containing the given virtual address (mutable version).
     /// 
@@ -318,13 +301,7 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// Mutable reference to the memory map containing the given virtual address, if it exists.
-    pub fn search_memory_map_mut(&mut self, vaddr: usize) -> Option<&mut VirtualMemoryMap> {
-        // First, find the memory map (this might update cache)
-        let result_key = self.find_memory_map_with_cache_update(vaddr)?;
-        
-        // Return mutable reference
-        self.memmap.get_mut(&result_key)
-    }
+    // Removed mutable accessor; use fixed operations instead
     
     /// Helper method that finds memory map and updates cache
     /// 
@@ -333,38 +310,16 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The start address key of the found memory map, if any
-    fn find_memory_map_with_cache_update(&mut self, vaddr: usize) -> Option<usize> {
-        // Check cache first
-        if let Some((cache_start, cache_end, cache_key)) = self.last_search_cache {
-            if cache_start <= vaddr && vaddr <= cache_end {
-                return Some(cache_key);
-            }
-        }
-        
-        // Find memory map using BTreeMap range search
-        if let Some((start_addr, map)) = self.memmap.range(..=vaddr).next_back() {
-            if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
-                // Update cache for future searches
-                self.last_search_cache = Some((map.vmarea.start, map.vmarea.end, *start_addr));
-                return Some(*start_addr);
-            }
-        }
-        
-        None
-    }
+    // Helper moved out to work with inner lock directly
 
     /// Adds a page table to the virtual memory manager.
-    pub fn add_page_table(&mut self, page_table: Arc<PageTable>) {
-        self.page_tables.push(page_table);
-    }
+    pub fn add_page_table(&self, page_table: Arc<PageTable>) { self.inner.write().page_tables.push(page_table); }
 
     /// Returns the root page table for the current address space.
     /// 
     /// # Returns
     /// The root page table for the current address space, if it exists.
-    pub fn get_root_page_table(&self) -> Option<&mut PageTable> {
-        get_root_pagetable(self.asid)
-    }
+    pub fn get_root_page_table(&self) -> Option<&mut PageTable> { get_root_pagetable(self.get_asid()) }
 
     /// Lazy map a virtual address to MMU on demand (called from page fault handler)
     /// 
@@ -377,7 +332,7 @@ impl VirtualMemoryManager {
     /// # Returns
     /// * `Ok(())` - Successfully mapped the page
     /// * `Err(&'static str)` - Failed to map (no mapping found or MMU error)
-    pub fn lazy_map_page(&mut self, vaddr: usize) -> Result<(), &'static str> {
+    pub fn lazy_map_page(&self, vaddr: usize) -> Result<(), &'static str> {
         // Backward-compat shim: default to Load with unknown size
         let access = crate::object::capability::memory_mapping::AccessKind { 
             op: crate::object::capability::memory_mapping::AccessOp::Load,
@@ -388,7 +343,7 @@ impl VirtualMemoryManager {
     }
 
     /// Lazy map with access context (instruction/load/store and optional size)
-    pub fn lazy_map_page_with(&mut self, access: crate::object::capability::memory_mapping::AccessKind) -> Result<(), &'static str> {
+    pub fn lazy_map_page_with(&self, access: crate::object::capability::memory_mapping::AccessKind) -> Result<(), &'static str> {
         let vaddr = access.vaddr;
         // Find the memory mapping for this virtual address
         let memory_map = match self.search_memory_map(vaddr) {
@@ -423,7 +378,7 @@ impl VirtualMemoryManager {
         
         // Map this single page to the MMU
         if let Some(root_pagetable) = self.get_root_page_table() {
-            root_pagetable.map(self.asid, page_vaddr, page_paddr, perms);
+            root_pagetable.map(self.get_asid(), page_vaddr, page_paddr, perms);
             Ok(())
         } else {
             Err("No root page table available")
@@ -438,7 +393,7 @@ impl VirtualMemoryManager {
     /// # Arguments
     /// * `vaddr_start` - Start of virtual address range
     /// * `vaddr_end` - End of virtual address range (inclusive)
-    pub fn unmap_range_from_mmu(&mut self, vaddr_start: usize, vaddr_end: usize) {
+    pub fn unmap_range_from_mmu(&self, vaddr_start: usize, vaddr_end: usize) {
         if let Some(root_pagetable) = self.get_root_page_table() {
             let num_pages = (vaddr_end - vaddr_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
             
@@ -463,7 +418,6 @@ impl VirtualMemoryManager {
     /// 
     /// The translated physical address. Returns None if no mapping exists for the address
     pub fn translate_vaddr(&self, vaddr: usize) -> Option<usize> {
-        // Use our optimized search method
         if let Some(map) = self.search_memory_map(vaddr) {
             // Calculate offset within the memory area
             let offset = vaddr - map.vmarea.start;
@@ -478,18 +432,14 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// The base address for mmap operations
-    pub fn get_mmap_base(&self) -> usize {
-        self.mmap_base
-    }
+    pub fn get_mmap_base(&self) -> usize { self.inner.read().mmap_base }
     
     /// Sets the mmap base address
     /// This allows dynamic adjustment of the mmap region
     /// 
     /// # Arguments
     /// * `base` - New base address for mmap operations
-    pub fn set_mmap_base(&mut self, base: usize) {
-        self.mmap_base = base;
-    }
+    pub fn set_mmap_base(&self, base: usize) { self.inner.write().mmap_base = base; }
     
     /// Find a suitable address for new memory mapping
     /// 
@@ -501,12 +451,10 @@ impl VirtualMemoryManager {
     /// A suitable virtual address for the new mapping, or None if no space available
     pub fn find_unmapped_area(&self, size: usize, alignment: usize) -> Option<usize> {
         let aligned_size = (size + alignment - 1) & !(alignment - 1);
-        
-        // Start search from mmap_base
-        let mut search_addr = self.mmap_base;
-        
+        let g = self.inner.read();
+        let mut search_addr = g.mmap_base;
         // Simple first-fit algorithm
-        for (_start, memory_map) in self.memmap.range(self.mmap_base..) {
+        for (_start, memory_map) in g.memmap.range(g.mmap_base..) {
             // Check if there's enough space before this memory map
             if search_addr + aligned_size <= memory_map.vmarea.start {
                 return Some(search_addr);
@@ -518,7 +466,7 @@ impl VirtualMemoryManager {
             // Align the search address
             search_addr = (search_addr + alignment - 1) & !(alignment - 1);
         }
-        
+        drop(g);
         // Check if there's space after the last memory map
         // For simplicity, we assume a reasonable upper limit for the address space
         const MAX_USER_ADDR: usize = 0x80000000; // 2GB limit for user space
@@ -552,7 +500,7 @@ impl VirtualMemoryManager {
     /// - Non-overlapping parts of existing mappings are preserved (split and kept).
     ///
     /// The caller is responsible for handling any managed pages associated with the overwritten mappings.
-    pub fn add_memory_map_fixed(&mut self, map: VirtualMemoryMap) -> Result<Vec<VirtualMemoryMap>, &'static str>
+    pub fn add_memory_map_fixed(&self, map: VirtualMemoryMap) -> Result<Vec<VirtualMemoryMap>, &'static str>
     {
         // Validate alignment like the regular add_memory_map
         if map.vmarea.start % PAGE_SIZE != 0 || map.pmarea.start % PAGE_SIZE != 0 ||
@@ -565,23 +513,18 @@ impl VirtualMemoryManager {
         let mut overwritten_mappings = Vec::new();
         let mut mappings_to_add = Vec::new();
 
-        // Find all overlapping mappings and process them
-        let overlapping_keys: alloc::vec::Vec<usize> = self.memmap
+        let mut g = self.inner.write();
+        let overlapping_keys: alloc::vec::Vec<usize> = g.memmap
             .range(..)
             .filter_map(|(start_addr, existing_map)| {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
-                if new_start <= existing_end && new_end >= existing_start {
-                    Some(*start_addr)
-                } else {
-                    None
-                }
+                if new_start <= existing_end && new_end >= existing_start { Some(*start_addr) } else { None }
             })
             .collect();
 
-        // Process each overlapping mapping
         for key in overlapping_keys {
-            if let Some(existing_map) = self.memmap.remove(&key) {
+            if let Some(existing_map) = g.memmap.remove(&key) {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
 
@@ -654,23 +597,16 @@ impl VirtualMemoryManager {
         }
 
         // Clear cache since we've modified the memory layout
-        self.last_search_cache = None;
+        g.last_search_cache = None;
 
-        // Remove overlapping mappings from MMU (page table) to prevent stale TLB entries
+        // Remove overlapping mappings from MMU (page table) after releasing lock
+        let split_vec = mappings_to_add.clone();
+        for split_map in split_vec { g.memmap.insert(split_map.vmarea.start, split_map); }
+        g.memmap.insert(map.vmarea.start, map);
+        drop(g);
         for overwritten_map in &overwritten_mappings {
-            // crate::println!("Unmapping overwritten mapping: {:x?}", overwritten_map);
             self.unmap_range_from_mmu(overwritten_map.vmarea.start, overwritten_map.vmarea.end);
         }
-
-        // Add the split mappings back (MMU mapping will be done lazily on page fault)
-        for split_map in mappings_to_add {
-            // crate::println!("Adding split mapping: {:x?}", split_map);
-            self.memmap.insert(split_map.vmarea.start, split_map);
-        }
-
-        // crate::println!("Adding new mapping: {:x?}", map);
-        // Add the new mapping (MMU mapping will be done lazily on page fault)
-        self.memmap.insert(map.vmarea.start, map);
 
         Ok(overwritten_mappings)
     }
@@ -681,8 +617,9 @@ impl VirtualMemoryManager {
     /// # Returns
     /// A tuple containing (total_maps, total_virtual_size, fragmentation_info)
     pub fn get_memory_stats(&self) -> (usize, usize, usize) {
-        let total_maps = self.memmap.len();
-        let total_virtual_size: usize = self.memmap.values()
+        let g = self.inner.read();
+        let total_maps = g.memmap.len();
+        let total_virtual_size: usize = g.memmap.values()
             .map(|memory_map| memory_map.vmarea.end - memory_map.vmarea.start + 1)
             .sum();
         
@@ -690,7 +627,7 @@ impl VirtualMemoryManager {
         let mut gaps = 0;
         let mut prev_end = None;
         
-        for memory_map in self.memmap.values() {
+        for memory_map in g.memmap.values() {
             if let Some(prev) = prev_end {
                 if memory_map.vmarea.start > prev + 1 {
                     gaps += 1;
@@ -707,16 +644,14 @@ impl VirtualMemoryManager {
     /// 
     /// # Returns
     /// Number of memory maps that were successfully coalesced
-    pub fn coalesce_memory_maps(&mut self) -> usize {
+    pub fn coalesce_memory_maps(&self) -> usize {
         let mut coalesced_count = 0;
         let mut to_remove = Vec::new();
         let mut to_add = Vec::new();
-        
         let mut prev_start: Option<usize> = None;
         let mut prev_map: Option<VirtualMemoryMap> = None;
-        
-        // Collect memory maps that can be merged
-        for (&start, memory_map) in &self.memmap {
+        let mut g = self.inner.write();
+        for (&start, memory_map) in &g.memmap {
             if let (Some(prev_s), Some(prev_memory_map)) = (prev_start, &prev_map) {
                 // Check if memory maps are adjacent and can be merged
                 if prev_memory_map.vmarea.end + 1 == memory_map.vmarea.start &&
@@ -755,16 +690,12 @@ impl VirtualMemoryManager {
         }
         
         // Apply changes
-        for start in to_remove {
-            self.memmap.remove(&start);
-        }
-        for memory_map in to_add {
-            self.memmap.insert(memory_map.vmarea.start, memory_map);
-        }
+        for start in to_remove { g.memmap.remove(&start); }
+        for memory_map in to_add { g.memmap.insert(memory_map.vmarea.start, memory_map); }
         
         // Clear cache after coalescing
         if coalesced_count > 0 {
-            self.last_search_cache = None;
+            g.last_search_cache = None;
         }
         
         coalesced_count
@@ -792,16 +723,29 @@ impl VirtualMemoryManager {
 impl Drop for VirtualMemoryManager {
     /// Drops the virtual memory manager, freeing the address space if it is still in use.
     fn drop(&mut self) {
-        if self.asid != 0 && is_asid_used(self.asid) {
-            // Free the address space if it is still in use
-            free_virtual_address_space(self.asid);
+        let asid = self.get_asid();
+        if asid != 0 && is_asid_used(asid) {
+            free_virtual_address_space(asid);
         }
     }
 }
 
+fn find_memory_map_key_with_cache_update(inner: &mut InnerVmm, vaddr: usize) -> Option<usize> {
+    if let Some((cache_start, cache_end, cache_key)) = inner.last_search_cache {
+        if cache_start <= vaddr && vaddr <= cache_end { return Some(cache_key); }
+    }
+    if let Some((start_addr, map)) = inner.memmap.range(..=vaddr).next_back() {
+        if map.vmarea.start <= vaddr && vaddr <= map.vmarea.end {
+            inner.last_search_cache = Some((map.vmarea.start, map.vmarea.end, *start_addr));
+            return Some(*start_addr);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::arch::vm::{alloc_virtual_address_space, get_root_pagetable};
+    use crate::arch::vm::alloc_virtual_address_space;
     use crate::environment::PAGE_SIZE;
     use crate::vm::VirtualMemoryMap;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
@@ -814,22 +758,22 @@ mod tests {
 
     #[test_case]
     fn test_set_and_get_asid() {
-        let mut vmm = VirtualMemoryManager::new();
+        let vmm = VirtualMemoryManager::new();
         vmm.set_asid(42);
         assert_eq!(vmm.get_asid(), 42);
     }
 
     #[test_case]
     fn test_add_and_get_memory_map() {
-        let mut vmm = VirtualMemoryManager::new();
+        let vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false, owner: None };
         vmm.add_memory_map(map).unwrap();
         
-        // Use new efficient API instead of deprecated get_memory_map(0)
+        // Use non-cloning with_memmaps API for performance
         assert_eq!(vmm.memmap_len(), 1);
-        let first_map = vmm.memmap_iter().next().unwrap();
-        assert_eq!(first_map.vmarea.start, 0x1000);
+        let first_map_start = vmm.with_memmaps(|m| m.values().next().unwrap().vmarea.start);
+        assert_eq!(first_map_start, 0x1000);
         
         // Test direct address-based access
         assert!(vmm.get_memory_map_by_addr(0x1000).is_some());
@@ -838,7 +782,7 @@ mod tests {
 
     #[test_case]
     fn test_remove_memory_map() {
-        let mut vmm = VirtualMemoryManager::new();
+        let vmm = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0, is_shared: false, owner: None };
         vmm.add_memory_map(map).unwrap();
@@ -855,7 +799,7 @@ mod tests {
 
     #[test_case]
     fn test_search_memory_map() {
-        let mut vmm = VirtualMemoryManager::new();
+        let vmm = VirtualMemoryManager::new();
         let vma1 = MemoryArea { start: 0x1000, end: 0x1fff };
         let map1 = VirtualMemoryMap { vmarea: vma1, pmarea: vma1, permissions: 0, is_shared: false, owner: None };
         let vma2 = MemoryArea { start: 0x3000, end: 0x3fff };
@@ -868,7 +812,7 @@ mod tests {
 
     #[test_case]
     fn test_get_root_page_table() {
-        let mut vmm = VirtualMemoryManager::new();
+        let vmm = VirtualMemoryManager::new();
         let asid = alloc_virtual_address_space();
         vmm.set_asid(asid);
         let page_table = vmm.get_root_page_table();
@@ -880,7 +824,7 @@ mod tests {
         use crate::environment::PAGE_SIZE;
         
         // Test memory optimization features
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Test mmap_base functionality
         assert_eq!(manager.get_mmap_base(), 0x40000000);
@@ -942,7 +886,7 @@ mod tests {
         use crate::environment::PAGE_SIZE;
         
         // Test memory map coalescing with adjacent compatible maps
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Add two adjacent memory maps that can be merged
         let map1 = VirtualMemoryMap::new(
@@ -978,15 +922,14 @@ mod tests {
         assert_eq!(gaps, 0); // No gaps after merging
         
         // Verify the merged map covers the entire range
-        let merged_map = manager.search_memory_map(0x10000000);
-        assert!(merged_map.is_some());
-        assert_eq!(merged_map.unwrap().vmarea.start, 0x10000000);
-        assert_eq!(merged_map.unwrap().vmarea.end, 0x10001fff);
+        let merged_map = manager.search_memory_map(0x10000000).unwrap();
+        assert_eq!(merged_map.vmarea.start, 0x10000000);
+        assert_eq!(merged_map.vmarea.end, 0x10001fff);
     }
 
     #[test_case]
     fn test_complex_overlap_detection() {
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Set up existing memory maps for comprehensive overlap testing
         // Map 1: [0x1000, 0x2000)
@@ -1113,16 +1056,18 @@ mod tests {
         // Verify all maps are accessible and correctly ordered
         let starts: [usize; 7] = [0x0, 0x1000, 0x2000, 0x4000, 0x5000, 0x7000, 0x8000];
         let mut i = 0;
-        for map in manager.memmap_iter() {
-            assert_eq!(map.vmarea.start, starts[i]);
-            i += 1;
-        }
+        manager.with_memmaps(|mm| {
+            for map in mm.values() {
+                assert_eq!(map.vmarea.start, starts[i]);
+                i += 1;
+            }
+        });
         assert_eq!(i, 7);
     }
     
     #[test_case]
     fn test_alignment_and_edge_cases() {
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Test Case 1: Non-aligned virtual address (should fail)
         let misaligned_virtual = VirtualMemoryMap::new(
@@ -1189,7 +1134,7 @@ mod tests {
     
     #[test_case]
     fn test_cache_invalidation_on_add() {
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Add initial mapping
         let map1 = VirtualMemoryMap::new(
@@ -1231,7 +1176,7 @@ mod tests {
 
     #[test_case]
     fn test_add_memory_map_fixed_complete_overlap() {        
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Add initial mapping at [0x2000, 0x3000)
         let initial_map = VirtualMemoryMap::new(
@@ -1262,17 +1207,16 @@ mod tests {
         
         // Should now have only the new fixed mapping
         assert_eq!(manager.memmap_len(), 1);
-        let remaining_map = manager.search_memory_map(0x2000);
-        assert!(remaining_map.is_some());
-        assert_eq!(remaining_map.unwrap().vmarea.start, 0x1000);
-        assert_eq!(remaining_map.unwrap().vmarea.end, 0x3fff);
-        assert_eq!(remaining_map.unwrap().permissions, 0o755);
-        assert_eq!(remaining_map.unwrap().is_shared, true);
+        let remaining_map = manager.search_memory_map(0x2000).unwrap();
+        assert_eq!(remaining_map.vmarea.start, 0x1000);
+        assert_eq!(remaining_map.vmarea.end, 0x3fff);
+        assert_eq!(remaining_map.permissions, 0o755);
+        assert_eq!(remaining_map.is_shared, true);
     }
 
     #[test_case]
     fn test_add_memory_map_fixed_partial_overlap() {        
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Add initial mapping at [0x1000, 0x3000) - 2 pages
         let initial_map = VirtualMemoryMap::new(
@@ -1304,24 +1248,22 @@ mod tests {
         assert_eq!(manager.memmap_len(), 2);
         
         // Check the remaining part of the original mapping
-        let remaining_original = manager.search_memory_map(0x1500);
-        assert!(remaining_original.is_some());
-        assert_eq!(remaining_original.unwrap().vmarea.start, 0x1000);
-        assert_eq!(remaining_original.unwrap().vmarea.end, 0x1fff);
-        assert_eq!(remaining_original.unwrap().permissions, 0o644);
+        let remaining_original = manager.search_memory_map(0x1500).unwrap();
+        assert_eq!(remaining_original.vmarea.start, 0x1000);
+        assert_eq!(remaining_original.vmarea.end, 0x1fff);
+        assert_eq!(remaining_original.permissions, 0o644);
         
         // Check the new fixed mapping
-        let new_fixed = manager.search_memory_map(0x3000);
-        assert!(new_fixed.is_some());
-        assert_eq!(new_fixed.unwrap().vmarea.start, 0x2000);
-        assert_eq!(new_fixed.unwrap().vmarea.end, 0x3fff);
-        assert_eq!(new_fixed.unwrap().permissions, 0o755);
-        assert_eq!(new_fixed.unwrap().is_shared, true);
+        let new_fixed = manager.search_memory_map(0x3000).unwrap();
+        assert_eq!(new_fixed.vmarea.start, 0x2000);
+        assert_eq!(new_fixed.vmarea.end, 0x3fff);
+        assert_eq!(new_fixed.permissions, 0o755);
+        assert_eq!(new_fixed.is_shared, true);
     }
 
     #[test_case]
     fn test_add_memory_map_fixed_split_both_ends() {
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Add initial mapping at [0x1000, 0x5000) - 4 pages
         let initial_map = VirtualMemoryMap::new(
@@ -1353,31 +1295,28 @@ mod tests {
         assert_eq!(manager.memmap_len(), 3);
         
         // Check the part before the fixed mapping
-        let before_part = manager.search_memory_map(0x1500);
-        assert!(before_part.is_some());
-        assert_eq!(before_part.unwrap().vmarea.start, 0x1000);
-        assert_eq!(before_part.unwrap().vmarea.end, 0x1fff);
-        assert_eq!(before_part.unwrap().permissions, 0o644);
+        let before_part = manager.search_memory_map(0x1500).unwrap();
+        assert_eq!(before_part.vmarea.start, 0x1000);
+        assert_eq!(before_part.vmarea.end, 0x1fff);
+        assert_eq!(before_part.permissions, 0o644);
         
         // Check the new fixed mapping
-        let fixed_part = manager.search_memory_map(0x3000);
-        assert!(fixed_part.is_some());
-        assert_eq!(fixed_part.unwrap().vmarea.start, 0x2000);
-        assert_eq!(fixed_part.unwrap().vmarea.end, 0x3fff);
-        assert_eq!(fixed_part.unwrap().permissions, 0o755);
-        assert_eq!(fixed_part.unwrap().is_shared, true);
+        let fixed_part = manager.search_memory_map(0x3000).unwrap();
+        assert_eq!(fixed_part.vmarea.start, 0x2000);
+        assert_eq!(fixed_part.vmarea.end, 0x3fff);
+        assert_eq!(fixed_part.permissions, 0o755);
+        assert_eq!(fixed_part.is_shared, true);
         
         // Check the part after the fixed mapping
-        let after_part = manager.search_memory_map(0x4500);
-        assert!(after_part.is_some());
-        assert_eq!(after_part.unwrap().vmarea.start, 0x4000);
-        assert_eq!(after_part.unwrap().vmarea.end, 0x4fff);
-        assert_eq!(after_part.unwrap().permissions, 0o644);
+        let after_part = manager.search_memory_map(0x4500).unwrap();
+        assert_eq!(after_part.vmarea.start, 0x4000);
+        assert_eq!(after_part.vmarea.end, 0x4fff);
+        assert_eq!(after_part.permissions, 0o644);
     }
 
     #[test_case]
     fn test_add_memory_map_fixed_no_overlap() {
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         
         // Add initial mapping at [0x1000, 0x2000)
         let initial_map = VirtualMemoryMap::new(
@@ -1419,7 +1358,7 @@ mod tests {
 
     #[test_case]
     fn test_lazy_mapping_and_unmapping() {
-        let mut manager = VirtualMemoryManager::new();
+        let manager = VirtualMemoryManager::new();
         let vma = MemoryArea { start: 0x1000, end: 0x1fff };
         let map = VirtualMemoryMap { vmarea: vma, pmarea: vma, permissions: 0o644, is_shared: false, owner: None };
         let asid = alloc_virtual_address_space();

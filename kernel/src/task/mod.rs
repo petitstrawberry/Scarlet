@@ -942,33 +942,32 @@ impl Task {
         }
         
         if !flags.is_set(CloneFlagsDef::Vm) {
-            // Copy or share memory maps from parent to child
-            for mmap in self.vm_manager.memmap_iter() {
-                let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                let vaddr = mmap.vmarea.start;
-                
-                if num_pages > 0 {
+            // Copy or share memory maps from parent to child without cloning lists
+            self.vm_manager.memmaps_iter_with(|iter| {
+                for mmap in iter {
+                    let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                    if num_pages == 0 { continue; }
+
+                    let vaddr = mmap.vmarea.start;
                     if mmap.is_shared {
                         // Shared memory regions: just reference the same physical pages
                         let shared_mmap = VirtualMemoryMap {
-                            pmarea: mmap.pmarea, // Same physical memory
-                            vmarea: mmap.vmarea, // Same virtual addresses
+                            pmarea: mmap.pmarea,
+                            vmarea: mmap.vmarea,
                             permissions: mmap.permissions,
                             is_shared: true,
                             owner: mmap.owner.clone(),
                         };
-                        // Add the shared memory map directly to the child task
                         child.vm_manager.add_memory_map(shared_mmap.clone())
                             .map_err(|_| "Failed to add shared memory map to child task")?;
 
-                        // TODO: Add logic to determine if the memory map is a trampoline
-                        // If the memory map is the trampoline, pre-map it
+                        // Pre-map trampoline page if applicable
                         if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                            // Pre-map the trampoline page
-                            let root_pagetable = child.vm_manager.get_root_page_table().unwrap();
-                            root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)?;
+                            if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
+                                root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)
+                                    .map_err(|_| "Failed to map trampoline page")?;
+                            }
                         }
-
                     } else {
                         // Private memory regions: allocate new pages and copy contents
                         let permissions = mmap.permissions;
@@ -976,20 +975,14 @@ impl Task {
                         let size = num_pages * PAGE_SIZE;
                         let paddr = pages as usize;
                         let new_mmap = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + (size - 1),
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr,
-                                end: vaddr + (size - 1),
-                            },
+                            pmarea: MemoryArea { start: paddr, end: paddr + (size - 1) },
+                            vmarea: MemoryArea { start: vaddr, end: vaddr + (size - 1) },
                             permissions,
                             is_shared: false,
                             owner: mmap.owner.clone(),
                         };
-                        
-                        // Copy the contents of the original memory (including stack contents)
+
+                        // Copy original contents page-by-page
                         for i in 0..num_pages {
                             let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
                             let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
@@ -997,21 +990,21 @@ impl Task {
                                 core::ptr::copy_nonoverlapping(
                                     src_page_addr as *const u8,
                                     dst_page_addr as *mut u8,
-                                    PAGE_SIZE
+                                    PAGE_SIZE,
                                 );
                             }
-                            // Manage the new pages in the child task
                             child.add_managed_page(ManagedPage {
                                 vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
                                 page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
                             });
                         }
-                        // Add the new memory map to the child task
+
                         child.vm_manager.add_memory_map(new_mmap)
                             .map_err(|_| "Failed to add memory map to child task")?;
                     }
                 }
-            }
+                Ok::<(), &'static str>(())
+            })?;
         }
 
         // Copy register states
@@ -1151,7 +1144,7 @@ impl Task {
 
         struct SleepWakerHandler {
             task_id: usize,
-            start_tick: u64,
+            _start_tick: u64,
         }
 
         impl TimerHandler for SleepWakerHandler {
@@ -1169,7 +1162,7 @@ impl Task {
         let wake_tick = get_tick() + ticks;
         let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(SleepWakerHandler {
             task_id: self.id,
-            start_tick: get_tick(),
+            _start_tick: get_tick(),
         });
         add_timer(wake_tick, &handler, 0);
 
@@ -1592,14 +1585,32 @@ mod tests {
         assert_eq!(child_task.text_size, parent_task.text_size);
 
         // Find the corresponding memory map in child that matches our test allocation
-        let child_mmap = child_task.vm_manager.memmap_iter()
-            .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
-            .expect("Test memory map not found in child task");
+        let child_mmap = {
+            let mut found = None;
+            child_task.vm_manager.with_memmaps(|mm| {
+                for m in mm.values() {
+                    if m.vmarea.start == vaddr && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1 {
+                        found = Some(m.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Test memory map not found in child task")
+        };
 
         // Verify that our specific memory region exists in both parent and child
-        let parent_test_mmap = parent_task.vm_manager.memmap_iter()
-            .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
-            .expect("Test memory map not found in parent task");
+        let parent_test_mmap = {
+            let mut found = None;
+            parent_task.vm_manager.with_memmaps(|mm| {
+                for m in mm.values() {
+                    if m.vmarea.start == vaddr && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1 {
+                        found = Some(m.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Test memory map not found in parent task")
+        };
 
         // Verify the virtual memory ranges match
         assert_eq!(child_mmap.vmarea.start, parent_test_mmap.vmarea.start);
@@ -1655,15 +1666,21 @@ mod tests {
         parent_task.init();
 
         // Find the stack memory map in parent
-        let stack_mmap = parent_task.vm_manager.memmap_iter()
-            .find(|mmap| {
+        let stack_mmap = {
+            let mut found = None;
+            parent_task.vm_manager.with_memmaps(|mm| {
+                for mmap in mm.values() {
                 // Stack should be near USER_STACK_END and have stack permissions
                 use crate::vm::vmem::VirtualMemoryRegion;
-                mmap.vmarea.end == crate::environment::USER_STACK_END - 1 && 
-                mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
-            })
-            .expect("Stack memory map not found in parent task")
-            .clone();
+                    if mmap.vmarea.end == crate::environment::USER_STACK_END - 1 &&
+                       mmap.permissions == VirtualMemoryRegion::Stack.default_permissions() {
+                        found = Some(mmap.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Stack memory map not found in parent task")
+        };
 
         // Write test data to parent's stack
         let stack_test_data: [u8; 16] = [
@@ -1679,14 +1696,21 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the corresponding stack memory map in child
-        let child_stack_mmap = child_task.vm_manager.memmap_iter()
-            .find(|mmap| {
+        let child_stack_mmap = {
+            let mut found = None;
+            child_task.vm_manager.with_memmaps(|mm| {
+                for mmap in mm.values() {
                 use crate::vm::vmem::VirtualMemoryRegion;
-                mmap.vmarea.start == stack_mmap.vmarea.start &&
-                mmap.vmarea.end == stack_mmap.vmarea.end &&
-                mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
-            })
-            .expect("Stack memory map not found in child task");
+                    if mmap.vmarea.start == stack_mmap.vmarea.start &&
+                       mmap.vmarea.end == stack_mmap.vmarea.end &&
+                       mmap.permissions == VirtualMemoryRegion::Stack.default_permissions() {
+                        found = Some(mmap.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Stack memory map not found in child task")
+        };
 
         // Verify that stack content was copied correctly
         unsafe {
@@ -1769,9 +1793,15 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the shared memory map in child
-        let child_shared_mmap = child_task.vm_manager.memmap_iter()
-            .find(|mmap| mmap.vmarea.start == shared_vaddr && mmap.is_shared)
-            .expect("Shared memory map not found in child task");
+        let child_shared_mmap = {
+            let mut found = None;
+            child_task.vm_manager.with_memmaps(|mm| {
+                for mmap in mm.values() {
+                    if mmap.vmarea.start == shared_vaddr && mmap.is_shared { found = Some(mmap.clone()); break; }
+                }
+            });
+            found.expect("Shared memory map not found in child task")
+        };
 
         // Verify that the physical addresses are the same (shared memory)
         assert_eq!(child_shared_mmap.pmarea.start, shared_mmap.pmarea.start,
