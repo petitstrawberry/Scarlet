@@ -1023,6 +1023,12 @@ impl Task {
             };
             child.abi_zones.insert(*start, new_zone);
         }
+        // Notify child's default ABI instance that cloning has completed
+        // Take and restore to avoid mutable aliasing with &mut child
+        if let Some(mut abi_boxed) = child.default_abi.take() {
+            let _ = abi_boxed.on_task_cloned(self, &mut child, flags);
+            child.default_abi = Some(abi_boxed);
+        }
         
         // Copy state such as data size
         child.stack_size = self.stack_size;

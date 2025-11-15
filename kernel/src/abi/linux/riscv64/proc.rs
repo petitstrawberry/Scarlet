@@ -476,29 +476,47 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     #[allow(dead_code)]
     const CLONE_CHILD_CLEARTID: usize = 0x00200000;
 
-    // Check for thread creation flags - not yet supported
-    let thread_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
-    if (flags & thread_flags) != 0 {
-        crate::println!("sys_clone: ERROR - Thread creation not yet supported (flags=0x{:x})", flags);
-        crate::println!("  CLONE_VM={}, CLONE_FS={}, CLONE_FILES={}, CLONE_SIGHAND={}, CLONE_THREAD={}", 
-            (flags & CLONE_VM) != 0,
-            (flags & CLONE_FS) != 0,
-            (flags & CLONE_FILES) != 0,
-            (flags & CLONE_SIGHAND) != 0,
-            (flags & CLONE_THREAD) != 0);
-        
+    // For now, support CLONE_VM/CLONE_FS/CLONE_FILES without CLONE_THREAD semantics.
+    // If CLONE_THREAD is specified, return ENOSYS until thread groups are implemented.
+    if (flags & CLONE_THREAD) != 0 || (flags & CLONE_SIGHAND) != 0 {
+        crate::println!("sys_clone: Thread-group semantics not supported yet (flags=0x{:x})", flags);
         trapframe.increment_pc_next(parent_task);
         use super::errno;
-        return errno::to_result(errno::ENOSYS); // Function not implemented
+        return errno::to_result(errno::ENOSYS);
     }
 
     trapframe.increment_pc_next(parent_task);
     parent_task.vcpu.store(trapframe);
     
-    match parent_task.clone_task(CloneFlags::default()) {
+    // Map Linux clone flags to Scarlet CloneFlags
+    let mut cflags = CloneFlags::new();
+    if (flags & CLONE_VM) != 0 { cflags.set(crate::task::CloneFlagsDef::Vm); }
+    if (flags & CLONE_FS) != 0 { cflags.set(crate::task::CloneFlagsDef::Fs); }
+    if (flags & CLONE_FILES) != 0 { cflags.set(crate::task::CloneFlagsDef::Files); }
+
+    match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
             child_task.vcpu.iregs.reg[10] = 0; // a0 = 0 in child
+            // If child_stack is provided, set child's user SP
+            if child_stack != 0 { child_task.vcpu.set_sp(child_stack); }
+            // If CLONE_SETTLS requested, set tp (x4) to tls for child
+            #[allow(non_snake_case)]
+            const CLONE_SETTLS: usize = 0x00080000;
+            if (flags & CLONE_SETTLS) != 0 {
+                child_task.vcpu.iregs.reg[4] = tls; // x4 = tp
+            }
+            // Handle parent/child TID stores if pointers are provided
+            if !parent_tid_ptr.is_null() {
+                if let Some(paddr) = parent_task.vm_manager.translate_vaddr(parent_tid_ptr as usize) {
+                    unsafe { *(paddr as *mut i32) = child_id as i32; }
+                }
+            }
+            if !child_tid_ptr.is_null() {
+                if let Some(paddr) = child_task.vm_manager.translate_vaddr(child_tid_ptr as usize) {
+                    unsafe { *(paddr as *mut i32) = child_id as i32; }
+                }
+            }
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             child_id
         },
