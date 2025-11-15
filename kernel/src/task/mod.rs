@@ -213,7 +213,9 @@ pub struct Task {
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
     /// Default ABI for this task. Determined from ELF OSABI etc.
-    pub default_abi: Box<dyn AbiModule + Send + Sync>,
+    /// Wrapped in Option to allow temporary take() during callbacks
+    /// that also need `&mut self` without borrow conflicts.
+    pub default_abi: Option<Box<dyn AbiModule + Send + Sync>>,
 
     /// ABI zones map. Key is the start address of the range.
     pub abi_zones: BTreeMap<usize, AbiZone>,
@@ -344,7 +346,7 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            default_abi: Box::new(ScarletAbi::default()), // Default ABI
+            default_abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             abi_zones: BTreeMap::new(),
             vfs: None,
             handle_table: HandleTable::new(),
@@ -879,7 +881,25 @@ impl Task {
             }
         }
         // No zone found, return default ABI
-        self.default_abi.as_mut()
+        self.default_abi.as_deref_mut().expect("default_abi not set")
+    }
+
+    /// Get an immutable reference to the default ABI
+    pub fn default_abi_ref(&self) -> &(dyn AbiModule + Send + Sync) {
+        self.default_abi.as_deref().expect("default_abi not set")
+    }
+
+    /// Get a mutable reference to the default ABI
+    pub fn default_abi_mut(&mut self) -> &mut (dyn AbiModule + Send + Sync) {
+        self.default_abi.as_deref_mut().expect("default_abi not set")
+    }
+
+    /// Temporarily take ownership of the default ABI to run a closure that also needs &mut self
+    pub fn with_default_abi_mut<R>(&mut self, f: impl FnOnce(&mut (dyn AbiModule + Send + Sync), &mut Task) -> R) -> R {
+        let mut abi = self.default_abi.take().expect("default_abi not set");
+        let r = f(abi.as_mut(), self);
+        self.default_abi = Some(abi);
+        r
     }
 
     /// Get the file descriptor table
@@ -998,7 +1018,7 @@ impl Task {
         self.vcpu.copy_iregs_to(&mut child.vcpu.iregs);
         
         // Clone the default ABI and ABI zones
-        child.default_abi = self.default_abi.clone_boxed();
+        child.default_abi = Some(self.default_abi.as_ref().expect("default_abi not set").clone_boxed());
         // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
         for (start, zone) in &self.abi_zones {
             let new_zone = AbiZone {
@@ -1212,7 +1232,7 @@ impl Task {
         }
         
         // Delegate to ABI module for event processing
-        let abi = &self.default_abi;
+        let abi = self.default_abi_ref();
         const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
         let mut processed_count = 0;
         

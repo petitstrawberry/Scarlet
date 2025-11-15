@@ -362,11 +362,8 @@ impl AbiRegistry {
         let registry = Self::global().lock();
         
         // Get current task's ABI reference for inheritance consideration
-        let current_abi = if let Some(task) = mytask() {
-            Some(task.default_abi.as_ref() as &(dyn AbiModule + Send + Sync))
-        } else {
-            None
-        };
+        let current_abi: Option<&(dyn AbiModule + Send + Sync)> = mytask()
+            .and_then(|task| task.default_abi.as_deref());
         
         // Try all ABI modules and find the one with highest confidence
         // Each ABI decides its own confidence based on:

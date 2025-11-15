@@ -226,7 +226,7 @@ impl TransparentExecutor {
             .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
 
         // Step 3: Check if ABI switch or forced rebuild is required
-        let current_abi_name = task.default_abi.get_name();
+        let current_abi_name = task.default_abi_ref().get_name();
         let abi_switch_required = abi_name != current_abi_name;
         let rebuild_required = abi_switch_required || force_abi_rebuild;
         
@@ -241,7 +241,7 @@ impl TransparentExecutor {
         
         // Step 6: Update task's ABI if switch occurred
         if abi_switch_required {
-            task.default_abi = abi;
+            task.default_abi = Some(abi);
         }
         
         Ok(())
