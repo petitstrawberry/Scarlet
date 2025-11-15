@@ -32,6 +32,12 @@ pub const TCSETSF: u32 = 0x5404;   // Set termios (drain and flush)
 /// Linux keyboard mode values (subset)
 pub const K_RAW: u32 = 0x00;
 pub const K_XLATE: u32 = 0x01;
+// Additional keyboard modes sometimes requested by SDL (for example,
+// SDL 1.2 when running on fbcon). Treat these permissively as
+// raw-equivalent modes for compatibility.
+pub const K_MEDIUMRAW: u32 = 0x02;
+pub const K_UNICODE: u32 = 0x03;
+pub const K_OFF: u32 = 0x04;
 
 /// KD text/graphics mode (subset)
 pub const KDSETMODE: u32 = 0x4B3A; // Set text/graphics mode
@@ -368,10 +374,12 @@ pub fn handle_ioctl(
             } else {
                 // KDSKBMODE: arg holds the mode value directly
                 let mode = arg as u32;
+                // Be permissive: treat any non-XLATE mode as non-canonical ("raw-ish").
+                // This covers K_RAW, K_MEDIUMRAW, K_UNICODE, K_OFF commonly used by SDL.
                 let enable_canonical = match mode {
                     K_XLATE => true,
-                    K_RAW => false,
-                    _ => return Err(()),
+                    K_RAW | K_MEDIUMRAW | K_UNICODE | K_OFF => false,
+                    _ => false, // Unknown modes: accept but consider non-canonical
                 };
                 let arg_bool = if enable_canonical { 1usize } else { 0usize };
                 match control_ops.control(SCTL_TTY_SET_CANONICAL, arg_bool) {
