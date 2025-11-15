@@ -351,6 +351,8 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         path_str.clone()
     };
 
+    // crate::println!("sys_openat: attempting to open '{}' with flags {:#o} (dirfd={})", mapped_path, flags, dirfd);
+
     // // Log flags details
     // let flags_table = [
     //     (O_RDONLY, "O_RDONLY"),
@@ -369,24 +371,24 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     //     }
     // }
 
-    let file = vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32);
+    let file = vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32);
 
     let kernel_obj = match file {
         Ok(obj) => {
-            // crate::println!("sys_openat: successfully opened '{}'", path_str);
+            // crate::println!("sys_openat: successfully opened '{}'", mapped_path);
             obj
         },
         Err(e) => {
-            // crate::println!("sys_openat: failed to open '{}' -> {:?}", path_str, e);
+            // crate::println!("sys_openat: failed to open '{}' -> {:?}", mapped_path, e);
             // If open failed and O_CREAT flag is set, try to create the file
             if flags & O_CREAT != 0 {
                 // crate::println!("sys_openat: O_CREAT flag set, attempting to create file '{}'", path_str);
                 // Build absolute path for file creation before getting mutable VFS reference
-                let absolute_path = if path_str.starts_with('/') {
-                    path_str.to_string()
+                let absolute_path = if mapped_path.starts_with('/') {
+                    mapped_path.to_string()
                 } else {
                     // Construct absolute path by resolving relative to current working directory
-                    match to_absolute_path_v2(&task, &path_str) {
+                    match to_absolute_path_v2(&task, &mapped_path) {
                         Ok(p) => p,
                         Err(_) => return errno::to_result(errno::ENOENT), // Path resolution failed
                     }
@@ -404,7 +406,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         // File created successfully, now try to open it
                         // Get immutable VFS reference again for opening
                         let vfs = task.vfs.as_ref().unwrap();
-                        match vfs.open_from(&base_entry, &base_mount, &path_str, flags as u32) {
+                        match vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32) {
                             Ok(obj) => obj,
                             Err(err) => return errno::to_result(errno::from_fs_error(&err)), // Failed to open newly created file
                         }
@@ -417,7 +419,7 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         // Try to open the existing file
                         let vfs = task.vfs.as_ref().unwrap();
                         let reopen_flags = (flags as u32) & !((O_CREAT | O_EXCL) as u32);
-                        match vfs.open_from(&base_entry, &base_mount, &path_str, reopen_flags) {
+                        match vfs.open_from(&base_entry, &base_mount, &mapped_path, reopen_flags) {
                             Ok(obj) => obj,
                             Err(open_err) => return errno::to_result(errno::from_fs_error(&open_err)), // Still failed to open
                         }
@@ -1508,8 +1510,12 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         if caps.iter().any(|c| *c == DeviceCapability::Tty) {
             match crate::abi::linux::device::tty::handle_ioctl(request, arg, kernel_object) {
                 Ok(Some(ret)) => return ret,
-                Ok(None) => { /* not handled; fall through to passthrough */ }
-                Err(_) => return usize::MAX,
+                Ok(None) => {
+                    // Do NOT pass through unknown TTY ioctls to device-specific control.
+                    // Return ENOTTY to match Linux behavior and avoid accidental derefs.
+                    return errno::to_result(errno::ENOTTY);
+                }
+                Err(_) => return errno::to_result(errno::ENOTTY),
             }
         }
         // Future: match on other capabilities here
@@ -1522,8 +1528,8 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     };
 
     match result {
-        Ok(value) => if value >= 0 { value as usize } else { usize::MAX },
-        Err(_) => usize::MAX,
+        Ok(value) => if value >= 0 { value as usize } else { errno::to_result(errno::EINVAL) },
+        Err(_) => errno::to_result(errno::ENOTTY),
     }
 }
 
