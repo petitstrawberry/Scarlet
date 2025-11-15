@@ -2365,6 +2365,454 @@ pub fn sys_epoll_pwait(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
     0 // No events ready
 }
 
+/// Minimal Linux pselect6 implementation (stub)
+///
+/// Provides very basic fd-set readiness handling to satisfy applications
+/// expecting the syscall to exist. This implementation:
+/// - Parses read/write/except fd sets (only readfds used for now)
+/// - Validates file descriptors via the Linux ABI fd table
+/// - Returns immediately with 0 (no fds ready) if none considered ready
+/// - Does NOT currently block waiting for readiness (future enhancement:
+///   integrate with TTY/device wakers and implement timeout semantics)
+/// - Writes back filtered fd sets containing only "ready" descriptors
+///
+/// Arguments (RISC-V register usage):
+///   arg0: nfds (number of file descriptors to check)
+///   arg1: readfds pointer (fd_set*)
+///   arg2: writefds pointer (fd_set*)
+///   arg3: exceptfds pointer (fd_set*)
+///   arg4: timeout pointer (timespec*) or NULL
+///   arg5: sigmask pointer (ignored)
+///
+/// Returns: number of ready descriptors, or -1 (usize::MAX) on error.
+pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    // 改良版 pselect6: fd_set を評価し、必要なら TTY 上でブロックする。
+    // 現在の実装:
+    //  - 可読/書き込み readiness を can_read/can_write で判定
+    //  - timeout==NULL かつ ready=0 で対象 readfds に TTY が含まれる場合は最初の TTY でブロック
+    //  - timeout 非NULL はゼロ値のみ即時タイムアウト扱い (非ゼロは未実装: 即時戻り)
+    let task = match mytask() { Some(t) => t, None => return usize::MAX };
+    let nfds = trapframe.get_arg(0) as usize;
+    let readfds_ptr = trapframe.get_arg(1);
+    let writefds_ptr = trapframe.get_arg(2);
+    let exceptfds_ptr = trapframe.get_arg(3);
+    let timeout_ptr = trapframe.get_arg(4); // timespec* or NULL
+    let _sigmask_ptr = trapframe.get_arg(5); // ignored for now
+
+    // PC は戻り時に一度だけ進める (ブロックする可能性があるためここでは進めない)
+
+    // Helper: read original fd_set words
+    let read_fd_set_words = |base_ptr: usize| -> Result<Vec<u64>, ()> {
+        if base_ptr == 0 { return Ok(Vec::new()); }
+        let words = (nfds + 63) / 64;
+        let mut out = Vec::with_capacity(words);
+        for w in 0..words {
+            let word_addr = base_ptr + w * core::mem::size_of::<u64>();
+            if let Some(paddr) = task.vm_manager.translate_vaddr(word_addr) {
+                unsafe { out.push(*(paddr as *const u64)); }
+            } else { return Err(()); }
+        }
+        Ok(out)
+    };
+
+    // Helper: zero fd_set
+    let fd_zero_all = |base_ptr: usize| -> Result<(), ()> {
+        if base_ptr == 0 { return Ok(()); }
+        let words = (nfds + 63) / 64;
+        for w in 0..words {
+            let word_addr = base_ptr + w * core::mem::size_of::<u64>();
+            if let Some(paddr) = task.vm_manager.translate_vaddr(word_addr) {
+                unsafe { *(paddr as *mut u64) = 0u64; }
+            } else { return Err(()); }
+        }
+        Ok(())
+    };
+
+    // Helper: test bit in copied fd_set
+    let fd_is_set = |fd: usize, words: &Vec<u64>| -> bool {
+        if words.is_empty() { return false; }
+        let word_index = fd / 64;
+        if word_index >= words.len() { return false; }
+        let bit_index = fd % 64;
+        (words[word_index] & (1u64 << bit_index)) != 0
+    };
+
+    // Helper: set bit in output fd_set
+    let fd_set_bit = |fd: usize, base_ptr: usize| -> Result<(), ()> {
+        if base_ptr == 0 { return Ok(()); }
+        let word_index = fd / 64;
+        let bit_index = fd % 64;
+        let word_addr = base_ptr + word_index * core::mem::size_of::<u64>();
+        if let Some(paddr) = task.vm_manager.translate_vaddr(word_addr) {
+            unsafe {
+                let word_ptr = paddr as *mut u64;
+                let old = *word_ptr;
+                *word_ptr = old | (1u64 << bit_index);
+            }
+            Ok(())
+        } else { Err(()) }
+    };
+
+    // Copy original sets
+    let read_original = match read_fd_set_words(readfds_ptr) { Ok(v) => v, Err(_) => return errno::to_result(errno::EFAULT) };
+    let write_original = match read_fd_set_words(writefds_ptr) { Ok(v) => v, Err(_) => return errno::to_result(errno::EFAULT) };
+    let except_original = match read_fd_set_words(exceptfds_ptr) { Ok(v) => v, Err(_) => return errno::to_result(errno::EFAULT) };
+
+    // Clear output
+    if fd_zero_all(readfds_ptr).is_err() { return errno::to_result(errno::EFAULT); }
+    if fd_zero_all(writefds_ptr).is_err() { return errno::to_result(errno::EFAULT); }
+    if fd_zero_all(exceptfds_ptr).is_err() { return errno::to_result(errno::EFAULT); }
+
+    let mut ready_count = 0usize;
+
+    // Collect TTY devices for potential blocking and evaluate read readiness
+    // if readfds_ptr != 0 {
+    //     crate::println!("[pselect6] enter nfds={} readfds_ptr=0x{:x} writefds_ptr=0x{:x} exceptfds_ptr=0x{:x} timeout_ptr=0x{:x}", nfds, readfds_ptr, writefds_ptr, exceptfds_ptr, timeout_ptr);
+    // } else {
+    //     crate::println!("[pselect6] enter nfds={} (no readfds) writefds_ptr=0x{:x} exceptfds_ptr=0x{:x} timeout_ptr=0x{:x}", nfds, writefds_ptr, exceptfds_ptr, timeout_ptr);
+    // }
+    // crate::println!(
+    //     "[pselect6] cfg zero_ts_blocks={} regular_ready={} stream_ready={} block_src={}",
+    //     PSELECT_CFG_ZERO_TIMESPEC_BLOCKS,
+    //     PSELECT_CFG_REGULAR_READ_READY,
+    //     PSELECT_CFG_STREAM_READ_READY,
+    //     PSELECT_CFG_BLOCK_SOURCE
+    // );
+    let mut tty_device_ids: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    if readfds_ptr != 0 { // Only evaluate read set if provided
+        for fd in 0..nfds {
+            if !fd_is_set(fd, &read_original) { continue; }
+            let handle_index = match abi.get_handle(fd) { Some(h) => h, None => continue };
+            let kernel_obj = match task.handle_table.get(handle_index) { Some(obj) => obj, None => continue };
+            let mut is_ready = false;
+            if let Some(file_obj) = kernel_obj.as_file() {
+                if let Ok(metadata) = file_obj.metadata() {
+                    match metadata.file_type {
+                        FileType::CharDevice(info) => {
+                            if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
+                                if let Some(cdev) = dev.as_char_device() {
+                                    let is_tty = dev.capabilities().contains(&crate::device::DeviceCapability::Tty);
+                                    if is_tty {
+                                        // TTY: follow select semantics (canonical: full line; raw: any byte)
+                                        if let Some(tty) = dev.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
+                                            is_ready = tty.is_read_ready_for_select();
+                                        }
+                                        tty_device_ids.push(info.device_id);
+                                    } else {
+                                        // Non-TTY char devices (e.g., evdev): use can_read()
+                                        is_ready = cdev.can_read();
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            // Regular files: Linuxでは基本的に read-ready（readはブロックしない想定）
+                            is_ready = true;
+                        }
+                    }
+                }
+                } else if kernel_obj.as_stream().is_some() {
+                    // Stream (pipe/socket-like): ready if any data is available.
+                    if let Some(pipe) = kernel_obj.as_pipe() {
+                        is_ready = pipe.available_bytes() > 0;
+                    } else {
+                        // Non-pipe streams fallback: conservatively not ready
+                        is_ready = false;
+                    }
+            }
+            // if is_ready {
+            //     if let Some(len) = tty_buf_len {
+            //         crate::println!("[pselect6] fd={} kind={} tty={} ready={} tty_buf_len={}", fd, kind, is_tty, is_ready, len);
+            //     } else {
+            //         crate::println!("[pselect6] fd={} kind={} tty={} ready={}", fd, kind, is_tty, is_ready);
+            //     }
+            // }
+            if is_ready {
+                if fd_set_bit(fd, readfds_ptr).is_err() { return errno::to_result(errno::EFAULT); }
+                ready_count += 1;
+            }
+        }
+    }
+    // crate::println!("[pselect6] initial read ready_count={} tty_candidates={}", ready_count, tty_device_ids.len());
+    // Initial summary of ready FDs (before potential blocking)
+    // if ready_count > 0 {
+    //     if readfds_ptr != 0 {
+    //         if let Ok(read_out) = read_fd_set_words(readfds_ptr) {
+    //             for fd in 0..nfds {
+    //                 if fd_is_set(fd, &read_out) {
+    //                     crate::println!("[pselect6] initial ready(read): fd={}", fd);
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     if writefds_ptr != 0 {
+    //         if let Ok(write_out) = read_fd_set_words(writefds_ptr) {
+    //             for fd in 0..nfds {
+    //                 if fd_is_set(fd, &write_out) {
+    //                     crate::println!("[pselect6] initial ready(write): fd={}", fd);
+    //                 }
+    //             }
+    //         }
+    //     }
+    // } else {
+    //     crate::println!("[pselect6] initial ready: none");
+    // }
+
+    // Writefds: naive can_write for char devices if requested
+    if writefds_ptr != 0 { // Only evaluate write set if provided
+        for fd in 0..nfds {
+            if !fd_is_set(fd, &write_original) { continue; }
+            let handle_index = match abi.get_handle(fd) { Some(h) => h, None => continue };
+            let kernel_obj = match task.handle_table.get(handle_index) { Some(obj) => obj, None => continue };
+            let mut is_ready = false;
+            if let Some(file_obj) = kernel_obj.as_file() {
+                if let Ok(metadata) = file_obj.metadata() {
+                    match metadata.file_type {
+                        FileType::CharDevice(info) => {
+                            if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
+                                if let Some(cdev) = dev.as_char_device() { is_ready = cdev.can_write(); }
+                            }
+                        }
+                        _ => { is_ready = true; }
+                    }
+                }
+            } else if kernel_obj.as_stream().is_some() {
+                // Stream (pipe) write-ready if buffer has space and there is a reader
+                if let Some(pipe) = kernel_obj.as_pipe() {
+                    let cap = pipe.buffer_size();
+                    let used = pipe.available_bytes();
+                    let space = cap.saturating_sub(used);
+                    is_ready = pipe.has_readers() && space > 0;
+                } else {
+                    is_ready = true; // best-effort for other stream types
+                }
+            }
+            if is_ready {
+                if fd_set_bit(fd, writefds_ptr).is_err() { return errno::to_result(errno::EFAULT); }
+                ready_count += 1;
+            }
+        }
+        // crate::println!("[pselect6] after write scan total ready_count={}", ready_count);
+    }
+
+    // exceptfds: not implemented yet (leave zero)
+    let _ = except_original; // silence unused warning
+
+    // Decide timeout semantics
+    #[repr(C)] #[derive(Copy, Clone)] struct Timespec { tv_sec: i64, tv_nsec: i64 }
+    let mut timespec_zero = false;
+    if timeout_ptr != 0 {
+        if let Some(paddr) = task.vm_manager.translate_vaddr(timeout_ptr) {
+            let ts = unsafe { *(paddr as *const Timespec) };
+            timespec_zero = ts.tv_sec == 0 && ts.tv_nsec == 0;
+        } else { return errno::to_result(errno::EFAULT); }
+    }
+
+    // Block conditions:
+    //  - no ready descriptors
+    //  - timeout_ptr == 0 (no timeout provided)  ← Linux semantics: {0,0} must NOT block
+    //  - we have a TTY candidate (currently only blockable source)
+    if ready_count == 0 && timeout_ptr == 0 && !tty_device_ids.is_empty() {
+        // crate::println!("[pselect6] blocking on first TTY (device_id={})", tty_device_ids[0]);
+        // Choose first TTY device to wait on
+        if let Some(first_dev_id) = tty_device_ids.first() {
+            if let Some(dev) = DeviceManager::get_manager().get_device(*first_dev_id) {
+                if let Some(tty) = dev.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
+                    // Wait until readable
+                    tty.wait_until_readable(trapframe);
+                }
+            }
+        }
+        // After wake: clear output sets again (already zeroed) and re-evaluate readiness sets
+        ready_count = 0;
+        // Re-run read readiness using same logic (only TTY char devices count as readable; streams left as stub for future)
+        if readfds_ptr != 0 {
+            for fd in 0..nfds {
+                if !fd_is_set(fd, &read_original) { continue; }
+                let handle_index = match abi.get_handle(fd) { Some(h) => h, None => continue };
+                let kernel_obj = match task.handle_table.get(handle_index) { Some(obj) => obj, None => continue };
+                let mut is_ready = false;
+                if let Some(file_obj) = kernel_obj.as_file() {
+                    if let Ok(metadata) = file_obj.metadata() {
+                        match metadata.file_type {
+                            FileType::CharDevice(info) => {
+                                if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
+                                    if let Some(cdev) = dev.as_char_device() {
+                                        let is_tty = dev.capabilities().contains(&crate::device::DeviceCapability::Tty);
+                                        if is_tty {
+                                            if let Some(tty) = dev.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
+                                                is_ready = tty.is_read_ready_for_select();
+                                            } else {
+                                                is_ready = cdev.can_read();
+                                            }
+                                        } else {
+                                            is_ready = cdev.can_read();
+                                        }
+                                    }
+                                }
+                            }
+                            _ => { is_ready = false; }
+                        }
+                    }
+                } else if kernel_obj.as_stream().is_some() {
+                    is_ready = false; // TODO: refine pipe/stream readiness
+                }
+                // if is_ready { crate::println!("[pselect6] re-eval ready(fd={})", fd); }
+                if is_ready {
+                    if fd_set_bit(fd, readfds_ptr).is_err() { return errno::to_result(errno::EFAULT); }
+                    ready_count += 1;
+                }
+            }
+        }
+        // Wake-time summary of ready FDs
+        // if ready_count > 0 {
+        //     if readfds_ptr != 0 {
+        //         if let Ok(read_out) = read_fd_set_words(readfds_ptr) {
+        //             for fd in 0..nfds { if fd_is_set(fd, &read_out) { crate::println!("[pselect6] wake ready(read): fd={}", fd); } }
+        //         }
+        //     }
+        //     if writefds_ptr != 0 {
+        //         if let Ok(write_out) = read_fd_set_words(writefds_ptr) {
+        //             for fd in 0..nfds { if fd_is_set(fd, &write_out) { crate::println!("[pselect6] wake ready(write): fd={}", fd); } }
+        //         }
+        //     }
+        // }
+        // crate::println!("[pselect6] wake re-eval ready_count={}", ready_count);
+    } else if ready_count == 0 && timeout_ptr != 0 && timespec_zero {
+        // timespec == {0,0}: poll semantics, do not block.
+        // crate::println!("[pselect6] zero timespec: immediate timeout (no block)");
+    } else if ready_count == 0 && timeout_ptr != 0 && !timespec_zero {
+        // Non-zero timeout: implement timed wait. Convert timespec to ticks (10ms granularity).
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct Timespec { tv_sec: i64, tv_nsec: i64 }
+        
+        let ts = {
+            if let Some(paddr) = task.vm_manager.translate_vaddr(timeout_ptr) {
+                unsafe { *(paddr as *const Timespec) }
+            } else { return errno::to_result(errno::EFAULT); }
+        };
+        if ts.tv_sec < 0 || ts.tv_nsec < 0 { // invalid -> treat as immediate timeout
+            // crate::println!("[pselect6] invalid timespec (negative); returning 0");
+        } else {
+            let total_ns = (ts.tv_sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(ts.tv_nsec as u64);
+            let mut ticks = crate::timer::ns_to_ticks(total_ns);
+            if ticks == 0 { ticks = 1; } // minimum 1 tick if non-zero
+            // crate::println!("[pselect6] timed wait: ticks={} tty_candidates={}", ticks, tty_device_ids.len());
+
+            if !tty_device_ids.is_empty() {
+                // Wait on first TTY with timeout; then re-evaluate if not timed out
+                if let Some(first_dev_id) = tty_device_ids.first() {
+                    if let Some(dev) = crate::device::manager::DeviceManager::get_manager().get_device(*first_dev_id) {
+                        if let Some(tty) = dev.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
+                            let timed_out = tty.wait_until_readable_with_timeout_ticks(trapframe, ticks);
+                            if !timed_out {
+                                // Re-scan readiness sets (same as after-wake path)
+                                ready_count = 0;
+                                if readfds_ptr != 0 {
+                                    for fd in 0..nfds {
+                                        if !fd_is_set(fd, &read_original) { continue; }
+                                        let handle_index = match abi.get_handle(fd) { Some(h) => h, None => continue };
+                                        let kernel_obj = match task.handle_table.get(handle_index) { Some(obj) => obj, None => continue };
+                                        let mut is_ready = false;
+                                        if let Some(file_obj) = kernel_obj.as_file() {
+                                            if let Ok(metadata) = file_obj.metadata() {
+                                                match metadata.file_type {
+                                                    FileType::CharDevice(info) => {
+                                                        if let Some(dev) = crate::device::manager::DeviceManager::get_manager().get_device(info.device_id) {
+                                                            if let Some(cdev) = dev.as_char_device() {
+                                                                let is_tty = dev.capabilities().contains(&crate::device::DeviceCapability::Tty);
+                                                                if is_tty {
+                                                                    if let Some(tty) = dev.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
+                                                                        is_ready = tty.is_read_ready_for_select();
+                                                                    } else {
+                                                                        is_ready = cdev.can_read();
+                                                                    }
+                                                                } else {
+                                                                    is_ready = cdev.can_read();
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => { is_ready = false; }
+                                                }
+                                            }
+                                        } else if kernel_obj.as_stream().is_some() {
+                                            is_ready = false;
+                                        }
+                                        // crate::println!("[pselect6] wake(re-timed) fd={} ready={}", fd, is_ready);
+                                        if is_ready {
+                                            if fd_set_bit(fd, readfds_ptr).is_err() { return errno::to_result(errno::EFAULT); }
+                                            ready_count += 1;
+                                        }
+                                    }
+                                }
+                                // if ready_count > 0 {
+                                //     if readfds_ptr != 0 {
+                                //         if let Ok(read_out) = read_fd_set_words(readfds_ptr) {
+                                //             for fd in 0..nfds { if fd_is_set(fd, &read_out) { crate::println!("[pselect6] wake ready(read): fd={}", fd); } }
+                                //         }
+                                //     }
+                                // }
+                            } else {
+                                // crate::println!("[pselect6] timed wait on TTY expired");
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No TTY to wait on: sleep until timeout using the task waitpid waker
+                struct TimeoutWakeWaitpid { task_id: usize }
+                impl crate::timer::TimerHandler for TimeoutWakeWaitpid {
+                    fn on_timer_expired(self: alloc::sync::Arc<Self>, _context: usize) {
+                        let w = crate::task::get_waitpid_waker(self.task_id);
+                        w.wake_all();
+                    }
+                }
+                if let Some(t) = mytask() {
+                    let task_id = t.get_id();
+                    let handler: alloc::sync::Arc<dyn crate::timer::TimerHandler> = alloc::sync::Arc::new(TimeoutWakeWaitpid { task_id });
+                    let deadline = crate::timer::get_tick().saturating_add(ticks);
+                    let timer_id = crate::timer::add_timer(deadline, &handler, 0);
+                    let w = crate::task::get_waitpid_waker(task_id);
+                    w.wait(task_id, trapframe);
+                    crate::timer::cancel_timer(timer_id);
+                }
+            }
+        }
+    }
+
+    // Increment PC now before returning
+    trapframe.increment_pc_next(task);
+    // // Summarize which FDs are marked ready in output sets
+    // if ready_count > 0 {
+    //     // Read set summary
+    //     if readfds_ptr != 0 {
+    //         if let Ok(read_out) = read_fd_set_words(readfds_ptr) {
+    //             for fd in 0..nfds {
+    //                 if fd_is_set(fd, &read_out) {
+    //                     crate::println!("[pselect6] ready(read): fd={}", fd);
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     // Write set summary
+    //     if writefds_ptr != 0 {
+    //         if let Ok(write_out) = read_fd_set_words(writefds_ptr) {
+    //             for fd in 0..nfds {
+    //                 if fd_is_set(fd, &write_out) {
+    //                     crate::println!("[pselect6] ready(write): fd={}", fd);
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+    // crate::println!("[pselect6] return ready_count={}", ready_count);
+    ready_count
+}
+
 /// Linux sys_fchmod implementation (stub)
 /// 
 /// Changes the permissions of a file using its file descriptor.
@@ -2464,7 +2912,7 @@ pub fn sys_readlinkat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
         None => return usize::MAX,
     };
     
-    let dirfd = trapframe.get_arg(0) as i32;
+    let _dirfd = trapframe.get_arg(0) as i32;
     let pathname_ptr = trapframe.get_arg(1);
     let buf_ptr = trapframe.get_arg(2);
     let bufsiz = trapframe.get_arg(3) as usize;
