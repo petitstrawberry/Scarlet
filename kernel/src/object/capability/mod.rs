@@ -8,6 +8,7 @@ pub mod file;
 pub mod control;
 pub mod memory_mapping;
 pub mod ipc;
+pub mod selectable;
 
 #[cfg(test)]
 mod control_tests;
@@ -28,6 +29,9 @@ pub use memory_mapping::MemoryMappingOps;
 
 // Re-export IPC types
 pub use ipc::{EventSender, EventReceiver, EventSubscriber};
+
+// Re-export selectable capability types
+pub use selectable::Selectable;
 
 /// Clone operations capability
 /// 

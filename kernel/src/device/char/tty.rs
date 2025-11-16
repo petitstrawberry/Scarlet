@@ -11,6 +11,7 @@ use spin::Mutex;
 use crate::device::{Device, DeviceType, DeviceCapability};
 use crate::arch::Trapframe;
 use crate::device::char::{CharDevice, TtyControl};
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
 use crate::device::manager::DeviceManager;
 use crate::sync::waker::Waker;
@@ -496,6 +497,47 @@ impl TtyDevice {
         self.echo_char(0x08);
         self.echo_char(b' ');
         self.echo_char(0x08);
+    }
+
+}
+
+impl Selectable for TtyDevice {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        if interest.read {
+            set.read = self.is_read_ready_for_select();
+        }
+        if interest.write {
+            // TTY writes are considered ready (no internal backpressure yet)
+            set.write = true;
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        // Only read interest requires actual waiting; write/except treated as always-ready
+        if interest.read {
+            match timeout_ticks {
+                Some(ticks) => {
+                    let timed_out = self.wait_until_readable_with_timeout_ticks(trapframe, ticks);
+                    if timed_out { SelectWaitOutcome::TimedOut } else { SelectWaitOutcome::Ready }
+                }
+                None => {
+                    self.wait_until_readable(trapframe);
+                    SelectWaitOutcome::Ready
+                }
+            }
+        } else {
+            SelectWaitOutcome::Ready
+        }
     }
 }
 

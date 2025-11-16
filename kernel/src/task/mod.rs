@@ -64,6 +64,8 @@ pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
     }
 }
 
+// pub fn get_select_waker(...) was removed; use object-level Selectable::wait_until_ready
+
 /// Get or create a parent waker for waitpid(-1) operations
 /// 
 /// This waker is used when a parent process calls waitpid(-1) to wait for any child to exit.
@@ -154,6 +156,8 @@ pub fn cleanup_parent_waker(parent_id: usize) {
     let mut wakers = wakers_mutex.lock();
     wakers.remove(&parent_id);
 }
+
+// pub fn cleanup_select_waker(...) was removed along with task-level select waker
 
 /// Types of blocked states for tasks
 #[derive(Debug, PartialEq, Clone, Copy)]

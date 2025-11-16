@@ -15,6 +15,7 @@ use crate::{
     object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError},
     DeviceManager
 };
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations};
 use super::{Ext2FileSystem, structures::{EXT2_S_IFMT, EXT2_S_IFREG, EXT2_S_IFDIR}};
@@ -959,5 +960,46 @@ impl FileObject for Ext2CharDeviceFileObject {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn as_selectable(&self) -> Option<&dyn Selectable> {
+        // Expose Selectable only for devices that actually support it (e.g., TTY)
+        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
+            if device.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>().is_some() {
+                return Some(self);
+            }
+        }
+        None
+    }
+}
+
+impl Selectable for Ext2CharDeviceFileObject {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        // Delegate to underlying device when possible (TTY), otherwise conservative defaults
+        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
+            if let Some(tty) = device.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
+                return tty.current_ready(interest);
+            }
+        }
+        let mut set = ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
+            if let Some(tty) = device.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
+                return tty.wait_until_ready(interest, trapframe, timeout_ticks);
+            }
+        }
+        // Non-selectable devices: do not block
+        SelectWaitOutcome::Ready
     }
 }

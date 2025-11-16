@@ -99,4 +99,13 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps {
     }
     
     fn as_any(&self) -> &dyn Any;
+
+    /// Optional capability: expose select/pselect readiness/wait interface.
+    ///
+    /// By default, files are not selectable via this hook. Implementors may
+    /// override and return `Some(self)` when they also implement
+    /// `crate::object::capability::Selectable`.
+    fn as_selectable(&self) -> Option<&dyn crate::object::capability::Selectable> {
+        None
+    }
 }

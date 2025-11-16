@@ -11,6 +11,7 @@ use spin::Mutex;
 
 use crate::object::capability::{StreamOps, StreamError, CloneOps};
 use crate::object::KernelObject;
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 use crate::sync::waker::Waker;
 use super::{StreamIpcOps, IpcError};
 
@@ -35,6 +36,12 @@ pub trait PipeObject: StreamIpcOps + CloneOps {
     
     /// Check if this end of the pipe is writable
     fn is_writable(&self) -> bool;
+
+    /// Optional capability: expose select/pselect readiness/wait interface.
+    ///
+    /// By default, pipes are not exposed via this hook unless the implementation
+    /// also implements `Selectable` and overrides this to return `Some(self)`.
+    fn as_selectable(&self) -> Option<&dyn Selectable> { None }
 }
 
 /// Represents errors specific to pipe operations
@@ -199,7 +206,7 @@ impl StreamOps for PipeEndpoint {
             // No space available - block until space becomes available
             // Block the current task using the pipe write waker
             use crate::task::mytask;
-            if let Some(mut task) = mytask() {
+            if let Some(task) = mytask() {
                 state.write_waker.wait(task.get_id(), task.get_trapframe());
                 
                 // After waking up, retry the write operation
@@ -445,6 +452,8 @@ impl PipeObject for UnidirectionalPipe {
     fn is_writable(&self) -> bool {
         self.endpoint.is_writable()
     }
+
+    fn as_selectable(&self) -> Option<&dyn Selectable> { Some(self) }
 }
 
 impl Clone for UnidirectionalPipe {
@@ -452,6 +461,58 @@ impl Clone for UnidirectionalPipe {
         Self {
             endpoint: self.endpoint.clone(),
         }
+    }
+}
+
+impl Selectable for UnidirectionalPipe {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        // Inspect internal state once
+        let st = self.endpoint.state.lock();
+        if interest.read && self.endpoint.can_read {
+            // Readable if buffer has data or writers are gone (EOF)
+            set.read = !st.buffer.is_empty() || st.writer_count == 0;
+        }
+        if interest.write && self.endpoint.can_write {
+            // Writable if space available or no readers (will error but not block)
+            let available_space = st.max_size.saturating_sub(st.buffer.len());
+            set.write = available_space > 0 || st.reader_count == 0;
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        use crate::task::mytask;
+        let mut waited = false;
+        // Prefer read wait if requested; otherwise write wait; except is ignored.
+        if interest.read && self.endpoint.can_read {
+            let st = self.endpoint.state.lock();
+            if st.buffer.is_empty() && st.writer_count > 0 {
+                if let Some(task) = mytask() {
+                    st.read_waker.wait(task.get_id(), trapframe);
+                    waited = true;
+                }
+            }
+        } else if interest.write && self.endpoint.can_write {
+            let st = self.endpoint.state.lock();
+            let space = st.max_size.saturating_sub(st.buffer.len());
+            if space == 0 && st.reader_count > 0 {
+                if let Some(task) = mytask() {
+                    st.write_waker.wait(task.get_id(), trapframe);
+                    waited = true;
+                }
+            }
+        }
+        let _ = waited;
+        SelectWaitOutcome::Ready
     }
 }
 
