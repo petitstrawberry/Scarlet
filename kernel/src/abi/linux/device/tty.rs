@@ -14,6 +14,8 @@ use crate::device::char::tty::tty_ctl::{SCTL_TTY_GET_KBMODE, SCTL_TTY_SET_KBMODE
 
 /// Linux keyboard ioctl command constants (subset)
 pub const KDGKBMODE: u32 = 0x4B44; // Get keyboard mode
+pub const KDGKBTYPE: u32 = 0x4B33; // Get keyboard type
+pub const KB_101: u32 = 0x02;      // English 101/102-key keyboard
 pub const KDSKBMODE: u32 = 0x4B45; // Set keyboard mode
 /// Linux VT (virtual terminal) ioctl command constants (subset)
 pub const VT_OPENQRY: u32 = 0x5600; // Find available VT number
@@ -89,6 +91,17 @@ pub fn handle_ioctl(
     };
 
     match request {
+        KDGKBTYPE => {
+            // Always return KB_101
+            let task = mytask().ok_or(())?;
+            let vaddr = arg as usize;
+            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+                unsafe { *(paddr as *mut u32) = KB_101; }
+                Ok(Some(0))
+            } else {
+                Ok(Some((-14_isize) as usize))
+            }
+        }
         // Minimal termios support with Scarlet TTY mapping (canonical + read policy)
         TCGETS | TCSETS | TCSETSW | TCSETSF => {
             crate::println!("[tty_ioctl] termios op {:#06x}", request);
