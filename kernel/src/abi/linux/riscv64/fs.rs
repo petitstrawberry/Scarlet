@@ -455,6 +455,17 @@ pub fn sys_openat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
             match abi.allocate_fd(handle as u32) {
                 Ok(fd) => {
                     // crate::println!("sys_openat: allocated fd {} for '{}'", fd, path_str);
+                    // Initialize file status flags (e.g., O_NONBLOCK) from open flags
+                    let mut status_flags: u32 = 0;
+                    if (flags & O_NONBLOCK) != 0 { status_flags |= (O_NONBLOCK as u32); }
+                    let _ = abi.set_file_status_flags(fd, status_flags);
+
+                    // Propagate non-blocking to the underlying object Selectable if available
+                    if let Some(obj) = task.handle_table.get(handle) {
+                        if let Some(sel) = obj.as_selectable() {
+                            sel.set_nonblocking(((status_flags as i32) & O_NONBLOCK) != 0);
+                        }
+                    }
                     fd
                 }
                 Err(_) => errno::to_result(errno::EMFILE), // Too many open files
@@ -584,6 +595,12 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
+    // Determine non-blocking mode
+    let nonblocking = abi
+        .get_file_status_flags(fd)
+        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
+        .unwrap_or(false);
+
     // Check if this is a directory by getting file metadata
     let is_directory = if let Some(file_obj) = kernel_obj.as_file() {
         if let Ok(metadata) = file_obj.metadata() {
@@ -657,8 +674,13 @@ pub fn sys_read(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                         0 // EOF
                     },
                     StreamError::WouldBlock => {
-                        get_scheduler().schedule(trapframe); // Yield to the scheduler
-                        usize::MAX // Unreachable, but needed to satisfy return type
+                        if nonblocking {
+                            trapframe.increment_pc_next(task);
+                            return errno::to_result(errno::EAGAIN);
+                        } else {
+                            get_scheduler().schedule(trapframe); // Yield to the scheduler
+                            usize::MAX // Unreachable, but needed to satisfy return type
+                        }
                     },
                     _ => {
                         // Other errors, return -1
@@ -696,10 +718,24 @@ pub fn sys_write(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         None => return usize::MAX, // Not a stream object
     };
 
+    // Determine non-blocking mode
+    let nonblocking = abi
+        .get_file_status_flags(fd)
+        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
+        .unwrap_or(false);
+
     let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
 
     match stream.write(buffer) {
         Ok(n) => n,
+        Err(StreamError::WouldBlock) => {
+            if nonblocking {
+                return errno::to_result(errno::EAGAIN);
+            } else {
+                get_scheduler().schedule(trapframe);
+                usize::MAX
+            }
+        }
         Err(_) => usize::MAX, // Write error
     }
 }
@@ -763,6 +799,11 @@ pub fn sys_pread64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
 
+    let nonblocking = abi
+        .get_file_status_flags(fd)
+        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
+        .unwrap_or(false);
+
     match file.read_at(position as u64, &mut buffer) {
         Ok(n) => {
             trapframe.increment_pc_next(task);
@@ -773,8 +814,13 @@ pub fn sys_pread64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
             0
         }
         Err(StreamError::WouldBlock) => {
-            get_scheduler().schedule(trapframe);
-            usize::MAX
+            if nonblocking {
+                trapframe.increment_pc_next(task);
+                errno::to_result(errno::EAGAIN)
+            } else {
+                get_scheduler().schedule(trapframe);
+                usize::MAX
+            }
         }
         Err(err) => {
             trapframe.increment_pc_next(task);
@@ -842,14 +888,24 @@ pub fn sys_pwrite64(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
 
     let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
 
+    let nonblocking = abi
+        .get_file_status_flags(fd)
+        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
+        .unwrap_or(false);
+
     match file.write_at(position as u64, buffer) {
         Ok(n) => {
             trapframe.increment_pc_next(task);
             n
         }
         Err(StreamError::WouldBlock) => {
-            get_scheduler().schedule(trapframe);
-            usize::MAX
+            if nonblocking {
+                trapframe.increment_pc_next(task);
+                errno::to_result(errno::EAGAIN)
+            } else {
+                get_scheduler().schedule(trapframe);
+                usize::MAX
+            }
         }
         Err(err) => {
             trapframe.increment_pc_next(task);
@@ -926,6 +982,11 @@ pub fn sys_writev(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         None => return usize::MAX, // Not a stream object
     };
 
+    let nonblocking = abi
+        .get_file_status_flags(fd)
+        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
+        .unwrap_or(false);
+
     // Translate and validate iovec array pointer
     let iovec_vaddr = match task.vm_manager.translate_vaddr(iovec_ptr) {
         Some(addr) => addr as *const IoVec,
@@ -969,6 +1030,15 @@ pub fn sys_writev(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                 // This matches Linux behavior for writev
                 if n < iovec.iov_len {
                     break;
+                }
+            }
+            Err(StreamError::WouldBlock) => {
+                if nonblocking {
+                    // If some bytes were written, return them; otherwise, EAGAIN
+                    if total_written == 0 { return errno::to_result(errno::EAGAIN); } else { break; }
+                } else {
+                    get_scheduler().schedule(trapframe);
+                    return usize::MAX;
                 }
             }
             Err(_) => {
@@ -1626,6 +1696,7 @@ pub struct IoVec {
 /// 
 /// This is a minimal implementation that logs the fcntl commands being used
 /// to help understand what functionality needs to be implemented.
+const LOG_FCNTL: bool = false;
 pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
@@ -1638,7 +1709,7 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     // Log the fcntl command to understand usage patterns
     match cmd {
         F_DUPFD => {
-            crate::println!("[sys_fcntl] F_DUPFD: fd={}, arg={} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_DUPFD: fd={}, arg={} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement F_DUPFD
         },
         F_GETFD => {
@@ -1665,59 +1736,91 @@ pub fn sys_fcntl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             }
         },
         F_GETFL => {
-            crate::println!("[sys_fcntl] F_GETFL: fd={} - NOT IMPLEMENTED", fd);
-            // TODO: Implement F_GETFL - return file status flags
+            if let Some(_handle) = abi.get_handle(fd) {
+                if let Some(flags) = abi.get_file_status_flags(fd) {
+                    return flags as usize;
+                } else {
+                    return usize::MAX;
+                }
+            } else {
+                return usize::MAX;
+            }
         },
         F_SETFL => {
-            crate::println!("[sys_fcntl] F_SETFL: fd={}, flags={:#x} - NOT IMPLEMENTED", fd, arg);
-            // TODO: Implement F_SETFL - set file status flags
+            // Only honor a subset (currently O_NONBLOCK). Preserve other bits as-is.
+            if let Some(_handle) = abi.get_handle(fd) {
+                // Get current status flags and update O_NONBLOCK bit only
+                let curr = abi.get_file_status_flags(fd).unwrap_or(0);
+                let mut new_flags = curr;
+                const O_NONBLOCK_U32: u32 = O_NONBLOCK as u32;
+                if (arg as u32) & O_NONBLOCK_U32 != 0 {
+                    new_flags |= O_NONBLOCK_U32;
+                } else {
+                    new_flags &= !O_NONBLOCK_U32;
+                }
+                if abi.set_file_status_flags(fd, new_flags).is_err() {
+                    return usize::MAX;
+                }
+                // Also propagate O_NONBLOCK to the object-level Selectable if available
+                if let Some(handle) = abi.get_handle(fd) {
+                    if let Some(obj) = task.handle_table.get(handle) {
+                        if let Some(sel) = obj.as_selectable() {
+                            sel.set_nonblocking(((new_flags as i32) & O_NONBLOCK) != 0);
+                        }
+                    }
+                }
+                
+                return 0;
+            } else {
+                return usize::MAX;
+            }
         },
         F_GETLK => {
-            crate::println!("[sys_fcntl] F_GETLK: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_GETLK: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement file locking
         },
         F_SETLK => {
-            crate::println!("[sys_fcntl] F_SETLK: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_SETLK: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement file locking
         },
         F_SETLKW => {
-            crate::println!("[sys_fcntl] F_SETLKW: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_SETLKW: fd={}, lock_ptr={:#x} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement file locking
         },
         F_SETOWN => {
-            crate::println!("[sys_fcntl] F_SETOWN: fd={}, owner={} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_SETOWN: fd={}, owner={} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement F_SETOWN
         },
         F_GETOWN => {
-            crate::println!("[sys_fcntl] F_GETOWN: fd={} - NOT IMPLEMENTED", fd);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_GETOWN: fd={} - NOT IMPLEMENTED", fd); }
             // TODO: Implement F_GETOWN
         },
         F_SETSIG => {
-            crate::println!("[sys_fcntl] F_SETSIG: fd={}, sig={} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_SETSIG: fd={}, sig={} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement F_SETSIG
         },
         F_GETSIG => {
-            crate::println!("[sys_fcntl] F_GETSIG: fd={} - NOT IMPLEMENTED", fd);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_GETSIG: fd={} - NOT IMPLEMENTED", fd); }
             // TODO: Implement F_GETSIG
         },
         F_SETLEASE => {
-            crate::println!("[sys_fcntl] F_SETLEASE: fd={}, lease_type={} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_SETLEASE: fd={}, lease_type={} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement F_SETLEASE
         },
         F_GETLEASE => {
-            crate::println!("[sys_fcntl] F_GETLEASE: fd={} - NOT IMPLEMENTED", fd);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_GETLEASE: fd={} - NOT IMPLEMENTED", fd); }
             // TODO: Implement F_GETLEASE
         },
         F_NOTIFY => {
-            crate::println!("[sys_fcntl] F_NOTIFY: fd={}, events={:#x} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_NOTIFY: fd={}, events={:#x} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement F_NOTIFY
         },
         F_DUPFD_CLOEXEC => {
-            crate::println!("[sys_fcntl] F_DUPFD_CLOEXEC: fd={}, arg={} - NOT IMPLEMENTED", fd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] F_DUPFD_CLOEXEC: fd={}, arg={} - NOT IMPLEMENTED", fd, arg); }
             // TODO: Implement F_DUPFD_CLOEXEC
         },
         _ => {
-            crate::println!("[sys_fcntl] UNKNOWN_CMD: fd={}, cmd={}, arg={:#x} - NOT IMPLEMENTED", fd, cmd, arg);
+            if LOG_FCNTL { crate::println!("[sys_fcntl] UNKNOWN_CMD: fd={}, cmd={}, arg={:#x} - NOT IMPLEMENTED", fd, cmd, arg); }
         }
     }
 
@@ -1853,6 +1956,11 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         Some(s) => s,
         None => return usize::MAX, // Not a stream object
     };
+
+    let nonblocking = abi
+        .get_file_status_flags(fd)
+        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
+        .unwrap_or(false);
     let iovec_vaddr = match task.vm_manager.translate_vaddr(iovec_ptr) {
         Some(addr) => addr as *mut IoVec,
         None => return usize::MAX,
@@ -1885,8 +1993,12 @@ pub fn sys_readv(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             }
             Err(StreamError::EndOfStream) => break,
             Err(StreamError::WouldBlock) => {
-                get_scheduler().schedule(trapframe);
-                return usize::MAX;
+                if nonblocking {
+                    if total_read == 0 { return errno::to_result(errno::EAGAIN); } else { break; }
+                } else {
+                    get_scheduler().schedule(trapframe);
+                    return usize::MAX;
+                }
             }
             Err(_) => {
                 if total_read == 0 {
