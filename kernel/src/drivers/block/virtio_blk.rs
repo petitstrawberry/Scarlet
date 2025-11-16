@@ -32,7 +32,7 @@ use core::{mem, ptr};
 use crate::defer;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_F_ANY_LAYOUT, VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
-use crate::object::capability::MemoryMappingOps;
+use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::{
     device::block::{request::{BlockIORequest, BlockIORequestType, BlockIOResult}, BlockDevice}, 
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
@@ -574,6 +574,8 @@ impl Device for VirtioBlockDevice {
     }
 }
 
+impl Selectable for VirtioBlockDevice {}
+
 impl VirtioDevice for VirtioBlockDevice {
     fn get_base_addr(&self) -> usize {
         self.base_addr
@@ -630,6 +632,8 @@ impl VirtioDevice for VirtioBlockDevice {
         Some(virtqueues[queue_idx].used.flags as *const _ as u64)
     }
 }
+
+
 
 impl BlockDevice for VirtioBlockDevice {
     fn get_disk_name(&self) -> &'static str {

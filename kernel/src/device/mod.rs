@@ -19,6 +19,7 @@ use core::any::Any;
 
 use alloc::vec::Vec;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::Selectable;
 
 /// Device capability flags for neutral feature discovery across ABIs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,7 +73,7 @@ pub enum DeviceType {
 /// All devices must support control operations through the ControlOps trait
 /// and memory mapping operations through the MemoryMappingOps trait.
 /// 
-pub trait Device: Send + Sync + ControlOps + MemoryMappingOps {
+pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;
@@ -154,6 +155,8 @@ impl Device for GenericDevice {
         self
     }
 }
+
+impl Selectable for GenericDevice {}
 
 impl ControlOps for GenericDevice {
     // Generic devices don't support control operations by default

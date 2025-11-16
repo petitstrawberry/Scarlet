@@ -23,6 +23,7 @@ use crate::device::{
     char::CharDevice, graphics::manager::FramebufferResource, manager::DeviceManager, Device, DeviceType
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::Selectable;
 
 /// Linux framebuffer ioctl command constants
 /// These provide compatibility with Linux framebuffer applications
@@ -487,6 +488,8 @@ impl MemoryMappingOps for FramebufferCharDevice {
         self.fb_resource.physical_addr != 0 && self.fb_resource.size > 0
     }
 }
+
+impl Selectable for FramebufferCharDevice {}
 
 impl FramebufferCharDevice {
     /// Build a FbVarScreenInfo reflecting the current framebuffer configuration

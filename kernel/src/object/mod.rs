@@ -260,7 +260,9 @@ impl KernelObject {
     pub fn as_selectable(&self) -> Option<&dyn Selectable> {
         match self {
             KernelObject::File(file_object) => {
-                file_object.as_selectable()
+                // FileObject requires Selectable; upcast trait object
+                let sel: &dyn Selectable = file_object.as_ref();
+                Some(sel)
             }
             KernelObject::Pipe(pipe_object) => {
                 pipe_object.as_selectable()

@@ -48,7 +48,14 @@ pub enum SelectWaitOutcome {
 /// Objects that can be waited on by select/pselect.
 pub trait Selectable {
     /// Return current readiness for the given interest set.
-    fn current_ready(&self, interest: ReadyInterest) -> ReadySet;
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        // Default: treat as always-ready for read/write interests, except is false
+        let mut set = ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
 
     /// Block the current task using the provided trapframe until the interest
     /// becomes ready or the optional timeout (in ticks) expires.
@@ -57,8 +64,23 @@ pub trait Selectable {
     /// readiness, otherwise `SelectWaitOutcome::Ready`.
     fn wait_until_ready(
         &self,
-        interest: ReadyInterest,
-        trapframe: &mut Trapframe,
-        timeout_ticks: Option<u64>,
-    ) -> SelectWaitOutcome;
+        _interest: ReadyInterest,
+        _trapframe: &mut Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        // Default: non-blocking, report Ready
+        SelectWaitOutcome::Ready
+    }
+
+    /// Enable or disable non-blocking I/O semantics on this object.
+    ///
+    /// When enabled, operations that would otherwise block (e.g., reads with
+    /// no data available, writes to a full buffer) should avoid internal waits
+    /// and instead report a WouldBlock condition to the caller.
+    fn set_nonblocking(&self, _enabled: bool) {}
+
+    /// Query whether non-blocking I/O semantics are enabled on this object.
+    fn is_nonblocking(&self) -> bool {
+        true
+    }
 }

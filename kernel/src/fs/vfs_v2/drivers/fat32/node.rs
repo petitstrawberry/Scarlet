@@ -527,6 +527,27 @@ impl FileObject for Fat32FileObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for Fat32FileObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
+}
+
 /// FAT32 directory object
 pub struct Fat32DirectoryObject {
     /// Reference to the FAT32 node
@@ -621,4 +642,25 @@ impl FileObject for Fat32DirectoryObject {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+impl crate::object::capability::selectable::Selectable for Fat32DirectoryObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }

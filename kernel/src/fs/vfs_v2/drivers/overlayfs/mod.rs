@@ -1197,6 +1197,8 @@ impl FileObject for OverlayDirectoryObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for OverlayDirectoryObject {}
+
 /// Driver for creating OverlayFS instances
 ///
 /// This driver implements the FileSystemDriver trait to allow OverlayFS

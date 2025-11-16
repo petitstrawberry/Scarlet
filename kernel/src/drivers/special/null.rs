@@ -16,10 +16,12 @@ use alloc::{sync::Arc, string::String};
 use crate::{
 	device::{self, char::CharDevice, manager::DeviceManager, Device, DeviceType},
 	driver_initcall,
-	object::capability::{ControlOps, MemoryMappingOps},
+	object::capability::{ControlOps, MemoryMappingOps, selectable::Selectable},
 };
 
 pub struct NullDevice;
+
+impl Selectable for NullDevice {} // Use default Selectable implementation
 
 impl Device for NullDevice {
 	fn device_type(&self) -> DeviceType {

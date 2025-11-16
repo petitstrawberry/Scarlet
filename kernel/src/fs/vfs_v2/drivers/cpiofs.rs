@@ -539,6 +539,27 @@ impl FileObject for CpioFileObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for CpioFileObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
+}
+
 /// Directory object for CPIO directories
 pub struct CpioDirectoryObject {
     node: Arc<dyn VfsNode>,
@@ -667,6 +688,27 @@ impl FileObject for CpioDirectoryObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for CpioDirectoryObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
+}
+
 /// Symbolic link object for CPIO symbolic links
 pub struct CpioSymlinkObject {
     node: Arc<dyn VfsNode>,
@@ -781,6 +823,27 @@ impl FileObject for CpioSymlinkObject {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+impl crate::object::capability::selectable::Selectable for CpioSymlinkObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
 
 

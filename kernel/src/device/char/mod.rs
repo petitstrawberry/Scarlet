@@ -2,6 +2,7 @@ use core::any::Any;
 
 use super::Device;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 
 extern crate alloc;
 
@@ -255,6 +256,27 @@ impl MemoryMappingOps for GenericCharDevice {
     fn supports_mmap(&self) -> bool {
         false
     }
+}
+
+impl Selectable for GenericCharDevice {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        if interest.read { set.read = self.can_read(); }
+        if interest.write { set.write = self.can_write(); }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
 
 #[cfg(test)]

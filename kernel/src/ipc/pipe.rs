@@ -116,6 +116,8 @@ pub struct PipeEndpoint {
     can_write: bool,
     /// Unique identifier for debugging
     id: String,
+    /// Per-endpoint non-blocking flag (O_NONBLOCK semantics)
+    nonblocking: core::sync::atomic::AtomicBool,
 }
 
 impl PipeEndpoint {
@@ -137,6 +139,7 @@ impl PipeEndpoint {
             can_read,
             can_write,
             id,
+            nonblocking: core::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -162,6 +165,9 @@ impl StreamOps for PipeEndpoint {
                 // Block the current task using the pipe read waker
                 use crate::task::mytask;
                 if let Some(task) = mytask() {
+                    if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+                        return Err(StreamError::WouldBlock);
+                    }
                     state.read_waker.wait(task.get_id(), task.get_trapframe());
                     
                     // After waking up, retry the read operation
@@ -207,6 +213,9 @@ impl StreamOps for PipeEndpoint {
             // Block the current task using the pipe write waker
             use crate::task::mytask;
             if let Some(task) = mytask() {
+                if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+                    return Err(StreamError::WouldBlock);
+                }
                 state.write_waker.wait(task.get_id(), task.get_trapframe());
                 
                 // After waking up, retry the write operation
@@ -328,6 +337,7 @@ impl Clone for PipeEndpoint {
             can_read: self.can_read,
             can_write: self.can_write,
             id: format!("{}_clone", self.id),
+            nonblocking: core::sync::atomic::AtomicBool::new(self.nonblocking.load(core::sync::atomic::Ordering::Relaxed)),
         };
         
         // Increment reference counts
@@ -513,6 +523,14 @@ impl Selectable for UnidirectionalPipe {
         }
         let _ = waited;
         SelectWaitOutcome::Ready
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.endpoint.nonblocking.store(enabled, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        self.endpoint.nonblocking.load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 

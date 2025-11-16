@@ -515,6 +515,27 @@ impl FileObject for Ext2FileObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for Ext2FileObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
+}
+
 impl Drop for Ext2FileObject {
     fn drop(&mut self) {
         #[cfg(test)]
@@ -793,6 +814,27 @@ impl FileObject for Ext2DirectoryObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for Ext2DirectoryObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
+}
+
 /// ext2 Character Device File Object
 ///
 /// Handles character device operations through ext2 device files.
@@ -960,16 +1002,6 @@ impl FileObject for Ext2CharDeviceFileObject {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-
-    fn as_selectable(&self) -> Option<&dyn Selectable> {
-        // Expose Selectable only for devices that actually support it (e.g., TTY)
-        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
-            if device.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>().is_some() {
-                return Some(self);
-            }
-        }
-        None
     }
 }
 

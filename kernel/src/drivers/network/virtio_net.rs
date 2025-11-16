@@ -29,7 +29,7 @@ use spin::{Mutex, RwLock};
 use core::mem;
 use crate::device::{Device, DeviceType};
 use crate::drivers::virtio::features::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC};
-use crate::object::capability::MemoryMappingOps;
+use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::{
     device::network::{NetworkDevice, DevicePacket, NetworkInterfaceConfig, MacAddress, NetworkStats}, 
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}}, object::capability::ControlOps
@@ -533,6 +533,8 @@ impl VirtioDevice for VirtioNetDevice {
         Some(virtqueues[queue_idx].used.flags as *const _ as u64)
     }
 }
+
+impl Selectable for VirtioNetDevice {} // Use default Selectable implementation
 
 impl NetworkDevice for VirtioNetDevice {
     fn get_interface_name(&self) -> &'static str {

@@ -1185,6 +1185,8 @@ impl FileObject for TmpFileObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for TmpFileObject {}
+
 pub struct TmpFSDriver;
 
 impl FileSystemDriver for TmpFSDriver {

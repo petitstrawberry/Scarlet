@@ -5,6 +5,7 @@
 
 use core::any::Any;
 
+use crate::object::capability::Selectable;
 use crate::object::capability::stream::{StreamOps, StreamError};
 use crate::object::capability::control::ControlOps;
 use crate::object::capability::memory_mapping::MemoryMappingOps;
@@ -30,7 +31,7 @@ pub enum SeekFrom {
 /// file-specific operations like seeking and metadata access, control
 /// operations for device-specific functionality, and memory mapping operations.
 /// Directory reading is handled through normal read() operations.
-pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps {
+pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// Seek to a position in the file stream
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
     
@@ -99,13 +100,4 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps {
     }
     
     fn as_any(&self) -> &dyn Any;
-
-    /// Optional capability: expose select/pselect readiness/wait interface.
-    ///
-    /// By default, files are not selectable via this hook. Implementors may
-    /// override and return `Some(self)` when they also implement
-    /// `crate::object::capability::Selectable`.
-    fn as_selectable(&self) -> Option<&dyn crate::object::capability::Selectable> {
-        None
-    }
 }

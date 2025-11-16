@@ -136,6 +136,8 @@ pub struct TtyDevice {
     // Simple escape sequence parser state for arrow keys in raw-ish mode
     // 0: none, 1: got ESC (0x1B), 2: got ESC '[', 3: got ESC 'O'
     esc_state: Mutex<u8>,
+    // Per-device non-blocking I/O flag (shared by all FDs referencing this TTY)
+    nonblocking: AtomicBool,
 }
 
 impl TtyDevice {
@@ -155,6 +157,7 @@ impl TtyDevice {
             debug_enabled: AtomicBool::new(false),
             kb_mode: core::sync::atomic::AtomicU8::new(0),
             esc_state: Mutex::new(0),
+            nonblocking: AtomicBool::new(false),
         }
     }
 
@@ -538,6 +541,14 @@ impl Selectable for TtyDevice {
         } else {
             SelectWaitOutcome::Ready
         }
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.nonblocking.store(enabled, Ordering::Relaxed);
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Relaxed)
     }
 }
 

@@ -1,6 +1,7 @@
 use core::any::Any;
 
 use crate::{device::{char::CharDevice, manager::DeviceManager, Device, DeviceType}, object::capability::{ControlOps, MemoryMappingOps}};
+use crate::object::capability::selectable::Selectable;
 
 /// Character device for xv6 console that bridges to TTY
 pub struct ConsoleDevice {
@@ -111,4 +112,6 @@ impl MemoryMappingOps for ConsoleDevice {
         false
     }
 }
+
+impl Selectable for ConsoleDevice {}
 

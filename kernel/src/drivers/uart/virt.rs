@@ -7,10 +7,10 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
-        char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo
-        }, Device, DeviceInfo, DeviceType
-    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial, object::capability::{ControlOps, MemoryMappingOps}
+        Device, DeviceInfo, DeviceType, char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType
+        }
+    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, object::capability::{ControlOps, MemoryMappingOps, Selectable}, traits::serial::Serial
 };
 
 pub struct Uart {
@@ -292,6 +292,8 @@ impl InterruptCapableDevice for Uart {
         self.interrupt_id.read().clone()
     }
 }
+
+impl Selectable for Uart {} // Use default Selectable implementation
 
 fn register_uart() {
     use alloc::vec;

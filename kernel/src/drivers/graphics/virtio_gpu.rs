@@ -10,9 +10,9 @@ use alloc::{boxed::Box, sync::Arc};
 use spin::{Mutex, RwLock};
 
 use crate::{
-    device::{graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}, Device, DeviceType},
+    device::{Device, DeviceType, graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}},
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}},
-    mem::page::{allocate_raw_pages, Page}, object::capability::{ControlOps, MemoryMappingOps}, timer::{add_timer, get_tick, ms_to_ticks, SoftwareTimer, TimerHandler},
+    mem::page::{Page, allocate_raw_pages}, object::capability::{ControlOps, MemoryMappingOps, Selectable}, timer::{SoftwareTimer, TimerHandler, add_timer, get_tick, ms_to_ticks},
 };
 use core::{ptr, sync::atomic::fence};
 
@@ -637,6 +637,8 @@ impl MemoryMappingOps for VirtioGpuDevice {
         false
     }
 }
+
+impl Selectable for VirtioGpuDevice {} // Use default Selectable implementation
 
 impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {

@@ -11,6 +11,7 @@ use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::Selectable;
 
 pub mod manager;
 pub mod framebuffer_device;
@@ -207,6 +208,8 @@ impl MemoryMappingOps for GenericGraphicsDevice {
         false
     }
 }
+
+impl Selectable for GenericGraphicsDevice {}
 
 impl GraphicsDevice for GenericGraphicsDevice {
     fn get_display_name(&self) -> &'static str {
