@@ -44,6 +44,8 @@ pub struct LinuxRiscv64Abi {
     fd_to_handle: [Option<u32>; MAX_FDS],
     /// File descriptor flags (e.g., FD_CLOEXEC)
     fd_flags: [u32; MAX_FDS],
+    /// File status flags (e.g., O_NONBLOCK) for F_GETFL/F_SETFL
+    file_status_flags: [u32; MAX_FDS],
     /// Free file descriptor list for O(1) allocation/deallocation
     free_fds: Vec<usize>,
     /// Signal handling state
@@ -61,6 +63,7 @@ impl Default for LinuxRiscv64Abi {
         Self {
             fd_to_handle: [None; MAX_FDS],
             fd_flags: [0; MAX_FDS],
+            file_status_flags: [0; MAX_FDS],
             free_fds,
             signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
@@ -120,6 +123,7 @@ impl LinuxRiscv64Abi {
         if fd < MAX_FDS {
             if let Some(handle) = self.fd_to_handle[fd].take() {
                 self.fd_flags[fd] = 0; // Clear flags when removing fd
+                self.file_status_flags[fd] = 0; // Clear status flags as well
                 // Add the freed fd back to the free list for reuse (O(1))
                 self.free_fds.push(fd);
                 Some(handle)
@@ -192,6 +196,25 @@ impl LinuxRiscv64Abi {
                 }
             }
             
+            Ok(())
+        } else {
+            Err("Invalid file descriptor")
+        }
+    }
+
+    /// Get file status flags (F_GETFL)
+    pub fn get_file_status_flags(&self, fd: usize) -> Option<u32> {
+        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
+            Some(self.file_status_flags[fd])
+        } else {
+            None
+        }
+    }
+
+    /// Set file status flags (F_SETFL)
+    pub fn set_file_status_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
+        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
+            self.file_status_flags[fd] = flags;
             Ok(())
         } else {
             Err("Invalid file descriptor")

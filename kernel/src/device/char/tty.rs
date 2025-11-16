@@ -216,22 +216,35 @@ impl TtyDevice {
 
     /// Read readiness for select/poll semantics.
     /// - Canonical mode: ready only when a full line (ending with '\n') exists.
-    /// - Non-canonical: ready when at least one byte is available.
+    /// - Non-canonical: honor read_min_ready_bytes; in RAW mode head 0xE0 requires a pair.
     pub fn is_read_ready_for_select(&self) -> bool {
         if self.canonical_mode.load(Ordering::Relaxed) {
             let g = self.input_buffer.lock();
-            g.iter().any(|&b| b == b'\n')
-        } else {
-            // For RAW (mode=2) consider E0 as a 2-byte unit; otherwise readable as single bytes.
-            let kb_mode = self.kb_mode.load(Ordering::Relaxed);
-            if kb_mode == 2 {
-                let g = self.input_buffer.lock();
-                if let Some(&first) = g.front() {
-                    if first == 0xE0 { g.len() >= 2 } else { g.len() >= 1 }
-                } else { false }
+            return g.iter().any(|&b| b == b'\n');
+        }
+
+        let min_ready = self.read_min_ready_bytes.load(Ordering::Relaxed) as usize;
+        let kb_mode = self.kb_mode.load(Ordering::Relaxed);
+
+        // If min_ready == 0, read() is defined to return immediately
+        // (possibly 0 bytes), so this is non-blocking -> ready.
+        if min_ready == 0 { return true; }
+
+        if kb_mode == 2 {
+            let g = self.input_buffer.lock();
+            let available = g.len();
+            if let Some(&first) = g.front() {
+                if first == 0xE0 {
+                    if available < 2 { return false; }
+                    return available >= min_ready;
+                }
             } else {
-                self.input_len() > 0
+                return false;
             }
+            available >= min_ready
+        } else {
+            let available = self.input_len();
+            available >= min_ready
         }
     }
     
@@ -520,6 +533,7 @@ impl Selectable for TtyDevice {
     }
 
     fn set_nonblocking(&self, enabled: bool) {
+        crate::println!("[TTY] set_nonblocking: {}", enabled);
         self.nonblocking.store(enabled, Ordering::Relaxed);
     }
 
@@ -647,6 +661,9 @@ impl CharDevice for TtyDevice {
                     }
                 }
                 // Wait for more input
+                if self.nonblocking.load(Ordering::Relaxed) {
+                    return 0; // non-blocking: no data yet
+                }
                 if let Some(task) = mytask() {
                     self.input_waker.wait(task.get_id(), task.get_trapframe());
                 } else {
@@ -689,6 +706,7 @@ impl CharDevice for TtyDevice {
                     (head_is_e0 && buffer.len() >= 2, have)
                 };
                 if need_pair && !have_pair {
+                    if self.nonblocking.load(Ordering::Relaxed) { return 0; }
                     if let Some(task) = mytask() { self.input_waker.wait(task.get_id(), task.get_trapframe()); continue; } else { return 0; }
                 }
             }
@@ -712,6 +730,7 @@ impl CharDevice for TtyDevice {
                 return copy_out(buffer, false);
             }
             // Not enough yet; block until new input arrives
+            if self.nonblocking.load(Ordering::Relaxed) { return 0; }
             if let Some(task) = mytask() {
                 self.input_waker.wait(task.get_id(), task.get_trapframe());
             } else {

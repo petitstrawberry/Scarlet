@@ -90,6 +90,7 @@ pub fn handle_ioctl(
         SCTL_TTY_GET_ECHO, SCTL_TTY_SET_ECHO,
     };
 
+    const LOG_TTY_IOCTL: bool = true;
     match request {
         KDGKBTYPE => {
             // Always return KB_101
@@ -104,7 +105,7 @@ pub fn handle_ioctl(
         }
         // Minimal termios support with Scarlet TTY mapping (canonical + read policy)
         TCGETS | TCSETS | TCSETSW | TCSETSF => {
-            crate::println!("[tty_ioctl] termios op {:#06x}", request);
+            if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] termios op {:#06x}", request); }
             // Validate the FD is a char device with TTY capability
             let is_tty = if let Some(file_obj) = kernel_object.as_file() {
                 if let Ok(metadata) = file_obj.metadata() {
@@ -172,7 +173,7 @@ pub fn handle_ioctl(
                             let _ = control_ops.control(SCTL_TTY_SET_ECHO, if echo_new { 1 } else { 0 });
                             let packed = ((timeout_ms as u32) << 16) | (vmin as u32);
                             let _ = control_ops.control(SCTL_TTY_SET_READ_POLICY, packed as usize);
-                            if prev_canonical != canonical_new || prev_echo != echo_new {
+                            if LOG_TTY_IOCTL && (prev_canonical != canonical_new || prev_echo != echo_new) {
                                 crate::println!("[linux TTY] termios change: canonical={} echo={} vmin={} timeout_ms={}",
                                     canonical_new, echo_new, vmin, timeout_ms);
                             }
@@ -330,7 +331,7 @@ pub fn handle_ioctl(
 
         // Get window size (rows/cols). Return a sensible default 80x25.
         TIOCGWINSZ => {
-            crate::println!("[tty_ioctl] TIOCGWINSZ");
+            if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] TIOCGWINSZ"); }
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
             if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
@@ -344,7 +345,7 @@ pub fn handle_ioctl(
 
         // Text/graphics mode stubs: accept and report KD_TEXT as default
         KDGETMODE => {
-            crate::println!("[tty_ioctl] KDGETMODE");
+            if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] KDGETMODE"); }
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
             if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
@@ -355,7 +356,7 @@ pub fn handle_ioctl(
             }
         }
         KDSETMODE => {
-            crate::println!("[tty_ioctl] KDSETMODE mode={:#x}", arg as u32);
+            if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] KDSETMODE mode={:#x}", arg as u32); }
             // Accept KD_TEXT/KD_GRAPHICS, no-op for now
             let mode = arg as u32;
             match mode {
@@ -365,7 +366,9 @@ pub fn handle_ioctl(
         }
 
         KDGKBMODE | KDSKBMODE => {
-            if request == KDGKBMODE { crate::println!("[tty_ioctl] KDGKBMODE"); } else { crate::println!("[tty_ioctl] KDSKBMODE -> {:#x}", arg as u32); }
+            if LOG_TTY_IOCTL {
+                if request == KDGKBMODE { crate::println!("[tty_ioctl] KDGKBMODE"); } else { crate::println!("[tty_ioctl] KDSKBMODE -> {:#x}", arg as u32); }
+            }
             // Validate the FD is a char device with TTY capability
             let is_tty = if let Some(file_obj) = kernel_object.as_file() {
                 if let Ok(metadata) = file_obj.metadata() {
@@ -423,7 +426,7 @@ pub fn handle_ioctl(
                 match control_ops.control(SCTL_TTY_SET_CANONICAL, arg_bool) {
                     Ok(_) => {
                         let new_canonical = enable_canonical;
-                        if prev_canonical != new_canonical {
+                        if LOG_TTY_IOCTL && prev_canonical != new_canonical {
                             crate::println!("[linux TTY] keyboard mode -> canonical={}", new_canonical);
                         }
                         // Also set Scarlet kb_mode for read() semantics
