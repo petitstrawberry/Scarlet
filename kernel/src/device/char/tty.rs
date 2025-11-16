@@ -12,7 +12,7 @@ use crate::device::{Device, DeviceType, DeviceCapability};
 use crate::arch::Trapframe;
 use crate::device::char::{CharDevice, TtyControl};
 use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
-use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent, EventCapableDevice};
+use crate::device::events::{DeviceEvent, DeviceEventListener, InputEvent};
 use crate::device::manager::DeviceManager;
 use crate::sync::waker::Waker;
 use crate::late_initcall;
@@ -86,10 +86,10 @@ fn try_init_tty_subsystem() -> Result<(), &'static str> {
     let tty_device = Arc::new(TtyDevice::new("tty0", uart_device_id));
     let uart_device = device_manager.get_device(uart_device_id).ok_or("UART device not found")?;
 
-    // Register TTY device as event listener for UART input events
-    if let Some(uart) = uart_device.as_any().downcast_ref::<crate::drivers::uart::virt::Uart>() {
+    // Register TTY device as event listener for UART input events via capability
+    if let Some(ec) = uart_device.as_event_capable() {
         let weak_tty = Arc::downgrade(&tty_device);
-        uart.register_event_listener(weak_tty);
+        ec.register_event_listener(weak_tty);
         crate::early_println!("TTY registered as UART event listener");
     }
 
@@ -187,41 +187,17 @@ impl TtyDevice {
         if self.can_read() { return false; }
         if ticks == 0 { return true; }
 
-        struct TtyTimeoutHandler { device_id: usize }
+        struct TtyTimeoutHandler { tty_ptr: *const TtyDevice }
+        unsafe impl Send for TtyTimeoutHandler {}
+        unsafe impl Sync for TtyTimeoutHandler {}
         impl TimerHandler for TtyTimeoutHandler {
             fn on_timer_expired(self: Arc<Self>, _context: usize) {
-                if let Some(dev) = crate::device::manager::DeviceManager::get_manager().get_device(self.device_id) {
-                    if let Some(tty) = dev.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
-                        tty.wake_input();
-                    }
-                }
+                unsafe { (*self.tty_ptr).wake_input(); }
             }
         }
 
-        // Resolve our own device_id by scanning DeviceManager once
-        let device_id = {
-            let mgr = crate::device::manager::DeviceManager::get_manager();
-            let mut found: Option<usize> = None;
-            let count = mgr.get_devices_count();
-            for id in 1..=count {
-                if let Some(d) = mgr.get_device(id) {
-                    if core::ptr::eq(d.as_any(), self as &dyn core::any::Any) {
-                        found = Some(id);
-                        break;
-                    }
-                }
-            }
-            found
-        };
-
-        // Fallback: if we cannot resolve device id, do a plain wait (no timeout)
-        let Some(device_id) = device_id else {
-            if let Some(task) = mytask() { self.input_waker.wait(task.get_id(), trapframe); }
-            return !self.can_read();
-        };
-
         let deadline = get_tick().saturating_add(ticks);
-        let handler: Arc<dyn TimerHandler> = Arc::new(TtyTimeoutHandler { device_id });
+        let handler: Arc<dyn TimerHandler> = Arc::new(TtyTimeoutHandler { tty_ptr: self as *const TtyDevice });
         let timer_id = add_timer(deadline, &handler, 0);
 
         if let Some(task) = mytask() {

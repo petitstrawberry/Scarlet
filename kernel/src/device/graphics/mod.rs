@@ -128,8 +128,8 @@ pub trait GraphicsDevice: Device {
     /// Flush framebuffer region to display
     fn flush_framebuffer(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str>;
     
-    /// Initialize the graphics device
-    fn init_graphics(&mut self) -> Result<(), &'static str>;
+    /// Initialize the graphics device (idempotent)
+    fn init_graphics(&self) -> Result<(), &'static str>;
 }
 
 /// A generic implementation of a graphics device
@@ -229,7 +229,7 @@ impl GraphicsDevice for GenericGraphicsDevice {
         Ok(())
     }
     
-    fn init_graphics(&mut self) -> Result<(), &'static str> {
+    fn init_graphics(&self) -> Result<(), &'static str> {
         // Generic implementation - no-op
         Ok(())
     }

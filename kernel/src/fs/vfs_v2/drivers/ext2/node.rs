@@ -1007,17 +1007,12 @@ impl FileObject for Ext2CharDeviceFileObject {
 
 impl Selectable for Ext2CharDeviceFileObject {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
-        // Delegate to underlying device when possible (TTY), otherwise conservative defaults
+        // Delegate to underlying Device's Selectable implementation when available
         if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
-            if let Some(tty) = device.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
-                return tty.current_ready(interest);
-            }
+            return device.current_ready(interest);
         }
-        let mut set = ReadySet::none();
-        if interest.read { set.read = true; }
-        if interest.write { set.write = true; }
-        if interest.except { set.except = false; }
-        set
+        // Fallback: conservative defaults (always ready, non-blocking)
+        ReadySet { read: interest.read, write: interest.write, except: interest.except && false }
     }
 
     fn wait_until_ready(
@@ -1027,11 +1022,9 @@ impl Selectable for Ext2CharDeviceFileObject {
         timeout_ticks: Option<u64>,
     ) -> SelectWaitOutcome {
         if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
-            if let Some(tty) = device.as_any().downcast_ref::<crate::device::char::tty::TtyDevice>() {
-                return tty.wait_until_ready(interest, trapframe, timeout_ticks);
-            }
+            return device.wait_until_ready(interest, trapframe, timeout_ticks);
         }
-        // Non-selectable devices: do not block
+        // No device found: do not block
         SelectWaitOutcome::Ready
     }
 }

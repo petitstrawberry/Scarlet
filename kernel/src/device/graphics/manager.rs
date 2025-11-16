@@ -177,16 +177,8 @@ impl GraphicsManager {
             .as_graphics_device()
             .ok_or("Device is not a graphics device")?;
 
-        // Initialize the graphics device if needed
-        if let Some(mut_device) = device.as_any().downcast_ref::<crate::drivers::graphics::virtio_gpu::VirtioGpuDevice>() {
-            // For VirtioGpuDevice, we need to ensure it's initialized
-            let mut_ptr = mut_device as *const _ as *mut crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
-            unsafe {
-                if let Err(e) = (*mut_ptr).init_graphics() {
-                    return Err(e);
-                }
-            }
-        }
+        // Initialize the graphics device if needed via trait (no downcast)
+        graphics_device.init_graphics()?;
 
         // Extract framebuffer configuration
         let config = graphics_device.get_framebuffer_config()?;

@@ -569,7 +569,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 
 pub struct VirtioGpuDevice {
     core: Arc<Mutex<VirtioGpuDeviceCore>>,
-    handler: Option<Arc<dyn TimerHandler>>,
+    handler: RwLock<Option<Arc<dyn TimerHandler>>>,
 }
 
 impl VirtioGpuDevice {
@@ -585,7 +585,7 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         Self {
             core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new(base_addr))),
-            handler: None,
+            handler: RwLock::new(None),
         }
     }
 }
@@ -657,7 +657,7 @@ impl GraphicsDevice for VirtioGpuDevice {
         self.core.lock().flush_framebuffer(x, y, width, height)
     }
 
-    fn init_graphics(&mut self) -> Result<(), &'static str> {
+    fn init_graphics(&self) -> Result<(), &'static str> {
         {
             let core = self.core.lock();
             let mut initialized = core.initialized.lock();
@@ -681,7 +681,8 @@ impl GraphicsDevice for VirtioGpuDevice {
 
         add_timer(get_tick() + ms_to_ticks(16), &handler, 0);
 
-        self.handler = Some(handler);
+        // Store handler via interior mutability
+        *self.handler.write() = Some(handler);
 
         // crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
         Ok(())

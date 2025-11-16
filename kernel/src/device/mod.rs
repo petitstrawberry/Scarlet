@@ -19,6 +19,7 @@ use core::any::Any;
 
 use alloc::vec::Vec;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::device::events::EventCapableDevice;
 use crate::object::capability::selectable::Selectable;
 
 /// Device capability flags for neutral feature discovery across ABIs
@@ -81,6 +82,11 @@ pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     
     /// Optional capabilities exposed by this device (default: none)
     fn capabilities(&self) -> &'static [DeviceCapability] { &[] }
+    
+    /// Cast to EventCapableDevice if this device can emit events
+    fn as_event_capable(&self) -> Option<&dyn EventCapableDevice> {
+        None
+    }
     
     /// Cast to CharDevice if this device is a character device
     fn as_char_device(&self) -> Option<&dyn char::CharDevice> {

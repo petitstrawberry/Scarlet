@@ -207,6 +207,10 @@ impl Device for Uart {
     fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
         &UART_CAPS
     }
+    
+    fn as_event_capable(&self) -> Option<&dyn EventCapableDevice> {
+        Some(self)
+    }
 }
 
 impl CharDevice for Uart {
