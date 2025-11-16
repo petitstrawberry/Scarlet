@@ -242,7 +242,7 @@ impl TtyDevice {
             let g = self.input_buffer.lock();
             g.iter().any(|&b| b == b'\n')
         } else {
-            // RAW(mode=2)のみ E0 の2バイト単位を考慮。それ以外は1バイトで可読。
+            // For RAW (mode=2) consider E0 as a 2-byte unit; otherwise readable as single bytes.
             let kb_mode = self.kb_mode.load(Ordering::Relaxed);
             if kb_mode == 2 {
                 let g = self.input_buffer.lock();
@@ -323,7 +323,7 @@ impl TtyDevice {
                 drop(input_buffer);
                 self.input_waker.wake_all();
             } else if kb_mode == 1 {
-                // MEDIUMRAW: 1バイトの Linux キーコードを返す（押下のみ）
+                // MEDIUMRAW: return 1-byte Linux keycode (press-only)
                 fn ascii_to_linux_keycode(b: u8) -> Option<u8> {
                     match b {
                         b'1' => Some(2), b'2' => Some(3), b'3' => Some(4), b'4' => Some(5), b'5' => Some(6),
@@ -352,7 +352,7 @@ impl TtyDevice {
                     drop(input_buffer);
                     dev.input_waker.wake_all();
                 }
-                // ESC/CSI/SS3 を Linux キーコードに解釈
+                // Interpret ESC/CSI/SS3 as Linux keycodes
                 let mut handled_escape = false;
                 {
                     let mut st = self.esc_state.lock();
@@ -394,7 +394,7 @@ impl TtyDevice {
                     }
                 }
             } else {
-                // RAW: XT Set1 スキャンコード（拡張は E0 プレフィクス）
+                // RAW: XT Set1 scancodes (extended codes are E0-prefixed)
                 fn ascii_to_set1_scancode(b: u8) -> Option<u8> {
                     match b {
                         b'1' => Some(2), b'2' => Some(3), b'3' => Some(4), b'4' => Some(5), b'5' => Some(6),
@@ -466,7 +466,7 @@ impl TtyDevice {
                 }
                 if !handled_escape {
                     if let Some(code) = ascii_to_set1_scancode(byte) {
-                        // 非拡張: 押下/解放を生成
+                        // Non-extended: generate press/release
                         let mut input_buffer = self.input_buffer.lock();
                         input_buffer.push_back(code);
                         input_buffer.push_back(code | 0x80);
@@ -630,7 +630,7 @@ impl CharDevice for TtyDevice {
         // Non-canonical (raw-ish): honor min_ready_bytes policy, and group E0-prefixed scancodes
         if min_ready == 0 {
             // Immediate return with whatever is available (possibly 0)
-            // RAW のみ E0 2バイトを優先的にまとめて返す
+            // For RAW prefer to return E0 2-byte pairs atomically
             let kb_mode = self.kb_mode.load(Ordering::Relaxed);
             if kb_mode == 2 {
                 let mut guard = self.input_buffer.lock();

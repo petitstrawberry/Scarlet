@@ -249,7 +249,7 @@ pub trait AbiModule: Send + Sync + 'static {
         _system_path: &str,
         _config_path: &str,
     ) -> Result<(), &'static str> {
-        // cross-vfs overlay_mount_fromはv2では未サポートのため一旦コメントアウト
+        // cross-vfs overlay_mount_from is not supported in v2, commented out for now
         // let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         // target_vfs.overlay_mount_from(
         //     Some(base_vfs),             // upper_vfs (base VFS)
@@ -283,7 +283,7 @@ pub trait AbiModule: Send + Sync + 'static {
         //     .map_err(|_| "Failed to bind mount /home")?;
         // target_vfs.bind_mount_from(&base_vfs, "/data/shared", "/data/shared")
         //     .map_err(|_| "Failed to bind mount /data/shared")?;
-        // target_vfs.bind_mount_from(&base_vfs, "/", "/scarlet") // Read-onlyは未サポート
+        // target_vfs.bind_mount_from(&base_vfs, "/", "/scarlet") // Read-only is not supported
         //     .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
         Ok(())
     }

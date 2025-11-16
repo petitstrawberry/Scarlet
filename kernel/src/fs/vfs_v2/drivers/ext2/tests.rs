@@ -40,7 +40,7 @@ fn test_ext2_mockdevice_basic_creation() {
             assert_eq!(fs.name(), "ext2");
         },
         Err(e) => {
-            //早期実行で期待される失敗のケース - エラーログは抑制せずに残す
+            // Expected failure case during early execution - keep error logs visible (do not suppress)
             early_println!("[Test] Failed to create ext2 filesystem from mock device: {:?}", e);
             early_println!("[Test] This is expected since our mock device doesn't have proper ext2 structure");
             assert!(
@@ -288,7 +288,7 @@ fn test_ext2_node_creation() {
 #[test_case]
 fn test_ext2_file_object_operations() {
     use super::node::*;
-    // use crate::fs::SeekFrom; // 使用されていないため無効化
+    // use crate::fs::SeekFrom; // disabled because unused
     use crate::object::capability::StreamOps;
     
     // Create a file object

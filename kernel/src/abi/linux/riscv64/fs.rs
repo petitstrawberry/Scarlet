@@ -2386,11 +2386,11 @@ pub fn sys_epoll_pwait(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 ///
 /// Returns: number of ready descriptors, or -1 (usize::MAX) on error.
 pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-    // 改良版 pselect6: fd_set を評価し、必要なら TTY 上でブロックする。
-    // 現在の実装:
-    //  - 可読/書き込み readiness を can_read/can_write で判定
-    //  - timeout==NULL かつ ready=0 で対象 readfds に TTY が含まれる場合は最初の TTY でブロック
-    //  - timeout 非NULL はゼロ値のみ即時タイムアウト扱い (非ゼロは未実装: 即時戻り)
+    // Improved pselect6: evaluate fd_set and block on TTYs if needed.
+    // Current implementation:
+    //  - Determine read/write readiness via can_read/can_write
+    //  - If timeout==NULL and no ready fds and readfds contains a TTY, block on the first TTY
+    //  - If timeout is non-NULL, only zero timeout is treated as immediate timeout (non-zero not implemented: immediate return)
     let task = match mytask() { Some(t) => t, None => return usize::MAX };
     let nfds = trapframe.get_arg(0) as usize;
     let readfds_ptr = trapframe.get_arg(1);
@@ -2399,7 +2399,7 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
     let timeout_ptr = trapframe.get_arg(4); // timespec* or NULL
     let _sigmask_ptr = trapframe.get_arg(5); // ignored for now
 
-    // PC は戻り時に一度だけ進める (ブロックする可能性があるためここでは進めない)
+    // Advance PC only once on return (do not advance here because the call may block)
 
     // Helper: read original fd_set words
     let read_fd_set_words = |base_ptr: usize| -> Result<Vec<u64>, ()> {
@@ -2506,7 +2506,7 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                             }
                         }
                         _ => {
-                            // Regular files: Linuxでは基本的に read-ready（readはブロックしない想定）
+                            // Regular files: on Linux regular files are generally read-ready (reads are assumed not to block)
                             is_ready = true;
                         }
                     }
