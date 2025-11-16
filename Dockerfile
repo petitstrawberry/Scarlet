@@ -41,18 +41,6 @@ RUN git clone https://github.com/mit-pdos/xv6-riscv.git /opt/xv6-riscv && \
     git checkout 2a39c5af63906b3dbd0db58b9f6846ad70f4315d && \
     make fs.img
 
-# Download and configure busybox
-RUN mkdir -p /opt && cd /opt && \
-    git clone https://git.busybox.net/busybox && \
-    cd busybox && \
-    make defconfig && \
-    # Disable TC (Traffic Control) features to avoid CBQ compilation errors
-    sed -i 's/CONFIG_TC=y/# CONFIG_TC is not set/' .config && \
-    sed -i 's/CONFIG_FEATURE_TC_INGRESS=y/# CONFIG_FEATURE_TC_INGRESS is not set/' .config && \
-    sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config && \
-    make CROSS_COMPILE=riscv64-linux-gnu- all && \
-    make CROSS_COMPILE=riscv64-linux-gnu- install
-
 # Install dependencies for Buildroot
 RUN apt update && \
     apt install -y libncurses5-dev wget unzip rsync
@@ -66,12 +54,36 @@ RUN cd /opt && \
 
 # Copy configuration files for Buildroot
 COPY docker/.config /opt/buildroot/.config
-# Create patches directory and copy LTP musl compatibility patch
-RUN mkdir -p /opt/buildroot/package/ltp-testsuite/patches
-COPY docker/0001-exclude-listmount-statmount-for-musl.patch /opt/buildroot/package/ltp-testsuite/patches/ 
 
-# Get source code 
+# Copy deploy script into image for runtime deployment
+COPY tools/deploy_rootfs.sh /opt/scripts/deploy_rootfs.sh
+RUN chmod +x /opt/scripts/deploy_rootfs.sh
+
+# # Create patches directory and copy LTP musl compatibility patch
+# RUN mkdir -p /opt/buildroot/package/ltp-testsuite/patches
+# COPY docker/0001-exclude-listmount-statmount-for-musl.patch /opt/buildroot/package/ltp-testsuite/patches/
+
+# Build Buildroot
 RUN cd /opt/buildroot && \
-    make source
+    make -j 8 && \
+    cd output/images && \
+    mkdir linux-riscv64 && \
+    tar -xf rootfs.tar -C linux-riscv64 && \
+    mkdir -p /opt/prebuilt && \
+    cp rootfs.tar /opt/prebuilt/linux-riscv64.tar
+
+# Build green (pdfreader built with SDL1.2) with debug info
+RUN git clone https://github.com/petitstrawberry/green.git /opt/green && \
+    cd /opt/green && \
+        make DEBUG=1 BUILDROOT=/opt/buildroot && \
+        mkdir -p /opt/prebuilt/bin /opt/prebuilt/lib && \
+        # copy main binary into prebuilt/bin
+        if [ -f /opt/green/green ]; then \
+            cp -a /opt/green/green /opt/prebuilt/bin/green && chmod +x /opt/prebuilt/bin/green; \
+        fi && \
+        # if green installs libraries under usr/lib, mirror them into prebuilt/lib
+        if [ -d /opt/green/usr/lib ]; then \
+            cp -a /opt/green/usr/lib/. /opt/prebuilt/lib/; \
+        fi
 
 WORKDIR /workspaces/Scarlet
