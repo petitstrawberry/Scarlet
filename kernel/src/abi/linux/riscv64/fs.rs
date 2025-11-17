@@ -2659,16 +2659,14 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
 ///
 /// Returns: number of fds with non-zero revents, or -1 (usize::MAX) on error.
 pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
+    use crate::object::capability::selectable::{ReadyInterest, ReadySet};
     use crate::timer::ns_to_ticks;
 
     let task = match mytask() { Some(t) => t, None => return usize::MAX };
 
-    // Linux struct pollfd
     #[repr(C)]
     struct PollFd { fd: i32, events: i16, revents: i16 }
 
-    // Linux poll event flags (subset)
     const POLLIN: i16 = 0x0001;
     const POLLPRI: i16 = 0x0002;
     const POLLOUT: i16 = 0x0004;
@@ -2682,7 +2680,6 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let _sigmask = trapframe.get_arg(3);
     let _sigsetsize = trapframe.get_arg(4);
 
-    // Increment PC early to avoid loops on error/return
     trapframe.increment_pc_next(task);
 
     if fds_ptr == 0 { return usize::MAX; }
@@ -2690,7 +2687,6 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     if kptr.is_null() { return usize::MAX; }
     let fds: &mut [PollFd] = unsafe { core::slice::from_raw_parts_mut(kptr, nfds) };
 
-    // Parse timeout
     #[repr(C)]
     struct LinuxTimespec { tv_sec: i64, tv_nsec: i64 }
     let mut timeout_ticks: Option<u64> = None;
@@ -2705,36 +2701,69 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         }
     }
 
-    // First pass: compute readiness and fill revents
-    let mut any_ready = false;
-    let mut first_selectable_index: Option<usize> = None;
-    for (idx, pfd) in fds.iter_mut().enumerate() {
+    struct EvalResult { ready: bool, selectable: bool }
+
+    let abi_ref = &*abi;
+    let task_ref: &crate::task::Task = &*task;
+
+    let eval_pfd = |pfd: &mut PollFd| -> EvalResult {
         pfd.revents = 0;
-        let fd = pfd.fd;
-        if fd < 0 { pfd.revents |= POLLNVAL; continue; }
-        let fd_usize = fd as usize;
-        let Some(handle) = abi.get_handle(fd_usize) else { pfd.revents |= POLLNVAL; continue; };
-        let Some(kobj) = task.handle_table.get(handle) else { pfd.revents |= POLLNVAL; continue; };
+        if pfd.fd < 0 {
+            pfd.revents |= POLLNVAL;
+            return EvalResult { ready: true, selectable: false };
+        }
+        let fd_usize = pfd.fd as usize;
+        let Some(handle) = abi_ref.get_handle(fd_usize) else {
+            pfd.revents |= POLLNVAL;
+            return EvalResult { ready: true, selectable: false };
+        };
+        let Some(kobj) = task_ref.handle_table.get(handle) else {
+            pfd.revents |= POLLNVAL;
+            return EvalResult { ready: true, selectable: false };
+        };
 
         let want_read = (pfd.events & POLLIN) != 0;
         let want_write = (pfd.events & POLLOUT) != 0;
         let want_except = (pfd.events & POLLPRI) != 0;
 
+        let mut selectable = false;
+
         if let Some(sel) = kobj.as_selectable() {
-            if first_selectable_index.is_none() { first_selectable_index = Some(idx); }
+            selectable = true;
             let rs: ReadySet = sel.current_ready(ReadyInterest { read: want_read, write: want_write, except: want_except });
-            if rs.read { pfd.revents |= POLLIN; }
-            if rs.write { pfd.revents |= POLLOUT; }
-            if rs.except { pfd.revents |= POLLPRI; }
+            if rs.read && want_read { pfd.revents |= POLLIN; }
+            if rs.write && want_write { pfd.revents |= POLLOUT; }
+            if rs.except && want_except { pfd.revents |= POLLPRI; }
         } else {
-            // Non-selectable objects: treat desired directions as ready
             if want_read { pfd.revents |= POLLIN; }
             if want_write { pfd.revents |= POLLOUT; }
         }
-        if pfd.revents != 0 { any_ready = true; }
+
+        if let Some(pipe) = kobj.as_pipe() {
+            if pipe.is_readable() && !pipe.has_writers() {
+                pfd.revents |= POLLHUP;
+                if want_read && (pfd.revents & POLLIN) == 0 {
+                    pfd.revents |= POLLIN;
+                }
+            }
+            if pipe.is_writable() && !pipe.has_readers() {
+                pfd.revents |= POLLERR | POLLHUP;
+            }
+        }
+
+        EvalResult { ready: pfd.revents != 0, selectable }
+    };
+
+    let mut any_ready = false;
+    let mut first_selectable_index: Option<usize> = None;
+    for (idx, pfd) in fds.iter_mut().enumerate() {
+        let eval = eval_pfd(pfd);
+        if eval.ready { any_ready = true; }
+        if first_selectable_index.is_none() && eval.selectable {
+            first_selectable_index = Some(idx);
+        }
     }
 
-    // Blocking path: if nothing ready and timeout is not zero-poll
     if !any_ready {
         let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
         if !zero_poll {
@@ -2742,8 +2771,8 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 let pfd = &fds[wait_idx];
                 if pfd.fd >= 0 {
                     let fd_usize = pfd.fd as usize;
-                    if let Some(handle) = abi.get_handle(fd_usize) {
-                        if let Some(kobj) = task.handle_table.get(handle) {
+                    if let Some(handle) = abi_ref.get_handle(fd_usize) {
+                        if let Some(kobj) = task_ref.handle_table.get(handle) {
                             if let Some(sel) = kobj.as_selectable() {
                                 let want_read = (pfd.events & POLLIN) != 0;
                                 let want_write = (pfd.events & POLLOUT) != 0;
@@ -2759,32 +2788,12 @@ pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
                 }
             }
 
-            // Re-evaluate readiness for all entries
             for pfd in fds.iter_mut() {
-                pfd.revents = 0;
-                let fd = pfd.fd;
-                if fd < 0 { pfd.revents |= POLLNVAL; continue; }
-                let fd_usize = fd as usize;
-                let Some(handle) = abi.get_handle(fd_usize) else { pfd.revents |= POLLNVAL; continue; };
-                let Some(kobj) = task.handle_table.get(handle) else { pfd.revents |= POLLNVAL; continue; };
-                let want_read = (pfd.events & POLLIN) != 0;
-                let want_write = (pfd.events & POLLOUT) != 0;
-                let want_except = (pfd.events & POLLPRI) != 0;
-                if let Some(sel) = kobj.as_selectable() {
-                    let rs: ReadySet = sel.current_ready(ReadyInterest { read: want_read, write: want_write, except: want_except });
-                    if rs.read { pfd.revents |= POLLIN; }
-                    if rs.write { pfd.revents |= POLLOUT; }
-                    if rs.except { pfd.revents |= POLLPRI; }
-                } else {
-                    if want_read { pfd.revents |= POLLIN; }
-                    if want_write { pfd.revents |= POLLOUT; }
-                }
-                // re-count later; no need to reuse any_ready beyond this scope
+                let _ = eval_pfd(pfd);
             }
         }
     }
 
-    // Return count of entries with non-zero revents
     let mut count = 0usize;
     for pfd in fds.iter() {
         if pfd.revents != 0 { count += 1; }
@@ -2872,7 +2881,8 @@ pub fn sys_umask(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
 /// Linux sys_readlinkat implementation
 /// 
-/// Reads the value of a symbolic link relative to a directory file descriptor.
+/// Reads the target of a symbolic link relative to a directory file descriptor.
+/// Properly queries the VFS and does not append a null terminator.
 ///
 /// Arguments:
 /// - abi: LinuxRiscv64Abi context  
@@ -2885,13 +2895,13 @@ pub fn sys_umask(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 /// Returns:
 /// - Number of bytes placed in buf on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_readlinkat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_readlinkat(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX,
+        None => return errno::to_result(errno::EIO),
     };
-    
-    let _dirfd = trapframe.get_arg(0) as i32;
+
+    let dirfd = trapframe.get_arg(0) as i32;
     let pathname_ptr = trapframe.get_arg(1);
     let buf_ptr = trapframe.get_arg(2);
     let bufsiz = trapframe.get_arg(3) as usize;
@@ -2899,71 +2909,87 @@ pub fn sys_readlinkat(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Parse the pathname
-    let path_str = match parse_c_string_from_userspace(task, pathname_ptr, 4096) {
-        Ok(s) => s,
-        Err(_) => return usize::MAX,
-    };
-
-    // crate::println!("sys_readlinkat: dirfd={}, path='{}', bufsiz={}", dirfd, path_str, bufsiz);
-
-    // Convert to absolute path for logging
-    let absolute_path = if path_str.starts_with('/') {
-        path_str.to_string()
-    } else {
-        match to_absolute_path_v2(&task, &path_str) {
-            Ok(p) => p,
-            Err(_) => return usize::MAX,
-        }
-    };
-
-    // Read the symlink using OverlayFS functionality
-    // Handle common symlink patterns for compatibility
-    let symlink_target = match absolute_path.as_str() {
-        "/sys/class/graphics/fb0/device/subsystem" => Some("../../../../bus/platform".to_string()),
-        "/proc/self/exe" => {
-            // Return a generic executable path since we don't track it yet
-            Some("/bin/sh".to_string())
-        },
-        "/dev/stdin" => Some("/proc/self/fd/0".to_string()),
-        "/dev/stdout" => Some("/proc/self/fd/1".to_string()),
-        "/dev/stderr" => Some("/proc/self/fd/2".to_string()),
-        _ => {
-            // TODO: Implement proper symlink reading when OverlayFS supports it
-            crate::println!("sys_readlinkat: symlink reading not yet implemented for '{}'", absolute_path);
-            None
-        }
-    };
-
-    if let Some(target) = symlink_target {
-        let target_bytes = target.as_bytes();
-        let copy_len = core::cmp::min(target_bytes.len(), bufsiz);
-        
-        // Copy the symlink target to user buffer using safe translation
-        if copy_len > 0 {
-            // Translate user virtual address to physical address
-            match task.vm_manager.translate_vaddr(buf_ptr) {
-                Some(physical_addr) => {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            target_bytes.as_ptr(),
-                            physical_addr as *mut u8,
-                            copy_len,
-                        );
-                    }
-                    return copy_len;
-                },
-                None => {
-                    crate::println!("sys_readlinkat: failed to translate user buffer address 0x{:x}", buf_ptr);
-                    return usize::MAX; // EFAULT
-                }
-            }
-        }
+    // Fast path: zero-sized buffer
+    if bufsiz == 0 {
         return 0;
     }
 
-    // Return ENOENT if symlink not found
-    usize::MAX - 1 // -ENOENT
+    // Parse the pathname
+    let path_str = match parse_c_string_from_userspace(task, pathname_ptr, MAX_PATH_LENGTH) {
+        Ok(s) => s,
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+
+    // Acquire VFS
+    let vfs = match task.vfs.as_ref() {
+        Some(v) => v,
+        None => return errno::to_result(errno::EIO),
+    };
+
+    // Determine base directory (entry and mount) for path resolution
+    use crate::fs::vfs_v2::core::VfsFileObject;
+    const AT_FDCWD: i32 = -100;
+
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+        vfs.get_cwd().unwrap_or_else(|| {
+            let root_mount = vfs.mount_tree.root_mount.read().clone();
+            (root_mount.root.clone(), root_mount)
+        })
+    } else {
+        // Resolve base from dirfd
+        let handle = match abi.get_handle(dirfd as usize) {
+            Some(h) => h,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let kernel_obj = match task.handle_table.get(handle) {
+            Some(obj) => obj,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let file_obj = match kernel_obj.as_file() {
+            Some(f) => f,
+            None => return errno::to_result(errno::ENOTDIR),
+        };
+        let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
+            Some(vfs_obj) => vfs_obj,
+            None => return errno::to_result(errno::ENOTDIR),
+        };
+        (vfs_file_obj.get_vfs_entry().clone(), vfs_file_obj.get_mount_point().clone())
+    };
+
+    // Resolve the path from the base (do not follow the final link)
+    let (entry, _mp) = match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+        Ok(v) => v,
+        Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+    };
+
+    // Ensure the target is a symlink and obtain its target
+    let node = entry.node();
+    let metadata = match node.metadata() {
+        Ok(m) => m,
+        Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+    };
+
+    let target = match metadata.file_type {
+        FileType::SymbolicLink(ref t) => t.as_str(),
+        _ => return errno::to_result(errno::EINVAL), // Not a symlink
+    };
+
+    // Copy to user buffer (no null terminator), truncated if needed
+    let target_bytes = target.as_bytes();
+    let copy_len = core::cmp::min(target_bytes.len(), bufsiz);
+
+    let user_buf = match task.vm_manager.translate_vaddr(buf_ptr) {
+        Some(addr) => addr as *mut u8,
+        None => return errno::to_result(errno::EFAULT),
+    };
+
+    if copy_len > 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(target_bytes.as_ptr(), user_buf, copy_len);
+        }
+    }
+
+    copy_len
 }
 
 /// Linux sys_getcwd system call implementation

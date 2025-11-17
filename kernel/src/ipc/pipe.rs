@@ -564,6 +564,24 @@ mod tests {
         assert_eq!(read, data.len());
         assert_eq!(&buffer[..read], data);
     }
+
+    #[test_case]
+    fn test_pipe_nonblocking_behaviour() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(4);
+
+        crate::object::capability::selectable::Selectable::set_nonblocking(&read_end, true);
+        crate::object::capability::selectable::Selectable::set_nonblocking(&write_end, true);
+
+        let mut buffer = [0u8; 1];
+        let read_result = read_end.read(&mut buffer);
+        assert!(matches!(read_result, Err(StreamError::WouldBlock)));
+
+        let data = [1u8, 2, 3, 4];
+        assert_eq!(write_end.write(&data).unwrap(), data.len());
+
+        let would_block = write_end.write(&[5]);
+        assert!(matches!(would_block, Err(StreamError::WouldBlock)));
+    }
     
     #[test_case]
     fn test_pipe_reference_counting() {
