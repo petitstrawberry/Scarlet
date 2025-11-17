@@ -90,7 +90,7 @@ pub fn handle_ioctl(
         SCTL_TTY_GET_ECHO, SCTL_TTY_SET_ECHO,
     };
 
-    const LOG_TTY_IOCTL: bool = true;
+    const LOG_TTY_IOCTL: bool = false;
     match request {
         KDGKBTYPE => {
             // Always return KB_101
