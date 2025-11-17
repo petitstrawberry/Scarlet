@@ -9,7 +9,12 @@ use crate::{
     object::KernelObject,
     task::mytask,
 };
-use crate::device::char::tty::tty_ctl::{SCTL_TTY_GET_KBMODE, SCTL_TTY_SET_KBMODE};
+use crate::device::char::tty::tty_ctl::{
+    SCTL_TTY_GET_KBMODE,
+    SCTL_TTY_GET_WINSIZE,
+    SCTL_TTY_SET_KBMODE,
+    SCTL_TTY_SET_WINSIZE,
+};
 // errno module isn't public here; use literal -EFAULT encoding where needed.
 
 /// Linux keyboard ioctl command constants (subset)
@@ -27,6 +32,7 @@ pub const VT_WAITACTIVE: u32 = 0x560C; // Wait until VT is active
 
 /// Termios/winsize ioctl constants (subset)
 pub const TIOCGWINSZ: u32 = 0x5413; // Get window size
+pub const TIOCSWINSZ: u32 = 0x5414; // Set window size
 pub const TCGETS: u32 = 0x5401;    // Get termios
 pub const TCSETS: u32 = 0x5402;    // Set termios (no wait)
 pub const TCSETSW: u32 = 0x5403;   // Set termios (drain output)
@@ -329,14 +335,51 @@ pub fn handle_ioctl(
             Ok(Some(0))
         }
 
-        // Get window size (rows/cols). Return a sensible default 80x25.
+        // Get window size (rows/cols). Fall back to 80x25 if unavailable.
         TIOCGWINSZ => {
             if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] TIOCGWINSZ"); }
+            if !is_tty_kernel_object(kernel_object) { return Err(()); }
+
             let task = mytask().ok_or(())?;
             let vaddr = arg as usize;
             if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
-                let ws = Winsize { ws_row: 25, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+                let (cols, rows) = if let Some(control_ops) = kernel_object.as_control() {
+                    match control_ops.control(SCTL_TTY_GET_WINSIZE, 0) {
+                        Ok(packed) => {
+                            let packed_u = packed as u32;
+                            let cols = (packed_u >> 16) as u16;
+                            let rows = (packed_u & 0xFFFF) as u16;
+                            (cols, rows)
+                        }
+                        Err(_) => (80, 25),
+                    }
+                } else {
+                    (80, 25)
+                };
+
+                let ws = Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
                 unsafe { core::ptr::write(paddr as *mut Winsize, ws); }
+                Ok(Some(0))
+            } else {
+                Ok(Some((-14_isize) as usize))
+            }
+        }
+
+        // Set window size from Linux winsize structure.
+        TIOCSWINSZ => {
+            if LOG_TTY_IOCTL { crate::println!("[tty_ioctl] TIOCSWINSZ"); }
+            if !is_tty_kernel_object(kernel_object) { return Err(()); }
+
+            let task = mytask().ok_or(())?;
+            let vaddr = arg as usize;
+            if let Some(paddr) = task.vm_manager.translate_vaddr(vaddr) {
+                let ws = unsafe { core::ptr::read(paddr as *const Winsize) };
+                if let Some(control_ops) = kernel_object.as_control() {
+                    let packed = ((ws.ws_col as usize) << 16) | (ws.ws_row as usize);
+                    control_ops.control(SCTL_TTY_SET_WINSIZE, packed).map_err(|_| ())?;
+                } else {
+                    return Err(());
+                }
                 Ok(Some(0))
             } else {
                 Ok(Some((-14_isize) as usize))
@@ -443,16 +486,7 @@ pub fn handle_ioctl(
             #[repr(C)]
             struct KbEntry { kb_table: u8, kb_index: u8, kb_value: u16 }
 
-            let is_tty = if let Some(file_obj) = kernel_object.as_file() {
-                if let Ok(metadata) = file_obj.metadata() {
-                    if let FileType::CharDevice(info) = metadata.file_type {
-                        if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
-                            dev.capabilities().iter().any(|c| *c == DeviceCapability::Tty)
-                        } else { false }
-                    } else { false }
-                } else { false }
-            } else { false };
-            if !is_tty { return Err(()); }
+            if !is_tty_kernel_object(kernel_object) { return Err(()); }
 
             fn us_kmap(norm: bool, idx: usize) -> u16 {
                 // Linux console keymap encoding: K(t,v) = ((t<<8)|v)
@@ -578,4 +612,17 @@ pub fn handle_ioctl(
         }
         _ => Ok(None),
     }
+}
+
+fn is_tty_kernel_object(kernel_object: &KernelObject) -> bool {
+    if let Some(file_obj) = kernel_object.as_file() {
+        if let Ok(metadata) = file_obj.metadata() {
+            if let FileType::CharDevice(info) = metadata.file_type {
+                if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
+                    return dev.capabilities().iter().any(|c| *c == DeviceCapability::Tty);
+                }
+            }
+        }
+    }
+    false
 }
