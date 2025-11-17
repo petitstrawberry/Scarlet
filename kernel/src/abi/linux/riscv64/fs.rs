@@ -2493,7 +2493,7 @@ pub fn sys_epoll_pwait(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 ///
 /// Returns: number of ready descriptors, or -1 (usize::MAX) on error.
 pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
+    use crate::object::capability::selectable::{ReadyInterest, ReadySet};
     use crate::timer::ns_to_ticks;
 
     let task = match mytask() { Some(t) => t, None => return usize::MAX };
@@ -2591,7 +2591,7 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
                 if let Some(handlew) = abi.get_handle(fd_wait) {
                     if let Some(kobjw) = task.handle_table.get(handlew) {
                         if let Some(sel) = kobjw.as_selectable() {
-                            let _outcome: SelectWaitOutcome = sel.wait_until_ready(
+                            let _ = sel.wait_until_ready(
                                 ReadyInterest { read: want_read, write: want_write, except: want_except },
                                 trapframe,
                                 timeout_ticks,
@@ -2646,6 +2646,150 @@ pub fn sys_pselect6(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
 
     trapframe.increment_pc_next(task);
     ready_count
+}
+
+/// Minimal Linux ppoll implementation
+///
+/// Arguments (RISC-V):
+///   arg0: fds_ptr (struct pollfd*)
+///   arg1: nfds (usize)
+///   arg2: timeout_ptr (timespec*) or NULL
+///   arg3: sigmask (ignored)
+///   arg4: sigsetsize (ignored)
+///
+/// Returns: number of fds with non-zero revents, or -1 (usize::MAX) on error.
+pub fn sys_ppoll(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
+    use crate::timer::ns_to_ticks;
+
+    let task = match mytask() { Some(t) => t, None => return usize::MAX };
+
+    // Linux struct pollfd
+    #[repr(C)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+
+    // Linux poll event flags (subset)
+    const POLLIN: i16 = 0x0001;
+    const POLLPRI: i16 = 0x0002;
+    const POLLOUT: i16 = 0x0004;
+    const POLLERR: i16 = 0x0008;
+    const POLLHUP: i16 = 0x0010;
+    const POLLNVAL: i16 = 0x0020;
+
+    let fds_ptr = trapframe.get_arg(0);
+    let nfds = trapframe.get_arg(1) as usize;
+    let timeout_ptr = trapframe.get_arg(2);
+    let _sigmask = trapframe.get_arg(3);
+    let _sigsetsize = trapframe.get_arg(4);
+
+    // Increment PC early to avoid loops on error/return
+    trapframe.increment_pc_next(task);
+
+    if fds_ptr == 0 { return usize::MAX; }
+    let kptr = match task.vm_manager.translate_vaddr(fds_ptr) { Some(p) => p as *mut PollFd, None => return usize::MAX };
+    if kptr.is_null() { return usize::MAX; }
+    let fds: &mut [PollFd] = unsafe { core::slice::from_raw_parts_mut(kptr, nfds) };
+
+    // Parse timeout
+    #[repr(C)]
+    struct LinuxTimespec { tv_sec: i64, tv_nsec: i64 }
+    let mut timeout_ticks: Option<u64> = None;
+    if timeout_ptr != 0 {
+        let tsp = match task.vm_manager.translate_vaddr(timeout_ptr) { Some(p) => p as *const LinuxTimespec, None => return usize::MAX };
+        let ts = unsafe { core::ptr::read_unaligned(tsp) };
+        if ts.tv_sec == 0 && ts.tv_nsec == 0 { timeout_ticks = Some(0); }
+        else {
+            let ns = (ts.tv_sec as i128) * 1_000_000_000i128 + (ts.tv_nsec as i128);
+            let ns_u = if ns <= 0 { 0 } else { (ns as u128) as u64 };
+            timeout_ticks = Some(ns_to_ticks(ns_u));
+        }
+    }
+
+    // First pass: compute readiness and fill revents
+    let mut any_ready = false;
+    let mut first_selectable_index: Option<usize> = None;
+    for (idx, pfd) in fds.iter_mut().enumerate() {
+        pfd.revents = 0;
+        let fd = pfd.fd;
+        if fd < 0 { pfd.revents |= POLLNVAL; continue; }
+        let fd_usize = fd as usize;
+        let Some(handle) = abi.get_handle(fd_usize) else { pfd.revents |= POLLNVAL; continue; };
+        let Some(kobj) = task.handle_table.get(handle) else { pfd.revents |= POLLNVAL; continue; };
+
+        let want_read = (pfd.events & POLLIN) != 0;
+        let want_write = (pfd.events & POLLOUT) != 0;
+        let want_except = (pfd.events & POLLPRI) != 0;
+
+        if let Some(sel) = kobj.as_selectable() {
+            if first_selectable_index.is_none() { first_selectable_index = Some(idx); }
+            let rs: ReadySet = sel.current_ready(ReadyInterest { read: want_read, write: want_write, except: want_except });
+            if rs.read { pfd.revents |= POLLIN; }
+            if rs.write { pfd.revents |= POLLOUT; }
+            if rs.except { pfd.revents |= POLLPRI; }
+        } else {
+            // Non-selectable objects: treat desired directions as ready
+            if want_read { pfd.revents |= POLLIN; }
+            if want_write { pfd.revents |= POLLOUT; }
+        }
+        if pfd.revents != 0 { any_ready = true; }
+    }
+
+    // Blocking path: if nothing ready and timeout is not zero-poll
+    if !any_ready {
+        let zero_poll = matches!(timeout_ticks, Some(t) if t == 0);
+        if !zero_poll {
+            if let Some(wait_idx) = first_selectable_index {
+                let pfd = &fds[wait_idx];
+                if pfd.fd >= 0 {
+                    let fd_usize = pfd.fd as usize;
+                    if let Some(handle) = abi.get_handle(fd_usize) {
+                        if let Some(kobj) = task.handle_table.get(handle) {
+                            if let Some(sel) = kobj.as_selectable() {
+                                let want_read = (pfd.events & POLLIN) != 0;
+                                let want_write = (pfd.events & POLLOUT) != 0;
+                                let want_except = (pfd.events & POLLPRI) != 0;
+                                let _ = sel.wait_until_ready(
+                                    ReadyInterest { read: want_read, write: want_write, except: want_except },
+                                    trapframe,
+                                    timeout_ticks,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Re-evaluate readiness for all entries
+            for pfd in fds.iter_mut() {
+                pfd.revents = 0;
+                let fd = pfd.fd;
+                if fd < 0 { pfd.revents |= POLLNVAL; continue; }
+                let fd_usize = fd as usize;
+                let Some(handle) = abi.get_handle(fd_usize) else { pfd.revents |= POLLNVAL; continue; };
+                let Some(kobj) = task.handle_table.get(handle) else { pfd.revents |= POLLNVAL; continue; };
+                let want_read = (pfd.events & POLLIN) != 0;
+                let want_write = (pfd.events & POLLOUT) != 0;
+                let want_except = (pfd.events & POLLPRI) != 0;
+                if let Some(sel) = kobj.as_selectable() {
+                    let rs: ReadySet = sel.current_ready(ReadyInterest { read: want_read, write: want_write, except: want_except });
+                    if rs.read { pfd.revents |= POLLIN; }
+                    if rs.write { pfd.revents |= POLLOUT; }
+                    if rs.except { pfd.revents |= POLLPRI; }
+                } else {
+                    if want_read { pfd.revents |= POLLIN; }
+                    if want_write { pfd.revents |= POLLOUT; }
+                }
+                // re-count later; no need to reuse any_ready beyond this scope
+            }
+        }
+    }
+
+    // Return count of entries with non-zero revents
+    let mut count = 0usize;
+    for pfd in fds.iter() {
+        if pfd.revents != 0 { count += 1; }
+    }
+    count
 }
 
 /// Linux sys_fchmod implementation (stub)

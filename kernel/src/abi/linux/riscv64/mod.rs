@@ -782,6 +782,7 @@ syscall_table! {
     Pread64 = 67 => fs::sys_pread64,
     Pwrite64 = 68 => fs::sys_pwrite64,
     Pselect6 = 72 => fs::sys_pselect6,
+    Ppoll = 73 => fs::sys_ppoll,
     NewFstAtAt = 79 => fs::sys_newfstatat,
     NewFstat = 80 => fs::sys_newfstat,
     ReadLinkAt = 78 => fs::sys_readlinkat,
