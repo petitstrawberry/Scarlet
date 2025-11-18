@@ -91,6 +91,6 @@ RUN git clone https://github.com/petitstrawberry/fbdoom.git /opt/fbdoom && \
     cd /opt/fbdoom/fbdoom && \
     make CROSS_COMPILE=riscv64-buildroot-linux-musl- V=1 && \
     mkdir -p /opt/prebuilt/bin && \
-    cp -a /opt/fbdoom/fbdoom/build/fbdoom /opt/prebuilt/bin/fbdoom && chmod +x /opt/prebuilt/bin/fbdoom
+    cp -a /opt/fbdoom/fbdoom/fbdoom /opt/prebuilt/bin/fbdoom && chmod +x /opt/prebuilt/bin/fbdoom
 
 WORKDIR /workspaces/Scarlet
