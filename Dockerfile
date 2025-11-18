@@ -1,6 +1,6 @@
 FROM ubuntu:25.04
 
-ENV PATH=/root/.cargo/bin:/opt/bin:$PATH
+ENV PATH=/root/.cargo/bin:/opt/bin:/opt/buildroot/output/host/bin:$PATH
 ENV MAKEFLAGS=-j$(($(nproc)-2))
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
@@ -75,15 +75,22 @@ RUN cd /opt/buildroot && \
 # Build green (pdfreader built with SDL1.2) with debug info
 RUN git clone https://github.com/petitstrawberry/green.git /opt/green && \
     cd /opt/green && \
-        make DEBUG=1 BUILDROOT=/opt/buildroot && \
-        mkdir -p /opt/prebuilt/bin /opt/prebuilt/lib && \
-        # copy main binary into prebuilt/bin
-        if [ -f /opt/green/green ]; then \
-            cp -a /opt/green/green /opt/prebuilt/bin/green && chmod +x /opt/prebuilt/bin/green; \
-        fi && \
-        # if green installs libraries under usr/lib, mirror them into prebuilt/lib
-        if [ -d /opt/green/usr/lib ]; then \
-            cp -a /opt/green/usr/lib/. /opt/prebuilt/lib/; \
-        fi
+    make DEBUG=1 BUILDROOT=/opt/buildroot && \
+    mkdir -p /opt/prebuilt/bin /opt/prebuilt/lib && \
+    # copy main binary into prebuilt/bin
+    if [ -f /opt/green/green ]; then \
+        cp -a /opt/green/green /opt/prebuilt/bin/green && chmod +x /opt/prebuilt/bin/green; \
+    fi && \
+    # if green installs libraries under usr/lib, mirror them into prebuilt/lib
+    if [ -d /opt/green/usr/lib ]; then \
+        cp -a /opt/green/usr/lib/. /opt/prebuilt/lib/; \
+    fi
+
+# Build fbdoom
+RUN git clone https://github.com/petitstrawberry/fbdoom.git /opt/fbdoom && \
+    cd /opt/fbdoom/fbdoom && \
+    make CROSS_COMPILE=riscv64-buildroot-linux-musl- V=1 && \
+    mkdir -p /opt/prebuilt/bin && \
+    cp -a /opt/fbdoom/fbdoom/build/fbdoom /opt/prebuilt/bin/fbdoom && chmod +x /opt/prebuilt/bin/fbdoom
 
 WORKDIR /workspaces/Scarlet
