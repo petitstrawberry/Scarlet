@@ -511,7 +511,16 @@ impl Scheduler {
         // let trapframe = cpu.get_trapframe();
         // crate::early_println!("[SCHED]   before Trapframe {:#x?}", trapframe);
 
-        cpu.set_kernel_stack(task.get_kernel_stack_bottom());
+        // Prefer the high-VA kernel stack window if available
+        let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+            // top = base + guard + TASK_KERNEL_STACK_SIZE
+            (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+        } else {
+            task.get_kernel_stack_bottom()
+        };
+
+        // crate::early_println!("[SCHED]   Setting kernel stack to {:#x}", sp);
+        cpu.set_kernel_stack(sp);
         
         // Handle trapframe and vcpu switching - use raw pointer to avoid borrow checker issues
         // This is safe because we're accessing different fields of the same struct

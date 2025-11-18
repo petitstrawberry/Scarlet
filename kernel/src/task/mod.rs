@@ -10,10 +10,11 @@ extern crate alloc;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{arch::{Arch, KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, TASK_KERNEL_STACK_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{EventContent, event::ProcessControlType}, mem::page::{Page, allocate_raw_pages, free_boxed_page}, object::handle::HandleTable, sched::scheduler::{Scheduler, get_scheduler}, timer::{TimerHandler, add_timer, get_tick}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}}};
+use crate::{arch::{KernelContext, Trapframe, get_cpu, trap::user::arch_switch_to_user_space, vcpu::Vcpu, vm::alloc_virtual_address_space}, environment::{DEAFAULT_MAX_TASK_DATA_SIZE, DEAFAULT_MAX_TASK_STACK_SIZE, DEAFAULT_MAX_TASK_TEXT_SIZE, KERNEL_VM_STACK_END, PAGE_SIZE, USER_STACK_END}, fs::VfsManager, ipc::{EventContent, event::ProcessControlType}, mem::page::{Page, allocate_raw_pages, free_boxed_page}, object::handle::HandleTable, sched::scheduler::{Scheduler, get_scheduler}, timer::{TimerHandler, add_timer, get_tick}, vm::{manager::VirtualMemoryManager, user_kernel_vm_init, user_vm_init, vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion}, map_task_kernel_stack_window}};
 use crate::abi::{scarlet::ScarletAbi, AbiModule};
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
+use core::ops::Range;
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -177,6 +178,12 @@ pub enum TaskType {
     User,
 }
 
+/// ABI Zone structure holding a memory range with an owned ABI module.
+pub struct AbiZone {
+    pub range: Range<usize>,
+    pub abi: Box<dyn AbiModule + Send + Sync>,
+}
+
 pub struct Task {
     id: usize,
     pub name: String,
@@ -203,8 +210,11 @@ pub struct Task {
     children: Vec<usize>,          /* List of child task IDs */
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
-    /// Dynamic ABI
-    pub abi: Option<Box<dyn AbiModule>>,
+    /// Default ABI for this task. Determined from ELF OSABI etc.
+    pub default_abi: Box<dyn AbiModule + Send + Sync>,
+
+    /// ABI zones map. Key is the start address of the range.
+    pub abi_zones: BTreeMap<usize, AbiZone>,
 
     /// Virtual File System Manager
     /// 
@@ -241,6 +251,9 @@ pub struct Task {
     pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
     /// Event processing enabled flag (similar to interrupt enable/disable)
     pub events_enabled: Mutex<bool>,
+
+    /// Kernel stack window base in shared kernel PT: (slot_index, base_vaddr)
+    kernel_stack_window_base: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -323,13 +336,15 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            abi: Some(Box::new(ScarletAbi::default())), // Default ABI
+            default_abi: Box::new(ScarletAbi::default()), // Default ABI
+            abi_zones: BTreeMap::new(),
             vfs: None,
             handle_table: HandleTable::new(),
             time_slice: 10, // Assign 10 ticks by default
             software_timers_handlers: Vec::new(),
             event_queue: spin::Mutex::new(crate::ipc::event::TaskEventQueue::new()),
             events_enabled: spin::Mutex::new(true), // Events enabled by default
+            kernel_stack_window_base: None,
         };
 
         *taskid += 1;
@@ -356,6 +371,10 @@ impl Task {
                 /* PC will be set when loading the ELF binary */
             }
         }
+
+        // Map kernel stack into shared kernel PT at unique high VA window
+        // This must be done after VM initialization so kernel PT is ready
+        map_task_kernel_stack_window(self).expect("Failed to map kernel stack window");
         
         /* Set the task state to Ready */
         self.state = TaskState::Ready;
@@ -822,6 +841,28 @@ impl Task {
         self.exit_status
     }
 
+    /// Resolve the ABI to use for the given address
+    /// 
+    /// This method returns a mutable reference to the ABI module that should be used
+    /// for a system call issued from the given address. It searches the ABI zones map
+    /// and returns the appropriate ABI, falling back to the default ABI if no zone matches.
+    /// 
+    /// # Arguments
+    /// * `addr` - The program counter address where the system call was issued
+    /// 
+    /// # Returns
+    /// A mutable reference to the ABI module to use
+    pub fn resolve_abi_mut(&mut self, addr: usize) -> &mut (dyn AbiModule + Send + Sync) {
+        // Search for the zone containing addr using efficient BTreeMap range query
+        if let Some((_start, zone)) = self.abi_zones.range_mut(..=addr).next_back() {
+            if zone.range.contains(&addr) {
+                return zone.abi.as_mut();
+            }
+        }
+        // No zone found, return default ABI
+        self.default_abi.as_mut()
+    }
+
     /// Get the file descriptor table
     /// 
     /// # Returns
@@ -937,11 +978,15 @@ impl Task {
         // Copy register states
         self.vcpu.copy_iregs_to(&mut child.vcpu.iregs);
         
-        // Set the ABI
-        if let Some(abi) = &self.abi {
-            child.abi = Some(abi.clone_boxed());
-        } else {
-            child.abi = None; // No ABI set
+        // Clone the default ABI and ABI zones
+        child.default_abi = self.default_abi.clone_boxed();
+        // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
+        for (start, zone) in &self.abi_zones {
+            let new_zone = AbiZone {
+                range: zone.range.clone(),
+                abi: zone.abi.clone_boxed(),
+            };
+            child.abi_zones.insert(*start, new_zone);
         }
         
         // Copy state such as data size
@@ -969,13 +1014,6 @@ impl Task {
             } else {
                 child.vfs = None;
             }
-        }
-
-        // Set the ABI
-        if let Some(abi) = &self.abi {
-            child.abi = Some(abi.clone_boxed());
-        } else {
-            child.abi = None; // No ABI set
         }
 
         // Initialize kernel context
@@ -1155,51 +1193,50 @@ impl Task {
         }
         
         // Delegate to ABI module for event processing
-        if let Some(abi) = &self.abi {
-            const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
-            let mut processed_count = 0;
+        let abi = &self.default_abi;
+        const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
+        let mut processed_count = 0;
+        
+        // Process events with limits to prevent infinite loops
+        while processed_count < MAX_EVENTS_PER_CYCLE {
+            let event = {
+                let mut queue = self.event_queue.lock();
+                queue.dequeue()
+            };
             
-            // Process events with limits to prevent infinite loops
-            while processed_count < MAX_EVENTS_PER_CYCLE {
-                let event = {
-                    let mut queue = self.event_queue.lock();
-                    queue.dequeue()
-                };
-                
-                match event {
-                    Some(event) => {
-                        processed_count += 1;
-                        
-                        // Check if this is a critical event that requires immediate attention
-                        let is_critical = self.is_critical_event(&event);
-                        
-                        // Let ABI handle the event
-                        abi.handle_event(event, self.id as u32)?;
-                        
-                        // Check if events were disabled during handling
-                        if !self.events_enabled() {
-                            break;
-                        }
-                        
-                        // If we processed a critical event, we can stop here
-                        // to allow the ABI module to take appropriate action
-                        if is_critical {
-                            break;
-                        }
+            match event {
+                Some(event) => {
+                    processed_count += 1;
+                    
+                    // Check if this is a critical event that requires immediate attention
+                    let is_critical = self.is_critical_event(&event);
+                    
+                    // Let ABI handle the event
+                    abi.handle_event(event, self.id as u32)?;
+                    
+                    // Check if events were disabled during handling
+                    if !self.events_enabled() {
+                        break;
                     }
-                    None => break, // No more events
+                    
+                    // If we processed a critical event, we can stop here
+                    // to allow the ABI module to take appropriate action
+                    if is_critical {
+                        break;
+                    }
                 }
+                None => break, // No more events
             }
-            
-            // If we hit the limit and there are still events, the scheduler
-            // will call us again on the next cycle
-            if processed_count == MAX_EVENTS_PER_CYCLE {
-                let queue = self.event_queue.lock();
-                if !queue.is_empty() {
-                    // Log that we're deferring events to next cycle
-                    // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle", 
-                    //                      self.id, queue.len());
-                }
+        }
+        
+        // If we hit the limit and there are still events, the scheduler
+        // will call us again on the next cycle
+        if processed_count == MAX_EVENTS_PER_CYCLE {
+            let queue = self.event_queue.lock();
+            if !queue.is_empty() {
+                // Log that we're deferring events to next cycle
+                // crate::early_println!("Task {}: Deferring {} events to next scheduler cycle", 
+                //                      self.id, queue.len());
             }
         }
         
@@ -1267,6 +1304,16 @@ impl Task {
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
         self.kernel_context.get_trapframe()
     }
+
+    /// Internal: set kernel stack window base (slot index and base vaddr)
+    pub fn set_kernel_stack_window_base(&mut self, base: Option<(usize, usize)>) {
+        self.kernel_stack_window_base = base;
+    }
+
+    /// Get kernel stack window base (slot index and base vaddr)
+    pub fn get_kernel_stack_window_base(&self) -> Option<(usize, usize)> {
+        self.kernel_stack_window_base
+    }
 }
 
 #[derive(Debug)]
@@ -1283,6 +1330,13 @@ impl WaitError {
             WaitError::ChildNotExited(msg) => msg,
             WaitError::ChildTaskNotFound(msg) => msg,
         }
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        // Best-effort teardown of kernel stack window mapping
+        crate::vm::unmap_task_kernel_stack_window(self);
     }
 }
 

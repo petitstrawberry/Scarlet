@@ -170,8 +170,8 @@ fn trap_init(riscv: &mut Riscv64) {
     let sie: usize = 0x20;
     unsafe {
         asm!("
+        csrci sstatus, 0x2 // Disable interrupts
         csrw  sie, {0}
-        csrsi sstatus, 0x2
         csrw  stvec, {1}
         csrw  sscratch, {2}
         ",

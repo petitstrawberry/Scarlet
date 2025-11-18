@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 
 use crate::arch::Trapframe;
 use crate::vm::vmem::MemoryArea;
+use crate::mem::page::{Page, allocate_boxed_pages};
 
 /// Kernel context for RISC-V 64-bit
 /// 
@@ -24,9 +25,8 @@ pub struct KernelContext {
     pub ra: u64,
     /// Saved registers s0-s11 (callee-saved)
     pub s: [u64; 12],
-    /// Kernel stack for this context
-    /// Using Box<[u8]> to directly allocate on heap without stack overflow
-    pub kernel_stack: Box<[u8]>,
+    /// Kernel stack pages for this context (page-aligned, contiguous)
+    pub kernel_stack: Box<[Page]>,
 }
 
 impl KernelContext {
@@ -35,9 +35,10 @@ impl KernelContext {
     /// # Returns
     /// A new KernelContext with allocated kernel stack ready for scheduling
     pub fn new() -> Self {
-        // Directly allocate on heap to avoid stack overflow
-        let kernel_stack = alloc::vec![0u8; crate::environment::TASK_KERNEL_STACK_SIZE].into_boxed_slice();
-        let stack_top = kernel_stack.as_ptr() as u64 + kernel_stack.len() as u64; // Initial stack top = stack bottom
+        // Allocate page-aligned contiguous pages for the kernel stack
+        let num_pages = crate::environment::TASK_KERNEL_STACK_SIZE / crate::environment::PAGE_SIZE;
+        let kernel_stack = allocate_boxed_pages(num_pages);
+        let stack_top = kernel_stack.as_ptr() as u64 + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
 
         Self {
             sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
@@ -49,22 +50,26 @@ impl KernelContext {
 
     /// Get the bottom of the kernel stack
     pub fn get_kernel_stack_bottom(&self) -> u64 {
-        self.kernel_stack.as_ptr() as u64 + self.kernel_stack.len() as u64
+        (self.kernel_stack.as_ptr() as u64)
+            + (self.kernel_stack.len() as u64 * crate::environment::PAGE_SIZE as u64)
     }
 
     pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
-        MemoryArea::new(self.kernel_stack.as_ptr() as usize, self.get_kernel_stack_bottom() as usize - 1)
+        MemoryArea::new(
+            self.kernel_stack.as_ptr() as usize,
+            (self.get_kernel_stack_bottom() as usize) - 1,
+        )
     }
 
     pub fn get_kernel_stack_ptr(&self) -> *const u8 {
-        self.kernel_stack.as_ptr()
+        self.kernel_stack.as_ptr() as *const u8
     }
 
     /// Set the kernel stack for this context
     /// # Arguments
     /// * `stack` - Boxed slice representing the kernel stack memory
     /// 
-    pub fn set_kernel_stack(&mut self, stack: Box<[u8]>) {
+    pub fn set_kernel_stack(&mut self, stack: Box<[Page]>) {
         self.kernel_stack = stack;
         self.sp = self.get_kernel_stack_bottom();
     }

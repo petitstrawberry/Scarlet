@@ -10,7 +10,7 @@ mod pipe;
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
 use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
-use proc::{sys_exit, sys_fork, sys_wait, sys_getpid, sys_kill};
+use proc::{sys_exit, sys_fork, sys_wait, sys_getpid, sys_kill, sys_sleep};
 
 use crate::{
     abi::{
@@ -143,7 +143,7 @@ impl AbiModule for Xv6Riscv64Abi {
         Self::name().to_string()
     }
 
-    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule> {
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule + Send + Sync> {
         Box::new(self.clone()) // Xv6Riscv64Abi is Copy, so we can dereference and copy
     }
     
@@ -155,7 +155,7 @@ impl AbiModule for Xv6Riscv64Abi {
         &self, 
         file_object: &crate::object::KernelObject, 
         file_path: &str,
-        current_abi: Option<&dyn AbiModule>
+        current_abi: Option<&(dyn AbiModule + Send + Sync)>
     ) -> Option<u8> {
         // Stage 1: Basic format validation (following implementation guidelines)
         let magic_score = match file_object.as_file() {
@@ -408,7 +408,7 @@ syscall_table! {
     Dup = 10 => sys_dup,
     Getpid = 11 => sys_getpid,
     Sbrk = 12 => sys_sbrk,
-    // Sleep = 13 => sys_sleep,
+    Sleep = 13 => sys_sleep,
     // Uptime = 14 => sys_uptime,
     Open = 15 => sys_open,
     Write = 16 => sys_write,

@@ -15,3 +15,13 @@ pub const DEAFAULT_MAX_TASK_TEXT_SIZE: usize = 0xffff_ffff_ffff_ffff; // Unlimit
 pub const TASK_KERNEL_STACK_SIZE: usize = 0x4000; // 16KiB per task
 #[cfg(any(debug_assertions, test))]
 pub const TASK_KERNEL_STACK_SIZE: usize = 0x8000; // 32KiB per task
+
+// Kernel high-VA stack window region (per-task windows in shared kernel PT)
+// One guard page + task kernel stack per slot
+pub const KERNEL_KSTACK_SLOT_SIZE: usize = TASK_KERNEL_STACK_SIZE + PAGE_SIZE;
+// Number of slots available for concurrent tasks
+pub const KERNEL_KSTACK_SLOTS: usize = 256;
+// Reserve the top-most page(s) for trampoline; place window region below KERNEL_VM_STACK
+pub const KERNEL_KSTACK_REGION_END: usize = KERNEL_VM_STACK_START - 1;
+pub const KERNEL_KSTACK_REGION_START: usize =
+	KERNEL_KSTACK_REGION_END + 1 - (KERNEL_KSTACK_SLOTS * KERNEL_KSTACK_SLOT_SIZE);

@@ -226,8 +226,8 @@ impl TransparentExecutor {
             .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
 
         // Step 3: Check if ABI switch or forced rebuild is required
-        let current_abi_name = task.abi.as_ref().map(|abi| abi.get_name());
-        let abi_switch_required = abi_name != current_abi_name.unwrap_or_default();
+        let current_abi_name = task.default_abi.get_name();
+        let abi_switch_required = abi_name != current_abi_name;
         let rebuild_required = abi_switch_required || force_abi_rebuild;
         
         if rebuild_required {
@@ -241,7 +241,7 @@ impl TransparentExecutor {
         
         // Step 6: Update task's ABI if switch occurred
         if abi_switch_required {
-            task.abi = Some(abi);
+            task.default_abi = abi;
         }
         
         Ok(())
@@ -289,7 +289,7 @@ impl TransparentExecutor {
     /// prepared by the user/administrator beforehand as part of system setup.
     fn setup_task_environment(
         task: &mut Task, 
-        abi: &mut Box<dyn crate::abi::AbiModule>
+        abi: &mut Box<dyn crate::abi::AbiModule + Send + Sync>
     ) -> ExecutorResult<()> {
         // TransparentExecutor provides clean VFS for ABI environment
         let clean_vfs = Self::create_clean_vfs()
