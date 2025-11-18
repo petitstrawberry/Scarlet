@@ -12,13 +12,14 @@ mod futex;
 
 // pub mod drivers;
 
-use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec::Vec};
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
     abi::AbiModule, arch::{self, IntRegisters, Trapframe}, early_initcall, fs::{FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS}, register_abi, task::elf_loader::{ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy}, vm::{setup_trampoline, setup_user_stack}
 };
+use self::time::PosixTimer;
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
 
@@ -52,6 +53,10 @@ pub struct LinuxRiscv64Abi {
     pub signal_state: Arc<spin::Mutex<signal::SignalState>>,
     /// Linux-specific per-task thread state (isolated inside ABI)
     thread_state: LinuxThreadState,
+    /// POSIX timers created via timer_create
+    posix_timers: BTreeMap<u64, PosixTimer>,
+    /// Next timer identifier (Linux timer_t)
+    next_timer_id: u64,
 }
 
 impl Default for LinuxRiscv64Abi {
@@ -67,6 +72,8 @@ impl Default for LinuxRiscv64Abi {
             free_fds,
             signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
+            posix_timers: BTreeMap::new(),
+            next_timer_id: 1,
             
         }
     }
@@ -255,6 +262,34 @@ impl LinuxRiscv64Abi {
     pub fn has_pending_signals(&self) -> bool {
         let signal_state = self.signal_state.lock();
         signal_state.next_deliverable_signal().is_some()
+    }
+
+    /// Allocate a unique timer identifier for POSIX timers
+    pub fn allocate_posix_timer_id(&mut self) -> u64 {
+        let mut id = self.next_timer_id;
+        if id == 0 {
+            id = 1;
+        }
+        self.next_timer_id = id.wrapping_add(1);
+        if self.next_timer_id == 0 {
+            self.next_timer_id = 1;
+        }
+        id
+    }
+
+    /// Store a POSIX timer definition tracked by this ABI instance
+    pub fn store_posix_timer(&mut self, timer: PosixTimer) {
+        self.posix_timers.insert(timer.id, timer);
+    }
+
+    /// Retrieve a reference to a stored POSIX timer
+    pub fn get_posix_timer(&self, id: u64) -> Option<&PosixTimer> {
+        self.posix_timers.get(&id)
+    }
+
+    /// Remove a POSIX timer from this ABI instance
+    pub fn remove_posix_timer(&mut self, id: u64) -> Option<PosixTimer> {
+        self.posix_timers.remove(&id)
     }
 }
 
@@ -793,6 +828,11 @@ syscall_table! {
     Futex = 98 => futex::sys_futex,
     SetRobustList = 99 => proc::sys_set_robust_list,
     Nanosleep = 101 => time::sys_nanosleep,
+    TimerCreate = 107 => time::sys_timer_create,
+    TimerGettime = 108 => time::sys_timer_gettime,
+    TimerGetoverrun = 109 => time::sys_timer_getoverrun,
+    TimerSettime = 110 => time::sys_timer_settime,
+    TimerDelete = 111 => time::sys_timer_delete,
     ClockGettime = 113 => time::sys_clock_gettime,
     ClockGetres = 114 => time::sys_clock_getres,
     RtSigaction = 134 => signal::sys_rt_sigaction,
