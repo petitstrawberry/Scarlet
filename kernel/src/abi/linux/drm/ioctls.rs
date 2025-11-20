@@ -110,7 +110,7 @@ pub fn handle_drm_version(arg: usize) -> Result<i32, &'static str> {
     let target_ptr = translate_user_pointer(arg)?;
     
     let version_ptr = target_ptr as *mut DrmVersion;
-    let mut version = unsafe { core::ptr::read(version_ptr) };
+    let mut version = unsafe { core::ptr::read_unaligned(version_ptr) };
     
     // Set version numbers
     version.version_major = 1;
