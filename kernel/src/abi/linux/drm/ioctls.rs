@@ -4,7 +4,7 @@
 //! Linux DRM API and Scarlet's GraphicsDevice abstraction.
 
 use super::types::*;
-use crate::device::graphics::{GraphicsDevice, PageFlipCapable, PixelFormat};
+use crate::device::graphics::{GraphicsDevice, PixelFormat};
 use crate::device::manager::DeviceManager;
 use alloc::vec::Vec;
 
