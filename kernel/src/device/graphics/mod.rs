@@ -113,23 +113,156 @@ pub enum GraphicsResponse {
 
 /// Graphics device interface
 /// 
-/// This trait defines the interface for graphics devices.
-/// It provides methods for framebuffer management and display operations.
+/// This trait defines the minimal OS-independent interface for graphics devices.
+/// It provides methods for fbdev-level framebuffer management and display operations.
+/// 
+/// ## Design Philosophy
+/// 
+/// The GraphicsDevice trait is designed to be minimal and OS-independent, providing
+/// only the essential operations needed for basic framebuffer access. More advanced
+/// features (like page flipping, 3D rendering, etc.) are provided through separate
+/// capability traits that devices can optionally implement.
+/// 
+/// ## Dynamic Framebuffer Address
+/// 
+/// Modern GPUs (both dGPU and iGPU) manage framebuffer memory as device-controlled
+/// buffers (in VRAM or system RAM). The OS must treat the "current scanout buffer
+/// address" as a variable value that can change. The `get_framebuffer_address()`
+/// method returns the current active framebuffer address, which the driver manages.
+/// From the CPU's perspective, this is always just a memory access - whether it's
+/// VRAM or system RAM is abstracted by the driver.
+/// 
+/// ## Capability-Based Extension
+/// 
+/// Additional capabilities should be exposed through separate traits like
+/// `PageFlipCapable`, `RenderDevice`, etc. This allows:
+/// - Devices to implement only the features they support
+/// - OS code to detect and use advanced features when available
+/// - Fallback implementations for devices without native support
 pub trait GraphicsDevice: Device {
     /// Get the device display name
     fn get_display_name(&self) -> &'static str;
     
     /// Get framebuffer configuration
+    /// 
+    /// Returns the current framebuffer configuration including resolution,
+    /// pixel format, and stride. This configuration may be updated by the
+    /// device driver when the display mode changes.
     fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str>;
     
-    /// Get framebuffer memory address
+    /// Get current framebuffer memory address
+    /// 
+    /// Returns the physical address of the current active framebuffer.
+    /// This address may change when the device performs operations like
+    /// page flipping. Callers should query this address whenever they
+    /// need to access the framebuffer, rather than caching it.
+    /// 
+    /// The returned address can be mapped to virtual memory for CPU access.
     fn get_framebuffer_address(&self) -> Result<usize, &'static str>;
     
     /// Flush framebuffer region to display
+    /// 
+    /// Ensures that any pending writes to the framebuffer memory are
+    /// visible on the display. This may involve:
+    /// - Flushing CPU caches
+    /// - Notifying the display controller of changes
+    /// - Triggering a display update cycle
+    /// 
+    /// # Arguments
+    /// 
+    /// * `x` - X coordinate of the region to flush
+    /// * `y` - Y coordinate of the region to flush
+    /// * `width` - Width of the region to flush
+    /// * `height` - Height of the region to flush
     fn flush_framebuffer(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str>;
     
     /// Initialize the graphics device (idempotent)
+    /// 
+    /// Performs any necessary initialization for the graphics device.
+    /// This method is idempotent - calling it multiple times should
+    /// be safe and should not cause issues.
     fn init_graphics(&self) -> Result<(), &'static str>;
+}
+
+/// Page flip capability for graphics devices
+/// 
+/// This trait represents the ability to perform hardware-accelerated page flipping,
+/// where the display controller can be instructed to switch the scanout source from
+/// one framebuffer to another without copying data.
+/// 
+/// ## Page Flipping vs. Memcpy
+/// 
+/// Devices that don't implement this trait can still support page flip semantics
+/// through a fallback mechanism that copies from a back buffer to the front buffer
+/// and then flushes. However, native page flipping is more efficient as it:
+/// - Avoids memory copy operations
+/// - Provides tear-free updates
+/// - Can be synchronized with vertical blank (vsync)
+/// 
+/// ## Usage
+/// 
+/// ```rust,ignore
+/// if let Some(page_flip_device) = device.as_page_flip_capable() {
+///     // Use hardware page flip
+///     page_flip_device.page_flip(buffer_id)?;
+/// } else {
+///     // Fallback to memcpy + flush
+///     // ... copy buffer to framebuffer ...
+///     device.flush_framebuffer(0, 0, width, height)?;
+/// }
+/// ```
+pub trait PageFlipCapable: GraphicsDevice {
+    /// Perform a page flip operation
+    /// 
+    /// Switches the display controller's scanout source to the specified buffer.
+    /// This operation should ideally be synchronized with vertical blank to avoid
+    /// tearing.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `buffer_id` - The ID of the buffer to flip to (device-specific)
+    /// 
+    /// # Returns
+    /// 
+    /// Result indicating success or failure
+    fn page_flip(&self, buffer_id: u32) -> Result<(), &'static str>;
+    
+    /// Create a new buffer for page flipping
+    /// 
+    /// Allocates a new buffer that can be used as a flip target.
+    /// Returns a device-specific buffer ID.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `width` - Width of the buffer in pixels
+    /// * `height` - Height of the buffer in pixels
+    /// * `format` - Pixel format for the buffer
+    /// 
+    /// # Returns
+    /// 
+    /// Result containing the buffer ID or an error
+    fn create_flip_buffer(&self, width: u32, height: u32, format: PixelFormat) -> Result<u32, &'static str>;
+    
+    /// Destroy a buffer created for page flipping
+    /// 
+    /// # Arguments
+    /// 
+    /// * `buffer_id` - The ID of the buffer to destroy
+    fn destroy_flip_buffer(&self, buffer_id: u32) -> Result<(), &'static str>;
+    
+    /// Get the physical address of a flip buffer
+    /// 
+    /// Returns the physical address where the specified buffer's memory
+    /// can be accessed. This can be used to map the buffer for CPU access.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `buffer_id` - The ID of the buffer
+    /// 
+    /// # Returns
+    /// 
+    /// Result containing the physical address or an error
+    fn get_flip_buffer_address(&self, buffer_id: u32) -> Result<usize, &'static str>;
 }
 
 /// A generic implementation of a graphics device
