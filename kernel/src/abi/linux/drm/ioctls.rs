@@ -1,16 +1,14 @@
 //! # DRM ioctl Implementations
 //!
 //! This module implements the DRM ioctl handlers that bridge between
-//! Linux DRM API and Scarlet's GraphicsDevice abstraction.
+//! Linux DRM API and Scarlet's GraphicsManager.
 //!
-//! The handlers convert Linux DRM ioctls to Scarlet graphics control
-//! commands (SCTL_GFX_*), maintaining clean separation between the
-//! Linux ABI layer and OS-independent graphics operations.
+//! GraphicsManager acts as Scarlet's equivalent of Linux DRM subsystem,
+//! providing OS-independent graphics operations. The DRM ioctl handlers
+//! simply translate Linux DRM ioctls to GraphicsManager function calls.
 
 use super::types::*;
 use crate::device::graphics::{GraphicsDevice, PixelFormat};
-use crate::device::graphics::graphics_ctl::commands::*;
-use crate::device::graphics::graphics_ctl::FlushParams;
 use alloc::vec::Vec;
 
 /// DRM ioctl command numbers
@@ -260,20 +258,16 @@ pub fn handle_drm_get_crtc(arg: usize, device_id: usize) -> Result<i32, &'static
     let crtc_ptr = target_ptr as *mut DrmModeCrtc;
     let mut crtc = unsafe { core::ptr::read_unaligned(crtc_ptr) };
     
-    // Get framebuffer configuration through Scarlet graphics control commands
+    // Get framebuffer configuration through GraphicsManager
     use crate::device::graphics::manager::GraphicsManager;
     let graphics_manager = GraphicsManager::get_manager();
-    
-    // Use SCTL_GFX_GET_CONFIG to get width/height
-    let packed_config = graphics_manager.handle_graphics_control(SCTL_GFX_GET_CONFIG, device_id)?;
-    let width = ((packed_config >> 32) & 0xFFFFFFFF) as u32;
-    let height = (packed_config & 0xFFFFFFFF) as u32;
+    let config = graphics_manager.get_framebuffer_config_by_device(device_id)?;
     
     // Fill in mode information
-    crtc.mode.hdisplay = width as u16;
-    crtc.mode.vdisplay = height as u16;
-    crtc.mode.htotal = width as u16;
-    crtc.mode.vtotal = height as u16;
+    crtc.mode.hdisplay = config.width as u16;
+    crtc.mode.vdisplay = config.height as u16;
+    crtc.mode.htotal = config.width as u16;
+    crtc.mode.vtotal = config.height as u16;
     crtc.mode.vrefresh = 60; // Assume 60Hz
     crtc.mode_valid = 1;
     
@@ -415,26 +409,19 @@ pub fn handle_drm_page_flip(arg: usize, ctx: &DrmDeviceContext) -> Result<i32, &
     let flip_ptr = target_ptr as *const DrmModePageFlip;
     let flip = unsafe { core::ptr::read_unaligned(flip_ptr) };
     
-    // Get framebuffer configuration and address through Scarlet graphics control commands
+    // Get framebuffer configuration and address through GraphicsManager
     use crate::device::graphics::manager::GraphicsManager;
     let graphics_manager = GraphicsManager::get_manager();
     
-    // Use SCTL_GFX_GET_CONFIG to get framebuffer size
-    let packed_config = graphics_manager.handle_graphics_control(SCTL_GFX_GET_CONFIG, ctx.device_id)?;
-    let width = ((packed_config >> 32) & 0xFFFFFFFF) as u32;
-    let height = (packed_config & 0xFFFFFFFF) as u32;
-    
-    // Use SCTL_GFX_GET_SIZE to get total size in bytes
-    let fb_size = graphics_manager.handle_graphics_control(SCTL_GFX_GET_SIZE, ctx.device_id)?;
-    
-    // Use SCTL_GFX_GET_ADDRESS to get framebuffer address
-    let fb_addr = graphics_manager.handle_graphics_control(SCTL_GFX_GET_ADDRESS, ctx.device_id)?;
+    let config = graphics_manager.get_framebuffer_config_by_device(ctx.device_id)?;
+    let fb_addr = graphics_manager.get_framebuffer_address_by_device(ctx.device_id)?;
     
     // Get source buffer (fb_id is treated as handle for dumb buffers)
     let (src_addr, src_size) = ctx.get_buffer(flip.fb_id)
         .ok_or("Invalid framebuffer ID")?;
     
     // Calculate copy size
+    let fb_size = config.size();
     let copy_size = src_size.min(fb_size);
     
     // Copy from source buffer to framebuffer
@@ -446,15 +433,8 @@ pub fn handle_drm_page_flip(arg: usize, ctx: &DrmDeviceContext) -> Result<i32, &
         );
     }
     
-    // Flush the framebuffer through SCTL_GFX_FLUSH
-    let flush_params = FlushParams {
-        device_id: ctx.device_id,
-        x: 0,
-        y: 0,
-        width,
-        height,
-    };
-    graphics_manager.handle_graphics_control(SCTL_GFX_FLUSH, flush_params.pack())?;
+    // Flush the framebuffer
+    graphics_manager.flush_framebuffer_by_device(ctx.device_id, 0, 0, config.width, config.height)?;
     
     Ok(0)
 }
