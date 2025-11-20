@@ -299,6 +299,100 @@ impl GraphicsManager {
             0
         }
     }
+    
+    /// Get framebuffer configuration by device ID
+    ///
+    /// This provides an OS-independent way to query framebuffer configuration
+    /// without directly accessing the device.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The device ID from DeviceManager
+    ///
+    /// # Returns
+    ///
+    /// Result containing the framebuffer configuration or an error
+    pub fn get_framebuffer_config_by_device(&self, device_id: usize) -> Result<FramebufferConfig, &'static str> {
+        // Find the framebuffer resource associated with this device
+        let framebuffers = self.framebuffers.lock();
+        if let Some(map) = framebuffers.as_ref() {
+            for (_, resource) in map.iter() {
+                if resource.source_device_id == device_id {
+                    return resource.get_current_config();
+                }
+            }
+        }
+        Err("No framebuffer found for device")
+    }
+    
+    /// Get current framebuffer address by device ID
+    ///
+    /// This provides an OS-independent way to query the current framebuffer
+    /// address without directly accessing the device.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The device ID from DeviceManager
+    ///
+    /// # Returns
+    ///
+    /// Result containing the physical address or an error
+    pub fn get_framebuffer_address_by_device(&self, device_id: usize) -> Result<usize, &'static str> {
+        // Find the framebuffer resource associated with this device
+        let framebuffers = self.framebuffers.lock();
+        if let Some(map) = framebuffers.as_ref() {
+            for (_, resource) in map.iter() {
+                if resource.source_device_id == device_id {
+                    return resource.get_current_address();
+                }
+            }
+        }
+        Err("No framebuffer found for device")
+    }
+    
+    /// Flush framebuffer region by device ID
+    ///
+    /// This provides an OS-independent way to flush the framebuffer
+    /// without directly accessing the device.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The device ID from DeviceManager
+    /// * `x` - X coordinate of the region to flush
+    /// * `y` - Y coordinate of the region to flush
+    /// * `width` - Width of the region to flush
+    /// * `height` - Height of the region to flush
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure
+    pub fn flush_framebuffer_by_device(&self, device_id: usize, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str> {
+        // Find the framebuffer resource and flush through the device
+        let device_manager = DeviceManager::get_manager();
+        let device = device_manager.get_device(device_id)
+            .ok_or("Device not found")?;
+        
+        let graphics_device = device.as_graphics_device()
+            .ok_or("Not a graphics device")?;
+        
+        graphics_device.flush_framebuffer(x, y, width, height)
+    }
+    
+    /// Get the device ID for a framebuffer by logical name
+    ///
+    /// # Arguments
+    ///
+    /// * `fb_name` - The logical name of the framebuffer (e.g., "fb0")
+    ///
+    /// # Returns
+    ///
+    /// Optional device ID
+    pub fn get_device_id_by_framebuffer(&self, fb_name: &str) -> Option<usize> {
+        let framebuffers = self.framebuffers.lock();
+        framebuffers.as_ref()
+            .and_then(|map| map.get(fb_name))
+            .map(|resource| resource.source_device_id)
+    }
 
     /// Create a FramebufferCharDevice and register it with DeviceManager
     ///

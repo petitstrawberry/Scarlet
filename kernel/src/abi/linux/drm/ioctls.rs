@@ -5,7 +5,6 @@
 
 use super::types::*;
 use crate::device::graphics::{GraphicsDevice, PixelFormat};
-use crate::device::manager::DeviceManager;
 use alloc::vec::Vec;
 
 /// DRM ioctl command numbers
@@ -250,30 +249,15 @@ pub fn handle_drm_get_resources(arg: usize) -> Result<i32, &'static str> {
 /// 
 /// Gets the current CRTC configuration.
 pub fn handle_drm_get_crtc(arg: usize, device_id: usize) -> Result<i32, &'static str> {
-    if arg == 0 {
-        return Err("Invalid argument pointer");
-    }
-    
-    let target_ptr = if let Some(current_task) = crate::task::mytask() {
-        current_task.vm_manager.translate_vaddr(arg)
-            .ok_or("Invalid user pointer")?
-    } else {
-        arg
-    };
+    let target_ptr = translate_user_pointer(arg)?;
     
     let crtc_ptr = target_ptr as *mut DrmModeCrtc;
-    let mut crtc = unsafe { core::ptr::read(crtc_ptr) };
+    let mut crtc = unsafe { core::ptr::read_unaligned(crtc_ptr) };
     
-    // Get the graphics device
-    let device_manager = DeviceManager::get_manager();
-    let device = device_manager.get_device(device_id)
-        .ok_or("Device not found")?;
-    
-    let graphics_device = device.as_graphics_device()
-        .ok_or("Not a graphics device")?;
-    
-    // Get current framebuffer configuration
-    let config = graphics_device.get_framebuffer_config()?;
+    // Get framebuffer configuration through GraphicsManager
+    use crate::device::graphics::manager::GraphicsManager;
+    let graphics_manager = GraphicsManager::get_manager();
+    let config = graphics_manager.get_framebuffer_config_by_device(device_id)?;
     
     // Fill in mode information
     crtc.mode.hdisplay = config.width as u16;
@@ -428,23 +412,14 @@ pub fn handle_drm_page_flip(arg: usize, ctx: &DrmDeviceContext) -> Result<i32, &
     };
     
     let flip_ptr = target_ptr as *const DrmModePageFlip;
-    let flip = unsafe { core::ptr::read(flip_ptr) };
+    let flip = unsafe { core::ptr::read_unaligned(flip_ptr) };
     
-    // Get the graphics device
-    let device_manager = DeviceManager::get_manager();
-    let device = device_manager.get_device(ctx.device_id)
-        .ok_or("Device not found")?;
+    // Get framebuffer configuration and address through GraphicsManager
+    use crate::device::graphics::manager::GraphicsManager;
+    let graphics_manager = GraphicsManager::get_manager();
     
-    let graphics_device = device.as_graphics_device()
-        .ok_or("Not a graphics device")?;
-    
-    // Check if device supports hardware page flipping
-    // For MVP, we always use the memcpy + flush approach
-    // In the future, we can check for PageFlipCapable trait here
-    
-    // Get framebuffer configuration
-    let config = graphics_device.get_framebuffer_config()?;
-    let fb_addr = graphics_device.get_framebuffer_address()?;
+    let config = graphics_manager.get_framebuffer_config_by_device(ctx.device_id)?;
+    let fb_addr = graphics_manager.get_framebuffer_address_by_device(ctx.device_id)?;
     
     // Get source buffer (fb_id is treated as handle for dumb buffers)
     let (src_addr, src_size) = ctx.get_buffer(flip.fb_id)
@@ -463,8 +438,8 @@ pub fn handle_drm_page_flip(arg: usize, ctx: &DrmDeviceContext) -> Result<i32, &
         );
     }
     
-    // Flush the framebuffer
-    graphics_device.flush_framebuffer(0, 0, config.width, config.height)?;
+    // Flush the framebuffer through GraphicsManager
+    graphics_manager.flush_framebuffer_by_device(ctx.device_id, 0, 0, config.width, config.height)?;
     
     Ok(0)
 }
