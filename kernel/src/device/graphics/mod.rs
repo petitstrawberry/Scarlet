@@ -202,15 +202,24 @@ pub trait GraphicsDevice: Device {
 /// ## Usage
 /// 
 /// ```rust,ignore
-/// if let Some(page_flip_device) = device.as_page_flip_capable() {
-///     // Use hardware page flip
-///     page_flip_device.page_flip(buffer_id)?;
+/// // Check if device supports page flipping via downcasting
+/// use core::any::Any;
+/// 
+/// if let Some(any_device) = device.as_any().downcast_ref::<SpecificDeviceType>() {
+///     if let Some(page_flip_device) = any_device as &dyn PageFlipCapable {
+///         // Use hardware page flip
+///         page_flip_device.page_flip(buffer_id)?;
+///     }
 /// } else {
 ///     // Fallback to memcpy + flush
+///     let config = device.get_framebuffer_config()?;
 ///     // ... copy buffer to framebuffer ...
-///     device.flush_framebuffer(0, 0, width, height)?;
+///     device.flush_framebuffer(0, 0, config.width, config.height)?;
 /// }
 /// ```
+/// 
+/// Note: A future enhancement may add an `as_page_flip_capable()` helper method
+/// to the Device trait for more convenient capability detection.
 pub trait PageFlipCapable: GraphicsDevice {
     /// Perform a page flip operation
     /// 

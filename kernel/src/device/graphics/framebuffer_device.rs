@@ -353,8 +353,9 @@ impl CharDevice for FramebufferCharDevice {
 
         // Get current framebuffer address from device
         let fb_addr = fb_resource.get_current_address()
-            .or_else(|_| {
+            .or_else(|e| {
                 // Fallback to cached address if device query fails
+                crate::early_println!("[FramebufferCharDevice] Warning: Failed to query current address ({}), using cached value", e);
                 if fb_resource.physical_addr == 0 {
                     Err("Invalid framebuffer address")
                 } else {
@@ -395,8 +396,9 @@ impl CharDevice for FramebufferCharDevice {
 
         // Get current framebuffer address from device
         let fb_addr = fb_resource.get_current_address()
-            .or_else(|_| {
+            .or_else(|e| {
                 // Fallback to cached address if device query fails
+                crate::early_println!("[FramebufferCharDevice] Warning: Failed to query current address ({}), using cached value", e);
                 if fb_resource.physical_addr == 0 {
                     Err("Invalid framebuffer address")
                 } else {
