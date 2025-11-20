@@ -176,7 +176,7 @@ pub fn handle_drm_version(arg: usize) -> Result<i32, &'static str> {
     }
     
     // Write back the version structure
-    unsafe { core::ptr::write(version_ptr, version); }
+    unsafe { core::ptr::write_unaligned(version_ptr, version); }
     
     Ok(0)
 }
@@ -242,7 +242,7 @@ pub fn handle_drm_get_resources(arg: usize) -> Result<i32, &'static str> {
         }
     }
     
-    unsafe { core::ptr::write(res_ptr, res); }
+    unsafe { core::ptr::write_unaligned(res_ptr, res); }
     Ok(0)
 }
 
@@ -287,7 +287,7 @@ pub fn handle_drm_get_crtc(arg: usize, device_id: usize) -> Result<i32, &'static
     crtc.y = 0;
     crtc.gamma_size = 256;
     
-    unsafe { core::ptr::write(crtc_ptr, crtc); }
+    unsafe { core::ptr::write_unaligned(crtc_ptr, crtc); }
     Ok(0)
 }
 
@@ -345,7 +345,7 @@ pub fn handle_drm_create_dumb(arg: usize, ctx: &mut DrmDeviceContext) -> Result<
     dumb.pitch = pitch;
     dumb.size = size as u64;
     
-    unsafe { core::ptr::write(dumb_ptr, dumb); }
+    unsafe { core::ptr::write_unaligned(dumb_ptr, dumb); }
     Ok(0)
 }
 
@@ -376,7 +376,7 @@ pub fn handle_drm_map_dumb(arg: usize, ctx: &DrmDeviceContext) -> Result<i32, &'
     // implementation would translate to the actual physical address
     map.offset = addr as u64;
     
-    unsafe { core::ptr::write(map_ptr, map); }
+    unsafe { core::ptr::write_unaligned(map_ptr, map); }
     Ok(0)
 }
 
