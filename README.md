@@ -119,11 +119,6 @@ Scarlet's Multi-ABI support is built around a modular ABI implementation system:
 
 - **Scarlet Native**: ✅ Complete - Direct kernel interface with optimal performance
 - **xv6 RISC-V 64-bit**: 🧪 Experimental - Largely implemented with core functionality available
-  - ✅ File operations (open, close, read, write, etc.)
-  - ✅ Process management (fork, exec, wait, exit)
-  - ✅ Memory management (sbrk)
-  - ✅ Inter-process communication (pipes)
-  - ✅ Device operations (mknod, console integration)
 - **Linux Compatibility (partial)**: 🧩 Early userland demo via Buildroot rootfs; syscall surface expanding toward full POSIX support
 
 This architecture enables true containerization where applications from different operating systems can coexist and communicate without modification.
@@ -145,7 +140,7 @@ The Linux ABI implementation is currently in active development:
 
 - **Userspace Support**: Runs simple static binaries and Buildroot/BusyBox environments.
 - **Syscall Coverage**: Basic file I/O, process management, and memory operations are implemented.
-- **Limitations**: Many advanced syscalls (networking, complex signals) are stubbed or missing. See `docs/abi/linux/status.md` for the compatibility matrix.
+- **Limitations**: Many advanced syscalls (networking, complex signals) are stubbed or missing. See [`docs/abi/linux/status.md`](docs/abi/linux/status.md) for the compatibility matrix.
 
 ## Architecture Support
 
