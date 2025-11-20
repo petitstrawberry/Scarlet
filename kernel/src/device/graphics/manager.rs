@@ -38,7 +38,8 @@ pub struct FramebufferResource {
     pub logical_name: String,
     /// Framebuffer configuration (resolution, format, etc.)
     pub config: FramebufferConfig,
-    /// Physical memory address of the framebuffer
+    /// Physical memory address of the framebuffer (cached, may be stale)
+    /// Use get_current_address() to query the device for the latest address
     pub physical_addr: usize,
     /// Size of the framebuffer in bytes
     pub size: usize,
@@ -63,6 +64,38 @@ impl FramebufferResource {
             size,
             created_char_device_id: RwLock::new(None),
         }
+    }
+    
+    /// Get the current framebuffer address from the device
+    /// 
+    /// This queries the device for the current active framebuffer address,
+    /// which may have changed since the resource was created (e.g., due to
+    /// page flipping). This is the recommended way to get the framebuffer
+    /// address rather than using the cached `physical_addr` field.
+    pub fn get_current_address(&self) -> Result<usize, &'static str> {
+        let device_manager = DeviceManager::get_manager();
+        let device = device_manager.get_device(self.source_device_id)
+            .ok_or("Source device not found")?;
+        
+        let graphics_device = device.as_graphics_device()
+            .ok_or("Device is not a graphics device")?;
+        
+        graphics_device.get_framebuffer_address()
+    }
+    
+    /// Get the current framebuffer configuration from the device
+    /// 
+    /// This queries the device for the current framebuffer configuration,
+    /// which may have changed since the resource was created.
+    pub fn get_current_config(&self) -> Result<FramebufferConfig, &'static str> {
+        let device_manager = DeviceManager::get_manager();
+        let device = device_manager.get_device(self.source_device_id)
+            .ok_or("Source device not found")?;
+        
+        let graphics_device = device.as_graphics_device()
+            .ok_or("Device is not a graphics device")?;
+        
+        graphics_device.get_framebuffer_config()
     }
 }
 

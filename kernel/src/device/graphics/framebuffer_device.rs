@@ -351,10 +351,16 @@ impl CharDevice for FramebufferCharDevice {
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
         let fb_resource = &self.fb_resource;
 
-        // Check if framebuffer address is valid
-        if fb_resource.physical_addr == 0 {
-            return Err("Invalid framebuffer address");
-        }
+        // Get current framebuffer address from device
+        let fb_addr = fb_resource.get_current_address()
+            .or_else(|_| {
+                // Fallback to cached address if device query fails
+                if fb_resource.physical_addr == 0 {
+                    Err("Invalid framebuffer address")
+                } else {
+                    Ok(fb_resource.physical_addr)
+                }
+            })?;
 
         let start_pos = position as usize;
         if start_pos >= fb_resource.size {
@@ -366,7 +372,7 @@ impl CharDevice for FramebufferCharDevice {
 
         // Read data from framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *const u8;
+            let fb_ptr = fb_addr as *const u8;
             let src_ptr = fb_ptr.add(start_pos);
             core::ptr::copy_nonoverlapping(src_ptr, buffer.as_mut_ptr(), to_read);
         }
@@ -387,10 +393,16 @@ impl CharDevice for FramebufferCharDevice {
     fn write_at(&self, position: u64, buffer: &[u8]) -> Result<usize, &'static str> {
         let fb_resource = &self.fb_resource;
 
-        // Check if framebuffer address is valid
-        if fb_resource.physical_addr == 0 {
-            return Err("Invalid framebuffer address");
-        }
+        // Get current framebuffer address from device
+        let fb_addr = fb_resource.get_current_address()
+            .or_else(|_| {
+                // Fallback to cached address if device query fails
+                if fb_resource.physical_addr == 0 {
+                    Err("Invalid framebuffer address")
+                } else {
+                    Ok(fb_resource.physical_addr)
+                }
+            })?;
 
         let start_pos = position as usize;
         if start_pos >= fb_resource.size {
@@ -402,7 +414,7 @@ impl CharDevice for FramebufferCharDevice {
 
         // Write data to framebuffer memory
         unsafe {
-            let fb_ptr = fb_resource.physical_addr as *mut u8;
+            let fb_ptr = fb_addr as *mut u8;
             let dst_ptr = fb_ptr.add(start_pos);
             core::ptr::copy_nonoverlapping(buffer.as_ptr(), dst_ptr, to_write);
         }
