@@ -58,6 +58,9 @@ impl DrmDeviceContext {
     /// Allocate a new handle
     fn allocate_handle(&mut self) -> u32 {
         let handle = self.next_handle;
+        if self.next_handle == u32::MAX {
+            panic!("DRM handle space exhausted: cannot allocate more handles");
+        }
         self.next_handle += 1;
         handle
     }
