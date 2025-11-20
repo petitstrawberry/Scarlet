@@ -317,6 +317,10 @@ pub fn handle_drm_create_dumb(arg: usize, ctx: &mut DrmDeviceContext) -> Result<
     let pages = (size + 4095) / 4096;
     let addr = crate::mem::page::allocate_raw_pages(pages) as usize;
     
+    // Check for allocation failure
+    if addr == 0 {
+        return Err("Failed to allocate buffer memory");
+    }
     // Allocate handle and store buffer
     let handle = ctx.allocate_handle();
     ctx.store_buffer(handle, addr, size);
