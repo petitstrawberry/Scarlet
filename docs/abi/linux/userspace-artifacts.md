@@ -4,7 +4,7 @@ This document explains how to rebuild the Buildroot-generated root filesystem an
 
 ## Prerequisites
 
-- Run inside the `scarlet-dev` container (see `README.md` for entering the environment).
+- Run inside the `scarlet-dev` container (see [`README.md`](../../../README.md) for entering the environment).
 - Buildroot sources must already be unpacked under `/opt/buildroot` (handled automatically by the Dockerfile).
 
 ## Building Buildroot

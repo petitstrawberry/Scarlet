@@ -91,6 +91,6 @@ This path points to the libraries within the Linux rootfs (accessed via the `/sc
 ## Troubleshooting
 
 If binaries fail to run:
-- Check `docs/abi/linux/status.md` to see if required syscalls are supported.
+- Check [`docs/abi/linux/status.md`](status.md) to see if required syscalls are supported.
 - Ensure the rootfs is correctly mounted.
 - Verify that the binaries were built for RISC-V 64-bit (riscv64).
