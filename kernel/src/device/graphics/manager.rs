@@ -578,6 +578,77 @@ impl GraphicsManager {
         
         Ok(bytes_to_write)
     }
+    
+    /// Handle Scarlet graphics control commands
+    ///
+    /// This method processes OS-independent graphics control commands,
+    /// providing an abstraction layer between OS-specific ABIs and
+    /// Scarlet's graphics subsystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The control command code (SCTL_GFX_*)
+    /// * `arg` - Command-specific argument
+    ///
+    /// # Returns
+    ///
+    /// Result containing the command-specific return value or an error
+    pub fn handle_graphics_control(&self, command: u32, arg: usize) -> Result<usize, &'static str> {
+        use super::graphics_ctl::commands::*;
+        use super::graphics_ctl::FlushParams;
+        
+        match command {
+            SCTL_GFX_GET_CONFIG => {
+                let device_id = arg;
+                let config = self.get_framebuffer_config_by_device(device_id)?;
+                // Pack width and height into usize (truncate if needed)
+                let packed = ((config.width as usize) << 32) | (config.height as usize);
+                Ok(packed)
+            }
+            
+            SCTL_GFX_GET_ADDRESS => {
+                let device_id = arg;
+                self.get_framebuffer_address_by_device(device_id)
+            }
+            
+            SCTL_GFX_FLUSH => {
+                // arg is pointer to FlushParams
+                let params = unsafe { FlushParams::unpack(arg) };
+                self.flush_framebuffer_by_device(
+                    params.device_id,
+                    params.x,
+                    params.y,
+                    params.width,
+                    params.height
+                )?;
+                Ok(0)
+            }
+            
+            SCTL_GFX_GET_FORMAT => {
+                let device_id = arg;
+                let config = self.get_framebuffer_config_by_device(device_id)?;
+                Ok(config.format as usize)
+            }
+            
+            SCTL_GFX_GET_SIZE => {
+                let device_id = arg;
+                let config = self.get_framebuffer_config_by_device(device_id)?;
+                Ok(config.size())
+            }
+            
+            SCTL_GFX_GET_DEVICE_ID => {
+                // arg is pointer to string (not used in current implementation)
+                // For now, return error as this needs proper string handling
+                Err("SCTL_GFX_GET_DEVICE_ID not yet implemented")
+            }
+            
+            SCTL_GFX_GET_FB_COUNT => {
+                Ok(self.get_framebuffer_count())
+            }
+            
+            _ => Err("Unknown graphics control command")
+        }
+    }
 
     /// Clear all framebuffers (for testing only)
     /// This allows tests to start with a clean GraphicsManager state

@@ -15,6 +15,7 @@ use crate::object::capability::selectable::Selectable;
 
 pub mod manager;
 pub mod framebuffer_device;
+pub mod graphics_ctl;
 
 #[cfg(test)]
 mod tests;
