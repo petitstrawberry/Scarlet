@@ -88,8 +88,9 @@ This interoperability is possible because all ABIs share the same underlying ker
 > **Current Status**: 
 > - ✅ **Scarlet Native ABI**: Fully implemented with interactive shell
 > - 🧪 **xv6 RISC-V 64-bit ABI**: Working with Cross-ABI execution capabilities!
+> - 🧩 **Linux ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
 > - ✅ **Cross-ABI Pipes**: Already functional between xv6 and Scarlet environments
-- 🧩 **Linux ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
+
 
 ## Key Features
 
