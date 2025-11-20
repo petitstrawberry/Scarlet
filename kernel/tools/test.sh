@@ -66,7 +66,7 @@ if [ "$DEBUG_MODE" = true ]; then
     qemu-system-riscv64 \
         -machine virt \
         -bios default \
-        -m 2G \
+        -m 4G \
         -nographic \
         -serial mon:stdio \
         --no-reboot \
@@ -91,7 +91,7 @@ else
     qemu-system-riscv64 \
         -machine virt \
         -bios default \
-        -m 2G \
+        -m 4G \
         -nographic \
         -serial mon:stdio \
         --no-reboot \
