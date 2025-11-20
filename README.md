@@ -88,7 +88,7 @@ This interoperability is possible because all ABIs share the same underlying ker
 > **Current Status**: 
 > - ✅ **Scarlet Native ABI**: Fully implemented with interactive shell
 > - 🧪 **xv6 RISC-V 64-bit ABI**: Working with Cross-ABI execution capabilities!
-> - 🧩 **Linux ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
+> - 🧩 **Linux RISC-V 64-bit ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
 > - ✅ **Cross-ABI Pipes**: Already functional between xv6 and Scarlet environments
 
 
@@ -119,7 +119,7 @@ Scarlet's Multi-ABI support is built around a modular ABI implementation system:
 
 - **Scarlet Native**: ✅ Complete - Direct kernel interface with optimal performance
 - **xv6 RISC-V 64-bit**: 🧪 Experimental - Largely implemented with core functionality available
-- **Linux Compatibility (partial)**: 🧩 Early userland demo via Buildroot rootfs; syscall surface expanding toward full POSIX support
+- **Linux RISC-V 64-bit (partial)**: 🧩 Early userland demo via Buildroot rootfs; syscall surface expanding toward full POSIX support
 
 This architecture enables true containerization where applications from different operating systems can coexist and communicate without modification.
 
