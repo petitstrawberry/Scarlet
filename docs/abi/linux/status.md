@@ -106,8 +106,8 @@ While basic file operations work, the current implementation has significant dev
 
 ## What Works Today
 
-- Buildroot root filesystem assembled under `/opt/prebuilt/linux-riscv64.tar`
-- Toolchain exports (under `/opt/buildroot/output/host`) for rebuilding userspace
+- Buildroot root filesystem generation (via `tools/linux/build_buildroot.sh`)
+- Toolchain exports (under `/opt/buildroot/output/host`) for building userspace
 - Demo binaries `green` and `fbdoom` built with the Buildroot toolchain
 - Process launch, basic file I/O, and framebuffer output through Scarlet-managed devices
 

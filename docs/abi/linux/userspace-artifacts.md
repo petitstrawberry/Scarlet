@@ -7,9 +7,9 @@ This document explains how to rebuild the Buildroot-generated root filesystem an
 - Run inside the `scarlet-dev` container (see `README.md` for entering the environment).
 - Buildroot sources must already be unpacked under `/opt/buildroot` (handled automatically by the Dockerfile).
 
-## Rebuilding Buildroot
+## Building Buildroot
 
-Use the helper script that mirrors the original Dockerfile steps:
+Use the helper script to build the root filesystem:
 
 ```bash
 bash tools/linux/build_buildroot.sh

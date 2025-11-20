@@ -8,22 +8,38 @@ The deployment process extracts the prebuilt Linux root filesystem (built via Bu
 
 The script `tools/linux/deploy_rootfs.sh` handles this process. It extracts artifacts from `/opt/prebuilt` (inside the container) to `mkfs/rootfs/system/linux-riscv64` (in your workspace).
 
+## Prerequisites
+
+Before running the deployment script, you must ensure that the Linux userspace artifacts (Buildroot rootfs and demo binaries) have been built and are available in `/opt/prebuilt` inside the container.
+
+If you haven't built them yet, please refer to [Linux Userspace Artifacts](userspace-artifacts.md) for instructions.
+
 ## Usage
 
-### 1. Build the Docker Image
+### 1. Start the Development Container
 
-Ensure you have the `scarlet-dev` image built, which contains the prebuilt artifacts.
+Start the `scarlet-dev` container with your workspace mounted:
 
 ```bash
-docker build -t scarlet-dev .
+docker run -it --rm -v "$(pwd)":/workspaces/Scarlet scarlet-dev
 ```
 
-### 2. Run the Deployment Script
+### 2. Build Artifacts (Inside Container)
 
-Run the container with your workspace mounted and execute the deploy script:
+**Note:** The `scarlet-dev` Docker image does **not** contain prebuilt artifacts to keep the image size manageable. You must build them inside the container before deployment.
 
 ```bash
-docker run --rm -v "$(pwd)":/workspaces/Scarlet scarlet-dev /workspaces/Scarlet/tools/linux/deploy_rootfs.sh
+# Build rootfs and user programs
+bash tools/linux/build_buildroot.sh
+bash tools/linux/build_user_programs.sh
+```
+
+### 3. Deploy (Inside Container)
+
+Once built, deploy them to the workspace:
+
+```bash
+bash tools/linux/deploy_rootfs.sh
 ```
 
 This will:
@@ -33,13 +49,13 @@ This will:
 
 ### Handling File Ownership
 
-Since the script runs as root inside the container, the deployed files will be owned by root. To preserve your host user's ownership, pass `TARGET_UID` and `TARGET_GID`:
+If you are running the container as root (default), the deployed files will be owned by root. To preserve your host user's ownership, you can pass environment variables when starting the container, or set them before running the deploy script:
 
 ```bash
-docker run --rm -v "$(pwd)":/workspaces/Scarlet \
-  -e TARGET_UID=$(id -u) \
-  -e TARGET_GID=$(id -g) \
-  scarlet-dev /workspaces/Scarlet/tools/linux/deploy_rootfs.sh
+# Example: Running deploy with ownership fix
+export TARGET_UID=$(id -u)
+export TARGET_GID=$(id -g)
+bash tools/linux/deploy_rootfs.sh
 ```
 
 ## Deployment Behavior
