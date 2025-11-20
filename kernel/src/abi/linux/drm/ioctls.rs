@@ -88,21 +88,26 @@ impl DrmDeviceContext {
     }
 }
 
+/// Translates a user pointer to a kernel-accessible address.
+/// 
+/// Returns the translated address or an error if translation fails.
+fn translate_user_pointer(arg: usize) -> Result<usize, &'static str> {
+    if arg == 0 {
+        return Err("Invalid argument pointer");
+    }
+    if let Some(current_task) = crate::task::mytask() {
+        current_task.vm_manager.translate_vaddr(arg)
+            .ok_or("Invalid user pointer")
+    } else {
+        Ok(arg)
+    }
+}
+
 /// Handle DRM_IOCTL_VERSION
 /// 
 /// Returns version information about the DRM driver.
 pub fn handle_drm_version(arg: usize) -> Result<i32, &'static str> {
-    if arg == 0 {
-        return Err("Invalid argument pointer");
-    }
-    
-    // Get current task for pointer translation
-    let target_ptr = if let Some(current_task) = crate::task::mytask() {
-        current_task.vm_manager.translate_vaddr(arg)
-            .ok_or("Invalid user pointer")?
-    } else {
-        arg
-    };
+    let target_ptr = translate_user_pointer(arg)?;
     
     let version_ptr = target_ptr as *mut DrmVersion;
     let mut version = unsafe { core::ptr::read(version_ptr) };
