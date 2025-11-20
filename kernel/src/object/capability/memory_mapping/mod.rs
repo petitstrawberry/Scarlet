@@ -59,7 +59,49 @@ pub trait MemoryMappingOps: Send + Sync {
     fn supports_mmap(&self) -> bool {
         true
     }
+
+    /// Diagnostic helper: return a short owner name for logging
+    ///
+    /// Default implementation returns a generic "object" string. Implementers
+    /// (e.g. VfsFileObject) should override to provide more meaningful names
+    /// such as file paths.
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        alloc::string::String::from("object")
+    }
+
+    // Resolve a page fault for a given access. Default: page-base paddr from mapping, not tail.
+    fn resolve_fault(
+        &self,
+        access: &crate::object::capability::memory_mapping::AccessKind,
+        map: &crate::vm::vmem::VirtualMemoryMap,
+    ) -> core::result::Result<crate::object::capability::memory_mapping::ResolveFaultResult, crate::object::capability::memory_mapping::ResolveFaultError> {
+        let page_vaddr = access.vaddr & !(crate::environment::PAGE_SIZE - 1);
+        let offset_in_mapping = page_vaddr - map.vmarea.start;
+        Ok(crate::object::capability::memory_mapping::ResolveFaultResult {
+            paddr_page_base: map.pmarea.start + offset_in_mapping,
+            is_tail: false,
+        })
+    }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub enum AccessOp { Instruction, Load, Store }
+
+#[derive(Clone, Copy, Debug)]
+pub struct AccessKind {
+    pub op: AccessOp,
+    pub vaddr: usize,
+    pub size: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ResolveFaultResult {
+    pub paddr_page_base: usize,
+    pub is_tail: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ResolveFaultError { Invalid, Unmapped }
 
 #[cfg(test)]
 mod tests {
@@ -108,6 +150,10 @@ mod tests {
 
         fn supports_mmap(&self) -> bool {
             !self.should_fail
+        }
+
+        fn mmap_owner_name(&self) -> alloc::string::String {
+            alloc::string::String::from("mock_object")
         }
     }
 

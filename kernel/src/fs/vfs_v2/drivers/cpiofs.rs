@@ -475,6 +475,27 @@ impl MemoryMappingOps for CpioFileObject {
 }
 
 impl FileObject for CpioFileObject {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let cpio_node = self.node.as_any()
+            .downcast_ref::<CpioNode>()
+            .ok_or(StreamError::IoError)?;
+
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        if offset >= cpio_node.content.len() {
+            return Ok(0);
+        }
+
+        let end = core::cmp::min(offset + buffer.len(), cpio_node.content.len());
+        let bytes_to_read = end - offset;
+        buffer[..bytes_to_read].copy_from_slice(&cpio_node.content[offset..end]);
+
+        Ok(bytes_to_read)
+    }
+
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::PermissionDenied)
+    }
+
     fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         let cpio_node = self.node.as_any()
             .downcast_ref::<CpioNode>()
@@ -516,6 +537,27 @@ impl FileObject for CpioFileObject {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+impl crate::object::capability::selectable::Selectable for CpioFileObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
 
 /// Directory object for CPIO directories
@@ -646,6 +688,27 @@ impl FileObject for CpioDirectoryObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for CpioDirectoryObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
+}
+
 /// Symbolic link object for CPIO symbolic links
 pub struct CpioSymlinkObject {
     node: Arc<dyn VfsNode>,
@@ -760,6 +823,27 @@ impl FileObject for CpioSymlinkObject {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+impl crate::object::capability::selectable::Selectable for CpioSymlinkObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
 
 

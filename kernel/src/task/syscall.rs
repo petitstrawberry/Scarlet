@@ -369,7 +369,6 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     let ticks = ns_to_ticks(nanosecs);
-    crate::early_println!("[syscall] Sleeping for {} ticks ({} ns)", ticks, nanosecs);
 
     // Increment PC before sleeping to avoid infinite loop
     trapframe.increment_pc_next(task);

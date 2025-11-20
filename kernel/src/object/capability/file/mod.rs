@@ -5,6 +5,7 @@
 
 use core::any::Any;
 
+use crate::object::capability::Selectable;
 use crate::object::capability::stream::{StreamOps, StreamError};
 use crate::object::capability::control::ControlOps;
 use crate::object::capability::memory_mapping::MemoryMappingOps;
@@ -30,12 +31,32 @@ pub enum SeekFrom {
 /// file-specific operations like seeking and metadata access, control
 /// operations for device-specific functionality, and memory mapping operations.
 /// Directory reading is handled through normal read() operations.
-pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps {
+pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// Seek to a position in the file stream
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
     
     /// Get metadata about the file
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
+
+    /// Read data from a specific offset without changing internal position
+    ///
+    /// This method performs a random-access read operation that must not
+    /// modify the file's current seek position. Filesystems that cannot
+    /// support position-independent reads may return `StreamError::NotSupported`.
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let _ = (offset, buffer);
+        Err(StreamError::NotSupported)
+    }
+
+    /// Write data to a specific offset without changing internal position
+    ///
+    /// Similar to [`read_at`], this operation must not adjust the file's
+    /// internal cursor. Implementations can default to returning
+    /// `StreamError::NotSupported` when random-access writes are unavailable.
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        let _ = (offset, buffer);
+        Err(StreamError::NotSupported)
+    }
 
     /// Truncate the file to the specified size
     /// 

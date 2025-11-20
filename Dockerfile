@@ -1,6 +1,6 @@
 FROM ubuntu:25.04
 
-ENV PATH=/root/.cargo/bin:/opt/bin:$PATH
+ENV PATH=/root/.cargo/bin:/opt/bin:/opt/buildroot/output/host/bin:$PATH
 ENV MAKEFLAGS=-j$(($(nproc)-2))
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
@@ -40,5 +40,26 @@ RUN git clone https://github.com/mit-pdos/xv6-riscv.git /opt/xv6-riscv && \
     cd /opt/xv6-riscv && \
     git checkout 2a39c5af63906b3dbd0db58b9f6846ad70f4315d && \
     make fs.img
+
+# Install dependencies for Buildroot
+RUN apt update && \
+    apt install -y libncurses5-dev wget unzip rsync
+
+# Download and set up Buildroot
+RUN cd /opt && \
+    wget https://buildroot.org/downloads/buildroot-2025.02.6.tar.gz && \
+    tar -xvf buildroot-2025.02.6.tar.gz && \
+    rm buildroot-2025.02.6.tar.gz && \
+    mv buildroot-2025.02.6 buildroot
+
+# Copy configuration files for Buildroot
+COPY docker/.config /opt/buildroot/.config
+
+# # Create patches directory and copy LTP musl compatibility patch
+# RUN mkdir -p /opt/buildroot/package/ltp-testsuite/patches
+# COPY docker/0001-exclude-listmount-statmount-for-musl.patch /opt/buildroot/package/ltp-testsuite/patches/
+
+# Buildroot compilation now handled by tools/linux/build_buildroot.sh
+# User program builds (green, fbdoom) handled by tools/linux/build_user_programs.sh
 
 WORKDIR /workspaces/Scarlet

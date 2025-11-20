@@ -6,13 +6,14 @@
 //! interfaces.
 //! 
 
-use crate::{arch::Trapframe, fs::{drivers::overlayfs::OverlayFS, VfsManager}, task::mytask};
+use crate::{arch::Trapframe, fs::{drivers::overlayfs::OverlayFS, VfsManager}, task::{mytask, CloneFlags}};
 use alloc::{boxed::Box, string::{String, ToString}, sync::Arc, vec::Vec};
 use hashbrown::HashMap;
 use spin::Mutex;
 
 pub mod scarlet;
 pub mod xv6;
+pub mod linux;
 
 pub const MAX_ABI_LENGTH: usize = 64;
 
@@ -39,6 +40,22 @@ pub trait AbiModule: Send + Sync + 'static {
     fn clone_boxed(&self) -> Box<dyn AbiModule + Send + Sync>;
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
+
+    /// Hook invoked after Task::clone_task creates the child
+    fn on_task_cloned(
+        &mut self,
+        _parent_task: &crate::task::Task,
+        _child_task: &mut crate::task::Task,
+        _flags: CloneFlags,
+    ) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    /// Hook invoked as part of Task::exit cleanup for the current task
+    ///
+    /// ABI modules can perform per-ABI teardown such as waking futex waiters,
+    /// clearing TLS/robust-list pointers, or delivering exit-related signals.
+    fn on_task_exit(&mut self, _task: &mut crate::task::Task) {}
     
     /// Determine if a binary can be executed by this ABI and return confidence
     /// 
@@ -227,12 +244,12 @@ pub trait AbiModule: Send + Sync + 'static {
     /// * `config_path` - Path to writable persistence layer (e.g., "/data/config/scarlet")
     fn setup_overlay_environment(
         &self,
-        target_vfs: &Arc<VfsManager>,
-        base_vfs: &Arc<VfsManager>,
-        system_path: &str,
-        config_path: &str,
+        _target_vfs: &Arc<VfsManager>,
+        _base_vfs: &Arc<VfsManager>,
+        _system_path: &str,
+        _config_path: &str,
     ) -> Result<(), &'static str> {
-        // cross-vfs overlay_mount_fromはv2では未サポートのため一旦コメントアウト
+        // cross-vfs overlay_mount_from is not supported in v2, commented out for now
         // let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         // target_vfs.overlay_mount_from(
         //     Some(base_vfs),             // upper_vfs (base VFS)
@@ -266,7 +283,7 @@ pub trait AbiModule: Send + Sync + 'static {
         //     .map_err(|_| "Failed to bind mount /home")?;
         // target_vfs.bind_mount_from(&base_vfs, "/data/shared", "/data/shared")
         //     .map_err(|_| "Failed to bind mount /data/shared")?;
-        // target_vfs.bind_mount_from(&base_vfs, "/", "/scarlet") // Read-onlyは未サポート
+        // target_vfs.bind_mount_from(&base_vfs, "/", "/scarlet") // Read-only is not supported
         //     .map_err(|_| "Failed to bind mount native Scarlet root to /scarlet")
         Ok(())
     }
@@ -361,11 +378,8 @@ impl AbiRegistry {
         let registry = Self::global().lock();
         
         // Get current task's ABI reference for inheritance consideration
-        let current_abi = if let Some(task) = mytask() {
-            Some(task.default_abi.as_ref() as &(dyn AbiModule + Send + Sync))
-        } else {
-            None
-        };
+        let current_abi: Option<&(dyn AbiModule + Send + Sync)> = mytask()
+            .and_then(|task| task.default_abi.as_deref());
         
         // Try all ABI modules and find the one with highest confidence
         // Each ABI decides its own confidence based on:

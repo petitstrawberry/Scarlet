@@ -7,10 +7,10 @@ use spin::{Mutex, RwLock};
 
 use crate::{
     device::{
-        char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
-            resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo
-        }, Device, DeviceInfo, DeviceType
-    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, traits::serial::Serial, object::capability::{ControlOps, MemoryMappingOps}
+        Device, DeviceInfo, DeviceType, char::CharDevice, events::{DeviceEventEmitter, DeviceEventListener, EventCapableDevice, InputEvent, InterruptCapableDevice}, manager::{DeviceManager, DriverPriority}, platform::{
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType
+        }
+    }, driver_initcall, drivers::uart, interrupt::{InterruptId, InterruptManager}, object::capability::{ControlOps, MemoryMappingOps, Selectable}, traits::serial::Serial
 };
 
 pub struct Uart {
@@ -181,6 +181,8 @@ impl MemoryMappingOps for Uart {
     }
 }
 
+static UART_CAPS: [crate::device::DeviceCapability; 1] = [crate::device::DeviceCapability::Serial];
+
 impl Device for Uart {
     fn device_type(&self) -> DeviceType {
         DeviceType::Char
@@ -199,6 +201,14 @@ impl Device for Uart {
     }
     
     fn as_char_device(&self) -> Option<&dyn CharDevice> {
+        Some(self)
+    }
+
+    fn capabilities(&self) -> &'static [crate::device::DeviceCapability] {
+        &UART_CAPS
+    }
+    
+    fn as_event_capable(&self) -> Option<&dyn EventCapableDevice> {
         Some(self)
     }
 }
@@ -286,6 +296,8 @@ impl InterruptCapableDevice for Uart {
         self.interrupt_id.read().clone()
     }
 }
+
+impl Selectable for Uart {} // Use default Selectable implementation
 
 fn register_uart() {
     use alloc::vec;

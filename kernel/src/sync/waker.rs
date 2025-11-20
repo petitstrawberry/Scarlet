@@ -9,8 +9,8 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use spin::Mutex;
 use core::fmt;
-use crate::arch::{Arch, Trapframe};
-use crate::task::{BlockedType, Task, TaskState};
+use crate::arch::Trapframe;
+use crate::task::{BlockedType, TaskState};
 use crate::sched::scheduler::get_scheduler;
 
 /// A synchronization primitive that manages waiting and waking of tasks
@@ -107,27 +107,50 @@ impl Waker {
     /// The calling code can then continue execution, typically to re-check the
     /// condition that caused the wait.
     pub fn wait(&self, task_id: usize, trapframe: &mut Trapframe) {
-        // crate::println!("[WAKER] Task {} waiting on waker '{}'", task_id, self.name);
-                
         // Add task to wait queue first
         {
             let mut queue = self.wait_queue.lock();
             queue.push_back(task_id);
         }
 
+        // Set task state to Blocked like dev branch behavior
         if let Some(task) = get_scheduler().get_task_by_id(task_id) {
-            // Set task state to blocked
             task.set_state(TaskState::Blocked(self.block_type));
         } else {
             panic!("[WAKER] Task ID {} not found in scheduler", task_id);
         }
 
-        // Yield CPU to scheduler - this will return when the task is woken up
+        // Yield CPU to scheduler - returns when woken
         get_scheduler().schedule(trapframe);
-        
-        // When we reach here, the task has been woken up and rescheduled
-        // crate::println!("[WAKER] Task {} woken up from waker '{}'", task_id, self.name);
     }
+
+    // /// Block any task (not limited to the current task) and add it to the wait queue
+    // ///
+    // /// This method is intended for blocking tasks other than the current one.
+    // /// It sets the specified task's state to Blocked and adds it to the wait queue.
+    // /// No scheduler switch or CPU state saving is performed.
+    // ///
+    // /// # Arguments
+    // /// * `task_id` - The ID of the task to be blocked
+    // pub fn block(&self, task_id: usize) {
+    //     {
+    //         let mut queue = self.wait_queue.lock();
+    //         queue.push_back(task_id);
+    //     }
+
+    //     if let Some(task) = get_scheduler().get_task_by_id(task_id) {
+    //         // Set task state to blocked
+    //         task.set_state(TaskState::Blocked(self.block_type));
+    //     } else {
+    //         panic!("[WAKER] Task ID {} not found in scheduler", task_id);
+    //     }
+
+    //     // Yield CPU to scheduler - this will return when the task is woken up
+    //     get_scheduler().schedule(cpu);
+        
+    //     // When we reach here, the task has been woken up and rescheduled
+    //     // crate::println!("[WAKER] Task {} woken up from waker '{}'", task_id, self.name);
+    // }
 
     /// Wake up one waiting task
     /// 

@@ -11,6 +11,7 @@ use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::Selectable;
 
 pub mod manager;
 pub mod framebuffer_device;
@@ -127,8 +128,8 @@ pub trait GraphicsDevice: Device {
     /// Flush framebuffer region to display
     fn flush_framebuffer(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str>;
     
-    /// Initialize the graphics device
-    fn init_graphics(&mut self) -> Result<(), &'static str>;
+    /// Initialize the graphics device (idempotent)
+    fn init_graphics(&self) -> Result<(), &'static str>;
 }
 
 /// A generic implementation of a graphics device
@@ -208,6 +209,8 @@ impl MemoryMappingOps for GenericGraphicsDevice {
     }
 }
 
+impl Selectable for GenericGraphicsDevice {}
+
 impl GraphicsDevice for GenericGraphicsDevice {
     fn get_display_name(&self) -> &'static str {
         self.display_name
@@ -226,7 +229,7 @@ impl GraphicsDevice for GenericGraphicsDevice {
         Ok(())
     }
     
-    fn init_graphics(&mut self) -> Result<(), &'static str> {
+    fn init_graphics(&self) -> Result<(), &'static str> {
         // Generic implementation - no-op
         Ok(())
     }

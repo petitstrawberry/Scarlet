@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use spin::Mutex;
-use crate::object::capability::{CloneOps, ControlOps, MemoryMappingOps, StreamError, StreamOps};
+use crate::object::capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamError, StreamOps};
 use crate::fs::{FileType, FileMetadata, SeekFrom};
 
 /// Mock FileObject for testing purposes
@@ -80,6 +80,8 @@ impl MemoryMappingOps for MockFileObject {
         false
     }
 }
+
+impl Selectable for MockFileObject {} // Use default Selectable implementation
 
 impl crate::fs::FileObject for MockFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
@@ -183,6 +185,8 @@ impl MemoryMappingOps for MockTaskFileObject {
         false
     }
 }
+
+impl Selectable for MockTaskFileObject {} // Use default Selectable implementation
 
 impl crate::fs::FileObject for MockTaskFileObject {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {

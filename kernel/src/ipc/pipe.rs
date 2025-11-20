@@ -11,6 +11,7 @@ use spin::Mutex;
 
 use crate::object::capability::{StreamOps, StreamError, CloneOps};
 use crate::object::KernelObject;
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 use crate::sync::waker::Waker;
 use super::{StreamIpcOps, IpcError};
 
@@ -35,6 +36,12 @@ pub trait PipeObject: StreamIpcOps + CloneOps {
     
     /// Check if this end of the pipe is writable
     fn is_writable(&self) -> bool;
+
+    /// Optional capability: expose select/pselect readiness/wait interface.
+    ///
+    /// By default, pipes are not exposed via this hook unless the implementation
+    /// also implements `Selectable` and overrides this to return `Some(self)`.
+    fn as_selectable(&self) -> Option<&dyn Selectable> { None }
 }
 
 /// Represents errors specific to pipe operations
@@ -109,6 +116,8 @@ pub struct PipeEndpoint {
     can_write: bool,
     /// Unique identifier for debugging
     id: String,
+    /// Per-endpoint non-blocking flag (O_NONBLOCK semantics)
+    nonblocking: core::sync::atomic::AtomicBool,
 }
 
 impl PipeEndpoint {
@@ -130,6 +139,7 @@ impl PipeEndpoint {
             can_read,
             can_write,
             id,
+            nonblocking: core::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -155,6 +165,9 @@ impl StreamOps for PipeEndpoint {
                 // Block the current task using the pipe read waker
                 use crate::task::mytask;
                 if let Some(task) = mytask() {
+                    if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+                        return Err(StreamError::WouldBlock);
+                    }
                     state.read_waker.wait(task.get_id(), task.get_trapframe());
                     
                     // After waking up, retry the read operation
@@ -199,7 +212,10 @@ impl StreamOps for PipeEndpoint {
             // No space available - block until space becomes available
             // Block the current task using the pipe write waker
             use crate::task::mytask;
-            if let Some(mut task) = mytask() {
+            if let Some(task) = mytask() {
+                if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
+                    return Err(StreamError::WouldBlock);
+                }
                 state.write_waker.wait(task.get_id(), task.get_trapframe());
                 
                 // After waking up, retry the write operation
@@ -321,6 +337,7 @@ impl Clone for PipeEndpoint {
             can_read: self.can_read,
             can_write: self.can_write,
             id: format!("{}_clone", self.id),
+            nonblocking: core::sync::atomic::AtomicBool::new(self.nonblocking.load(core::sync::atomic::Ordering::Relaxed)),
         };
         
         // Increment reference counts
@@ -445,6 +462,8 @@ impl PipeObject for UnidirectionalPipe {
     fn is_writable(&self) -> bool {
         self.endpoint.is_writable()
     }
+
+    fn as_selectable(&self) -> Option<&dyn Selectable> { Some(self) }
 }
 
 impl Clone for UnidirectionalPipe {
@@ -452,6 +471,66 @@ impl Clone for UnidirectionalPipe {
         Self {
             endpoint: self.endpoint.clone(),
         }
+    }
+}
+
+impl Selectable for UnidirectionalPipe {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        // Inspect internal state once
+        let st = self.endpoint.state.lock();
+        if interest.read && self.endpoint.can_read {
+            // Readable if buffer has data or writers are gone (EOF)
+            set.read = !st.buffer.is_empty() || st.writer_count == 0;
+        }
+        if interest.write && self.endpoint.can_write {
+            // Writable if space available or no readers (will error but not block)
+            let available_space = st.max_size.saturating_sub(st.buffer.len());
+            set.write = available_space > 0 || st.reader_count == 0;
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        use crate::task::mytask;
+        let mut waited = false;
+        // Prefer read wait if requested; otherwise write wait; except is ignored.
+        if interest.read && self.endpoint.can_read {
+            let st = self.endpoint.state.lock();
+            if st.buffer.is_empty() && st.writer_count > 0 {
+                if let Some(task) = mytask() {
+                    st.read_waker.wait(task.get_id(), trapframe);
+                    waited = true;
+                }
+            }
+        } else if interest.write && self.endpoint.can_write {
+            let st = self.endpoint.state.lock();
+            let space = st.max_size.saturating_sub(st.buffer.len());
+            if space == 0 && st.reader_count > 0 {
+                if let Some(task) = mytask() {
+                    st.write_waker.wait(task.get_id(), trapframe);
+                    waited = true;
+                }
+            }
+        }
+        let _ = waited;
+        SelectWaitOutcome::Ready
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.endpoint.nonblocking.store(enabled, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        self.endpoint.nonblocking.load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -484,6 +563,24 @@ mod tests {
         let read = read_end.read(&mut buffer).unwrap();
         assert_eq!(read, data.len());
         assert_eq!(&buffer[..read], data);
+    }
+
+    #[test_case]
+    fn test_pipe_nonblocking_behaviour() {
+        let (read_end, write_end) = UnidirectionalPipe::create_pair_raw(4);
+
+        crate::object::capability::selectable::Selectable::set_nonblocking(&read_end, true);
+        crate::object::capability::selectable::Selectable::set_nonblocking(&write_end, true);
+
+        let mut buffer = [0u8; 1];
+        let read_result = read_end.read(&mut buffer);
+        assert!(matches!(read_result, Err(StreamError::WouldBlock)));
+
+        let data = [1u8, 2, 3, 4];
+        assert_eq!(write_end.write(&data).unwrap(), data.len());
+
+        let would_block = write_end.write(&[5]);
+        assert!(matches!(would_block, Err(StreamError::WouldBlock)));
     }
     
     #[test_case]

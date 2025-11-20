@@ -30,8 +30,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             let mut vaddr = trapframe.epc as usize;
             let task = get_scheduler().get_current_task(get_cpu().get_cpuid()).unwrap();
             let manager = &mut task.vm_manager;
+            use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                match manager.lazy_map_page(vaddr) {
+                let access = AccessKind { op: AccessOp::Instruction, vaddr, size: None };
+                match manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
@@ -54,8 +56,11 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             }
             let task = get_scheduler().get_current_task(get_cpu().get_cpuid()).unwrap();
             let manager = &mut task.vm_manager;
+            use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                match manager.lazy_map_page(vaddr) {
+                let op = if cause == 13 { AccessOp::Load } else { AccessOp::Store };
+                let access = AccessKind { op, vaddr, size: None };
+                match manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);

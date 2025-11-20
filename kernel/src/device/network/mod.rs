@@ -10,7 +10,7 @@ use spin::Mutex;
 use alloc::sync::Arc;
 
 use super::{Device, DeviceType, manager::DeviceManager};
-use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
 
 /// Get the first available network device
 /// 
@@ -329,6 +329,8 @@ impl MemoryMappingOps for GenericNetworkDevice {
         false
     }
 }
+
+impl Selectable for GenericNetworkDevice {}
 
 impl NetworkDevice for GenericNetworkDevice {
     fn get_interface_name(&self) -> &'static str {

@@ -110,7 +110,14 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             // Convert args to &[&str] for execve
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             
-            if execve(&executable_path, &arg_refs, &[]) != 0 {
+            // Get all environment variables and convert them to the format needed for execve
+            let env_vars = std::env::vars();
+            let env_strings: Vec<String> = env_vars
+                .map(|(key, value)| format!("{}={}", key, value))
+                .collect();
+            let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
+            
+            if execve(&executable_path, &arg_refs, &env_refs) != 0 {
                 println!("sh: {}: execution failed", executable_path);
             }
             exit(126); // Standard exit code for "command not executable"

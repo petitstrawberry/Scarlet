@@ -434,6 +434,29 @@ impl Scheduler {
         false
     }
 
+    /// Clean up a zombie task after it has been waited on
+    /// 
+    /// This removes the task from zombie_queue and task_pool, freeing all resources.
+    /// Should only be called from Task::wait() after confirming the task is a zombie.
+    /// 
+    /// # Arguments
+    /// * `task_id` - The ID of the zombie task to clean up
+    pub fn cleanup_zombie_task(&mut self, task_id: usize) {
+        // Remove from zombie queue
+        for cpu_id in 0..NUM_OF_CPUS {
+            if let Some(pos) = self.zombie_queue[cpu_id].iter().position(|&id| id == task_id) {
+                self.zombie_queue[cpu_id].remove(pos);
+                crate::println!("[Scheduler] Removed task {} from zombie_queue", task_id);
+                break;
+            }
+        }
+        
+        // Remove from task pool (this frees all task resources)
+        if let Some(_task) = self.task_pool.remove_task(task_id) {
+            crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
+        }
+    }
+
     /// Get IDs of all tasks across ready, blocked, and zombie queues
     ///
     /// This helper is used by subsystems (e.g., event broadcast) that need

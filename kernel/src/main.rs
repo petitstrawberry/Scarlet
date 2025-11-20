@@ -627,9 +627,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     match load_elf_into_task(file_ref, &mut task) {
         Ok(_) => {
-            for map in task.vm_manager.memmap_iter() {
+            task.vm_manager.memmaps_iter_with(|maps| {
+                for map in maps {
                 early_println!("[Scarlet Kernel] Task memory map: {:#x} - {:#x}", map.vmarea.start, map.vmarea.end);
-            }
+                }
+            });
             early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
             get_scheduler().add_task(task, get_cpu().get_cpuid());
         }

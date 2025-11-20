@@ -2,8 +2,35 @@ use core::any::Any;
 
 use super::Device;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 
 extern crate alloc;
+
+/// OS/ABI-agnostic TTY control interface
+///
+/// This trait intentionally avoids Linux/POSIX terms and numbers.
+/// ABI adapters (e.g., abi/linux) should translate their own termios/ioctl
+/// to these neutral controls.
+pub trait TtyControl {
+    /// Enable or disable local echo.
+    fn set_echo(&self, enabled: bool);
+    /// Returns whether local echo is enabled.
+    fn is_echo_enabled(&self) -> bool;
+
+    /// Enable or disable canonical (line) mode.
+    fn set_canonical(&self, enabled: bool);
+    /// Returns whether canonical (line) mode is enabled.
+    fn is_canonical(&self) -> bool;
+
+    /// Set terminal window size in character cells.
+    fn set_winsize(&self, cols: u16, rows: u16);
+    /// Get terminal window size in character cells.
+    fn get_winsize(&self) -> (u16, u16);
+}
+
+/// Composite endpoint trait for TTY devices (byte stream + neutral controls)
+pub trait TtyDeviceEndpoint: CharDevice + TtyControl {}
+impl<T: CharDevice + TtyControl> TtyDeviceEndpoint for T {}
 
 /// Seek operations for character device positioning
 #[derive(Debug, Clone, Copy)]
@@ -229,6 +256,27 @@ impl MemoryMappingOps for GenericCharDevice {
     fn supports_mmap(&self) -> bool {
         false
     }
+}
+
+impl Selectable for GenericCharDevice {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        if interest.read { set.read = self.can_read(); }
+        if interest.write { set.write = self.can_write(); }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
 
 #[cfg(test)]

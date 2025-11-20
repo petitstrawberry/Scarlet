@@ -7,9 +7,7 @@
 mod tests {
     use alloc::vec::Vec;
     use crate::{
-        fs::{FileType, DeviceFileInfo, FileObject},
-        device::{DeviceType, char::CharDevice, Device},
-        object::capability::{ControlOps, MemoryMappingOps},
+        device::{Device, DeviceType, char::CharDevice}, fs::{DeviceFileInfo, FileObject, FileType}, object::capability::{ControlOps, MemoryMappingOps, Selectable}
     };
     use spin::Mutex;
     use core::any::Any;
@@ -52,6 +50,8 @@ mod tests {
             Some(self)
         }
     }
+
+    impl Selectable for MockCharDevice {} // Use default Selectable implementation
 
     impl CharDevice for MockCharDevice {
         fn read_byte(&self) -> Option<u8> {

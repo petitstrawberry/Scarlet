@@ -44,12 +44,12 @@ use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
 use crate::mem::page::{allocate_raw_pages, free_raw_pages};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
+use crate::task::{Task, ManagedPage};
 use alloc::boxed::Box;
 use alloc::{format, vec};
 use alloc::string::{String, ToString};
-use crate::task::Task;
 
-use super::{ManagedPage, TaskType};
+use super::TaskType;
 
 // ELF Magic Number
 const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F', ];
@@ -521,7 +521,7 @@ pub fn analyze_and_load_elf_with_strategy(
             if let Some(final_interp_path) = actual_interpreter {
                 crate::println!("Using interpreter: {}", final_interp_path);
                 let base_address = load_elf_segments_for_interpreter(&header, file_obj, task, strategy)?;
-                let interpreter_entry = load_interpreter(&final_interp_path, task, strategy)?;
+                let (interpreter_entry, interpreter_base) = load_interpreter(&final_interp_path, task, strategy)?;
                 
                 // Prepare program headers info for auxiliary vector
                 let phdr_info = ProgramHeadersInfo {
@@ -530,13 +530,19 @@ pub fn analyze_and_load_elf_with_strategy(
                     phdr_count: header.e_phnum as u64,
                 };
                 
-                // TODO: Get actual interpreter base address from load_interpreter result
-                let interpreter_base = 0x40000000u64; // Hardcoded for now
+                // Calculate original entry point correctly based on ELF type
+                // For ET_EXEC: e_entry is an absolute address
+                // For ET_DYN: e_entry is relative to base_address
+                let original_entry = if needs_relocation {
+                    base_address + header.e_entry
+                } else {
+                    header.e_entry
+                };
                 
                 Ok(LoadElfResult {
                     mode: ExecutionMode::Dynamic { interpreter_path: final_interp_path },
                     entry_point: interpreter_entry,
-                    original_entry_point: Some(base_address + header.e_entry),
+                    original_entry_point: Some(original_entry),
                     base_address: Some(base_address),
                     interpreter_base: Some(interpreter_base),
                     program_headers: phdr_info,
@@ -623,30 +629,57 @@ fn find_interpreter_path(header: &ElfHeader, file_obj: &dyn FileObject) -> Resul
 fn load_elf_segments_for_interpreter(header: &ElfHeader, file_obj: &dyn FileObject, task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
     // Use strategy to determine base address
     let needs_relocation = header.e_type == ET_DYN;
+    // crate::println!("[ELF Loader] Main program: e_type={:#x}, needs_relocation={}, e_phoff={:#x}", 
+    //     header.e_type, needs_relocation, header.e_phoff);
     let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
+    // crate::println!("[ELF Loader] Chosen base_address={:#x}", base_address);
+    
+    // Track the actual load address of the first LOAD segment for program headers
+    let mut first_load_addr: Option<u64> = None;
+    let mut _load_segment_count = 0;
     
     // Load PT_LOAD segments using simplified approach
     for_each_program_header(header, file_obj, |_i, ph| {
         if ph.p_type == PT_LOAD {
             let segment_addr = base_address + ph.p_vaddr;
+            // crate::println!("[ELF Loader] PT_LOAD[{}]: p_vaddr={:#x}, p_memsz={:#x}, p_filesz={:#x}, p_flags={:#x} -> load_addr={:#x}", 
+            //     i, ph.p_vaddr, ph.p_memsz, ph.p_filesz, ph.p_flags, segment_addr);
+            if first_load_addr.is_none() {
+                first_load_addr = Some(segment_addr);
+                // crate::println!("[ELF Loader] First LOAD segment at {:#x}", segment_addr);
+            }
             load_elf_segment_at_address(ph, file_obj, task, segment_addr)?;
+            _load_segment_count += 1;
         }
         Ok(true) // Continue iteration
     })?;
     
-    Ok(base_address)
+    // crate::println!("[ELF Loader] Loaded {} PT_LOAD segments, e_entry={:#x}", _load_segment_count, header.e_entry);
+    
+    // Calculate phdr_addr based on actual load address
+    // Program headers are typically in the first LOAD segment
+    let actual_base = first_load_addr.unwrap_or(base_address);
+    
+    // Program headers are already loaded as part of the first LOAD segment
+    // (which typically includes the ELF header and program headers)
+    // No need to create a separate mapping - just return the address
+    // crate::println!("[ELF Loader] Program headers at {:#x} (actual_base={:#x} + e_phoff={:#x})", 
+    //     actual_base + header.e_phoff, actual_base, header.e_phoff);
+    
+    // Return the actual base address where the first segment was loaded
+    Ok(actual_base)
 }
 
 /// Load interpreter (dynamic linker) into task memory  
 /// Maximum recursion depth for interpreter loading to prevent infinite loops
 const MAX_INTERPRETER_DEPTH: usize = 5;
 
-fn load_interpreter(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy) -> Result<u64, ElfLoaderError> {
+fn load_interpreter(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy) -> Result<(u64, u64), ElfLoaderError> {
     load_interpreter_recursive(interpreter_path, task, strategy, 0)
 }
 
 /// Recursive interpreter loading with depth limiting
-fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy, depth: usize) -> Result<u64, ElfLoaderError> {
+fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy: &LoadStrategy, depth: usize) -> Result<(u64, u64), ElfLoaderError> {
     // Check recursion depth to prevent infinite loops
     if depth >= MAX_INTERPRETER_DEPTH {
         return Err(ElfLoaderError {
@@ -703,7 +736,7 @@ fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy:
     
     // Step 3: Check if this interpreter itself has an interpreter (recursive case)
     let nested_interpreter_path = find_interpreter_path(&interp_header, file_object)?;
-    let final_entry_point = if let Some(nested_path) = nested_interpreter_path {
+    let (final_entry_point, final_base) = if let Some(nested_path) = nested_interpreter_path {
         let resolved_nested_path = (strategy.resolve_interpreter)(Some(&nested_path))
             .unwrap_or(nested_path);
         crate::println!("Interpreter {} requests nested interpreter: {}", interpreter_path, resolved_nested_path);
@@ -714,23 +747,50 @@ fn load_interpreter_recursive(interpreter_path: &str, task: &mut Task, strategy:
         // No nested interpreter, load this interpreter normally
         let interp_needs_relocation = interp_header.e_type == ET_DYN;
         
-        // Use strategy to determine base address for interpreter
-        let interpreter_base = (strategy.choose_base_address)(LoadTarget::Interpreter, interp_needs_relocation);
-        crate::println!("Interpreter base address: {:#x}", interpreter_base);
-        
-        // Load interpreter segments with specific base address
-        load_elf_segments_with_base(&interp_header, file_object, task, interpreter_base)?;
-        
-        // Calculate actual entry point
-        if interp_needs_relocation {
-            interpreter_base + interp_header.e_entry as u64
+        // Determine total span of PT_LOAD segments to avoid overlap
+        let mut min_vaddr: u64 = u64::MAX;
+        let mut max_end: u64 = 0;
+        for_each_program_header(&interp_header, file_object, |_i, ph| {
+            if ph.p_type == PT_LOAD {
+                if ph.p_vaddr < min_vaddr { min_vaddr = ph.p_vaddr; }
+                let end = ph.p_vaddr.saturating_add(ph.p_memsz);
+                if end > max_end { max_end = end; }
+            }
+            Ok(true)
+        })?;
+
+        if min_vaddr == u64::MAX {
+            return Err(ElfLoaderError { message: "Interpreter has no PT_LOAD segments".to_string() });
+        }
+
+        let span = max_end.saturating_sub(min_vaddr) as usize;
+        let align = crate::environment::PAGE_SIZE;
+        let span_aligned = (span + align - 1) & !(align - 1);
+
+        // Prefer the strategy's hint, but pick an actually free area in the task's VM
+        let _preferred = (strategy.choose_base_address)(LoadTarget::Interpreter, interp_needs_relocation);
+        let start = task.vm_manager
+            .find_unmapped_area(span_aligned, align)
+            .ok_or_else(|| ElfLoaderError { message: "No unmapped area available for interpreter".to_string() })? as u64;
+
+        // Compute additive base so that the lowest PT_LOAD maps to `start`
+        let interpreter_base_add = start.saturating_sub(min_vaddr);
+        crate::println!("Interpreter base address: {:#x} (mapped span: {:#x} bytes)", interpreter_base_add, span_aligned);
+
+        // Load interpreter segments with this base
+        load_elf_segments_with_base(&interp_header, file_object, task, interpreter_base_add)?;
+
+        // Calculate actual entry point and return base used for relocations/AT_BASE
+        let entry = if interp_needs_relocation {
+            interpreter_base_add + interp_header.e_entry as u64
         } else {
             interp_header.e_entry
-        }
+        };
+        (entry, interpreter_base_add)
     };
     
     crate::println!("Interpreter entry point (depth {}): {:#x}", depth, final_entry_point);
-    Ok(final_entry_point)
+    Ok((final_entry_point, final_base))
 }
 
 /// Load ELF segments for interpreter with specified base address
@@ -829,6 +889,15 @@ fn load_elf_into_task_static(header: &ElfHeader, file_obj: &dyn FileObject, task
                         message: format!("Unknown segment type: {:#x}", ph.p_flags),
                     });
                 }
+            }
+            
+            // Update brk to track the end of the loaded program
+            // brk should be set to the maximum end address of all loaded segments
+            let segment_end = mapping_addr + aligned_size;
+            let current_brk = task.brk.unwrap_or(0);
+            if segment_end > current_brk {
+                task.brk = Some(segment_end);
+                // crate::println!("[ELF loader] Updated brk to {:#x} (segment end at {:#x})", segment_end, mapping_addr);
             }
             
             // Load segment data using common function (if there's file data)
@@ -1012,7 +1081,9 @@ fn map_elf_segment(task: &mut Task, vaddr: usize, size: usize, align: usize, fla
     };
 
     // Check if the area is overlapping with existing mappings
-    if task.vm_manager.search_memory_map(vaddr).is_some() {
+    if let Some(_existing) = task.vm_manager.search_memory_map(vaddr) {
+        // crate::println!("[ELF Loader] ERROR: Memory area {:#x}-{:#x} overlaps with existing mapping {:#x}-{:#x}", 
+        //     vaddr, vaddr + size - 1, existing.vmarea.start, existing.vmarea.end);
         return Err("Memory area overlaps with existing mapping");
     }
 
@@ -1169,6 +1240,11 @@ fn load_elf_segment_at_address(
     let mapping_start = (segment_addr as usize) - page_offset;
     let mapping_size = (ph.p_memsz as usize) + page_offset;
     let aligned_size = (mapping_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    
+    // crate::println!("[ELF Loader] Loading segment: vaddr={:#x}, memsz={:#x}, filesz={:#x}, flags={:#x}", 
+    //     segment_addr, ph.p_memsz, ph.p_filesz, ph.p_flags);
+    // crate::println!("[ELF Loader]   mapping: start={:#x}, size={:#x}, aligned_size={:#x}", 
+    //     mapping_start, mapping_size, aligned_size);
     
     // Map segment with proper page alignment
     map_elf_segment(task, mapping_start, aligned_size, align, ph.p_flags).map_err(|e| ElfLoaderError {

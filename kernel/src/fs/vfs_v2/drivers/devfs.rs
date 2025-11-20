@@ -692,6 +692,41 @@ impl FileObject for DevFileObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for DevFileObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        // Delegate to underlying Device's Selectable; fallback to default
+        if let Some(ref device_guard) = self.device_guard {
+            return device_guard.as_ref().current_ready(interest);
+        }
+        crate::object::capability::selectable::Selectable::current_ready(self, interest)
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        if let Some(ref device_guard) = self.device_guard {
+            return device_guard.as_ref().wait_until_ready(interest, trapframe, timeout_ticks);
+        }
+        crate::object::capability::selectable::Selectable::wait_until_ready(self, interest, trapframe, timeout_ticks)
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        if let Some(ref device_guard) = self.device_guard {
+            device_guard.as_ref().set_nonblocking(enabled);
+        }
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        if let Some(ref device_guard) = self.device_guard {
+            return device_guard.as_ref().is_nonblocking();
+        }
+        crate::object::capability::selectable::Selectable::is_nonblocking(self)
+    }
+}
+
 /// A file object for directories in DevFS
 /// 
 /// This struct provides a FileObject implementation for directories
@@ -836,6 +871,27 @@ impl FileObject for DevDirectoryObject {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+impl crate::object::capability::selectable::Selectable for DevDirectoryObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
 
 impl FileSystemDriver for DevFSDriver {

@@ -10,9 +10,9 @@ use alloc::{boxed::Box, sync::Arc};
 use spin::{Mutex, RwLock};
 
 use crate::{
-    device::{graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}, Device, DeviceType},
+    device::{Device, DeviceType, graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}},
     drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}},
-    mem::page::{allocate_raw_pages, Page}, object::capability::{ControlOps, MemoryMappingOps}, timer::{add_timer, get_tick, ms_to_ticks, SoftwareTimer, TimerHandler},
+    mem::page::{Page, allocate_raw_pages}, object::capability::{ControlOps, MemoryMappingOps, Selectable}, timer::{SoftwareTimer, TimerHandler, add_timer, get_tick, ms_to_ticks},
 };
 use core::{ptr, sync::atomic::fence};
 
@@ -208,7 +208,7 @@ impl VirtioGpuDeviceCore {
 
         // The response buffer is allocated on the stack. It's faster and
         // its memory is automatically reclaimed when the function returns.
-        let mut resp_buffer = [0u8; 64];
+        let mut resp_buffer = [0u8; 128];
 
         // Allocate descriptors
         let cmd_desc = control_queue.alloc_desc().ok_or("Failed to allocate command descriptor")?;
@@ -569,7 +569,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 
 pub struct VirtioGpuDevice {
     core: Arc<Mutex<VirtioGpuDeviceCore>>,
-    handler: Option<Arc<dyn TimerHandler>>,
+    handler: RwLock<Option<Arc<dyn TimerHandler>>>,
 }
 
 impl VirtioGpuDevice {
@@ -585,7 +585,7 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         Self {
             core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new(base_addr))),
-            handler: None,
+            handler: RwLock::new(None),
         }
     }
 }
@@ -638,6 +638,8 @@ impl MemoryMappingOps for VirtioGpuDevice {
     }
 }
 
+impl Selectable for VirtioGpuDevice {} // Use default Selectable implementation
+
 impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {
         "virtio-gpu"
@@ -655,7 +657,7 @@ impl GraphicsDevice for VirtioGpuDevice {
         self.core.lock().flush_framebuffer(x, y, width, height)
     }
 
-    fn init_graphics(&mut self) -> Result<(), &'static str> {
+    fn init_graphics(&self) -> Result<(), &'static str> {
         {
             let core = self.core.lock();
             let mut initialized = core.initialized.lock();
@@ -679,7 +681,8 @@ impl GraphicsDevice for VirtioGpuDevice {
 
         add_timer(get_tick() + ms_to_ticks(16), &handler, 0);
 
-        self.handler = Some(handler);
+        // Store handler via interior mutability
+        *self.handler.write() = Some(handler);
 
         // crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
         Ok(())

@@ -14,6 +14,7 @@ use core::fmt;
 
 use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, SeekFrom};
 use crate::object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError};
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 use super::mount_tree::MountPoint;
 
 /// DirectoryEntry structure used by readdir
@@ -394,9 +395,21 @@ impl MemoryMappingOps for VfsFileObject {
     fn supports_mmap(&self) -> bool {
         self.inner.supports_mmap()
     }
+
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        alloc::format!("vfs:{}", self.get_original_path())
+    }
 }
 
 impl FileObject for VfsFileObject {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.inner.write_at(offset, buffer)
+    }
+
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         self.inner.seek(whence)
     }
@@ -411,5 +424,28 @@ impl FileObject for VfsFileObject {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl Selectable for VfsFileObject {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        self.inner.current_ready(interest)
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        self.inner.wait_until_ready(interest, trapframe, timeout_ticks)
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.inner.set_nonblocking(enabled)
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        self.inner.is_nonblocking()
     }
 }

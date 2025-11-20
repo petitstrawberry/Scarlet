@@ -19,6 +19,17 @@ use core::any::Any;
 
 use alloc::vec::Vec;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::device::events::EventCapableDevice;
+use crate::object::capability::selectable::Selectable;
+
+/// Device capability flags for neutral feature discovery across ABIs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceCapability {
+    /// Device behaves like a terminal/TTY (byte stream with line discipline hooks)
+    Tty,
+    /// Device provides raw serial I/O (low-level byte stream, no line discipline)
+    Serial,
+}
 
 pub trait DeviceInfo {
     fn name(&self) -> &'static str;
@@ -63,17 +74,25 @@ pub enum DeviceType {
 /// All devices must support control operations through the ControlOps trait
 /// and memory mapping operations through the MemoryMappingOps trait.
 /// 
-pub trait Device: Send + Sync + ControlOps + MemoryMappingOps {
+pub trait Device: Send + Sync + ControlOps + MemoryMappingOps + Selectable {
     fn device_type(&self) -> DeviceType;
     fn name(&self) -> &'static str;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     
+    /// Optional capabilities exposed by this device (default: none)
+    fn capabilities(&self) -> &'static [DeviceCapability] { &[] }
+    
+    /// Cast to EventCapableDevice if this device can emit events
+    fn as_event_capable(&self) -> Option<&dyn EventCapableDevice> {
+        None
+    }
+    
     /// Cast to CharDevice if this device is a character device
     fn as_char_device(&self) -> Option<&dyn char::CharDevice> {
         None
     }
-    
+
     /// Cast to BlockDevice if this device is a block device  
     fn as_block_device(&self) -> Option<&dyn block::BlockDevice> {
         None
@@ -142,6 +161,8 @@ impl Device for GenericDevice {
         self
     }
 }
+
+impl Selectable for GenericDevice {}
 
 impl ControlOps for GenericDevice {
     // Generic devices don't support control operations by default

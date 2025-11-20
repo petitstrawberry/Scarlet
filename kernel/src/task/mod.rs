@@ -34,14 +34,15 @@ fn init_parent_waitpid_wakers() -> Mutex<BTreeMap<usize, Waker>> {
     Mutex::new(BTreeMap::new())
 }
 
-/// Get or create a waker for a specific task
+/// Get or create a waker for waitpid/wait operations for a specific task
 /// 
-/// This function returns a reference to the waker associated with the given task ID.
+/// This function returns a reference to the waker associated with the given task ID,
+/// used exclusively for waitpid/wait (child termination wait) synchronization.
 /// If no waker exists for the task, a new one is created.
 /// 
 /// # Arguments
 /// 
-/// * `task_id` - The ID of the task to get a waker for
+/// * `task_id` - The ID of the task to get a waitpid/wait waker for
 /// 
 /// # Returns
 /// 
@@ -63,10 +64,13 @@ pub fn get_waitpid_waker(task_id: usize) -> &'static Waker {
     }
 }
 
+// pub fn get_select_waker(...) was removed; use object-level Selectable::wait_until_ready
+
 /// Get or create a parent waker for waitpid(-1) operations
 /// 
-/// This waker is used when a parent process calls waitpid(-1) to wait for any child.
-/// It's separate from the task-specific wakers to avoid conflicts.
+/// This waker is used when a parent process calls waitpid(-1) to wait for any child to exit.
+/// It is separate from the task-specific waitpid wakers to avoid conflicts, and is used
+/// exclusively for waitpid(-1) (any child termination wait) synchronization.
 /// 
 /// # Arguments
 /// 
@@ -153,6 +157,8 @@ pub fn cleanup_parent_waker(parent_id: usize) {
     wakers.remove(&parent_id);
 }
 
+// pub fn cleanup_select_waker(...) was removed along with task-level select waker
+
 /// Types of blocked states for tasks
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BlockedType {
@@ -211,7 +217,9 @@ pub struct Task {
     exit_status: Option<i32>,      /* Exit code (for monitoring child task termination) */
 
     /// Default ABI for this task. Determined from ELF OSABI etc.
-    pub default_abi: Box<dyn AbiModule + Send + Sync>,
+    /// Wrapped in Option to allow temporary take() during callbacks
+    /// that also need `&mut self` without borrow conflicts.
+    pub default_abi: Option<Box<dyn AbiModule + Send + Sync>>,
 
     /// ABI zones map. Key is the start address of the range.
     pub abi_zones: BTreeMap<usize, AbiZone>,
@@ -247,6 +255,12 @@ pub struct Task {
     pub time_slice: u32,
     /// Software timer handlers
     pub software_timers_handlers: Vec<Arc<dyn TimerHandler>>,
+
+    // Wakers for task-specific operations
+    
+    /// Waker for sleep operations
+    pub sleep_waker: Waker,
+
     /// Task-local event queue with priority ordering
     pub event_queue: Mutex<crate::ipc::event::TaskEventQueue>,
     /// Event processing enabled flag (similar to interrupt enable/disable)
@@ -336,12 +350,14 @@ impl Task {
             parent_id: None,
             children: Vec::new(),
             exit_status: None,
-            default_abi: Box::new(ScarletAbi::default()), // Default ABI
+            default_abi: Some(Box::new(ScarletAbi::default())), // Default ABI
             abi_zones: BTreeMap::new(),
             vfs: None,
             handle_table: HandleTable::new(),
             time_slice: 10, // Assign 10 ticks by default
             software_timers_handlers: Vec::new(),
+            // Wakers for task-specific operations
+            sleep_waker: Waker::new_interruptible("task_sleep_waker"),
             event_queue: spin::Mutex::new(crate::ipc::event::TaskEventQueue::new()),
             events_enabled: spin::Mutex::new(true), // Events enabled by default
             kernel_stack_window_base: None,
@@ -416,10 +432,9 @@ impl Task {
     /// # Returns
     /// The program break address
     pub fn get_brk(&self) -> usize {
-        if self.brk.is_none() {
-            return self.text_size + self.data_size;
-        }
-        self.brk.unwrap()
+        // Return brk if set (represents program end address)
+        // Otherwise fallback to legacy size-based calculation for compatibility
+        self.brk.unwrap_or(self.text_size + self.data_size)
     }
 
     /// Set the program break (NOT work in Kernel task)
@@ -430,10 +445,6 @@ impl Task {
     /// # Returns
     /// If successful, returns Ok(()), otherwise returns an error.
     pub fn set_brk(&mut self, brk: usize) -> Result<(), &'static str> {
-        // println!("New brk: {:#x}", brk);
-        if brk < self.text_size {
-            return Err("Invalid address");
-        }
         let prev_brk = self.get_brk();
         if brk < prev_brk {
             /* Free pages */
@@ -449,13 +460,27 @@ impl Task {
             let addr = (brk + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             let num_of_pages = (addr - prev_addr) / PAGE_SIZE;
 
+            // crate::println!("[set_brk] Expanding: prev_brk={:#x} -> brk={:#x}", prev_brk, brk);
+            // crate::println!("[set_brk] Page allocation: prev_addr={:#x}, addr={:#x}, num_pages={}", 
+            //     prev_addr, addr, num_of_pages);
+
             if num_of_pages > 0 {
                 match self.vm_manager.search_memory_map(prev_addr) {
-                    Some(_) => {},
+                    Some(_existing_map) => {
+                        // crate::println!("[set_brk] Existing mapping found: VA {:#x}-{:#x}, skipping allocation", 
+                        //     existing_map.vmarea.start, existing_map.vmarea.end);
+                    },
                     None => {
+                        // crate::println!("[set_brk] No existing mapping, allocating {} pages at {:#x}", 
+                        //     num_of_pages, prev_addr);
                         match self.allocate_data_pages(prev_addr, num_of_pages) {
-                            Ok(_) => {},
-                            Err(_) => return Err("Failed to allocate pages"),
+                            Ok(_) => {
+                                // crate::println!("[set_brk] Successfully allocated {} pages", num_of_pages);
+                            },
+                            Err(_e) => {
+                                // crate::println!("[set_brk] Failed to allocate pages: {}", e);
+                                return Err("Failed to allocate pages");
+                            }
                         }
                     },
                 }
@@ -860,7 +885,25 @@ impl Task {
             }
         }
         // No zone found, return default ABI
-        self.default_abi.as_mut()
+        self.default_abi.as_deref_mut().expect("default_abi not set")
+    }
+
+    /// Get an immutable reference to the default ABI
+    pub fn default_abi_ref(&self) -> &(dyn AbiModule + Send + Sync) {
+        self.default_abi.as_deref().expect("default_abi not set")
+    }
+
+    /// Get a mutable reference to the default ABI
+    pub fn default_abi_mut(&mut self) -> &mut (dyn AbiModule + Send + Sync) {
+        self.default_abi.as_deref_mut().expect("default_abi not set")
+    }
+
+    /// Temporarily take ownership of the default ABI to run a closure that also needs &mut self
+    pub fn with_default_abi_mut<R>(&mut self, f: impl FnOnce(&mut (dyn AbiModule + Send + Sync), &mut Task) -> R) -> R {
+        let mut abi = self.default_abi.take().expect("default_abi not set");
+        let r = f(abi.as_mut(), self);
+        self.default_abi = Some(abi);
+        r
     }
 
     /// Get the file descriptor table
@@ -898,38 +941,40 @@ impl Task {
                     // to avoid creating new stack that would overwrite parent's stack content
                     let asid = alloc_virtual_address_space();
                     child.vm_manager.set_asid(asid);
+                } else {
+                    // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
+                    child.vm_manager = self.vm_manager.clone();
                 }
             }
         }
         
         if !flags.is_set(CloneFlagsDef::Vm) {
-            // Copy or share memory maps from parent to child
-            for mmap in self.vm_manager.memmap_iter() {
-                let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                let vaddr = mmap.vmarea.start;
-                
-                if num_pages > 0 {
+            // Copy or share memory maps from parent to child without cloning lists
+            self.vm_manager.memmaps_iter_with(|iter| {
+                for mmap in iter {
+                    let num_pages = (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                    if num_pages == 0 { continue; }
+
+                    let vaddr = mmap.vmarea.start;
                     if mmap.is_shared {
                         // Shared memory regions: just reference the same physical pages
                         let shared_mmap = VirtualMemoryMap {
-                            pmarea: mmap.pmarea, // Same physical memory
-                            vmarea: mmap.vmarea, // Same virtual addresses
+                            pmarea: mmap.pmarea,
+                            vmarea: mmap.vmarea,
                             permissions: mmap.permissions,
                             is_shared: true,
                             owner: mmap.owner.clone(),
                         };
-                        // Add the shared memory map directly to the child task
                         child.vm_manager.add_memory_map(shared_mmap.clone())
                             .map_err(|_| "Failed to add shared memory map to child task")?;
 
-                        // TODO: Add logic to determine if the memory map is a trampoline
-                        // If the memory map is the trampoline, pre-map it
+                        // Pre-map trampoline page if applicable
                         if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
-                            // Pre-map the trampoline page
-                            let root_pagetable = child.vm_manager.get_root_page_table().unwrap();
-                            root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)?;
+                            if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
+                                root_pagetable.map_memory_area(child.vm_manager.get_asid(), shared_mmap)
+                                    .map_err(|_| "Failed to map trampoline page")?;
+                            }
                         }
-
                     } else {
                         // Private memory regions: allocate new pages and copy contents
                         let permissions = mmap.permissions;
@@ -937,20 +982,14 @@ impl Task {
                         let size = num_pages * PAGE_SIZE;
                         let paddr = pages as usize;
                         let new_mmap = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + (size - 1),
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr,
-                                end: vaddr + (size - 1),
-                            },
+                            pmarea: MemoryArea { start: paddr, end: paddr + (size - 1) },
+                            vmarea: MemoryArea { start: vaddr, end: vaddr + (size - 1) },
                             permissions,
                             is_shared: false,
                             owner: mmap.owner.clone(),
                         };
-                        
-                        // Copy the contents of the original memory (including stack contents)
+
+                        // Copy original contents page-by-page
                         for i in 0..num_pages {
                             let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
                             let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
@@ -958,28 +997,28 @@ impl Task {
                                 core::ptr::copy_nonoverlapping(
                                     src_page_addr as *const u8,
                                     dst_page_addr as *mut u8,
-                                    PAGE_SIZE
+                                    PAGE_SIZE,
                                 );
                             }
-                            // Manage the new pages in the child task
                             child.add_managed_page(ManagedPage {
                                 vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
                                 page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
                             });
                         }
-                        // Add the new memory map to the child task
+
                         child.vm_manager.add_memory_map(new_mmap)
                             .map_err(|_| "Failed to add memory map to child task")?;
                     }
                 }
-            }
+                Ok::<(), &'static str>(())
+            })?;
         }
 
         // Copy register states
         self.vcpu.copy_iregs_to(&mut child.vcpu.iregs);
         
         // Clone the default ABI and ABI zones
-        child.default_abi = self.default_abi.clone_boxed();
+        child.default_abi = Some(self.default_abi.as_ref().expect("default_abi not set").clone_boxed());
         // Clone ABI zones (each zone contains a boxed ABI that needs to be cloned)
         for (start, zone) in &self.abi_zones {
             let new_zone = AbiZone {
@@ -987,6 +1026,12 @@ impl Task {
                 abi: zone.abi.clone_boxed(),
             };
             child.abi_zones.insert(*start, new_zone);
+        }
+        // Notify child's default ABI instance that cloning has completed
+        // Take and restore to avoid mutable aliasing with &mut child
+        if let Some(mut abi_boxed) = child.default_abi.take() {
+            let _ = abi_boxed.on_task_cloned(self, &mut child, flags);
+            child.default_abi = Some(abi_boxed);
         }
         
         // Copy state such as data size
@@ -1036,6 +1081,9 @@ impl Task {
     pub fn exit(&mut self, status: i32) {        
         // Close all open handles when task exits
         self.handle_table.close_all();
+        // Let current ABI perform exit-time cleanup (Linux: clear_child_tid, robust list, etc.)
+        // Use take/restore to avoid aliasing &mut self and &mut field
+        self.with_default_abi_mut(|abi, task| abi.on_task_exit(task));
         
         match self.parent_id {
             Some(parent_id) => {
@@ -1109,7 +1157,7 @@ impl Task {
 
         struct SleepWakerHandler {
             task_id: usize,
-            start_tick: u64,
+            _start_tick: u64,
         }
 
         impl TimerHandler for SleepWakerHandler {
@@ -1127,7 +1175,7 @@ impl Task {
         let wake_tick = get_tick() + ticks;
         let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(SleepWakerHandler {
             task_id: self.id,
-            start_tick: get_tick(),
+            _start_tick: get_tick(),
         });
         add_timer(wake_tick, &handler, 0);
 
@@ -1193,7 +1241,7 @@ impl Task {
         }
         
         // Delegate to ABI module for event processing
-        let abi = &self.default_abi;
+        let abi = self.default_abi_ref();
         const MAX_EVENTS_PER_CYCLE: usize = 8; // Prevent scheduler starvation
         let mut processed_count = 0;
         
@@ -1550,14 +1598,32 @@ mod tests {
         assert_eq!(child_task.text_size, parent_task.text_size);
 
         // Find the corresponding memory map in child that matches our test allocation
-        let child_mmap = child_task.vm_manager.memmap_iter()
-            .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
-            .expect("Test memory map not found in child task");
+        let child_mmap = {
+            let mut found = None;
+            child_task.vm_manager.with_memmaps(|mm| {
+                for m in mm.values() {
+                    if m.vmarea.start == vaddr && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1 {
+                        found = Some(m.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Test memory map not found in child task")
+        };
 
         // Verify that our specific memory region exists in both parent and child
-        let parent_test_mmap = parent_task.vm_manager.memmap_iter()
-            .find(|mmap| mmap.vmarea.start == vaddr && mmap.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1)
-            .expect("Test memory map not found in parent task");
+        let parent_test_mmap = {
+            let mut found = None;
+            parent_task.vm_manager.with_memmaps(|mm| {
+                for m in mm.values() {
+                    if m.vmarea.start == vaddr && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1 {
+                        found = Some(m.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Test memory map not found in parent task")
+        };
 
         // Verify the virtual memory ranges match
         assert_eq!(child_mmap.vmarea.start, parent_test_mmap.vmarea.start);
@@ -1613,15 +1679,21 @@ mod tests {
         parent_task.init();
 
         // Find the stack memory map in parent
-        let stack_mmap = parent_task.vm_manager.memmap_iter()
-            .find(|mmap| {
+        let stack_mmap = {
+            let mut found = None;
+            parent_task.vm_manager.with_memmaps(|mm| {
+                for mmap in mm.values() {
                 // Stack should be near USER_STACK_END and have stack permissions
                 use crate::vm::vmem::VirtualMemoryRegion;
-                mmap.vmarea.end == crate::environment::USER_STACK_END - 1 && 
-                mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
-            })
-            .expect("Stack memory map not found in parent task")
-            .clone();
+                    if mmap.vmarea.end == crate::environment::USER_STACK_END - 1 &&
+                       mmap.permissions == VirtualMemoryRegion::Stack.default_permissions() {
+                        found = Some(mmap.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Stack memory map not found in parent task")
+        };
 
         // Write test data to parent's stack
         let stack_test_data: [u8; 16] = [
@@ -1637,14 +1709,21 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the corresponding stack memory map in child
-        let child_stack_mmap = child_task.vm_manager.memmap_iter()
-            .find(|mmap| {
+        let child_stack_mmap = {
+            let mut found = None;
+            child_task.vm_manager.with_memmaps(|mm| {
+                for mmap in mm.values() {
                 use crate::vm::vmem::VirtualMemoryRegion;
-                mmap.vmarea.start == stack_mmap.vmarea.start &&
-                mmap.vmarea.end == stack_mmap.vmarea.end &&
-                mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
-            })
-            .expect("Stack memory map not found in child task");
+                    if mmap.vmarea.start == stack_mmap.vmarea.start &&
+                       mmap.vmarea.end == stack_mmap.vmarea.end &&
+                       mmap.permissions == VirtualMemoryRegion::Stack.default_permissions() {
+                        found = Some(mmap.clone());
+                        break;
+                    }
+                }
+            });
+            found.expect("Stack memory map not found in child task")
+        };
 
         // Verify that stack content was copied correctly
         unsafe {
@@ -1727,9 +1806,15 @@ mod tests {
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
         // Find the shared memory map in child
-        let child_shared_mmap = child_task.vm_manager.memmap_iter()
-            .find(|mmap| mmap.vmarea.start == shared_vaddr && mmap.is_shared)
-            .expect("Shared memory map not found in child task");
+        let child_shared_mmap = {
+            let mut found = None;
+            child_task.vm_manager.with_memmaps(|mm| {
+                for mmap in mm.values() {
+                    if mmap.vmarea.start == shared_vaddr && mmap.is_shared { found = Some(mmap.clone()); break; }
+                }
+            });
+            found.expect("Shared memory map not found in child task")
+        };
 
         // Verify that the physical addresses are the same (shared memory)
         assert_eq!(child_shared_mmap.pmarea.start, shared_mmap.pmarea.start,
@@ -1772,5 +1857,35 @@ mod tests {
                     "Shared memory data should be identical from both parent and child views");
             }
         }
+    }
+
+    #[test_case]
+    fn test_clone_task_with_clone_vm_shares_address_space() {
+        use crate::environment::PAGE_SIZE;
+
+        let mut parent = super::new_user_task("ParentCloneVm".to_string(), 0);
+        parent.init();
+
+        // Allocate one page initially in the parent
+        let base_vaddr = 0x4000;
+        parent.allocate_data_pages(base_vaddr, 1).unwrap();
+        let parent_len_before = parent.vm_manager.memmap_len();
+
+        // Clone with CLONE_VM flag (share the address space only)
+        let mut flags = super::CloneFlags::new();
+        flags.set(super::CloneFlagsDef::Vm);
+        let child = parent.clone_task(flags).unwrap();
+
+        // Indirectly verify that both share the same ASID/address space
+        assert_eq!(child.vm_manager.get_asid(), parent.vm_manager.get_asid());
+        assert_eq!(child.vm_manager.memmap_len(), parent_len_before);
+
+        // Adding another page in the parent should be immediately visible to the child
+        parent.allocate_data_pages(base_vaddr + PAGE_SIZE, 1).unwrap();
+        assert_eq!(child.vm_manager.memmap_len(), parent.vm_manager.memmap_len());
+
+        // Managed pages are per-task; child should not acquire new managed pages
+        // when sharing VM (physical memory isn't privately managed by the child)
+        assert!(child.managed_pages.len() <= parent.managed_pages.len());
     }
 }

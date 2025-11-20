@@ -15,6 +15,7 @@ use crate::{
     object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError},
     DeviceManager
 };
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 
 use crate::fs::vfs_v2::core::{VfsNode, FileSystemOperations};
 use super::{Ext2FileSystem, structures::{EXT2_S_IFMT, EXT2_S_IFREG, EXT2_S_IFDIR}};
@@ -432,6 +433,42 @@ impl FileObject for Ext2FileObject {
         })
     }
 
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.ensure_content_loaded()?;
+
+        let content = self.cached_content.read();
+        let content = content.as_ref().ok_or(StreamError::IoError)?;
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+
+        if offset >= content.len() {
+            return Ok(0);
+        }
+
+        let bytes_available = content.len() - offset;
+        let bytes_to_read = core::cmp::min(buffer.len(), bytes_available);
+        buffer[..bytes_to_read].copy_from_slice(&content[offset..offset + bytes_to_read]);
+
+        Ok(bytes_to_read)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.ensure_content_loaded()?;
+
+        let mut cached = self.cached_content.write();
+        let content = cached.as_mut().ok_or(StreamError::IoError)?;
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+
+        let required_size = offset.saturating_add(buffer.len());
+        if required_size > content.len() {
+            content.resize(required_size, 0);
+        }
+
+        content[offset..offset + buffer.len()].copy_from_slice(buffer);
+        *self.is_dirty.write() = true;
+
+        Ok(buffer.len())
+    }
+
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let mut pos = self.position.lock();
         
@@ -476,6 +513,27 @@ impl FileObject for Ext2FileObject {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+impl crate::object::capability::selectable::Selectable for Ext2FileObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
 
 impl Drop for Ext2FileObject {
@@ -756,6 +814,27 @@ impl FileObject for Ext2DirectoryObject {
     }
 }
 
+impl crate::object::capability::selectable::Selectable for Ext2DirectoryObject {
+    fn current_ready(&self, interest: crate::object::capability::selectable::ReadyInterest) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read { set.read = true; }
+        if interest.write { set.write = true; }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
+}
+
 /// ext2 Character Device File Object
 ///
 /// Handles character device operations through ext2 device files.
@@ -923,5 +1002,29 @@ impl FileObject for Ext2CharDeviceFileObject {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl Selectable for Ext2CharDeviceFileObject {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        // Delegate to underlying Device's Selectable implementation when available
+        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
+            return device.current_ready(interest);
+        }
+        // Fallback: conservative defaults (always ready, non-blocking)
+        ReadySet { read: interest.read, write: interest.write, except: interest.except && false }
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        if let Some(device) = DeviceManager::get_manager().get_device(self.device_info.device_id) {
+            return device.wait_until_ready(interest, trapframe, timeout_ticks);
+        }
+        // No device found: do not block
+        SelectWaitOutcome::Ready
     }
 }

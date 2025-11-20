@@ -12,7 +12,7 @@ use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
 use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::StreamIpcOps;
-use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps};
+use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, Selectable};
 
 /// Unified representation of all kernel-managed resources
 pub enum KernelObject {
@@ -253,6 +253,22 @@ impl KernelObject {
                 Some(event_subscription_obj)
             }
             _ => None
+        }
+    }
+
+    /// Try to get Selectable capability for pselect/select readiness
+    pub fn as_selectable(&self) -> Option<&dyn Selectable> {
+        match self {
+            KernelObject::File(file_object) => {
+                // FileObject requires Selectable; upcast trait object
+                let sel: &dyn Selectable = file_object.as_ref();
+                Some(sel)
+            }
+            KernelObject::Pipe(pipe_object) => {
+                pipe_object.as_selectable()
+            }
+            KernelObject::EventChannel(_) => None,
+            KernelObject::EventSubscription(_) => None,
         }
     }
 }

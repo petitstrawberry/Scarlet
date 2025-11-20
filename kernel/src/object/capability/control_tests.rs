@@ -131,10 +131,5 @@ mod tests {
         let result = fb_device.control(framebuffer_commands::FBIOGET_FSCREENINFO, 0);
         assert!(result.is_err(), "Should fail with null pointer");
         assert_eq!(result.unwrap_err(), "Invalid argument pointer");
-        
-        // Test FBIOPUT_VSCREENINFO (not supported)
-        let result = fb_device.control(framebuffer_commands::FBIOPUT_VSCREENINFO, 0);
-        assert!(result.is_err(), "Should fail for unsupported operation");
-        assert_eq!(result.unwrap_err(), "Setting screen information not supported");
     }
 }

@@ -10,6 +10,7 @@ use super::*;
 use crate::device::block::request::BlockIOResult;
 use crate::device::{Device, DeviceType};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::Selectable;
 
 // Mock block device
 pub struct MockBlockDevice {
@@ -163,3 +164,5 @@ impl MemoryMappingOps for MockBlockDevice {
         false
     }
 }
+
+impl Selectable for MockBlockDevice {}

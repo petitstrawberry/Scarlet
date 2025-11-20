@@ -6,6 +6,7 @@ use request::{BlockIORequest, BlockIOResult};
 
 use super::Device;
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::Selectable;
 
 pub mod request;
 
@@ -94,6 +95,8 @@ impl MemoryMappingOps for GenericBlockDevice {
         false
     }
 }
+
+impl Selectable for GenericBlockDevice {}
 
 impl BlockDevice for GenericBlockDevice {
     fn get_disk_name(&self) -> &'static str {

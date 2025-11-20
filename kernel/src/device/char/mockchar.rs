@@ -4,6 +4,7 @@ use spin::Mutex;
 
 use super::{CharDevice, super::{Device, DeviceType}};
 use crate::object::capability::{ControlOps, MemoryMappingOps};
+use crate::object::capability::selectable::{Selectable, ReadyInterest, ReadySet, SelectWaitOutcome};
 
 /// Mock character device for testing
 pub struct MockCharDevice {
@@ -117,4 +118,26 @@ impl MemoryMappingOps for MockCharDevice {
     fn supports_mmap(&self) -> bool {
         false
     }
+}
+
+impl Selectable for MockCharDevice {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut set = ReadySet::none();
+        if interest.read { set.read = self.can_read(); }
+        if interest.write { set.write = self.can_write(); }
+        if interest.except { set.except = false; }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        // Mock: do not actually block
+        SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool { true }
 }
