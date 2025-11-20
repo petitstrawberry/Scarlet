@@ -6,7 +6,7 @@
 use super::types::*;
 use crate::device::graphics::{GraphicsDevice, PageFlipCapable, PixelFormat};
 use crate::device::manager::DeviceManager;
-use alloc::{vec::Vec, string::String};
+use alloc::vec::Vec;
 
 /// DRM ioctl command numbers
 pub mod commands {
