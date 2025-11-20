@@ -308,11 +308,26 @@ pub fn handle_drm_create_dumb(arg: usize, ctx: &mut DrmDeviceContext) -> Result<
     
     let dumb_ptr = target_ptr as *mut DrmModeCreateDumb;
     let mut dumb = unsafe { core::ptr::read(dumb_ptr) };
-    
-    // Calculate size
-    let pitch = ((dumb.width * dumb.bpp + 31) / 32) * 4;
-    let size = (pitch * dumb.height) as usize;
-    
+
+    // Validate user-provided dimensions
+    // Reasonable maximums: width/height <= 16384, bpp in {8, 16, 24, 32}
+    if dumb.width == 0 || dumb.width > 16384 {
+        return Err("Invalid dumb buffer width");
+    }
+    if dumb.height == 0 || dumb.height > 16384 {
+        return Err("Invalid dumb buffer height");
+    }
+    match dumb.bpp {
+        8 | 16 | 24 | 32 => {},
+        _ => return Err("Invalid dumb buffer bpp"),
+    }
+
+    // Calculate size with checked arithmetic
+    let width_bpp = dumb.width.checked_mul(dumb.bpp)
+        .ok_or("Width * bpp overflow")?;
+    let pitch = ((width_bpp + 31) / 32) * 4;
+    let size = pitch.checked_mul(dumb.height)
+        .ok_or("Pitch * height overflow")? as usize;
     // Allocate memory for the buffer
     let pages = (size + 4095) / 4096;
     let addr = crate::mem::page::allocate_raw_pages(pages) as usize;
