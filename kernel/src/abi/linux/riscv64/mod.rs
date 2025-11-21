@@ -17,7 +17,7 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::A
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
 use crate::{
-    abi::AbiModule, arch::{self, IntRegisters, Trapframe}, early_initcall, fs::{FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS}, register_abi, task::elf_loader::{ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy}, vm::{setup_trampoline, setup_user_stack}
+    abi::AbiModule, arch::{self, IntRegisters, Trapframe}, early_initcall, fs::{FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS, drivers::tmpfs::TmpFS, DeviceFileInfo}, register_abi, task::elf_loader::{ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy}, vm::{setup_trampoline, setup_user_stack}, device::{manager::DeviceManager, DeviceType}
 };
 use self::time::PosixTimer;
 
@@ -749,12 +749,75 @@ impl AbiModule for LinuxRiscv64Abi {
                 return Err("Failed to create /dev directory for Linux");
             }
         }
-        match target_vfs.bind_mount_from(base_vfs, "/dev", "/dev") {
+
+        // Mount tmpfs at /dev
+        let dev_tmpfs = TmpFS::new(0); // Unlimited memory for dev tmpfs
+        match target_vfs.mount(dev_tmpfs, "/dev", 0) {
             Ok(()) => {}
-            Err(_e) => {
-                crate::println!("Failed to bind mount /dev for Linux: {}", _e.message);
-                return Err("Failed to bind mount /dev for Linux");
+            Err(e) => {
+                crate::println!("Failed to mount tmpfs at /dev: {}", e.message);
+                return Err("Failed to mount tmpfs at /dev");
             }
+        }
+
+        // Populate /dev with essential devices
+        let device_manager = DeviceManager::get_manager();
+        
+        // List of standard devices to create if they exist
+        let standard_devices = [
+            ("null", DeviceType::Char),
+            ("zero", DeviceType::Char),
+            ("full", DeviceType::Char),
+            ("random", DeviceType::Char),
+            ("urandom", DeviceType::Char),
+            ("tty", DeviceType::Char),
+            ("console", DeviceType::Char),
+            ("fb0", DeviceType::Char), // Framebuffer
+        ];
+
+        for (name, dev_type) in standard_devices.iter() {
+            if let Some(id) = device_manager.get_device_id_by_name(name) {
+                let path = format!("/dev/{}", name);
+                let info = DeviceFileInfo {
+                    device_id: id,
+                    device_type: *dev_type,
+                };
+                let _ = target_vfs.create_device_file(&path, info);
+            }
+        }
+
+        // Setup /dev/dri/card0
+        match create_dir_if_not_exists(target_vfs, "/dev/dri") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /dev/dri: {}", e.message);
+            }
+        }
+
+        if let Some(id) = device_manager.get_device_id_by_name("card0") {
+            let info = DeviceFileInfo {
+                device_id: id,
+                device_type: DeviceType::Char,
+            };
+            if let Err(e) = target_vfs.create_device_file("/dev/dri/card0", info) {
+                 crate::println!("Failed to create /dev/dri/card0: {}", e.message);
+            }
+        } else {
+             crate::println!("Warning: card0 device not found in DeviceManager");
+        }
+        
+        // Setup /dev/shm (tmpfs)
+        match create_dir_if_not_exists(target_vfs, "/dev/shm") {
+            Ok(()) => {}
+            Err(_) => {}
+        }
+        let shm_fs = TmpFS::new(0);
+        let _ = target_vfs.mount(shm_fs, "/dev/shm", 0);
+
+        // Setup /dev/pts (devpts - simplified as tmpfs for now or bind mount)
+        match create_dir_if_not_exists(target_vfs, "/dev/pts") {
+            Ok(()) => {}
+            Err(_) => {}
         }
 
         // Setup gateway to native Scarlet environment (read-only for security)

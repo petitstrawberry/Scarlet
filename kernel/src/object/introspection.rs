@@ -35,6 +35,8 @@ pub enum KernelObjectType {
     BlockDevice = 6,
     /// Socket (future)
     Socket = 7,
+    /// Graphics Buffer
+    GraphicsBuffer = 8,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -135,6 +137,23 @@ impl KernelObjectInfo {
             },
             handle_role,
             access_mode: Self::encode_access_mode(true, false), // Subscription is read-only
+        }
+    }
+    
+    /// Create info for a GraphicsBuffer KernelObject
+    pub fn for_graphics_buffer(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::GraphicsBuffer,
+            capabilities: ObjectCapabilities {
+                stream_ops: false,
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: true, // Graphics buffers are usually cloneable (Arc)
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
         }
     }
     

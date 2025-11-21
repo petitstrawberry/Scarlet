@@ -58,6 +58,8 @@
 
 pub mod types;
 pub mod ioctls;
+pub mod file;
 
 pub use types::*;
 pub use ioctls::*;
+pub use file::DrmFile;

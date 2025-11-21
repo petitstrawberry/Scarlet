@@ -88,6 +88,10 @@ pub fn new() -> Self {
                 // Event subscriptions are used for receiving events
                 HandleType::EventSubscription
             }
+            KernelObject::GraphicsBuffer(_) => {
+                // Graphics buffers are regular resources
+                HandleType::Regular
+            }
         };
 
         HandleMetadata {
@@ -210,6 +214,9 @@ pub fn new() -> Self {
                 }
                 KernelObject::EventSubscription(_) => {
                     Some(introspection::KernelObjectInfo::for_event_subscription(handle_role))
+                }
+                KernelObject::GraphicsBuffer(_) => {
+                    Some(introspection::KernelObjectInfo::for_graphics_buffer(handle_role, readable, writable))
                 }
             }
         } else {

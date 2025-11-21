@@ -24,7 +24,7 @@ use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::device::{
-    graphics::{FramebufferConfig, GraphicsDevice},
+    graphics::{FramebufferConfig, buffer::{DumbBuffer, GraphicsBuffer}},
     manager::{DeviceManager, SharedDevice},
     DeviceType,
 };
@@ -161,6 +161,22 @@ impl GraphicsManager {
         unsafe { &mut MANAGER }
     }
 
+    /// Create a new dumb buffer
+    /// 
+    /// # Arguments
+    /// 
+    /// * `width` - Width in pixels
+    /// * `height` - Height in pixels
+    /// * `bpp` - Bits per pixel
+    /// 
+    /// # Returns
+    /// 
+    /// Result containing the new dumb buffer or an error
+    pub fn create_dumb_buffer(&self, width: u32, height: u32, bpp: u32) -> Result<Arc<dyn GraphicsBuffer>, &'static str> {
+        let buffer = DumbBuffer::new(width, height, bpp)?;
+        Ok(Arc::new(buffer))
+    }
+
     /// Discover and register graphics devices from DeviceManager
     ///
     /// This method scans all devices in the DeviceManager for graphics devices
@@ -253,6 +269,20 @@ impl GraphicsManager {
         // Automatically create and register the character device
         if let Err(e) = self.create_framebuffer_char_device(&logical_name) {
             crate::early_println!("[GraphicsManager] Warning: Failed to create character device for {}: {}", logical_name, e);
+        }
+
+        // Create DRM character device
+        // We use the same index as the framebuffer (fb0 -> card0)
+        // Note: logical_name is "fbX", so we can parse X or just use the fact that we just added it.
+        // But we don't have the index easily available here anymore without parsing or recalculating.
+        // Let's just parse it from logical_name.
+        if let Some(index_str) = logical_name.strip_prefix("fb") {
+            if let Ok(_index) = index_str.parse::<usize>() {
+                let card_name = format!("card{}", index_str);
+                if let Err(e) = self.create_drm_char_device(device_id, &card_name) {
+                    crate::early_println!("[GraphicsManager] Warning: Failed to create DRM character device for device {}: {}", device_id, e);
+                }
+            }
         }
         
         Ok(())
@@ -430,6 +460,34 @@ impl GraphicsManager {
         self.set_char_device_id(fb_name, device_id)?;
         
         crate::early_println!("[GraphicsManager] Created framebuffer character device: /dev/{}", fb_name);
+        Ok(())
+    }
+
+    /// Create a DrmCharDevice and register it with DeviceManager
+    ///
+    /// # Arguments
+    ///
+    /// * `device_id` - The device ID of the underlying graphics device
+    /// * `name` - The name for the character device (e.g., "card0")
+    ///
+    /// # Returns
+    ///
+    /// Result indicating success or failure
+    pub fn create_drm_char_device(&mut self, device_id: usize, name: &str) -> Result<(), &'static str> {
+        use crate::device::{graphics::drm_device::DrmCharDevice, manager::DeviceManager};
+        use alloc::sync::Arc;
+        
+        // Create the character device
+        let drm_char_device = DrmCharDevice::new(device_id);
+        
+        // Register with DeviceManager
+        let device_manager = DeviceManager::get_mut_manager();
+        let _device_id = device_manager.register_device_with_name(
+            name.to_string(),
+            Arc::new(drm_char_device)
+        );
+        
+        crate::early_println!("[GraphicsManager] Created DRM character device: /dev/{}", name);
         Ok(())
     }
 
@@ -623,10 +681,7 @@ mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::{
-        graphics::{manager::GraphicsManager, GenericGraphicsDevice, FramebufferConfig, PixelFormat},
-        Device,
-    };
+    use crate::device::graphics::{manager::GraphicsManager, GenericGraphicsDevice, FramebufferConfig, PixelFormat};
     use alloc::{string::ToString, sync::Arc};
 
     #[test_case]

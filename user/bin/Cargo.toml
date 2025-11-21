@@ -43,6 +43,10 @@ path = "src/cat.rs"
 name = "fb_test"
 path = "src/fb_test.rs"
 
+[[bin]]
+name = "drm_test"
+path = "src/drm_test.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std" }
 framebuffer = { path = "../lib/framebuffer" }

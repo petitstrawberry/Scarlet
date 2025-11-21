@@ -7,11 +7,12 @@ pub mod capability;
 pub mod introspection;
 pub mod handle;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use crate::fs::FileObject;
 use crate::ipc::pipe::PipeObject;
 use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::StreamIpcOps;
+use crate::device::graphics::buffer::GraphicsBuffer;
 use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps, Selectable};
 
 /// Unified representation of all kernel-managed resources
@@ -20,6 +21,7 @@ pub enum KernelObject {
     Pipe(Arc<dyn PipeObject>),
     EventChannel(Arc<EventChannelObject>),
     EventSubscription(Arc<EventSubscriptionObject>),
+    GraphicsBuffer(Arc<dyn GraphicsBuffer>),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // SharedMemory(Arc<dyn SharedMemoryObject>),
@@ -69,6 +71,7 @@ impl KernelObject {
                 // Event subscriptions don't provide stream operations
                 None
             }
+            KernelObject::GraphicsBuffer(_) => None,
         }
     }
     
@@ -92,6 +95,7 @@ impl KernelObject {
                 // Event subscriptions don't provide stream IPC operations
                 None
             }
+            KernelObject::GraphicsBuffer(_) => None,
         }
     }
     
@@ -115,6 +119,7 @@ impl KernelObject {
                 // Event subscriptions don't provide file operations
                 None
             }
+            KernelObject::GraphicsBuffer(_) => None,
         }
     }
     
@@ -137,6 +142,7 @@ impl KernelObject {
                 // Event subscriptions don't provide pipe operations
                 None
             }
+            KernelObject::GraphicsBuffer(_) => None,
         }
     }
     
@@ -161,6 +167,7 @@ impl KernelObject {
                 let cloneable: &dyn CloneOps = event_subscription.as_ref();
                 Some(cloneable)
             }
+            KernelObject::GraphicsBuffer(_) => None,
         }
     }
     
@@ -183,6 +190,10 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide control operations
                 None
+            }
+            KernelObject::GraphicsBuffer(buffer) => {
+                let control_ops: &dyn ControlOps = buffer.as_ref();
+                Some(control_ops)
             }
         }
     }
@@ -207,6 +218,10 @@ impl KernelObject {
                 // Event subscriptions don't provide memory mapping operations
                 None
             }
+            KernelObject::GraphicsBuffer(buffer) => {
+                let memory_mapping_ops: &dyn MemoryMappingOps = buffer.as_ref();
+                Some(memory_mapping_ops)
+            }
         }
     }
 
@@ -230,6 +245,10 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide memory mapping operations
                 None
+            }
+            KernelObject::GraphicsBuffer(buffer) => {
+                let weak_buffer = Arc::downgrade(buffer);
+                Some(weak_buffer)
             }
         }
     }
@@ -269,6 +288,7 @@ impl KernelObject {
             }
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
+            KernelObject::GraphicsBuffer(_) => None,
         }
     }
 }
@@ -292,6 +312,9 @@ impl Clone for KernelObject {
                 }
                 KernelObject::EventSubscription(event_subscription) => {
                     KernelObject::EventSubscription(Arc::clone(event_subscription))
+                }
+                KernelObject::GraphicsBuffer(buffer) => {
+                    KernelObject::GraphicsBuffer(Arc::clone(buffer))
                 }
             }
         }

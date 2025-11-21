@@ -6,21 +6,39 @@ This document describes Scarlet's Linux DRM (Direct Rendering Manager) compatibi
 
 The DRM compatibility layer is isolated in `kernel/src/abi/linux/drm/` and provides Linux applications with standard DRM ioctls while internally using Scarlet's OS-independent graphics abstractions.
 
-## Architecture
+## Architecture (v2)
+
+The v2 architecture promotes graphics buffers to **First-Class Kernel Objects**. This integrates graphics memory management with the OS's native handle system while maintaining Linux ABI compatibility.
 
 ```
 ┌─────────────────────────────────────────┐
 │      Linux Applications (DRM API)       │
+│  (Uses u32 GEM handles, e.g., 1, 2)     │
 └──────────────────┬──────────────────────┘
                    │ DRM ioctls
                    ▼
 ┌─────────────────────────────────────────┐
 │  kernel/src/abi/linux/drm               │
 │  (Linux DRM Compatibility Layer)        │
-│  • types.rs - DRM structures            │
-│  • ioctls.rs - ioctl handlers           │
+│                                         │
+│  ┌───────────────────────────────────┐  │
+│  │ DrmFile (FileObject)              │  │
+│  │ • Maps GEM ID -> Arc<KernelObject>│  │
+│  └───────────────────────────────────┘  │
 └──────────────────┬──────────────────────┘
-                   │ GraphicsManager calls
+                   │ Arc<GraphicsBuffer>
+                   ▼
+┌─────────────────────────────────────────┐
+│  kernel/src/object                      │
+│  (Kernel Object System)                 │
+│                                         │
+│  ┌───────────────────────────────────┐  │
+│  │ KernelObject::GraphicsBuffer      │  │
+│  │ • Implements ControlOps           │  │
+│  │ • Implements MemoryMappingOps     │  │
+│  └───────────────────────────────────┘  │
+└──────────────────┬──────────────────────┘
+                   │ Trait calls
                    ▼
 ┌─────────────────────────────────────────┐
 │  kernel/src/device/graphics             │
@@ -42,7 +60,7 @@ The DRM compatibility layer is isolated in `kernel/src/abi/linux/drm/` and provi
 
 ### Dumb Buffers
 
-- **DRM_IOCTL_MODE_CREATE_DUMB**: Creates dumb buffer
+- **DRM_IOCTL_MODE_CREATE_DUMB**: Creates dumb buffer (backed by `GraphicsBuffer`)
 - **DRM_IOCTL_MODE_MAP_DUMB**: Maps dumb buffer for CPU access  
 - **DRM_IOCTL_MODE_DESTROY_DUMB**: Destroys dumb buffer
 
@@ -50,15 +68,13 @@ The DRM compatibility layer is isolated in `kernel/src/abi/linux/drm/` and provi
 
 - **DRM_IOCTL_MODE_PAGE_FLIP**: Performs page flip operation
 
-## MVP Implementation
+## v2 Implementation Details
 
-The MVP (Minimum Viable Product) implementation provides:
+The v2 implementation introduces a robust object model:
 
-- **Single display**: One CRTC, one connector, one encoder
-- **Dumb buffers**: Simple CPU-accessible buffers
-- **Page flip**: Implemented via memcpy + flush (software fallback)
-- **No 3D**: Only 2D framebuffer operations
-- **No GEM**: No GPU memory management (dumb buffers only)
+- **DrmFile**: Represents an open DRM file descriptor. It maintains a translation table from Linux "GEM handles" (u32) to Scarlet `KernelObject`s.
+- **GraphicsBuffer**: A new `KernelObject` variant representing a contiguous region of graphics memory.
+- **Double Ownership**: Buffers are owned by both the creating task (via `HandleTable`) and the `DrmFile` session. This ensures safety even if the task dies or the file is shared.
 
 ## DRM to Scarlet Mapping
 
@@ -67,79 +83,58 @@ The MVP (Minimum Viable Product) implementation provides:
 | CRTC | Display output | 1:1 with GraphicsDevice |
 | Connector | Physical connection | Single connector per device |
 | Encoder | Signal conversion | Abstracted away |
-| Dumb buffer | Memory region | Allocated via allocate_raw_pages |
-| Page flip | Buffer swap | memcpy + flush (MVP) |
-| Framebuffer | Display buffer | FramebufferConfig + address |
+| Dumb buffer | `GraphicsBuffer` | `KernelObject::GraphicsBuffer` |
+| GEM Handle | Session ID | Local u32 ID mapped to `Arc<KernelObject>` |
+| Page flip | Buffer swap | `PageFlipCapable` trait or fallback |
 
 ## ioctl Implementation Details
-
-### DRM_IOCTL_VERSION
-
-Returns version information:
-- Driver name: "scarlet"
-- Version: 1.0.0
-- Description: "Scarlet DRM driver"
-
-### DRM_IOCTL_MODE_GETRESOURCES
-
-Returns resource counts and IDs:
-- 1 CRTC (ID: 1)
-- 1 Connector (ID: 1)
-- 1 Encoder (ID: 1)
-- Framebuffer dimensions
-
-### DRM_IOCTL_MODE_GETCRTC
-
-Returns CRTC configuration:
-- Current mode (resolution, refresh rate)
-- Framebuffer ID
-- Position (x, y)
-- Enabled state
 
 ### DRM_IOCTL_MODE_CREATE_DUMB
 
 Creates a dumb buffer:
-- Validates dimensions and bpp
-- Calculates pitch and size
-- Allocates memory via `allocate_raw_pages`
-- Returns handle and size
-
-**Security**: Validates dimensions to prevent integer overflow.
+1. Allocates a `GraphicsBuffer` via `GraphicsManager`.
+2. Wraps it in `KernelObject::GraphicsBuffer`.
+3. Inserts it into the current task's `HandleTable` (returning a native handle).
+4. Inserts it into the `DrmFile`'s GEM map (returning a GEM handle).
+5. Returns the GEM handle to userspace.
 
 ### DRM_IOCTL_MODE_MAP_DUMB
 
 Maps a dumb buffer for CPU access:
-- Verifies handle exists
-- Returns fake offset (actual address stored internally)
-- Applications can mmap() using this offset
+1. Looks up the buffer using the GEM handle.
+2. Returns a "fake offset" that encodes the buffer's identity.
+3. When userspace calls `mmap` with this offset, the kernel resolves it back to the `GraphicsBuffer` and maps the physical memory.
 
 ### DRM_IOCTL_MODE_DESTROY_DUMB
 
 Destroys a dumb buffer:
-- Verifies handle exists
-- Frees allocated memory
-- Removes from context
+1. Removes the entry from the `DrmFile`'s GEM map.
+2. Drops the `Arc<KernelObject>`.
+3. If no other references exist (e.g., in `HandleTable`), the memory is freed.
 
 ### DRM_IOCTL_MODE_PAGE_FLIP
 
 Performs page flip:
-- Retrieves source buffer by handle
-- Copies to framebuffer via memcpy
-- Flushes to display
+1. Looks up the buffer using the GEM handle.
+2. Validates it is a `GraphicsBuffer`.
+3. Calls `GraphicsManager::flush_framebuffer` (or hardware flip if supported).
 
-**MVP Note**: This is a software implementation. Future versions will support hardware page flipping via `PageFlipCapable` trait.
+## DrmFile Context
 
-## DrmDeviceContext
+Each open `/dev/dri/cardX` file descriptor corresponds to a `DrmFile` struct:
 
-Each device has a `DrmDeviceContext` that manages:
+```rust
+pub struct DrmFile {
+    /// Connection to the physical device
+    device_id: usize,
+    /// Map from GEM handle (u32) to Kernel Object
+    gem_handles: Mutex<HashMap<u32, Arc<KernelObject>>>,
+    /// Next available GEM handle ID
+    next_gem_id: Mutex<u32>,
+}
+```
 
-- **Dumb buffers**: Handle → (address, size) mapping
-- **Handle allocation**: Monotonically increasing handles
-- **Device ID**: Associated GraphicsDevice
-
-### Handle Management
-
-Handles start at 1 and increment. When handles are exhausted (u32::MAX), the system panics (unlikely in practice).
+This structure ensures that GEM handles are local to the open file, matching Linux behavior.
 
 ## Usage Example
 

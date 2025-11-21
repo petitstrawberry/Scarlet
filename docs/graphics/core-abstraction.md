@@ -18,6 +18,9 @@ Scarlet's graphics subsystem provides a minimal, OS-independent interface for fr
 │  │ GraphicsDevice (core trait)     │   │
 │  └─────────────────────────────────┘   │
 │  ┌─────────────────────────────────┐   │
+│  │ GraphicsBuffer (memory trait)   │   │
+│  └─────────────────────────────────┘   │
+│  ┌─────────────────────────────────┐   │
 │  │ PageFlipCapable (capability)    │   │
 │  └─────────────────────────────────┘   │
 │  ┌─────────────────────────────────┐   │
@@ -37,14 +40,22 @@ Scarlet's graphics subsystem provides a minimal, OS-independent interface for fr
 
 ### 1. OS-Independent Core
 
-The core graphics abstractions (`GraphicsDevice`, `PageFlipCapable`, etc.) are completely OS-independent. They:
+The core graphics abstractions (`GraphicsDevice`, `GraphicsBuffer`, `PageFlipCapable`, etc.) are completely OS-independent. They:
 
 - Do not reference Linux, Windows, or any specific OS concepts
 - Use generic terminology (framebuffer, flush, page flip)
 - Can be implemented by any graphics driver
 - Can be used by any OS ABI layer
 
-### 2. Dynamic Framebuffer Addresses
+### 2. Graphics Buffers as First-Class Objects
+
+Graphics memory is managed via the `GraphicsBuffer` trait, which allows buffers to be:
+- Treated as first-class kernel objects
+- Mapped into user memory (via `MemoryMappingOps`)
+- Controlled via ioctls (via `ControlOps`)
+- Shared between processes
+
+### 3. Dynamic Framebuffer Addresses
 
 Modern GPUs manage framebuffer memory dynamically. The design acknowledges this by:
 
@@ -102,6 +113,22 @@ pub struct FramebufferConfig {
 
 The configuration describes the display resolution and pixel format. The stride (bytes per line) may be larger than `width * bytes_per_pixel` for alignment requirements.
 
+## GraphicsBuffer Trait
+
+The `GraphicsBuffer` trait represents a contiguous region of graphics memory (VRAM or GTT) that can be mapped and controlled:
+
+```rust
+pub trait GraphicsBuffer: Send + Sync + MemoryMappingOps + ControlOps {
+    fn size(&self) -> usize;
+    fn physical_address(&self) -> usize;
+    fn as_any(&self) -> &dyn Any;
+}
+```
+
+This trait inherits from:
+- **MemoryMappingOps**: Allows the buffer to be mapped into user address space (mmap).
+- **ControlOps**: Allows the buffer to accept ioctl commands (future DMA-BUF support).
+
 ## PageFlipCapable Trait
 
 The `PageFlipCapable` trait extends `GraphicsDevice` with page flipping support:
@@ -151,6 +178,7 @@ The `GraphicsManager` acts as Scarlet's OS-independent graphics subsystem (analo
 
 ABI layers (like Linux DRM) should use GraphicsManager methods instead of directly accessing devices:
 
+- `create_dumb_buffer(width, height, bpp)` - Create a new dumb buffer (returns `Arc<dyn GraphicsBuffer>`)
 - `get_framebuffer_config_by_device(device_id)` - Query device configuration
 - `get_framebuffer_address_by_device(device_id)` - Query current framebuffer address
 - `flush_framebuffer_by_device(device_id, x, y, w, h)` - Flush framebuffer region
