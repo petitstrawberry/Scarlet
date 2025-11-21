@@ -1,20 +1,14 @@
-# Graphics Abstraction Design
+# Scarlet Graphics Core Abstraction
 
-This document describes the design of Scarlet's graphics abstraction layer and its Linux DRM compatibility.
+This document describes Scarlet's OS-independent graphics abstraction layer.
 
 ## Architecture Overview
 
-Scarlet's graphics subsystem is designed with OS-independence at its core, while providing compatibility layers for specific OS ABIs (like Linux DRM).
+Scarlet's graphics subsystem provides a minimal, OS-independent interface for framebuffer operations while supporting advanced features through capability-based extensions.
 
 ```
 ┌─────────────────────────────────────────┐
-│      Linux Applications (DRM API)       │
-└──────────────────┬──────────────────────┘
-                   │ DRM ioctls
-                   ▼
-┌─────────────────────────────────────────┐
-│  kernel/src/abi/linux/drm               │
-│  (Linux DRM Compatibility Layer)        │
+│      OS ABI Layers (Linux, etc.)        │
 └──────────────────┬──────────────────────┘
                    │ Trait method calls
                    ▼
@@ -90,10 +84,23 @@ pub trait GraphicsDevice: Device {
 
 ### Key Methods
 
-- **get_framebuffer_config()**: Returns resolution, format, and stride
-- **get_framebuffer_address()**: Returns the current framebuffer physical address
+- **get_framebuffer_config()**: Returns resolution, format, and stride information
+- **get_framebuffer_address()**: Returns the current framebuffer physical address (may change)
 - **flush_framebuffer()**: Ensures writes are visible on display
 - **init_graphics()**: Idempotent initialization
+
+### Framebuffer Configuration
+
+```rust
+pub struct FramebufferConfig {
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub stride: u32,
+}
+```
+
+The configuration describes the display resolution and pixel format. The stride (bytes per line) may be larger than `width * bytes_per_pixel` for alignment requirements.
 
 ## PageFlipCapable Trait
 
@@ -108,9 +115,17 @@ pub trait PageFlipCapable: GraphicsDevice {
 }
 ```
 
+### Hardware Page Flipping
+
+Hardware page flipping allows:
+- Double/triple buffering without CPU copies
+- Tear-free display updates
+- Lower latency
+- Better performance
+
 ### Fallback Strategy
 
-When a device doesn't implement `PageFlipCapable`, the OS can provide a fallback:
+When a device doesn't implement `PageFlipCapable`, the OS ABI layer can provide a fallback:
 
 1. Allocate a back buffer in system RAM
 2. Let the application render to the back buffer
@@ -120,62 +135,26 @@ When a device doesn't implement `PageFlipCapable`, the OS can provide a fallback
 
 This is slower than hardware page flipping but provides compatibility.
 
-## Linux DRM Compatibility Layer
-
-The DRM compatibility layer is isolated in `kernel/src/abi/linux/drm/` and provides:
-
-### DRM ioctls
-
-- **DRM_IOCTL_VERSION**: Reports driver version info
-- **DRM_IOCTL_MODE_GETRESOURCES**: Lists CRTCs, connectors, encoders
-- **DRM_IOCTL_MODE_GETCRTC**: Gets CRTC configuration
-- **DRM_IOCTL_MODE_SETCRTC**: Sets CRTC configuration
-- **DRM_IOCTL_MODE_CREATE_DUMB**: Creates dumb buffer
-- **DRM_IOCTL_MODE_MAP_DUMB**: Maps dumb buffer for CPU access
-- **DRM_IOCTL_MODE_DESTROY_DUMB**: Destroys dumb buffer
-- **DRM_IOCTL_MODE_PAGE_FLIP**: Performs page flip
-
-### MVP Implementation
-
-The MVP implementation provides basic functionality:
-
-- **Single display**: One CRTC, one connector, one encoder
-- **Dumb buffers**: Simple CPU-accessible buffers
-- **Page flip**: Implemented via memcpy + flush
-- **No 3D**: Only 2D framebuffer operations
-
-### DRM to GraphicsDevice Mapping
-
-| DRM Concept | Scarlet Concept |
-|-------------|-----------------|
-| CRTC | Display output (1:1 with device) |
-| Connector | Physical display connection |
-| Encoder | Signal conversion (abstracted) |
-| Dumb buffer | Allocated memory region |
-| Page flip | Buffer swap (memcpy in MVP) |
-| Framebuffer | FramebufferConfig + address |
-
-### Future Extensions
-
-The DRM layer can be extended to support:
-
-- Hardware-accelerated page flipping (via `PageFlipCapable`)
-- Multiple displays (multiple CRTCs/connectors)
-- 3D rendering (via future `RenderDevice` trait)
-- Synchronization (vblank events, fences)
-- Advanced pixel formats
-- Direct rendering to display buffers
-
 ## GraphicsManager
 
-The `GraphicsManager` coordinates graphics devices and creates `/dev/fbX` character devices.
+The `GraphicsManager` acts as Scarlet's OS-independent graphics subsystem (analogous to Linux DRM).
 
 ### Key Responsibilities
 
 - Discover graphics devices from `DeviceManager`
-- Extract framebuffer resources
+- Extract and manage framebuffer resources
 - Create character devices for user-space access
 - Maintain logical names (fb0, fb1, etc.)
+- Provide OS-independent API for ABI layers
+
+### Methods for ABI Layers
+
+ABI layers (like Linux DRM) should use GraphicsManager methods instead of directly accessing devices:
+
+- `get_framebuffer_config_by_device(device_id)` - Query device configuration
+- `get_framebuffer_address_by_device(device_id)` - Query current framebuffer address
+- `flush_framebuffer_by_device(device_id, x, y, w, h)` - Flush framebuffer region
+- `get_device_id_by_framebuffer(fb_name)` - Lookup device by framebuffer name
 
 ### Dynamic Address Support
 
@@ -185,30 +164,7 @@ The manager doesn't cache framebuffer addresses. Instead:
 2. When address is needed, query the device's `get_framebuffer_address()`
 3. This ensures we always get the current active address
 
-## Implementation Status
-
-### Completed (MVP)
-
-- ✅ Enhanced `GraphicsDevice` trait documentation
-- ✅ `PageFlipCapable` trait definition
-- ✅ DRM module structure (`kernel/src/abi/linux/drm/`)
-- ✅ DRM type definitions (structures, constants)
-- ✅ Basic DRM ioctl implementations:
-  - VERSION, GETRESOURCES, GETCRTC
-  - CREATE_DUMB, MAP_DUMB, DESTROY_DUMB
-  - PAGE_FLIP (memcpy + flush)
-
-### Planned (Future Work)
-
-- ⏳ Update `FramebufferResource` to query device for address
-- ⏳ Implement `PageFlipCapable` in VirtIO GPU driver
-- ⏳ Add GETCONNECTOR, GETENCODER, SETCRTC ioctls
-- ⏳ Implement proper mmap support for dumb buffers
-- ⏳ Add vblank event support
-- ⏳ Multi-display support
-- ⏳ 3D rendering capabilities (`RenderDevice` trait)
-
-## Usage Example
+## Usage Examples
 
 ### Basic Framebuffer Access
 
@@ -231,24 +187,43 @@ unsafe {
 graphics_device.flush_framebuffer(0, 0, config.width, config.height)?;
 ```
 
-### Page Flipping (with fallback)
+### Using GraphicsManager (for ABI layers)
 
 ```rust
-// Try hardware page flip
-if let Some(page_flip_device) = device.as_page_flip_capable() {
+use crate::device::graphics::manager::GraphicsManager;
+
+// Get configuration through manager
+let graphics_manager = GraphicsManager::get_manager();
+let config = graphics_manager.get_framebuffer_config_by_device(device_id)?;
+let fb_addr = graphics_manager.get_framebuffer_address_by_device(device_id)?;
+
+// Render operations...
+
+// Flush through manager
+graphics_manager.flush_framebuffer_by_device(device_id, 0, 0, config.width, config.height)?;
+```
+
+### Page Flipping with Fallback
+
+```rust
+// Try hardware page flip using as_any() downcasting
+use core::any::Any;
+
+if let Some(any_device) = device.as_any().downcast_ref::<SomeGpuDriver>() {
+    // Check if it implements PageFlipCapable
     // Create back buffer
-    let buffer_id = page_flip_device.create_flip_buffer(
+    let buffer_id = any_device.create_flip_buffer(
         config.width, 
         config.height, 
         config.format
     )?;
     
     // Get buffer address and render to it
-    let buffer_addr = page_flip_device.get_flip_buffer_address(buffer_id)?;
+    let buffer_addr = any_device.get_flip_buffer_address(buffer_id)?;
     // ... render ...
     
     // Hardware flip
-    page_flip_device.page_flip(buffer_id)?;
+    any_device.page_flip(buffer_id)?;
 } else {
     // Fallback: allocate back buffer in system RAM
     let back_buffer = allocate_buffer(config.size());
@@ -265,28 +240,110 @@ if let Some(page_flip_device) = device.as_page_flip_capable() {
 }
 ```
 
-## Testing Strategy
+## Implementing Graphics Drivers
+
+### Minimal Implementation
+
+A basic graphics driver must implement `GraphicsDevice`:
+
+```rust
+impl GraphicsDevice for MyDriver {
+    fn get_display_name(&self) -> &'static str {
+        "MyDriver Display"
+    }
+
+    fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
+        // Return current configuration
+        Ok(self.config)
+    }
+
+    fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
+        // Return current framebuffer physical address
+        Ok(self.framebuffer_phys_addr)
+    }
+
+    fn flush_framebuffer(&self, x: u32, y: u32, width: u32, height: u32) 
+        -> Result<(), &'static str> {
+        // Ensure CPU writes are visible
+        // May involve cache flushes, DMA operations, etc.
+        Ok(())
+    }
+
+    fn init_graphics(&self) -> Result<(), &'static str> {
+        // Initialize hardware (idempotent)
+        Ok(())
+    }
+}
+```
+
+### Adding Page Flip Support
+
+For hardware page flipping, also implement `PageFlipCapable`:
+
+```rust
+impl PageFlipCapable for MyDriver {
+    fn page_flip(&self, buffer_id: u32) -> Result<(), &'static str> {
+        // Switch display to show the specified buffer
+        self.set_scanout_buffer(buffer_id)
+    }
+
+    fn create_flip_buffer(&self, width: u32, height: u32, format: PixelFormat) 
+        -> Result<u32, &'static str> {
+        // Allocate a buffer for double buffering
+        let buffer_id = self.allocate_buffer(width, height, format)?;
+        Ok(buffer_id)
+    }
+
+    fn destroy_flip_buffer(&self, buffer_id: u32) -> Result<(), &'static str> {
+        // Free the buffer
+        self.free_buffer(buffer_id)
+    }
+
+    fn get_flip_buffer_address(&self, buffer_id: u32) -> Result<usize, &'static str> {
+        // Return buffer's physical address
+        self.get_buffer_address(buffer_id)
+    }
+}
+```
+
+## Testing
 
 ### Unit Tests
 
 - Test `GraphicsDevice` trait implementations
-- Test DRM structure serialization/deserialization
 - Test buffer allocation and management
+- Test configuration queries
 
 ### Integration Tests
 
-- Test DRM ioctl handling with mock devices
-- Test page flip fallback mechanism
-- Test character device operations
+- Test GraphicsManager device discovery
+- Test character device creation
+- Test address query mechanisms
 
-### System Tests
+## Future Extensions
 
-- Run Linux DRM applications
-- Verify display output
-- Performance benchmarking
+### Multi-Display Support
+
+```rust
+pub trait MultiDisplay: GraphicsDevice {
+    fn get_display_count(&self) -> usize;
+    fn get_display_config(&self, display_id: u32) -> Result<FramebufferConfig, &'static str>;
+    fn set_display_mode(&self, display_id: u32, config: &FramebufferConfig) -> Result<(), &'static str>;
+}
+```
+
+### 3D Rendering
+
+```rust
+pub trait RenderDevice: GraphicsDevice {
+    fn submit_command_buffer(&self, commands: &[u8]) -> Result<(), &'static str>;
+    fn create_render_target(&self, width: u32, height: u32) -> Result<u32, &'static str>;
+    fn wait_idle(&self) -> Result<(), &'static str>;
+}
+```
 
 ## References
 
-- [Linux DRM Documentation](https://www.kernel.org/doc/html/latest/gpu/drm-uapi.html)
-- [VirtIO GPU Specification](https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.html#x1-3430008)
-- [Mesa DRI Implementation](https://www.mesa3d.org/)
+- `kernel/src/device/graphics/mod.rs` - Core trait definitions
+- `kernel/src/device/graphics/manager.rs` - GraphicsManager implementation
+- `kernel/src/drivers/virtio/gpu.rs` - Example driver implementation
