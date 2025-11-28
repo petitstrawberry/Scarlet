@@ -38,7 +38,9 @@ impl FreeListAllocator {
         }
         self.heap_start.store(start, Ordering::SeqCst);
         self.heap_end.store(start + initial_size, Ordering::SeqCst);
-        unsafe { *self.head.get() = core::ptr::null_mut(); }
+        unsafe {
+            *self.head.get() = core::ptr::null_mut();
+        }
     }
 
     fn extend_heap(&self, size: usize) -> *mut u8 {
@@ -63,7 +65,9 @@ impl FreeListAllocator {
         let mut curr = unsafe { *self.head.get() };
         while !curr.is_null() {
             let addr = curr as usize;
-            let aligned_addr = (addr + core::cmp::max(align, core::mem::align_of::<FreeBlock>()) - 1) & !(core::cmp::max(align, core::mem::align_of::<FreeBlock>()) - 1);
+            let aligned_addr = (addr + core::cmp::max(align, core::mem::align_of::<FreeBlock>())
+                - 1)
+                & !(core::cmp::max(align, core::mem::align_of::<FreeBlock>()) - 1);
             let offset = aligned_addr - addr;
             if unsafe { (*curr).size } >= size + offset {
                 return (prev, curr);
@@ -80,7 +84,9 @@ unsafe impl GlobalAlloc for FreeListAllocator {
         let size = layout.size().max(core::mem::size_of::<FreeBlock>());
         let align = layout.align();
         if self.heap_start.load(Ordering::SeqCst) == 0 {
-            unsafe { self.init(); }
+            unsafe {
+                self.init();
+            }
         }
         // Find a fitting free block
         let (mut prev, mut curr) = unsafe { self.find_fit(size, align) };

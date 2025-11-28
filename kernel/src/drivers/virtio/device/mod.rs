@@ -1,11 +1,27 @@
 //! Virtio device driver interface module.
-//! 
+//!
 
-use core::{result::Result, sync::atomic::{AtomicUsize, Ordering}};
+use core::{
+    result::Result,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use alloc::{boxed::Box, format, sync::Arc, vec};
 
-use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}, Device}, driver_initcall, drivers::{block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice, network::virtio_net::VirtioNetDevice, virtio::queue}};
+use crate::{
+    device::{
+        Device,
+        manager::{DeviceManager, DriverPriority},
+        platform::{
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+        },
+    },
+    driver_initcall,
+    drivers::{
+        block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice,
+        network::virtio_net::VirtioNetDevice, virtio::queue,
+    },
+};
 
 // Static counters for device naming
 static BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -13,7 +29,7 @@ static NET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register enum for Virtio devices
-/// 
+///
 /// This enum represents the registers of the Virtio device.
 /// Each variant corresponds to a specific register offset.
 /// The offsets are defined in the Virtio specification.
@@ -86,7 +102,7 @@ impl Register {
 }
 
 /// DeviceStatus enum for Virtio devices
-/// 
+///
 /// This enum represents the status of the Virtio device.
 /// Each variant corresponds to a specific status bit.
 /// The status bits are defined in the Virtio specification.
@@ -103,66 +119,66 @@ pub enum DeviceStatus {
 
 impl DeviceStatus {
     /// Check if the status is set
-    /// 
+    ///
     /// This method checks if the specified status bit is set in the given status.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `status` - The status to check.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Returns true if the status bit is set, false otherwise.
     pub fn is_set(&self, status: u32) -> bool {
         (status & *self as u32) != 0
     }
 
     /// Set the status bit
-    /// 
+    ///
     /// This method sets the specified status bit in the given status.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `status` - A mutable reference to the status to modify.
-    /// 
+    ///
     pub fn set(&self, status: &mut u32) {
         *status |= *self as u32;
     }
 
     /// Clear the status bit
-    /// 
+    ///
     /// This method clears the specified status bit in the given status.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `status` - A mutable reference to the status to modify.
-    /// 
+    ///
     pub fn clear(&self, status: &mut u32) {
         *status &= !(*self as u32);
     }
 
     /// Toggle the status bit
-    /// 
+    ///
     /// This method toggles the specified status bit in the given status.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `status` - A mutable reference to the status to modify.
-    /// 
+    ///
     pub fn toggle(&self, status: &mut u32) {
         *status ^= *self as u32;
     }
 
     /// Convert from u32 to DeviceStatus
-    /// 
+    ///
     /// This method converts a u32 value to the corresponding DeviceStatus variant.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `status` - The u32 value to convert.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Returns the corresponding DeviceStatus variant.
     ///
     pub fn from_u32(status: u32) -> Self {
@@ -177,22 +193,22 @@ impl DeviceStatus {
             _ => panic!("Invalid device status"),
         }
     }
-    
+
     /// Convert DeviceStatus to u32
-    /// 
+    ///
     /// This method converts the DeviceStatus variant to its corresponding u32 value.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Returns the u32 value corresponding to the DeviceStatus variant.
-    /// 
+    ///
     pub fn to_u32(&self) -> u32 {
         *self as u32
     }
 }
 
 /// VirtioDevice trait
-/// 
+///
 /// This trait defines the interface for VirtIO devices.
 /// It provides methods for initializing the device, accessing registers,
 /// and performing device operations according to the VirtIO specification.
@@ -227,7 +243,7 @@ pub trait VirtioDevice {
 
         // Reset device
         self.reset();
-        
+
         // Acknowledge device
         self.acknowledge();
 
@@ -291,50 +307,58 @@ pub trait VirtioDevice {
 
     /// Negotiate device features
     ///
-    /// This method reads device features, selects supported features, 
+    /// This method reads device features, selects supported features,
     /// sets driver features, and verifies features OK status.
     ///
     /// # Returns
     ///
-    /// Returns Ok(negotiated_features) if feature negotiation was successful, 
+    /// Returns Ok(negotiated_features) if feature negotiation was successful,
     /// Err message otherwise
     fn negotiate_features(&mut self) -> Result<u32, &'static str> {
         // Read device features
         let device_features = self.read32_register(Register::DeviceFeatures);
         // Select supported features
         let driver_features = self.get_supported_features(device_features);
-        
+
         #[cfg(test)]
         {
             use crate::early_println;
-            early_println!("[virtio] Negotiating features: device=0x{:x}, driver=0x{:x}", device_features, driver_features);
+            early_println!(
+                "[virtio] Negotiating features: device=0x{:x}, driver=0x{:x}",
+                device_features,
+                driver_features
+            );
         }
-        
+
         // Write driver features
         self.write32_register(Register::DriverFeatures, driver_features);
-        
+
         // Set FEATURES_OK status bit
         let mut status = self.read32_register(Register::Status);
         DeviceStatus::FeaturesOK.set(&mut status);
         self.write32_register(Register::Status, status);
-        
+
         // Verify FEATURES_OK status bit
         let final_status = self.read32_register(Register::Status);
         let success = DeviceStatus::FeaturesOK.is_set(final_status);
-        
+
         #[cfg(test)]
         {
             use crate::early_println;
-            early_println!("[virtio] Feature negotiation result: success={}, status=0x{:x}", success, final_status);
+            early_println!(
+                "[virtio] Feature negotiation result: success={}, status=0x{:x}",
+                success,
+                final_status
+            );
         }
-        
+
         if success {
             Ok(driver_features)
         } else {
             Err("Feature negotiation failed")
         }
     }
-    
+
     /// Get device features supported by this driver
     ///
     /// This method can be overridden by specific device implementations
@@ -352,7 +376,7 @@ pub trait VirtioDevice {
         // Device-specific implementations should override this
         device_features
     }
-    
+
     /// Set up a virtqueue
     ///
     /// This method configures a virtqueue by setting the queue selection,
@@ -369,7 +393,7 @@ pub trait VirtioDevice {
         if queue_idx >= self.get_virtqueue_count() {
             return false;
         }
-        
+
         // Select the queue
         self.write32_register(Register::QueueSel, queue_idx as u32);
         // Check if the queue is ready
@@ -377,29 +401,29 @@ pub trait VirtioDevice {
         if ready != 0 {
             return false; // Queue already set up
         }
-        
+
         // Get maximum queue size
         let queue_size_max = self.read32_register(Register::QueueNumMax);
         if queue_size > queue_size_max as usize {
             return false; // Requested size exceeds maximum
         }
-        
+
         // Set queue size
         self.write32_register(Register::QueueNum, queue_size as u32);
-        
+
         // Get queue addresses directly - safer than closures
         let desc_addr = self.get_queue_desc_addr(queue_idx);
         let driver_addr = self.get_queue_driver_addr(queue_idx);
         let device_addr = self.get_queue_device_addr(queue_idx);
-        
+
         if desc_addr.is_none() || driver_addr.is_none() || device_addr.is_none() {
             return false;
         }
-        
+
         let desc_addr = desc_addr.unwrap();
         let driver_addr = driver_addr.unwrap();
         let device_addr = device_addr.unwrap();
-        
+
         // Set the queue descriptor address
         let desc_addr_low = (desc_addr & 0xffffffff) as u32;
         let desc_addr_high = (desc_addr >> 32) as u32;
@@ -423,7 +447,7 @@ pub trait VirtioDevice {
         if DeviceStatus::Failed.is_set(status) {
             return false; // Queue setup failed
         }
-        
+
         // Mark queue as ready
         self.write32_register(Register::QueueReady, 1);
 
@@ -432,10 +456,10 @@ pub trait VirtioDevice {
         if DeviceStatus::Failed.is_set(status) {
             return false; // Queue setup failed
         }
-        
+
         true
     }
-    
+
     /// Read device-specific configuration
     ///
     /// This method reads configuration data from the device-specific configuration space.
@@ -451,7 +475,7 @@ pub trait VirtioDevice {
         let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
         unsafe { core::ptr::read_volatile(addr as *const T) }
     }
-    
+
     /// Write device-specific configuration
     ///
     /// This method writes configuration data to the device-specific configuration space.
@@ -464,7 +488,7 @@ pub trait VirtioDevice {
         let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
         unsafe { core::ptr::write_volatile(addr as *mut T, value) }
     }
-    
+
     /// Get device and vendor IDs
     ///
     /// # Returns
@@ -475,7 +499,7 @@ pub trait VirtioDevice {
         let vendor_id = self.read32_register(Register::VendorId);
         (device_id, vendor_id)
     }
-    
+
     /// Get interrupt status
     ///
     /// # Returns
@@ -484,7 +508,7 @@ pub trait VirtioDevice {
     fn get_interrupt_status(&self) -> u32 {
         self.read32_register(Register::InterruptStatus)
     }
-    
+
     /// Process interrupts (polling method)
     ///
     /// This method checks for interrupts and acknowledges them.
@@ -499,12 +523,12 @@ pub trait VirtioDevice {
         }
         status
     }
-    
+
     /// Memory barrier for ensuring memory operations ordering
     fn memory_barrier(&self) {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
-    
+
     /// Notify the device about new buffers in a specified virtqueue
     ///
     /// This method notifies the device that new buffers are available in the specified virtqueue.
@@ -581,20 +605,19 @@ pub trait VirtioDevice {
     fn get_base_addr(&self) -> usize;
     fn get_virtqueue_count(&self) -> usize;
     fn get_virtqueue_size(&self, queue_idx: usize) -> usize;
-    
+
     /// Get the descriptor address for a virtqueue
     fn get_queue_desc_addr(&self, queue_idx: usize) -> Option<u64>;
-    
+
     /// Get the driver area address for a virtqueue
     fn get_queue_driver_addr(&self, queue_idx: usize) -> Option<u64>;
-    
+
     /// Get the device area address for a virtqueue
     fn get_queue_device_addr(&self, queue_idx: usize) -> Option<u64>;
 }
 
-
 /// Device type enum for Virtio devices
-/// 
+///
 /// This enum represents the different types of Virtio devices.
 /// Each variant corresponds to a specific device type.
 /// The types are defined in the Virtio specification.
@@ -609,15 +632,15 @@ pub enum VirtioDeviceType {
 
 impl VirtioDeviceType {
     /// Convert from u32 to VirtioDeviceType
-    /// 
+    ///
     /// This method converts a u32 value to the corresponding VirtioDeviceType variant.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `device_type` - The u32 value to convert.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Returns the corresponding VirtioDeviceType variant.
     pub fn from_u32(device_type: u32) -> Self {
         match device_type {
@@ -633,10 +656,10 @@ impl VirtioDeviceType {
 }
 
 /// Virtio Common Device
-/// 
+///
 /// Only use this struct for checking the device info.
 /// It should not be used for actual device operations.
-/// 
+///
 struct VirtioDeviceCommon {
     base_addr: usize,
 }
@@ -680,12 +703,12 @@ impl VirtioDevice for VirtioDeviceCommon {
         // This should be overridden by specific device implementations
         None
     }
-    
+
     fn get_queue_driver_addr(&self, _queue_idx: usize) -> Option<u64> {
         // This should be overridden by specific device implementations
         None
     }
-    
+
     fn get_queue_device_addr(&self, _queue_idx: usize) -> Option<u64> {
         // This should be overridden by specific device implementations
         None
@@ -699,36 +722,49 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     // Get memory region resource (res_type == PlatformDeviceResourceType::MEM)
-    let mem_res = res.iter()
+    let mem_res = res
+        .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("Memory resource not found")?;
-    
+
     let base_addr = mem_res.start as usize;
 
     // Create a new Virtio device
     let virtio_device = VirtioDeviceCommon::new(base_addr);
     // Check device type
     let device_type = VirtioDeviceType::from_u32(virtio_device.get_device_info().0);
-    
+
     match device_type {
         VirtioDeviceType::Block => {
             let id = BLOCK_COUNTER.fetch_add(1, Ordering::SeqCst);
             let name = format!("vblk{}", id);
-            crate::early_println!("[Virtio] Detected Virtio Block Device at {:#x}, registering as {}", base_addr, name);
+            crate::early_println!(
+                "[Virtio] Detected Virtio Block Device at {:#x}, registering as {}",
+                base_addr,
+                name
+            );
             let dev: Arc<dyn Device> = Arc::new(VirtioBlockDevice::new(base_addr));
             DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Net => {
             let id = NET_COUNTER.fetch_add(1, Ordering::SeqCst);
             let name = format!("veth{}", id);
-            crate::early_println!("[Virtio] Detected Virtio Network Device at {:#x}, registering as {}", base_addr, name);
+            crate::early_println!(
+                "[Virtio] Detected Virtio Network Device at {:#x}, registering as {}",
+                base_addr,
+                name
+            );
             let dev: Arc<dyn Device> = Arc::new(VirtioNetDevice::new(base_addr));
             DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::GPU => {
             let id = GPU_COUNTER.fetch_add(1, Ordering::SeqCst);
             let name = format!("vfb{}", id);
-            crate::early_println!("[Virtio] Detected Virtio GPU Device at {:#x}, registering as {}", base_addr, name);
+            crate::early_println!(
+                "[Virtio] Detected Virtio GPU Device at {:#x}, registering as {}",
+                base_addr,
+                name
+            );
             let dev: Arc<dyn Device> = Arc::new(VirtioGpuDevice::new(base_addr));
             DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
@@ -746,12 +782,7 @@ fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 }
 
 fn register_driver() {
-    let driver = PlatformDeviceDriver::new(
-        "virtio-mmio",
-        probe_fn,
-        remove_fn,
-        vec!["virtio,mmio"],
-    );
+    let driver = PlatformDeviceDriver::new("virtio-mmio", probe_fn, remove_fn, vec!["virtio,mmio"]);
     // Register the driver with the kernel
     DeviceManager::get_mut_manager().register_driver(Box::new(driver), DriverPriority::Standard)
 }

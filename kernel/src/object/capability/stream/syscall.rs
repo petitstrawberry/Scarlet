@@ -1,5 +1,5 @@
 //! System calls for StreamOps capability
-//! 
+//!
 //! This module implements system calls that operate on KernelObjects
 //! with StreamOps capability (read/write operations).
 
@@ -7,12 +7,12 @@ use crate::arch::Trapframe;
 use crate::task::mytask;
 
 /// System call for reading from a KernelObject with StreamOps capability
-/// 
+///
 /// # Arguments
 /// - handle: Handle to the KernelObject
 /// - buffer_ptr: Pointer to the buffer to read into
 /// - count: Number of bytes to read
-/// 
+///
 /// # Returns
 /// - On success: number of bytes read
 /// - On error: usize::MAX
@@ -21,7 +21,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    
+
     let handle = trapframe.get_arg(0) as u32;
     let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *mut u8,
@@ -53,12 +53,12 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
 }
 
 /// System call for writing to a KernelObject with StreamOps capability
-/// 
+///
 /// # Arguments
 /// - handle: Handle to the KernelObject
 /// - buffer_ptr: Pointer to the buffer to write from
 /// - count: Number of bytes to write
-/// 
+///
 /// # Returns
 /// - On success: number of bytes written
 /// - On error: usize::MAX
@@ -67,7 +67,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
         Some(task) => task,
         None => return usize::MAX,
     };
-    
+
     let handle = trapframe.get_arg(0) as u32;
     let buf_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,

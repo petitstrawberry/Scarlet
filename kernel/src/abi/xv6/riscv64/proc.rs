@@ -1,11 +1,11 @@
-use alloc::string::{String, ToString};
 use crate::{
-    arch::{get_cpu, Trapframe}, 
-    fs::FileType, 
+    arch::{Trapframe, get_cpu},
+    fs::FileType,
     library::std::string::cstring_to_string,
-    sched::scheduler::get_scheduler, 
-    task::{get_parent_waitpid_waker, mytask, CloneFlags, WaitError}
+    sched::scheduler::get_scheduler,
+    task::{CloneFlags, WaitError, get_parent_waitpid_waker, mytask},
 };
+use alloc::string::{String, ToString};
 
 /// VFS v2 helper function for path absolutization using VfsManager
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
@@ -21,17 +21,22 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
 /// TODO: This should be moved to a shared helper when VFS v2 provides public API
 fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
     const MAX_PATH_LENGTH: usize = 128;
-    cstring_to_string(ptr, MAX_PATH_LENGTH).map(|(s, _)| s).map_err(|_| ())
+    cstring_to_string(ptr, MAX_PATH_LENGTH)
+        .map(|(s, _)| s)
+        .map_err(|_| ())
 }
 
-pub fn sys_fork(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_fork(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let parent_task = mytask().unwrap();
-    
+
     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
 
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.store(trapframe);
-    
+
     /* Clone the task */
     match parent_task.clone_task(CloneFlags::default()) {
         Ok(mut child_task) => {
@@ -40,14 +45,17 @@ pub fn sys_fork(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             /* Return the child task ID as pid to the parent proc */
             child_id
-        },
+        }
         Err(_) => {
             usize::MAX /* Return -1 on error */
         }
     }
 }
 
-pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_exit(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     task.vcpu.store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
@@ -56,7 +64,10 @@ pub fn sys_exit(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     usize::MAX // -1 (If exit is successful, this will not be reached)
 }
 
-pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_wait(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let status_ptr = trapframe.get_arg(0) as *mut i32;
 
@@ -68,26 +79,27 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
                 Ok(status) => {
                     // Child has exited, return the status
                     if status_ptr != core::ptr::null_mut() {
-                        let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                        let status_ptr = task
+                            .vm_manager
+                            .translate_vaddr(status_ptr as usize)
+                            .unwrap() as *mut i32;
                         unsafe {
                             *status_ptr = status;
                         }
                     }
                     trapframe.increment_pc_next(task);
                     return child_pid;
-                },
-                Err(error) => {
-                    match error {
-                        WaitError::ChildNotExited(_) => continue,
-                        _ => {
-                            trapframe.increment_pc_next(task);
-                            return usize::MAX;
-                        },
-                    }
                 }
+                Err(error) => match error {
+                    WaitError::ChildNotExited(_) => continue,
+                    _ => {
+                        trapframe.increment_pc_next(task);
+                        return usize::MAX;
+                    }
+                },
             }
         }
-        
+
         // No child has exited yet, block until one does
         let parent_waker = get_parent_waitpid_waker(task.get_id());
         parent_waker.wait(task.get_id(), trapframe);
@@ -96,7 +108,10 @@ pub fn sys_wait(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     }
 }
 
-pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_kill(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let pid = trapframe.get_arg(0) as usize;
     let signal = trapframe.get_arg(1) as i32;
@@ -119,7 +134,10 @@ pub fn sys_kill(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     }
 }
 
-pub fn sys_sbrk(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_sbrk(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     let increment = trapframe.get_arg(0);
     let brk = task.get_brk();
@@ -130,11 +148,17 @@ pub fn sys_sbrk(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &
     }
 }
 
-pub fn sys_chdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_chdir(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    
-    let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0) as usize).unwrap() as *const u8;
+
+    let path_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0) as usize)
+        .unwrap() as *const u8;
     let path = match get_path_str_v2(path_ptr) {
         Ok(p) => match to_absolute_path_v2(&task, &p) {
             Ok(abs_path) => abs_path,
@@ -166,13 +190,19 @@ pub fn sys_chdir(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: 
     0
 }
 
-pub fn sys_getpid(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_getpid(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
     task.get_id()
 }
 
-pub fn sys_sleep(_abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_sleep(
+    _abi: &mut crate::abi::xv6::riscv64::Xv6Riscv64Abi,
+    trapframe: &mut Trapframe,
+) -> usize {
     let ticks = trapframe.get_arg(0) as u64;
     let task = mytask().unwrap();
 

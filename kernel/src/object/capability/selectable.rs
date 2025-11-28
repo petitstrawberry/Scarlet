@@ -21,9 +21,27 @@ pub struct ReadyInterest {
 }
 
 impl ReadyInterest {
-    pub const fn read() -> Self { Self { read: true, write: false, except: false } }
-    pub const fn write() -> Self { Self { read: false, write: true, except: false } }
-    pub const fn rw() -> Self { Self { read: true, write: true, except: false } }
+    pub const fn read() -> Self {
+        Self {
+            read: true,
+            write: false,
+            except: false,
+        }
+    }
+    pub const fn write() -> Self {
+        Self {
+            read: false,
+            write: true,
+            except: false,
+        }
+    }
+    pub const fn rw() -> Self {
+        Self {
+            read: true,
+            write: true,
+            except: false,
+        }
+    }
 }
 
 /// Result mask for readiness queries.
@@ -35,7 +53,13 @@ pub struct ReadySet {
 }
 
 impl ReadySet {
-    pub const fn none() -> Self { Self { read: false, write: false, except: false } }
+    pub const fn none() -> Self {
+        Self {
+            read: false,
+            write: false,
+            except: false,
+        }
+    }
 }
 
 /// Outcome of a wait operation.
@@ -51,9 +75,15 @@ pub trait Selectable {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         // Default: treat as always-ready for read/write interests, except is false
         let mut set = ReadySet::none();
-        if interest.read { set.read = true; }
-        if interest.write { set.write = true; }
-        if interest.except { set.except = false; }
+        if interest.read {
+            set.read = true;
+        }
+        if interest.write {
+            set.write = true;
+        }
+        if interest.except {
+            set.except = false;
+        }
         set
     }
 

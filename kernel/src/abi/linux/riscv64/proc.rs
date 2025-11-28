@@ -1,5 +1,8 @@
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi, arch::{Trapframe, get_cpu}, sched::scheduler::get_scheduler, task::{mytask, CloneFlags}
+    abi::linux::riscv64::LinuxRiscv64Abi,
+    arch::{Trapframe, get_cpu},
+    sched::scheduler::get_scheduler,
+    task::{CloneFlags, mytask},
 };
 
 // /// VFS v2 helper function for path absolutization
@@ -36,12 +39,11 @@ use crate::{
 
 // pub fn sys_fork(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 //     let parent_task = mytask().unwrap();
-    
-//     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
 
+//     trapframe.increment_pc_next(parent_task); /* Increment the program counter */
 //     /* Save the trapframe to the task before cloning */
 //     parent_task.vcpu.store(trapframe);
-    
+
 //     /* Clone the task */
 //     match parent_task.clone_task(CloneFlags::default()) {
 //         Ok(mut child_task) => {
@@ -131,7 +133,7 @@ pub fn sys_set_robust_list(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe)
 //             }
 //         }
 //     }
-    
+
 //     // No child has exited yet, block until one does
 //     // xv6's wait() is equivalent to waitpid(-1), so we use the parent waker
 //     let parent_waker = get_parent_waker(task.get_id());
@@ -148,22 +150,22 @@ pub fn sys_kill(_abi: &mut LinuxRiscv64Abi, _trapframe: &mut Trapframe) -> usize
 #[allow(dead_code)]
 pub fn sys_sbrk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let increment = trapframe.get_arg(0) as isize;  // Treat as signed increment
+    let increment = trapframe.get_arg(0) as isize; // Treat as signed increment
     let current_brk = task.get_brk();
     trapframe.increment_pc_next(task);
-    
+
     // Handle increment of 0 (query current brk)
     if increment == 0 {
         return current_brk;
     }
-    
+
     let new_brk = if increment > 0 {
         current_brk.checked_add(increment as usize)
     } else {
         // Handle negative increment (decrease brk)
         current_brk.checked_sub((-increment) as usize)
     };
-    
+
     let new_brk = match new_brk {
         Some(brk) => brk,
         None => {
@@ -172,13 +174,13 @@ pub fn sys_sbrk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             return errno::to_result(errno::ENOMEM);
         }
     };
-    
+
     match task.set_brk(new_brk) {
         Ok(_) => {
             let new_actual = task.get_brk();
             // crate::println!("[brk] sbrk inc={} old={:#x} new={:#x}", increment, current_brk, new_actual);
             new_actual
-        },
+        }
         Err(_) => {
             use super::errno;
             // crate::println!("[brk] sbrk fail inc={} old={:#x}", increment, current_brk);
@@ -191,19 +193,19 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let new_brk = trapframe.get_arg(0);
     trapframe.increment_pc_next(task);
-    
+
     // If new_brk is 0, just return current brk (query current brk)
     if new_brk == 0 {
         return task.get_brk();
     }
-    
+
     let _old = task.get_brk();
     match task.set_brk(new_brk) {
         Ok(_) => {
             let actual = task.get_brk();
             // crate::println!("[brk] brk req={:#x} old={:#x} -> {:#x}", new_brk, old, actual);
             actual
-        },
+        }
         Err(_) => {
             let cur = task.get_brk();
             // crate::println!("[brk] brk fail req={:#x} keep={:#x}", new_brk, cur);
@@ -215,7 +217,7 @@ pub fn sys_brk(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 // pub fn sys_chdir(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 //     let task = mytask().unwrap();
 //     trapframe.increment_pc_next(task);
-    
+
 //     let path_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0) as usize).unwrap() as *const u8;
 //     let path = match get_path_str_v2(path_ptr) {
 //         Ok(p) => match to_absolute_path_v2(&task, &p) {
@@ -345,7 +347,7 @@ pub struct UtsName {
     /// System name (e.g., "Linux")
     pub sysname: [u8; 65],
     /// Node name (hostname)
-    pub nodename: [u8; 65], 
+    pub nodename: [u8; 65],
     /// Release (kernel version)
     pub release: [u8; 65],
     /// Version (kernel build info)
@@ -397,14 +399,14 @@ impl UtsName {
 }
 
 /// Linux uname system call implementation
-/// 
+///
 /// Returns system information including system name, hostname, kernel version,
 /// and hardware architecture. This provides compatibility with Linux applications
 /// that query system information.
-/// 
+///
 /// # Arguments
 /// - buf: Pointer to utsname structure to fill
-/// 
+///
 /// # Returns
 /// - 0 on success
 /// - usize::MAX on error (-1 in Linux)
@@ -435,7 +437,7 @@ pub fn sys_uname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 }
 
 /// Linux sys_clone implementation for RISC-V64 ABI
-/// 
+///
 /// RISC-V64 clone argument order (Linux ABI):
 /// long clone(unsigned long flags, void *stack, int *parent_tid, unsigned long tls, int *child_tid);
 ///
@@ -454,8 +456,8 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     let flags = trapframe.get_arg(0);
     let child_stack = trapframe.get_arg(1);
     let parent_tid_ptr = trapframe.get_arg(2) as *mut i32; // a2
-    let tls = trapframe.get_arg(3);                        // a3 (RISC-V: TLS here)
-    let child_tid_ptr = trapframe.get_arg(4) as *mut i32;  // a4
+    let tls = trapframe.get_arg(3); // a3 (RISC-V: TLS here)
+    let child_tid_ptr = trapframe.get_arg(4) as *mut i32; // a4
 
     let parent_tid_opt = (!parent_tid_ptr.is_null()).then_some(parent_tid_ptr as usize);
     let child_tid_opt = (!child_tid_ptr.is_null()).then_some(child_tid_ptr as usize);
@@ -478,7 +480,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     // Thread-related flags (accepted but not fully implemented yet)
     #[allow(dead_code)]
     const CLONE_SIGHAND: usize = 0x00000800;
-    const CLONE_THREAD:  usize = 0x00010000;
+    const CLONE_THREAD: usize = 0x00010000;
     #[allow(dead_code)]
     const CLONE_SETTLS: usize = 0x00080000;
     /// Set child's TID at child_tid_ptr in child's memory
@@ -499,19 +501,27 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 
     trapframe.increment_pc_next(parent_task);
     parent_task.vcpu.store(trapframe);
-    
+
     // Map Linux clone flags to Scarlet CloneFlags
     let mut cflags = CloneFlags::new();
-    if (flags & CLONE_VM) != 0 { cflags.set(crate::task::CloneFlagsDef::Vm); }
-    if (flags & CLONE_FS) != 0 { cflags.set(crate::task::CloneFlagsDef::Fs); }
-    if (flags & CLONE_FILES) != 0 { cflags.set(crate::task::CloneFlagsDef::Files); }
+    if (flags & CLONE_VM) != 0 {
+        cflags.set(crate::task::CloneFlagsDef::Vm);
+    }
+    if (flags & CLONE_FS) != 0 {
+        cflags.set(crate::task::CloneFlagsDef::Fs);
+    }
+    if (flags & CLONE_FILES) != 0 {
+        cflags.set(crate::task::CloneFlagsDef::Files);
+    }
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
             child_task.vcpu.iregs.reg[10] = 0; // a0 = 0 in child
             // If child_stack is provided, set child's user SP
-            if child_stack != 0 { child_task.vcpu.set_sp(child_stack); }
+            if child_stack != 0 {
+                child_task.vcpu.set_sp(child_stack);
+            }
             // If CLONE_SETTLS requested, set tp (x4) to tls for child
             #[allow(non_snake_case)]
             const CLONE_SETTLS: usize = 0x00080000;
@@ -521,15 +531,25 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             // Do not modify user pthread list; musl manages linkage. No safety-net writes.
             // Handle parent TID store when CLONE_PARENT_SETTID is requested
             if (flags & CLONE_PARENT_SETTID) != 0 && !parent_tid_ptr.is_null() {
-                if let Some(paddr) = parent_task.vm_manager.translate_vaddr(parent_tid_ptr as usize) {
-                    unsafe { *(paddr as *mut i32) = child_id as i32; }
+                if let Some(paddr) = parent_task
+                    .vm_manager
+                    .translate_vaddr(parent_tid_ptr as usize)
+                {
+                    unsafe {
+                        *(paddr as *mut i32) = child_id as i32;
+                    }
                 }
             }
             // IMPORTANT: Only write child TID when CLONE_CHILD_SETTID is set.
             // For CLONE_CHILD_CLEARTID, the pointer is a futex lock to clear on exit.
             if (flags & CLONE_CHILD_SETTID) != 0 && !child_tid_ptr.is_null() {
-                if let Some(paddr) = child_task.vm_manager.translate_vaddr(child_tid_ptr as usize) {
-                    unsafe { *(paddr as *mut i32) = child_id as i32; }
+                if let Some(paddr) = child_task
+                    .vm_manager
+                    .translate_vaddr(child_tid_ptr as usize)
+                {
+                    unsafe {
+                        *(paddr as *mut i32) = child_id as i32;
+                    }
                 }
             }
             // No kernel-side TLS scanning/resolution. Linux simply sets tp from tls;
@@ -537,7 +557,7 @@ pub fn sys_clone(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
             // Now that we're done using child_task by reference, enqueue it.
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             child_id
-        },
+        }
         Err(_) => usize::MAX,
     };
 
@@ -600,7 +620,7 @@ pub fn sys_setuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 ///
 /// Arguments:
 /// Wait for process to change state (wait4 system call).
-/// 
+///
 /// This is a Linux-compatible implementation that waits for child processes
 /// to exit and returns their process ID and exit status.
 ///
@@ -623,7 +643,7 @@ pub fn sys_setuid(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 /// - ENOSYS: unsupported operation (process groups)
 /// - EPERM: no current task context
 pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
-    use crate::task::{get_parent_waitpid_waker, WaitError};
+    use crate::task::{WaitError, get_parent_waitpid_waker};
 
     let task = match mytask() {
         Some(t) => t,
@@ -668,26 +688,26 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         }
                         trapframe.increment_pc_next(task);
                         return child_pid;
-                    },
+                    }
                     Err(error) => {
                         match error {
                             WaitError::NoSuchChild(_) => {
                                 // This child is not our child
                                 continue;
-                            },
+                            }
                             WaitError::ChildTaskNotFound(_) => {
                                 // Child task not found in scheduler, continue with other children
                                 continue;
-                            },
+                            }
                             WaitError::ChildNotExited(_) => {
                                 // Child not exited yet, continue with other children
                                 continue;
-                            },
+                            }
                         }
                     }
                 }
             }
-            
+
             // No child has exited yet, block until one does
             // Use parent waker for waitpid(-1) semantics
             let parent_waker = get_parent_waitpid_waker(task.get_id());
@@ -698,7 +718,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         } else if pid > 0 {
             // Wait for specific child process
             let child_pid = pid as usize;
-            
+
             // Check if this is actually our child
             if !task.get_children().contains(&child_pid) {
                 trapframe.increment_pc_next(task);
@@ -731,11 +751,11 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                         WaitError::NoSuchChild(_) => {
                             trapframe.increment_pc_next(task);
                             return usize::MAX - 9; // -ECHILD
-                        },
+                        }
                         WaitError::ChildTaskNotFound(_) => {
                             trapframe.increment_pc_next(task);
                             return usize::MAX - 9; // -ECHILD
-                        },
+                        }
                         WaitError::ChildNotExited(_) => {
                             // Child not exited yet, wait for it
                             use crate::task::get_waitpid_waker;
@@ -744,7 +764,7 @@ pub fn sys_wait4(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                             // Woken by specific child exit; re-check.
                             // Continue the loop to re-check after waking up
                             continue;
-                        },
+                        }
                     }
                 }
             }

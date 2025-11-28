@@ -28,16 +28,25 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
         /* Instruction page fault */
         12 => {
             let mut vaddr = trapframe.epc as usize;
-            let task = get_scheduler().get_current_task(get_cpu().get_cpuid()).unwrap();
+            let task = get_scheduler()
+                .get_current_task(get_cpu().get_cpuid())
+                .unwrap();
             let manager = &mut task.vm_manager;
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                let access = AccessKind { op: AccessOp::Instruction, vaddr, size: None };
+                let access = AccessKind {
+                    op: AccessOp::Instruction,
+                    vaddr,
+                    size: None,
+                };
                 match manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
-                        panic!("Failed to map page for instruction page fault at vaddr: {:#x}", vaddr);
+                        panic!(
+                            "Failed to map page for instruction page fault at vaddr: {:#x}",
+                            vaddr
+                        );
                     }
                 }
 
@@ -54,17 +63,30 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             unsafe {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
-            let task = get_scheduler().get_current_task(get_cpu().get_cpuid()).unwrap();
+            let task = get_scheduler()
+                .get_current_task(get_cpu().get_cpuid())
+                .unwrap();
             let manager = &mut task.vm_manager;
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
-                let op = if cause == 13 { AccessOp::Load } else { AccessOp::Store };
-                let access = AccessKind { op, vaddr, size: None };
+                let op = if cause == 13 {
+                    AccessOp::Load
+                } else {
+                    AccessOp::Store
+                };
+                let access = AccessKind {
+                    op,
+                    vaddr,
+                    size: None,
+                };
                 match manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
-                        panic!("Failed to map page for load/store page fault at vaddr: {:#x}", vaddr);
+                        panic!(
+                            "Failed to map page for load/store page fault at vaddr: {:#x}",
+                            vaddr
+                        );
                     }
                 }
 
@@ -74,11 +96,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 }
                 vaddr = (vaddr + 4) & !0b11; // Align to the next 4-byte boundary
             }
-        },
+        }
         _ => {
             print_traplog(trapframe);
             panic!("Unhandled exception: {}", cause);
-            
         }
     }
 }

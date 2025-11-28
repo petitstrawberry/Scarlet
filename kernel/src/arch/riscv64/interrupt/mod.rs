@@ -4,7 +4,7 @@
 //! for the RISC-V architecture.
 
 /// Enable interrupts globally on RISC-V
-/// 
+///
 /// Sets the SIE (Supervisor Interrupt Enable) bit in the sstatus register.
 pub fn enable_interrupts() {
     unsafe {
@@ -13,7 +13,7 @@ pub fn enable_interrupts() {
 }
 
 /// Disable interrupts globally on RISC-V
-/// 
+///
 /// Clears the SIE (Supervisor Interrupt Enable) bit in the sstatus register.
 pub fn disable_interrupts() {
     unsafe {
@@ -22,7 +22,7 @@ pub fn disable_interrupts() {
 }
 
 /// Check if interrupts are currently enabled on RISC-V
-/// 
+///
 /// Returns true if the SIE bit is set in the sstatus register.
 pub fn are_interrupts_enabled() -> bool {
     let sstatus: usize;
@@ -33,7 +33,7 @@ pub fn are_interrupts_enabled() -> bool {
 }
 
 /// Execute a closure with interrupts disabled
-/// 
+///
 /// This is a convenience function that saves the current interrupt state,
 /// disables interrupts, executes the closure, and restores the interrupt state.
 pub fn with_interrupts_disabled<F, R>(f: F) -> R
@@ -50,7 +50,7 @@ where
 }
 
 /// Enable timer interrupts
-/// 
+///
 /// Enables the timer interrupt by setting the STIE (Supervisor Timer Interrupt Enable) bit in the sie register.
 pub fn enable_timer_interrupts() {
     unsafe {
@@ -63,7 +63,7 @@ pub fn enable_timer_interrupts() {
 }
 
 /// Disable timer interrupts
-/// 
+///
 /// Disables the timer interrupt by clearing the STIE (Supervisor Timer Interrupt Enable) bit in the sie register.
 pub fn disable_timer_interrupts() {
     unsafe {
@@ -76,7 +76,7 @@ pub fn disable_timer_interrupts() {
 }
 
 /// Check if timer interrupts are enabled
-/// 
+///
 /// Returns true if the STIE (Supervisor Timer Interrupt Enable) bit is set in the sie register.
 pub fn are_timer_interrupts_enabled() -> bool {
     let sie: usize;
@@ -87,7 +87,7 @@ pub fn are_timer_interrupts_enabled() -> bool {
 }
 
 /// Enable software interrupts
-/// 
+///
 /// Enables the software interrupt by setting the SSIE (Supervisor Software Interrupt Enable) bit in the sie register.
 pub fn enable_software_interrupts() {
     unsafe {
@@ -112,7 +112,7 @@ pub fn disable_software_interrupts() {
 }
 
 /// Check if software interrupts are enabled
-/// 
+///
 /// Returns true if the SSIE (Supervisor Software Interrupt Enable) bit is set in the sie register.
 pub fn are_software_interrupts_enabled() -> bool {
     let sie: usize;
@@ -123,7 +123,7 @@ pub fn are_software_interrupts_enabled() -> bool {
 }
 
 /// Enable external interrupts
-/// 
+///
 /// Enables the external interrupt by setting the SEIE (Supervisor External Interrupt Enable) bit in the sie register.
 pub fn enable_external_interrupts() {
     unsafe {
@@ -149,7 +149,7 @@ pub fn disable_external_interrupts() {
 }
 
 /// Check if external interrupts are enabled
-/// 
+///
 /// Returns true if the SEIE (Supervisor External Interrupt Enable) bit is set in the sie register.
 pub fn are_external_interrupts_enabled() -> bool {
     let sie: usize;

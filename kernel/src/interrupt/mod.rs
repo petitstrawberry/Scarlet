@@ -1,5 +1,5 @@
 //! Interrupt management system
-//! 
+//!
 //! This module provides a comprehensive interrupt management system for the Scarlet kernel.
 //! It supports both local interrupts (via CLINT) and external interrupts (via PLIC) on RISC-V architecture.
 
@@ -19,9 +19,8 @@ pub type CpuId = u32;
 /// Priority level for interrupts
 pub type Priority = u32;
 
-
 /// Handle for managing interrupt processing
-/// 
+///
 /// This provides a safe interface for interrupt handlers to interact with
 /// the interrupt controller without direct access.
 pub struct InterruptHandle<'a> {
@@ -33,7 +32,11 @@ pub struct InterruptHandle<'a> {
 
 impl<'a> InterruptHandle<'a> {
     /// Create a new interrupt handle
-    pub fn new(interrupt_id: InterruptId, cpu_id: CpuId, manager: &'a mut InterruptManager) -> Self {
+    pub fn new(
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+        manager: &'a mut InterruptManager,
+    ) -> Self {
         Self {
             interrupt_id,
             cpu_id,
@@ -53,14 +56,15 @@ impl<'a> InterruptHandle<'a> {
     }
 
     /// Mark the interrupt as completed
-    /// 
+    ///
     /// This should be called when the handler has finished processing the interrupt.
     pub fn complete(&mut self) -> InterruptResult<()> {
         if self.completed {
             return Err(InterruptError::InvalidOperation);
         }
-        
-        self.manager.complete_external_interrupt(self.cpu_id, self.interrupt_id)?;
+
+        self.manager
+            .complete_external_interrupt(self.cpu_id, self.interrupt_id)?;
         self.completed = true;
         Ok(())
     }
@@ -72,12 +76,14 @@ impl<'a> InterruptHandle<'a> {
 
     /// Enable another interrupt
     pub fn enable_interrupt(&mut self, target_interrupt: InterruptId) -> InterruptResult<()> {
-        self.manager.enable_external_interrupt(target_interrupt, self.cpu_id)
+        self.manager
+            .enable_external_interrupt(target_interrupt, self.cpu_id)
     }
 
     /// Disable another interrupt
     pub fn disable_interrupt(&mut self, target_interrupt: InterruptId) -> InterruptResult<()> {
-        self.manager.disable_external_interrupt(target_interrupt, self.cpu_id)
+        self.manager
+            .disable_external_interrupt(target_interrupt, self.cpu_id)
     }
 }
 
@@ -156,16 +162,17 @@ pub fn are_interrupts_enabled() -> bool {
 }
 
 /// Unified interrupt manager
-/// 
+///
 /// This manages both local and external interrupts in a single structure.
 pub struct InterruptManager {
     controllers: controllers::InterruptControllers,
     external_handlers: spin::Mutex<HashMap<InterruptId, ExternalInterruptHandler>>,
-    interrupt_devices: spin::Mutex<HashMap<InterruptId, alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>>>,
+    interrupt_devices: spin::Mutex<
+        HashMap<InterruptId, alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>>,
+    >,
 }
 
 impl InterruptManager {
-
     /// Create a new interrupt manager
     pub fn new() -> Self {
         Self {
@@ -182,7 +189,7 @@ impl InterruptManager {
     }
 
     /// Get a mutable reference to the global interrupt manager (convenience method)
-    /// 
+    ///
     /// This method locks the global manager and returns a guard.
     /// Use this when you need to perform multiple operations atomically.
     pub fn get_manager() -> spin::MutexGuard<'static, InterruptManager> {
@@ -190,7 +197,7 @@ impl InterruptManager {
     }
 
     /// Execute a closure with mutable access to the global interrupt manager
-    /// 
+    ///
     /// This is a convenience method that automatically handles locking and unlocking.
     pub fn with_manager<F, R>(f: F) -> R
     where
@@ -216,20 +223,23 @@ impl InterruptManager {
             }
         }
 
-        
         enable_external_interrupts(); // Enable external interrupts
         // Timer interrupts are disabled by default, enable them if needed by scheduler or other components
         enable_interrupts(); // Enable interrupts globally
     }
 
     /// Handle an external interrupt
-    pub fn handle_external_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
+    pub fn handle_external_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
         // First, check for device-based handlers
         let device = {
             let devices = self.interrupt_devices.lock();
             devices.get(&interrupt_id).cloned()
         };
-        
+
         if let Some(device) = device {
             // Call device's interrupt handler
             device.handle_interrupt()?;
@@ -240,7 +250,7 @@ impl InterruptManager {
                 let handlers = self.external_handlers.lock();
                 handlers.get(&interrupt_id).copied()
             };
-            
+
             if let Some(handler_fn) = handler {
                 let mut handle = InterruptHandle::new(interrupt_id, cpu_id, self);
                 handler_fn(&mut handle)
@@ -252,12 +262,16 @@ impl InterruptManager {
     }
 
     /// Claim and handle the next pending external interrupt
-    pub fn claim_and_handle_external_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<Option<InterruptId>> {
-        let interrupt_id = if let Some(ref mut controller) = self.controllers.external_controller_mut() {
-            controller.claim_interrupt(cpu_id)?
-        } else {
-            return Err(InterruptError::ControllerNotFound);
-        };
+    pub fn claim_and_handle_external_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+    ) -> InterruptResult<Option<InterruptId>> {
+        let interrupt_id =
+            if let Some(ref mut controller) = self.controllers.external_controller_mut() {
+                controller.claim_interrupt(cpu_id)?
+            } else {
+                return Err(InterruptError::ControllerNotFound);
+            };
 
         if let Some(id) = interrupt_id {
             self.handle_external_interrupt(id, cpu_id)?;
@@ -268,7 +282,11 @@ impl InterruptManager {
     }
 
     /// Enable a local interrupt type for a CPU
-    pub fn enable_local_interrupt(&mut self, cpu_id: CpuId, interrupt_type: controllers::LocalInterruptType) -> InterruptResult<()> {
+    pub fn enable_local_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_type: controllers::LocalInterruptType,
+    ) -> InterruptResult<()> {
         if let Some(ref mut controller) = self.controllers.local_controller_mut_for_cpu(cpu_id) {
             controller.enable_interrupt(cpu_id, interrupt_type)
         } else {
@@ -277,7 +295,11 @@ impl InterruptManager {
     }
 
     /// Disable a local interrupt type for a CPU
-    pub fn disable_local_interrupt(&mut self, cpu_id: CpuId, interrupt_type: controllers::LocalInterruptType) -> InterruptResult<()> {
+    pub fn disable_local_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_type: controllers::LocalInterruptType,
+    ) -> InterruptResult<()> {
         if let Some(ref mut controller) = self.controllers.local_controller_mut_for_cpu(cpu_id) {
             controller.disable_interrupt(cpu_id, interrupt_type)
         } else {
@@ -287,7 +309,8 @@ impl InterruptManager {
 
     /// Send a software interrupt to a specific CPU
     pub fn send_software_interrupt(&mut self, target_cpu: CpuId) -> InterruptResult<()> {
-        if let Some(ref mut controller) = self.controllers.local_controller_mut_for_cpu(target_cpu) {
+        if let Some(ref mut controller) = self.controllers.local_controller_mut_for_cpu(target_cpu)
+        {
             controller.send_software_interrupt(target_cpu)
         } else {
             Err(InterruptError::ControllerNotFound)
@@ -321,22 +344,43 @@ impl InterruptManager {
     }
 
     /// Register a local interrupt controller (e.g., CLINT) for specific CPUs
-    pub fn register_local_controller(&mut self, controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>, cpu_ids: &[CpuId]) -> InterruptResult<usize> {
-        Ok(self.controllers.register_local_controller(controller, cpu_ids))
+    pub fn register_local_controller(
+        &mut self,
+        controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>,
+        cpu_ids: &[CpuId],
+    ) -> InterruptResult<usize> {
+        Ok(self
+            .controllers
+            .register_local_controller(controller, cpu_ids))
     }
 
     /// Register a local interrupt controller for a CPU range
-    pub fn register_local_controller_for_range(&mut self, controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>, cpu_range: core::ops::Range<CpuId>) -> InterruptResult<usize> {
-        Ok(self.controllers.register_local_controller_for_range(controller, cpu_range))
+    pub fn register_local_controller_for_range(
+        &mut self,
+        controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>,
+        cpu_range: core::ops::Range<CpuId>,
+    ) -> InterruptResult<usize> {
+        Ok(self
+            .controllers
+            .register_local_controller_for_range(controller, cpu_range))
     }
 
     /// Register a local interrupt controller for a single CPU
-    pub fn register_local_controller_for_cpu(&mut self, controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>, cpu_id: CpuId) -> InterruptResult<usize> {
-        Ok(self.controllers.register_local_controller_for_cpu(controller, cpu_id))
+    pub fn register_local_controller_for_cpu(
+        &mut self,
+        controller: alloc::boxed::Box<dyn controllers::LocalInterruptController>,
+        cpu_id: CpuId,
+    ) -> InterruptResult<usize> {
+        Ok(self
+            .controllers
+            .register_local_controller_for_cpu(controller, cpu_id))
     }
 
     /// Register an external interrupt controller (e.g., PLIC)
-    pub fn register_external_controller(&mut self, controller: alloc::boxed::Box<dyn controllers::ExternalInterruptController>) -> InterruptResult<()> {
+    pub fn register_external_controller(
+        &mut self,
+        controller: alloc::boxed::Box<dyn controllers::ExternalInterruptController>,
+    ) -> InterruptResult<()> {
         if self.controllers.has_external_controller() {
             return Err(InterruptError::HardwareError);
         }
@@ -345,7 +389,11 @@ impl InterruptManager {
     }
 
     /// Register a handler for a specific external interrupt
-    pub fn register_external_handler(&mut self, interrupt_id: InterruptId, handler: ExternalInterruptHandler) -> InterruptResult<()> {
+    pub fn register_external_handler(
+        &mut self,
+        interrupt_id: InterruptId,
+        handler: ExternalInterruptHandler,
+    ) -> InterruptResult<()> {
         let mut handlers = self.external_handlers.lock();
         if handlers.contains_key(&interrupt_id) {
             return Err(InterruptError::HandlerAlreadyRegistered);
@@ -355,7 +403,11 @@ impl InterruptManager {
     }
 
     /// Register a device-based handler for a specific external interrupt
-    pub fn register_interrupt_device(&mut self, interrupt_id: InterruptId, device: alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>) -> InterruptResult<()> {
+    pub fn register_interrupt_device(
+        &mut self,
+        interrupt_id: InterruptId,
+        device: alloc::sync::Arc<dyn crate::device::events::InterruptCapableDevice>,
+    ) -> InterruptResult<()> {
         let mut devices = self.interrupt_devices.lock();
         if devices.contains_key(&interrupt_id) {
             return Err(InterruptError::HandlerAlreadyRegistered);
@@ -365,7 +417,11 @@ impl InterruptManager {
     }
 
     /// Complete an external interrupt
-    pub fn complete_external_interrupt(&mut self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
+    pub fn complete_external_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_id: InterruptId,
+    ) -> InterruptResult<()> {
         if let Some(ref mut controller) = self.controllers.external_controller_mut() {
             controller.complete_interrupt(cpu_id, interrupt_id)
         } else {
@@ -374,7 +430,11 @@ impl InterruptManager {
     }
 
     /// Enable an external interrupt for a specific CPU
-    pub fn enable_external_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
+    pub fn enable_external_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
         if let Some(ref mut controller) = self.controllers.external_controller_mut() {
             controller.enable_interrupt(interrupt_id, cpu_id)
         } else {
@@ -383,7 +443,11 @@ impl InterruptManager {
     }
 
     /// Disable an external interrupt for a specific CPU
-    pub fn disable_external_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
+    pub fn disable_external_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
         if let Some(ref mut controller) = self.controllers.external_controller_mut() {
             controller.disable_interrupt(interrupt_id, cpu_id)
         } else {
@@ -406,4 +470,5 @@ impl InterruptManager {
 pub type ExternalInterruptHandler = fn(&mut InterruptHandle) -> InterruptResult<()>;
 
 /// Handler function type for local interrupts (timer, software)
-pub type LocalInterruptHandler = fn(cpu_id: CpuId, interrupt_type: controllers::LocalInterruptType) -> InterruptResult<()>;
+pub type LocalInterruptHandler =
+    fn(cpu_id: CpuId, interrupt_type: controllers::LocalInterruptType) -> InterruptResult<()>;

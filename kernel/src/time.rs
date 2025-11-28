@@ -1,12 +1,12 @@
 //! Time utilities for the kernel
-//! 
+//!
 //! This module provides time-related functionality for the kernel,
 //! including current time access for filesystem operations.
 
 use crate::timer::get_kernel_timer;
 
 /// Get the current time in microseconds
-/// 
+///
 /// This function returns the current system time in microseconds since boot.
 /// For filesystem operations, this provides a monotonic timestamp.
 pub fn current_time() -> u64 {
@@ -30,7 +30,7 @@ pub fn format_time_us(time_us: u64) -> (u64, u64, u64) {
     let seconds = time_us / 1_000_000;
     let minutes = seconds / 60;
     let hours = minutes / 60;
-    
+
     (hours, minutes % 60, seconds % 60)
 }
 
@@ -44,7 +44,7 @@ mod tests {
         assert_eq!(hours, 1);
         assert_eq!(minutes, 1);
         assert_eq!(seconds, 1);
-        
+
         let (hours, minutes, seconds) = format_time_us(123_000_000); // 2 minutes, 3 seconds
         assert_eq!(hours, 0);
         assert_eq!(minutes, 2);

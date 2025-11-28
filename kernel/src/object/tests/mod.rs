@@ -4,5 +4,5 @@
 //! including HandleTable and KernelObject functionality, as well as integration
 //! tests with the Task system.
 
-mod mock;
 mod kernel_object;
+mod mock;

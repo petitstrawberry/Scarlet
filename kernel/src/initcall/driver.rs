@@ -25,16 +25,15 @@ use crate::early_println;
 ///
 /// This macro relies on linker sections and should only be used for functions that are
 /// safe to call during the kernel's driver initialization phase.
-/// 
+///
 #[macro_export]
 macro_rules! driver_initcall {
     ($func:ident) => {
         #[unsafe(link_section = ".initcall.driver")]
         #[used(linker)]
-        static __DRIVER_INITCALL__ : fn() = $func;
+        static __DRIVER_INITCALL__: fn() = $func;
     };
 }
-
 
 unsafe extern "C" {
     static __INITCALL_DRIVER_START: usize;

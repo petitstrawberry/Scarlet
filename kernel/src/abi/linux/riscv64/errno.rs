@@ -408,7 +408,7 @@ pub const EHWPOISON: usize = 133;
 /// Helper function to convert FileSystemErrorKind to Linux errno
 pub fn from_fs_error(error: &crate::fs::FileSystemError) -> usize {
     use crate::fs::FileSystemErrorKind;
-    
+
     match error.kind {
         FileSystemErrorKind::NotFound => ENOENT,
         FileSystemErrorKind::PermissionDenied => EACCES,

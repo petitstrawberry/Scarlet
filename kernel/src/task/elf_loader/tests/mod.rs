@@ -2,7 +2,7 @@
 //!
 //! Tests for ELF binary loading and execution, including integration with VFS manager for filesystem-based executable loading in isolated namespaces.
 
-use crate::fs::{VfsManager, drivers::tmpfs::TmpFS, TmpFSParams, FileType, SeekFrom};
+use crate::fs::{FileType, SeekFrom, TmpFSParams, VfsManager, drivers::tmpfs::TmpFS};
 use crate::task::new_user_task;
 
 use super::*;
@@ -13,7 +13,11 @@ fn test_parse_elf_header() {
     // Attempt to parse the ELF
     let result = ElfHeader::parse(&elf_data);
     // Check if the ELF header is valid
-    assert!(result.is_ok(), "Failed to parse ELF header: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to parse ELF header: {:?}",
+        result.err()
+    );
     let header = result.unwrap();
 
     // Verify the parsed ELF header matches the expected values
@@ -27,11 +31,20 @@ fn test_parse_elf_header() {
     assert_eq!(header.e_shoff, 3217992, "Unexpected section header offset");
     assert_eq!(header.e_flags, 0x5, "Unexpected flags");
     assert_eq!(header.e_ehsize, 64, "Unexpected ELF header size");
-    assert_eq!(header.e_phentsize, 56, "Unexpected program header entry size");
+    assert_eq!(
+        header.e_phentsize, 56,
+        "Unexpected program header entry size"
+    );
     assert_eq!(header.e_phnum, 4, "Unexpected number of program headers");
-    assert_eq!(header.e_shentsize, 64, "Unexpected section header entry size");
+    assert_eq!(
+        header.e_shentsize, 64,
+        "Unexpected section header entry size"
+    );
     assert_eq!(header.e_shnum, 19, "Unexpected number of section headers");
-    assert_eq!(header.e_shstrndx, 17, "Unexpected section header string table index");
+    assert_eq!(
+        header.e_shstrndx, 17,
+        "Unexpected section header string table index"
+    );
 }
 
 #[test_case]
@@ -49,42 +62,131 @@ fn test_parse_program_headers() {
 
         match i {
             0 => {
-                assert_eq!(program_header.p_type, PT_LOAD, "Unexpected type for segment 0");
-                assert_eq!(program_header.p_offset, 0x1000, "Unexpected offset for segment 0");
-                assert_eq!(program_header.p_vaddr, 0x0, "Unexpected virtual address for segment 0");
-                assert_eq!(program_header.p_paddr, 0x0, "Unexpected physical address for segment 0");
-                assert_eq!(program_header.p_filesz, 0x8888, "Unexpected file size for segment 0");
-                assert_eq!(program_header.p_memsz, 0x8888, "Unexpected memory size for segment 0");
-                assert_eq!(program_header.p_flags, PF_R | PF_X, "Unexpected flags for segment 0");
-                assert_eq!(program_header.p_align, 0x1000, "Unexpected alignment for segment 0");
+                assert_eq!(
+                    program_header.p_type, PT_LOAD,
+                    "Unexpected type for segment 0"
+                );
+                assert_eq!(
+                    program_header.p_offset, 0x1000,
+                    "Unexpected offset for segment 0"
+                );
+                assert_eq!(
+                    program_header.p_vaddr, 0x0,
+                    "Unexpected virtual address for segment 0"
+                );
+                assert_eq!(
+                    program_header.p_paddr, 0x0,
+                    "Unexpected physical address for segment 0"
+                );
+                assert_eq!(
+                    program_header.p_filesz, 0x8888,
+                    "Unexpected file size for segment 0"
+                );
+                assert_eq!(
+                    program_header.p_memsz, 0x8888,
+                    "Unexpected memory size for segment 0"
+                );
+                assert_eq!(
+                    program_header.p_flags,
+                    PF_R | PF_X,
+                    "Unexpected flags for segment 0"
+                );
+                assert_eq!(
+                    program_header.p_align, 0x1000,
+                    "Unexpected alignment for segment 0"
+                );
             }
             1 => {
-                assert_eq!(program_header.p_type, PT_LOAD, "Unexpected type for segment 1");
-                assert_eq!(program_header.p_offset, 0xa000, "Unexpected offset for segment 1");
-                assert_eq!(program_header.p_vaddr, 0x9000, "Unexpected virtual address for segment 1");
-                assert_eq!(program_header.p_paddr, 0x9000, "Unexpected physical address for segment 1");
-                assert_eq!(program_header.p_filesz, 0x283f, "Unexpected file size for segment 1");
-                assert_eq!(program_header.p_memsz, 0x283f, "Unexpected memory size for segment 1");
-                assert_eq!(program_header.p_flags, PF_R, "Unexpected flags for segment 1");
-                assert_eq!(program_header.p_align, 0x1000, "Unexpected alignment for segment 1");
+                assert_eq!(
+                    program_header.p_type, PT_LOAD,
+                    "Unexpected type for segment 1"
+                );
+                assert_eq!(
+                    program_header.p_offset, 0xa000,
+                    "Unexpected offset for segment 1"
+                );
+                assert_eq!(
+                    program_header.p_vaddr, 0x9000,
+                    "Unexpected virtual address for segment 1"
+                );
+                assert_eq!(
+                    program_header.p_paddr, 0x9000,
+                    "Unexpected physical address for segment 1"
+                );
+                assert_eq!(
+                    program_header.p_filesz, 0x283f,
+                    "Unexpected file size for segment 1"
+                );
+                assert_eq!(
+                    program_header.p_memsz, 0x283f,
+                    "Unexpected memory size for segment 1"
+                );
+                assert_eq!(
+                    program_header.p_flags, PF_R,
+                    "Unexpected flags for segment 1"
+                );
+                assert_eq!(
+                    program_header.p_align, 0x1000,
+                    "Unexpected alignment for segment 1"
+                );
             }
             2 => {
-                assert_eq!(program_header.p_type, PT_LOAD, "Unexpected type for segment 2");
-                assert_eq!(program_header.p_offset, 0xd000, "Unexpected offset for segment 2");
-                assert_eq!(program_header.p_vaddr, 0xc000, "Unexpected virtual address for segment 2");
-                assert_eq!(program_header.p_paddr, 0xc000, "Unexpected physical address for segment 2");
-                assert_eq!(program_header.p_filesz, 0x8, "Unexpected file size for segment 2");
-                assert_eq!(program_header.p_memsz, 0x2000, "Unexpected memory size for segment 2");
-                assert_eq!(program_header.p_flags, PF_R | PF_W, "Unexpected flags for segment 2");
-                assert_eq!(program_header.p_align, 0x1000, "Unexpected alignment for segment 2");
+                assert_eq!(
+                    program_header.p_type, PT_LOAD,
+                    "Unexpected type for segment 2"
+                );
+                assert_eq!(
+                    program_header.p_offset, 0xd000,
+                    "Unexpected offset for segment 2"
+                );
+                assert_eq!(
+                    program_header.p_vaddr, 0xc000,
+                    "Unexpected virtual address for segment 2"
+                );
+                assert_eq!(
+                    program_header.p_paddr, 0xc000,
+                    "Unexpected physical address for segment 2"
+                );
+                assert_eq!(
+                    program_header.p_filesz, 0x8,
+                    "Unexpected file size for segment 2"
+                );
+                assert_eq!(
+                    program_header.p_memsz, 0x2000,
+                    "Unexpected memory size for segment 2"
+                );
+                assert_eq!(
+                    program_header.p_flags,
+                    PF_R | PF_W,
+                    "Unexpected flags for segment 2"
+                );
+                assert_eq!(
+                    program_header.p_align, 0x1000,
+                    "Unexpected alignment for segment 2"
+                );
             }
             3 => {
                 // assert_eq!(program_header.p_type, PT_RISCV_ATTRIBUTES, "Unexpected type for segment 3");
-                assert_eq!(program_header.p_offset, 0x1e1f1d, "Unexpected offset for segment 3");
-                assert_eq!(program_header.p_filesz, 0x5a, "Unexpected file size for segment 3");
-                assert_eq!(program_header.p_memsz, 0x5a, "Unexpected memory size for segment 3");
-                assert_eq!(program_header.p_flags, PF_R, "Unexpected flags for segment 3");
-                assert_eq!(program_header.p_align, 0x1, "Unexpected alignment for segment 3");
+                assert_eq!(
+                    program_header.p_offset, 0x1e1f1d,
+                    "Unexpected offset for segment 3"
+                );
+                assert_eq!(
+                    program_header.p_filesz, 0x5a,
+                    "Unexpected file size for segment 3"
+                );
+                assert_eq!(
+                    program_header.p_memsz, 0x5a,
+                    "Unexpected memory size for segment 3"
+                );
+                assert_eq!(
+                    program_header.p_flags, PF_R,
+                    "Unexpected flags for segment 3"
+                );
+                assert_eq!(
+                    program_header.p_align, 0x1,
+                    "Unexpected alignment for segment 3"
+                );
             }
             _ => panic!("Unexpected program header index: {}", i),
         }
@@ -98,24 +200,39 @@ fn test_load_elf() {
     let manager = VfsManager::new();
     let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
     let fs = TmpFS::new(params.memory_limit);
-    manager.mount(fs.clone(), "/", 0).expect("Failed to mount test filesystem");
+    manager
+        .mount(fs.clone(), "/", 0)
+        .expect("Failed to mount test filesystem");
     let file_path = "/test.elf";
-    manager.create_file(file_path, FileType::RegularFile).expect("Failed to create test file");
+    manager
+        .create_file(file_path, FileType::RegularFile)
+        .expect("Failed to create test file");
     let kernel_obj = manager.open(file_path, 0).expect("Failed to open file");
     let file = kernel_obj.as_file().expect("Failed to get file reference");
-    file.write(include_bytes!("test.elf")).expect("Failed to write test ELF file");
-    
+    file.write(include_bytes!("test.elf"))
+        .expect("Failed to write test ELF file");
+
     // Seek to beginning for reading
-    file.seek(SeekFrom::Start(0)).expect("Failed to seek to start");
-    
+    file.seek(SeekFrom::Start(0))
+        .expect("Failed to seek to start");
+
     // Create a new task
     let mut task = new_user_task("test".to_string(), 0);
-    
+
     // Load the ELF file into the task
     let entry_point = load_elf_into_task(file, &mut task).expect("Failed to load ELF file");
-    
+
     // Translate the entry point virtual address to a physical address
-    let paddr = task.vm_manager.translate_vaddr(entry_point as usize).expect(format!("Failed to translate entry point address: {:#x}", entry_point).as_str());
+    let paddr = task
+        .vm_manager
+        .translate_vaddr(entry_point as usize)
+        .expect(
+            format!(
+                "Failed to translate entry point address: {:#x}",
+                entry_point
+            )
+            .as_str(),
+        );
 
     // Read the instruction at the entry point
     let instruction: u32;
@@ -127,7 +244,10 @@ fn test_load_elf() {
     let expected_instruction: u32 = 0x00000073; // Example: ecall instruction
 
     // Assert that the instruction matches the expected value
-    assert_eq!(instruction, expected_instruction, "Entry point instruction does not match expected value");
+    assert_eq!(
+        instruction, expected_instruction,
+        "Entry point instruction does not match expected value"
+    );
 }
 
 #[test_case]
@@ -137,16 +257,22 @@ fn test_load_elf_invalid_magic() {
     let manager = VfsManager::new();
     let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
     let fs = TmpFS::new(params.memory_limit);
-    manager.mount(fs.clone(), "/", 0).expect("Failed to mount test filesystem");
+    manager
+        .mount(fs.clone(), "/", 0)
+        .expect("Failed to mount test filesystem");
     let file_path = "/invalid.elf";
-    manager.create_file(file_path, FileType::RegularFile).expect("Failed to create test file");
+    manager
+        .create_file(file_path, FileType::RegularFile)
+        .expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid magic number
     let invalid_elf_data = vec![0u8; 64]; // 64-byte ELF header with all zeros
     let kernel_obj = manager.open("/invalid.elf", 0).unwrap();
     let file = kernel_obj.as_file().expect("Failed to get file reference");
-    file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
-    file.seek(SeekFrom::Start(0)).expect("Failed to seek to start");
+    file.write(&invalid_elf_data)
+        .expect("Failed to write invalid ELF data");
+    file.seek(SeekFrom::Start(0))
+        .expect("Failed to seek to start");
 
     // Create a new task
     let mut task = new_user_task("test_invalid_magic".to_string(), 0);
@@ -155,7 +281,10 @@ fn test_load_elf_invalid_magic() {
     let result = load_elf_into_task(file, &mut task);
 
     // Assert that the result is an error
-    assert!(result.is_err(), "Expected error when loading ELF with invalid magic number");
+    assert!(
+        result.is_err(),
+        "Expected error when loading ELF with invalid magic number"
+    );
 }
 
 #[test_case]
@@ -165,9 +294,13 @@ fn test_load_elf_invalid_alignment() {
     let manager = VfsManager::new();
     let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
     let fs = TmpFS::new(params.memory_limit);
-    manager.mount(fs.clone(), "/", 0).expect("Failed to mount test filesystem");
+    manager
+        .mount(fs.clone(), "/", 0)
+        .expect("Failed to mount test filesystem");
     let file_path = "/invalid_align.elf";
-    manager.create_file(file_path, FileType::RegularFile).expect("Failed to create test file");
+    manager
+        .create_file(file_path, FileType::RegularFile)
+        .expect("Failed to create test file");
 
     // Create a mock ELF file with an invalid alignment
     let mut invalid_elf_data = vec![0u8; 64];
@@ -195,9 +328,13 @@ fn test_load_elf_invalid_alignment() {
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_memsz
     invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
 
-    let kernel_obj = manager.open("/invalid_align.elf", 0o777).map_err(|_| "Failed to create file").unwrap();
+    let kernel_obj = manager
+        .open("/invalid_align.elf", 0o777)
+        .map_err(|_| "Failed to create file")
+        .unwrap();
     let file = kernel_obj.as_file().expect("Failed to get file reference");
-    file.write(&invalid_elf_data).expect("Failed to write invalid ELF data");
+    file.write(&invalid_elf_data)
+        .expect("Failed to write invalid ELF data");
 
     // Create a new task
     let mut task = new_user_task("test_invalid_alignment".to_string(), 0);
@@ -206,7 +343,10 @@ fn test_load_elf_invalid_alignment() {
     let result = load_elf_into_task(file, &mut task);
 
     // Assert that the result is an error
-    assert!(result.is_err(), "Expected error when loading ELF with invalid alignment");
+    assert!(
+        result.is_err(),
+        "Expected error when loading ELF with invalid alignment"
+    );
 }
 
 #[test_case]
@@ -216,10 +356,17 @@ fn test_load_elf_bss_zeroed() {
     let manager = VfsManager::new();
     let params = TmpFSParams::with_memory_limit(1024 * 1024); // 1MB
     let fs = TmpFS::new(params.memory_limit);
-    manager.mount(fs.clone(), "/", 0).expect("Failed to mount test filesystem");
+    manager
+        .mount(fs.clone(), "/", 0)
+        .expect("Failed to mount test filesystem");
     let file_path = "/test_bss.elf";
-    manager.create_file(file_path, FileType::RegularFile).expect("Failed to create test file");
-    let kernel_obj = manager.open(file_path, 0o777).map_err(|_| "Failed to create file").unwrap();
+    manager
+        .create_file(file_path, FileType::RegularFile)
+        .expect("Failed to create test file");
+    let kernel_obj = manager
+        .open(file_path, 0o777)
+        .map_err(|_| "Failed to create file")
+        .unwrap();
     let file = kernel_obj.as_file().expect("Failed to get file reference");
 
     // Create a mock ELF file with a .bss section
@@ -259,14 +406,20 @@ fn test_load_elf_bss_zeroed() {
     // Verify that the .bss section is zeroed
     let bss_start = 0x1000; // Virtual address of .bss section (aligned to PAGE_SIZE)
     let bss_size = 0x2000; // Size of .bss section (2 * PAGE_SIZE)
-    let paddr = task.vm_manager.translate_vaddr(bss_start).expect("Failed to translate .bss start address");
+    let paddr = task
+        .vm_manager
+        .translate_vaddr(bss_start)
+        .expect("Failed to translate .bss start address");
 
     for i in 0..bss_size {
         let byte: u8;
         unsafe {
             byte = core::ptr::read((paddr + i) as *const u8);
         }
-        assert_eq!(byte, 0, "Non-zero byte found in .bss section at offset {}", i);
+        assert_eq!(
+            byte, 0,
+            "Non-zero byte found in .bss section at offset {}",
+            i
+        );
     }
 }
-

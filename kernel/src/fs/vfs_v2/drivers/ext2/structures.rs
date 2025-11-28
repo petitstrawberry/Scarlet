@@ -3,9 +3,9 @@
 //! This module defines the on-disk data structures used by the ext2 filesystem.
 //! All structures are packed and follow the ext2 filesystem specification.
 
-use core::mem;
-use alloc::{boxed::Box, vec, string::String, format};
 use crate::fs::{FileSystemError, FileSystemErrorKind};
+use alloc::{boxed::Box, format, string::String, vec};
+use core::mem;
 
 /// ext2 magic number
 pub const EXT2_SUPER_MAGIC: u16 = 0xEF53;
@@ -14,7 +14,7 @@ pub const EXT2_SUPER_MAGIC: u16 = 0xEF53;
 pub const EXT2_ROOT_INO: u32 = 2;
 
 /// ext2 file type constants for inode mode field
-pub const EXT2_S_IFMT: u16 = 0xF000;  // File type mask
+pub const EXT2_S_IFMT: u16 = 0xF000; // File type mask
 pub const EXT2_S_IFREG: u16 = 0x8000; // Regular file
 pub const EXT2_S_IFDIR: u16 = 0x4000; // Directory
 pub const EXT2_S_IFLNK: u16 = 0xA000; // Symbolic link
@@ -24,7 +24,7 @@ pub const EXT2_S_IFIFO: u16 = 0x1000; // FIFO (pipe)
 pub const EXT2_S_IFSOCK: u16 = 0xC000; // Socket
 
 /// ext2 Superblock structure
-/// 
+///
 /// This structure represents the superblock of an ext2 filesystem.
 /// It contains essential information about the filesystem layout and parameters.
 #[derive(Debug, Clone, Copy)]
@@ -115,7 +115,10 @@ impl Ext2Superblock {
         if data.len() < 1024 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                format!("Insufficient data for ext2 superblock: got {} bytes, need at least 1024 bytes", data.len())
+                format!(
+                    "Insufficient data for ext2 superblock: got {} bytes, need at least 1024 bytes",
+                    data.len()
+                ),
             ));
         }
 
@@ -131,7 +134,7 @@ impl Ext2Superblock {
         if u16::from_le(superblock.magic) != EXT2_SUPER_MAGIC {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Invalid ext2 magic number"
+                "Invalid ext2 magic number",
             ));
         }
 
@@ -144,19 +147,22 @@ impl Ext2Superblock {
         if data.len() < 1024 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                format!("Insufficient data for ext2 superblock: got {} bytes, need at least 1024 bytes", data.len())
+                format!(
+                    "Insufficient data for ext2 superblock: got {} bytes, need at least 1024 bytes",
+                    data.len()
+                ),
             ));
         }
 
         // Safe approach: create zeroed superblock on heap, then copy data
         let mut superblock = Box::new(unsafe { core::mem::zeroed::<Self>() });
-        
+
         // Copy data safely
         unsafe {
             core::ptr::copy_nonoverlapping(
                 data.as_ptr(),
                 superblock.as_mut() as *mut Self as *mut u8,
-                core::mem::size_of::<Self>().min(1024)
+                core::mem::size_of::<Self>().min(1024),
             );
         }
 
@@ -164,7 +170,7 @@ impl Ext2Superblock {
         if u16::from_le(superblock.magic) != EXT2_SUPER_MAGIC {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Invalid ext2 magic number"
+                "Invalid ext2 magic number",
             ));
         }
 
@@ -238,14 +244,12 @@ impl Ext2BlockGroupDescriptor {
         if data.len() < mem::size_of::<Self>() {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Insufficient data for ext2 block group descriptor"
+                "Insufficient data for ext2 block group descriptor",
             ));
         }
 
         // Use unsafe cast for efficiency since the structure is packed and has fixed layout
-        let descriptor = unsafe {
-            *(data.as_ptr() as *const Self)
-        };
+        let descriptor = unsafe { *(data.as_ptr() as *const Self) };
 
         Ok(descriptor)
     }
@@ -379,14 +383,12 @@ impl Ext2Inode {
         if data.len() < mem::size_of::<Self>() {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Insufficient data for ext2 inode"
+                "Insufficient data for ext2 inode",
             ));
         }
 
         // Use unsafe cast for efficiency since the inode structure is packed and has fixed layout
-        let inode = unsafe {
-            *(data.as_ptr() as *const Self)
-        };
+        let inode = unsafe { *(data.as_ptr() as *const Self) };
 
         Ok(inode)
     }
@@ -485,56 +487,61 @@ impl Ext2Inode {
     }
 
     /// Read symbolic link target from inode
-    /// 
+    ///
     /// This method handles both fast symlinks (target stored in block array)
     /// and slow symlinks (target stored in data blocks).
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `filesystem` - Reference to the ext2 filesystem for block reading
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// The target path of the symbolic link, or an error if this is not a symlink
     /// or if the target cannot be read.
-    pub fn read_symlink_target(&self, filesystem: &super::Ext2FileSystem) -> Result<String, FileSystemError> {
+    pub fn read_symlink_target(
+        &self,
+        filesystem: &super::Ext2FileSystem,
+    ) -> Result<String, FileSystemError> {
         // Check if this is actually a symbolic link
         if !self.is_symlink() {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
-                "Not a symbolic link"
+                "Not a symbolic link",
             ));
         }
 
         let size = self.get_size() as usize;
-        
+
         if size <= 60 {
             // Fast symlink: target path is stored in inode.block array
             let inode_bytes = unsafe {
                 core::slice::from_raw_parts(
                     self as *const Self as *const u8,
-                    core::mem::size_of::<Self>()
+                    core::mem::size_of::<Self>(),
                 )
             };
             // Block array starts at offset 40 in the inode structure
             let block_start_offset = 40;
             let block_bytes = &inode_bytes[block_start_offset..block_start_offset + 60];
             let target_bytes = &block_bytes[..size];
-            
-            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Invalid UTF-8 in symlink target"
-            ))
+
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| {
+                FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Invalid UTF-8 in symlink target",
+                )
+            })
         } else {
             // Slow symlink: target path is stored in data blocks
             let first_block = u32::from_le(self.block[0]);
             if first_block == 0 {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::InvalidData,
-                    "Symlink has no data block"
+                    "Symlink has no data block",
                 ));
             }
-            
+
             // Read the block containing the target path
             let block_sector = filesystem.block_to_sector(first_block as u64);
             let request = Box::new(crate::device::block::request::BlockIORequest {
@@ -545,30 +552,34 @@ impl Ext2Inode {
                 cylinder: 0,
                 buffer: vec![0u8; filesystem.block_size as usize],
             });
-            
+
             filesystem.block_device.enqueue_request(request);
             let results = filesystem.block_device.process_requests();
-            
+
             let block_data = if let Some(result) = results.first() {
                 match &result.result {
                     Ok(_) => result.request.buffer.clone(),
-                    Err(_) => return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read symlink data block"
-                    )),
+                    Err(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::IoError,
+                            "Failed to read symlink data block",
+                        ));
+                    }
                 }
             } else {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::IoError,
-                    "No result from symlink data block read"
+                    "No result from symlink data block read",
                 ));
             };
-            
+
             let target_bytes = &block_data[..size];
-            String::from_utf8(target_bytes.to_vec()).map_err(|_| FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Invalid UTF-8 in symlink target"
-            ))
+            String::from_utf8(target_bytes.to_vec()).map_err(|_| {
+                FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Invalid UTF-8 in symlink target",
+                )
+            })
         }
     }
 }
@@ -596,14 +607,12 @@ impl Ext2DirectoryEntryRaw {
         if data.len() < mem::size_of::<Self>() {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Insufficient data for ext2 directory entry header"
+                "Insufficient data for ext2 directory entry header",
             ));
         }
 
         // Use unsafe cast for efficiency since the directory entry header is packed and fixed-size
-        let entry = unsafe {
-            *(data.as_ptr() as *const Self)
-        };
+        let entry = unsafe { *(data.as_ptr() as *const Self) };
 
         Ok(entry)
     }
@@ -642,25 +651,26 @@ impl Ext2DirectoryEntry {
         if data.len() < 8 {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Insufficient data for ext2 directory entry"
+                "Insufficient data for ext2 directory entry",
             ));
         }
 
         let entry = Ext2DirectoryEntryRaw::from_bytes(data)?;
-        
+
         if data.len() < 8 + entry.name_len as usize {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Insufficient data for directory entry name"
+                "Insufficient data for directory entry name",
             ));
         }
 
         let name_bytes = &data[8..8 + entry.name_len as usize];
-        let name = String::from_utf8(name_bytes.to_vec())
-            .map_err(|_| FileSystemError::new(
+        let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| {
+            FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
-                "Invalid UTF-8 in directory entry name"
-            ))?;
+                "Invalid UTF-8 in directory entry name",
+            )
+        })?;
 
         Ok(Self { entry, name })
     }

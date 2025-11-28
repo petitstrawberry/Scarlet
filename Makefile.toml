@@ -7,6 +7,28 @@ CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "user/lib/std", "user/bin"]
 default_task = "build"
 skip_core_tasks = true
 
+[tasks.fmt]
+description = "Format all code"
+dependencies = ["fmt-kernel", "fmt-userlib", "fmt-userbin"]
+
+[tasks.fmt-kernel]
+description = "Format kernel code"
+cwd = "kernel"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-userlib]
+description = "Format user library code"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "fmt"]
+
+[tasks.fmt-userbin]
+description = "Format user program code"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "fmt"]
+
 [tasks.build]
 description = "Build all components (default: debug)"
 dependencies = ["build-debug"]

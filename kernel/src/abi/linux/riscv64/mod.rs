@@ -1,14 +1,14 @@
 #[macro_use]
 mod macros;
-mod proc;
-mod mm;
-mod fs;
-mod time;
-mod signal;
-mod pipe;
-mod socket;
 mod errno;
+mod fs;
 mod futex;
+mod mm;
+mod pipe;
+mod proc;
+mod signal;
+mod socket;
+mod time;
 
 // pub mod drivers;
 
@@ -16,10 +16,20 @@ use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::A
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
-use crate::{
-    abi::AbiModule, arch::{self, IntRegisters, Trapframe}, early_initcall, fs::{FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS}, register_abi, task::elf_loader::{ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy}, vm::{setup_trampoline, setup_user_stack}
-};
 use self::time::PosixTimer;
+use crate::{
+    abi::AbiModule,
+    arch::{self, IntRegisters, Trapframe},
+    early_initcall,
+    fs::{
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
+    },
+    register_abi,
+    task::elf_loader::{
+        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
+    },
+    vm::{setup_trampoline, setup_user_stack},
+};
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
 
@@ -74,14 +84,17 @@ impl Default for LinuxRiscv64Abi {
             thread_state: LinuxThreadState::default(),
             posix_timers: BTreeMap::new(),
             next_timer_id: 1,
-            
         }
     }
 }
 
 impl LinuxRiscv64Abi {
-    pub fn thread_state(&self) -> &LinuxThreadState { &self.thread_state }
-    pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState { &mut self.thread_state }
+    pub fn thread_state(&self) -> &LinuxThreadState {
+        &self.thread_state
+    }
+    pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState {
+        &mut self.thread_state
+    }
     /// Allocate a new file descriptor and map it to a handle
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
         let fd = if let Some(freed_fd) = self.free_fds.pop() {
@@ -91,31 +104,31 @@ impl LinuxRiscv64Abi {
             // No more file descriptors available
             return Err("Too many open files");
         };
-        
+
         self.fd_to_handle[fd] = Some(handle);
         Ok(fd)
     }
-    
+
     /// Allocate a specific file descriptor and map it to a handle
     pub fn allocate_specific_fd(&mut self, fd: usize, handle: u32) -> Result<(), &'static str> {
         if fd >= MAX_FDS {
             return Err("File descriptor out of range");
         }
-        
+
         // Check if the fd is already in use
         if self.fd_to_handle[fd].is_some() {
             return Err("File descriptor already in use");
         }
-        
+
         // Remove from free list if present
         if let Some(pos) = self.free_fds.iter().position(|&x| x == fd) {
             self.free_fds.remove(pos);
         }
-        
+
         self.fd_to_handle[fd] = Some(handle);
         Ok(())
     }
-    
+
     /// Get handle from file descriptor
     pub fn get_handle(&self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
@@ -124,7 +137,7 @@ impl LinuxRiscv64Abi {
             None
         }
     }
-    
+
     /// Remove file descriptor mapping and clear its flags
     pub fn remove_fd(&mut self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
@@ -141,7 +154,7 @@ impl LinuxRiscv64Abi {
             None
         }
     }
-    
+
     /// Find file descriptor by handle (linear search)
     pub fn find_fd_by_handle(&self, handle: u32) -> Option<usize> {
         for (fd, &mapped_handle) in self.fd_to_handle.iter().enumerate() {
@@ -153,18 +166,18 @@ impl LinuxRiscv64Abi {
         }
         None
     }
-    
+
     /// Initialize standard file descriptors (stdin, stdout, stderr)
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
         // Linux convention: fd 0 = stdin, fd 1 = stdout, fd 2 = stderr
         self.fd_to_handle[0] = Some(stdin_handle);
         self.fd_to_handle[1] = Some(stdout_handle);
         self.fd_to_handle[2] = Some(stderr_handle);
-        
+
         // Remove std fds from free list
         self.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
     }
-    
+
     /// Get file descriptor flags
     pub fn get_fd_flags(&self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
@@ -173,36 +186,39 @@ impl LinuxRiscv64Abi {
             None
         }
     }
-    
+
     /// Set file descriptor flags
     pub fn set_fd_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
-        use crate::{task::mytask, object::handle::SpecialSemantics};
         use crate::abi::linux::riscv64::fs::FD_CLOEXEC;
-        
+        use crate::{object::handle::SpecialSemantics, task::mytask};
+
         if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
             let handle = self.fd_to_handle[fd].unwrap();
             self.fd_flags[fd] = flags;
-            
+
             // Update handle metadata to sync FD_CLOEXEC with SpecialSemantics::CloseOnExec
             if let Some(task) = mytask() {
                 if let Some(current_metadata) = task.handle_table.get_metadata(handle) {
                     let mut new_metadata = current_metadata.clone();
-                    
+
                     if flags & FD_CLOEXEC != 0 {
                         // Set CloseOnExec if FD_CLOEXEC flag is present
                         new_metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);
                     } else {
                         // Remove CloseOnExec if FD_CLOEXEC flag is not present
-                        if matches!(new_metadata.special_semantics, Some(SpecialSemantics::CloseOnExec)) {
+                        if matches!(
+                            new_metadata.special_semantics,
+                            Some(SpecialSemantics::CloseOnExec)
+                        ) {
                             new_metadata.special_semantics = None;
                         }
                     }
-                    
+
                     // Update the metadata
                     let _ = task.handle_table.update_metadata(handle, new_metadata);
                 }
             }
-            
+
             Ok(())
         } else {
             Err("Invalid file descriptor")
@@ -227,20 +243,21 @@ impl LinuxRiscv64Abi {
             Err("Invalid file descriptor")
         }
     }
-    
+
     /// Get total number of allocated file descriptors
     pub fn fd_count(&self) -> usize {
         self.fd_to_handle.iter().filter(|&&h| h.is_some()).count()
     }
-    
+
     /// Get the list of allocated file descriptors (for debugging)
     pub fn allocated_fds(&self) -> Vec<usize> {
-        self.fd_to_handle.iter()
+        self.fd_to_handle
+            .iter()
             .enumerate()
             .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
             .collect()
     }
-    
+
     /// Process pending signals and handle them according to Linux semantics
     /// Returns true if execution should be interrupted (signal handler called or process terminated)
     pub fn process_signals(&self, trapframe: &mut Trapframe) -> bool {
@@ -249,7 +266,7 @@ impl LinuxRiscv64Abi {
     }
 
     // No pthread/TLS probing helpers; user space owns pthread layout.
-    
+
     /// Handle incoming event from Scarlet event system and convert to signal if applicable
     pub fn handle_event_direct(&self, event: &crate::ipc::event::Event) {
         if let Some(signal) = signal::handle_event_to_signal(event) {
@@ -257,7 +274,7 @@ impl LinuxRiscv64Abi {
             signal_state.add_pending(signal);
         }
     }
-    
+
     /// Check if there are pending signals ready for delivery
     pub fn has_pending_signals(&self) -> bool {
         let signal_state = self.signal_state.lock();
@@ -297,7 +314,7 @@ impl AbiModule for LinuxRiscv64Abi {
     fn name() -> &'static str {
         "linux-riscv64"
     }
-    
+
     fn get_name(&self) -> alloc::string::String {
         Self::name().to_string()
     }
@@ -305,39 +322,54 @@ impl AbiModule for LinuxRiscv64Abi {
     fn clone_boxed(&self) -> alloc::boxed::Box<dyn AbiModule + Send + Sync> {
         Box::new(self.clone())
     }
-    
-    fn handle_syscall(&mut self, trapframe: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
+
+    fn handle_syscall(
+        &mut self,
+        trapframe: &mut crate::arch::Trapframe,
+    ) -> Result<usize, &'static str> {
         syscall_handler(self, trapframe)
     }
 
-    fn handle_event(&self, event: crate::ipc::Event, target_task_id: u32) -> Result<(), &'static str> {
+    fn handle_event(
+        &self,
+        event: crate::ipc::Event,
+        target_task_id: u32,
+    ) -> Result<(), &'static str> {
         // Convert event to signal if applicable
         if let Some(signal) = signal::handle_event_to_signal(&event) {
             let scheduler = crate::sched::scheduler::get_scheduler();
-            let target_task = scheduler.get_task_by_id(target_task_id as usize)
+            let target_task = scheduler
+                .get_task_by_id(target_task_id as usize)
                 .ok_or("Target task not found")?;
-            
+
             // Check if this is a fatal signal that should terminate immediately
             match signal {
-                signal::LinuxSignal::SIGKILL | 
-                signal::LinuxSignal::SIGTERM | 
-                signal::LinuxSignal::SIGINT => {
+                signal::LinuxSignal::SIGKILL
+                | signal::LinuxSignal::SIGTERM
+                | signal::LinuxSignal::SIGINT => {
                     // Fatal signals: terminate task immediately
                     let exit_code = 128 + (signal as i32); // Standard Unix exit code for signals
-                    crate::early_println!("Linux ABI: Terminating task {} due to signal {} (exit code {})", 
-                                         target_task.get_id(), signal as u32, exit_code);
+                    crate::early_println!(
+                        "Linux ABI: Terminating task {} due to signal {} (exit code {})",
+                        target_task.get_id(),
+                        signal as u32,
+                        exit_code
+                    );
                     target_task.exit(exit_code);
                 }
                 _ => {
                     // Other signals: add to pending (for future handler implementation)
                     let mut signal_state = self.signal_state.lock();
                     signal_state.add_pending(signal);
-                    crate::early_println!("Linux ABI: Added signal {} to pending for task {}", 
-                                         signal as u32, target_task_id);
+                    crate::early_println!(
+                        "Linux ABI: Added signal {} to pending for task {}",
+                        signal as u32,
+                        target_task_id
+                    );
                 }
             }
         }
-        
+
         // For non-signal events, just acknowledge
         Ok(())
     }
@@ -357,7 +389,11 @@ impl AbiModule for LinuxRiscv64Abi {
 
         // Initialize child's TGID based on whether this was a thread (CLONE_THREAD) or a process clone.
         ts.tgid = if is_thread {
-            if parent_tgid != 0 { parent_tgid } else { _parent_task.get_id() }
+            if parent_tgid != 0 {
+                parent_tgid
+            } else {
+                _parent_task.get_id()
+            }
         } else {
             _child_task.get_id()
         };
@@ -388,10 +424,10 @@ impl AbiModule for LinuxRiscv64Abi {
     }
 
     fn can_execute_binary(
-        &self, 
-        file_object: &crate::object::KernelObject, 
+        &self,
+        file_object: &crate::object::KernelObject,
         file_path: &str,
-        current_abi: Option<&(dyn AbiModule + Send + Sync)>
+        current_abi: Option<&(dyn AbiModule + Send + Sync)>,
     ) -> Option<u8> {
         // Stage 1: Basic format validation (following implementation guidelines)
         let magic_score = match file_object.as_file() {
@@ -407,14 +443,14 @@ impl AbiModule for LinuxRiscv64Abi {
                             return None; // Not an ELF file, cannot execute
                         }
                     }
-                    _ => return None // Read failed, cannot determine
+                    _ => return None, // Read failed, cannot determine
                 }
             }
-            None => return None // Not a file object
+            None => return None, // Not a file object
         };
-        
+
         let mut confidence = magic_score;
-        
+
         // Stage 2: ELF header checks
         if let Some(file_obj) = file_object.as_file() {
             // Check ELF header for System-V ABI (Linux uses System-V ABI)
@@ -422,11 +458,12 @@ impl AbiModule for LinuxRiscv64Abi {
             file_obj.seek(SeekFrom::Start(7)).ok(); // OSABI is at
             match file_obj.read(&mut osabi_buffer) {
                 Ok(bytes_read) if bytes_read == 1 => {
-                    if osabi_buffer[0] == 0 { // System-V ABI
+                    if osabi_buffer[0] == 0 {
+                        // System-V ABI
                         confidence += 50; // Strong indicator for System-V ABI
                     }
                 }
-                _ => return None // Read failed, cannot determine
+                _ => return None, // Read failed, cannot determine
             }
         } else {
             return None; // Not a file object
@@ -438,14 +475,14 @@ impl AbiModule for LinuxRiscv64Abi {
         } else if file_path.ends_with(".elf") {
             confidence += 5; // General ELF compatibility
         }
-        
+
         // Stage 4: ABI inheritance bonus - moderate priority for same ABI
         if let Some(abi) = current_abi {
             if abi.get_name() == self.get_name() {
                 confidence += 15; // Moderate inheritance bonus for Linux
             }
         }
-        
+
         Some(confidence.min(100)) // Standard 0-100 confidence range
     }
 
@@ -466,31 +503,35 @@ impl AbiModule for LinuxRiscv64Abi {
                 task.brk = None;
 
                 // Load ELF using Linux-compatible method with dynamic linking support
-                match analyze_and_load_elf_with_strategy(file_obj, task, &LoadStrategy {
-                    choose_base_address: |target, needs_relocation| {
-                        match (target, needs_relocation) {
-                            (LoadTarget::MainProgram, false) => 0,        // Static executables
-                            (LoadTarget::MainProgram, true) => 0x40000000,   // PIE executables
-                            (LoadTarget::Interpreter, _) => 0x40000000,   // Dynamic linker
-                            (LoadTarget::SharedLib, _) => 0x50000000,     // Shared libraries
-                        }
-                    },
-                    resolve_interpreter: |requested| {
-                        // Map interpreter paths to system paths
-                        requested.map(|path| {
-                            if path.starts_with("/lib/ld-") || path.starts_with("/lib64/ld-") {
-                                // Map to our system path
-                                format!("/scarlet/system/linux-riscv64{}", path)
-                            } else {
-                                path.to_string()
+                match analyze_and_load_elf_with_strategy(
+                    file_obj,
+                    task,
+                    &LoadStrategy {
+                        choose_base_address: |target, needs_relocation| {
+                            match (target, needs_relocation) {
+                                (LoadTarget::MainProgram, false) => 0, // Static executables
+                                (LoadTarget::MainProgram, true) => 0x40000000, // PIE executables
+                                (LoadTarget::Interpreter, _) => 0x40000000, // Dynamic linker
+                                (LoadTarget::SharedLib, _) => 0x50000000, // Shared libraries
                             }
-                        })
+                        },
+                        resolve_interpreter: |requested| {
+                            // Map interpreter paths to system paths
+                            requested.map(|path| {
+                                if path.starts_with("/lib/ld-") || path.starts_with("/lib64/ld-") {
+                                    // Map to our system path
+                                    format!("/scarlet/system/linux-riscv64{}", path)
+                                } else {
+                                    path.to_string()
+                                }
+                            })
+                        },
                     },
-                }) {
+                ) {
                     Ok(load_result) => {
                         // Set the name
                         task.name = argv.get(0).map_or("linux".to_string(), |s| s.to_string());
-                // Do not resolve pthread/TLS or arm futex-based watches in kernel.
+                        // Do not resolve pthread/TLS or arm futex-based watches in kernel.
                         crate::println!("Program segments:");
                         task.vm_manager.with_memmaps(|mm| {
                             for map in mm.values() {
@@ -501,9 +542,10 @@ impl AbiModule for LinuxRiscv64Abi {
                             }
                         });
                         crate::println!("=================================");
-                        
+
                         // Clear page table entries
-                        let idx = arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
+                        let idx =
+                            arch::vm::get_root_pagetable_ptr(task.vm_manager.get_asid()).unwrap();
                         let root_page_table = arch::vm::get_pagetable(idx).unwrap();
                         root_page_table.unmap_all();
                         // Setup the trampoline
@@ -549,7 +591,7 @@ impl AbiModule for LinuxRiscv64Abi {
                             //     crate::println!("LD_LIBRARY_PATH raw bytes: {:?}", env.as_bytes());
                             //     for (i, &byte) in env.as_bytes().iter().enumerate() {
                             //         if byte < 32 || byte > 126 {
-                            //             crate::println!("  Non-printable byte at {}: 0x{:02x} ('{}' is printable)", 
+                            //             crate::println!("  Non-printable byte at {}: 0x{:02x} ('{}' is printable)",
                             //                           i, byte, (byte >= 32 && byte <= 126));
                             //         }
                             //     }
@@ -574,14 +616,14 @@ impl AbiModule for LinuxRiscv64Abi {
                         // Build auxiliary vector based on the ELF loading result
                         use crate::task::elf_loader::build_auxiliary_vector;
                         let auxv = build_auxiliary_vector(&load_result);
-                        
+
                         // --- Calculate total size needed for structured data ---
                         let auxv_size = auxv.len() * 16; // Each auxv entry is 16 bytes
                         let envp_size = (env_vaddrs.len() + 1) * 8; // +1 for NULL terminator
                         let argv_size = (arg_vaddrs.len() + 1) * 8; // +1 for NULL terminator
                         let argc_size = 8;
                         let total_structured_size = auxv_size + envp_size + argv_size + argc_size;
-                        
+
                         // Align the total size and calculate final sp
                         let aligned_size = (total_structured_size + 15) & !15; // Round up to 16-byte boundary
                         sp -= aligned_size;
@@ -589,47 +631,53 @@ impl AbiModule for LinuxRiscv64Abi {
                         let mut current_pos = final_sp;
 
                         // --- Place data from the calculated position ---
-                        
+
                         // --- 1. Argument count (argc) ---
                         let argc = argv.len() as u64;
                         unsafe {
-                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = argc;
+                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) =
+                                argc;
                         }
                         current_pos += 8;
 
                         // --- 2. Argument pointer array (argv) ---
                         for &arg_vaddr in arg_vaddrs.iter() {
                             unsafe {
-                                *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = arg_vaddr;
+                                *(task.vm_manager.translate_vaddr(current_pos).unwrap()
+                                    as *mut u64) = arg_vaddr;
                             }
                             current_pos += 8;
                         }
                         // NULL terminator for argv
                         unsafe {
-                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = 0;
+                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) =
+                                0;
                         }
                         current_pos += 8;
 
                         // --- 3. Environment pointer array (envp) ---
                         for &env_vaddr in env_vaddrs.iter() {
                             unsafe {
-                                *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = env_vaddr;
+                                *(task.vm_manager.translate_vaddr(current_pos).unwrap()
+                                    as *mut u64) = env_vaddr;
                             }
                             current_pos += 8;
                         }
                         // NULL terminator for envp
                         unsafe {
-                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) = 0;
+                            *(task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64) =
+                                0;
                         }
                         current_pos += 8;
 
                         // --- 4. Auxiliary vector (auxv) ---
                         // crate::println!("Setting up auxiliary vector with {} entries:", auxv.len());
                         for auxv_entry in auxv.iter() {
-                            // crate::println!("  auxv[{}]: type={:#x} value={:#x} @ sp={:#x}", 
+                            // crate::println!("  auxv[{}]: type={:#x} value={:#x} @ sp={:#x}",
                             //     i, auxv_entry.a_type, auxv_entry.a_val, current_pos);
                             unsafe {
-                                let paddr = task.vm_manager.translate_vaddr(current_pos).unwrap() as *mut u64;
+                                let paddr = task.vm_manager.translate_vaddr(current_pos).unwrap()
+                                    as *mut u64;
                                 *paddr = auxv_entry.a_type;
                                 *(paddr.add(1)) = auxv_entry.a_val;
                             }
@@ -645,7 +693,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         //     let addr = sp + (i * 8);
                         //     if let Some(paddr) = task.vm_manager.translate_vaddr(addr) {
                         //         let value = unsafe { *(paddr as *const u64) };
-                        //         crate::println!("  [{:#x}] = {:#018x} ({})", addr, value, 
+                        //         crate::println!("  [{:#x}] = {:#018x} ({})", addr, value,
                         //             core::str::from_utf8(&value.to_le_bytes()).unwrap_or("<invalid>"));
                         //     }
                         // }
@@ -676,7 +724,7 @@ impl AbiModule for LinuxRiscv64Abi {
     fn get_default_cwd(&self) -> &str {
         "/" // Linux uses root as default working directory
     }
-    
+
     fn setup_overlay_environment(
         &self,
         target_vfs: &Arc<VfsManager>,
@@ -688,22 +736,32 @@ impl AbiModule for LinuxRiscv64Abi {
         // Linux ABI uses overlay mount with system Linux tools and config persistence
         let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         let upper_vfs = base_vfs;
-        let fs = match OverlayFS::new_from_paths_and_vfs(Some((upper_vfs, config_path)), lower_vfs_list, "/") {
+        let fs = match OverlayFS::new_from_paths_and_vfs(
+            Some((upper_vfs, config_path)),
+            lower_vfs_list,
+            "/",
+        ) {
             Ok(fs) => fs,
             Err(e) => {
-                crate::println!("Failed to create overlay filesystem for Linux ABI: {}", e.message);
+                crate::println!(
+                    "Failed to create overlay filesystem for Linux ABI: {}",
+                    e.message
+                );
                 return Err("Failed to create Linux overlay environment");
             }
         };
         match target_vfs.mount(fs, "/", 0) {
             Ok(()) => Ok(()),
             Err(e) => {
-                crate::println!("Failed to create cross-VFS overlay for Linux ABI: {}", e.message);
+                crate::println!(
+                    "Failed to create cross-VFS overlay for Linux ABI: {}",
+                    e.message
+                );
                 Err("Failed to create Linux overlay environment")
             }
         }
     }
-    
+
     fn setup_shared_resources(
         &self,
         target_vfs: &Arc<VfsManager>,
@@ -761,20 +819,29 @@ impl AbiModule for LinuxRiscv64Abi {
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
             Err(_e) => {
-                crate::println!("Failed to create /scarlet directory for Linux: {}", _e.message);
+                crate::println!(
+                    "Failed to create /scarlet directory for Linux: {}",
+                    _e.message
+                );
                 return Err("Failed to create /scarlet directory for Linux");
             }
         }
         match target_vfs.bind_mount_from(base_vfs, "/", "/scarlet") {
             Ok(()) => Ok(()),
             Err(_e) => {
-                crate::println!("Failed to bind mount native Scarlet root to /scarlet for Linux: {}", _e.message);
+                crate::println!(
+                    "Failed to bind mount native Scarlet root to /scarlet for Linux: {}",
+                    _e.message
+                );
                 return Err("Failed to bind mount native Scarlet root to /scarlet for Linux");
             }
         }
     }
 
-    fn initialize_from_existing_handles(&mut self, _task: &mut crate::task::Task) -> Result<(), &'static str> {
+    fn initialize_from_existing_handles(
+        &mut self,
+        _task: &mut crate::task::Task,
+    ) -> Result<(), &'static str> {
         // _task.handle_table.close_all();
         self.init_std_fds(
             0, // stdin handle

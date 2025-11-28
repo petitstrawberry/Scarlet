@@ -20,11 +20,13 @@ use crate::abi::MAX_ABI_LENGTH;
 use crate::device::manager::DeviceManager;
 use crate::executor::executor::TransparentExecutor;
 use crate::fs::MAX_PATH_LENGTH;
-use crate::library::std::string::{parse_c_string_from_userspace, parse_string_array_from_userspace};
+use crate::library::std::string::{
+    parse_c_string_from_userspace, parse_string_array_from_userspace,
+};
 
-use crate::arch::{get_cpu, Trapframe};
+use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
-use crate::task::{get_parent_waitpid_waker, get_waitpid_waker, CloneFlags, WaitError};
+use crate::task::{CloneFlags, WaitError, get_parent_waitpid_waker, get_waitpid_waker};
 use crate::timer::{get_tick, ms_to_ticks, ns_to_ticks};
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
@@ -79,7 +81,7 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
 pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    
+
     // Find TTY device for blocking input
     let manager = DeviceManager::get_manager();
     if let Some(borrowed_device) = manager.get_device_by_name("tty0") {
@@ -90,7 +92,7 @@ pub fn sys_getchar(trapframe: &mut Trapframe) -> usize {
             }
         }
     }
-    
+
     0 // Return 0 if no device found (should not happen)
 }
 
@@ -115,14 +117,14 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     match parent_task.clone_task(clone_flags) {
         Ok(mut child_task) => {
             let child_id = child_task.get_id();
-            // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}", 
+            // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.iregs.reg[10] = 0; /* Set the return value to 0 in the child task */
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
             /* Return the child task ID to the parent task */
             child_id
-        },
+        }
         Err(_) => {
             usize::MAX /* Return -1 on error */
         }
@@ -131,71 +133,80 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    
+
     // crate::println!("[EXECVE] Task {} starting execve", task.get_id());
-    
+
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
-    
+
     // Get arguments from trapframe
     let path_ptr = trapframe.get_arg(0);
     let argv_ptr = trapframe.get_arg(1);
     let envp_ptr = trapframe.get_arg(2);
     let flags = trapframe.get_arg(3); // New flags argument
-    
+
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => {
             // crate::println!("[EXECVE] Task {}: Executing path: {}", task.get_id(), path);
             path
-        },
+        }
         Err(_) => {
             // crate::println!("[EXECVE] Task {}: Path parsing error", task.get_id());
             return usize::MAX; // Path parsing error
         }
     };
-    
+
     // Parse argv and envp
-    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(args) => {
-            // crate::println!("[EXECVE] Task {}: argv count: {}", task.get_id(), args.len());
-            args
-        },
-        Err(_) => {
-            // crate::println!("[EXECVE] Task {}: argv parsing error", task.get_id());
-            return usize::MAX; // argv parsing error
-        }
-    };
-    
-    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
-        Ok(env) => {
-            // crate::println!("[EXECVE] Task {}: envp count: {}", task.get_id(), env.len());
-            env
-        },
-        Err(_) => {
-            // crate::println!("[EXECVE] Task {}: envp parsing error", task.get_id());
-            return usize::MAX; // envp parsing error
-        }
-    };
-    
+    let argv_strings =
+        match parse_string_array_from_userspace(task, argv_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+            Ok(args) => {
+                // crate::println!("[EXECVE] Task {}: argv count: {}", task.get_id(), args.len());
+                args
+            }
+            Err(_) => {
+                // crate::println!("[EXECVE] Task {}: argv parsing error", task.get_id());
+                return usize::MAX; // argv parsing error
+            }
+        };
+
+    let envp_strings =
+        match parse_string_array_from_userspace(task, envp_ptr, MAX_ARG_COUNT, MAX_PATH_LENGTH) {
+            Ok(env) => {
+                // crate::println!("[EXECVE] Task {}: envp count: {}", task.get_id(), env.len());
+                env
+            }
+            Err(_) => {
+                // crate::println!("[EXECVE] Task {}: envp parsing error", task.get_id());
+                return usize::MAX; // envp parsing error
+            }
+        };
+
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
-    
+
     // Check if force ABI rebuild is requested
     let force_abi_rebuild = (flags & EXECVE_FORCE_ABI_REBUILD) != 0;
-    
+
     // crate::println!("[EXECVE] Task {}: Starting TransparentExecutor::execute_binary", task.get_id());
-    
+
     // Use TransparentExecutor for cross-ABI execution
-    match TransparentExecutor::execute_binary(&path_str, &argv_refs, &envp_refs, task, trapframe, force_abi_rebuild) {
+    match TransparentExecutor::execute_binary(
+        &path_str,
+        &argv_refs,
+        &envp_refs,
+        task,
+        trapframe,
+        force_abi_rebuild,
+    ) {
         Ok(_) => {
             // crate::println!("[EXECVE] Task {}: execute_binary succeeded", task.get_id());
             // execve normally should not return on success - the process is replaced
             // However, if ABI module sets trapframe return value and returns here,
             // we should respect that value instead of hardcoding 0
             trapframe.get_return_value()
-        },
+        }
         Err(_) => {
             // crate::println!("[EXECVE] Task {}: execute_binary failed", task.get_id());
             // Execution failed - return error code
@@ -207,7 +218,7 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
 
 pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    
+
     // Increment PC to avoid infinite loop if execve fails
     trapframe.increment_pc_next(task);
 
@@ -217,30 +228,32 @@ pub fn sys_execve_abi(trapframe: &mut Trapframe) -> usize {
     let envp_ptr = trapframe.get_arg(2);
     let abi_str_ptr = trapframe.get_arg(3);
     let flags = trapframe.get_arg(4); // New flags argument
-    
+
     // Parse path
     let path_str = match parse_c_string_from_userspace(task, path_ptr, MAX_PATH_LENGTH) {
         Ok(path) => path,
         Err(_) => return usize::MAX, // Path parsing error
     };
-    
+
     // Parse ABI string
     let abi_str = match parse_c_string_from_userspace(task, abi_str_ptr, MAX_ABI_LENGTH) {
         Ok(abi) => abi,
         Err(_) => return usize::MAX, // ABI parsing error
     };
-    
+
     // Parse argv and envp
-    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH) {
+    let argv_strings = match parse_string_array_from_userspace(task, argv_ptr, 256, MAX_PATH_LENGTH)
+    {
         Ok(args) => args,
         Err(_) => return usize::MAX, // argv parsing error
     };
-    
-    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH) {
+
+    let envp_strings = match parse_string_array_from_userspace(task, envp_ptr, 256, MAX_PATH_LENGTH)
+    {
         Ok(env) => env,
         Err(_) => return usize::MAX, // envp parsing error
     };
-    
+
     // Convert Vec<String> to Vec<&str> for TransparentExecutor
     let argv_refs: Vec<&str> = argv_strings.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp_strings.iter().map(|s| s.as_str()).collect();
@@ -287,39 +300,43 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     Ok(status) => {
                         // Child has exited, return the status
                         if status_ptr != core::ptr::null_mut() {
-                            let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                            let status_ptr = task
+                                .vm_manager
+                                .translate_vaddr(status_ptr as usize)
+                                .unwrap() as *mut i32;
                             unsafe {
                                 *status_ptr = status;
                             }
                         }
                         trapframe.increment_pc_next(task);
                         return child_pid;
-                    },
-                    Err(error) => {
-                        match error {
-                            WaitError::ChildNotExited(_) => continue,
-                            _ => {
-                                trapframe.increment_pc_next(task);
-                                return usize::MAX;
-                            },
-                        }
                     }
+                    Err(error) => match error {
+                        WaitError::ChildNotExited(_) => continue,
+                        _ => {
+                            trapframe.increment_pc_next(task);
+                            return usize::MAX;
+                        }
+                    },
                 }
             }
-            
+
             // No child has exited yet, block until one does
             let parent_waker = get_parent_waitpid_waker(task.get_id());
             parent_waker.wait(task.get_id(), trapframe);
             // Continue the loop to re-check after waking up
             continue;
         }
-        
+
         // Wait for specific child process
         match task.wait(pid as usize) {
             Ok(status) => {
                 // Child has exited, return the status
                 if status_ptr != core::ptr::null_mut() {
-                    let status_ptr = task.vm_manager.translate_vaddr(status_ptr as usize).unwrap() as *mut i32;
+                    let status_ptr = task
+                        .vm_manager
+                        .translate_vaddr(status_ptr as usize)
+                        .unwrap() as *mut i32;
                     unsafe {
                         *status_ptr = status;
                     }
@@ -332,12 +349,12 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                     WaitError::NoSuchChild(_) => {
                         trapframe.increment_pc_next(task);
                         return usize::MAX;
-                    },
+                    }
                     WaitError::ChildTaskNotFound(_) => {
                         trapframe.increment_pc_next(task);
                         crate::print!("Child task with PID {} not found", pid);
                         return usize::MAX;
-                    },
+                    }
                     WaitError::ChildNotExited(_) => {
                         // If the child task is not exited, we need to wait for it
                         let child_waker = get_waitpid_waker(pid as usize);
@@ -345,7 +362,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
                         // Continue the loop to re-check after waking up
                         continue;
-                    },
+                    }
                 }
             }
         }
@@ -381,12 +398,12 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
 }
 
 /// Register an ABI zone for a specific memory range
-/// 
+///
 /// # Arguments
 /// * `start` - Start address of the memory range
 /// * `len` - Length of the memory range in bytes
 /// * `abi_name_ptr` - Pointer to null-terminated ABI name string in user space
-/// 
+///
 /// # Returns
 /// * `0` on success
 /// * `usize::MAX` (-1) on failure
@@ -395,9 +412,9 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
     let start = trapframe.get_arg(0);
     let len = trapframe.get_arg(1);
     let abi_name_ptr = trapframe.get_arg(2);
-    
+
     trapframe.increment_pc_next(task);
-    
+
     // Parse the ABI name from user space
     let abi_name = match parse_c_string_from_userspace(task, abi_name_ptr, MAX_ABI_LENGTH) {
         Ok(name) => name,
@@ -406,9 +423,14 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
             return usize::MAX; // -1
         }
     };
-    
-    crate::early_println!("[syscall] Registering ABI zone: start={:#x}, len={:#x}, abi={}", start, len, abi_name);
-    
+
+    crate::early_println!(
+        "[syscall] Registering ABI zone: start={:#x}, len={:#x}, abi={}",
+        start,
+        len,
+        abi_name
+    );
+
     // Instantiate the ABI module
     let abi = match crate::abi::AbiRegistry::instantiate(&abi_name) {
         Some(abi) => abi,
@@ -417,36 +439,36 @@ pub fn sys_register_abi_zone(trapframe: &mut Trapframe) -> usize {
             return usize::MAX; // -1
         }
     };
-    
+
     // Create the ABI zone
     let zone = crate::task::AbiZone {
         range: start..(start + len),
         abi,
     };
-    
+
     // Insert into the task's ABI zones map
     task.abi_zones.insert(start, zone);
-    
+
     crate::early_println!("[syscall] Successfully registered ABI zone");
     0
 }
 
 /// Unregister an ABI zone
-/// 
+///
 /// # Arguments
 /// * `start` - Start address of the memory range to unregister
-/// 
+///
 /// # Returns
 /// * `0` on success
 /// * `usize::MAX` (-1) on failure (zone not found)
 pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let start = trapframe.get_arg(0);
-    
+
     trapframe.increment_pc_next(task);
-    
+
     crate::early_println!("[syscall] Unregistering ABI zone at start={:#x}", start);
-    
+
     // Remove the ABI zone from the map
     match task.abi_zones.remove(&start) {
         Some(_) => {
@@ -459,4 +481,3 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
         }
     }
 }
-

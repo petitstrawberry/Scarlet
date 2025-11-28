@@ -6,6 +6,11 @@ skip_core_tasks = true
 OSABI_VALUE = "83"
 DIST_DIR = "dist"
 
+[tasks.fmt]
+description = "Format all user program code"
+command = "cargo"
+args = ["fmt"]
+
 [tasks.build]
 description = "Build all user programs with OSABI=83 (debug mode)"
 dependencies = ["build-only-debug", "set-osabi-debug"]

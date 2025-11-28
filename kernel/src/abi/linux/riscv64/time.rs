@@ -1,16 +1,19 @@
 //! Time-related system calls for Linux ABI on RISC-V 64
-//! 
+//!
 //! This module implements Linux time system calls for the Scarlet kernel,
 //! providing compatibility with Linux userspace programs that need time information.
 
-use super::{errno, signal::{LinuxSignal, SignalState}};
+use super::{
+    errno,
+    signal::{LinuxSignal, SignalState},
+};
 use crate::{
     abi::linux::riscv64::LinuxRiscv64Abi,
     arch::Trapframe,
     sched::scheduler::get_scheduler,
     task::mytask,
     time::current_time,
-    timer::{add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns, TimerHandler},
+    timer::{TimerHandler, add_timer, cancel_timer, get_tick, ns_to_ticks, ticks_to_ns},
 };
 use alloc::sync::{Arc, Weak};
 use spin::Mutex;
@@ -104,7 +107,11 @@ impl PosixTimer {
             timer_id: id,
             shared: Arc::downgrade(&shared),
         });
-        Self { id, shared, handler }
+        Self {
+            id,
+            shared,
+            handler,
+        }
     }
 
     /// Schedule (or reschedule) this timer with the specified first expiration and interval.
@@ -281,8 +288,8 @@ fn ns_to_timespec(ns: u64) -> TimeSpec {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TimeSpec {
-    pub tv_sec: i64,    // seconds
-    pub tv_nsec: i64,   // nanoseconds
+    pub tv_sec: i64,  // seconds
+    pub tv_nsec: i64, // nanoseconds
 }
 
 /// Linux itimerspec structure used by timer_settime/gettime.
@@ -542,29 +549,26 @@ pub fn sys_timer_delete(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 }
 
 /// sys_clock_gettime - Get time from specified clock
-/// 
+///
 /// Arguments:
 /// - a0 (x10): clock_id - which clock to read from
 /// - a1 (x11): timespec - pointer to timespec structure to fill
-/// 
+///
 /// Returns:
 /// - 0 on success
 /// - -EINVAL (-22) for invalid clock_id
 /// - -EFAULT (-14) for invalid timespec pointer
-pub fn sys_clock_gettime(
-    _abi: &mut LinuxRiscv64Abi, 
-    trapframe: &mut Trapframe
-) -> usize {
+pub fn sys_clock_gettime(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().expect("No current task found");
-    let clock_id = trapframe.get_arg(0) as i32;  // a0
+    let clock_id = trapframe.get_arg(0) as i32; // a0
 
     trapframe.increment_pc_next(&task);
 
     let timespec_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *mut TimeSpec,  // a1
+        Some(ptr) => ptr as *mut TimeSpec,   // a1
         None => return (-14_isize) as usize, // -EFAULT
     };
-    
+
     // Get the current time based on the clock type
     let timespec = match clock_id {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
@@ -575,7 +579,7 @@ pub fn sys_clock_gettime(
                 tv_sec: (time_us / 1_000_000) as i64,
                 tv_nsec: ((time_us % 1_000_000) * 1000) as i64,
             }
-        },
+        }
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE => {
             // Monotonic time since boot
             let time_us = current_time();
@@ -583,7 +587,7 @@ pub fn sys_clock_gettime(
                 tv_sec: (time_us / 1_000_000) as i64,
                 tv_nsec: ((time_us % 1_000_000) * 1000) as i64,
             }
-        },
+        }
         CLOCK_BOOTTIME => {
             // Boot time (same as monotonic for now)
             let time_us = current_time();
@@ -591,7 +595,7 @@ pub fn sys_clock_gettime(
                 tv_sec: (time_us / 1_000_000) as i64,
                 tv_nsec: ((time_us % 1_000_000) * 1000) as i64,
             }
-        },
+        }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             // CPU time for process/thread (simplified implementation)
             // In a full implementation, this would track actual CPU time
@@ -600,17 +604,17 @@ pub fn sys_clock_gettime(
                 tv_sec: (time_us / 1_000_000) as i64,
                 tv_nsec: ((time_us % 1_000_000) * 1000) as i64,
             }
-        },
+        }
         _ => {
             return (-22_isize) as usize; // -EINVAL
         }
     };
-    
+
     // Write the timespec to user space
     unsafe {
         *timespec_ptr = timespec;
     }
-    
+
     0 // Success
 }
 
@@ -640,7 +644,10 @@ pub fn sys_nanosleep(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> u
         None => return (-14_isize) as usize, // -EFAULT
     };
     // Convert timespec to nanoseconds
-    let ns = rqtp.tv_sec.saturating_mul(1_000_000_000).saturating_add(rqtp.tv_nsec);
+    let ns = rqtp
+        .tv_sec
+        .saturating_mul(1_000_000_000)
+        .saturating_add(rqtp.tv_nsec);
     if ns <= 0 {
         return 0;
     }
@@ -707,8 +714,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<TimeSpec>(), 16);
         assert_eq!(core::mem::align_of::<TimeSpec>(), 8);
     }
-    
-    #[test_case] 
+
+    #[test_case]
     fn test_clock_constants() {
         // Verify clock constants match Linux values
         assert_eq!(CLOCK_REALTIME, 0);

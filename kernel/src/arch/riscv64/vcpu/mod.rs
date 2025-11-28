@@ -1,12 +1,12 @@
 //! VCPU module for RISC-V 64-bit architecture.
-//! 
+//!
 //! This module provides the virtual CPU (VCPU) abstraction for the RISC-V 64-bit
 //! architecture. The VCPU is responsible for executing instructions and managing
 //! the state of the CPU.
 
 use crate::arch::Trapframe;
 
-use super::{IntRegisters};
+use super::IntRegisters;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {

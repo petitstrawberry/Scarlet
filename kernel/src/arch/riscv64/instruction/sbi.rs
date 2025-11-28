@@ -49,7 +49,12 @@ impl SbiError {
 /// More robust SBI call implementation with additional safety measures
 #[inline(never)]
 #[unsafe(no_mangle)]
-pub fn sbi_call(extension: Extension, function: usize, arg0: usize, arg1: usize) -> Result<usize, SbiError> {
+pub fn sbi_call(
+    extension: Extension,
+    function: usize,
+    arg0: usize,
+    arg1: usize,
+) -> Result<usize, SbiError> {
     let error: usize;
     let ret: usize;
 
@@ -72,9 +77,7 @@ pub fn sbi_call(extension: Extension, function: usize, arg0: usize, arg1: usize)
     match error {
         0 => Ok(ret),
         error_code if error_code <= 8 => Err(SbiError::from_error(error_code)),
-        _ => {
-            Err(SbiError::Failed)
-        }
+        _ => Err(SbiError::Failed),
     }
 }
 
@@ -95,6 +98,11 @@ pub fn sbi_set_timer(stime_value: u64) {
 }
 
 pub fn sbi_system_reset(reset_type: u32, reset_reason: u32) -> ! {
-    let _ = sbi_call(Extension::Srst, 0, reset_type as usize, reset_reason as usize);
+    let _ = sbi_call(
+        Extension::Srst,
+        0,
+        reset_type as usize,
+        reset_reason as usize,
+    );
     loop {}
 }

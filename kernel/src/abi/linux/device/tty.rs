@@ -3,24 +3,21 @@
 //! This module maps Linux ioctls (e.g., termios/keyboard subset) onto Scarlet
 //! TTY control ops exposed via ControlOps on Device-backed file objects.
 
+use crate::device::char::tty::tty_ctl::{
+    SCTL_TTY_GET_KBMODE, SCTL_TTY_GET_WINSIZE, SCTL_TTY_SET_KBMODE, SCTL_TTY_SET_WINSIZE,
+};
 use crate::{
-    device::{manager::DeviceManager, DeviceCapability},
+    device::{DeviceCapability, manager::DeviceManager},
     fs::FileType,
     object::KernelObject,
     task::mytask,
-};
-use crate::device::char::tty::tty_ctl::{
-    SCTL_TTY_GET_KBMODE,
-    SCTL_TTY_GET_WINSIZE,
-    SCTL_TTY_SET_KBMODE,
-    SCTL_TTY_SET_WINSIZE,
 };
 // errno module isn't public here; use literal -EFAULT encoding where needed.
 
 /// Linux keyboard ioctl command constants (subset)
 pub const KDGKBMODE: u32 = 0x4B44; // Get keyboard mode
 pub const KDGKBTYPE: u32 = 0x4B33; // Get keyboard type
-pub const KB_101: u32 = 0x02;      // English 101/102-key keyboard
+pub const KB_101: u32 = 0x02; // English 101/102-key keyboard
 pub const KDSKBMODE: u32 = 0x4B45; // Set keyboard mode
 /// Linux VT (virtual terminal) ioctl command constants (subset)
 pub const VT_OPENQRY: u32 = 0x5600; // Find available VT number
@@ -33,10 +30,10 @@ pub const VT_WAITACTIVE: u32 = 0x560C; // Wait until VT is active
 /// Termios/winsize ioctl constants (subset)
 pub const TIOCGWINSZ: u32 = 0x5413; // Get window size
 pub const TIOCSWINSZ: u32 = 0x5414; // Set window size
-pub const TCGETS: u32 = 0x5401;    // Get termios
-pub const TCSETS: u32 = 0x5402;    // Set termios (no wait)
-pub const TCSETSW: u32 = 0x5403;   // Set termios (drain output)
-pub const TCSETSF: u32 = 0x5404;   // Set termios (drain and flush)
+pub const TCGETS: u32 = 0x5401; // Get termios
+pub const TCSETS: u32 = 0x5402; // Set termios (no wait)
+pub const TCSETSW: u32 = 0x5403; // Set termios (drain output)
+pub const TCSETSF: u32 = 0x5404; // Set termios (drain and flush)
 
 /// Linux keyboard mode values (subset)
 pub const K_RAW: u32 = 0x00;
@@ -91,9 +88,8 @@ pub fn handle_ioctl(
     kernel_object: &KernelObject,
 ) -> Result<Option<usize>, ()> {
     use crate::device::char::tty::tty_ctl::{
-        SCTL_TTY_GET_CANONICAL, SCTL_TTY_SET_CANONICAL,
-        SCTL_TTY_GET_READ_POLICY, SCTL_TTY_SET_READ_POLICY,
-        SCTL_TTY_GET_ECHO, SCTL_TTY_SET_ECHO,
+        SCTL_TTY_GET_CANONICAL, SCTL_TTY_GET_ECHO, SCTL_TTY_GET_READ_POLICY,
+        SCTL_TTY_SET_CANONICAL, SCTL_TTY_SET_ECHO, SCTL_TTY_SET_READ_POLICY,
     };
 
     const LOG_TTY_IOCTL: bool = false;
@@ -619,7 +615,10 @@ fn is_tty_kernel_object(kernel_object: &KernelObject) -> bool {
         if let Ok(metadata) = file_obj.metadata() {
             if let FileType::CharDevice(info) = metadata.file_type {
                 if let Some(dev) = DeviceManager::get_manager().get_device(info.device_id) {
-                    return dev.capabilities().iter().any(|c| *c == DeviceCapability::Tty);
+                    return dev
+                        .capabilities()
+                        .iter()
+                        .any(|c| *c == DeviceCapability::Tty);
                 }
             }
         }

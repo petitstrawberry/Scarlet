@@ -1,6 +1,6 @@
 //! # Scarlet Standard Library
 //!
-//! This no_std library provides the core functionality for user-space programs 
+//! This no_std library provides the core functionality for user-space programs
 //! running on the Scarlet.
 //!
 //! ## Features
@@ -69,23 +69,23 @@ mod alloc_exports {
     pub use alloc::vec;
 }
 
-mod arch;
 mod allocator;
-pub mod syscall;
-pub mod io;
+mod arch;
+pub mod env;
+pub mod ffi;
 pub mod fs;
+pub mod handle;
+pub mod io;
+pub mod syscall;
 pub mod task;
 pub mod thread;
-pub mod ffi;
-pub mod env;
-pub mod handle;
 
 /// Debug/profiler utilities
 pub mod profiler {
-    use crate::syscall::{syscall0, Syscall};
-    
+    use crate::syscall::{Syscall, syscall0};
+
     /// Dump profiler statistics from the kernel
-    /// 
+    ///
     /// This function calls the kernel's profiler dump system call to output
     /// performance statistics collected during execution. Only available
     /// when the kernel is built with profiler support.
@@ -94,8 +94,8 @@ pub mod profiler {
     }
 }
 
-pub use core_exports::*;
 pub use alloc_exports::*;
+pub use core_exports::*;
 
 #[panic_handler]
 pub fn panic(_info: &core::panic::PanicInfo) -> ! {

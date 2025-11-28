@@ -5,6 +5,22 @@ CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
 default_task = "build-userlib"
 skip_core_tasks = true
 
+[tasks.fmt]
+description = "Format all user library code"
+dependencies = ["fmt-std", "fmt-framebuffer"]
+
+[tasks.fmt-std]
+description = "Format user library std code"
+cwd = "std"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-framebuffer]
+description = "Format user library framebuffer code"
+cwd = "framebuffer"
+command = "cargo"
+args = ["fmt"]
+
 [tasks.build-userlib]
 description = "Build all user libraries (default: debug)"
 dependencies = ["build-userlib-debug"]

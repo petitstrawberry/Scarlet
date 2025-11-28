@@ -1,5 +1,5 @@
 //! Early console driver for RISC-V64 architecture.
-//! 
+//!
 
 use super::instruction::sbi::sbi_console_putchar;
 

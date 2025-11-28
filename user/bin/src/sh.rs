@@ -3,19 +3,24 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, print, println, string::String, vec::Vec, task::{execve, exit, fork, waitpid}};
 use std::io::Read;
+use std::{
+    format, print, println,
+    string::String,
+    task::{execve, exit, fork, waitpid},
+    vec::Vec,
+};
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
     // First expand environment variables
     let expanded_input = expand_variables(input);
-    
+
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
     let mut chars = expanded_input.chars();
-    
+
     while let Some(c) = chars.next() {
         match c {
             '"' => {
@@ -34,18 +39,18 @@ fn parse_command(input: &str) -> (String, Vec<String>) {
             }
         }
     }
-    
+
     if !current.is_empty() {
         parts.push(current);
     }
-    
+
     if parts.is_empty() {
         return (String::new(), Vec::new());
     }
-    
+
     let program = parts[0].clone();
     let args = parts;
-    
+
     (program, args)
 }
 
@@ -55,7 +60,7 @@ fn find_executable_in_path(program: &str) -> Option<String> {
     if program.contains('/') {
         return Some(String::from(program));
     }
-    
+
     // Get PATH environment variable
     match std::env::var("PATH") {
         Some(path_var) => {
@@ -70,7 +75,7 @@ fn find_executable_in_path(program: &str) -> Option<String> {
                 } else {
                     format!("{}/{}", path_dir, program)
                 };
-                
+
                 // Check if file exists by trying to open it
                 match std::fs::File::open(&full_path) {
                     Ok(_) => return Some(full_path),
@@ -96,7 +101,7 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
     if let Some(exit_code) = handle_builtin_command(program, args) {
         return exit_code;
     }
-    
+
     let executable_path = match find_executable_in_path(program) {
         Some(path) => path,
         None => {
@@ -104,19 +109,19 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             return 127; // Standard exit code for "command not found"
         }
     };
-    
+
     match fork() {
         0 => {
             // Convert args to &[&str] for execve
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            
+
             // Get all environment variables and convert them to the format needed for execve
             let env_vars = std::env::vars();
             let env_strings: Vec<String> = env_vars
                 .map(|(key, value)| format!("{}={}", key, value))
                 .collect();
             let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
-            
+
             if execve(&executable_path, &arg_refs, &env_refs) != 0 {
                 println!("sh: {}: execution failed", executable_path);
             }
@@ -145,7 +150,7 @@ fn execute_script(script_path: &str) -> i32 {
             return execute_command(script_path, &[String::from(script_path)]);
         }
     };
-    
+
     execute_script_content(&script_content)
 }
 
@@ -155,7 +160,7 @@ fn read_file(file_path: &str) -> Result<String, i32> {
         Ok(mut file) => {
             let mut content = String::new();
             let mut buffer = [0u8; 1024];
-            
+
             loop {
                 match file.read(&mut buffer) {
                     Ok(0) => break, // EOF
@@ -170,7 +175,7 @@ fn read_file(file_path: &str) -> Result<String, i32> {
                     Err(_) => return Err(-1),
                 }
             }
-            
+
             Ok(content)
         }
         Err(_) => Err(-1),
@@ -180,27 +185,27 @@ fn read_file(file_path: &str) -> Result<String, i32> {
 /// Execute script content line by line
 fn execute_script_content(content: &str) -> i32 {
     let mut last_exit_code = 0;
-    
+
     for line in content.lines() {
         let trimmed_line = line.trim();
-        
+
         // Skip empty lines and comments
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
             continue;
         }
-        
+
         let (program, args) = parse_command(trimmed_line);
-        
+
         if program.is_empty() {
             continue;
         }
-        
+
         last_exit_code = execute_command(&program, &args);
-        
+
         // If a command fails, we could choose to continue or stop
         // For now, we continue executing the rest of the script
     }
-    
+
     last_exit_code
 }
 
@@ -209,18 +214,18 @@ fn interactive_shell() -> i32 {
     let mut inputs = String::new();
 
     println!("Scarlet Shell (Interactive Mode)");
-    
+
     // Try to execute .shrc on startup
     execute_shrc();
-    
+
     println!("Enter 'exit' to quit");
 
     loop {
         inputs.clear();
         print!("# ");
         loop {
-            let c = std::io::get_char();            
-            
+            let c = std::io::get_char();
+
             if c as u8 >= 0x20 && c as u8 <= 0x7e {
                 // Handle printable characters
                 inputs.push(c);
@@ -236,13 +241,13 @@ fn interactive_shell() -> i32 {
                 inputs.push(' ');
             }
         }
-        
+
         if inputs.trim().is_empty() {
             continue;
         }
 
         let (program, args) = parse_command(inputs.trim());
-        
+
         if program.is_empty() {
             continue;
         }
@@ -263,7 +268,7 @@ fn interactive_shell() -> i32 {
 fn expand_variables(input: &str) -> String {
     let mut result = String::new();
     let mut chars = input.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '$' {
             // Check if this is a variable expansion
@@ -273,7 +278,7 @@ fn expand_variables(input: &str) -> String {
                     chars.next(); // consume '{'
                     let mut var_name = String::new();
                     let mut found_close = false;
-                    
+
                     while let Some(var_char) = chars.next() {
                         if var_char == '}' {
                             found_close = true;
@@ -281,7 +286,7 @@ fn expand_variables(input: &str) -> String {
                         }
                         var_name.push(var_char);
                     }
-                    
+
                     if found_close && !var_name.is_empty() {
                         // Expand the variable
                         if let Some(value) = get_variable_value(&var_name) {
@@ -298,10 +303,15 @@ fn expand_variables(input: &str) -> String {
                             // This is a simplified approach
                         }
                     }
-                } else if next_char.is_alphabetic() || next_char == '_' || next_char == '?' || next_char == '$' || next_char == '0' {
+                } else if next_char.is_alphabetic()
+                    || next_char == '_'
+                    || next_char == '?'
+                    || next_char == '$'
+                    || next_char == '0'
+                {
                     // Handle $VAR syntax and special variables
                     let mut var_name = String::new();
-                    
+
                     if next_char == '?' || next_char == '$' || next_char == '0' {
                         // Special single-character variables
                         var_name.push(chars.next().unwrap());
@@ -315,7 +325,7 @@ fn expand_variables(input: &str) -> String {
                             }
                         }
                     }
-                    
+
                     if !var_name.is_empty() {
                         // Expand the variable
                         if let Some(value) = get_variable_value(&var_name) {
@@ -337,7 +347,7 @@ fn expand_variables(input: &str) -> String {
             result.push(c);
         }
     }
-    
+
     result
 }
 
@@ -387,18 +397,18 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 println!("export: usage: export NAME=VALUE");
                 return Some(1);
             }
-            
+
             let assignment = &args[1];
             if let Some(eq_pos) = assignment.find('=') {
                 let name = &assignment[..eq_pos];
-                let value = &assignment[eq_pos+1..];
-                
+                let value = &assignment[eq_pos + 1..];
+
                 // Validate variable name (basic check)
                 if name.is_empty() {
                     println!("export: invalid variable name");
                     return Some(1);
                 }
-                
+
                 // Set the environment variable
                 std::env::set_var(name, value);
                 Some(0)
@@ -431,7 +441,7 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                     }
                 }
             };
-            
+
             match std::fs::change_directory(target_dir) {
                 Ok(()) => {
                     // Success - update PWD environment variable
@@ -449,9 +459,9 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 println!("unset: usage: unset NAME");
                 return Some(1);
             }
-            
+
             let var_name = &args[1];
-            
+
             // Check if variable exists before unsetting
             match std::env::var(var_name) {
                 Some(_) => {
@@ -471,7 +481,7 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
             let mut no_newline = false;
             let mut interpret_escapes = false;
             let mut start_index = 1;
-            
+
             // Parse options
             while start_index < args.len() {
                 let arg = &args[start_index];
@@ -493,21 +503,21 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                     break;
                 }
             }
-            
+
             if start_index < args.len() {
                 let mut output = String::new();
                 for (i, arg) in args[start_index..].iter().enumerate() {
                     if i > 0 {
                         output.push(' ');
                     }
-                    
+
                     if interpret_escapes {
                         output.push_str(&process_escape_sequences(arg));
                     } else {
                         output.push_str(arg);
                     }
                 }
-                
+
                 if no_newline {
                     print!("{}", output);
                 } else {
@@ -527,7 +537,7 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 println!("source: usage: source FILENAME");
                 return Some(1);
             }
-            
+
             let script_path = &args[1];
             match read_file(script_path) {
                 Ok(content) => {
@@ -547,17 +557,17 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
 /// Execute .shrc file if it exists
 fn execute_shrc() {
     let mut shrc_paths = Vec::new();
-    
+
     // Add HOME/.shrc if HOME is set
     if let Some(home) = std::env::var("HOME") {
         shrc_paths.push(format!("{}/.shrc", home));
     }
-    
+
     // Add standard paths
     shrc_paths.push(String::from("/.shrc"));
     shrc_paths.push(String::from("/etc/shrc"));
     shrc_paths.push(String::from("./.shrc"));
-    
+
     for shrc_path in &shrc_paths {
         // Check if file exists by trying to open it
         match std::fs::File::open(shrc_path) {
@@ -572,29 +582,29 @@ fn execute_shrc() {
             Err(_) => continue,
         }
     }
-    
+
     // No .shrc file found, which is normal
 }
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let args = std::env::args_vec();
-    
+
     // Check command line arguments
     if args.len() > 1 {
         // Non-interactive mode: execute script or command
         let script_or_command = &args[1];
-        
+
         // Check for -c flag (execute command string)
         if args.len() > 2 && args[1] == "-c" {
             let command = &args[2];
             let (program, cmd_args) = parse_command(command);
-            
+
             if program.is_empty() {
                 println!("No command specified");
                 return 1;
             }
-            
+
             return execute_command(&program, &cmd_args);
         } else {
             // Execute script file
@@ -610,7 +620,7 @@ fn main() -> i32 {
 fn process_escape_sequences(input: &str) -> String {
     let mut result = String::new();
     let mut chars = input.chars();
-    
+
     while let Some(c) = chars.next() {
         if c == '\\' {
             if let Some(next_char) = chars.next() {
@@ -639,6 +649,6 @@ fn process_escape_sequences(input: &str) -> String {
             result.push(c);
         }
     }
-    
+
     result
 }

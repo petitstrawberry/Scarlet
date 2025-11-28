@@ -18,48 +18,48 @@ pub enum Syscall {
     Getchar = 17,
 
     Sleep = 20,
-    
+
     // === Handle Management ===
     HandleQuery = 100,
     HandleSetRole = 101,
-    HandleClose = 102,      // Close any handle (files, pipes, etc.)
-    HandleDuplicate = 103,  // Duplicate any handle
-    HandleControl = 110,    // Control operations on handles (ioctl-equivalent)
-    
+    HandleClose = 102,     // Close any handle (files, pipes, etc.)
+    HandleDuplicate = 103, // Duplicate any handle
+    HandleControl = 110,   // Control operations on handles (ioctl-equivalent)
+
     // === Core Capabilities (Object-oriented) ===
     // StreamOps Capability - read/write operations
     StreamRead = 200,
     StreamWrite = 201,
-    
+
     // FileObject Capability - file-specific operations (extends StreamOps)
     FileSeek = 300,
     FileTruncate = 301,
     // FileMetadata = 302,
-    
+
     // === VFS Operations (VFS layer management and file access) ===
-    VfsOpen = 400,          // Open files/directories through VFS
-    VfsRemove = 401,        // Remove files or directories (unified Remove/Unlink)
-    VfsCreateFile = 402,    // Create regular files through VFS
+    VfsOpen = 400,            // Open files/directories through VFS
+    VfsRemove = 401,          // Remove files or directories (unified Remove/Unlink)
+    VfsCreateFile = 402,      // Create regular files through VFS
     VfsCreateDirectory = 403, // Create directories through VFS
     VfsChangeDirectory = 404, // Change current working directory
-    VfsTruncate = 405,      // Truncate files by path
-    VfsCreateSymlink = 406, // Create symbolic links through VFS
-    VfsReadlink = 407,      // Read symbolic link target through VFS
-    
+    VfsTruncate = 405,        // Truncate files by path
+    VfsCreateSymlink = 406,   // Create symbolic links through VFS
+    VfsReadlink = 407,        // Read symbolic link target through VFS
+
     // === Filesystem Operations (mount management) ===
     FsMount = 500,
     FsUmount = 501,
     FsPivotRoot = 502,
-    
+
     // === IPC Operations ===
-    Pipe = 600,             // Create pipe handles
-    
+    Pipe = 600, // Create pipe handles
+
     // === Memory Mapping Operations ===
-    MemoryMap = 700,        // Memory map operation (mmap)
-    MemoryUnmap = 701,      // Memory unmap operation (munmap)
-    
+    MemoryMap = 700,   // Memory map operation (mmap)
+    MemoryUnmap = 701, // Memory unmap operation (munmap)
+
     // === Debug/Profiler Operations ===
-    ProfilerDump = 999,     // Dump profiler statistics (debug only)
+    ProfilerDump = 999, // Dump profiler statistics (debug only)
 }
 
 pub fn syscall0(syscall: Syscall) -> usize {
@@ -82,10 +82,25 @@ pub fn syscall4(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: u
     arch_syscall4(syscall, arg1, arg2, arg3, arg4)
 }
 
-pub fn syscall5(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> usize {
+pub fn syscall5(
+    syscall: Syscall,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> usize {
     arch_syscall5(syscall, arg1, arg2, arg3, arg4, arg5)
 }
 
-pub fn syscall6(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize, arg6: usize) -> usize {
+pub fn syscall6(
+    syscall: Syscall,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+) -> usize {
     arch_syscall6(syscall, arg1, arg2, arg3, arg4, arg5, arg6)
 }

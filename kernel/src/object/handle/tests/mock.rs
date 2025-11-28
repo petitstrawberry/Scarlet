@@ -1,10 +1,12 @@
 //! Mock objects for testing kernel object management system
 
-use alloc::vec::Vec;
+use crate::fs::{FileMetadata, FileType, SeekFrom};
+use crate::object::capability::{
+    CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamError, StreamOps,
+};
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use spin::Mutex;
-use crate::object::capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamError, StreamOps};
-use crate::fs::{FileType, FileMetadata, SeekFrom};
 
 /// Mock FileObject for testing purposes
 pub struct MockFileObject {
@@ -15,26 +17,26 @@ pub struct MockFileObject {
 
 impl MockFileObject {
     pub fn new(data: Vec<u8>) -> Self {
-        Self { 
+        Self {
             name: "unnamed".to_string(),
-            data, 
-            position: Mutex::new(0) 
+            data,
+            position: Mutex::new(0),
         }
     }
-    
+
     pub fn with_name_and_content(name: &str, content: &str) -> Self {
-        Self { 
+        Self {
             name: name.to_string(),
-            data: content.as_bytes().to_vec(), 
-            position: Mutex::new(0) 
+            data: content.as_bytes().to_vec(),
+            position: Mutex::new(0),
         }
     }
-    
+
     pub fn from_data(data: Vec<u8>) -> Self {
-        Self { 
+        Self {
             name: "unnamed".to_string(),
-            data, 
-            position: Mutex::new(0) 
+            data,
+            position: Mutex::new(0),
         }
     }
 }
@@ -44,15 +46,15 @@ impl StreamOps for MockFileObject {
         let mut pos = self.position.lock();
         let available = self.data.len().saturating_sub(*pos);
         let to_read = buffer.len().min(available);
-        
+
         if to_read > 0 {
             buffer[..to_read].copy_from_slice(&self.data[*pos..*pos + to_read]);
             *pos += to_read;
         }
-        
+
         Ok(to_read)
     }
-    
+
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         // Mock implementation - just return the buffer length
         Ok(buffer.len())
@@ -67,8 +69,11 @@ impl ControlOps for MockFileObject {
 }
 
 impl MemoryMappingOps for MockFileObject {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported")
     }
 
@@ -103,11 +108,11 @@ impl crate::fs::FileObject for MockFileObject {
                 }
             }
         };
-        
+
         *pos = new_pos;
         Ok(new_pos as u64)
     }
-    
+
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
@@ -138,9 +143,9 @@ pub struct MockTaskFileObject {
 
 impl MockTaskFileObject {
     pub fn new(data: Vec<u8>) -> Self {
-        Self { 
-            data, 
-            position: Mutex::new(0) 
+        Self {
+            data,
+            position: Mutex::new(0),
         }
     }
 }
@@ -150,15 +155,15 @@ impl StreamOps for MockTaskFileObject {
         let mut pos = self.position.lock();
         let available = self.data.len().saturating_sub(*pos);
         let to_read = buffer.len().min(available);
-        
+
         if to_read > 0 {
             buffer[..to_read].copy_from_slice(&self.data[*pos..*pos + to_read]);
             *pos += to_read;
         }
-        
+
         Ok(to_read)
     }
-    
+
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         Ok(buffer.len())
     }
@@ -172,8 +177,11 @@ impl ControlOps for MockTaskFileObject {
 }
 
 impl MemoryMappingOps for MockTaskFileObject {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported")
     }
 
@@ -208,11 +216,11 @@ impl crate::fs::FileObject for MockTaskFileObject {
                 }
             }
         };
-        
+
         *pos = new_pos;
         Ok(new_pos as u64)
     }
-    
+
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         Ok(FileMetadata {
             file_type: FileType::RegularFile,
@@ -248,7 +256,7 @@ impl MockPipeObject {
             write_buffer: Mutex::new(Vec::new()),
         }
     }
-    
+
     pub fn with_data(data: &str) -> Self {
         Self {
             read_buffer: Mutex::new(data.as_bytes().to_vec()),
@@ -261,15 +269,15 @@ impl StreamOps for MockPipeObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let mut read_buf = self.read_buffer.lock();
         let to_read = buffer.len().min(read_buf.len());
-        
+
         if to_read > 0 {
             buffer[..to_read].copy_from_slice(&read_buf[..to_read]);
             read_buf.drain(..to_read);
         }
-        
+
         Ok(to_read)
     }
-    
+
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         let mut write_buf = self.write_buffer.lock();
         write_buf.extend_from_slice(buffer);
@@ -284,16 +292,16 @@ impl CloneOps for MockPipeObject {
     fn custom_clone(&self) -> crate::object::KernelObject {
         use crate::object::KernelObject;
         use alloc::sync::Arc;
-        
+
         // Clone the current state
         let read_data = self.read_buffer.lock().clone();
         let write_data = self.write_buffer.lock().clone();
-        
+
         let cloned = MockPipeObject {
             read_buffer: Mutex::new(read_data),
             write_buffer: Mutex::new(write_data),
         };
-        
+
         KernelObject::Pipe(Arc::new(cloned))
     }
 }
@@ -316,23 +324,23 @@ impl crate::ipc::pipe::PipeObject for MockPipeObject {
     fn has_readers(&self) -> bool {
         true // Mock implementation
     }
-    
+
     fn has_writers(&self) -> bool {
         true // Mock implementation
     }
-    
+
     fn buffer_size(&self) -> usize {
         1024 // Mock buffer size
     }
-    
+
     fn available_bytes(&self) -> usize {
         self.read_buffer.lock().len()
     }
-    
+
     fn is_readable(&self) -> bool {
         true // Mock implementation
     }
-    
+
     fn is_writable(&self) -> bool {
         true // Mock implementation
     }

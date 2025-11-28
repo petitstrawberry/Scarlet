@@ -8,7 +8,8 @@ use core::arch::naked_asm;
 #[unsafe(naked)]
 pub extern "C" fn _entry() {
     unsafe {
-        naked_asm!("
+        naked_asm!(
+            "
         .option norvc
         .option norelax
         .align 8

@@ -1,19 +1,17 @@
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi,
-    arch::Trapframe,
+    abi::linux::riscv64::LinuxRiscv64Abi, arch::Trapframe, ipc::pipe::UnidirectionalPipe,
     task::mytask,
-    ipc::pipe::UnidirectionalPipe,
 };
 
 /// Linux socket domains
-pub const AF_UNIX: i32 = 1;     // Unix domain sockets
-pub const AF_INET: i32 = 2;     // Internet IP Protocol
-pub const AF_INET6: i32 = 10;   // IP version 6
+pub const AF_UNIX: i32 = 1; // Unix domain sockets
+pub const AF_INET: i32 = 2; // Internet IP Protocol
+pub const AF_INET6: i32 = 10; // IP version 6
 
 /// Linux socket types
-pub const SOCK_STREAM: i32 = 1;    // Stream socket
-pub const SOCK_DGRAM: i32 = 2;     // Datagram socket
-pub const SOCK_RAW: i32 = 3;       // Raw socket
+pub const SOCK_STREAM: i32 = 1; // Stream socket
+pub const SOCK_DGRAM: i32 = 2; // Datagram socket
+pub const SOCK_RAW: i32 = 3; // Raw socket
 pub const SOCK_SEQPACKET: i32 = 5; // Sequenced packet socket
 
 /// Linux sys_socket implementation (mock with pipe)
@@ -38,7 +36,7 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _domain = trapframe.get_arg(0) as i32;
     let _type = trapframe.get_arg(1) as i32;
     let _protocol = trapframe.get_arg(2) as i32;
@@ -49,7 +47,7 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
     // Create a pipe to mock a socket
     // This allows applications to get a valid fd and proceed
     let (read_obj, _write_obj) = UnidirectionalPipe::create_pair(4096);
-    
+
     // Insert only the read end as the "socket" - we don't need the write end
     match task.handle_table.insert(read_obj) {
         Ok(handle) => {
@@ -62,7 +60,7 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                     usize::MAX
                 }
             }
-        },
+        }
         Err(_) => usize::MAX, // Failed to create pipe
     }
 }
@@ -87,7 +85,7 @@ pub fn sys_bind(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _sockfd = trapframe.get_arg(0) as i32;
     let _addr_ptr = trapframe.get_arg(1);
     let _addrlen = trapframe.get_arg(2) as u32;
@@ -118,7 +116,7 @@ pub fn sys_listen(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _sockfd = trapframe.get_arg(0) as i32;
     let _backlog = trapframe.get_arg(1) as i32;
 
@@ -149,7 +147,7 @@ pub fn sys_accept(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _sockfd = trapframe.get_arg(0) as i32;
     let _addr_ptr = trapframe.get_arg(1);
     let _addrlen_ptr = trapframe.get_arg(2);
@@ -159,15 +157,13 @@ pub fn sys_accept(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     // Mock implementation - create a new pipe as the "accepted" connection
     let (read_obj, _write_obj) = UnidirectionalPipe::create_pair(4096);
-    
+
     match task.handle_table.insert(read_obj) {
-        Ok(handle) => {
-            match abi.allocate_fd(handle) {
-                Ok(fd) => fd,
-                Err(_) => {
-                    let _ = task.handle_table.remove(handle);
-                    usize::MAX
-                }
+        Ok(handle) => match abi.allocate_fd(handle) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = task.handle_table.remove(handle);
+                usize::MAX
             }
         },
         Err(_) => usize::MAX,
@@ -194,7 +190,7 @@ pub fn sys_connect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _sockfd = trapframe.get_arg(0) as i32;
     let _addr_ptr = trapframe.get_arg(1);
     let _addrlen = trapframe.get_arg(2) as u32;
@@ -226,7 +222,7 @@ pub fn sys_getsockname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _sockfd = trapframe.get_arg(0) as i32;
     let addr_ptr = trapframe.get_arg(1);
     let addrlen_ptr = trapframe.get_arg(2);
@@ -237,17 +233,17 @@ pub fn sys_getsockname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
     // Mock implementation - write minimal valid sockaddr and return success
     if let (Some(addr_paddr), Some(addrlen_paddr)) = (
         task.vm_manager.translate_vaddr(addr_ptr),
-        task.vm_manager.translate_vaddr(addrlen_ptr)
+        task.vm_manager.translate_vaddr(addrlen_ptr),
     ) {
         unsafe {
             // Read the provided length
             let addrlen = *(addrlen_paddr as *const u32);
-            
+
             // Write minimal sockaddr_un structure for Unix domain socket
             if addrlen >= 2 {
                 let sockaddr = addr_paddr as *mut u16;
                 *sockaddr = AF_UNIX as u16; // sa_family = AF_UNIX
-                
+
                 // Update the actual length used
                 *(addrlen_paddr as *mut u32) = 2;
             }
@@ -280,7 +276,7 @@ pub fn sys_getsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _sockfd = trapframe.get_arg(0) as i32;
     let _level = trapframe.get_arg(1) as i32;
     let _optname = trapframe.get_arg(2) as i32;
@@ -293,17 +289,17 @@ pub fn sys_getsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
     // Mock implementation - write minimal valid data and return success
     if let (Some(optval_paddr), Some(optlen_paddr)) = (
         task.vm_manager.translate_vaddr(optval_ptr),
-        task.vm_manager.translate_vaddr(optlen_ptr)
+        task.vm_manager.translate_vaddr(optlen_ptr),
     ) {
         unsafe {
             // Read the provided length
             let optlen = *(optlen_paddr as *const u32);
-            
+
             // Write dummy option value (typically an integer)
             if optlen >= 4 && optval_ptr != 0 {
                 let optval = optval_paddr as *mut u32;
                 *optval = 1; // Generic "enabled" value
-                
+
                 // Update the actual length used
                 *(optlen_paddr as *mut u32) = 4;
             }
@@ -336,7 +332,7 @@ pub fn sys_setsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
         Some(t) => t,
         None => return usize::MAX,
     };
-    
+
     let _sockfd = trapframe.get_arg(0) as i32;
     let _level = trapframe.get_arg(1) as i32;
     let _optname = trapframe.get_arg(2) as i32;

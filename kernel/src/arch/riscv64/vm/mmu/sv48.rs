@@ -3,8 +3,8 @@ use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
+use crate::vm::vmem::VirtualMemoryMap;
 use crate::vm::vmem::VirtualMemoryPermission;
-use crate::{vm::vmem::VirtualMemoryMap};
 
 const MAX_PAGING_LEVEL: usize = 3;
 
@@ -52,15 +52,15 @@ impl PageTableEntry {
 
     pub fn set_ppn(&mut self, ppn: usize) -> &mut Self {
         let ppn_mask = 0x3ffffffffff; // Mask for the PPN bits
-        let masked_ppn = (ppn as u64) & ppn_mask;  // Mask the PPN to fit in the entry
+        let masked_ppn = (ppn as u64) & ppn_mask; // Mask the PPN to fit in the entry
 
-        self.entry &= !(ppn_mask << 10);  // Clear the PPN bits in the entry
-        self.entry |= masked_ppn << 10;   // Set the new PPN bits
+        self.entry &= !(ppn_mask << 10); // Clear the PPN bits in the entry
+        self.entry |= masked_ppn << 10; // Set the new PPN bits
         self
     }
 
     pub fn set_flags(&mut self, flags: u64) -> &mut Self {
-         let mask = 0x3ff;
+        let mask = 0x3ff;
         self.entry |= flags & mask;
         self
     }
@@ -119,9 +119,9 @@ impl PageTable {
     }
 
     /// Get the value for the satp register.
-    /// 
+    ///
     /// # Note
-    /// 
+    ///
     /// Only for RISC-V (Sv48).
     pub fn get_val_for_satp(&self, asid: u16) -> u64 {
         let asid = asid as usize;
@@ -130,17 +130,24 @@ impl PageTable {
         (mode << 60 | asid << 44 | ppn) as u64
     }
 
-    pub fn map_memory_area(&mut self, asid: u16, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
+    pub fn map_memory_area(
+        &mut self,
+        asid: u16,
+        mmap: VirtualMemoryMap,
+    ) -> Result<(), &'static str> {
         // Check if the address and size is aligned to PAGE_SIZE
-        if mmap.vmarea.start % PAGE_SIZE != 0 || mmap.pmarea.start % PAGE_SIZE != 0 ||
-            mmap.vmarea.size() % PAGE_SIZE != 0 || mmap.pmarea.size() % PAGE_SIZE != 0 {
+        if mmap.vmarea.start % PAGE_SIZE != 0
+            || mmap.pmarea.start % PAGE_SIZE != 0
+            || mmap.vmarea.size() % PAGE_SIZE != 0
+            || mmap.pmarea.size() % PAGE_SIZE != 0
+        {
             return Err("Address is not aligned to PAGE_SIZE");
         }
 
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(asid, vaddr, paddr, mmap.permissions);    
+            self.map(asid, vaddr, paddr, mmap.permissions);
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
                 None => break,
@@ -164,10 +171,10 @@ impl PageTable {
         } else if canonical_check == 0 && upper_bits != 0 {
             panic!("Non-canonical virtual address: {:#x}", vaddr);
         }
-        
+
         let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
         let paddr = paddr & 0xffff_ffff_ffff_f000;
-        
+
         let pte = match self.walk(vaddr, true, asid) {
             Some(pte) => pte,
             None => panic!("map: walk() couldn't allocate a needed page-table page"),
@@ -175,10 +182,10 @@ impl PageTable {
 
         // Allow remapping - just update the existing entry
         let ppn = (paddr >> 12) & 0xfffffffffff;
-        
+
         // Clear existing flags before setting new ones
         pte.clear_all();
-        
+
         if VirtualMemoryPermission::Read.contained_in(permissions) {
             pte.readable();
         }
@@ -199,7 +206,7 @@ impl PageTable {
     // Find the address of the PTE in page table that corresponds to virtual address vaddr.
     // If alloc == true, create any required page-table pages.
     // Returns None if walk() couldn't allocate a needed page-table page.
-    // 
+    //
     // The RISC-V Sv48 scheme has four levels of page-table pages.
     // A page-table page contains 512 64-bit PTEs.
     // A 48-bit virtual address is split into five fields:
@@ -211,7 +218,7 @@ impl PageTable {
     //    0..11 -- 12 bits of byte offset within the page.
     pub fn walk(&mut self, vaddr: usize, alloc: bool, asid: u16) -> Option<&mut PageTableEntry> {
         let mut pagetable = self as *mut PageTable;
-        
+
         // Check if virtual address is within valid canonical range for Sv48
         let canonical_check = (vaddr >> 47) & 1;
         let upper_bits = (vaddr >> 48) & 0xffff;
@@ -226,7 +233,7 @@ impl PageTable {
             for level in (1..=MAX_PAGING_LEVEL).rev() {
                 let vpn = (vaddr >> (12 + 9 * level)) & 0x1ff;
                 let pte = &mut (*pagetable).entries[vpn];
-                
+
                 if pte.is_valid() {
                     // At an intermediate level, a PTE must not be a leaf (no huge page support).
                     if pte.is_leaf() {
@@ -249,7 +256,7 @@ impl PageTable {
                     pagetable = new_table;
                 }
             }
-            
+
             // Return the PTE at level 0
             let vpn = (vaddr >> 12) & 0x1ff;
             Some(&mut (*pagetable).entries[vpn])
@@ -265,9 +272,9 @@ impl PageTable {
         } else if canonical_check == 0 && upper_bits != 0 {
             panic!("Non-canonical virtual address: {:#x}", vaddr);
         }
-        
+
         let vaddr = vaddr & 0xffff_ffff_ffff_f000; // Page align
-        
+
         match self.walk(vaddr, false, 0) {
             Some(pte) => {
                 if pte.is_valid() {

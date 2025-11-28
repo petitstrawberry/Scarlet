@@ -1,8 +1,8 @@
 //! Kernel timer module.
-//! 
+//!
 //! This module provides the kernel timer functionality, which is responsible for
 //! managing the system timer and scheduling tasks based on time intervals.
-//! 
+//!
 
 use crate::arch::Trapframe;
 use crate::arch::timer::ArchTimer;
@@ -10,8 +10,8 @@ use crate::environment::NUM_OF_CPUS;
 use crate::sched::scheduler::get_scheduler;
 use core::sync::atomic::{AtomicU64, Ordering};
 extern crate alloc;
-use alloc::sync::{Arc, Weak};
 use alloc::collections::BinaryHeap;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cmp::Ordering as CmpOrdering;
 
@@ -112,11 +112,11 @@ pub trait TimerHandler: Send + Sync {
 
 /// Software timer structure
 pub struct SoftwareTimer {
-    pub id: u64,                        // Unique timer ID
-    pub expires: u64,                   // Expiration tick
-    pub handler: Weak<dyn TimerHandler>,// Weak reference to callback handler
-    pub context: usize,                 // User context
-    pub active: bool,                   // Is this timer active?
+    pub id: u64,                         // Unique timer ID
+    pub expires: u64,                    // Expiration tick
+    pub handler: Weak<dyn TimerHandler>, // Weak reference to callback handler
+    pub context: usize,                  // User context
+    pub active: bool,                    // Is this timer active?
 }
 
 // Global timer ID counter
