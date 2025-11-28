@@ -11,6 +11,49 @@ skip_core_tasks = true
 description = "Format all code"
 dependencies = ["fmt-kernel", "fmt-userlib", "fmt-userbin"]
 
+[tasks.fmt-check]
+description = "Check formatting (no changes)"
+dependencies = ["fmt-kernel-check", "fmt-userlib-check", "fmt-userbin-check"]
+
+[tasks.fmt-kernel-check]
+description = "Check kernel formatting"
+cwd = "kernel"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-userlib-check]
+description = "Check user library formatting by calling sub Makefile.toml"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "fmt-check"]
+
+[tasks.fmt-userbin-check]
+description = "Check user program formatting"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "fmt-check"]
+
+[tasks.clippy]
+description = "Run clippy for all components"
+dependencies = ["clippy-kernel", "clippy-userlib", "clippy-userbin"]
+
+[tasks.clippy-kernel]
+description = "Run clippy for kernel"
+cwd = "kernel"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.clippy-userlib]
+description = "Run clippy for user libraries by calling sub Makefile.toml"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "clippy"]
+
+[tasks.clippy-userbin]
+description = "Run clippy for user programs by calling sub Makefile.toml"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "clippy"]
 [tasks.fmt-kernel]
 description = "Format kernel code"
 cwd = "kernel"

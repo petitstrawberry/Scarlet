@@ -9,6 +9,22 @@ skip_core_tasks = true
 description = "Format all user library code"
 dependencies = ["fmt-std", "fmt-framebuffer"]
 
+[tasks.fmt-check]
+description = "Check formatting for all user library code"
+dependencies = ["fmt-std-check", "fmt-framebuffer-check"]
+
+[tasks.fmt-std-check]
+description = "Check formatting for user library std code"
+cwd = "std"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-framebuffer-check]
+description = "Check formatting for user library framebuffer code"
+cwd = "framebuffer"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
 [tasks.fmt-std]
 description = "Format user library std code"
 cwd = "std"
@@ -59,3 +75,19 @@ script = [
     "cd std && cargo doc --no-deps",
     "cd ../framebuffer && cargo doc --no-deps"
 ]
+
+[tasks.clippy]
+description = "Run clippy for all user libraries"
+dependencies = ["clippy-std", "clippy-framebuffer"]
+
+[tasks.clippy-std]
+description = "Run clippy for user library std code"
+cwd = "std"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.clippy-framebuffer]
+description = "Run clippy for user library framebuffer code"
+cwd = "framebuffer"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
