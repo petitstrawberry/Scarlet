@@ -161,8 +161,7 @@ impl Default for FbVarScreenInfo {
 
 /// Fixed screen information structure (Linux fb_fix_screeninfo compatible)
 #[repr(C)]
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FbFixScreenInfo {
     /// Identification string
     pub id: [u8; 16],
@@ -195,7 +194,6 @@ pub struct FbFixScreenInfo {
     /// Reserved for future compatibility
     pub reserved: [u16; 2],
 }
-
 
 /// Framebuffer device wrapper
 ///

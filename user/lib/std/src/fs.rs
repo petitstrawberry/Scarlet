@@ -414,7 +414,7 @@ impl File {
     /// Handle instance
     pub fn into_handle(self) -> Handle {
         // Prevent the File's Drop from running
-        
+
         unsafe {
             let handle_ptr = &self.handle as *const Handle;
             core::mem::forget(self);
