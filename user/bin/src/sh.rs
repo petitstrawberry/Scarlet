@@ -21,7 +21,7 @@ fn parse_command(input: &str) -> (String, Vec<String>) {
     let mut in_quotes = false;
     let mut chars = expanded_input.chars();
 
-    while let Some(c) = chars.next() {
+    for c in chars {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
@@ -71,9 +71,9 @@ fn find_executable_in_path(program: &str) -> Option<String> {
                 }
 
                 let full_path = if path_dir.ends_with('/') {
-                    format!("{}{}", path_dir, program)
+                    format!("{path_dir}{program}")
                 } else {
-                    format!("{}/{}", path_dir, program)
+                    format!("{path_dir}/{program}")
                 };
 
                 // Check if file exists by trying to open it
@@ -86,7 +86,7 @@ fn find_executable_in_path(program: &str) -> Option<String> {
         }
         None => {
             // No PATH set, try current directory
-            let current_path = format!("./{}", program);
+            let current_path = format!("./{program}");
             match std::fs::File::open(&current_path) {
                 Ok(_) => Some(current_path),
                 Err(_) => None,
@@ -118,7 +118,7 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             // Get all environment variables and convert them to the format needed for execve
             let env_vars = std::env::vars();
             let env_strings: Vec<String> = env_vars
-                .map(|(key, value)| format!("{}={}", key, value))
+                .map(|(key, value)| format!("{key}={value}"))
                 .collect();
             let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
 
@@ -129,11 +129,11 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
         }
         -1 => {
             println!("sh: fork failed");
-            return 1;
+            1
         }
         pid => {
             let (_, status) = waitpid(pid, 0);
-            return status;
+            status
         }
     }
 }
@@ -279,7 +279,7 @@ fn expand_variables(input: &str) -> String {
                     let mut var_name = String::new();
                     let mut found_close = false;
 
-                    while let Some(var_char) = chars.next() {
+                    for var_char in chars.by_ref() {
                         if var_char == '}' {
                             found_close = true;
                             break;
@@ -560,7 +560,7 @@ fn execute_shrc() {
 
     // Add HOME/.shrc if HOME is set
     if let Some(home) = std::env::var("HOME") {
-        shrc_paths.push(format!("{}/.shrc", home));
+        shrc_paths.push(format!("{home}/.shrc"));
     }
 
     // Add standard paths
@@ -605,14 +605,14 @@ fn main() -> i32 {
                 return 1;
             }
 
-            return execute_command(&program, &cmd_args);
+            execute_command(&program, &cmd_args)
         } else {
             // Execute script file
-            return execute_script(script_or_command);
+            execute_script(script_or_command)
         }
     } else {
         // Interactive mode
-        return interactive_shell();
+        interactive_shell()
     }
 }
 

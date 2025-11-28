@@ -65,11 +65,11 @@ fn main() -> i32 {
                     width_size = max_size_width
                 );
             }
-            return 0;
+            0
         }
         Err(errno) => {
             println!("ls: cannot open '{}': error {}", path, errno);
-            return 1;
+            1
         }
     }
 }

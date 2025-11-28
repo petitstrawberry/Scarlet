@@ -7,17 +7,15 @@ use core::arch::naked_asm;
 #[unsafe(export_name = "_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _entry() {
-    unsafe {
-        naked_asm!(
-            "
-        .option norvc
-        .option norelax
-        .align 8
-                ecall
-                j main
-        ",
-        );
-    }
+    naked_asm!(
+        "
+    .option norvc
+    .option norelax
+    .align 8
+            ecall
+            j main
+    ",
+    );
 }
 
 #[panic_handler]

@@ -162,6 +162,7 @@ impl Default for FbVarScreenInfo {
 /// Fixed screen information structure (Linux fb_fix_screeninfo compatible)
 #[repr(C)]
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct FbFixScreenInfo {
     /// Identification string
     pub id: [u8; 16],
@@ -195,27 +196,6 @@ pub struct FbFixScreenInfo {
     pub reserved: [u16; 2],
 }
 
-impl Default for FbFixScreenInfo {
-    fn default() -> Self {
-        Self {
-            id: [0; 16],
-            smem_start: 0,
-            smem_len: 0,
-            type_: 0,
-            type_aux: 0,
-            visual: 0,
-            xpanstep: 0,
-            ypanstep: 0,
-            ywrapstep: 0,
-            line_length: 0,
-            mmio_start: 0,
-            mmio_len: 0,
-            accel: 0,
-            capabilities: 0,
-            reserved: [0; 2],
-        }
-    }
-}
 
 /// Framebuffer device wrapper
 ///
@@ -245,7 +225,7 @@ impl Framebuffer {
         };
 
         // Attempt to set up memory mapping
-        if let Err(_) = framebuffer.setup_mmap() {
+        if framebuffer.setup_mmap().is_err() {
             // If mmap fails, continue with traditional file I/O
             // This provides backward compatibility
         }

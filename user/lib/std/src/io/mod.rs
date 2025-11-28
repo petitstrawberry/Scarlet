@@ -332,10 +332,7 @@ impl Stderr {
 pub fn putchar(c: char) -> usize {
     let mut buf = [0u8; 4];
     let char_str = c.encode_utf8(&mut buf);
-    match stdout().write(char_str.as_bytes()) {
-        Ok(bytes) => bytes,
-        Err(_) => 0,
-    }
+    stdout().write(char_str.as_bytes()).unwrap_or_default()
 }
 
 /// Reads a single character from the console
@@ -369,10 +366,7 @@ pub fn get_char() -> char {
 /// # Returns
 /// The number of characters output
 pub fn puts(s: &str) -> usize {
-    match stdout().write(s.as_bytes()) {
-        Ok(bytes) => bytes,
-        Err(_) => 0,
-    }
+    stdout().write(s.as_bytes()).unwrap_or_default()
 }
 
 /// Print implementation for Scarlet

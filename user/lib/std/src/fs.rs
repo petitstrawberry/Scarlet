@@ -414,12 +414,12 @@ impl File {
     /// Handle instance
     pub fn into_handle(self) -> Handle {
         // Prevent the File's Drop from running
-        let handle = unsafe {
+        
+        unsafe {
             let handle_ptr = &self.handle as *const Handle;
             core::mem::forget(self);
             core::ptr::read(handle_ptr)
-        };
-        handle
+        }
     }
 
     /// Clone the underlying handle via duplication
@@ -498,7 +498,7 @@ impl File {
         }
 
         // Parse the directory entry
-        if let Some(entry) = parse_dir_entry(&buf[..bytes_read as usize]) {
+        if let Some(entry) = parse_dir_entry(&buf[..bytes_read]) {
             Ok(Some(DirectoryEntry::from_raw(entry)))
         } else {
             Err(Error::new(
