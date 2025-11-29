@@ -455,9 +455,7 @@ pub fn sys_mknod(
 ) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    let name_ptr = match task
-        .vm_manager
-        .translate_vaddr(trapframe.get_arg(0)) {
+    let name_ptr = match task.vm_manager.translate_vaddr(trapframe.get_arg(0)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX, // Invalid address
     };

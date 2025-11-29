@@ -396,7 +396,10 @@ impl AbiModule for OctoxRiscv64Abi {
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
             Err(e) => {
-                crate::println!("Failed to create /scarlet directory for Octox: {}", e.message);
+                crate::println!(
+                    "Failed to create /scarlet directory for Octox: {}",
+                    e.message
+                );
                 return Err("Failed to create /scarlet directory for Octox");
             }
         }
