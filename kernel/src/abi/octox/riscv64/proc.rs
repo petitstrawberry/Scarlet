@@ -142,7 +142,9 @@ pub fn sys_sbrk(
     let increment = trapframe.get_arg(0);
     let brk = task.get_brk();
     trapframe.increment_pc_next(task);
-    match task.set_brk(unsafe { brk.unchecked_add(increment) }) {
+    // Use wrapping_add for safer arithmetic (consistent with xv6 behavior)
+    // The set_brk call will validate the new address
+    match task.set_brk(brk.wrapping_add(increment)) {
         Ok(_) => brk,
         Err(_) => usize::MAX, /* -1 */
     }

@@ -455,12 +455,20 @@ pub fn sys_mknod(
 ) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    let name_ptr = task
+    let name_ptr = match task
         .vm_manager
-        .translate_vaddr(trapframe.get_arg(0))
-        .unwrap() as *const u8;
-    let name = get_path_str_v2(name_ptr).unwrap();
-    let path = to_absolute_path_v2(&task, &name).unwrap();
+        .translate_vaddr(trapframe.get_arg(0)) {
+        Some(ptr) => ptr as *const u8,
+        None => return usize::MAX, // Invalid address
+    };
+    let name = match get_path_str_v2(name_ptr) {
+        Ok(n) => n,
+        Err(_) => return usize::MAX, // Invalid path string
+    };
+    let path = match to_absolute_path_v2(&task, &name) {
+        Ok(p) => p,
+        Err(_) => return usize::MAX, // Path conversion error
+    };
 
     let major = trapframe.get_arg(1) as u32;
     let minor = trapframe.get_arg(2) as u32;
@@ -472,7 +480,10 @@ pub fn sys_mknod(
                 crate::abi::octox::drivers::console::ConsoleDevice::new(0, "console"),
             )));
 
-            let vfs = task.vfs.as_mut().unwrap();
+            let vfs = match task.vfs.as_mut() {
+                Some(v) => v,
+                None => return usize::MAX, // VFS not initialized
+            };
             let _res = vfs.create_file(
                 &path,
                 FileType::CharDevice(DeviceFileInfo {
@@ -480,7 +491,6 @@ pub fn sys_mknod(
                     device_type: crate::device::DeviceType::Char,
                 }),
             );
-            // crate::println!("Created console device at {}", path);
         }
         _ => {}
     }
@@ -748,7 +758,6 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
 /// Helper function to replace the missing get_path_str function
 /// TODO: This should be moved to a shared helper when VFS v2 provides public API
 fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
-    const MAX_PATH_LENGTH: usize = 128;
     cstring_to_string(ptr, MAX_PATH_LENGTH)
         .map(|(s, _)| s)
         .map_err(|_| ())
