@@ -21,6 +21,7 @@ use hashbrown::HashMap;
 use spin::Mutex;
 
 pub mod linux;
+pub mod octox;
 pub mod scarlet;
 pub mod xv6;
 
