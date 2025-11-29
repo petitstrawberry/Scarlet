@@ -41,6 +41,12 @@ RUN git clone https://github.com/mit-pdos/xv6-riscv.git /opt/xv6-riscv && \
     git checkout 2a39c5af63906b3dbd0db58b9f6846ad70f4315d && \
     make fs.img
 
+# Build octox and the user programs
+RUN git clone https://github.com/o8vm/octox.git /opt/octox && \
+    cd /opt/octox && \
+    git checkout fd1dc60d89fcd1e787bccaf1af85c3f48552c33d && \
+    cargo build --target riscv64gc-unknown-none-elf
+
 # Install dependencies for Buildroot
 RUN apt update && \
     apt install -y libncurses5-dev wget unzip rsync
