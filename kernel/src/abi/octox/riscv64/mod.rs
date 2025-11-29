@@ -1,3 +1,25 @@
+//! octox-riscv64 ABI Module
+//!
+//! This module provides binary compatibility with the octox OS (https://github.com/o8vm/octox)
+//! for the RISC-V 64-bit architecture. Octox is a Rust-based OS that uses an xv6-compatible
+//! syscall interface with additional extensions (dup2, fcntl).
+//!
+//! ## Syscall Interface
+//!
+//! The octox ABI supports the following syscalls:
+//! - Process management: fork(1), exit(2), wait(3), getpid(11), sbrk(12), sleep(13), kill(6), uptime(14)
+//! - File operations: open(15), close(21), read(5), write(16), dup(10), dup2(22), fstat(8), fcntl(23)
+//! - File system: link(19), unlink(18), mkdir(20), mknod(17), chdir(9), exec(7)
+//! - IPC: pipe(4)
+//!
+//! ## Binary Detection
+//!
+//! Octox binaries are detected by:
+//! - ELF magic bytes
+//! - File path containing "octox" or ending with ".octox"
+//! - ABI inheritance bonus when current task uses octox ABI
+//!
+
 #[macro_use]
 mod macros;
 mod file;
