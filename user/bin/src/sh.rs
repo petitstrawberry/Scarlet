@@ -10,6 +10,8 @@ use std::{
     task::{execve, exit, fork, waitpid},
     vec::Vec,
 };
+use std::handle::Handle;
+use std::fs::OpenOptions;
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
@@ -97,23 +99,114 @@ fn find_executable_in_path(program: &str) -> Option<String> {
 
 /// Execute a command with PATH resolution
 fn execute_command(program: &str, args: &[String]) -> i32 {
-    // First check if it's a built-in command
-    if let Some(exit_code) = handle_builtin_command(program, args) {
-        return exit_code;
+    // First, scan args for redirection tokens and prepare file handles.
+    let mut cleaned_args: Vec<String> = Vec::new();
+    let mut redirs: Vec<(Handle, u32)> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == ">" || a == ">>" {
+            // output redirection
+            if i + 1 >= args.len() {
+                println!("sh: syntax error near unexpected token `newline'");
+                return 2;
+            }
+            let filename = &args[i + 1];
+            // Open the file with appropriate flags
+            let mut opts = OpenOptions::new();
+            opts.write(true).create(true);
+            if a == ">" {
+                opts.truncate(true);
+            } else {
+                opts.append(true);
+            }
+
+            match opts.open(filename.as_str()) {
+                Ok(f) => {
+                    let h = f.into_handle();
+                    // stdout role = 3
+                    redirs.push((h, 3));
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            }
+            i += 2;
+        } else if a == "<" {
+            // input redirection
+            if i + 1 >= args.len() {
+                println!("sh: syntax error near unexpected token `newline'");
+                return 2;
+            }
+            let filename = &args[i + 1];
+            match std::fs::File::open(filename.as_str()) {
+                Ok(f) => {
+                    let h = f.into_handle();
+                    // stdin role = 2
+                    redirs.push((h, 2));
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            }
+            i += 2;
+        } else {
+            cleaned_args.push(a.clone());
+            i += 1;
+        }
     }
 
-    let executable_path = match find_executable_in_path(program) {
-        Some(path) => path,
-        None => {
-            println!("sh: {}: command not found", program);
-            return 127; // Standard exit code for "command not found"
-        }
+    // If no program specified after cleaning, nothing to do
+    if cleaned_args.is_empty() {
+        return 0;
+    }
+
+    // DEBUG: show what we're about to run and any redirections
+    crate::println!("sh: execute_command: program='{}' args={:?} redirs_count={}", program, cleaned_args, redirs.len());
+
+    // First check if it's a built-in command
+    let is_builtin = match program {
+        "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." => true,
+        _ => false,
     };
 
+    // If it's a builtin and there are no redirections, run it directly in the parent
+    if is_builtin && redirs.is_empty() {
+        if let Some(code) = handle_builtin_command(program, &cleaned_args) {
+            return code;
+        }
+        return 0;
+    }
+
+    // Locate external executable (only needed for non-builtin or builtin-with-redir)
+    let executable_path = if !is_builtin {
+        match find_executable_in_path(program) {
+            Some(path) => path,
+            None => {
+                println!("sh: {}: command not found", program);
+                return 127; // Standard exit code for "command not found"
+            }
+        }
+    } else {
+        // builtin with redirection: no external path required, keep empty
+        String::new()
+    };
     match fork() {
         0 => {
+            crate::println!("sh: child pid=0 for '{}'", program);
+            // Child: apply redirections and then execute builtin or external
+            // Set roles for each handle
+            for (h, role) in redirs {
+                // h is moved here; set role. Ignore errors for now
+                let _ = h.set_role(role);
+                crate::println!("sh: child set_role={} on redirected handle", role);
+            }
+
             // Convert args to &[&str] for execve
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let arg_refs: Vec<&str> = cleaned_args.iter().map(|s| s.as_str()).collect();
 
             // Get all environment variables and convert them to the format needed for execve
             let env_vars = std::env::vars();
@@ -122,6 +215,15 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
                 .collect();
             let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
 
+            // If builtin, execute in child
+            if is_builtin {
+                if let Some(code) = handle_builtin_command(program, &cleaned_args) {
+                    crate::println!("sh: child builtin '{}' exited with {}", program, code);
+                    exit(code);
+                }
+            }
+
+            crate::println!("sh: child calling execve('{}')", executable_path);
             if execve(&executable_path, &arg_refs, &env_refs) != 0 {
                 println!("sh: {}: execution failed", executable_path);
             }
@@ -132,7 +234,15 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             1
         }
         pid => {
+            crate::println!("sh: parent forked child pid={}", pid);
+            // Parent: close our copies of the redirected handles so child solely owns them
+            for (h, _role) in redirs {
+                let _ = h.close();
+            }
+
+            crate::println!("sh: parent waiting for pid={}", pid);
             let (_, status) = waitpid(pid, 0);
+            crate::println!("sh: parent got status {} for pid={}", status, pid);
             status
         }
     }
