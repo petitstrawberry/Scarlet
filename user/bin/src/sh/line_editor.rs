@@ -331,7 +331,8 @@ impl LineEditor {
                 EditorAction::Continue
             }
             '\t' => {
-                self.insert_char(' ');  // Convert tab to space for now
+                // Tab completion
+                self.handle_tab_completion();
                 EditorAction::Continue
             }
             c if c >= ' ' && c <= '~' => {
@@ -475,6 +476,172 @@ impl LineEditor {
         // Move cursor to correct position
         let cursor_col = self.prompt.len() + self.cursor;
         print!("\r\x1b[{}G", cursor_col + 1);
+    }
+
+    /// Handle tab completion
+    fn handle_tab_completion(&mut self) {
+        // Get the current line as a string
+        let line: String = self.buffer.iter().collect();
+        let words: Vec<&str> = line.split_whitespace().collect();
+
+        // Find the word at cursor position
+        let (word_start, word_to_complete) = self.get_word_at_cursor();
+
+        if words.is_empty() || (words.len() == 1 && !line.ends_with(' ') && word_start == 0) {
+            // First word - complete command
+            self.complete_command(word_to_complete, word_start);
+        } else {
+            // Other words - complete filename
+            self.complete_filename(word_to_complete, word_start);
+        }
+    }
+
+    /// Get the word at the cursor position
+    fn get_word_at_cursor(&self) -> (usize, String) {
+        let line: String = self.buffer.iter().collect();
+        let bytes = line.as_bytes();
+
+        // Find word boundaries
+        let mut start = self.cursor;
+        while start > 0 && bytes[start - 1] != b' ' && bytes[start - 1] != b'\t' {
+            start -= 1;
+        }
+
+        let mut end = self.cursor;
+        while end < bytes.len() && bytes[end] != b' ' && bytes[end] != b'\t' {
+            end += 1;
+        }
+
+        let word = String::from(&line[start..end]);
+        (start, word)
+    }
+
+    /// Complete command name from PATH
+    fn complete_command(&mut self, prefix: String, word_start: usize) {
+        let mut matches = Vec::new();
+
+        // Get PATH and search for matching executables
+        if let Some(path) = std::env::var("PATH") {
+            for dir in path.split(':') {
+                if let Ok(entries) = std::fs::list_directory(dir) {
+                    for entry in entries {
+                        let name = String::from(&entry.name[..]);
+                        if name.starts_with(&prefix) {
+                            matches.push(name);
+                        }
+                    }
+                }
+            }
+        }
+
+        matches.sort();
+        matches.dedup();
+
+        self.apply_completion(matches, prefix.len(), word_start);
+    }
+
+    /// Complete filename from current directory
+    fn complete_filename(&mut self, prefix: String, word_start: usize) {
+        let mut matches = Vec::new();
+
+        // Read current directory
+        if let Ok(entries) = std::fs::list_directory(".") {
+            for entry in entries {
+                let name = String::from(&entry.name[..]);
+                if name.starts_with(&prefix) {
+                    // Add trailing / for directories
+                    let mut completion = name;
+                    if entry.file_type == 1 {  // Directory
+                        completion.push('/');
+                    }
+                    matches.push(completion);
+                }
+            }
+        }
+
+        matches.sort();
+
+        self.apply_completion(matches, prefix.len(), word_start);
+    }
+
+    /// Apply completion based on matches
+    fn apply_completion(&mut self, matches: Vec<String>, prefix_len: usize, word_start: usize) {
+        if matches.is_empty() {
+            // No matches - beep or do nothing
+            return;
+        }
+
+        if matches.len() == 1 {
+            // Single match - complete it
+            let completion = &matches[0][prefix_len..];
+
+            // Remove old word and insert new completion
+            for _ in 0..prefix_len {
+                if word_start < self.buffer.len() {
+                    self.buffer.remove(word_start);
+                }
+            }
+
+            // Insert completion
+            let completion_chars: Vec<char> = matches[0].chars().collect();
+            for (i, ch) in completion_chars.iter().enumerate() {
+                self.buffer.insert(word_start + i, *ch);
+            }
+
+            self.cursor = word_start + completion_chars.len();
+
+            // Redraw line
+            self.redraw_line();
+        } else {
+            // Multiple matches - show them
+            print!("\n");
+            for (i, m) in matches.iter().enumerate() {
+                print!("{}  ", m);
+                if (i + 1) % 5 == 0 {
+                    print!("\n");
+                }
+            }
+            if matches.len() % 5 != 0 {
+                print!("\n");
+            }
+
+            // Find common prefix
+            let common_prefix = self.find_common_prefix(&matches);
+            if common_prefix.len() > prefix_len {
+                // Complete to common prefix
+                let completion = &common_prefix[prefix_len..];
+                for ch in completion.chars() {
+                    self.buffer.insert(self.cursor, ch);
+                    self.cursor += 1;
+                }
+            }
+
+            // Redraw prompt and line
+            print!("{}", self.prompt);
+            for c in &self.buffer {
+                print!("{}", c);
+            }
+        }
+    }
+
+    /// Find common prefix of strings
+    fn find_common_prefix(&self, strings: &[String]) -> String {
+        if strings.is_empty() {
+            return String::new();
+        }
+
+        let first = &strings[0];
+        let mut prefix_len = first.len();
+
+        for s in &strings[1..] {
+            let mut i = 0;
+            while i < prefix_len && i < s.len() && first.chars().nth(i) == s.chars().nth(i) {
+                i += 1;
+            }
+            prefix_len = i;
+        }
+
+        first.chars().take(prefix_len).collect()
     }
 
     /// Replace the buffer with new content (for history navigation)
