@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use core::arch::naked_asm;
 
 use crate::arch::Trapframe;
-use crate::mem::page::{Page, allocate_boxed_pages};
+use crate::mem::page::{Page, allocate_contiguous_boxed_pages};
 use crate::vm::vmem::MemoryArea;
 
 /// Kernel context for RISC-V 64-bit
@@ -37,7 +37,7 @@ impl KernelContext {
     pub fn new() -> Self {
         // Allocate page-aligned contiguous pages for the kernel stack
         let num_pages = crate::environment::TASK_KERNEL_STACK_SIZE / crate::environment::PAGE_SIZE;
-        let kernel_stack = allocate_boxed_pages(num_pages);
+        let kernel_stack = allocate_contiguous_boxed_pages(num_pages);
         let stack_top = kernel_stack.as_ptr() as u64
             + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
 

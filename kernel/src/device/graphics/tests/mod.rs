@@ -74,7 +74,7 @@ fn test_framebuffer_drawing_operations() {
     // Allocate test framebuffer memory
     let fb_size = config.size();
     let fb_pages = (fb_size + 4095) / 4096;
-    let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+    let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
     assert_ne!(fb_addr, 0);
     device.set_framebuffer_address(fb_addr);
 
@@ -198,7 +198,7 @@ fn test_pixel_format_operations() {
 
         // Allocate and set framebuffer
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         device.set_framebuffer_address(fb_addr);
 
         // Test pixel writing based on format

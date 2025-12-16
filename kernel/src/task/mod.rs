@@ -28,7 +28,7 @@ use crate::{
     },
     fs::VfsManager,
     ipc::{EventContent, event::ProcessControlType},
-    mem::page::{Page, allocate_raw_pages, free_boxed_page},
+    mem::page::{Page, allocate_page, free_boxed_page},
     object::handle::HandleTable,
     sched::scheduler::{Scheduler, get_scheduler},
     timer::{TimerHandler, add_timer, get_tick},
@@ -541,33 +541,42 @@ impl Task {
             return Err("Address is not page aligned");
         }
 
-        let pages = allocate_raw_pages(num_of_pages);
-        let size = num_of_pages * PAGE_SIZE;
-        let paddr = pages as usize;
-        let mmap = VirtualMemoryMap {
-            pmarea: MemoryArea {
-                start: paddr,
-                end: paddr + size - 1,
-            },
-            vmarea: MemoryArea {
-                start: vaddr,
-                end: vaddr + size - 1,
-            },
-            permissions,
-            is_shared: false, // Default to not shared for task-allocated pages
-            owner: None,
-        };
-        self.vm_manager
-            .add_memory_map(mmap.clone())
-            .map_err(|e| panic!("Failed to add memory map: {}", e))?;
-
+        // Allocate each page independently so they can be freed individually
+        let mut first_map: Option<VirtualMemoryMap> = None;
         for i in 0..num_of_pages {
-            let page = unsafe { Box::from_raw(pages.wrapping_add(i)) };
-            let vaddr = mmap.vmarea.start + i * PAGE_SIZE;
-            self.add_managed_page(ManagedPage { vaddr, page });
+            let page = allocate_page();
+            let page_vaddr = vaddr + i * PAGE_SIZE;
+            let paddr = page.as_ref() as *const Page as usize;
+
+            // Each page gets its own VMA (1 page = 1 VMA)
+            let mmap = VirtualMemoryMap {
+                pmarea: MemoryArea {
+                    start: paddr,
+                    end: paddr + PAGE_SIZE - 1,
+                },
+                vmarea: MemoryArea {
+                    start: page_vaddr,
+                    end: page_vaddr + PAGE_SIZE - 1,
+                },
+                permissions,
+                is_shared: false,
+                owner: None,
+            };
+            self.vm_manager
+                .add_memory_map(mmap.clone())
+                .map_err(|e| panic!("Failed to add memory map: {}", e))?;
+
+            if first_map.is_none() {
+                first_map = Some(mmap);
+            }
+
+            self.add_managed_page(ManagedPage {
+                vaddr: page_vaddr,
+                page,
+            });
         }
 
-        Ok(mmap)
+        first_map.ok_or("Failed to allocate pages")
     }
 
     /// Free pages for the task.
@@ -576,77 +585,29 @@ impl Task {
     /// * `vaddr` - The virtual address to free pages (NOTE: The address must be page aligned)
     /// * `num_of_pages` - The number of pages to free
     pub fn free_pages(&mut self, vaddr: usize, num_of_pages: usize) {
-        let page = vaddr / PAGE_SIZE;
+        let asid = self.vm_manager.get_asid();
+
+        // Collect pages to free first, then unmap
+        let mut pages_to_free = Vec::new();
+
         for p in 0..num_of_pages {
-            let vaddr = (page + p) * PAGE_SIZE;
-            match self.vm_manager.remove_memory_map_by_addr(vaddr) {
-                Some(mmap) => {
-                    if p == 0 && mmap.vmarea.start < vaddr {
-                        /* Re add the first part of the memory map */
-                        let size = vaddr - mmap.vmarea.start;
-                        let paddr = mmap.pmarea.start;
-                        let mmap1 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: mmap.vmarea.start,
-                                end: vaddr - 1,
-                            },
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap1)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap1.vmarea.start, mmap1.vmarea.end);
-                    }
-                    if p == num_of_pages - 1 && mmap.vmarea.end > vaddr + PAGE_SIZE - 1 {
-                        /* Re add the second part of the memory map */
-                        let size = mmap.vmarea.end - (vaddr + PAGE_SIZE) + 1;
-                        let paddr = mmap.pmarea.start + (vaddr + PAGE_SIZE - mmap.vmarea.start);
-                        let mmap2 = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + size - 1,
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr + PAGE_SIZE,
-                                end: mmap.vmarea.end,
-                            },
-                            permissions: mmap.permissions,
-                            is_shared: mmap.is_shared,
-                            owner: mmap.owner.clone(),
-                        };
-                        self.vm_manager
-                            .add_memory_map(mmap2)
-                            .map_err(|e| panic!("Failed to add memory map: {}", e))
-                            .unwrap();
-                        // println!("Removed map : {:#x} - {:#x}", mmap.vmarea.start, mmap.vmarea.end);
-                        // println!("Re added map: {:#x} - {:#x}", mmap2.vmarea.start, mmap2.vmarea.end);
-                    }
-                    // let offset = vaddr - mmap.vmarea.start;
-                    // free_raw_pages((mmap.pmarea.start + offset) as *mut Page, 1);
+            let page_vaddr = vaddr + p * PAGE_SIZE;
 
-                    if let Some(free_page) = self.remove_managed_page(vaddr) {
-                        free_boxed_page(free_page.page);
-                    }
+            // Remove the VMA for this page
+            self.vm_manager.remove_memory_map_by_addr(page_vaddr);
 
-                    // println!("Freed pages : {:#x} - {:#x}", vaddr, vaddr + PAGE_SIZE - 1);
-                }
-                None => {}
+            // Remove and free the managed page
+            if let Some(free_page) = self.remove_managed_page(page_vaddr) {
+                pages_to_free.push((page_vaddr, free_page.page));
             }
         }
-        /* Unmap pages */
-        let asid = self.vm_manager.get_asid();
-        let root_pagetable = self.vm_manager.get_root_page_table().unwrap();
-        for p in 0..num_of_pages {
-            let vaddr = (page + p) * PAGE_SIZE;
-            root_pagetable.unmap(asid, vaddr);
+
+        // Now unmap from page table (separate loop to avoid borrow conflict)
+        if let Some(root_pagetable) = self.vm_manager.get_root_page_table() {
+            for (page_vaddr, page) in pages_to_free {
+                root_pagetable.unmap(asid, page_vaddr);
+                free_boxed_page(page);
+            }
         }
     }
 
@@ -796,7 +757,7 @@ impl Task {
     ///
     /// # Note
     /// Pages added as ManagedPage of the Task will be automatically freed when the Task is terminated.
-    /// So, you must not free them by calling free_raw_pages/free_boxed_pages manually.
+    /// So, you must not free them by calling contiguous page helpers manually.
     ///
     pub fn add_managed_page(&mut self, pages: ManagedPage) {
         self.managed_pages.push(pages);
@@ -810,6 +771,7 @@ impl Task {
     /// # Returns
     /// The managed page if found, otherwise None
     ///
+    #[allow(dead_code)]
     fn get_managed_page(&self, vaddr: usize) -> Option<&ManagedPage> {
         for page in &self.managed_pages {
             if page.vaddr == vaddr {
@@ -1029,44 +991,48 @@ impl Task {
                     } else {
                         // Private memory regions: allocate new pages and copy contents
                         let permissions = mmap.permissions;
-                        let pages = allocate_raw_pages(num_pages);
-                        let size = num_pages * PAGE_SIZE;
-                        let paddr = pages as usize;
-                        let new_mmap = VirtualMemoryMap {
-                            pmarea: MemoryArea {
-                                start: paddr,
-                                end: paddr + (size - 1),
-                            },
-                            vmarea: MemoryArea {
-                                start: vaddr,
-                                end: vaddr + (size - 1),
-                            },
-                            permissions,
-                            is_shared: false,
-                            owner: mmap.owner.clone(),
-                        };
 
-                        // Copy original contents page-by-page
+                        // Allocate each page independently (1 page = 1 VMA)
                         for i in 0..num_pages {
+                            let page = allocate_page();
+                            let page_vaddr = vaddr + i * PAGE_SIZE;
+                            let paddr = page.as_ref() as *const Page as usize;
+
+                            // Copy original contents
                             let src_page_addr = mmap.pmarea.start + i * PAGE_SIZE;
-                            let dst_page_addr = new_mmap.pmarea.start + i * PAGE_SIZE;
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     src_page_addr as *const u8,
-                                    dst_page_addr as *mut u8,
+                                    paddr as *mut u8,
                                     PAGE_SIZE,
                                 );
                             }
+
+                            // Each page gets its own VMA
+                            let new_mmap = VirtualMemoryMap {
+                                pmarea: MemoryArea {
+                                    start: paddr,
+                                    end: paddr + PAGE_SIZE - 1,
+                                },
+                                vmarea: MemoryArea {
+                                    start: page_vaddr,
+                                    end: page_vaddr + PAGE_SIZE - 1,
+                                },
+                                permissions,
+                                is_shared: false,
+                                owner: mmap.owner.clone(),
+                            };
+
+                            child
+                                .vm_manager
+                                .add_memory_map(new_mmap)
+                                .map_err(|_| "Failed to add memory map to child task")?;
+
                             child.add_managed_page(ManagedPage {
-                                vaddr: new_mmap.vmarea.start + i * PAGE_SIZE,
-                                page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+                                vaddr: page_vaddr,
+                                page,
                             });
                         }
-
-                        child
-                            .vm_manager
-                            .add_memory_map(new_mmap)
-                            .map_err(|_| "Failed to add memory map to child task")?;
                     }
                 }
                 Ok::<(), &'static str>(())
@@ -1196,17 +1162,20 @@ impl Task {
             return Err(WaitError::NoSuchChild("No such child task".to_string()));
         }
 
-        if let Some(child_task) = get_scheduler().get_task_by_id(child_id) {
-            if child_task.get_state() == TaskState::Zombie {
-                let status = child_task.get_exit_status().unwrap_or(-1);
-                child_task.set_state(TaskState::Terminated);
-                self.remove_child(child_id);
-                Ok(status)
-            } else {
-                Err(WaitError::ChildNotExited(
+        let scheduler = get_scheduler();
+        if let Some(child_task) = scheduler.get_task_by_id(child_id) {
+            let status = child_task.get_exit_status().unwrap_or(-1);
+            if child_task.get_state() != TaskState::Zombie {
+                return Err(WaitError::ChildNotExited(
                     "Child has not exited or is not a zombie".to_string(),
-                ))
+                ));
             }
+            // Ensure the child will be removed when the scheduler sees it again.
+            child_task.set_state(TaskState::Terminated);
+            // Drop child resources now (vm_manager, managed_pages, etc.).
+            self.remove_child(child_id);
+            scheduler.cleanup_zombie_task(child_id);
+            Ok(status)
         } else {
             Err(WaitError::ChildTaskNotFound(
                 "Child task not found".to_string(),
@@ -1634,12 +1603,18 @@ mod tests {
         // Allocate some memory pages for the parent task
         let vaddr = 0x1000;
         let num_pages = 2;
-        let mmap = parent_task.allocate_data_pages(vaddr, num_pages).unwrap();
+        let _mmap = parent_task.allocate_data_pages(vaddr, num_pages).unwrap();
+
+        // Get the first page's physical address for testing
+        let first_page_paddr = parent_task
+            .vm_manager
+            .translate_vaddr(vaddr)
+            .expect("Failed to translate vaddr");
 
         // Write test data to parent's memory
         let test_data: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
         unsafe {
-            let dst_ptr = mmap.pmarea.start as *mut u8;
+            let dst_ptr = first_page_paddr as *mut u8;
             core::ptr::copy_nonoverlapping(test_data.as_ptr(), dst_ptr, test_data.len());
         }
 
@@ -1669,47 +1644,34 @@ mod tests {
         assert_eq!(child_task.data_size, parent_task.data_size);
         assert_eq!(child_task.text_size, parent_task.text_size);
 
-        // Find the corresponding memory map in child that matches our test allocation
-        let child_mmap = {
+        // Find the corresponding memory map in child that matches the first page
+        // (with new design, each page has its own VMA)
+        let child_first_page_mmap = {
             let mut found = None;
             child_task.vm_manager.with_memmaps(|mm| {
                 for m in mm.values() {
                     if m.vmarea.start == vaddr
-                        && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1
+                        && m.vmarea.end == vaddr + crate::environment::PAGE_SIZE - 1
                     {
                         found = Some(m.clone());
                         break;
                     }
                 }
             });
-            found.expect("Test memory map not found in child task")
+            found.expect("First page memory map not found in child task")
         };
 
-        // Verify that our specific memory region exists in both parent and child
-        let parent_test_mmap = {
-            let mut found = None;
-            parent_task.vm_manager.with_memmaps(|mm| {
-                for m in mm.values() {
-                    if m.vmarea.start == vaddr
-                        && m.vmarea.end == vaddr + num_pages * crate::environment::PAGE_SIZE - 1
-                    {
-                        found = Some(m.clone());
-                        break;
-                    }
-                }
-            });
-            found.expect("Test memory map not found in parent task")
-        };
-
-        // Verify the virtual memory ranges match
-        assert_eq!(child_mmap.vmarea.start, parent_test_mmap.vmarea.start);
-        assert_eq!(child_mmap.vmarea.end, parent_test_mmap.vmarea.end);
-        assert_eq!(child_mmap.permissions, parent_test_mmap.permissions);
+        // Verify the virtual memory ranges match for the first page
+        assert_eq!(child_first_page_mmap.vmarea.start, vaddr);
+        assert_eq!(
+            child_first_page_mmap.vmarea.end,
+            vaddr + crate::environment::PAGE_SIZE - 1
+        );
 
         // Verify the data was copied correctly
         unsafe {
-            let parent_ptr = mmap.pmarea.start as *const u8;
-            let child_ptr = child_mmap.pmarea.start as *const u8;
+            let parent_ptr = first_page_paddr as *const u8;
+            let child_ptr = child_first_page_mmap.pmarea.start as *const u8;
 
             // Check that physical addresses are different (separate memory)
             assert_ne!(
@@ -1727,11 +1689,11 @@ mod tests {
 
         // Verify that modifying parent's memory doesn't affect child's memory
         unsafe {
-            let parent_ptr = mmap.pmarea.start as *mut u8;
+            let parent_ptr = first_page_paddr as *mut u8;
             let original_value = *parent_ptr;
             *parent_ptr = 0xFF; // Modify first byte in parent
 
-            let child_ptr = child_mmap.pmarea.start as *const u8;
+            let child_ptr = child_first_page_mmap.pmarea.start as *const u8;
             let child_first_byte = *child_ptr;
 
             // Child's first byte should still be the original value
@@ -1762,12 +1724,12 @@ mod tests {
         let mut parent_task = super::new_user_task("ParentWithStack".to_string(), 0);
         parent_task.init();
 
-        // Find the stack memory map in parent
+        // Find the last stack page in parent (the one ending at USER_STACK_END - 1)
+        // With the new design, each stack page has its own VMA
         let stack_mmap = {
             let mut found = None;
             parent_task.vm_manager.with_memmaps(|mm| {
                 for mmap in mm.values() {
-                    // Stack should be near USER_STACK_END and have stack permissions
                     use crate::vm::vmem::VirtualMemoryRegion;
                     if mmap.vmarea.end == crate::environment::USER_STACK_END - 1
                         && mmap.permissions == VirtualMemoryRegion::Stack.default_permissions()
@@ -1777,16 +1739,17 @@ mod tests {
                     }
                 }
             });
-            found.expect("Stack memory map not found in parent task")
+            found.expect("Stack top page not found in parent task")
         };
 
-        // Write test data to parent's stack
+        // Write test data to parent's stack (in the top page)
         let stack_test_data: [u8; 16] = [
             0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
             0x99, 0x00,
         ];
         unsafe {
-            let stack_ptr = (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            // Write at the beginning of the top stack page
+            let stack_ptr = stack_mmap.pmarea.start as *mut u8;
             core::ptr::copy_nonoverlapping(
                 stack_test_data.as_ptr(),
                 stack_ptr,
@@ -1797,7 +1760,7 @@ mod tests {
         // Clone the parent task
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
-        // Find the corresponding stack memory map in child
+        // Find the corresponding stack page in child
         let child_stack_mmap = {
             let mut found = None;
             child_task.vm_manager.with_memmaps(|mm| {
@@ -1812,15 +1775,13 @@ mod tests {
                     }
                 }
             });
-            found.expect("Stack memory map not found in child task")
+            found.expect("Stack top page not found in child task")
         };
 
         // Verify that stack content was copied correctly
         unsafe {
-            let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
-            let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+            let parent_stack_ptr = stack_mmap.pmarea.start as *const u8;
+            let child_stack_ptr = child_stack_mmap.pmarea.start as *const u8;
 
             // Check that physical addresses are different (separate memory)
             assert_ne!(
@@ -1842,13 +1803,11 @@ mod tests {
 
         // Verify that modifying parent's stack doesn't affect child's stack
         unsafe {
-            let parent_stack_ptr =
-                (stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *mut u8;
+            let parent_stack_ptr = stack_mmap.pmarea.start as *mut u8;
             let original_value = *parent_stack_ptr;
             *parent_stack_ptr = 0xFE; // Modify first byte in parent stack
 
-            let child_stack_ptr =
-                (child_stack_mmap.pmarea.start + crate::environment::PAGE_SIZE) as *const u8;
+            let child_stack_ptr = child_stack_mmap.pmarea.start as *const u8;
             let child_first_byte = *child_stack_ptr;
 
             // Child's first byte should still be the original value
@@ -1868,7 +1827,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_shared_memory() {
         use crate::environment::PAGE_SIZE;
-        use crate::mem::page::allocate_raw_pages;
+        use crate::mem::page::allocate_contiguous_raw_pages;
         use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
         let mut parent_task = super::new_user_task("ParentWithShared".to_string(), 0);
@@ -1877,7 +1836,7 @@ mod tests {
         // Manually add a shared memory region to test sharing behavior
         let shared_vaddr = 0x5000;
         let num_pages = 1;
-        let pages = allocate_raw_pages(num_pages);
+        let pages = allocate_contiguous_raw_pages(num_pages);
         let paddr = pages as usize;
 
         let shared_mmap = VirtualMemoryMap {

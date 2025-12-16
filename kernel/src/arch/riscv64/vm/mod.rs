@@ -16,7 +16,7 @@ use mmu::PageTable;
 use spin::Once;
 use spin::RwLock;
 
-use crate::mem::page::allocate_raw_pages;
+use crate::mem::page::allocate_contiguous_raw_pages;
 
 const NUM_OF_ASID: usize = u16::MAX as usize + 1; // Maximum ASID value
 static ASID_BITMAP_TABLES: Once<RwLock<Box<[u64]>>> = Once::new();
@@ -46,7 +46,7 @@ pub fn get_pagetable(ptr: *mut PageTable) -> Option<&'static mut PageTable> {
 }
 
 fn new_boxed_pagetable() -> Box<PageTable> {
-    let ptr = allocate_raw_pages(1) as *mut PageTable;
+    let ptr = allocate_contiguous_raw_pages(1) as *mut PageTable;
     if ptr.is_null() {
         panic!("Failed to allocate a new page table");
     }
