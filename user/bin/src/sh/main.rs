@@ -3,15 +3,23 @@
 
 extern crate scarlet_std as std;
 
-use std::io::Read;
 use std::{
     format, print, println,
     string::String,
-    task::{execve, exit, fork, waitpid},
+    task::{execve, exit, fork, waitpid, pipe},
     vec::Vec,
+    mem,
 };
 use std::handle::Handle;
 use std::fs::OpenOptions;
+use std::io::Read;
+
+// New modules for enhanced shell
+mod line_editor;
+mod history;
+mod parser;
+
+use parser::{Pipeline, Command, RedirectType};
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
@@ -21,7 +29,7 @@ fn parse_command(input: &str) -> (String, Vec<String>) {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = expanded_input.chars();
+    let chars = expanded_input.chars();
 
     for c in chars {
         match c {
@@ -319,58 +327,306 @@ fn execute_script_content(content: &str) -> i32 {
     last_exit_code
 }
 
-/// Interactive shell mode
-fn interactive_shell() -> i32 {
-    let mut inputs = String::new();
+/// Execute a single command from the new Command struct
+fn execute_single_command(cmd: &Command) -> i32 {
+    let program = &cmd.program;
+    let args = &cmd.args;
 
-    println!("Scarlet Shell (Interactive Mode)");
+    // Apply redirects using the existing logic from execute_command
+    let mut stdin_handle: Option<Handle> = None;
+    let mut stdout_handle: Option<Handle> = None;
+
+    for (rtype, filename) in &cmd.redirects {
+        match rtype {
+            RedirectType::Output => {
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true).truncate(true);
+                match opts.open(filename.as_str()) {
+                    Ok(f) => {
+                        println!("DEBUG: Opened {} for output redirection", filename);
+                        stdout_handle = Some(f.into_handle());
+                    }
+                    Err(_) => {
+                        println!("sh: {}: Failed to open file", filename);
+                        return 1;
+                    }
+                }
+            }
+            RedirectType::Append => {
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true).append(true);
+                match opts.open(filename.as_str()) {
+                    Ok(f) => {
+                        stdout_handle = Some(f.into_handle());
+                    }
+                    Err(_) => {
+                        println!("sh: {}: Failed to open file", filename);
+                        return 1;
+                    }
+                }
+            }
+            RedirectType::Input => {
+                match std::fs::File::open(filename.as_str()) {
+                    Ok(f) => {
+                        stdin_handle = Some(f.into_handle());
+                    }
+                    Err(_) => {
+                        println!("sh: {}: Failed to open file", filename);
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if it's a built-in command
+    let is_builtin = match program.as_str() {
+        "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." => true,
+        _ => false,
+    };
+
+    // If builtin with no redirects, run directly
+    if is_builtin && stdin_handle.is_none() && stdout_handle.is_none() {
+        if let Some(code) = handle_builtin_command(program, args) {
+            return code;
+        }
+        return 0;
+    }
+
+    // Locate executable
+    let executable_path = if !is_builtin {
+        match find_executable_in_path(program) {
+            Some(path) => path,
+            None => {
+                println!("sh: {}: command not found", program);
+                return 127;
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    match fork() {
+        0 => {
+            // Child: apply redirects and execute
+            // For stdin: close handle 0, then dup to get handle 0
+            if let Some(h) = stdin_handle {
+                // Close stdin (handle 0)
+                let _ = unsafe { Handle::from_raw(0) }.close();
+                // Duplicate the input file handle - should get assigned to handle 0
+                if let Ok(new_h) = h.duplicate() {
+                    // If not handle 0, we have a problem, but continue anyway
+                    println!("DEBUG: Stdin redirect got handle {}", new_h.as_raw());
+                    std::mem::forget(new_h);
+                }
+                std::mem::forget(h); // Don't close the original
+            }
+            // For stdout: close handle 1, then dup to get handle 1
+            if let Some(h) = stdout_handle {
+                println!("DEBUG: Closing stdout and duplicating file");
+                // Close stdout (handle 1)
+                let _ = unsafe { Handle::from_raw(1) }.close();
+                // Duplicate the output file handle - should get assigned to handle 1
+                match h.duplicate() {
+                    Ok(new_h) => {
+                        println!("DEBUG: Stdout redirect got handle {}", new_h.as_raw());
+                        std::mem::forget(new_h);
+                    }
+                    Err(_) => {
+                        println!("DEBUG: Failed to duplicate stdout handle!");
+                    }
+                }
+                std::mem::forget(h); // Don't close the original
+            }
+
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let env_vars = std::env::vars();
+            let env_strings: Vec<String> = env_vars
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect();
+            let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
+
+            if is_builtin {
+                if let Some(code) = handle_builtin_command(program, args) {
+                    exit(code);
+                }
+            }
+
+            if execve(&executable_path, &arg_refs, &env_refs) != 0 {
+                println!("sh: {}: execution failed", executable_path);
+            }
+            exit(126);
+        }
+        -1 => {
+            println!("sh: fork failed");
+            1
+        }
+        pid => {
+            // Parent: wait for child
+            let (_, status) = waitpid(pid, 0);
+            status
+        }
+    }
+}
+
+/// Execute a pipeline of commands
+fn execute_pipeline(pipeline: &Pipeline) -> i32 {
+    let num_commands = pipeline.commands.len();
+
+    // Single command - no pipes needed
+    if num_commands == 1 {
+        return execute_single_command(&pipeline.commands[0]);
+    }
+
+    // Multiple commands - set up pipes
+    let mut pipes: Vec<(Handle, Handle)> = Vec::new();
+
+    // Create pipes between consecutive commands
+    for _ in 0..num_commands - 1 {
+        match pipe() {
+            Ok((read_end, write_end)) => {
+                pipes.push((read_end, write_end));
+            }
+            Err(_) => {
+                println!("sh: failed to create pipe");
+                return 1;
+            }
+        }
+    }
+
+    let mut pids: Vec<i32> = Vec::new();
+
+    // Fork and execute each command
+    for (i, cmd) in pipeline.commands.iter().enumerate() {
+        match fork() {
+            0 => {
+                // Child process
+
+                // Set up stdin from previous pipe
+                if i > 0 {
+                    // Not the first command - read from previous pipe
+                    if let Err(_) = pipes[i - 1].0.set_role(2) {
+                        // stdin role
+                        exit(1);
+                    }
+                }
+
+                // Set up stdout to next pipe
+                if i < num_commands - 1 {
+                    // Not the last command - write to next pipe
+                    if let Err(_) = pipes[i].1.set_role(3) {
+                        // stdout role
+                        exit(1);
+                    }
+                }
+
+                // Note: We don't close pipes here because Handle::close() consumes self
+                // The handles will be automatically closed when the child process exits
+                // or they go out of scope
+
+                // Execute the command
+                let exit_code = execute_single_command(cmd);
+                exit(exit_code);
+            }
+            -1 => {
+                println!("sh: fork failed");
+                // Clean up will happen automatically when pipes go out of scope
+                return 1;
+            }
+            pid => {
+                // Parent process
+                pids.push(pid);
+            }
+        }
+    }
+
+    // Close all pipes in parent by taking ownership
+    for (read_end, write_end) in pipes {
+        let _ = read_end.close();
+        let _ = write_end.close();
+    }
+
+    // Wait for all children
+    let mut last_status = 0;
+    for pid in pids {
+        let (_, status) = waitpid(pid, 0);
+        last_status = status;
+    }
+
+    last_status
+}
+
+/// Interactive shell mode (enhanced version with line editing and history)
+fn interactive_shell() -> i32 {
+    println!("Scarlet Shell (Enhanced Interactive Mode)");
+    println!("Features: cursor movement, command history, pipes");
 
     // Try to execute .shrc on startup
     execute_shrc();
 
     println!("Enter 'exit' to quit");
 
-    loop {
-        inputs.clear();
-        print!("# ");
-        loop {
-            let c = std::io::get_char();
+    // Initialize history
+    let mut history = history::History::new(100);
+    let history_file = "/.sh_history";
 
-            if c as u8 >= 0x20 && c as u8 <= 0x7e {
-                // Handle printable characters
-                inputs.push(c);
-            } else if c == '\n' {
-                break;
-            } else if c == '\x7f' {
-                // Handle backspace
-                if !inputs.is_empty() {
-                    inputs.pop();
-                }
-            } else if c == '\t' {
-                // Handle tab
-                inputs.push(' ');
-            }
+    // Try to load history from file
+    match history.load_from_file(history_file) {
+        Ok(_) => {
+            // Successfully loaded history
         }
-
-        if inputs.trim().is_empty() {
-            continue;
-        }
-
-        let (program, args) = parse_command(inputs.trim());
-
-        if program.is_empty() {
-            continue;
-        }
-
-        let status = execute_command(&program, &args);
-        if status != 0 {
-            // Command failed, but continue shell
+        Err(_) => {
+            // No history file or failed to load, that's fine
         }
     }
-    // This line is unreachable because 'exit' command terminates the process
-    // But we keep it for compiler satisfaction
+
+    // Initialize line editor without raw mode for now
+    let mut editor = line_editor::LineEditor::new("# ");
+    // TODO: Re-enable raw mode once TTY control is working properly
+    // if let Err(_) = editor.set_raw_mode(true) {
+    //     println!("Warning: Failed to enable raw mode, line editing may not work properly");
+    // }
+
+    loop {
+        // Read a line with history support
+        let input = match editor.read_line_with_history(&mut history) {
+            Ok(line) => line,
+            Err(_) => {
+                // Ctrl-C or error
+                continue;
+            }
+        };
+
+        let trimmed = input.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Add to history
+        history.add(input.clone());
+
+        // Parse the command using the new parser
+        match parser::parse_pipeline(trimmed) {
+            Ok(pipeline) => {
+                // Execute the pipeline
+                let status = execute_pipeline(&pipeline);
+                if status != 0 {
+                    // Command failed, but continue shell
+                }
+            }
+            Err(err) => {
+                println!("sh: parse error: {:?}", err);
+            }
+        }
+    }
+
+    // Save history before exiting (unreachable in practice due to exit command)
     #[allow(unreachable_code)]
-    0
+    {
+        let _ = history.save_to_file(history_file);
+        0
+    }
 }
 
 /// Expand environment variables in a string

@@ -13,7 +13,7 @@ path = "src/login.rs"
 
 [[bin]]
 name = "sh"
-path = "src/sh.rs"
+path = "src/sh/main.rs"
 
 [[bin]]
 name = "ls"
