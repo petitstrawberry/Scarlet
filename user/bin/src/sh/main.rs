@@ -580,12 +580,11 @@ fn interactive_shell() -> i32 {
         }
     }
 
-    // Initialize line editor without raw mode for now
+    // Initialize line editor with raw mode enabled
     let mut editor = line_editor::LineEditor::new("# ");
-    // TODO: Re-enable raw mode once TTY control is working properly
-    // if let Err(_) = editor.set_raw_mode(true) {
-    //     println!("Warning: Failed to enable raw mode, line editing may not work properly");
-    // }
+    if let Err(_) = editor.set_raw_mode(true) {
+        println!("Warning: Failed to enable raw mode, falling back to canonical mode");
+    }
 
     loop {
         // Read a line with history support
