@@ -20,6 +20,10 @@ name = "ls"
 path = "src/ls.rs"
 
 [[bin]]
+name = "rm"
+path = "src/rm.rs"
+
+[[bin]]
 name = "hello"
 path = "src/hello.rs"
 
