@@ -281,7 +281,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // If this is a file-backed private mapping, allocate private pages now and copy contents
     if is_map_private_flag && !is_shared {
         // Allocate/map private pages page-by-page.
-        // NOTE: Avoid `allocate_raw_pages(num_pages)` + `Box::from_raw(ptr.add(i))` (UB).
+        // NOTE: Avoid `allocate_contiguous_raw_pages(num_pages)` + `Box::from_raw(ptr.add(i))` (UB).
 
         // For private mappings we do not notify the original object via on_mapped
         // because the new mapping uses private pages and the object is not the owner.

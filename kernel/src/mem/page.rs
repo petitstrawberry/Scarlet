@@ -18,31 +18,36 @@ impl Page {
     }
 }
 
-/// Allocates a number of pages.
+/// Allocates a number of pages as a *single contiguous allocation*.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
 ///
 /// # Returns
 /// A pointer to the allocated pages.
-pub fn allocate_raw_pages(num_of_pages: usize) -> *mut Page {
-    let boxed_pages = allocate_boxed_pages(num_of_pages);
+///
+/// # Notes
+/// - This is intended for cases that require contiguous backing (e.g. DMA buffers).
+/// - Do NOT split this allocation into per-page `Box<Page>` values; that violates
+///   the allocator contract.
+pub fn allocate_contiguous_raw_pages(num_of_pages: usize) -> *mut Page {
+    let boxed_pages = allocate_contiguous_boxed_pages(num_of_pages);
     Box::into_raw(boxed_pages) as *mut Page
 }
 
-/// Frees a number of pages.
+/// Frees pages allocated by [`allocate_contiguous_raw_pages`].
 ///
 /// # Arguments
 /// * `pages` - A pointer to the pages to free
 /// * `num_of_pages` - The number of pages to free
-pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
+pub fn free_contiguous_raw_pages(pages: *mut Page, num_of_pages: usize) {
     unsafe {
         let boxed_pages = Box::from_raw(core::ptr::slice_from_raw_parts_mut(pages, num_of_pages));
-        free_boxed_pages(boxed_pages);
+        free_contiguous_boxed_pages(boxed_pages);
     }
 }
 
-/// Allocates a number of pages and returns them as a boxed slice.
+/// Allocates a number of pages as a *single contiguous boxed slice*.
 ///
 /// # Arguments
 /// * `num_of_pages` - The number of pages to allocate
@@ -50,7 +55,7 @@ pub fn free_raw_pages(pages: *mut Page, num_of_pages: usize) {
 /// # Returns
 /// A boxed slice of the allocated pages.
 ///
-pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
+pub fn allocate_contiguous_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
     // Allocate raw memory and initialize it
     use alloc::alloc::{Layout, alloc_zeroed};
     use core::ptr;
@@ -69,12 +74,12 @@ pub fn allocate_boxed_pages(num_of_pages: usize) -> Box<[Page]> {
     }
 }
 
-/// Frees a boxed slice of pages.
+/// Frees pages allocated by [`allocate_contiguous_boxed_pages`].
 ///
 /// # Arguments
 /// * `pages` - A boxed slice of pages to free
 ///
-pub fn free_boxed_pages(pages: Box<[Page]>) {
+pub fn free_contiguous_boxed_pages(pages: Box<[Page]>) {
     // The Box will be automatically freed when it goes out of scope
     drop(pages);
 }

@@ -1,4 +1,4 @@
-use crate::{drivers::virtio::queue::VirtQueue, mem::page::allocate_raw_pages};
+use crate::{drivers::virtio::queue::VirtQueue, mem::page::allocate_contiguous_raw_pages};
 use core::cell::UnsafeCell;
 
 use super::*;
@@ -64,7 +64,7 @@ impl VirtioDevice for TestVirtioDevice {
 
 #[test_case]
 fn read_write_register() {
-    let page = allocate_raw_pages(1);
+    let page = allocate_contiguous_raw_pages(1);
     let base_addr = page as usize;
     let register = Register::MagicValue;
     let value = 0x12345678;
@@ -95,7 +95,7 @@ fn test_device_status() {
 
 #[test_case]
 fn test_device_initialization() {
-    let page = allocate_raw_pages(1);
+    let page = allocate_contiguous_raw_pages(1);
     let base_addr = page as usize;
     let mut device = TestVirtioDevice::new(base_addr, 2);
 
@@ -118,7 +118,7 @@ fn test_device_initialization() {
 
 #[test_case]
 fn test_feature_negotiation() {
-    let page = allocate_raw_pages(1);
+    let page = allocate_contiguous_raw_pages(1);
     let base_addr = page as usize;
     let mut device = TestVirtioDevice::new(base_addr, 2);
 
@@ -137,7 +137,7 @@ fn test_feature_negotiation() {
 
 #[test_case]
 fn test_queue_setup() {
-    let page = allocate_raw_pages(1);
+    let page = allocate_contiguous_raw_pages(1);
     let base_addr = page as usize;
     let mut device = TestVirtioDevice::new(base_addr, 2);
 
@@ -157,7 +157,7 @@ fn test_queue_setup() {
 
 #[test_case]
 fn test_config_read_write() {
-    let page = allocate_raw_pages(1);
+    let page = allocate_contiguous_raw_pages(1);
     let base_addr = page as usize;
     let device = TestVirtioDevice::new(base_addr, 2);
 
@@ -178,7 +178,7 @@ fn test_config_read_write() {
 
 #[test_case]
 fn test_interrupt_handling() {
-    let page = allocate_raw_pages(1);
+    let page = allocate_contiguous_raw_pages(1);
     let base_addr = page as usize;
     let mut device = TestVirtioDevice::new(base_addr, 2);
 

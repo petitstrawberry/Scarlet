@@ -137,7 +137,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     let is_map_private_flag = (flags & MAP_PRIVATE) != 0;
     if is_map_private_flag && !is_shared {
         // Allocate/map private pages page-by-page.
-        // NOTE: Avoid `allocate_raw_pages(num_pages)` + `Box::from_raw(ptr.add(i))` (UB).
+        // NOTE: Avoid `allocate_contiguous_raw_pages(num_pages)` + `Box::from_raw(ptr.add(i))` (UB).
 
         let mut mapped_vaddrs: Vec<usize> = Vec::with_capacity(num_pages);
 

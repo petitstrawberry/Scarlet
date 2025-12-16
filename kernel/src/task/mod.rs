@@ -754,7 +754,7 @@ impl Task {
     ///
     /// # Note
     /// Pages added as ManagedPage of the Task will be automatically freed when the Task is terminated.
-    /// So, you must not free them by calling free_raw_pages/free_boxed_pages manually.
+    /// So, you must not free them by calling contiguous page helpers manually.
     ///
     pub fn add_managed_page(&mut self, pages: ManagedPage) {
         self.managed_pages.push(pages);
@@ -1819,7 +1819,7 @@ mod tests {
     #[test_case]
     fn test_clone_task_shared_memory() {
         use crate::environment::PAGE_SIZE;
-        use crate::mem::page::allocate_raw_pages;
+        use crate::mem::page::allocate_contiguous_raw_pages;
         use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
         let mut parent_task = super::new_user_task("ParentWithShared".to_string(), 0);
@@ -1828,7 +1828,7 @@ mod tests {
         // Manually add a shared memory region to test sharing behavior
         let shared_vaddr = 0x5000;
         let num_pages = 1;
-        let pages = allocate_raw_pages(num_pages);
+        let pages = allocate_contiguous_raw_pages(num_pages);
         let paddr = pages as usize;
 
         let shared_mmap = VirtualMemoryMap {

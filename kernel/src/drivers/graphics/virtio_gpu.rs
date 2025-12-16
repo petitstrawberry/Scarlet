@@ -18,7 +18,7 @@ use crate::{
         device::VirtioDevice,
         queue::{DescriptorFlag, VirtQueue},
     },
-    mem::page::{Page, allocate_raw_pages},
+    mem::page::{Page, allocate_contiguous_raw_pages},
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
     timer::{SoftwareTimer, TimerHandler, add_timer, get_tick, ms_to_ticks},
 };
@@ -413,7 +413,7 @@ impl VirtioGpuDeviceCore {
             self.create_2d_resource(width, height, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM)?;
         let fb_size = (width * height * 4) as usize;
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_pages_ptr = allocate_raw_pages(fb_pages);
+        let fb_pages_ptr = allocate_contiguous_raw_pages(fb_pages);
         if fb_pages_ptr.is_null() {
             return Err("Failed to allocate framebuffer memory");
         }
@@ -448,7 +448,7 @@ impl VirtioGpuDeviceCore {
         }
         *self.framebuffer_addr.write() = Some(fb_addr);
         // Allocate shadow framebuffer
-        let shadow_pages_ptr = allocate_raw_pages(fb_pages);
+        let shadow_pages_ptr = allocate_contiguous_raw_pages(fb_pages);
         if shadow_pages_ptr.is_null() {
             return Err("Failed to allocate shadow framebuffer memory");
         }
