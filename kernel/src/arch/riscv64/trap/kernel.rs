@@ -152,6 +152,12 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 asm!("csrr {}, stval", out(reg) vaddr);
             }
 
+            // Kernel-mode NULL/near-NULL access is always a bug.
+            if vaddr < PAGE_SIZE {
+                print_traplog(trapframe);
+                panic!("Invalid kernel memory access near NULL: vaddr={:#x}", vaddr);
+            }
+
             // Detect kernel stack overflow via guard-page hit
             if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
                 if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
@@ -171,7 +177,7 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                 crate::println!("[kernel] Handling page fault at vaddr: {:#x}", vaddr);
 
                 // Additional validation for suspicious addresses
-                if vaddr == 0 || vaddr == usize::MAX {
+                if vaddr == usize::MAX {
                     print_traplog(trapframe);
                     panic!("Invalid memory access at vaddr: {:#x}", vaddr);
                 }
