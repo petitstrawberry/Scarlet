@@ -42,7 +42,7 @@
 
 use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
-use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+use crate::mem::page::{Page, allocate_page};
 use crate::task::{ManagedPage, Task};
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
 use alloc::boxed::Box;
@@ -50,6 +50,38 @@ use alloc::string::{String, ToString};
 use alloc::{format, vec};
 
 use super::TaskType;
+
+fn copy_bytes_into_task(
+    task: &Task,
+    dst_vaddr: usize,
+    src: &[u8],
+    context: &'static str,
+) -> Result<(), ElfLoaderError> {
+    let mut copied = 0usize;
+    while copied < src.len() {
+        let cur_vaddr = dst_vaddr + copied;
+        let page_off = cur_vaddr & (PAGE_SIZE - 1);
+        let chunk = core::cmp::min(PAGE_SIZE - page_off, src.len() - copied);
+
+        let paddr = task.vm_manager.translate_vaddr(cur_vaddr).ok_or(ElfLoaderError {
+            message: format!(
+                "Failed to translate virtual address {:#x} ({})",
+                cur_vaddr, context
+            ),
+        })?;
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr().add(copied),
+                paddr as *mut u8,
+                chunk,
+            );
+        }
+
+        copied += chunk;
+    }
+    Ok(())
+}
 
 // ELF Magic Number
 const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -67,6 +99,48 @@ pub const ET_DYN: u16 = 3; // Shared object file / Position Independent Executab
 // Program Header Type
 const PT_LOAD: u32 = 1; // Loadable segment
 const PT_INTERP: u32 = 3; // Interpreter path
+const PT_PHDR: u32 = 6; // Program header table itself
+
+fn compute_phdr_runtime_address(
+    header: &ElfHeader,
+    file_obj: &dyn FileObject,
+    load_bias: u64,
+) -> Result<u64, ElfLoaderError> {
+    // Linux kernel prefers PT_PHDR if present; fall back to locating e_phoff
+    // within a PT_LOAD mapping.
+    let mut phdr_from_pt_phdr: Option<u64> = None;
+    let mut phdr_from_load: Option<u64> = None;
+
+    for_each_program_header(header, file_obj, |_i, ph| {
+        if ph.p_type == PT_PHDR {
+            phdr_from_pt_phdr = Some(load_bias + ph.p_vaddr);
+            return Ok(false);
+        }
+
+        if ph.p_type == PT_LOAD {
+            let phoff = header.e_phoff;
+            let seg_off = ph.p_offset;
+            let seg_end_off = ph.p_offset.saturating_add(ph.p_filesz);
+            if seg_off <= phoff && phoff < seg_end_off {
+                let delta = phoff - seg_off;
+                phdr_from_load = Some(load_bias + ph.p_vaddr + delta);
+            }
+        }
+
+        Ok(true)
+    })?;
+
+    if let Some(addr) = phdr_from_pt_phdr {
+        return Ok(addr);
+    }
+    if let Some(addr) = phdr_from_load {
+        return Ok(addr);
+    }
+
+    Err(ElfLoaderError {
+        message: "Failed to determine runtime address of program headers (no PT_PHDR and e_phoff not covered by any PT_LOAD)".to_string(),
+    })
+}
 
 /// Target type for ELF loading (determines base address strategy)
 #[derive(Debug, Clone, Copy)]
@@ -538,14 +612,15 @@ pub fn analyze_and_load_elf_with_strategy(
 
             if let Some(final_interp_path) = actual_interpreter {
                 crate::println!("Using interpreter: {}", final_interp_path);
-                let base_address =
+                let load_bias =
                     load_elf_segments_for_interpreter(&header, file_obj, task, strategy)?;
                 let (interpreter_entry, interpreter_base) =
                     load_interpreter(&final_interp_path, task, strategy)?;
 
                 // Prepare program headers info for auxiliary vector
+                let phdr_addr = compute_phdr_runtime_address(&header, file_obj, load_bias)?;
                 let phdr_info = ProgramHeadersInfo {
-                    phdr_addr: base_address + header.e_phoff,
+                    phdr_addr,
                     phdr_size: header.e_phentsize as u64,
                     phdr_count: header.e_phnum as u64,
                 };
@@ -554,7 +629,7 @@ pub fn analyze_and_load_elf_with_strategy(
                 // For ET_EXEC: e_entry is an absolute address
                 // For ET_DYN: e_entry is relative to base_address
                 let original_entry = if needs_relocation {
-                    base_address + header.e_entry
+                    load_bias + header.e_entry
                 } else {
                     header.e_entry
                 };
@@ -565,7 +640,7 @@ pub fn analyze_and_load_elf_with_strategy(
                     },
                     entry_point: interpreter_entry,
                     original_entry_point: Some(original_entry),
-                    base_address: Some(base_address),
+                    base_address: Some(load_bias),
                     interpreter_base: Some(interpreter_base),
                     program_headers: phdr_info,
                 })
@@ -584,9 +659,11 @@ pub fn analyze_and_load_elf_with_strategy(
 
             // For static executables, load program headers into memory if needed
             let phdr_info = if needs_relocation {
-                // PIE static executable - program headers are loaded with the executable
+                // PIE static executable - program headers are loaded with the executable.
+                // Prefer PT_PHDR and otherwise locate e_phoff inside PT_LOAD.
+                let phdr_addr = compute_phdr_runtime_address(&header, file_obj, base_address)?;
                 ProgramHeadersInfo {
-                    phdr_addr: base_address + header.e_phoff,
+                    phdr_addr,
                     phdr_size: header.e_phentsize as u64,
                     phdr_count: header.e_phnum as u64,
                 }
@@ -670,23 +747,17 @@ fn load_elf_segments_for_interpreter(
     let needs_relocation = header.e_type == ET_DYN;
     // crate::println!("[ELF Loader] Main program: e_type={:#x}, needs_relocation={}, e_phoff={:#x}",
     //     header.e_type, needs_relocation, header.e_phoff);
-    let base_address = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
+    let load_bias = (strategy.choose_base_address)(LoadTarget::MainProgram, needs_relocation);
     // crate::println!("[ELF Loader] Chosen base_address={:#x}", base_address);
 
-    // Track the actual load address of the first LOAD segment for program headers
-    let mut first_load_addr: Option<u64> = None;
     let mut _load_segment_count = 0;
 
     // Load PT_LOAD segments using simplified approach
     for_each_program_header(header, file_obj, |_i, ph| {
         if ph.p_type == PT_LOAD {
-            let segment_addr = base_address + ph.p_vaddr;
+            let segment_addr = load_bias + ph.p_vaddr;
             // crate::println!("[ELF Loader] PT_LOAD[{}]: p_vaddr={:#x}, p_memsz={:#x}, p_filesz={:#x}, p_flags={:#x} -> load_addr={:#x}",
             //     i, ph.p_vaddr, ph.p_memsz, ph.p_filesz, ph.p_flags, segment_addr);
-            if first_load_addr.is_none() {
-                first_load_addr = Some(segment_addr);
-                // crate::println!("[ELF Loader] First LOAD segment at {:#x}", segment_addr);
-            }
             load_elf_segment_at_address(ph, file_obj, task, segment_addr)?;
             _load_segment_count += 1;
         }
@@ -695,18 +766,8 @@ fn load_elf_segments_for_interpreter(
 
     // crate::println!("[ELF Loader] Loaded {} PT_LOAD segments, e_entry={:#x}", _load_segment_count, header.e_entry);
 
-    // Calculate phdr_addr based on actual load address
-    // Program headers are typically in the first LOAD segment
-    let actual_base = first_load_addr.unwrap_or(base_address);
-
-    // Program headers are already loaded as part of the first LOAD segment
-    // (which typically includes the ELF header and program headers)
-    // No need to create a separate mapping - just return the address
-    // crate::println!("[ELF Loader] Program headers at {:#x} (actual_base={:#x} + e_phoff={:#x})",
-    //     actual_base + header.e_phoff, actual_base, header.e_phoff);
-
-    // Return the actual base address where the first segment was loaded
-    Ok(actual_base)
+    // Return the load bias (the additive base used for p_vaddr->runtime address).
+    Ok(load_bias)
 }
 
 /// Load interpreter (dynamic linker) into task memory  
@@ -1047,23 +1108,12 @@ fn load_elf_into_task_static(
                 //     crate::println!("  data: {}", hex_str);
                 // }
 
-                match task.vm_manager.translate_vaddr(target_vaddr) {
-                    Some(paddr) => unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            segment_data.as_ptr(),
-                            paddr as *mut u8,
-                            ph.p_filesz as usize,
-                        );
-                    },
-                    None => {
-                        return Err(ElfLoaderError {
-                            message: format!(
-                                "Failed to translate virtual address {:#x}",
-                                target_vaddr
-                            ),
-                        });
-                    }
-                }
+                copy_bytes_into_task(
+                    task,
+                    target_vaddr,
+                    &segment_data,
+                    "segment data copy",
+                )?;
             }
         }
         Ok(true) // Continue iteration
@@ -1142,23 +1192,12 @@ fn load_program_headers_into_memory(
     })?;
 
     // Copy program headers to task memory
-    match task.vm_manager.translate_vaddr(phdr_vaddr as usize) {
-        Some(paddr) => unsafe {
-            core::ptr::copy_nonoverlapping(
-                phdr_data.as_ptr(),
-                paddr as *mut u8,
-                phdr_table_size as usize,
-            );
-        },
-        None => {
-            return Err(ElfLoaderError {
-                message: format!(
-                    "Failed to translate program headers virtual address {:#x}",
-                    phdr_vaddr
-                ),
-            });
-        }
-    }
+    copy_bytes_into_task(
+        task,
+        phdr_vaddr as usize,
+        &phdr_data,
+        "program headers copy",
+    )?;
     Ok(phdr_vaddr)
 }
 
@@ -1204,12 +1243,6 @@ fn map_elf_segment(
         permissions |= VirtualMemoryPermission::User as usize;
     }
 
-    // Create memory area
-    let vmarea = MemoryArea {
-        start: vaddr,
-        end: vaddr + size - 1,
-    };
-
     // Check if the area is overlapping with existing mappings
     if let Some(_existing) = task.vm_manager.search_memory_map(vaddr) {
         // crate::println!("[ELF Loader] ERROR: Memory area {:#x}-{:#x} overlaps with existing mapping {:#x}-{:#x}",
@@ -1217,38 +1250,39 @@ fn map_elf_segment(
         return Err("Memory area overlaps with existing mapping");
     }
 
-    // Allocate physical memory
+    // Allocate physical memory (each page independently for safe individual deallocation)
     let num_of_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    let pages = allocate_raw_pages(num_of_pages);
-    let ptr = pages as *mut u8;
-    if ptr.is_null() {
-        return Err("Failed to allocate memory");
-    }
-    let pmarea = MemoryArea {
-        start: ptr as usize,
-        end: (ptr as usize) + size - 1,
-    };
 
-    // Create memory mapping
-    let map = VirtualMemoryMap {
-        vmarea,
-        pmarea,
-        permissions,
-        is_shared: false, // User program memory should not be shared
-        owner: None,
-    };
-
-    // Add to VM manager
-    if let Err(e) = task.vm_manager.add_memory_map(map) {
-        free_raw_pages(pages, num_of_pages);
-        return Err(e);
-    }
-
-    // Manage segment page in the task
     for i in 0..num_of_pages {
+        let page = allocate_page();
+        let page_vaddr = vaddr + i * PAGE_SIZE;
+        let paddr = page.as_ref() as *const Page as usize;
+
+        // Each page gets its own VMA (1 page = 1 VMA)
+        let map = VirtualMemoryMap {
+            vmarea: MemoryArea {
+                start: page_vaddr,
+                end: page_vaddr + PAGE_SIZE - 1,
+            },
+            pmarea: MemoryArea {
+                start: paddr,
+                end: paddr + PAGE_SIZE - 1,
+            },
+            permissions,
+            is_shared: false,
+            owner: None,
+        };
+
+        // Add to VM manager
+        if let Err(e) = task.vm_manager.add_memory_map(map) {
+            // Note: previously allocated pages in this loop will be cleaned up
+            // when the task is destroyed
+            return Err(e);
+        }
+
         task.add_managed_page(ManagedPage {
-            vaddr: vaddr + i * PAGE_SIZE,
-            page: unsafe { Box::from_raw(pages.wrapping_add(i)) },
+            vaddr: page_vaddr,
+            page,
         });
     }
 
@@ -1406,23 +1440,12 @@ fn load_elf_segment_at_address(
         let data_offset = (segment_addr as usize) - mapping_start;
         let target_vaddr = mapping_start + data_offset;
 
-        match task.vm_manager.translate_vaddr(target_vaddr) {
-            Some(paddr) => unsafe {
-                core::ptr::copy_nonoverlapping(
-                    segment_data.as_ptr(),
-                    paddr as *mut u8,
-                    ph.p_filesz as usize,
-                );
-            },
-            None => {
-                return Err(ElfLoaderError {
-                    message: format!(
-                        "Failed to translate virtual address {:#x} for segment loading",
-                        target_vaddr
-                    ),
-                });
-            }
-        }
+        copy_bytes_into_task(
+            task,
+            target_vaddr,
+            &segment_data,
+            "segment loading",
+        )?;
     }
 
     // Update task size information for proper memory management

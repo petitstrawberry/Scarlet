@@ -88,3 +88,24 @@ pub fn free_boxed_page(page: Box<Page>) {
     // The Box will be automatically freed when it goes out of scope
     drop(page);
 }
+
+/// Allocates a single page and returns it as a boxed page.
+///
+/// Each page is independently allocated, so it can be freed individually.
+/// Use this for ELF segments, user stacks, mmap, brk, etc.
+///
+/// # Returns
+/// A boxed page, zero-initialized.
+pub fn allocate_page() -> Box<Page> {
+    use alloc::alloc::{Layout, alloc_zeroed};
+
+    let layout = Layout::new::<Page>();
+
+    unsafe {
+        let ptr = alloc_zeroed(layout) as *mut Page;
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        Box::from_raw(ptr)
+    }
+}

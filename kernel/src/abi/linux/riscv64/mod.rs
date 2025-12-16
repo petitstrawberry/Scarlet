@@ -702,6 +702,16 @@ impl AbiModule for LinuxRiscv64Abi {
                         task.vcpu.iregs = IntRegisters::new(); // Clear registers
                         task.vcpu.set_sp(sp); // Set stack pointer
 
+                        // RISC-V Linux userspace entry ABI:
+                        // a0 = argc, a1 = argv, a2 = envp.
+                        // Some runtimes (including dynamic linker startup paths) rely on these.
+                        let argc = argv.len() as usize;
+                        let argv_ptr = sp + 8; // argc is stored at sp
+                        let envp_ptr = argv_ptr + (argc + 1) * core::mem::size_of::<u64>();
+                        task.vcpu.iregs.reg[10] = argc;
+                        task.vcpu.iregs.reg[11] = argv_ptr;
+                        task.vcpu.iregs.reg[12] = envp_ptr;
+
                         // Initialize trapframe with clean state
                         trapframe.regs = task.vcpu.iregs;
                         trapframe.epc = load_result.entry_point;
