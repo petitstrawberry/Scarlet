@@ -12,7 +12,9 @@ mod time;
 
 // pub mod drivers;
 
-use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec};
+use alloc::{
+    boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec,
+};
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
@@ -263,7 +265,13 @@ impl LinuxRiscv64Abi {
         self.fd_to_handle
             .iter()
             .enumerate()
-            .filter_map(|(fd, &handle)| if handle != INVALID_FD_HANDLE { Some(fd) } else { None })
+            .filter_map(|(fd, &handle)| {
+                if handle != INVALID_FD_HANDLE {
+                    Some(fd)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 

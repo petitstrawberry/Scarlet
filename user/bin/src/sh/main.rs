@@ -3,23 +3,22 @@
 
 extern crate scarlet_std as std;
 
-use std::{
-    format, print, println,
-    string::String,
-    task::{execve, exit, fork, waitpid, pipe},
-    vec::Vec,
-    mem,
-};
-use std::handle::Handle;
 use std::fs::OpenOptions;
+use std::handle::Handle;
 use std::io::Read;
+use std::{
+    format, mem, print, println,
+    string::String,
+    task::{execve, exit, fork, pipe, waitpid},
+    vec::Vec,
+};
 
 // New modules for enhanced shell
-mod line_editor;
 mod history;
+mod line_editor;
 mod parser;
 
-use parser::{Pipeline, Command, RedirectType};
+use parser::{Command, Pipeline, RedirectType};
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
@@ -173,7 +172,12 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
     }
 
     // DEBUG: show what we're about to run and any redirections
-    crate::println!("sh: execute_command: program='{}' args={:?} redirs_count={}", program, cleaned_args, redirs.len());
+    crate::println!(
+        "sh: execute_command: program='{}' args={:?} redirs_count={}",
+        program,
+        cleaned_args,
+        redirs.len()
+    );
 
     // First check if it's a built-in command
     let is_builtin = match program {
@@ -365,17 +369,15 @@ fn execute_single_command(cmd: &Command) -> i32 {
                     }
                 }
             }
-            RedirectType::Input => {
-                match std::fs::File::open(filename.as_str()) {
-                    Ok(f) => {
-                        stdin_handle = Some(f.into_handle());
-                    }
-                    Err(_) => {
-                        println!("sh: {}: Failed to open file", filename);
-                        return 1;
-                    }
+            RedirectType::Input => match std::fs::File::open(filename.as_str()) {
+                Ok(f) => {
+                    stdin_handle = Some(f.into_handle());
                 }
-            }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            },
         }
     }
 

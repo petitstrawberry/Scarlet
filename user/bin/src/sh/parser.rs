@@ -15,9 +15,9 @@ use std::{string::String, vec::Vec};
 /// Types of I/O redirection
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedirectType {
-    Output,  // >
-    Append,  // >>
-    Input,   // <
+    Output, // >
+    Append, // >>
+    Input,  // <
 }
 
 /// A single command with arguments and redirections
@@ -74,10 +74,10 @@ pub enum ParseError {
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     Word(String),
-    Pipe,              // |
-    RedirectOut,       // >
-    RedirectAppend,    // >>
-    RedirectIn,        // <
+    Pipe,           // |
+    RedirectOut,    // >
+    RedirectAppend, // >>
+    RedirectIn,     // <
 }
 
 /// Tokenize an input string into tokens
