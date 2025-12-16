@@ -12,7 +12,7 @@ mod time;
 
 // pub mod drivers;
 
-use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec};
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
@@ -32,6 +32,7 @@ use crate::{
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
+const INVALID_FD_HANDLE: u32 = u32::MAX;
 
 #[derive(Clone, Default)]
 pub struct LinuxThreadState {
@@ -51,12 +52,14 @@ pub struct LinuxThreadState {
 #[derive(Clone)]
 pub struct LinuxRiscv64Abi {
     /// File descriptor to handle mapping table (fd -> handle)
-    /// None means the fd is not allocated
-    fd_to_handle: [Option<u32>; MAX_FDS],
+    /// INVALID_FD_HANDLE means the fd is not allocated.
+    ///
+    /// NOTE: This is intentionally heap-backed to avoid large stack frames in release builds.
+    fd_to_handle: Vec<u32>,
     /// File descriptor flags (e.g., FD_CLOEXEC)
-    fd_flags: [u32; MAX_FDS],
+    fd_flags: Vec<u32>,
     /// File status flags (e.g., O_NONBLOCK) for F_GETFL/F_SETFL
-    file_status_flags: [u32; MAX_FDS],
+    file_status_flags: Vec<u32>,
     /// Free file descriptor list for O(1) allocation/deallocation
     free_fds: Vec<usize>,
     /// Signal handling state
@@ -76,9 +79,9 @@ impl Default for LinuxRiscv64Abi {
         let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
         Self {
-            fd_to_handle: [None; MAX_FDS],
-            fd_flags: [0; MAX_FDS],
-            file_status_flags: [0; MAX_FDS],
+            fd_to_handle: vec![INVALID_FD_HANDLE; MAX_FDS],
+            fd_flags: vec![0; MAX_FDS],
+            file_status_flags: vec![0; MAX_FDS],
             free_fds,
             signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
@@ -105,7 +108,7 @@ impl LinuxRiscv64Abi {
             return Err("Too many open files");
         };
 
-        self.fd_to_handle[fd] = Some(handle);
+        self.fd_to_handle[fd] = handle;
         Ok(fd)
     }
 
@@ -116,7 +119,7 @@ impl LinuxRiscv64Abi {
         }
 
         // Check if the fd is already in use
-        if self.fd_to_handle[fd].is_some() {
+        if self.fd_to_handle[fd] != INVALID_FD_HANDLE {
             return Err("File descriptor already in use");
         }
 
@@ -125,14 +128,17 @@ impl LinuxRiscv64Abi {
             self.free_fds.remove(pos);
         }
 
-        self.fd_to_handle[fd] = Some(handle);
+        self.fd_to_handle[fd] = handle;
         Ok(())
     }
 
     /// Get handle from file descriptor
     pub fn get_handle(&self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
-            self.fd_to_handle[fd]
+            match self.fd_to_handle[fd] {
+                INVALID_FD_HANDLE => None,
+                handle => Some(handle),
+            }
         } else {
             None
         }
@@ -141,7 +147,9 @@ impl LinuxRiscv64Abi {
     /// Remove file descriptor mapping and clear its flags
     pub fn remove_fd(&mut self, fd: usize) -> Option<u32> {
         if fd < MAX_FDS {
-            if let Some(handle) = self.fd_to_handle[fd].take() {
+            let handle = self.fd_to_handle[fd];
+            if handle != INVALID_FD_HANDLE {
+                self.fd_to_handle[fd] = INVALID_FD_HANDLE;
                 self.fd_flags[fd] = 0; // Clear flags when removing fd
                 self.file_status_flags[fd] = 0; // Clear status flags as well
                 // Add the freed fd back to the free list for reuse (O(1))
@@ -158,10 +166,8 @@ impl LinuxRiscv64Abi {
     /// Find file descriptor by handle (linear search)
     pub fn find_fd_by_handle(&self, handle: u32) -> Option<usize> {
         for (fd, &mapped_handle) in self.fd_to_handle.iter().enumerate() {
-            if let Some(h) = mapped_handle {
-                if h == handle {
-                    return Some(fd);
-                }
+            if mapped_handle != INVALID_FD_HANDLE && mapped_handle == handle {
+                return Some(fd);
             }
         }
         None
@@ -170,9 +176,9 @@ impl LinuxRiscv64Abi {
     /// Initialize standard file descriptors (stdin, stdout, stderr)
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
         // Linux convention: fd 0 = stdin, fd 1 = stdout, fd 2 = stderr
-        self.fd_to_handle[0] = Some(stdin_handle);
-        self.fd_to_handle[1] = Some(stdout_handle);
-        self.fd_to_handle[2] = Some(stderr_handle);
+        self.fd_to_handle[0] = stdin_handle;
+        self.fd_to_handle[1] = stdout_handle;
+        self.fd_to_handle[2] = stderr_handle;
 
         // Remove std fds from free list
         self.free_fds.retain(|&fd| fd != 0 && fd != 1 && fd != 2);
@@ -180,7 +186,7 @@ impl LinuxRiscv64Abi {
 
     /// Get file descriptor flags
     pub fn get_fd_flags(&self, fd: usize) -> Option<u32> {
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
+        if fd < MAX_FDS && self.fd_to_handle[fd] != INVALID_FD_HANDLE {
             Some(self.fd_flags[fd])
         } else {
             None
@@ -192,8 +198,8 @@ impl LinuxRiscv64Abi {
         use crate::abi::linux::riscv64::fs::FD_CLOEXEC;
         use crate::{object::handle::SpecialSemantics, task::mytask};
 
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
-            let handle = self.fd_to_handle[fd].unwrap();
+        if fd < MAX_FDS && self.fd_to_handle[fd] != INVALID_FD_HANDLE {
+            let handle = self.fd_to_handle[fd];
             self.fd_flags[fd] = flags;
 
             // Update handle metadata to sync FD_CLOEXEC with SpecialSemantics::CloseOnExec
@@ -227,7 +233,7 @@ impl LinuxRiscv64Abi {
 
     /// Get file status flags (F_GETFL)
     pub fn get_file_status_flags(&self, fd: usize) -> Option<u32> {
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
+        if fd < MAX_FDS && self.fd_to_handle[fd] != INVALID_FD_HANDLE {
             Some(self.file_status_flags[fd])
         } else {
             None
@@ -236,7 +242,7 @@ impl LinuxRiscv64Abi {
 
     /// Set file status flags (F_SETFL)
     pub fn set_file_status_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
-        if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
+        if fd < MAX_FDS && self.fd_to_handle[fd] != INVALID_FD_HANDLE {
             self.file_status_flags[fd] = flags;
             Ok(())
         } else {
@@ -246,7 +252,10 @@ impl LinuxRiscv64Abi {
 
     /// Get total number of allocated file descriptors
     pub fn fd_count(&self) -> usize {
-        self.fd_to_handle.iter().filter(|&&h| h.is_some()).count()
+        self.fd_to_handle
+            .iter()
+            .filter(|&&h| h != INVALID_FD_HANDLE)
+            .count()
     }
 
     /// Get the list of allocated file descriptors (for debugging)
@@ -254,7 +263,7 @@ impl LinuxRiscv64Abi {
         self.fd_to_handle
             .iter()
             .enumerate()
-            .filter_map(|(fd, &handle)| if handle.is_some() { Some(fd) } else { None })
+            .filter_map(|(fd, &handle)| if handle != INVALID_FD_HANDLE { Some(fd) } else { None })
             .collect()
     }
 
