@@ -16,7 +16,14 @@ use std::handle::Handle;
 // TTY control opcodes (from kernel investigation)
 const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
 const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
+const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
 const SCTL_TTY_FLUSH_INPUT: u32 = 0x5354_0009;
+const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
+
+// Keyboard modes
+const KB_XLATE: usize = 0;      // Translated mode (ASCII)
+const KB_MEDIUMRAW: usize = 1;  // Linux keycodes (1 byte)
+const KB_RAW: usize = 2;        // Raw scan codes
 
 // Linux keycodes for special keys (from TTY device)
 const KEY_UP: u32 = 103;
@@ -44,6 +51,8 @@ pub struct LineEditor {
     prompt: String,
     raw_mode_enabled: bool,
     stdin_handle: Option<Handle>,
+    // Escape sequence parsing state (0=none, 1=got ESC, 2=got ESC [)
+    esc_state: u8,
 }
 
 impl LineEditor {
@@ -55,6 +64,7 @@ impl LineEditor {
             prompt: String::from(prompt),
             raw_mode_enabled: false,
             stdin_handle: None,
+            esc_state: 0,
         }
     }
 
@@ -77,6 +87,34 @@ impl LineEditor {
             let echo_value = if enabled { 0 } else { 1 };
             if handle.control(SCTL_TTY_SET_ECHO, echo_value).is_err() {
                 return Err(());
+            }
+
+            // Set keyboard mode
+            // 0=XLATE (ASCII passthrough), 1=MEDIUMRAW (Linux keycodes), 2=RAW (scan codes)
+            // Use XLATE mode so all ASCII characters (including symbols) pass through
+            if handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE).is_err() {
+                print!("DEBUG: Failed to set keyboard mode!\n");
+                return Err(());
+            }
+
+            // Set read policy for raw mode
+            // Format: ((timeout_ms as u32) << 16) | (min_ready_bytes as u32)
+            if enabled {
+                // Raw mode: min=1 byte, timeout=0ms (return immediately when data available)
+                let read_policy = (0 << 16) | 1;
+                if handle.control(SCTL_TTY_SET_READ_POLICY, read_policy as usize).is_err() {
+                    print!("DEBUG: Failed to set read policy!\n");
+                    return Err(());
+                }
+                // Raw mode enabled successfully
+            } else {
+                // Canonical mode: restore default policy
+                // min=1, timeout=0 is reasonable for canonical too
+                let read_policy = (0 << 16) | 1;
+                if handle.control(SCTL_TTY_SET_READ_POLICY, read_policy as usize).is_err() {
+                    return Err(());
+                }
+                print!("DEBUG: Canonical mode restored\n");
             }
 
             self.raw_mode_enabled = enabled;
@@ -213,57 +251,94 @@ impl LineEditor {
         }
     }
 
-    /// Handle a keycode in raw mode
-    fn handle_raw_key(&mut self, key: u32) -> EditorAction {
-        match key {
-            // Enter key (0x0A in raw mode)
-            10 => EditorAction::Submit,
+    /// Handle a character in raw mode (XLATE mode - ASCII + escape sequences)
+    fn handle_raw_key(&mut self, byte: u32) -> EditorAction {
+        let ch = byte as u8 as char;
 
-            // Backspace (0x7F or 0x08)
-            0x7f | 0x08 => {
+        // Handle escape sequences for arrow keys
+        match (self.esc_state, byte as u8) {
+            (0, 0x1B) => {
+                // ESC pressed - start escape sequence
+                self.esc_state = 1;
+                return EditorAction::Continue;
+            }
+            (1, b'[') => {
+                // ESC [ - CSI sequence
+                self.esc_state = 2;
+                return EditorAction::Continue;
+            }
+            (2, b'A') => {
+                // ESC [ A - Up arrow
+                self.esc_state = 0;
+                return EditorAction::HistoryPrev;
+            }
+            (2, b'B') => {
+                // ESC [ B - Down arrow
+                self.esc_state = 0;
+                return EditorAction::HistoryNext;
+            }
+            (2, b'C') => {
+                // ESC [ C - Right arrow
+                self.esc_state = 0;
+                self.move_cursor_right();
+                return EditorAction::Continue;
+            }
+            (2, b'D') => {
+                // ESC [ D - Left arrow
+                self.esc_state = 0;
+                self.move_cursor_left();
+                return EditorAction::Continue;
+            }
+            (2, b'H') => {
+                // ESC [ H - Home
+                self.esc_state = 0;
+                self.move_cursor_home();
+                return EditorAction::Continue;
+            }
+            (2, b'F') => {
+                // ESC [ F - End
+                self.esc_state = 0;
+                self.move_cursor_end();
+                return EditorAction::Continue;
+            }
+            (2, b'3') => {
+                // ESC [ 3 - might be Delete (ESC [ 3 ~)
+                self.esc_state = 3;
+                return EditorAction::Continue;
+            }
+            (3, b'~') => {
+                // ESC [ 3 ~ - Delete
+                self.esc_state = 0;
+                self.delete_char();
+                return EditorAction::Continue;
+            }
+            _ if self.esc_state != 0 => {
+                // Invalid escape sequence, reset
+                self.esc_state = 0;
+                return EditorAction::Continue;
+            }
+            _ => {}
+        }
+
+        // Handle regular ASCII characters
+        match ch {
+            '\r' | '\n' => EditorAction::Submit,
+            '\x03' => EditorAction::Interrupt,  // Ctrl-C
+            '\x7f' | '\x08' => {  // Backspace/DEL
                 if self.cursor > 0 {
                     self.backspace();
                 }
                 EditorAction::Continue
             }
-
-            // Ctrl-C (0x03)
-            3 => EditorAction::Interrupt,
-
-            // Arrow keys
-            KEY_LEFT => {
-                self.move_cursor_left();
+            '\t' => {
+                self.insert_char(' ');  // Convert tab to space for now
                 EditorAction::Continue
             }
-            KEY_RIGHT => {
-                self.move_cursor_right();
+            c if c >= ' ' && c <= '~' => {
+                // Printable ASCII
+                self.insert_char(c);
                 EditorAction::Continue
             }
-            KEY_UP => EditorAction::HistoryPrev,
-            KEY_DOWN => EditorAction::HistoryNext,
-
-            // Home/End
-            KEY_HOME => {
-                self.move_cursor_home();
-                EditorAction::Continue
-            }
-            KEY_END => {
-                self.move_cursor_end();
-                EditorAction::Continue
-            }
-
-            // Delete key
-            KEY_DELETE => {
-                self.delete_char();
-                EditorAction::Continue
-            }
-
-            // Printable characters (ASCII 0x20-0x7E)
-            key if key >= 0x20 && key <= 0x7e => {
-                self.insert_char(key as u8 as char);
-                EditorAction::Continue
-            }
-
             _ => EditorAction::Continue,
         }
     }
@@ -271,10 +346,23 @@ impl LineEditor {
     /// Insert a character at the cursor position
     fn insert_char(&mut self, c: char) {
         self.buffer.insert(self.cursor, c);
-        self.cursor += 1;
 
-        // Redraw from cursor to end
-        self.redraw_from_cursor();
+        // In raw mode, manually output the character and everything after it
+        // Print from current cursor position to end
+        for i in self.cursor..self.buffer.len() {
+            print!("{}", self.buffer[i]);
+        }
+
+        // If we inserted in the middle, move cursor back to correct position
+        let chars_after = self.buffer.len() - self.cursor - 1;
+        if chars_after > 0 {
+            // Move cursor left by the number of characters we printed after insertion
+            for _ in 0..chars_after {
+                print!("\x1b[D");
+            }
+        }
+
+        self.cursor += 1;
     }
 
     /// Delete character before cursor (backspace)
@@ -283,8 +371,20 @@ impl LineEditor {
             self.buffer.remove(self.cursor - 1);
             self.cursor -= 1;
 
-            // Move cursor left, redraw rest of line, move cursor back
-            self.redraw_from_cursor();
+            // Move cursor left
+            print!("\x1b[D");
+
+            // Print remaining characters and clear to end
+            for i in self.cursor..self.buffer.len() {
+                print!("{}", self.buffer[i]);
+            }
+            print!(" \x1b[K");  // Space to clear the last char, then clear to EOL
+
+            // Move cursor back to correct position
+            let chars_after = self.buffer.len() - self.cursor;
+            for _ in 0..=chars_after {
+                print!("\x1b[D");
+            }
         }
     }
 
@@ -293,8 +393,17 @@ impl LineEditor {
         if self.cursor < self.buffer.len() {
             self.buffer.remove(self.cursor);
 
-            // Redraw from cursor to end
-            self.redraw_from_cursor();
+            // Print remaining characters and clear to end
+            for i in self.cursor..self.buffer.len() {
+                print!("{}", self.buffer[i]);
+            }
+            print!(" \x1b[K");  // Space to clear the last char, then clear to EOL
+
+            // Move cursor back to correct position
+            let chars_after = self.buffer.len() - self.cursor;
+            for _ in 0..=chars_after {
+                print!("\x1b[D");
+            }
         }
     }
 
