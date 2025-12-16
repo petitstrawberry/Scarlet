@@ -11,8 +11,8 @@
 extern crate scarlet_std as std;
 
 use std::fs::{File, OpenOptions};
-use std::{string::String, vec::Vec, format};
 use std::io::Read;
+use std::{format, string::String, vec::Vec};
 
 /// Command history manager
 pub struct History {

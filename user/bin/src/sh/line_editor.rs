@@ -10,8 +10,8 @@
 
 extern crate scarlet_std as std;
 
-use std::{print, string::String, vec::Vec};
 use std::handle::Handle;
+use std::{print, string::String, vec::Vec};
 
 // TTY control opcodes (from kernel investigation)
 const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
@@ -21,9 +21,9 @@ const SCTL_TTY_FLUSH_INPUT: u32 = 0x5354_0009;
 const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
 
 // Keyboard modes
-const KB_XLATE: usize = 0;      // Translated mode (ASCII)
-const KB_MEDIUMRAW: usize = 1;  // Linux keycodes (1 byte)
-const KB_RAW: usize = 2;        // Raw scan codes
+const KB_XLATE: usize = 0; // Translated mode (ASCII)
+const KB_MEDIUMRAW: usize = 1; // Linux keycodes (1 byte)
+const KB_RAW: usize = 2; // Raw scan codes
 
 // Linux keycodes for special keys (from TTY device)
 const KEY_UP: u32 = 103;
@@ -37,11 +37,11 @@ const KEY_DELETE: u32 = 111;
 /// Actions that can result from handling a key
 #[derive(Debug, PartialEq)]
 enum EditorAction {
-    Continue,       // Continue editing
-    Submit,         // Submit the line (Enter pressed)
-    Interrupt,      // Ctrl-C pressed
-    HistoryPrev,    // Up arrow
-    HistoryNext,    // Down arrow
+    Continue,    // Continue editing
+    Submit,      // Submit the line (Enter pressed)
+    Interrupt,   // Ctrl-C pressed
+    HistoryPrev, // Up arrow
+    HistoryNext, // Down arrow
 }
 
 /// Line editor with cursor support
@@ -79,7 +79,10 @@ impl LineEditor {
         if let Some(ref handle) = self.stdin_handle {
             // Set canonical mode (opposite of raw mode)
             let canonical_value = if enabled { 0 } else { 1 };
-            if handle.control(SCTL_TTY_SET_CANONICAL, canonical_value).is_err() {
+            if handle
+                .control(SCTL_TTY_SET_CANONICAL, canonical_value)
+                .is_err()
+            {
                 return Err(());
             }
 
@@ -102,7 +105,10 @@ impl LineEditor {
             if enabled {
                 // Raw mode: min=1 byte, timeout=0ms (return immediately when data available)
                 let read_policy = (0 << 16) | 1;
-                if handle.control(SCTL_TTY_SET_READ_POLICY, read_policy as usize).is_err() {
+                if handle
+                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
+                    .is_err()
+                {
                     print!("DEBUG: Failed to set read policy!\n");
                     return Err(());
                 }
@@ -111,7 +117,10 @@ impl LineEditor {
                 // Canonical mode: restore default policy
                 // min=1, timeout=0 is reasonable for canonical too
                 let read_policy = (0 << 16) | 1;
-                if handle.control(SCTL_TTY_SET_READ_POLICY, read_policy as usize).is_err() {
+                if handle
+                    .control(SCTL_TTY_SET_READ_POLICY, read_policy as usize)
+                    .is_err()
+                {
                     return Err(());
                 }
                 print!("DEBUG: Canonical mode restored\n");
@@ -167,7 +176,10 @@ impl LineEditor {
     }
 
     /// Read a line from the user with history support
-    pub fn read_line_with_history(&mut self, history: &mut crate::history::History) -> Result<String, ()> {
+    pub fn read_line_with_history(
+        &mut self,
+        history: &mut crate::history::History,
+    ) -> Result<String, ()> {
         // Clear buffer and reset cursor
         self.buffer.clear();
         self.cursor = 0;
@@ -323,8 +335,9 @@ impl LineEditor {
         // Handle regular ASCII characters
         match ch {
             '\r' | '\n' => EditorAction::Submit,
-            '\x03' => EditorAction::Interrupt,  // Ctrl-C
-            '\x7f' | '\x08' => {  // Backspace/DEL
+            '\x03' => EditorAction::Interrupt, // Ctrl-C
+            '\x7f' | '\x08' => {
+                // Backspace/DEL
                 if self.cursor > 0 {
                     self.backspace();
                 }
@@ -379,7 +392,7 @@ impl LineEditor {
             for i in self.cursor..self.buffer.len() {
                 print!("{}", self.buffer[i]);
             }
-            print!(" \x1b[K");  // Space to clear the last char, then clear to EOL
+            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
 
             // Move cursor back to correct position
             let chars_after = self.buffer.len() - self.cursor;
@@ -398,7 +411,7 @@ impl LineEditor {
             for i in self.cursor..self.buffer.len() {
                 print!("{}", self.buffer[i]);
             }
-            print!(" \x1b[K");  // Space to clear the last char, then clear to EOL
+            print!(" \x1b[K"); // Space to clear the last char, then clear to EOL
 
             // Move cursor back to correct position
             let chars_after = self.buffer.len() - self.cursor;
@@ -586,7 +599,8 @@ impl LineEditor {
                     };
 
                     // Add trailing / for directories
-                    if entry.file_type == 1 {  // Directory
+                    if entry.file_type == 1 {
+                        // Directory
                         completion.push('/');
                     }
                     matches.push(completion);

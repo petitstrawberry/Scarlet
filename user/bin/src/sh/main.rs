@@ -3,23 +3,22 @@
 
 extern crate scarlet_std as std;
 
-use std::{
-    format, print, println,
-    string::String,
-    task::{execve, exit, fork, waitpid, pipe},
-    vec::Vec,
-    mem,
-};
-use std::handle::Handle;
 use std::fs::OpenOptions;
+use std::handle::Handle;
 use std::io::Read;
+use std::{
+    format, mem, print, println,
+    string::String,
+    task::{execve, exit, fork, pipe, waitpid},
+    vec::Vec,
+};
 
 // New modules for enhanced shell
-mod line_editor;
 mod history;
+mod line_editor;
 mod parser;
 
-use parser::{Pipeline, Command, RedirectType};
+use parser::{Command, Pipeline, RedirectType};
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
@@ -107,6 +106,79 @@ fn find_executable_in_path(program: &str) -> Option<String> {
 
 /// Execute a command with PATH resolution
 fn execute_command(program: &str, args: &[String]) -> i32 {
+    // First, scan args for redirection tokens and prepare file handles.
+    let mut cleaned_args: Vec<String> = Vec::new();
+    let mut redirs: Vec<(Handle, u32)> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == ">" || a == ">>" {
+            // output redirection
+            if i + 1 >= args.len() {
+                println!("sh: syntax error near unexpected token `newline'");
+                return 2;
+            }
+            let filename = &args[i + 1];
+            // Open the file with appropriate flags
+            let mut opts = OpenOptions::new();
+            opts.write(true).create(true);
+            if a == ">" {
+                opts.truncate(true);
+            } else {
+                opts.append(true);
+            }
+
+            match opts.open(filename.as_str()) {
+                Ok(f) => {
+                    let h = f.into_handle();
+                    // stdout role = 3
+                    redirs.push((h, 3));
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            }
+            i += 2;
+        } else if a == "<" {
+            // input redirection
+            if i + 1 >= args.len() {
+                println!("sh: syntax error near unexpected token `newline'");
+                return 2;
+            }
+            let filename = &args[i + 1];
+            match std::fs::File::open(filename.as_str()) {
+                Ok(f) => {
+                    let h = f.into_handle();
+                    // stdin role = 2
+                    redirs.push((h, 2));
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            }
+            i += 2;
+        } else {
+            cleaned_args.push(a.clone());
+            i += 1;
+        }
+    }
+
+    // If no program specified after cleaning, nothing to do
+    if cleaned_args.is_empty() {
+        return 0;
+    }
+
+    // DEBUG: show what we're about to run and any redirections
+    crate::println!(
+        "sh: execute_command: program='{}' args={:?} redirs_count={}",
+        program,
+        cleaned_args,
+        redirs.len()
+    );
+
     // First check if it's a built-in command
     if let Some(exit_code) = handle_builtin_command(program, args) {
         return exit_code;
@@ -257,17 +329,15 @@ fn execute_single_command(cmd: &Command) -> i32 {
                     }
                 }
             }
-            RedirectType::Input => {
-                match std::fs::File::open(filename.as_str()) {
-                    Ok(f) => {
-                        stdin_handle = Some(f.into_handle());
-                    }
-                    Err(_) => {
-                        println!("sh: {}: Failed to open file", filename);
-                        return 1;
-                    }
+            RedirectType::Input => match std::fs::File::open(filename.as_str()) {
+                Ok(f) => {
+                    stdin_handle = Some(f.into_handle());
                 }
-            }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            },
         }
     }
 
