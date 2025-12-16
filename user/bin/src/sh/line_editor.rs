@@ -540,17 +540,52 @@ impl LineEditor {
         self.apply_completion(matches, prefix.len(), word_start);
     }
 
-    /// Complete filename from current directory
+    /// Complete filename from current directory or specified path
     fn complete_filename(&mut self, prefix: String, word_start: usize) {
         let mut matches = Vec::new();
 
-        // Read current directory
-        if let Ok(entries) = std::fs::list_directory(".") {
+        // Check if prefix contains a path separator
+        let (dir_part, file_part) = if let Some(last_slash) = prefix.rfind('/') {
+            // Has path separator - extract directory and filename parts
+            let dir = if last_slash == 0 {
+                // Absolute path starting with /
+                String::from("/")
+            } else {
+                String::from(&prefix[..=last_slash])
+            };
+            let file = String::from(&prefix[last_slash + 1..]);
+            (dir, file)
+        } else {
+            // No path separator - use current directory
+            (String::from("."), prefix.clone())
+        };
+
+        // List files in the directory
+        if let Ok(entries) = std::fs::list_directory(&dir_part) {
             for entry in entries {
                 let name = String::from(&entry.name[..]);
-                if name.starts_with(&prefix) {
+
+                // Skip . and .. unless explicitly typed
+                if (name == "." || name == "..") && !file_part.starts_with('.') {
+                    continue;
+                }
+
+                if name.starts_with(&file_part) {
+                    // Build full completion path
+                    let mut completion = if dir_part == "." {
+                        // Current directory - just use filename
+                        name.clone()
+                    } else {
+                        // Other directory - include directory part
+                        let mut full_path = dir_part.clone();
+                        if !full_path.ends_with('/') {
+                            full_path.push('/');
+                        }
+                        full_path.push_str(&name);
+                        full_path
+                    };
+
                     // Add trailing / for directories
-                    let mut completion = name;
                     if entry.file_type == 1 {  // Directory
                         completion.push('/');
                     }

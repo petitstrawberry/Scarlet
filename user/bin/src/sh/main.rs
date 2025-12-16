@@ -460,10 +460,14 @@ fn interactive_shell() -> i32 {
 
     // Initialize history
     let mut history = history::History::new(100);
-    let history_file = "/.sh_history";
+    // HOME/.sh_history
+    let history_file = match std::env::var("HOME") {
+        Some(home) => format!("{}/.sh_history", home),
+        None => String::from(".sh_history"),
+    };
 
     // Try to load history from file
-    match history.load_from_file(history_file) {
+    match history.load_from_file(&history_file) {
         Ok(_) => {
             // Successfully loaded history
         }
@@ -510,12 +514,15 @@ fn interactive_shell() -> i32 {
                 println!("sh: parse error: {:?}", err);
             }
         }
+
+        // Save history after each command
+        let _ = history.save_to_file(&history_file);
     }
 
     // Save history before exiting (unreachable in practice due to exit command)
     #[allow(unreachable_code)]
     {
-        let _ = history.save_to_file(history_file);
+        let _ = history.save_to_file(&history_file);
         0
     }
 }
