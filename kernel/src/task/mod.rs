@@ -570,7 +570,10 @@ impl Task {
                 first_map = Some(mmap);
             }
 
-            self.add_managed_page(ManagedPage { vaddr: page_vaddr, page });
+            self.add_managed_page(ManagedPage {
+                vaddr: page_vaddr,
+                page,
+            });
         }
 
         first_map.ok_or("Failed to allocate pages")
@@ -1647,7 +1650,9 @@ mod tests {
             let mut found = None;
             child_task.vm_manager.with_memmaps(|mm| {
                 for m in mm.values() {
-                    if m.vmarea.start == vaddr && m.vmarea.end == vaddr + crate::environment::PAGE_SIZE - 1 {
+                    if m.vmarea.start == vaddr
+                        && m.vmarea.end == vaddr + crate::environment::PAGE_SIZE - 1
+                    {
                         found = Some(m.clone());
                         break;
                     }
@@ -1658,7 +1663,10 @@ mod tests {
 
         // Verify the virtual memory ranges match for the first page
         assert_eq!(child_first_page_mmap.vmarea.start, vaddr);
-        assert_eq!(child_first_page_mmap.vmarea.end, vaddr + crate::environment::PAGE_SIZE - 1);
+        assert_eq!(
+            child_first_page_mmap.vmarea.end,
+            vaddr + crate::environment::PAGE_SIZE - 1
+        );
 
         // Verify the data was copied correctly
         unsafe {

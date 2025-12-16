@@ -63,19 +63,18 @@ fn copy_bytes_into_task(
         let page_off = cur_vaddr & (PAGE_SIZE - 1);
         let chunk = core::cmp::min(PAGE_SIZE - page_off, src.len() - copied);
 
-        let paddr = task.vm_manager.translate_vaddr(cur_vaddr).ok_or(ElfLoaderError {
-            message: format!(
-                "Failed to translate virtual address {:#x} ({})",
-                cur_vaddr, context
-            ),
-        })?;
+        let paddr = task
+            .vm_manager
+            .translate_vaddr(cur_vaddr)
+            .ok_or(ElfLoaderError {
+                message: format!(
+                    "Failed to translate virtual address {:#x} ({})",
+                    cur_vaddr, context
+                ),
+            })?;
 
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                src.as_ptr().add(copied),
-                paddr as *mut u8,
-                chunk,
-            );
+            core::ptr::copy_nonoverlapping(src.as_ptr().add(copied), paddr as *mut u8, chunk);
         }
 
         copied += chunk;
@@ -1108,12 +1107,7 @@ fn load_elf_into_task_static(
                 //     crate::println!("  data: {}", hex_str);
                 // }
 
-                copy_bytes_into_task(
-                    task,
-                    target_vaddr,
-                    &segment_data,
-                    "segment data copy",
-                )?;
+                copy_bytes_into_task(task, target_vaddr, &segment_data, "segment data copy")?;
             }
         }
         Ok(true) // Continue iteration
@@ -1440,12 +1434,7 @@ fn load_elf_segment_at_address(
         let data_offset = (segment_addr as usize) - mapping_start;
         let target_vaddr = mapping_start + data_offset;
 
-        copy_bytes_into_task(
-            task,
-            target_vaddr,
-            &segment_data,
-            "segment loading",
-        )?;
+        copy_bytes_into_task(task, target_vaddr, &segment_data, "segment loading")?;
     }
 
     // Update task size information for proper memory management

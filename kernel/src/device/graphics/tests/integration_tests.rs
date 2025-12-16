@@ -125,7 +125,8 @@ mod integration_tests {
         let config1 = FramebufferConfig::new(1920, 1080, PixelFormat::RGBA8888);
         device1.set_framebuffer_config(config1.clone());
         let fb_addr1 =
-            crate::mem::page::allocate_contiguous_raw_pages((config1.size() + 4095) / 4096) as usize;
+            crate::mem::page::allocate_contiguous_raw_pages((config1.size() + 4095) / 4096)
+                as usize;
         device1.set_framebuffer_address(fb_addr1);
         let shared_device1: Arc<dyn Device> = Arc::new(device1);
 
@@ -134,7 +135,8 @@ mod integration_tests {
         let config2 = FramebufferConfig::new(1024, 768, PixelFormat::BGRA8888);
         device2.set_framebuffer_config(config2.clone());
         let fb_addr2 =
-            crate::mem::page::allocate_contiguous_raw_pages((config2.size() + 4095) / 4096) as usize;
+            crate::mem::page::allocate_contiguous_raw_pages((config2.size() + 4095) / 4096)
+                as usize;
         device2.set_framebuffer_address(fb_addr2);
         let shared_device2: Arc<dyn Device> = Arc::new(device2);
 
@@ -205,7 +207,8 @@ mod integration_tests {
         let mut device = GenericGraphicsDevice::new("test-gpu");
         let config = FramebufferConfig::new(800, 600, PixelFormat::RGB888);
         device.set_framebuffer_config(config.clone());
-        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages((config.size() + 4095) / 4096) as usize;
+        let fb_addr =
+            crate::mem::page::allocate_contiguous_raw_pages((config.size() + 4095) / 4096) as usize;
         device.set_framebuffer_address(fb_addr);
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
@@ -351,7 +354,8 @@ mod integration_tests {
         let mut device = GenericGraphicsDevice::new("devfs-test-gpu");
         let config = FramebufferConfig::new(100, 100, PixelFormat::RGBA8888);
         device.set_framebuffer_config(config.clone());
-        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages((config.size() + 4095) / 4096) as usize;
+        let fb_addr =
+            crate::mem::page::allocate_contiguous_raw_pages((config.size() + 4095) / 4096) as usize;
         device.set_framebuffer_address(fb_addr);
         let shared_device: Arc<dyn Device> = Arc::new(device);
 
@@ -439,7 +443,8 @@ mod integration_tests {
             );
             device.set_framebuffer_config(config.clone());
             let fb_addr =
-                crate::mem::page::allocate_contiguous_raw_pages((config.size() + 4095) / 4096) as usize;
+                crate::mem::page::allocate_contiguous_raw_pages((config.size() + 4095) / 4096)
+                    as usize;
             device.set_framebuffer_address(fb_addr);
             let shared_device: Arc<dyn Device> = Arc::new(device);
 

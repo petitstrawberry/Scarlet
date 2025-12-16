@@ -688,7 +688,8 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
             if let Some(owner_weak) = &original_mapping.owner {
                 if let Some(owner) = owner_weak.upgrade() {
                     let offset = addr - original_mapping.vmarea.start;
-                    if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, aligned_length)
+                    if let Ok((_, obj_permissions, _)) =
+                        owner.get_mapping_info(offset, aligned_length)
                     {
                         if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
                             // crate::println!("sys_mprotect: Requested permissions exceed object permissions");

@@ -329,11 +329,13 @@ unsafe impl GlobalAlloc for Allocator {
 
                 let new_live =
                     self.live_bytes.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-                let _ =
-                    self.peak_live_bytes
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                            if new_live > cur { Some(new_live) } else { None }
-                        });
+                let _ = self.peak_live_bytes.fetch_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |cur| {
+                        if new_live > cur { Some(new_live) } else { None }
+                    },
+                );
 
                 self.maybe_log_usage();
             }
@@ -360,11 +362,11 @@ unsafe impl GlobalAlloc for Allocator {
             {
                 self.dealloc_calls.fetch_add(1, Ordering::Relaxed);
 
-                let _ = self
-                    .live_alloc_count
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                        Some(cur.saturating_sub(1))
-                    });
+                let _ = self.live_alloc_count.fetch_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |cur| Some(cur.saturating_sub(1)),
+                );
                 let _ = self
                     .live_bytes
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
