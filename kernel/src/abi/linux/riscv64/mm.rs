@@ -5,11 +5,11 @@ use crate::{
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
-    mem::page::allocate_raw_pages,
+    mem::page::allocate_page,
     task::mytask,
     vm::vmem::{MemoryArea, VirtualMemoryMap},
 };
-use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     // Linux mmap constants
@@ -148,7 +148,7 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
                 // );
                 break info;
             }
-            Err(e) => {
+            Err(_e) => {
                 if ok_len >= PAGE_SIZE {
                     ok_len -= PAGE_SIZE;
                 } else {
@@ -236,9 +236,6 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
     // crate::println!("sys_mmap: Step 19 - Creating memory areas (vaddr={:#x}, paddr={:#x})", final_vaddr, paddr);
 
-    // Create memory areas
-    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
-
     // crate::println!("sys_mmap: Step 20 - Calculating permissions");
 
     // Convert protection flags to kernel permissions
@@ -283,120 +280,102 @@ pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
     // If this is a file-backed private mapping, allocate private pages now and copy contents
     if is_map_private_flag && !is_shared {
-        // crate::println!("sys_mmap: Step 23 - Allocating pages for private mapping");
-        // Allocate pages for the private copy
-        let pages = allocate_raw_pages(num_pages);
-        // crate::println!("sys_mmap: Step 24 - Allocated pages at {:#x}", pages as usize);
-        let pages_ptr = pages as usize;
-        let private_pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
+        // Allocate/map private pages page-by-page.
+        // NOTE: Avoid `allocate_contiguous_raw_pages(num_pages)` + `Box::from_raw(ptr.add(i))` (UB).
 
-        // crate::println!("sys_mmap: Step 25 - Creating VirtualMemoryMap");
-        let vm_map = VirtualMemoryMap::new(private_pmarea, vmarea, final_permissions, false, None);
+        // For private mappings we do not notify the original object via on_mapped
+        // because the new mapping uses private pages and the object is not the owner.
 
-        // crate::println!("sys_mmap: Step 26 - Adding memory map to VM manager (is_fixed={})", is_fixed);
+        let mut mapped_vaddrs: Vec<usize> = Vec::with_capacity(num_pages);
 
-        // Use add_memory_map_fixed only if MAP_FIXED is set, otherwise use add_memory_map
-        let map_result = if is_fixed {
-            task.vm_manager
-                .add_memory_map_fixed(vm_map)
-                .map(|removed| Some(removed))
-        } else {
-            task.vm_manager.add_memory_map(vm_map).map(|_| None)
-        };
+        for i in 0..num_pages {
+            let page_vaddr = final_vaddr + i * PAGE_SIZE;
+            let mut page = allocate_page();
 
-        match map_result {
-            Ok(removed_mappings_opt) => {
-                // let removed_count = removed_mappings_opt.as_ref().map(|r| r.len()).unwrap_or(0);
-                // crate::println!("sys_mmap: Step 27 - Memory map added successfully, processing {} removed mappings", removed_count);
-                // For private mappings we do not notify the original object via on_mapped
-                // because the new mapping uses private physical pages and the object
-                // is not the owner of those pages.
-
-                // Notify owners for any removed mappings (only shared ones)
-                // crate::println!("sys_mmap: Step 28 - Notifying owners of removed mappings");
-                if let Some(removed_mappings) = &removed_mappings_opt {
-                    for removed_map in removed_mappings {
-                        if removed_map.is_shared {
-                            if let Some(owner_weak) = &removed_map.owner {
-                                if let Some(owner) = owner_weak.upgrade() {
-                                    owner.on_unmapped(
-                                        removed_map.vmarea.start,
-                                        removed_map.vmarea.size(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Clean up managed pages from removed mappings
-                // crate::println!("sys_mmap: Step 29 - Cleaning up managed pages from removed mappings");
-                if let Some(removed_mappings) = removed_mappings_opt {
-                    for removed_map in removed_mappings {
-                        if !removed_map.is_shared {
-                            let mapping_start = removed_map.vmarea.start;
-                            let mapping_end = removed_map.vmarea.end;
-                            let num_removed_pages =
-                                (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-                            for i in 0..num_removed_pages {
-                                let page_vaddr = mapping_start + i * PAGE_SIZE;
-                                if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                                    // freed when dropped
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Zero-initialize entire region, then copy only the mappable portion (ok_len)
+            // Copy only the mappable portion (ok_len) into this page; the rest stays zero.
+            let src_offset = i * PAGE_SIZE;
+            if ok_len > src_offset {
+                let copy_len = core::cmp::min(PAGE_SIZE, ok_len - src_offset);
                 unsafe {
-                    core::ptr::write_bytes(pages as *mut u8, 0u8, aligned_length);
+                    core::ptr::copy_nonoverlapping(
+                        (paddr + src_offset) as *const u8,
+                        page.data.as_mut_ptr(),
+                        copy_len,
+                    );
                 }
-                if ok_len > 0 {
-                    let copy_len = core::cmp::min(ok_len, aligned_length);
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            paddr as *const u8,
-                            pages as *mut u8,
-                            copy_len,
-                        );
-                    }
-                }
+            }
 
-                // Add managed pages for the task so they are freed on task exit
-                // crate::println!("sys_mmap: Step 31 - Adding {} managed pages", num_pages);
-                for i in 0..num_pages {
-                    let page_vaddr = final_vaddr + i * crate::environment::PAGE_SIZE;
-                    let page_ptr = unsafe { (pages as *mut crate::mem::page::Page).add(i) };
+            let page_ptr = page.as_ref() as *const crate::mem::page::Page as usize;
+            let page_vmarea = MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1);
+            let page_pmarea = MemoryArea::new(page_ptr, page_ptr + PAGE_SIZE - 1);
+            let page_map =
+                VirtualMemoryMap::new(page_pmarea, page_vmarea, final_permissions, false, None);
+
+            // Use add_memory_map_fixed only if MAP_FIXED is set, otherwise use add_memory_map
+            let map_result = if is_fixed {
+                task.vm_manager
+                    .add_memory_map_fixed(page_map)
+                    .map(|removed| Some(removed))
+            } else {
+                task.vm_manager.add_memory_map(page_map).map(|_| None)
+            };
+
+            match map_result {
+                Ok(removed_mappings_opt) => {
+                    // Notify owners for any removed mappings (only shared ones)
+                    if let Some(removed_mappings) = &removed_mappings_opt {
+                        for removed_map in removed_mappings {
+                            if removed_map.is_shared {
+                                if let Some(owner_weak) = &removed_map.owner {
+                                    if let Some(owner) = owner_weak.upgrade() {
+                                        owner.on_unmapped(
+                                            removed_map.vmarea.start,
+                                            removed_map.vmarea.size(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Clean up managed pages from removed private mappings
+                    if let Some(removed_mappings) = removed_mappings_opt {
+                        for removed_map in removed_mappings {
+                            if !removed_map.is_shared {
+                                let mapping_start = removed_map.vmarea.start;
+                                let mapping_end = removed_map.vmarea.end;
+                                let num_removed_pages =
+                                    (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                                for i in 0..num_removed_pages {
+                                    let page_vaddr = mapping_start + i * PAGE_SIZE;
+                                    if let Some(_managed_page) =
+                                        task.remove_managed_page(page_vaddr)
+                                    {
+                                        // freed when dropped
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     task.add_managed_page(crate::task::ManagedPage {
                         vaddr: page_vaddr,
-                        page: unsafe { Box::from_raw(page_ptr) },
+                        page,
                     });
+                    mapped_vaddrs.push(page_vaddr);
                 }
-
-                // crate::println!("sys_mmap: Step 32 - Private mapping complete, returning {:#x}", final_vaddr);
-
-                // Print current memory map for debugging
-                // crate::println!("=== Memory Map After mmap ===");
-                // for map in task.vm_manager.memmap_iter() {
-                //     crate::println!("  VA: {:#x}-{:#x} -> PA: {:#x}-{:#x} (perm: {:#x}, shared: {})",
-                //         map.vmarea.start, map.vmarea.end,
-                //         map.pmarea.start, map.pmarea.end,
-                //         map.permissions, map.is_shared);
-                // }
-                // crate::println!("=============================");
-
-                // crate::println!("sys_mmap: RETURN {:#x} (private file-backed)", final_vaddr);
-                final_vaddr
-            }
-            Err(_) => {
-                // crate::println!("sys_mmap: Step 33 - Failed to add private mapping");
-                // Free allocated pages to avoid leak
-                crate::mem::page::free_raw_pages(pages, num_pages);
-                // crate::println!("sys_mmap: Failed to add private mapping");
-                to_result(errno::ENOMEM)
+                Err(_) => {
+                    // Rollback any pages mapped so far
+                    for vaddr in mapped_vaddrs.drain(..) {
+                        let _ = task.vm_manager.remove_memory_map_by_addr(vaddr);
+                        let _ = task.remove_managed_page(vaddr);
+                    }
+                    return to_result(errno::ENOMEM);
+                }
             }
         }
+
+        return final_vaddr;
     } else {
         // crate::println!("sys_mmap: Step 33 - Shared or object-backed mapping path");
         // For MAP_SHARED (or object-backed) mappings, if the backend couldn't provide
@@ -558,8 +537,7 @@ fn handle_anonymous_mapping(
     };
 
     // For anonymous mappings, allocate physical memory directly
-    let pages = allocate_raw_pages(num_pages);
-    let pages_ptr = pages as usize;
+    let mut mapped_vaddrs: Vec<usize> = Vec::with_capacity(num_pages);
 
     // Convert protection flags to kernel permissions
     let mut permissions = 0;
@@ -576,63 +554,75 @@ fn handle_anonymous_mapping(
         }
     }
 
-    // Create memory areas
-    let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
-    let pmarea = MemoryArea::new(pages_ptr, pages_ptr + aligned_length - 1);
+    for i in 0..num_pages {
+        let page_vaddr = final_vaddr + i * PAGE_SIZE;
+        let page = allocate_page();
+        let page_ptr = page.as_ref() as *const crate::mem::page::Page as usize;
 
-    // Create virtual memory map
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, permissions, is_shared, None); // Anonymous mappings have no owner
+        let page_vmarea = MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1);
+        let page_pmarea = MemoryArea::new(page_ptr, page_ptr + PAGE_SIZE - 1);
+        let vm_map = VirtualMemoryMap::new(page_pmarea, page_vmarea, permissions, is_shared, None);
 
-    // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
-    match task.vm_manager.add_memory_map_fixed(vm_map) {
-        Ok(removed_mappings) => {
-            // First, process notifications for object owners
-            for removed_map in &removed_mappings {
-                if removed_map.is_shared {
-                    if let Some(owner_weak) = &removed_map.owner {
-                        if let Some(owner) = owner_weak.upgrade() {
-                            owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
+        // Use add_memory_map_fixed for both FIXED and non-FIXED mappings to handle overlaps consistently
+        match task.vm_manager.add_memory_map_fixed(vm_map) {
+            Ok(removed_mappings) => {
+                // First, process notifications for object owners
+                for removed_map in &removed_mappings {
+                    if removed_map.is_shared {
+                        if let Some(owner_weak) = &removed_map.owner {
+                            if let Some(owner) = owner_weak.upgrade() {
+                                owner.on_unmapped(
+                                    removed_map.vmarea.start,
+                                    removed_map.vmarea.size(),
+                                );
+                            }
                         }
                     }
                 }
-            }
 
-            // Then, handle managed page cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
-            for removed_map in removed_mappings {
-                // Remove managed pages only for private mappings
-                if !removed_map.is_shared {
-                    let mapping_start = removed_map.vmarea.start;
-                    let mapping_end = removed_map.vmarea.end;
-                    let num_removed_pages =
-                        (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
+                // Then, handle managed page cleanup (MMU cleanup is already handled by VmManager.add_memory_map_fixed)
+                for removed_map in removed_mappings {
+                    // Remove managed pages only for private mappings
+                    if !removed_map.is_shared {
+                        let mapping_start = removed_map.vmarea.start;
+                        let mapping_end = removed_map.vmarea.end;
+                        let num_removed_pages =
+                            (mapping_end - mapping_start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
 
-                    for i in 0..num_removed_pages {
-                        let page_vaddr = mapping_start + i * PAGE_SIZE;
-                        if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
-                            // The managed page is automatically freed when dropped
+                        for i in 0..num_removed_pages {
+                            let page_vaddr = mapping_start + i * PAGE_SIZE;
+                            if let Some(_managed_page) = task.remove_managed_page(page_vaddr) {
+                                // freed when dropped
+                            }
                         }
                     }
                 }
-            }
 
-            // Add managed pages for the new anonymous mapping
-            for i in 0..num_pages {
-                let page_vaddr = final_vaddr + i * crate::environment::PAGE_SIZE;
-                let page_ptr = unsafe { (pages as *mut crate::mem::page::Page).add(i) };
-                task.add_managed_page(crate::task::ManagedPage {
-                    vaddr: page_vaddr,
-                    page: unsafe { Box::from_raw(page_ptr) },
-                });
-            }
+                // NOTE: For shared anonymous mappings we currently avoid adding ManagedPage,
+                // since we don't have refcounted ownership across tasks yet.
+                if !is_shared {
+                    task.add_managed_page(crate::task::ManagedPage {
+                        vaddr: page_vaddr,
+                        page,
+                    });
+                }
 
-            final_vaddr
-        }
-        Err(_) => {
-            // Free allocated pages on error to avoid leak
-            crate::mem::page::free_raw_pages(pages, num_pages);
-            to_result(errno::ENOMEM)
+                mapped_vaddrs.push(page_vaddr);
+            }
+            Err(_) => {
+                // Rollback any pages mapped so far
+                for vaddr in mapped_vaddrs.drain(..) {
+                    let _ = task.vm_manager.remove_memory_map_by_addr(vaddr);
+                    if !is_shared {
+                        let _ = task.remove_managed_page(vaddr);
+                    }
+                }
+                return to_result(errno::ENOMEM);
+            }
         }
     }
+
+    final_vaddr
 }
 
 pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
@@ -673,15 +663,6 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         }
     }
 
-    // Get the original mapping to determine properties
-    let original_mapping = match task.vm_manager.search_memory_map(addr) {
-        Some(map) => map,
-        None => {
-            // crate::println!("sys_mprotect: No memory mapping found at address {:#x}", addr);
-            return usize::MAX; // -ENOMEM
-        }
-    };
-
     // Convert Linux protection flags to kernel permissions
     let mut new_permissions = 0;
     if prot != 0 {
@@ -697,47 +678,88 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
         }
     }
 
-    // Note: Do not globally enforce execute-only here.
+    let desired_end = addr + aligned_length - 1;
 
-    // For file-backed mappings, check object permissions
-    if let Some(owner_weak) = &original_mapping.owner {
-        if let Some(owner) = owner_weak.upgrade() {
-            let offset = addr - original_mapping.vmarea.start;
-            if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, aligned_length) {
-                if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
-                    // crate::println!("sys_mprotect: Requested permissions exceed object permissions");
-                    return usize::MAX; // -EACCES
+    // Fast path: a single mapping covers the entire range.
+    // This matches the legacy behavior when a region is backed by a contiguous pmarea.
+    if let Some(original_mapping) = task.vm_manager.search_memory_map(addr) {
+        if original_mapping.vmarea.start <= addr && desired_end <= original_mapping.vmarea.end {
+            // For file-backed mappings, check object permissions
+            if let Some(owner_weak) = &original_mapping.owner {
+                if let Some(owner) = owner_weak.upgrade() {
+                    let offset = addr - original_mapping.vmarea.start;
+                    if let Ok((_, obj_permissions, _)) =
+                        owner.get_mapping_info(offset, aligned_length)
+                    {
+                        if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
+                            // crate::println!("sys_mprotect: Requested permissions exceed object permissions");
+                            return usize::MAX; // -EACCES
+                        }
+                    }
+                }
+            }
+
+            // Calculate physical address for the new mapping
+            let offset_in_mapping = addr - original_mapping.vmarea.start;
+            let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
+
+            // Create the new memory mapping with updated permissions
+            let new_map = VirtualMemoryMap::new(
+                MemoryArea::new(new_paddr, new_paddr + aligned_length - 1),
+                MemoryArea::new(addr, desired_end),
+                new_permissions,
+                original_mapping.is_shared,
+                original_mapping.owner.clone(),
+            );
+
+            // Use add_memory_map_fixed to handle splitting and overlaps automatically
+            return match task.vm_manager.add_memory_map_fixed(new_map) {
+                Ok(_removed_mappings) => 0,
+                Err(_) => usize::MAX,
+            };
+        }
+    }
+
+    // Slow path: update permissions page-by-page.
+    // This is required when the address range is represented by per-page VMAs
+    // or when the physical backing is not contiguous.
+    for i in 0..num_pages {
+        let page_addr = addr + i * PAGE_SIZE;
+
+        let original_mapping = match task.vm_manager.search_memory_map(page_addr) {
+            Some(map) => map,
+            None => return usize::MAX,
+        };
+
+        // For file-backed mappings, check object permissions for this page
+        if let Some(owner_weak) = &original_mapping.owner {
+            if let Some(owner) = owner_weak.upgrade() {
+                let offset = page_addr - original_mapping.vmarea.start;
+                if let Ok((_, obj_permissions, _)) = owner.get_mapping_info(offset, PAGE_SIZE) {
+                    if (new_permissions & obj_permissions) != (new_permissions & 0x7) {
+                        return usize::MAX; // -EACCES
+                    }
                 }
             }
         }
-    }
 
-    // Calculate physical address for the new mapping
-    let offset_in_mapping = addr - original_mapping.vmarea.start;
-    let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
+        let offset_in_mapping = page_addr - original_mapping.vmarea.start;
+        let new_paddr = original_mapping.pmarea.start + offset_in_mapping;
 
-    // Create the new memory mapping with updated permissions
-    let new_map = VirtualMemoryMap::new(
-        MemoryArea::new(new_paddr, new_paddr + aligned_length - 1),
-        MemoryArea::new(addr, addr + aligned_length - 1),
-        new_permissions,
-        original_mapping.is_shared,
-        original_mapping.owner.clone(),
-    );
+        let new_map = VirtualMemoryMap::new(
+            MemoryArea::new(new_paddr, new_paddr + PAGE_SIZE - 1),
+            MemoryArea::new(page_addr, page_addr + PAGE_SIZE - 1),
+            new_permissions,
+            original_mapping.is_shared,
+            original_mapping.owner.clone(),
+        );
 
-    // Use add_memory_map_fixed to handle splitting and overlaps automatically
-    match task.vm_manager.add_memory_map_fixed(new_map) {
-        Ok(_removed_mappings) => {
-            // crate::println!("sys_mprotect: Successfully updated permissions for {:#x}-{:#x}",
-            //    addr, addr + aligned_length - 1);
-
-            0 // Success
-        }
-        Err(_) => {
-            // crate::println!("sys_mprotect: Failed to update memory mapping: {}", e);
-            usize::MAX // -EFAULT
+        if task.vm_manager.add_memory_map_fixed(new_map).is_err() {
+            return usize::MAX;
         }
     }
+
+    0
 }
 
 pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {

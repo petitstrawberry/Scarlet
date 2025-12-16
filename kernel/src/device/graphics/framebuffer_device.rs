@@ -807,7 +807,7 @@ mod tests {
         // Allocate memory for test framebuffer
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -863,7 +863,7 @@ mod tests {
 
         let fb_size = config.size(); // 10 * 10 * 3 = 300 bytes
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -964,7 +964,7 @@ mod tests {
             assert_eq!(fb_size, expected_size);
 
             let fb_pages = (fb_size + 4095) / 4096;
-            let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+            let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
             test_device.set_framebuffer_address(fb_addr);
 
             let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -1025,7 +1025,7 @@ mod tests {
 
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -1085,7 +1085,7 @@ mod tests {
 
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -1132,7 +1132,7 @@ mod tests {
 
         let fb_size = config.size(); // 256 * 256 * 4 = 262,144 bytes
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -1193,7 +1193,7 @@ mod tests {
 
         let fb_size = config.size(); // 16 * 16 * 3 = 768 bytes
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -1271,7 +1271,7 @@ mod tests {
 
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
@@ -1345,7 +1345,7 @@ mod tests {
 
         let fb_size = config.size();
         let fb_pages = (fb_size + 4095) / 4096;
-        let fb_addr = crate::mem::page::allocate_raw_pages(fb_pages) as usize;
+        let fb_addr = crate::mem::page::allocate_contiguous_raw_pages(fb_pages) as usize;
         test_device.set_framebuffer_address(fb_addr);
 
         let shared_device: Arc<dyn Device> = Arc::new(test_device);
