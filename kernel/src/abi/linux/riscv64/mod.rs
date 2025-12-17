@@ -12,7 +12,7 @@ mod time;
 
 // pub mod drivers;
 
-use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec};
 // use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
 // use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
@@ -52,11 +52,14 @@ pub struct LinuxThreadState {
 pub struct LinuxRiscv64Abi {
     /// File descriptor to handle mapping table (fd -> handle)
     /// None means the fd is not allocated
-    fd_to_handle: [Option<u32>; MAX_FDS],
+    /// Vec to avoid stack overflow during initialization
+    fd_to_handle: Vec<Option<u32>>,
     /// File descriptor flags (e.g., FD_CLOEXEC)
-    fd_flags: [u32; MAX_FDS],
+    /// Vec to avoid stack overflow during initialization
+    fd_flags: Vec<u32>,
     /// File status flags (e.g., O_NONBLOCK) for F_GETFL/F_SETFL
-    file_status_flags: [u32; MAX_FDS],
+    /// Vec to avoid stack overflow during initialization
+    file_status_flags: Vec<u32>,
     /// Free file descriptor list for O(1) allocation/deallocation
     free_fds: Vec<usize>,
     /// Signal handling state
@@ -76,9 +79,9 @@ impl Default for LinuxRiscv64Abi {
         let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
         Self {
-            fd_to_handle: [None; MAX_FDS],
-            fd_flags: [0; MAX_FDS],
-            file_status_flags: [0; MAX_FDS],
+            fd_to_handle: vec![None; MAX_FDS],
+            fd_flags: vec![0; MAX_FDS],
+            file_status_flags: vec![0; MAX_FDS],
             free_fds,
             signal_state: Arc::new(spin::Mutex::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
