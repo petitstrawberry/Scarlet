@@ -1,5 +1,5 @@
 use crate::boxed::Box;
-use crate::syscall::{Syscall, syscall0, syscall1, syscall3, syscall4, syscall5};
+use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 use crate::vec::Vec;
 
 // Flags for execve system calls
@@ -464,4 +464,37 @@ pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
 ///
 pub fn wait() -> (i32, i32) {
     waitpid(-1, 0)
+}
+
+/// Creates a pipe pair
+///
+/// Creates a unidirectional pipe with read and write ends.
+///
+/// # Return Value
+/// - Ok((read_handle, write_handle)): On success, returns tuple of handles
+/// - Err(error_code): On failure
+///
+/// # Example
+/// ```no_run
+/// use scarlet_std::task::pipe;
+/// use scarlet_std::handle::Handle;
+///
+/// let (read_end, write_end) = pipe().expect("Failed to create pipe");
+/// // Use read_end and write_end for IPC
+/// ```
+pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
+    let mut pipefd = [0u32; 2];
+    let result = syscall2(
+        Syscall::Pipe,
+        pipefd.as_mut_ptr() as usize,
+        0, // flags (not used yet in sys_pipe)
+    );
+
+    if result == usize::MAX {
+        return Err(-1);
+    }
+
+    let read_handle = unsafe { crate::handle::Handle::from_raw(pipefd[0] as i32) };
+    let write_handle = unsafe { crate::handle::Handle::from_raw(pipefd[1] as i32) };
+    Ok((read_handle, write_handle))
 }
