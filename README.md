@@ -22,7 +22,7 @@ Scarlet is an operating system kernel written in Rust that implements native ABI
 ```bash
 # Get started with Docker (recommended)
 docker build -t scarlet-dev .
-docker run -it --rm scarlet-dev bash -c "cargo make build && cargo make run"
+docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev bash -c "cargo make build && cargo make run"
 
 # Once Scarlet boots, you'll see:
 Login successful for user: root
