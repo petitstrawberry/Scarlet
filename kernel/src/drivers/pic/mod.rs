@@ -3,8 +3,7 @@
 //! This module contains implementations of various interrupt controllers
 //! used in different platforms and architectures.
 
-pub mod clint;
+// pub mod clint; // Currently not used
+#[cfg(target_arch = "riscv64")]
+pub mod sbi_clint;
 pub mod plic;
-
-pub use clint::Clint;
-pub use plic::Plic;
