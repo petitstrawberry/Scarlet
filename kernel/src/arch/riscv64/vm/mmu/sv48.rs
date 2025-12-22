@@ -97,12 +97,12 @@ impl PageTableEntry {
     }
 
     pub fn accessed(&mut self) -> &mut Self {
-        self.entry |= 0x20;
+        self.entry |= 0x40;
         self
     }
 
     pub fn dirty(&mut self) -> &mut Self {
-        self.entry |= 0x40;
+        self.entry |= 0x80;
         self
     }
 }
