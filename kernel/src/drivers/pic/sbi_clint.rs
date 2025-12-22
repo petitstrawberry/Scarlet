@@ -7,7 +7,11 @@ use core::arch::asm;
 use alloc::boxed::Box;
 
 use crate::{
-    early_initcall, interrupt::{CpuId, InterruptError, InterruptManager, InterruptResult, controllers::{LocalInterruptController, LocalInterruptType}}
+    early_initcall,
+    interrupt::{
+        CpuId, InterruptError, InterruptManager, InterruptResult,
+        controllers::{LocalInterruptController, LocalInterruptType},
+    },
 };
 
 struct SbiClint {
@@ -92,12 +96,8 @@ impl LocalInterruptController for SbiClint {
         }
 
         match interrupt_type {
-            LocalInterruptType::Timer => {
-                false
-            }
-            LocalInterruptType::Software => {
-                false
-            }
+            LocalInterruptType::Timer => false,
+            LocalInterruptType::Software => false,
             LocalInterruptType::External => false, // Not managed by CLINT
         }
     }
@@ -123,7 +123,6 @@ impl LocalInterruptController for SbiClint {
 
     /// Send a software interrupt to a specific CPU
     fn send_software_interrupt(&mut self, target_cpu: CpuId) -> InterruptResult<()> {
-
         Ok(())
     }
 
@@ -175,7 +174,7 @@ unsafe impl Sync for SbiClint {}
 fn register_driver() {
     // Create the SBI timer controller
     let mut controller = Box::new(SbiClint { max_cpus: 4 });
-    
+
     if let Err(e) = controller.init(0) {
         crate::early_println!(
             "[interrupt] Failed to initialize CLINT for CPU {}: {}",
@@ -189,9 +188,7 @@ fn register_driver() {
         .lock()
         .register_local_controller_for_range(controller, 0..4)
     {
-        Ok(_) => {
-
-        }
+        Ok(_) => {}
         Err(e) => {
             crate::early_println!("[interrupt] Failed to register CLINT: {}", e);
         }
