@@ -5,6 +5,7 @@ pub enum Extension {
     SetTimer = 0x00,
     ConsolePutChar = 0x01,
     ConsoleGetChar = 0x02,
+    DebugConsole = 0x4442434e,
     Timer = 0x54494d45,
     Ipi = 0x735049,
     Rfence = 0x52464e43,
@@ -91,6 +92,10 @@ pub fn sbi_console_getchar() -> char {
         Ok(c) => c as u8 as char,
         Err(_) => '\0',
     }
+}
+
+pub fn sbi_debug_console_write_byte(c: char) {
+    let _ = sbi_call(Extension::DebugConsole, 0x2, c as usize, 0);
 }
 
 pub fn sbi_set_timer(stime_value: u64) {

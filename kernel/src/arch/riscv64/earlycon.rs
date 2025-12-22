@@ -1,9 +1,9 @@
 //! Early console driver for RISC-V64 architecture.
 //!
 
-use super::instruction::sbi::sbi_console_putchar;
+use crate::arch::instruction::sbi::sbi_debug_console_write_byte;
 
 pub fn early_putc(c: u8) {
     // Call SBI to print a character.
-    sbi_console_putchar(c as char);
+    sbi_debug_console_write_byte(c as char);
 }
