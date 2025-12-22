@@ -120,7 +120,7 @@ impl PageTable {
             asm!(
                 "
                 csrw satp, {0}
-                sfence.vma
+                sfence.vma zero, zero
                 ",
 
                 in(reg) satp,
@@ -174,7 +174,15 @@ impl PageTable {
     }
 
     /* Only for root page table */
-    pub fn map(&mut self, asid: u16, vaddr: usize, paddr: usize, permissions: usize, accessed: bool, dirty: bool) {
+    pub fn map(
+        &mut self,
+        asid: u16,
+        vaddr: usize,
+        paddr: usize,
+        permissions: usize,
+        accessed: bool,
+        dirty: bool,
+    ) {
         // Check if the virtual address is properly canonicalized for Sv48
         let canonical_check = (vaddr >> 47) & 1;
         let upper_bits = (vaddr >> 48) & 0xffff;
@@ -219,7 +227,7 @@ impl PageTable {
 
         pte.set_ppn(ppn);
         pte.validate();
-        unsafe { asm!("sfence.vma") };
+        unsafe { asm!("sfence.vma zero,zero") };
     }
 
     // Find the address of the PTE in page table that corresponds to virtual address vaddr.
@@ -298,7 +306,7 @@ impl PageTable {
             Some(pte) => {
                 if pte.is_valid() {
                     pte.clear_all();
-                    unsafe { asm!("sfence.vma") };
+                    unsafe { asm!("sfence.vma zero,zero") };
                 }
             }
             None => {
@@ -313,6 +321,6 @@ impl PageTable {
             entry.clear_all();
         }
         // Ensure the TLB flush instruction is not optimized away.
-        unsafe { asm!("sfence.vma") };
+        unsafe { asm!("sfence.vma zero,zero") };
     }
 }

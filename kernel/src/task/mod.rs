@@ -1022,7 +1022,12 @@ impl Task {
                         if mmap.vmarea.start == 0xffff_ffff_ffff_f000 {
                             if let Some(root_pagetable) = child.vm_manager.get_root_page_table() {
                                 root_pagetable
-                                    .map_memory_area(child.vm_manager.get_asid(), shared_mmap, true, true)
+                                    .map_memory_area(
+                                        child.vm_manager.get_asid(),
+                                        shared_mmap,
+                                        true,
+                                        true,
+                                    )
                                     .map_err(|_| "Failed to map trampoline page")?;
                             }
                         }

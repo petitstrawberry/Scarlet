@@ -411,7 +411,14 @@ impl VirtualMemoryManager {
 
         // Map this single page to the MMU
         if let Some(root_pagetable) = self.get_root_page_table() {
-            root_pagetable.map(self.get_asid(), page_vaddr, page_paddr, perms, true, access.op == AccessOp::Store);
+            root_pagetable.map(
+                self.get_asid(),
+                page_vaddr,
+                page_paddr,
+                perms,
+                true,
+                access.op == AccessOp::Store,
+            );
             Ok(())
         } else {
             Err("No root page table available")
