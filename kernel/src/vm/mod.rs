@@ -101,7 +101,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         .unwrap();
     /* Pre-map the kernel space */
     root_page_table
-        .map_memory_area(asid, kernel_map)
+        .map_memory_area(asid, kernel_map, true, true)
         .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
         .unwrap();
 
@@ -188,7 +188,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         .unwrap();
     /* Pre-map the kernel space */
     root_page_table
-        .map_memory_area(asid, kernel_map)
+        .map_memory_area(asid, kernel_map, true, true)
         .map_err(|e| {
             panic!("Failed to map kernel memory area: {}", e);
         })
@@ -314,7 +314,7 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
     let root = kman
         .get_root_page_table()
         .ok_or("Kernel root page table not set")?;
-    root.map_memory_area(kman.get_asid(), mmap)
+    root.map_memory_area(kman.get_asid(), mmap, true, true)
         .map_err(|_| "Failed to map kernel stack window")?;
 
     // Record base for later SP and teardown
@@ -465,7 +465,7 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     manager
         .get_root_page_table()
         .unwrap()
-        .map_memory_area(manager.get_asid(), trampoline_map)
+        .map_memory_area(manager.get_asid(), trampoline_map, true, true)
         .map_err(|e| panic!("Failed to map trampoline memory area: {}", e))
         .unwrap();
 

@@ -40,6 +40,7 @@ use alloc::collections::btree_map::Values;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use spin::RwLock;
 
+use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::{
     arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable},
     environment::PAGE_SIZE,
@@ -410,7 +411,7 @@ impl VirtualMemoryManager {
 
         // Map this single page to the MMU
         if let Some(root_pagetable) = self.get_root_page_table() {
-            root_pagetable.map(self.get_asid(), page_vaddr, page_paddr, perms);
+            root_pagetable.map(self.get_asid(), page_vaddr, page_paddr, perms, true, access.op == AccessOp::Store);
             Ok(())
         } else {
             Err("No root page table available")

@@ -95,6 +95,16 @@ impl PageTableEntry {
         self.entry |= 0x10;
         self
     }
+
+    pub fn accessed(&mut self) -> &mut Self {
+        self.entry |= 0x20;
+        self
+    }
+
+    pub fn dirty(&mut self) -> &mut Self {
+        self.entry |= 0x40;
+        self
+    }
 }
 
 #[repr(align(4096))]
@@ -134,6 +144,8 @@ impl PageTable {
         &mut self,
         asid: u16,
         mmap: VirtualMemoryMap,
+        accessed: bool,
+        dirty: bool,
     ) -> Result<(), &'static str> {
         // Check if the address and size is aligned to PAGE_SIZE
         if mmap.vmarea.start % PAGE_SIZE != 0
@@ -147,7 +159,7 @@ impl PageTable {
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(asid, vaddr, paddr, mmap.permissions);
+            self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty);
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
                 None => break,
@@ -162,7 +174,7 @@ impl PageTable {
     }
 
     /* Only for root page table */
-    pub fn map(&mut self, asid: u16, vaddr: usize, paddr: usize, permissions: usize) {
+    pub fn map(&mut self, asid: u16, vaddr: usize, paddr: usize, permissions: usize, accessed: bool, dirty: bool) {
         // Check if the virtual address is properly canonicalized for Sv48
         let canonical_check = (vaddr >> 47) & 1;
         let upper_bits = (vaddr >> 48) & 0xffff;
@@ -198,6 +210,13 @@ impl PageTable {
         if VirtualMemoryPermission::User.contained_in(permissions) {
             pte.accesible_from_user();
         }
+        if accessed {
+            pte.accessed();
+        }
+        if dirty {
+            pte.dirty();
+        }
+
         pte.set_ppn(ppn);
         pte.validate();
         unsafe { asm!("sfence.vma") };
