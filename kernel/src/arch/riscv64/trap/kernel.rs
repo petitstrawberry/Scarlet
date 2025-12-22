@@ -4,7 +4,7 @@ use core::{arch::asm, mem::transmute};
 use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
 use crate::environment::PAGE_SIZE;
-use crate::println;
+use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::get_scheduler;
 use crate::vm::get_kernel_vm_manager;
 
@@ -183,7 +183,18 @@ fn arch_kernel_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     panic!("Invalid memory access at vaddr: {:#x}", vaddr);
                 }
 
-                match manager.lazy_map_page(vaddr) {
+                let op = if cause == 13 {
+                    AccessOp::Load
+                } else {
+                    AccessOp::Store
+                };
+                let access = AccessKind {
+                    op,
+                    vaddr,
+                    size: None,
+                };
+
+                match manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
