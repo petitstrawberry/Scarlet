@@ -8,7 +8,7 @@ use alloc::{alloc::alloc_zeroed, vec::Vec};
 use core::{
     alloc::Layout,
     mem::{self, swap},
-    sync::atomic::compiler_fence,
+    sync::atomic::{compiler_fence, fence},
 };
 
 // struct RawVirtQueue {
@@ -275,6 +275,9 @@ impl<'a> VirtQueue<'a> {
     ///
     /// bool: True if the virtqueue is busy, false otherwise.
     pub fn is_busy(&self) -> bool {
+        // A memory fence is needed to ensure that we see the latest value of `used.idx`
+        // written by the device.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         // Volatile read to ensure we get the latest value
         let used_idx = unsafe { core::ptr::read_volatile(self.used.idx) };
         self.last_used_idx == used_idx
@@ -299,10 +302,22 @@ impl<'a> VirtQueue<'a> {
 
         let ring_ptr =
             &mut self.avail.ring[(*self.avail.idx as usize) % self.avail.size] as *mut u16;
+
         unsafe {
             core::ptr::write_volatile(ring_ptr, desc_idx as u16);
         }
-        *self.avail.idx = (*self.avail.idx).wrapping_add(1);
+
+        fence(core::sync::atomic::Ordering::SeqCst);
+
+        // *self.avail.idx = (*self.avail.idx).wrapping_add(1);
+
+        let new_idx = self.avail.idx.wrapping_add(1);
+        unsafe {
+            core::ptr::write_volatile(self.avail.idx, new_idx);
+        }
+
+        fence(core::sync::atomic::Ordering::SeqCst);
+
         Ok(())
     }
 
@@ -316,6 +331,9 @@ impl<'a> VirtQueue<'a> {
     /// Option<usize>: The index of the descriptor that was used, or None if no descriptors are available.
     ///
     pub fn pop(&mut self) -> Option<usize> {
+        // A memory fence is needed to ensure that we see the latest value of `used.idx`
+        // written by the device.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         // Check if there are any used buffers available
         if self.last_used_idx == *self.used.idx {
             return None;
