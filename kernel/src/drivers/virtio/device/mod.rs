@@ -9,6 +9,7 @@ use core::{
 use alloc::{boxed::Box, format, sync::Arc, vec};
 
 use crate::{
+    arch::io_mb,
     device::{
         Device,
         manager::{DeviceManager, DriverPriority},
@@ -561,7 +562,10 @@ pub trait VirtioDevice {
     /// The 32-bit value read from the register
     fn read32_register(&self, register: Register) -> u32 {
         let addr = self.get_base_addr() + register.offset();
-        unsafe { core::ptr::read_volatile(addr as *const u32) }
+        io_mb();
+        let val = unsafe { core::ptr::read_volatile(addr as *const u32) };
+        io_mb();
+        val
     }
 
     /// Write a 32-bit value to a device register
@@ -572,7 +576,9 @@ pub trait VirtioDevice {
     /// * `value` - The 32-bit value to write
     fn write32_register(&self, register: Register, value: u32) {
         let addr = self.get_base_addr() + register.offset();
+        io_mb();
         unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
+        io_mb();
     }
 
     /// Read a 64-bit value from a device register
@@ -586,7 +592,10 @@ pub trait VirtioDevice {
     /// The 64-bit value read from the register
     fn read64_register(&self, register: Register) -> u64 {
         let addr = self.get_base_addr() + register.offset();
-        unsafe { core::ptr::read_volatile(addr as *const u64) }
+        io_mb();
+        let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
+        io_mb();
+        val
     }
 
     /// Write a 64-bit value to a device register
@@ -597,7 +606,9 @@ pub trait VirtioDevice {
     /// * `value` - The 64-bit value to write
     fn write64_register(&self, register: Register, value: u64) {
         let addr = self.get_base_addr() + register.offset();
+        io_mb();
         unsafe { core::ptr::write_volatile(addr as *mut u64, value) }
+        io_mb();
     }
 
     // Required methods to be implemented by specific device types

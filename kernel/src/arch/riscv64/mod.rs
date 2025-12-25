@@ -234,14 +234,63 @@ pub fn disable_interrupt() {
     }
 }
 
-/// Full barrier for MMIO (I/O) operations.
+/// Full memory barrier for normal memory (RAM).
+///
+/// This orders previous reads/writes before subsequent reads/writes.
+/// For device/MMIO ordering, prefer [`io_mb`].
+#[inline(always)]
+pub fn mb() {
+    unsafe {
+        asm!("fence rw, rw", options(nostack));
+    }
+}
+
+/// Read memory barrier for normal memory (RAM).
+#[inline(always)]
+pub fn rmb() {
+    unsafe {
+        asm!("fence r, r", options(nostack));
+    }
+}
+
+/// Write memory barrier for normal memory (RAM).
+#[inline(always)]
+pub fn wmb() {
+    unsafe {
+        asm!("fence w, w", options(nostack));
+    }
+}
+
+/// Full barrier for device/MMIO (I/O) operations.
 ///
 /// RISC-V requires an explicit I/O fence to order device register accesses.
 #[inline(always)]
-pub fn mmio_fence() {
+pub fn io_mb() {
     unsafe {
         asm!("fence iorw, iorw", options(nostack));
     }
+}
+
+/// Read barrier for device/MMIO (I/O) operations.
+#[inline(always)]
+pub fn io_rmb() {
+    unsafe {
+        asm!("fence ir, ir", options(nostack));
+    }
+}
+
+/// Write barrier for device/MMIO (I/O) operations.
+#[inline(always)]
+pub fn io_wmb() {
+    unsafe {
+        asm!("fence ow, ow", options(nostack));
+    }
+}
+
+/// Backward-compatible alias for a full device/MMIO barrier.
+#[inline(always)]
+pub fn mmio_fence() {
+    io_mb()
 }
 
 pub fn get_cpu() -> &'static mut Riscv64 {
