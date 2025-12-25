@@ -139,7 +139,7 @@ impl VirtioBlockDevice {
         // Initialize the device
         let negotiated_features = match device.init() {
             Ok(features) => features,
-            Err(_) => panic!("Failed to initialize Virtio Block Device"),
+            Err(e) => panic!("Failed to initialize Virtio Block Device: {}", e),
         };
 
         // Read device configuration
@@ -467,6 +467,16 @@ impl VirtioBlockDevice {
 
                 // Submit the request
                 if virtqueues[0].push(header_desc).is_ok() {
+                    // use crate::early_println;
+                    // early_println!("[virtio-blk] Submitting request: req_idx={}, header_desc={}, data_desc={}, status_desc={}",
+                    //     idx, header_desc, data_desc, status_desc);
+                    // early_println!("[virtio-blk]   h_addr=0x{:x}, h_len={}, h_flags=0x{:x}",
+                    //     virtqueues[0].desc[header_desc].addr, virtqueues[0].desc[header_desc].len, virtqueues[0].desc[header_desc].flags);
+                    // early_println!("[virtio-blk]   d_addr=0x{:x}, d_len={}, d_flags=0x{:x}",
+                    //     virtqueues[0].desc[data_desc].addr, virtqueues[0].desc[data_desc].len, virtqueues[0].desc[data_desc].flags);
+                    // early_println!("[virtio-blk]   s_addr=0x{:x}, s_len={}, s_flags=0x{:x}",
+                    //     virtqueues[0].desc[status_desc].addr, virtqueues[0].desc[status_desc].len, virtqueues[0].desc[status_desc].flags);
+
                     request_data.push((
                         idx,
                         header_desc,
@@ -508,6 +518,7 @@ impl VirtioBlockDevice {
 
         // Notify the device once for all requests
         if !request_data.is_empty() {
+            // crate::early_println!("[virtio-blk] Notifying queue 0 for {} requests", request_data.len());
             self.notify(0);
         }
 
@@ -544,8 +555,22 @@ impl VirtioBlockDevice {
 
         // Process all completions until everything is done
         while !pending_requests.is_empty() {
-            // Wait for something to complete
-            while virtqueues[0].is_busy() {}
+            // Read status before polling to check if device entered a FAILED state
+            let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
+            // crate::early_println!("[virtio-blk] Polling for completion. Device status = 0x{:x}", status);
+
+            // Wait for something to complete, but also check for device failure.
+            while virtqueues[0].is_busy() {
+                let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
+                if crate::drivers::virtio::device::DeviceStatus::DeviceNeedReset.is_set(status) {
+                    crate::early_println!("[virtio-blk] ERROR: Device entered NEEDS_RESET state during poll. Aborting. Status=0x{:x}", status);
+                    break;
+                }
+                 if crate::drivers::virtio::device::DeviceStatus::Failed.is_set(status) {
+                    crate::early_println!("[virtio-blk] ERROR: Device entered FAILED state during poll. Aborting. Status=0x{:x}", status);
+                    break;
+                }
+            }
 
             // Process all completed requests in this round
             while let Some(desc_idx) = virtqueues[0].pop() {

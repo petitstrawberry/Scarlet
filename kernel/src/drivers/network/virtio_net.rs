@@ -169,7 +169,7 @@ impl VirtioNetDevice {
         // Initialize the VirtIO device first
         let negotiated_features = match device.init() {
             Ok(features) => features,
-            Err(_) => panic!("Failed to initialize VirtIO Network Device"),
+            Err(e) => panic!("Failed to initialize VirtIO Network Device: {}", e),
         };
 
         // Read device configuration with the negotiated features
