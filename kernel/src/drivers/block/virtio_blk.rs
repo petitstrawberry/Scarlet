@@ -563,11 +563,17 @@ impl VirtioBlockDevice {
             while virtqueues[0].is_busy() {
                 let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
                 if crate::drivers::virtio::device::DeviceStatus::DeviceNeedReset.is_set(status) {
-                    crate::early_println!("[virtio-blk] ERROR: Device entered NEEDS_RESET state during poll. Aborting. Status=0x{:x}", status);
+                    crate::early_println!(
+                        "[virtio-blk] ERROR: Device entered NEEDS_RESET state during poll. Aborting. Status=0x{:x}",
+                        status
+                    );
                     break;
                 }
-                 if crate::drivers::virtio::device::DeviceStatus::Failed.is_set(status) {
-                    crate::early_println!("[virtio-blk] ERROR: Device entered FAILED state during poll. Aborting. Status=0x{:x}", status);
+                if crate::drivers::virtio::device::DeviceStatus::Failed.is_set(status) {
+                    crate::early_println!(
+                        "[virtio-blk] ERROR: Device entered FAILED state during poll. Aborting. Status=0x{:x}",
+                        status
+                    );
                     break;
                 }
             }
