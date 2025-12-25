@@ -232,6 +232,16 @@ pub fn disable_interrupt() {
     }
 }
 
+/// Full barrier for MMIO (I/O) operations.
+///
+/// RISC-V requires an explicit I/O fence to order device register accesses.
+#[inline(always)]
+pub fn mmio_fence() {
+    unsafe {
+        asm!("fence iorw, iorw", options(nostack));
+    }
+}
+
 pub fn get_cpu() -> &'static mut Riscv64 {
     let scratch: usize;
 

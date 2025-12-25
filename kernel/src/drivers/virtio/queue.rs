@@ -7,7 +7,7 @@
 use alloc::{alloc::alloc_zeroed, vec::Vec};
 use core::{
     alloc::Layout,
-    mem::{self, swap},
+    mem::{self},
     sync::atomic::{compiler_fence, fence},
 };
 
@@ -334,18 +334,23 @@ impl<'a> VirtQueue<'a> {
         // A memory fence is needed to ensure that we see the latest value of `used.idx`
         // written by the device.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        let used_idx = unsafe { core::ptr::read_volatile(self.used.idx) };
+
         // Check if there are any used buffers available
-        if self.last_used_idx == *self.used.idx {
+        if self.last_used_idx == used_idx {
             return None;
         }
 
         // Calculate the index in the used ring
-        let used_idx = self.last_used_idx as usize % self.desc.len();
+        let used_ring_idx = self.last_used_idx as usize % self.desc.len();
 
         // Retrieve the descriptor index from the used ring
-        let desc_idx = self.used.ring[used_idx].id as usize;
+        let used_entry_ptr = self.used.ring.as_ptr().wrapping_add(used_ring_idx);
+        let used_entry = unsafe { core::ptr::read_volatile(used_entry_ptr) };
+        let desc_idx = used_entry.id as usize;
+
         // Update the last used index
-        // self.last_used_idx = (self.last_used_idx + 1) % self.used.ring.len();
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
         Some(desc_idx)
@@ -517,7 +522,7 @@ pub struct RawUsedRing {
 /// It contains the ID and length of the used buffer.
 ///
 /// This structure is located in the physical memory directly.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct RawUsedRingEntry {
     pub id: u32,
