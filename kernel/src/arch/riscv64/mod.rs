@@ -88,11 +88,12 @@ impl Riscv64 {
     }
 }
 
-#[repr(align(4))]
+#[repr(align(16))]
 #[derive(Debug, Clone)]
 pub struct Trapframe {
     pub regs: IntRegisters,
     pub epc: u64,
+    pub _padding: u64,
 }
 
 impl Trapframe {
@@ -100,6 +101,7 @@ impl Trapframe {
         Trapframe {
             regs: IntRegisters::new(),
             epc: 0,
+            _padding: 0xdeadbeefdeadbeef,
         }
     }
 

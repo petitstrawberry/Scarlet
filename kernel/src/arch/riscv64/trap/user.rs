@@ -36,7 +36,7 @@ pub extern "C" fn _user_trap_entry() {
                 ld      sp, 24(a0)
 
                 /* Allocate space on the kernel stack for saving user context */
-                addi    sp, sp, -264 /* sizeof(Trapframe) = 264 bytes */
+                addi    sp, sp, -272 /* sizeof(Trapframe) = 272 bytes */
 
                 /* Save the context of the current hart */
                 sd      x0, 0(sp)

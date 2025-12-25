@@ -3,6 +3,7 @@ use core::{arch::asm, mem::transmute};
 
 use crate::arch::trap::print_traplog;
 use crate::arch::{Trapframe, get_cpu};
+use crate::early_println;
 use crate::environment::PAGE_SIZE;
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::sched::scheduler::get_scheduler;
@@ -20,7 +21,7 @@ pub extern "C" fn _kernel_trap_entry() {
                 /* Disable the interrupt */
                 csrci   sstatus, 0x2
                 /* Decrease the stack pointer */
-                addi    sp, sp, -280
+                addi    sp, sp, -288
                 /* Save the context of the current hart */
                 sd      x0, 0(sp)
                 sd      x1, 8(sp)
@@ -100,7 +101,7 @@ pub extern "C" fn _kernel_trap_entry() {
                 ld     x31, 248(sp)
 
                 /* Increase the stack pointer */
-                addi   sp, sp, 280
+                addi   sp, sp, 288
 
                 sret
             "
