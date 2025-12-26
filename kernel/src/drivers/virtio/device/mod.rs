@@ -739,7 +739,6 @@ pub trait VirtioDevice {
                 self.get_base_addr()
             );
         }
-
     }
 
     /// Read a 64-bit value from a device register
