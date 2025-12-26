@@ -103,7 +103,7 @@ fn test_device_initialization() {
     device.write32_register(Register::MagicValue, 0x74726976); // "virt" in little-endian
 
     // Test the behavior of the Status register
-    device.reset();
+    device.reset().unwrap();
     assert_eq!(device.read32_register(Register::Status), 0);
 
     device.acknowledge();
