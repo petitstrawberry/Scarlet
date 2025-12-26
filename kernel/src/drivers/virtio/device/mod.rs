@@ -388,7 +388,9 @@ pub trait VirtioDevice {
 
         // Spec: wait until the device reports status==0.
         // Use a bounded loop so we never hang permanently.
-        early_println!("[virtio][reset] waiting for reset completion...");
+        if cfg!(debug_assertions) {
+            early_println!("[virtio][reset] waiting for reset completion...");
+        }
         self.wait_for_status_zero("reset", 100_000)?;
 
         // self.debug_dump_mmio_state("reset:after");
