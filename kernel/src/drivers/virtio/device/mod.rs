@@ -230,6 +230,12 @@ pub trait VirtioDevice {
         io_mb();
     }
 
+    /// Dumps a subset of the device's MMIO register state for debugging purposes.
+    ///
+    /// The provided `tag` is included in the log output to help identify the caller or
+    /// context from which the dump was triggered. This method does not return a value.
+    ///
+    /// In non-debug builds, this method is effectively a no-op.
     fn debug_dump_mmio_state(&self, tag: &'static str) {
         #[cfg(debug_assertions)]
         {
