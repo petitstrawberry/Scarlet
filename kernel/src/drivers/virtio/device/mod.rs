@@ -20,8 +20,9 @@ use crate::{
     driver_initcall,
     drivers::{
         block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice,
-        network::virtio_net::VirtioNetDevice, virtio::queue,
+        network::virtio_net::VirtioNetDevice,
     },
+    early_println,
 };
 
 // Static counters for device naming
@@ -214,6 +215,93 @@ impl DeviceStatus {
 /// It provides methods for initializing the device, accessing registers,
 /// and performing device operations according to the VirtIO specification.
 pub trait VirtioDevice {
+    #[cfg(not(debug_assertions))]
+    #[inline(never)]
+    fn write32_register_slowpath(&self, addr: usize, value: u32) {
+        io_mb();
+        unsafe { core::ptr::write_volatile(addr as *mut u32, value) };
+        io_mb();
+        // Some environments effectively require a read to flush a posted MMIO write.
+        // Do NOT read back the just-written register: many virtio-mmio registers are write-only
+        // (QueueNotify, queue address regs, DriverFeatures, etc.), and QEMU will warn.
+        // Reading STATUS is safe and provides a single well-defined flush point.
+        let status_addr = self.get_base_addr() + Register::Status.offset();
+        unsafe {
+            core::ptr::read_volatile(status_addr as *const u32);
+        }
+        io_mb();
+    }
+
+    fn debug_dump_mmio_state(&self, tag: &'static str) {
+        #[cfg(debug_assertions)]
+        {
+            let base = self.get_base_addr();
+            let magic = self.read32_register(Register::MagicValue);
+            let version = self.read32_register(Register::Version);
+            let device_id = self.read32_register(Register::DeviceId);
+            let vendor_id = self.read32_register(Register::VendorId);
+            let status = self.read32_register(Register::Status);
+            let isr = self.read32_register(Register::InterruptStatus);
+
+            crate::early_println!(
+                "[virtio][{}] base={:#x} magic=0x{:08x} ver={} dev_id={} vendor=0x{:08x} status=0x{:02x} isr=0x{:02x}",
+                tag,
+                base,
+                magic,
+                version,
+                device_id,
+                vendor_id,
+                status,
+                isr
+            );
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = tag;
+        }
+    }
+
+    fn debug_log_status_transition(&self, tag: &'static str, old: u32, new: u32, readback: u32) {
+        #[cfg(debug_assertions)]
+        {
+            crate::early_println!(
+                "[virtio][{}] status: old=0x{:02x} -> write=0x{:02x} -> readback=0x{:02x}",
+                tag,
+                old,
+                new,
+                readback
+            );
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = (tag, old, new, readback);
+        }
+    }
+
+    fn wait_for_status_zero(
+        &self,
+        tag: &'static str,
+        max_iters: usize,
+    ) -> Result<(), &'static str> {
+        // Virtio spec: after writing 0 (reset), driver should consider reset complete
+        // when it reads back status == 0.
+        for _ in 0..max_iters {
+            let status = self.read32_register(Register::Status) & 0xff;
+            if status == 0 {
+                return Ok(());
+            }
+        }
+        let final_status = self.read32_register(Register::Status) & 0xff;
+        crate::early_println!(
+            "[virtio][{}] reset wait timeout: status=0x{:02x}",
+            tag,
+            final_status
+        );
+        Err("Virtio device reset did not complete")
+    }
+
     /// Initialize the device
     ///
     /// This method performs the standard VirtIO initialization sequence:
@@ -229,6 +317,8 @@ pub trait VirtioDevice {
     /// Returns Ok(negotiated_features) if initialization was successful,
     /// Err message otherwise
     fn init(&mut self) -> Result<u32, &'static str> {
+        self.debug_dump_mmio_state("init:entry");
+
         // Verify device (Magic Value should be "virt")
         if self.read32_register(Register::MagicValue) != 0x74726976 {
             self.set_failed();
@@ -243,13 +333,19 @@ pub trait VirtioDevice {
         }
 
         // Reset device
-        self.reset();
+        if let Err(e) = self.reset() {
+            self.set_failed();
+            return Err(e);
+        }
+        // self.debug_dump_mmio_state("init:after_reset");
 
         // Acknowledge device
         self.acknowledge();
+        self.debug_dump_mmio_state("init:after_ack");
 
         // Set driver status
         self.driver();
+        self.debug_dump_mmio_state("init:after_driver");
 
         // Negotiate features
         let negotiated_features = match self.negotiate_features() {
@@ -270,40 +366,75 @@ pub trait VirtioDevice {
 
         // Mark driver OK
         self.driver_ok();
+        self.debug_dump_mmio_state("init:after_driver_ok");
         Ok(negotiated_features)
     }
 
     /// Reset the device by writing 0 to the Status register
-    fn reset(&mut self) {
+    fn reset(&mut self) -> Result<(), &'static str> {
+        // self.debug_dump_mmio_state("reset:before");
+
+        let _old = self.read32_register(Register::Status);
         self.write32_register(Register::Status, 0);
+        // Ensure the write is visible to the device before we continue.
+        io_mb();
+
+        // let rb = self.read32_register(Register::Status);
+        // self.debug_log_status_transition("reset", old, 0, rb);
+
+        // Spec: wait until the device reports status==0.
+        // Use a bounded loop so we never hang permanently.
+        if cfg!(debug_assertions) {
+            early_println!("[virtio][reset] waiting for reset completion...");
+        }
+        self.wait_for_status_zero("reset", 100_000)?;
+
+        // self.debug_dump_mmio_state("reset:after");
+        Ok(())
     }
 
     /// Set ACKNOWLEDGE status bit
     fn acknowledge(&mut self) {
-        let mut status = self.read32_register(Register::Status);
+        let old = self.read32_register(Register::Status);
+        let mut status = old;
         DeviceStatus::Acknowledge.set(&mut status);
         self.write32_register(Register::Status, status);
+
+        let rb = self.read32_register(Register::Status);
+        self.debug_log_status_transition("ack", old, status, rb);
     }
 
     /// Set DRIVER status bit
     fn driver(&mut self) {
-        let mut status = self.read32_register(Register::Status);
+        let old = self.read32_register(Register::Status);
+        let mut status = old;
         DeviceStatus::Driver.set(&mut status);
         self.write32_register(Register::Status, status);
+
+        let rb = self.read32_register(Register::Status);
+        self.debug_log_status_transition("driver", old, status, rb);
     }
 
     /// Set DRIVER_OK status bit
     fn driver_ok(&mut self) {
-        let mut status = self.read32_register(Register::Status);
+        let old = self.read32_register(Register::Status);
+        let mut status = old;
         DeviceStatus::DriverOK.set(&mut status);
         self.write32_register(Register::Status, status);
+
+        let rb = self.read32_register(Register::Status);
+        self.debug_log_status_transition("driver_ok", old, status, rb);
     }
 
     /// Set FAILED status bit
     fn set_failed(&mut self) {
-        let mut status = self.read32_register(Register::Status);
+        let old = self.read32_register(Register::Status);
+        let mut status = old;
         DeviceStatus::Failed.set(&mut status);
         self.write32_register(Register::Status, status);
+
+        let rb = self.read32_register(Register::Status);
+        self.debug_log_status_transition("failed", old, status, rb);
     }
 
     /// Negotiate device features
@@ -320,6 +451,11 @@ pub trait VirtioDevice {
         let device_features = self.read32_register(Register::DeviceFeatures);
         // Select supported features
         let driver_features = self.get_supported_features(device_features);
+        crate::early_println!(
+            "[virtio][feat] device_features=0x{:08x} driver_features=0x{:08x}",
+            device_features,
+            driver_features
+        );
 
         #[cfg(test)]
         {
@@ -527,7 +663,9 @@ pub trait VirtioDevice {
 
     /// Memory barrier for ensuring memory operations ordering
     fn memory_barrier(&self) {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        // Virtio requires ordering of normal memory (descriptor writes) vs MMIO doorbells.
+        // On RISC-V, a plain atomic fence may not order memory vs device I/O; use an I/O fence.
+        crate::arch::io_mb();
     }
 
     /// Notify the device about new buffers in a specified virtqueue
@@ -547,8 +685,9 @@ pub trait VirtioDevice {
             panic!("Invalid virtqueue index");
         }
         // Insert memory barrier before notification
-        self.memory_barrier();
+        io_mb();
         self.write32_register(Register::QueueNotify, virtqueue_idx as u32);
+        io_mb();
     }
 
     /// Read a 32-bit value from a device register
@@ -576,9 +715,28 @@ pub trait VirtioDevice {
     /// * `value` - The 32-bit value to write
     fn write32_register(&self, register: Register, value: u32) {
         let addr = self.get_base_addr() + register.offset();
-        io_mb();
-        unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
-        io_mb();
+        // NOTE: Release builds on some environments have shown sensitivity to MMIO
+        // sequencing/posted writes. Use a non-inlined slowpath with a readback flush
+        // to reduce optimization/timing variance.
+        #[cfg(not(debug_assertions))]
+        {
+            self.write32_register_slowpath(addr, value);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            io_mb();
+            unsafe { core::ptr::write_volatile(addr as *mut u32, value) };
+            io_mb();
+        }
+
+        if register == Register::Status && (value & !0xff) != 0 {
+            crate::early_println!(
+                "[virtio][WARN] writing non-8bit value to Status: 0x{:08x} (base={:#x})",
+                value,
+                self.get_base_addr()
+            );
+        }
     }
 
     /// Read a 64-bit value from a device register
@@ -607,7 +765,7 @@ pub trait VirtioDevice {
     fn write64_register(&self, register: Register, value: u64) {
         let addr = self.get_base_addr() + register.offset();
         io_mb();
-        unsafe { core::ptr::write_volatile(addr as *mut u64, value) }
+        unsafe { core::ptr::write_volatile(addr as *mut u64, value) };
         io_mb();
     }
 
