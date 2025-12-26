@@ -221,21 +221,17 @@ pub trait VirtioDevice {
         io_mb();
         unsafe { core::ptr::write_volatile(addr as *mut u32, value) };
         io_mb();
-        // Some environments effectively require a readback to flush a posted MMIO write
-        // (and it also helps prevent the optimizer from eliding the intended I/O effect).
-        // This is especially important for virtio-mmio STATUS sequencing.
+        // Some environments effectively require a read to flush a posted MMIO write.
+        // Do NOT read back the just-written register: many virtio-mmio registers are write-only
+        // (QueueNotify, queue address regs, DriverFeatures, etc.), and QEMU will warn.
+        // Reading STATUS is safe and provides a single well-defined flush point.
+        let status_addr = self.get_base_addr() + Register::Status.offset();
         unsafe {
-            core::ptr::read_volatile(addr as *const u32);
+            core::ptr::read_volatile(status_addr as *const u32);
         }
         io_mb();
     }
 
-    /// Dumps a subset of the device's MMIO register state for debugging purposes.
-    ///
-    /// The provided `tag` is included in the log output to help identify the caller or
-    /// context from which the dump was triggered. This method does not return a value.
-    ///
-    /// In non-debug builds, this method is effectively a no-op.
     fn debug_dump_mmio_state(&self, tag: &'static str) {
         #[cfg(debug_assertions)]
         {
