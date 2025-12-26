@@ -297,12 +297,6 @@ pub trait VirtioDevice {
                 return Ok(());
             }
         }
-        // while self.read32_register(Register::Status) & 0xff != 0 {
-        //     // busy wait
-        // }
-
-        // return Ok(());
-
         let final_status = self.read32_register(Register::Status) & 0xff;
         crate::early_println!(
             "[virtio][{}] reset wait timeout: status=0x{:02x}",
