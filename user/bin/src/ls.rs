@@ -3,10 +3,9 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, println};
 use std::string::String;
 use std::vec::Vec;
-
+use std::{format, println};
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
@@ -35,7 +34,7 @@ fn main() -> i32 {
                 let file_id_str = format!("{}", entry.file_id);
                 let file_type_str = get_file_type_str(entry.file_type);
                 let size_str = format!("{}", entry.size);
-                
+
                 max_file_id_width = max_file_id_width.max(file_id_str.len());
                 max_file_type_width = max_file_type_width.max(file_type_str.len());
                 max_size_width = max_size_width.max(size_str.len());
@@ -54,22 +53,23 @@ fn main() -> i32 {
                 let file_type = entry.file_type;
                 let size = entry.size;
                 let file_type_str = get_file_type_str(file_type);
-                
-                println!("{:>width_id$} {:width_type$} {:>width_size$} {}", 
-                    file_id, 
-                    file_type_str, 
-                    size, 
+
+                println!(
+                    "{:>width_id$} {:width_type$} {:>width_size$} {}",
+                    file_id,
+                    file_type_str,
+                    size,
                     name,
                     width_id = max_file_id_width,
                     width_type = max_file_type_width,
                     width_size = max_size_width
                 );
             }
-            return 0;
+            0
         }
         Err(errno) => {
             println!("ls: cannot open '{}': error {}", path, errno);
-            return 1;
+            1
         }
     }
 }

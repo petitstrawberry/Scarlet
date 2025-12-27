@@ -1,8 +1,8 @@
 use core::arch::asm;
 use core::mem::transmute;
 use instruction::sbi::sbi_system_reset;
-use trap::kernel::arch_kernel_trap_handler;
 use trap::kernel::_kernel_trap_entry;
+use trap::kernel::arch_kernel_trap_handler;
 use trap::user::_user_trap_entry;
 use trap::user::arch_user_trap_handler;
 use vcpu::Mode;
@@ -16,17 +16,17 @@ use crate::mem::KERNEL_STACK;
 use crate::task::Task;
 
 pub mod boot;
+pub mod context;
+pub mod earlycon;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
-pub mod trap;
-pub mod earlycon;
-pub mod vcpu;
-pub mod timer;
-pub mod vm;
 pub mod registers;
-pub mod context;
 pub mod switch;
+pub mod timer;
+pub mod trap;
+pub mod vcpu;
+pub mod vm;
 
 pub use earlycon::*;
 pub use registers::IntRegisters;
@@ -40,16 +40,22 @@ static mut CPUS: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPU
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Riscv64 {
-    scratch: u64, // offeset: 0
-    pub hartid: u64, // offset: 8
-    satp: u64, // offset: 16
+    scratch: u64,      // offeset: 0
+    pub hartid: u64,   // offset: 8
+    satp: u64,         // offset: 16
     kernel_stack: u64, // offset: 24
-    kernel_trap: u64, // offset: 32
+    kernel_trap: u64,  // offset: 32
 }
 
 impl Riscv64 {
     pub const fn new(cpu_id: usize) -> Self {
-        Riscv64 { scratch: 0, hartid: cpu_id as u64, kernel_stack: 0, kernel_trap: 0, satp: 0 }
+        Riscv64 {
+            scratch: 0,
+            hartid: cpu_id as u64,
+            kernel_stack: 0,
+            kernel_trap: 0,
+            satp: 0,
+        }
     }
 
     pub fn get_cpuid(&self) -> usize {
@@ -58,11 +64,11 @@ impl Riscv64 {
 
     pub fn get_trapframe_paddr(&self) -> usize {
         /* Get pointer of the trapframe, which is located at the top of the kernel stack */
-        let addr =  self.kernel_stack as usize - core::mem::size_of::<Trapframe>();
+        let addr = self.kernel_stack as usize - core::mem::size_of::<Trapframe>();
         addr
     }
 
-     pub fn set_kernel_stack(&mut self, initial_top: u64) {
+    pub fn set_kernel_stack(&mut self, initial_top: u64) {
         self.kernel_stack = initial_top;
     }
 
@@ -78,17 +84,16 @@ impl Riscv64 {
     }
 
     pub fn as_paddr_cpu(&mut self) -> &mut Riscv64 {
-        unsafe {
-            &mut CPUS[self.hartid as usize]
-        }
+        unsafe { &mut CPUS[self.hartid as usize] }
     }
 }
 
-#[repr(align(4))]
+#[repr(align(16))]
 #[derive(Debug, Clone)]
 pub struct Trapframe {
     pub regs: IntRegisters,
     pub epc: u64,
+    pub _padding: u64,
 }
 
 impl Trapframe {
@@ -96,9 +101,10 @@ impl Trapframe {
         Trapframe {
             regs: IntRegisters::new(),
             epc: 0,
+            _padding: 0xdeadbeefdeadbeef,
         }
     }
-    
+
     pub fn get_syscall_number(&self) -> usize {
         self.regs.reg[17] // a7
     }
@@ -125,15 +131,16 @@ impl Trapframe {
 
     /// Increment the program counter (epc) to the next instruction
     /// This is typically used after handling a trap or syscall to continue execution.
-    /// 
+    ///
     pub fn increment_pc_next(&mut self, task: &Task) {
-        let instruction = Instruction::fetch(
-            task.vm_manager.translate_vaddr(self.epc as usize).unwrap()
-        );
+        let instruction =
+            Instruction::fetch(task.vm_manager.translate_vaddr(self.epc as usize).unwrap());
         let len = instruction.len();
         if len == 0 {
             debug_assert!(len > 0, "Invalid instruction length: {}", len);
-            early_println!("Warning: Invalid instruction length encountered. Defaulting to 4 bytes.");
+            early_println!(
+                "Warning: Invalid instruction length encountered. Defaulting to 4 bytes."
+            );
             self.epc += 4; // Default to 4 bytes for invalid instruction length
         } else {
             self.epc += len as u64;
@@ -158,9 +165,9 @@ pub fn get_user_trap_handler() -> usize {
 }
 
 #[allow(static_mut_refs)]
-fn trap_init(riscv: &mut Riscv64) {    
+fn trap_init(riscv: &mut Riscv64) {
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
-    let stack_size =  STACK_SIZE;
+    let stack_size = STACK_SIZE;
 
     let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
     riscv.kernel_stack = trap_stack as u64;
@@ -209,18 +216,81 @@ pub fn set_arch(addr: usize) {
 
 pub fn enable_interrupt() {
     unsafe {
-        asm!("
+        asm!(
+            "
         csrsi sstatus, 0x2
-        ");
+        "
+        );
     }
 }
 
 pub fn disable_interrupt() {
     unsafe {
-        asm!("
+        asm!(
+            "
         csrci sstatus, 0x2
-        ");
+        "
+        );
     }
+}
+
+/// Full memory barrier for normal memory (RAM).
+///
+/// This orders previous reads/writes before subsequent reads/writes.
+/// For device/MMIO ordering, prefer [`io_mb`].
+#[inline(always)]
+pub fn mb() {
+    unsafe {
+        asm!("fence rw, rw", options(nostack));
+    }
+}
+
+/// Read memory barrier for normal memory (RAM).
+#[inline(always)]
+pub fn rmb() {
+    unsafe {
+        asm!("fence r, r", options(nostack));
+    }
+}
+
+/// Write memory barrier for normal memory (RAM).
+#[inline(always)]
+pub fn wmb() {
+    unsafe {
+        asm!("fence w, w", options(nostack));
+    }
+}
+
+/// Full barrier for device/MMIO (I/O) operations.
+///
+/// RISC-V requires an explicit I/O fence to order device register accesses.
+#[inline(always)]
+pub fn io_mb() {
+    unsafe {
+        asm!("fence iorw, iorw", options(nostack));
+    }
+}
+
+/// Read barrier for device/MMIO (I/O) operations.
+#[inline(always)]
+pub fn io_rmb() {
+    unsafe {
+        asm!("fence ir, ir", options(nostack));
+    }
+}
+
+/// Write barrier for device/MMIO (I/O) operations.
+#[inline(always)]
+pub fn io_wmb() {
+    unsafe {
+        asm!("fence ow, ow", options(nostack));
+    }
+}
+
+/// Backward-compatible alias for a full device/MMIO barrier.
+#[inline(always)]
+pub fn mmio_fence() {
+    io_mb()
 }
 
 pub fn get_cpu() -> &'static mut Riscv64 {
@@ -252,7 +322,7 @@ pub fn set_next_mode(mode: Mode) {
                     sstatus = in(reg) sstatus,
                 );
             }
-        },
+        }
         Mode::Kernel => {
             unsafe {
                 // sstatus.spp = 1 (S-mode)
@@ -267,7 +337,7 @@ pub fn set_next_mode(mode: Mode) {
                     sstatus = in(reg) sstatus,
                 );
             }
-        },
+        }
     }
 }
 
@@ -282,39 +352,4 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 
 pub fn reboot() -> ! {
     sbi_system_reset(1, 0);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Test architecture-specific features for RISC-V
-    #[test_case]
-    fn test_riscv64_specific_features() {
-        use crate::arch::riscv64::vcpu::Mode;
-        
-        // Test mode switching
-        set_next_mode(Mode::Kernel);
-        set_next_mode(Mode::User);
-    }
-
-    /// Test platform-specific interrupt controllers for RISC-V
-    mod platform_tests {
-        use super::*;
-
-        #[test_case]
-        fn test_plic_availability() {
-            use crate::drivers::pic::Plic;
-            
-            // Test that PLIC can be instantiated (actual hardware interaction would need setup)
-            // This test mainly verifies compilation and basic structure
-        }
-
-        #[test_case]
-        fn test_clint_availability() {
-            use crate::drivers::pic::Clint;
-            
-            // Test that CLINT can be instantiated
-        }
-    }
 }

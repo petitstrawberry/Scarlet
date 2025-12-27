@@ -1,18 +1,18 @@
 //! Kernel object management system
-//! 
+//!
 //! This module provides a unified abstraction for all kernel-managed resources
 //! including files, pipes, devices, and other IPC mechanisms.
 
 pub mod capability;
-pub mod introspection;
 pub mod handle;
+pub mod introspection;
 
-use alloc::{sync::Arc, vec::Vec};
 use crate::fs::FileObject;
-use crate::ipc::pipe::PipeObject;
-use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::StreamIpcOps;
-use capability::{StreamOps, CloneOps, ControlOps, MemoryMappingOps};
+use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
+use crate::ipc::pipe::PipeObject;
+use alloc::{sync::Arc, vec::Vec};
+use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 
 /// Unified representation of all kernel-managed resources
 pub enum KernelObject {
@@ -32,7 +32,7 @@ impl KernelObject {
     pub fn from_file_object(file_object: Arc<dyn FileObject>) -> Self {
         KernelObject::File(file_object)
     }
-    
+
     /// Create a KernelObject from a PipeObject
     pub fn from_pipe_object(pipe_object: Arc<dyn PipeObject>) -> Self {
         KernelObject::Pipe(pipe_object)
@@ -47,7 +47,7 @@ impl KernelObject {
     pub fn from_event_subscription(event_subscription: Arc<EventSubscriptionObject>) -> Self {
         KernelObject::EventSubscription(event_subscription)
     }
-    
+
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -71,7 +71,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get StreamIpcOps capability for IPC stream operations
     pub fn as_stream_ipc(&self) -> Option<&dyn StreamIpcOps> {
         match self {
@@ -94,7 +94,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get FileObject that provides file-like operations and stream capabilities
     pub fn as_file(&self) -> Option<&dyn FileObject> {
         match self {
@@ -117,7 +117,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get PipeObject that provides pipe-specific operations
     pub fn as_pipe(&self) -> Option<&dyn PipeObject> {
         match self {
@@ -139,7 +139,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get CloneOps capability
     pub fn as_cloneable(&self) -> Option<&dyn CloneOps> {
         match self {
@@ -163,7 +163,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get ControlOps capability
     pub fn as_control(&self) -> Option<&dyn ControlOps> {
         match self {
@@ -186,7 +186,7 @@ impl KernelObject {
             }
         }
     }
-    
+
     /// Try to get MemoryMappingOps capability
     pub fn as_memory_mappable(&self) -> Option<&dyn MemoryMappingOps> {
         match self {
@@ -241,10 +241,10 @@ impl KernelObject {
                 let event_channel_obj: &EventChannelObject = event_channel.as_ref();
                 Some(event_channel_obj)
             }
-            _ => None
+            _ => None,
         }
     }
-    
+
     /// Try to get EventSubscriptionObject
     pub fn as_event_subscription(&self) -> Option<&EventSubscriptionObject> {
         match self {
@@ -252,7 +252,21 @@ impl KernelObject {
                 let event_subscription_obj: &EventSubscriptionObject = event_subscription.as_ref();
                 Some(event_subscription_obj)
             }
-            _ => None
+            _ => None,
+        }
+    }
+
+    /// Try to get Selectable capability for pselect/select readiness
+    pub fn as_selectable(&self) -> Option<&dyn Selectable> {
+        match self {
+            KernelObject::File(file_object) => {
+                // FileObject requires Selectable; upcast trait object
+                let sel: &dyn Selectable = file_object.as_ref();
+                Some(sel)
+            }
+            KernelObject::Pipe(pipe_object) => pipe_object.as_selectable(),
+            KernelObject::EventChannel(_) => None,
+            KernelObject::EventSubscription(_) => None,
         }
     }
 }
@@ -265,12 +279,8 @@ impl Clone for KernelObject {
         } else {
             // Default: Use Arc::clone for direct cloning
             match self {
-                KernelObject::File(file_object) => {
-                    KernelObject::File(Arc::clone(file_object))
-                }
-                KernelObject::Pipe(pipe_object) => {
-                    KernelObject::Pipe(Arc::clone(pipe_object))
-                }
+                KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
+                KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
                 KernelObject::EventChannel(event_channel) => {
                     KernelObject::EventChannel(Arc::clone(event_channel))
                 }

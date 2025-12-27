@@ -10,7 +10,7 @@
 //!
 //! The module provides two ways to defer execution:
 //!
-//! 1. The `defer` function, which takes a closure and returns an object that executes 
+//! 1. The `defer` function, which takes a closure and returns an object that executes
 //!    the closure when dropped:
 //!
 //! ```
@@ -48,7 +48,7 @@
 //! through the `Drop` trait to ensure the deferred function is called when the returned
 //! object goes out of scope.
 //! Defer module.
-//! 
+//!
 //! This module provides a mechanism to execute a function when the current scope is exited.
 
 /// Defer a function to be executed when the current scope is exited.
@@ -67,7 +67,7 @@
 #[must_use]
 #[inline]
 pub fn defer<F>(f: F) -> impl Drop
-where 
+where
     F: FnOnce(),
 {
     struct Defer<F: FnOnce()> {
@@ -79,7 +79,7 @@ where
             Defer { f: Some(f) }
         }
     }
-    
+
     impl<F: FnOnce()> Drop for Defer<F> {
         fn drop(&mut self) {
             if let Some(f) = self.f.take() {
@@ -87,7 +87,7 @@ where
             }
         }
     }
-    
+
     Defer::new(f)
 }
 
@@ -169,7 +169,7 @@ mod tests {
     fn test_defer_macro() {
         let mut called = false;
         {
-            defer!{
+            defer! {
                 called = true;
             }
         }

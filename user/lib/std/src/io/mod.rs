@@ -21,7 +21,7 @@ impl Error {
     pub fn new(kind: ErrorKind, message: &'static str) -> Self {
         Self { kind, message }
     }
-    
+
     /// Return the kind of this error
     pub fn kind(&self) -> ErrorKind {
         self.kind
@@ -107,7 +107,7 @@ pub trait Read {
 pub trait Write {
     /// Write a buffer into this writer, returning how many bytes were written
     fn write(&mut self, buf: &[u8]) -> Result<usize>;
-    
+
     /// Flush this output stream, ensuring that all intermediately buffered data reaches the destination
     fn flush(&mut self) -> Result<()>;
 }
@@ -197,12 +197,16 @@ impl Stdin {
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize> {
         let handle = unsafe { Handle::from_raw(0) };
         let result = if let Ok(stream) = handle.as_stream() {
-            stream.read(buffer)
+            stream
+                .read(buffer)
                 .map_err(|_| Error::new(ErrorKind::Other, "Read from stdin failed"))
         } else {
-            Err(Error::new(ErrorKind::Unsupported, "Stdin does not support read operations"))
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Stdin does not support read operations",
+            ))
         };
-        
+
         // Prevent handle from being dropped and closing stdin
         mem::forget(handle);
         result
@@ -220,12 +224,16 @@ impl Stdout {
     pub fn write(&self, data: &[u8]) -> Result<usize> {
         let handle = unsafe { Handle::from_raw(1) };
         let result = if let Ok(stream) = handle.as_stream() {
-            stream.write(data)
+            stream
+                .write(data)
                 .map_err(|_| Error::new(ErrorKind::Other, "Write to stdout failed"))
         } else {
-            Err(Error::new(ErrorKind::Unsupported, "Stdout does not support write operations"))
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Stdout does not support write operations",
+            ))
         };
-        
+
         // Prevent handle from being dropped and closing stdout
         mem::forget(handle);
         result
@@ -239,7 +247,10 @@ impl Stdout {
         while !remaining.is_empty() {
             let bytes_written = self.write(remaining)?;
             if bytes_written == 0 {
-                return Err(Error::new(ErrorKind::WriteZero, "Failed to write whole buffer"));
+                return Err(Error::new(
+                    ErrorKind::WriteZero,
+                    "Failed to write whole buffer",
+                ));
             }
             remaining = &remaining[bytes_written..];
         }
@@ -266,12 +277,16 @@ impl Stderr {
     pub fn write(&self, data: &[u8]) -> Result<usize> {
         let handle = unsafe { Handle::from_raw(2) };
         let result = if let Ok(stream) = handle.as_stream() {
-            stream.write(data)
+            stream
+                .write(data)
                 .map_err(|_| Error::new(ErrorKind::Other, "Write to stderr failed"))
         } else {
-            Err(Error::new(ErrorKind::Unsupported, "Stderr does not support write operations"))
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "Stderr does not support write operations",
+            ))
         };
-        
+
         // Prevent handle from being dropped and closing stderr
         mem::forget(handle);
         result
@@ -285,7 +300,10 @@ impl Stderr {
         while !remaining.is_empty() {
             let bytes_written = self.write(remaining)?;
             if bytes_written == 0 {
-                return Err(Error::new(ErrorKind::WriteZero, "Failed to write whole buffer"));
+                return Err(Error::new(
+                    ErrorKind::WriteZero,
+                    "Failed to write whole buffer",
+                ));
             }
             remaining = &remaining[bytes_written..];
         }
@@ -302,33 +320,30 @@ impl Stderr {
 }
 
 /// Outputs a single character to the console
-/// 
+///
 /// This function uses stdout to output characters.
-/// 
+///
 /// # Arguments
 /// * `c` - The character to output
-/// 
+///
 /// # Returns
 /// The number of bytes written on success, 0 on failure
-/// 
+///
 pub fn putchar(c: char) -> usize {
     let mut buf = [0u8; 4];
     let char_str = c.encode_utf8(&mut buf);
-    match stdout().write(char_str.as_bytes()) {
-        Ok(bytes) => bytes,
-        Err(_) => 0,
-    }
+    stdout().write(char_str.as_bytes()).unwrap_or_default()
 }
 
 /// Reads a single character from the console
 /// This function uses stdin to read characters.
-/// 
+///
 /// # Note
 /// This function is blocking and will wait for user input.
-/// 
+///
 /// # Returns
 /// The character read from the console.
-/// 
+///
 pub fn get_char() -> char {
     let mut buf = [0u8; 1];
     loop {
@@ -344,23 +359,20 @@ pub fn get_char() -> char {
 }
 
 /// Outputs a string to the console
-/// 
+///
 /// # Arguments
 /// * `s` - The string to output
-/// 
+///
 /// # Returns
 /// The number of characters output
 pub fn puts(s: &str) -> usize {
-    match stdout().write(s.as_bytes()) {
-        Ok(bytes) => bytes,
-        Err(_) => 0,
-    }
+    stdout().write(s.as_bytes()).unwrap_or_default()
 }
 
 /// Print implementation for Scarlet
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
-    
+
     let mut writer = StdoutWriter;
     writer.write_fmt(args).unwrap();
 }

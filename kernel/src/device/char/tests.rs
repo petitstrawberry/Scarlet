@@ -1,7 +1,7 @@
 use alloc::vec;
 
-use super::*;
 use super::mockchar::MockCharDevice;
+use super::*;
 use crate::device::DeviceType;
 
 #[test_case]
@@ -11,13 +11,7 @@ fn test_generic_char_device_creation() {
     let can_read_fn = || true;
     let can_write_fn = || true;
 
-    let device = GenericCharDevice::new(
-        "test_char",
-        read_fn,
-        write_fn,
-        can_read_fn,
-        can_write_fn,
-    );
+    let device = GenericCharDevice::new("test_char", read_fn, write_fn, can_read_fn, can_write_fn);
 
     assert_eq!(device.name(), "test_char");
     assert_eq!(device.device_type(), DeviceType::Char);
@@ -31,13 +25,8 @@ fn test_generic_char_device_read_write() {
     let can_read_fn = || true;
     let can_write_fn = || true;
 
-    let device = GenericCharDevice::new(
-        "test_char_rw",
-        read_fn,
-        write_fn,
-        can_read_fn,
-        can_write_fn,
-    );
+    let device =
+        GenericCharDevice::new("test_char_rw", read_fn, write_fn, can_read_fn, can_write_fn);
 
     // Test single byte read
     assert_eq!(device.read_byte(), Some(b'T'));
@@ -113,7 +102,7 @@ fn test_char_device_read_exhaustion() {
     // Read all available data
     assert_eq!(device.read_byte(), Some(b'A'));
     assert_eq!(device.read_byte(), Some(b'B'));
-    
+
     // Further reads should return None
     assert_eq!(device.read_byte(), None);
     assert!(!device.can_read());

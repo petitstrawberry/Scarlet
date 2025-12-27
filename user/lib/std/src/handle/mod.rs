@@ -5,9 +5,9 @@
 
 pub mod capability;
 
-use crate::syscall::{syscall1, syscall2, syscall3, Syscall};
 use crate::ffi::str_to_cstr_bytes;
-use capability::{StreamOps, FileObject};
+use crate::syscall::{Syscall, syscall1, syscall2, syscall3};
+use capability::{FileObject, StreamOps};
 
 /// Result type for handle operations
 pub type HandleResult<T> = Result<T, HandleError>;
@@ -42,7 +42,7 @@ impl HandleError {
 }
 
 /// A typed handle to a KernelObject
-/// 
+///
 /// Handles represent ownership of a KernelObject and provide type-safe
 /// access to the object's capabilities. Handles are not cloneable to
 /// ensure clear ownership semantics.
@@ -53,11 +53,11 @@ pub struct Handle {
 
 impl Handle {
     /// Open a file or resource and return a Handle
-    /// 
+    ///
     /// # Arguments
     /// * `path` - Path to the resource
     /// * `flags` - Open flags (implementation-specific)
-    /// 
+    ///
     /// # Returns
     /// Handle to the opened resource, or HandleError on failure
     pub fn open(path: &str, flags: usize) -> HandleResult<Self> {
@@ -65,19 +65,19 @@ impl Handle {
             Ok(bytes) => bytes,
             Err(_) => return Err(HandleError::InvalidParameter),
         };
-        
+
         let result = syscall3(
             Syscall::VfsOpen,
             path_bytes.as_ptr() as usize,
             flags,
             0, // mode (unused for now)
         );
-        
+
         HandleError::from_syscall_result(result).map(|raw| Handle { raw })
     }
 
     /// Create a Handle from a raw handle value
-    /// 
+    ///
     /// # Safety
     /// The caller must ensure that the raw handle is valid
     pub unsafe fn from_raw(raw: i32) -> Self {
@@ -90,7 +90,7 @@ impl Handle {
     }
 
     /// Close the handle and release the underlying KernelObject
-    /// 
+    ///
     /// After calling this method, the Handle becomes invalid
     pub fn close(self) -> HandleResult<()> {
         let result = syscall1(Syscall::HandleClose, self.raw as usize);
@@ -98,7 +98,7 @@ impl Handle {
     }
 
     /// Duplicate this handle
-    /// 
+    ///
     /// Creates a new Handle pointing to the same KernelObject
     pub fn duplicate(&self) -> HandleResult<Handle> {
         let result = syscall1(Syscall::HandleDuplicate, self.raw as usize);
@@ -106,7 +106,7 @@ impl Handle {
     }
 
     /// Query the capabilities supported by this handle
-    /// 
+    ///
     /// # Returns
     /// A bitmask of supported capabilities
     pub fn query_capabilities(&self) -> HandleResult<u64> {
@@ -115,23 +115,19 @@ impl Handle {
     }
 
     /// Set role metadata for this handle
-    /// 
+    ///
     /// # Arguments
     /// * `role` - New role for the handle
-    /// 
+    ///
     /// # Returns
     /// Success or HandleError on failure
     pub fn set_role(&self, role: u32) -> HandleResult<()> {
-        let result = syscall2(
-            Syscall::HandleSetRole,
-            self.raw as usize,
-            role as usize,
-        );
+        let result = syscall2(Syscall::HandleSetRole, self.raw as usize, role as usize);
         HandleError::from_syscall_result(result).map(|_| ())
     }
 
     /// Get a StreamOps capability for this handle
-    /// 
+    ///
     /// # Returns
     /// StreamOps capability if the handle supports stream operations
     pub fn as_stream(&self) -> HandleResult<StreamOps> {
@@ -141,7 +137,7 @@ impl Handle {
     }
 
     /// Get a FileObject capability for this handle
-    /// 
+    ///
     /// # Returns
     /// FileObject capability if the handle supports file operations
     pub fn as_file(&self) -> HandleResult<FileObject> {
@@ -151,11 +147,11 @@ impl Handle {
     }
 
     /// Perform a control operation on this handle (ioctl-equivalent)
-    /// 
+    ///
     /// # Arguments
     /// * `command` - Control command
     /// * `arg` - Argument for the control command
-    /// 
+    ///
     /// # Returns
     /// Result of the control operation
     pub fn control(&self, command: u32, arg: usize) -> HandleResult<i32> {

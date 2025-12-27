@@ -10,10 +10,10 @@ use crate::vm::vmem::MemoryArea;
 static mut ALLOCATOR: Allocator = Allocator::new();
 
 struct Allocator {
-  // inner: Option<Talck<spin::Mutex<()>, ClaimOnOom>>,
-  inner: Option<LockedHeap>,
-  allocated_count: AtomicUsize,
-  allocated_bytes: AtomicUsize,
+    // inner: Option<Talck<spin::Mutex<()>, ClaimOnOom>>,
+    inner: Option<LockedHeap>,
+    allocated_count: AtomicUsize,
+    allocated_bytes: AtomicUsize,
 }
 
 unsafe impl GlobalAlloc for Allocator {
@@ -23,11 +23,12 @@ unsafe impl GlobalAlloc for Allocator {
             let ptr = unsafe { inner.alloc(layout) };
             // early_println!("Allocated {} bytes at {:?}", layout.size(), ptr);
             self.allocated_count.fetch_add(1, Ordering::SeqCst);
-            self.allocated_bytes.fetch_add(layout.size(), Ordering::SeqCst);
+            self.allocated_bytes
+                .fetch_add(layout.size(), Ordering::SeqCst);
             // early_println!("Total allocations: {}, Total bytes allocated: {}", self.allocated_count.load(Ordering::SeqCst), self.allocated_bytes.load(Ordering::SeqCst));
             ptr
         } else {
-          panic!("Allocator not initialized, cannot allocate memory.");
+            panic!("Allocator not initialized, cannot allocate memory.");
         }
     }
 
@@ -36,7 +37,8 @@ unsafe impl GlobalAlloc for Allocator {
             unsafe { inner.dealloc(ptr, layout) }
             // early_println!("Deallocated {} bytes at {:?}", layout.size(), ptr);
             self.allocated_count.fetch_sub(1, Ordering::SeqCst);
-            self.allocated_bytes.fetch_sub(layout.size(), Ordering::SeqCst);
+            self.allocated_bytes
+                .fetch_sub(layout.size(), Ordering::SeqCst);
             // early_println!("Total allocations: {}, Total bytes allocated: {}", self.allocated_count.load(Ordering::SeqCst), self.allocated_bytes.load(Ordering::SeqCst));
         } else {
             panic!("Allocator not initialized, cannot deallocate memory.");
@@ -46,7 +48,11 @@ unsafe impl GlobalAlloc for Allocator {
 
 impl Allocator {
     pub const fn new() -> Self {
-        Allocator { inner: None, allocated_count: AtomicUsize::new(0), allocated_bytes: AtomicUsize::new(0) }
+        Allocator {
+            inner: None,
+            allocated_count: AtomicUsize::new(0),
+            allocated_bytes: AtomicUsize::new(0),
+        }
     }
 
     pub unsafe fn init(&mut self, start: usize, size: usize) {

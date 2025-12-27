@@ -1,10 +1,10 @@
 //! Platform device driver module.
-//! 
+//!
 //! This module provides the implementation of platform device drivers, including
 //! device information and driver management. It defines the `PlatformDeviceInfo` and
 //! `PlatformDeviceDriver` structs, which represent the device information and driver
 //! respectively.
-//! 
+//!
 //! The module implements the `Device` and `DeviceDriver` traits for platform devices,
 //! allowing them to be integrated into the device management system.
 //!
@@ -51,7 +51,6 @@
 //! respectively. The module also includes the `Device` and `DeviceDriver` traits,
 //! which define the interface for device information and drivers.
 //!
-
 
 pub mod resource;
 
@@ -103,7 +102,12 @@ impl PlatformDeviceInfo {
     /// # Returns
     ///
     /// A new `PlatformDeviceInfo` instance with the provided values.
-    pub fn new(name: &'static str, id: usize, compatible: Vec<&'static str>, resources: Vec<PlatformDeviceResource>) -> Self {
+    pub fn new(
+        name: &'static str,
+        id: usize,
+        compatible: Vec<&'static str>,
+        resources: Vec<PlatformDeviceResource>,
+    ) -> Self {
         Self {
             name,
             id,
@@ -113,11 +117,11 @@ impl PlatformDeviceInfo {
     }
 
     /// Get the `PlatformDeviceResource` associated with the device.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A reference to a vector of `PlatformDeviceResource` objects.
-    /// 
+    ///
     pub fn get_resources(&self) -> &Vec<PlatformDeviceResource> {
         &self.resources
     }
@@ -157,7 +161,7 @@ impl PlatformDeviceDriver {
     ) -> Self {
         Self {
             name,
-            probe_fn,           
+            probe_fn,
             remove_fn,
             compatible,
         }
@@ -175,7 +179,8 @@ impl DeviceDriver for PlatformDeviceDriver {
 
     fn probe(&self, device: &dyn DeviceInfo) -> Result<(), &'static str> {
         // Downcast the device to a `PlatformDeviceInfo`
-        let platform_device_info = device.as_any()
+        let platform_device_info = device
+            .as_any()
             .downcast_ref::<PlatformDeviceInfo>()
             .ok_or("Failed to downcast to PlatformDeviceInfo")?;
         // Call the probe function
@@ -186,7 +191,6 @@ impl DeviceDriver for PlatformDeviceDriver {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -215,10 +219,18 @@ mod tests {
     fn test_probe_failure() {
         struct DummyDevice;
         impl DeviceInfo for DummyDevice {
-            fn name(&self) -> &'static str { "dummy" }
-            fn id(&self) -> usize { 0 }
-            fn compatible(&self) -> Vec<&'static str> { vec![] }
-            fn as_any(&self) -> &dyn Any { self }
+            fn name(&self) -> &'static str {
+                "dummy"
+            }
+            fn id(&self) -> usize {
+                0
+            }
+            fn compatible(&self) -> Vec<&'static str> {
+                vec![]
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
         }
 
         let device = DummyDevice;

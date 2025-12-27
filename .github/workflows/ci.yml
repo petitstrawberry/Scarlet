@@ -56,6 +56,9 @@ jobs:
       if: steps.docker-cache.outputs.cache-hit == 'true'
       run: docker load < /tmp/docker-image
 
+    - name: Run formatting check
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make fmt-check
+
     - name: Build scarlet kernel 
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build
       

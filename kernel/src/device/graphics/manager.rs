@@ -19,14 +19,19 @@
 
 extern crate alloc;
 
-use alloc::{format, string::{String, ToString}, sync::Arc, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::device::{
+    DeviceType,
     graphics::{FramebufferConfig, GraphicsDevice},
     manager::{DeviceManager, SharedDevice},
-    DeviceType,
 };
 
 /// Framebuffer resource extracted from graphics devices
@@ -149,9 +154,16 @@ impl GraphicsManager {
 
             if device.device_type() == DeviceType::Graphics {
                 if let Err(e) = self.register_framebuffer_from_device(device_id, device) {
-                    crate::early_println!("[GraphicsManager] Failed to register framebuffer from device {}: {}", device_id, e);
+                    crate::early_println!(
+                        "[GraphicsManager] Failed to register framebuffer from device {}: {}",
+                        device_id,
+                        e
+                    );
                 } else {
-                    crate::early_println!("[GraphicsManager] Successfully registered framebuffer from device {}", device_id);
+                    crate::early_println!(
+                        "[GraphicsManager] Successfully registered framebuffer from device {}",
+                        device_id
+                    );
                 }
             }
         }
@@ -177,23 +189,15 @@ impl GraphicsManager {
             .as_graphics_device()
             .ok_or("Device is not a graphics device")?;
 
-        // Initialize the graphics device if needed
-        if let Some(mut_device) = device.as_any().downcast_ref::<crate::drivers::graphics::virtio_gpu::VirtioGpuDevice>() {
-            // For VirtioGpuDevice, we need to ensure it's initialized
-            let mut_ptr = mut_device as *const _ as *mut crate::drivers::graphics::virtio_gpu::VirtioGpuDevice;
-            unsafe {
-                if let Err(e) = (*mut_ptr).init_graphics() {
-                    return Err(e);
-                }
-            }
-        }
+        // Initialize the graphics device if needed via trait (no downcast)
+        graphics_device.init_graphics()?;
 
         // Extract framebuffer configuration
         let config = graphics_device.get_framebuffer_config()?;
-        
+
         // Extract framebuffer address
         let physical_addr = graphics_device.get_framebuffer_address()?;
-        
+
         // Calculate framebuffer size
         let size = config.size();
 
@@ -220,16 +224,27 @@ impl GraphicsManager {
         if framebuffers.is_none() {
             *framebuffers = Some(HashMap::new());
         }
-        framebuffers.as_mut().unwrap().insert(logical_name.clone(), resource);
+        framebuffers
+            .as_mut()
+            .unwrap()
+            .insert(logical_name.clone(), resource);
         drop(framebuffers);
 
-        crate::early_println!("[GraphicsManager] Registered framebuffer resource: {} -> {}", device_id, logical_name);
+        crate::early_println!(
+            "[GraphicsManager] Registered framebuffer resource: {} -> {}",
+            device_id,
+            logical_name
+        );
 
         // Automatically create and register the character device
         if let Err(e) = self.create_framebuffer_char_device(&logical_name) {
-            crate::early_println!("[GraphicsManager] Warning: Failed to create character device for {}: {}", logical_name, e);
+            crate::early_println!(
+                "[GraphicsManager] Warning: Failed to create character device for {}: {}",
+                logical_name,
+                e
+            );
         }
-        
+
         Ok(())
     }
 
@@ -285,32 +300,36 @@ impl GraphicsManager {
     ///
     /// Result indicating success or failure
     pub fn create_framebuffer_char_device(&mut self, fb_name: &str) -> Result<(), &'static str> {
-        use crate::device::{graphics::framebuffer_device::FramebufferCharDevice, manager::DeviceManager};
+        use crate::device::{
+            graphics::framebuffer_device::FramebufferCharDevice, manager::DeviceManager,
+        };
         use alloc::sync::Arc;
-        
+
         // Get framebuffer resource
         let fb_resource = {
             let framebuffers = self.framebuffers.lock();
-            framebuffers.as_ref()
+            framebuffers
+                .as_ref()
                 .and_then(|map| map.get(fb_name))
                 .cloned()
                 .ok_or("Framebuffer not found")?
         };
-        
+
         // Create the character device
         let fb_char_device = FramebufferCharDevice::new(fb_resource);
-        
+
         // Register with DeviceManager (this will automatically publish to DevFS)
         let device_manager = DeviceManager::get_mut_manager();
-        let device_id = device_manager.register_device_with_name(
-            fb_name.to_string(),
-            Arc::new(fb_char_device)
-        );
-        
+        let device_id =
+            device_manager.register_device_with_name(fb_name.to_string(), Arc::new(fb_char_device));
+
         // Update the framebuffer resource with the device ID
         self.set_char_device_id(fb_name, device_id)?;
-        
-        crate::early_println!("[GraphicsManager] Created framebuffer character device: /dev/{}", fb_name);
+
+        crate::early_println!(
+            "[GraphicsManager] Created framebuffer character device: /dev/{}",
+            fb_name
+        );
         Ok(())
     }
 
@@ -354,11 +373,11 @@ impl GraphicsManager {
     /// The byte at the specified position, or None if invalid
     pub fn read_byte_from_framebuffer(&self, fb_name: &str, position: usize) -> Option<u8> {
         let fb_resource = self.get_framebuffer(fb_name)?;
-        
+
         if position >= fb_resource.size {
             return None;
         }
-        
+
         // Read byte from framebuffer memory
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *const u8;
@@ -377,20 +396,26 @@ impl GraphicsManager {
     /// # Returns
     ///
     /// Result indicating success or failure
-    pub fn write_byte_to_framebuffer(&self, fb_name: &str, position: usize, byte: u8) -> Result<(), &'static str> {
-        let fb_resource = self.get_framebuffer(fb_name)
+    pub fn write_byte_to_framebuffer(
+        &self,
+        fb_name: &str,
+        position: usize,
+        byte: u8,
+    ) -> Result<(), &'static str> {
+        let fb_resource = self
+            .get_framebuffer(fb_name)
             .ok_or("Framebuffer not found")?;
-        
+
         if position >= fb_resource.size {
             return Err("Position beyond framebuffer size");
         }
-        
+
         // Write byte to framebuffer memory
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *mut u8;
             *fb_ptr.add(position) = byte;
         }
-        
+
         Ok(())
     }
 
@@ -410,21 +435,21 @@ impl GraphicsManager {
             Some(resource) => resource,
             None => return 0,
         };
-        
+
         let available_bytes = fb_resource.size.saturating_sub(position);
         let bytes_to_read = buffer.len().min(available_bytes);
-        
+
         if bytes_to_read == 0 {
             return 0;
         }
-        
+
         // Read bytes from framebuffer memory
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *const u8;
             let src = fb_ptr.add(position);
             core::ptr::copy_nonoverlapping(src, buffer.as_mut_ptr(), bytes_to_read);
         }
-        
+
         bytes_to_read
     }
 
@@ -439,24 +464,30 @@ impl GraphicsManager {
     /// # Returns
     ///
     /// Result containing the number of bytes written or an error
-    pub fn write_framebuffer(&self, fb_name: &str, position: usize, buffer: &[u8]) -> Result<usize, &'static str> {
-        let fb_resource = self.get_framebuffer(fb_name)
+    pub fn write_framebuffer(
+        &self,
+        fb_name: &str,
+        position: usize,
+        buffer: &[u8],
+    ) -> Result<usize, &'static str> {
+        let fb_resource = self
+            .get_framebuffer(fb_name)
             .ok_or("Framebuffer not found")?;
-        
+
         let available_space = fb_resource.size.saturating_sub(position);
         let bytes_to_write = buffer.len().min(available_space);
-        
+
         if bytes_to_write == 0 {
             return Err("No space available in framebuffer");
         }
-        
+
         // Write bytes to framebuffer memory
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *mut u8;
             let dst = fb_ptr.add(position);
             core::ptr::copy_nonoverlapping(buffer.as_ptr(), dst, bytes_to_write);
         }
-        
+
         Ok(bytes_to_write)
     }
 
@@ -465,17 +496,17 @@ impl GraphicsManager {
     #[cfg(test)]
     pub fn clear_for_test(&mut self) {
         use crate::device::manager::DeviceManager;
-        
+
         // Clear GraphicsManager state
         let mut framebuffers = self.framebuffers.lock();
         *framebuffers = None;
-        
+
         let mut display_configs = self.display_configs.lock();
         display_configs.clear();
-        
+
         let mut active_mappings = self.active_mappings.lock();
         active_mappings.clear();
-        
+
         // Also clear DeviceManager state to ensure test isolation
         DeviceManager::get_mut_manager().clear_for_test();
     }
@@ -505,8 +536,10 @@ mod test_utils {
 mod tests {
     use super::*;
     use crate::device::{
-        graphics::{manager::GraphicsManager, GenericGraphicsDevice, FramebufferConfig, PixelFormat},
         Device,
+        graphics::{
+            FramebufferConfig, GenericGraphicsDevice, PixelFormat, manager::GraphicsManager,
+        },
     };
     use alloc::{string::ToString, sync::Arc};
 
@@ -541,7 +574,7 @@ mod tests {
     fn test_graphics_manager_singleton() {
         let manager1 = GraphicsManager::get_manager();
         let manager2 = GraphicsManager::get_manager();
-        
+
         // Both should point to the same instance
         assert_eq!(manager1 as *const _, manager2 as *const _);
     }
@@ -549,25 +582,25 @@ mod tests {
     #[test_case]
     fn test_framebuffer_registration() {
         let mut manager = test_utils::create_test_graphics_manager();
-        
+
         // Create a test graphics device
         let mut device = GenericGraphicsDevice::new("test-gpu");
         let config = FramebufferConfig::new(800, 600, PixelFormat::BGRA8888);
         device.set_framebuffer_config(config.clone());
         device.set_framebuffer_address(0x90000000);
-        
+
         let shared_device: SharedDevice = Arc::new(device);
-        
+
         // Register the device
         let result = manager.register_framebuffer_from_device(0, shared_device);
         assert!(result.is_ok());
-        
+
         // Check that framebuffer was registered
         assert_eq!(manager.get_framebuffer_count(), 1);
         let names = manager.get_framebuffer_names();
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], "fb0");
-        
+
         // Check framebuffer details
         let fb = manager.get_framebuffer("fb0").unwrap();
         assert_eq!(fb.source_device_id, 0);
@@ -581,32 +614,40 @@ mod tests {
     #[test_case]
     fn test_multiple_framebuffer_registration() {
         let mut manager = test_utils::create_test_graphics_manager();
-        
+
         // Create first device
         let mut device1 = GenericGraphicsDevice::new("test-gpu1");
         let config1 = FramebufferConfig::new(1920, 1080, PixelFormat::RGBA8888);
         device1.set_framebuffer_config(config1.clone());
         device1.set_framebuffer_address(0x80000000);
         let shared_device1: SharedDevice = Arc::new(device1);
-        
+
         // Create second device
         let mut device2 = GenericGraphicsDevice::new("test-gpu2");
         let config2 = FramebufferConfig::new(1024, 768, PixelFormat::BGRA8888);
         device2.set_framebuffer_config(config2.clone());
         device2.set_framebuffer_address(0x90000000);
         let shared_device2: SharedDevice = Arc::new(device2);
-        
+
         // Register both devices
-        assert!(manager.register_framebuffer_from_device(1, shared_device1).is_ok());
-        assert!(manager.register_framebuffer_from_device(2, shared_device2).is_ok());
-        
+        assert!(
+            manager
+                .register_framebuffer_from_device(1, shared_device1)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .register_framebuffer_from_device(2, shared_device2)
+                .is_ok()
+        );
+
         // Check registration
         assert_eq!(manager.get_framebuffer_count(), 2);
         let names = manager.get_framebuffer_names();
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"fb0".to_string()));
         assert!(names.contains(&"fb1".to_string()));
-        
+
         // Check individual framebuffers
         let fb0 = manager.get_framebuffer("fb0").unwrap();
         let fb1 = manager.get_framebuffer("fb1").unwrap();
@@ -619,7 +660,7 @@ mod tests {
     #[test_case]
     fn test_char_device_id_assignment() {
         let mut manager = test_utils::create_test_graphics_manager();
-        
+
         // Create and register a device
         let mut device = GenericGraphicsDevice::new("test-gpu");
         let config = FramebufferConfig::new(640, 480, PixelFormat::RGB888);
@@ -627,15 +668,17 @@ mod tests {
         device.set_framebuffer_address(0x80000000);
         let shared_device: SharedDevice = Arc::new(device);
 
-        manager.register_framebuffer_from_device(0, shared_device).unwrap();
+        manager
+            .register_framebuffer_from_device(0, shared_device)
+            .unwrap();
 
         // Set character device ID
         assert!(manager.set_char_device_id("fb0", 42).is_ok());
-        
+
         // Verify the ID was set
         let fb = manager.get_framebuffer("fb0").unwrap();
         assert_eq!(*fb.created_char_device_id.read(), Some(42));
-        
+
         // Test setting ID for non-existent framebuffer
         assert!(manager.set_char_device_id("fb999", 123).is_err());
     }
@@ -643,10 +686,10 @@ mod tests {
     #[test_case]
     fn test_framebuffer_not_found() {
         let manager = GraphicsManager::new();
-        
+
         // Try to get non-existent framebuffer
         assert!(manager.get_framebuffer("non_existent").is_none());
-        
+
         // Empty manager should return empty results
         assert_eq!(manager.get_framebuffer_count(), 0);
         assert_eq!(manager.get_framebuffer_names().len(), 0);

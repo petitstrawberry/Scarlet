@@ -3,26 +3,39 @@
 //! This is a simplified read-only filesystem for handling CPIO archives
 //! used as initramfs. It implements the VFS v2 architecture.
 
-use alloc::{
-    boxed::Box, collections::BTreeMap, format, string::{String, ToString}, sync::Arc, vec::Vec
-};
-use spin::RwLock;
-use core::any::Any;
 use alloc::sync::Weak;
-
-use crate::{driver_initcall, fs::{core::DirectoryEntryInternal, get_fs_driver_manager, vfs_v2::core::{
-    FileSystemOperations, VfsNode
-}, FileSystemDriver, FileSystemType}, object::capability::MemoryMappingOps, vm::vmem::MemoryArea};
-use crate::fs::{
-    FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, FilePermission
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
 };
-use crate::object::capability::{StreamOps, StreamError, ControlOps};
+use core::any::Any;
+use spin::RwLock;
+
+use crate::fs::{
+    FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
+};
+use crate::object::capability::{ControlOps, StreamError, StreamOps};
+use crate::{
+    driver_initcall,
+    fs::{
+        FileSystemDriver, FileSystemType,
+        core::DirectoryEntryInternal,
+        get_fs_driver_manager,
+        vfs_v2::core::{FileSystemOperations, VfsNode},
+    },
+    object::capability::MemoryMappingOps,
+    vm::vmem::MemoryArea,
+};
 
 /// CPIO filesystem implementation
 pub struct CpioFS {
     /// Root node of the filesystem
     root_node: Arc<CpioNode>,
-    
+
     /// Filesystem name
     name: String,
 }
@@ -31,19 +44,19 @@ pub struct CpioFS {
 pub struct CpioNode {
     /// File name
     name: String,
-    
+
     /// File type
     file_type: FileType,
-    
+
     /// File content (for regular files)
     content: Vec<u8>,
-    
+
     /// Child nodes (for directories)
     children: RwLock<BTreeMap<String, Arc<CpioNode>>>,
-    
+
     /// Reference to filesystem
     filesystem: RwLock<Option<Arc<CpioFS>>>,
-    
+
     /// File ID
     file_id: usize,
 
@@ -64,13 +77,17 @@ impl CpioNode {
             parent: RwLock::new(None),
         })
     }
-    
+
     /// Add a child to this directory node
-    pub fn add_child(self: &Arc<Self>, name: String, child: Arc<CpioNode>) -> Result<(), FileSystemError> {
+    pub fn add_child(
+        self: &Arc<Self>,
+        name: String,
+        child: Arc<CpioNode>,
+    ) -> Result<(), FileSystemError> {
         if self.file_type != FileType::Directory {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotADirectory,
-                "Cannot add child to non-directory node"
+                "Cannot add child to non-directory node",
             ));
         }
         // Set parent pointer
@@ -79,7 +96,7 @@ impl CpioNode {
         children.insert(name, child);
         Ok(())
     }
-    
+
     /// Get a child by name
     pub fn get_child(&self, name: &str) -> Option<Arc<CpioNode>> {
         let children = self.children.read();
@@ -87,7 +104,11 @@ impl CpioNode {
     }
 
     pub fn parent_file_id(&self) -> Option<u64> {
-        self.parent.read().as_ref()?.upgrade().map(|p| p.file_id as u64)
+        self.parent
+            .read()
+            .as_ref()?
+            .upgrade()
+            .map(|p| p.file_id as u64)
     }
 
     /// Helper to convert from Arc<dyn VfsNode> to Arc<CpioNode>
@@ -106,9 +127,11 @@ impl VfsNode for CpioNode {
 
     fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>> {
         let fs_guard = self.filesystem.read();
-        fs_guard.as_ref().map(|fs| Arc::downgrade(fs) as Weak<dyn FileSystemOperations>)
+        fs_guard
+            .as_ref()
+            .map(|fs| Arc::downgrade(fs) as Weak<dyn FileSystemOperations>)
     }
-    
+
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
@@ -125,19 +148,19 @@ impl VfsNode for CpioNode {
             link_count: 1,
         })
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn read_link(&self) -> Result<String, FileSystemError> {
         // Check if this is actually a symbolic link and return target
         match &self.file_type {
             FileType::SymbolicLink(target) => Ok(target.clone()),
             _ => Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
-                "Not a symbolic link"
-            ))
+                "Not a symbolic link",
+            )),
         }
     }
 }
@@ -161,13 +184,17 @@ impl CpioFS {
 
     /// VFS v2 driver registration API: create from option string
     /// Example: option = Some("initramfs_addr=0x80000000,size=65536")
-    pub fn create_from_option_string(option: Option<&str>, cpio_data: &[u8]) -> Arc<dyn FileSystemOperations> {
+    pub fn create_from_option_string(
+        option: Option<&str>,
+        cpio_data: &[u8],
+    ) -> Arc<dyn FileSystemOperations> {
         // Name is fixed, cpio_data is assumed to be provided externally
         let name = "cpiofs".to_string();
         // Extend option parsing as needed
-        CpioFS::new(name, cpio_data).expect("Failed to create CpioFS") as Arc<dyn FileSystemOperations>
+        CpioFS::new(name, cpio_data).expect("Failed to create CpioFS")
+            as Arc<dyn FileSystemOperations>
     }
-    
+
     /// Parse CPIO archive and build directory tree
     fn parse_cpio_archive(self: &Arc<Self>, data: &[u8]) -> Result<(), FileSystemError> {
         // CPIO new ASCII format: magic "070701"
@@ -175,36 +202,70 @@ impl CpioFS {
         let mut file_id = 2;
         while offset + 110 <= data.len() {
             // Parse header
-            let magic = &data[offset..offset+6];
+            let magic = &data[offset..offset + 6];
             if magic != b"070701" {
                 break;
             }
-            let _inode = match core::str::from_utf8(&data[offset+6..offset+14]) {
-                Ok(s) => u32::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid inode value"))?,
-                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in inode field")),
+            let _inode = match core::str::from_utf8(&data[offset + 6..offset + 14]) {
+                Ok(s) => u32::from_str_radix(s, 16).map_err(|_| {
+                    FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid inode value")
+                })?,
+                Err(_) => {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid UTF-8 in inode field",
+                    ));
+                }
             };
-            let mode = match core::str::from_utf8(&data[offset+14..offset+22]) {
-                Ok(s) => u32::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid mode value"))?,
-                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in mode field")),
+            let mode = match core::str::from_utf8(&data[offset + 14..offset + 22]) {
+                Ok(s) => u32::from_str_radix(s, 16).map_err(|_| {
+                    FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid mode value")
+                })?,
+                Err(_) => {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid UTF-8 in mode field",
+                    ));
+                }
             };
-            let namesize = match core::str::from_utf8(&data[offset+94..offset+102]) {
-                Ok(s) => usize::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid namesize value"))?,
-                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in namesize field")),
+            let namesize = match core::str::from_utf8(&data[offset + 94..offset + 102]) {
+                Ok(s) => usize::from_str_radix(s, 16).map_err(|_| {
+                    FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid namesize value")
+                })?,
+                Err(_) => {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid UTF-8 in namesize field",
+                    ));
+                }
             };
-            let filesize = match core::str::from_utf8(&data[offset+54..offset+62]) {
-                Ok(s) => usize::from_str_radix(s, 16).map_err(|_| FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid filesize value"))?,
-                Err(_) => return Err(FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid UTF-8 in filesize field")),
+            let filesize = match core::str::from_utf8(&data[offset + 54..offset + 62]) {
+                Ok(s) => usize::from_str_radix(s, 16).map_err(|_| {
+                    FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid filesize value")
+                })?,
+                Err(_) => {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid UTF-8 in filesize field",
+                    ));
+                }
             };
             let name_start = offset + 110;
             let name_end = name_start + namesize;
-            if name_end > data.len() { break; }
-            let name = &data[name_start..name_end-1]; // remove trailing NUL
+            if name_end > data.len() {
+                break;
+            }
+            let name = &data[name_start..name_end - 1]; // remove trailing NUL
             let name_str = core::str::from_utf8(name).unwrap_or("").to_string();
             let file_start = (name_end + 3) & !3; // 4-byte align
             let file_end = file_start + filesize;
-            if file_end > data.len() { break; }
-            if name_str == "TRAILER!!!" { break; }
-            
+            if file_end > data.len() {
+                break;
+            }
+            if name_str == "TRAILER!!!" {
+                break;
+            }
+
             // Determine file type
             let (file_type, content) = match mode & 0o170000 {
                 0o040000 => (FileType::Directory, Vec::new()),
@@ -212,24 +273,25 @@ impl CpioFS {
                 0o120000 => {
                     // For symbolic links, extract target path from content
                     let target_bytes = data[file_start..file_end].to_vec();
-                    let target_path = String::from_utf8(target_bytes.clone()).unwrap_or_else(|_| String::new());
+                    let target_path =
+                        String::from_utf8(target_bytes.clone()).unwrap_or_else(|_| String::new());
                     (FileType::SymbolicLink(target_path), target_bytes)
-                },
+                }
                 _ => (FileType::RegularFile, data[file_start..file_end].to_vec()),
             };
             // Build node and insert into tree
             let base_name = if let Some(pos) = name_str.rfind('/') {
-                &name_str[pos+1..]
+                &name_str[pos + 1..]
             } else {
                 &name_str[..]
             };
-            
+
             // Skip "." and ".." entries as they are handled automatically by the VFS
             if base_name == "." || base_name == ".." {
                 offset = (file_end + 3) & !3;
                 continue;
             }
-            
+
             let node = CpioNode::new(base_name.to_string(), file_type, content, file_id);
             {
                 let mut fs_guard = node.filesystem.write();
@@ -237,19 +299,30 @@ impl CpioFS {
             }
             file_id += 1;
             // Insert into parent
-            let parent_path = if let Some(pos) = name_str.rfind('/') { &name_str[..pos] } else { "" };
+            let parent_path = if let Some(pos) = name_str.rfind('/') {
+                &name_str[..pos]
+            } else {
+                ""
+            };
             let parent = if parent_path.is_empty() {
                 Arc::clone(&self.root_node)
             } else {
                 // Traverse from root to find parent
                 let mut cur = Arc::clone(&self.root_node);
                 for part in parent_path.split('/') {
-                    if part.is_empty() { continue; }
+                    if part.is_empty() {
+                        continue;
+                    }
                     if let Some(child) = cur.get_child(part) {
                         cur = child;
                     } else {
                         // Create intermediate directory if missing
-                        let dir = CpioNode::new(part.to_string(), FileType::Directory, Vec::new(), file_id);
+                        let dir = CpioNode::new(
+                            part.to_string(),
+                            FileType::Directory,
+                            Vec::new(),
+                            file_id,
+                        );
                         {
                             let mut fs_guard = dir.filesystem.write();
                             *fs_guard = Some(Arc::clone(self));
@@ -261,7 +334,9 @@ impl CpioFS {
                 }
                 cur
             };
-            parent.add_child(base_name.to_string(), Arc::clone(&node)).ok();
+            parent
+                .add_child(base_name.to_string(), Arc::clone(&node))
+                .ok();
             offset = (file_end + 3) & !3;
         }
         Ok(())
@@ -275,51 +350,51 @@ impl FileSystemOperations for CpioFS {
         name: &String,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         // Downcast to CpioNode
-        let cpio_parent = parent_node.as_any()
+        let cpio_parent = parent_node
+            .as_any()
             .downcast_ref::<CpioNode>()
-            .ok_or_else(|| FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Invalid node type for CpioFS"
-            ))?;
-        
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Invalid node type for CpioFS",
+                )
+            })?;
+
         // Look up child
-        cpio_parent.get_child(name)
+        cpio_parent
+            .get_child(name)
             .map(|n| n as Arc<dyn VfsNode>)
-            .ok_or_else(|| FileSystemError::new(
-                FileSystemErrorKind::NotFound,
-                format!("File not found: {} in {}", name, cpio_parent.name)
-            ))
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NotFound,
+                    format!("File not found: {} in {}", name, cpio_parent.name),
+                )
+            })
     }
-    
+
     fn open(
         &self,
         node: &Arc<dyn VfsNode>,
         _flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
-        let cpio_node = node.as_any()
-            .downcast_ref::<CpioNode>()
-            .ok_or_else(|| FileSystemError::new(
+        let cpio_node = node.as_any().downcast_ref::<CpioNode>().ok_or_else(|| {
+            FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
-                "Invalid node type for CpioFS"
-            ))?;
-        
+                "Invalid node type for CpioFS",
+            )
+        })?;
+
         match cpio_node.file_type {
-            FileType::RegularFile => {
-                Ok(Arc::new(CpioFileObject::new(Arc::clone(node))))
-            },
-            FileType::Directory => {
-                Ok(Arc::new(CpioDirectoryObject::new(Arc::clone(node))))
-            },
-            FileType::SymbolicLink(_) => {
-                Ok(Arc::new(CpioSymlinkObject::new(Arc::clone(node))))
-            },
+            FileType::RegularFile => Ok(Arc::new(CpioFileObject::new(Arc::clone(node)))),
+            FileType::Directory => Ok(Arc::new(CpioDirectoryObject::new(Arc::clone(node)))),
+            FileType::SymbolicLink(_) => Ok(Arc::new(CpioSymlinkObject::new(Arc::clone(node)))),
             _ => Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
-                "Unsupported file type"
-            ))
+                "Unsupported file type",
+            )),
         }
     }
-    
+
     fn create(
         &self,
         _parent_node: &Arc<dyn VfsNode>,
@@ -329,10 +404,10 @@ impl FileSystemOperations for CpioFS {
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         Err(FileSystemError::new(
             FileSystemErrorKind::ReadOnly,
-            "CPIO filesystem is read-only"
+            "CPIO filesystem is read-only",
         ))
     }
-    
+
     fn remove(
         &self,
         _parent_node: &Arc<dyn VfsNode>,
@@ -340,47 +415,47 @@ impl FileSystemOperations for CpioFS {
     ) -> Result<(), FileSystemError> {
         Err(FileSystemError::new(
             FileSystemErrorKind::ReadOnly,
-            "CPIO filesystem is read-only"
+            "CPIO filesystem is read-only",
         ))
     }
-    
+
     fn root_node(&self) -> Arc<dyn VfsNode> {
         Arc::clone(&self.root_node) as Arc<dyn VfsNode>
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn is_read_only(&self) -> bool {
         true
     }
-    
+
     fn readdir(
         &self,
         node: &Arc<dyn VfsNode>,
     ) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
-        let cpio_node = node.as_any()
-            .downcast_ref::<CpioNode>()
-            .ok_or_else(|| FileSystemError::new(
+        let cpio_node = node.as_any().downcast_ref::<CpioNode>().ok_or_else(|| {
+            FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
-                "Invalid node type for CpioFS"
-            ))?;
+                "Invalid node type for CpioFS",
+            )
+        })?;
         if cpio_node.file_type != FileType::Directory {
             return Err(FileSystemError::new(
                 FileSystemErrorKind::NotADirectory,
-                "Not a directory"
+                "Not a directory",
             ));
         }
         let mut entries = Vec::new();
-        
+
         // Add "." and ".." entries
         entries.push(DirectoryEntryInternal {
             name: ".".to_string(),
             file_type: FileType::Directory,
             file_id: cpio_node.file_id as u64,
         });
-        
+
         // .. entry should have the parent directory's file_id
         let parent_file_id = cpio_node.parent_file_id().unwrap_or(0);
         entries.push(DirectoryEntryInternal {
@@ -388,7 +463,7 @@ impl FileSystemOperations for CpioFS {
             file_type: FileType::Directory,
             file_id: parent_file_id,
         });
-        
+
         // Add children
         let children = cpio_node.children.read();
         for child in children.values() {
@@ -398,10 +473,10 @@ impl FileSystemOperations for CpioFS {
                 file_id: child.file_id as u64,
             });
         }
-        
+
         Ok(entries)
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -424,25 +499,27 @@ impl CpioFileObject {
 
 impl StreamOps for CpioFileObject {
     fn read(&self, buf: &mut [u8]) -> Result<usize, StreamError> {
-        let cpio_node = self.node.as_any()
+        let cpio_node = self
+            .node
+            .as_any()
             .downcast_ref::<CpioNode>()
             .ok_or(StreamError::IoError)?;
-        
+
         let mut pos = self.position.write();
         let start = *pos as usize;
         let end = (start + buf.len()).min(cpio_node.content.len());
-        
+
         if start >= cpio_node.content.len() {
             return Ok(0); // EOF
         }
-        
+
         let bytes_to_read = end - start;
         buf[..bytes_to_read].copy_from_slice(&cpio_node.content[start..end]);
         *pos += bytes_to_read as u64;
-        
+
         Ok(bytes_to_read)
     }
-    
+
     fn write(&self, _buf: &[u8]) -> Result<usize, StreamError> {
         Err(StreamError::PermissionDenied)
     }
@@ -456,33 +533,61 @@ impl ControlOps for CpioFileObject {
 }
 
 impl MemoryMappingOps for CpioFileObject {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported for CPIO files")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // CPIO files don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // CPIO files don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
     }
 }
 
 impl FileObject for CpioFileObject {
-    fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
-        let cpio_node = self.node.as_any()
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let cpio_node = self
+            .node
+            .as_any()
             .downcast_ref::<CpioNode>()
             .ok_or(StreamError::IoError)?;
-        
+
+        let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        if offset >= cpio_node.content.len() {
+            return Ok(0);
+        }
+
+        let end = core::cmp::min(offset + buffer.len(), cpio_node.content.len());
+        let bytes_to_read = end - offset;
+        buffer[..bytes_to_read].copy_from_slice(&cpio_node.content[offset..end]);
+
+        Ok(bytes_to_read)
+    }
+
+    fn write_at(&self, _offset: u64, _buffer: &[u8]) -> Result<usize, StreamError> {
+        Err(StreamError::PermissionDenied)
+    }
+
+    fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
+        let cpio_node = self
+            .node
+            .as_any()
+            .downcast_ref::<CpioNode>()
+            .ok_or(StreamError::IoError)?;
+
         let mut pos = self.position.write();
         let file_size = cpio_node.content.len() as u64;
-        
+
         let new_pos = match whence {
             crate::fs::SeekFrom::Start(offset) => offset,
             crate::fs::SeekFrom::Current(offset) => {
@@ -491,7 +596,7 @@ impl FileObject for CpioFileObject {
                 } else {
                     pos.saturating_sub((-offset) as u64)
                 }
-            },
+            }
             crate::fs::SeekFrom::End(offset) => {
                 if offset >= 0 {
                     file_size + offset as u64
@@ -500,21 +605,53 @@ impl FileObject for CpioFileObject {
                 }
             }
         };
-        
+
         *pos = new_pos.min(file_size);
         Ok(*pos)
     }
-    
+
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError> {
         self.node.metadata().map_err(StreamError::from)
     }
-    
+
     fn truncate(&self, _size: u64) -> Result<(), StreamError> {
         Err(StreamError::PermissionDenied)
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl crate::object::capability::selectable::Selectable for CpioFileObject {
+    fn current_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+    ) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read {
+            set.read = true;
+        }
+        if interest.write {
+            set.write = true;
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        true
     }
 }
 
@@ -535,7 +672,9 @@ impl CpioDirectoryObject {
 
 impl StreamOps for CpioDirectoryObject {
     fn read(&self, buf: &mut [u8]) -> Result<usize, StreamError> {
-        let cpio_node = self.node.as_any()
+        let cpio_node = self
+            .node
+            .as_any()
             .downcast_ref::<CpioNode>()
             .ok_or(StreamError::NotSupported)?;
         if cpio_node.file_type != FileType::Directory {
@@ -569,7 +708,7 @@ impl StreamOps for CpioDirectoryObject {
                 metadata: None,
             });
         }
-        
+
         let position = *self.position.read() as usize;
         if position >= all_entries.len() {
             return Ok(0); // EOF
@@ -578,14 +717,10 @@ impl StreamOps for CpioDirectoryObject {
         let dir_entry = crate::fs::DirectoryEntry::from_internal(internal_entry);
         let entry_size = dir_entry.entry_size();
         if buf.len() < entry_size {
-            return Err(StreamError::InvalidArgument); 
+            return Err(StreamError::InvalidArgument);
         }
-        let entry_bytes = unsafe {
-            core::slice::from_raw_parts(
-                &dir_entry as *const _ as *const u8,
-                entry_size
-            )
-        };
+        let entry_bytes =
+            unsafe { core::slice::from_raw_parts(&dir_entry as *const _ as *const u8, entry_size) };
         buf[..entry_size].copy_from_slice(entry_bytes);
         *self.position.write() += 1;
         Ok(entry_size)
@@ -593,7 +728,7 @@ impl StreamOps for CpioDirectoryObject {
     fn write(&self, _buf: &[u8]) -> Result<usize, StreamError> {
         Err(StreamError::FileSystemError(FileSystemError::new(
             FileSystemErrorKind::ReadOnly,
-            "CPIO filesystem is read-only"
+            "CPIO filesystem is read-only",
         )))
     }
 }
@@ -606,19 +741,22 @@ impl ControlOps for CpioDirectoryObject {
 }
 
 impl MemoryMappingOps for CpioDirectoryObject {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported for directories")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // Directories don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // Directories don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
     }
@@ -629,20 +767,52 @@ impl FileObject for CpioDirectoryObject {
         // Seeking in directories not supported
         Err(StreamError::NotSupported)
     }
-    
+
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError> {
         self.node.metadata().map_err(StreamError::from)
     }
-    
+
     fn truncate(&self, _size: u64) -> Result<(), StreamError> {
         Err(StreamError::FileSystemError(FileSystemError::new(
             FileSystemErrorKind::ReadOnly,
-            "CPIO filesystem is read-only"
+            "CPIO filesystem is read-only",
         )))
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl crate::object::capability::selectable::Selectable for CpioDirectoryObject {
+    fn current_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+    ) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read {
+            set.read = true;
+        }
+        if interest.write {
+            set.write = true;
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        true
     }
 }
 
@@ -664,29 +834,31 @@ impl CpioSymlinkObject {
 impl StreamOps for CpioSymlinkObject {
     fn read(&self, buf: &mut [u8]) -> Result<usize, StreamError> {
         // Reading a symlink returns the target path
-        let target = self.node.read_link()
+        let target = self
+            .node
+            .read_link()
             .map_err(|e| StreamError::FileSystemError(e))?;
-        
+
         let target_bytes = target.as_bytes();
         let mut pos = self.position.write();
         let start = *pos as usize;
-        
+
         if start >= target_bytes.len() {
             return Ok(0); // EOF
         }
-        
+
         let end = (start + buf.len()).min(target_bytes.len());
         let bytes_to_read = end - start;
         buf[..bytes_to_read].copy_from_slice(&target_bytes[start..end]);
         *pos += bytes_to_read as u64;
-        
+
         Ok(bytes_to_read)
     }
-    
+
     fn write(&self, _buf: &[u8]) -> Result<usize, StreamError> {
         Err(StreamError::FileSystemError(FileSystemError::new(
             FileSystemErrorKind::ReadOnly,
-            "CPIO filesystem is read-only"
+            "CPIO filesystem is read-only",
         )))
     }
 }
@@ -698,19 +870,22 @@ impl ControlOps for CpioSymlinkObject {
 }
 
 impl MemoryMappingOps for CpioSymlinkObject {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported for symbolic links")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // Symbolic links don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // Symbolic links don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
     }
@@ -718,12 +893,14 @@ impl MemoryMappingOps for CpioSymlinkObject {
 
 impl FileObject for CpioSymlinkObject {
     fn seek(&self, whence: crate::fs::SeekFrom) -> Result<u64, StreamError> {
-        let target = self.node.read_link()
+        let target = self
+            .node
+            .read_link()
             .map_err(|e| StreamError::FileSystemError(e))?;
         let target_size = target.len() as u64;
-        
+
         let mut pos = self.position.write();
-        
+
         let new_pos = match whence {
             crate::fs::SeekFrom::Start(offset) => offset,
             crate::fs::SeekFrom::Current(offset) => {
@@ -732,7 +909,7 @@ impl FileObject for CpioSymlinkObject {
                 } else {
                     pos.saturating_sub((-offset) as u64)
                 }
-            },
+            }
             crate::fs::SeekFrom::End(offset) => {
                 if offset >= 0 {
                     target_size + offset as u64
@@ -741,30 +918,61 @@ impl FileObject for CpioSymlinkObject {
                 }
             }
         };
-        
+
         *pos = new_pos.min(target_size);
         Ok(*pos)
     }
-    
+
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError> {
         self.node.metadata().map_err(StreamError::from)
     }
-    
+
     fn truncate(&self, _size: u64) -> Result<(), StreamError> {
         Err(StreamError::FileSystemError(FileSystemError::new(
             FileSystemErrorKind::ReadOnly,
-            "CPIO filesystem is read-only"
+            "CPIO filesystem is read-only",
         )))
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
+impl crate::object::capability::selectable::Selectable for CpioSymlinkObject {
+    fn current_ready(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+    ) -> crate::object::capability::selectable::ReadySet {
+        let mut set = crate::object::capability::selectable::ReadySet::none();
+        if interest.read {
+            set.read = true;
+        }
+        if interest.write {
+            set.write = true;
+        }
+        if interest.except {
+            set.except = false;
+        }
+        set
+    }
+
+    fn wait_until_ready(
+        &self,
+        _interest: crate::object::capability::selectable::ReadyInterest,
+        _trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> crate::object::capability::selectable::SelectWaitOutcome {
+        crate::object::capability::selectable::SelectWaitOutcome::Ready
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        true
+    }
+}
 
 /// Driver for CPIO-format filesystems (initramfs)
-/// 
+///
 /// This driver creates filesystems from memory areas only.
 pub struct CpiofsDriver;
 
@@ -772,37 +980,46 @@ impl FileSystemDriver for CpiofsDriver {
     fn name(&self) -> &'static str {
         "cpiofs"
     }
-    
+
     /// This filesystem only supports creation from memory
     fn filesystem_type(&self) -> FileSystemType {
         FileSystemType::Memory
     }
-    
+
     /// Create a file system from memory area
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `memory_area` - A reference to the memory area containing the CPIO filesystem data
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A result containing a boxed CPIO filesystem or an error
-    /// 
-    fn create_from_memory(&self, memory_area: &MemoryArea) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+    ///
+    fn create_from_memory(
+        &self,
+        memory_area: &MemoryArea,
+    ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         let data = unsafe { memory_area.as_slice() };
         // Create the Cpiofs from the memory data
         match CpioFS::new("cpiofs".to_string(), data) {
             Ok(cpio_fs) => Ok(cpio_fs),
             Err(err) => Err(FileSystemError {
                 kind: FileSystemErrorKind::InvalidData,
-                message: format!("Failed to create CPIO filesystem from memory: {}", err.message),
-            })
+                message: format!(
+                    "Failed to create CPIO filesystem from memory: {}",
+                    err.message
+                ),
+            }),
         }
     }
 
-    fn create_from_params(&self, params: &dyn crate::fs::params::FileSystemParams) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
+    fn create_from_params(
+        &self,
+        params: &dyn crate::fs::params::FileSystemParams,
+    ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         use crate::fs::params::*;
-        
+
         // Try to downcast to CpioFSParams
         if let Some(_cpio_params) = params.as_any().downcast_ref::<CpioFSParams>() {
             // CPIO filesystem requires memory area for creation, so we cannot create from parameters alone
@@ -811,7 +1028,7 @@ impl FileSystemDriver for CpiofsDriver {
                 message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
             });
         }
-        
+
         // Try to downcast to BasicFSParams for compatibility
         if let Some(_basic_params) = params.as_any().downcast_ref::<BasicFSParams>() {
             return Err(FileSystemError {
@@ -819,11 +1036,12 @@ impl FileSystemDriver for CpiofsDriver {
                 message: "CPIO filesystem requires memory area for creation. Use create_from_memory instead.".to_string(),
             });
         }
-        
+
         // If all downcasts fail, return error
         Err(FileSystemError {
             kind: FileSystemErrorKind::NotSupported,
-            message: "CPIO filesystem requires CpioFSParams and memory area for creation".to_string(),
+            message: "CPIO filesystem requires CpioFSParams and memory area for creation"
+                .to_string(),
         })
     }
 }

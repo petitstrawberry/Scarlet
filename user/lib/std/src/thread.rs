@@ -1,4 +1,4 @@
-use crate::{syscall::{syscall1, Syscall}};
+use crate::syscall::{Syscall, syscall1};
 use core::time::Duration;
 
 pub fn sleep(dur: Duration) -> i32 {

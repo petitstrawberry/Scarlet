@@ -1,13 +1,13 @@
 //! Scheduler module
-//! 
+//!
 //! The scheduler module is responsible for scheduling tasks on the CPU.
 //! Currently, the scheduler is a simple round-robin scheduler with separate
 //! queues for different task states to improve efficiency:
-//! 
+//!
 //! - `ready_queue`: Tasks that are ready to run
 //! - `blocked_queue`: Tasks waiting for I/O or other events  
 //! - `zombie_queue`: Finished tasks waiting to be cleaned up
-//! 
+//!
 //! This separation avoids unnecessary iteration over blocked/zombie tasks
 //! during normal scheduling operations.
 
@@ -18,9 +18,19 @@ use core::panic;
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, string::ToString, vec::Vec};
 use hashbrown::HashMap;
 
-use crate::{arch::{Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle, interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector, trap::{user::arch_switch_to_user_space}}, environment::NUM_OF_CPUS, task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters}, timer::get_kernel_timer, vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector}};
-use crate::println;
 use crate::print;
+use crate::println;
+use crate::{
+    arch::{
+        Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle,
+        interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector,
+        trap::user::arch_switch_to_user_space,
+    },
+    environment::NUM_OF_CPUS,
+    task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
+    timer::get_kernel_timer,
+    vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector},
+};
 
 use crate::task::Task;
 
@@ -48,7 +58,7 @@ impl TaskPool {
             .map(|_| None)
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        
+
         TaskPool {
             tasks,
             id_to_index: HashMap::new(),
@@ -59,7 +69,7 @@ impl TaskPool {
 
     fn add_task(&mut self, task: Task) -> Result<(), &'static str> {
         let task_id = task.get_id();
-        
+
         // Find available index
         let index = if let Some(free_idx) = self.free_indices.pop() {
             free_idx
@@ -70,7 +80,7 @@ impl TaskPool {
         } else {
             return Err("Task pool full");
         };
-        
+
         self.tasks[index] = Some(task);
         self.id_to_index.insert(task_id, index);
         Ok(())
@@ -142,13 +152,13 @@ impl Scheduler {
     }
 
     /// Determines the next task to run and returns current and next task IDs
-    /// 
+    ///
     /// This method performs the core scheduling algorithm and task state management
     /// without performing actual context switches or hardware setup.
-    /// 
+    ///
     /// # Arguments
     /// * `cpu` - The CPU architecture state (for CPU ID)
-    /// 
+    ///
     /// # Returns
     /// * `(old_task_id, new_task_id)` - Tuple of old and new task IDs
     fn run(&mut self, cpu: &Arch) -> (Option<usize>, Option<usize>) {
@@ -163,11 +173,13 @@ impl Scheduler {
             if self.ready_queue[cpu_id].is_empty() {
                 match task_id {
                     Some(task_id) => {
-                        let t = self.get_task_by_id(task_id).expect("Task must exist in task pool");
+                        let t = self
+                            .get_task_by_id(task_id)
+                            .expect("Task must exist in task pool");
                         match t.state {
                             TaskState::NotInitialized => {
                                 panic!("Task must be initialized before scheduling");
-                            },
+                            }
                             TaskState::Zombie => {
                                 let task_id = t.get_id();
                                 let parent_id = t.get_parent_id();
@@ -180,10 +192,10 @@ impl Scheduler {
                                     wake_parent_waiters(parent_id);
                                 }
                                 continue;
-                            },
+                            }
                             TaskState::Terminated => {
                                 panic!("At least one task must be scheduled");
-                            },
+                            }
                             TaskState::Blocked(_) => {
                                 // Reset current_task_id since this task is no longer current
                                 if self.current_task_id[cpu_id] == Some(task_id) {
@@ -192,7 +204,7 @@ impl Scheduler {
                                 // Put blocked task to blocked queue without running it
                                 self.blocked_queue[cpu_id].push_back(task_id);
                                 continue;
-                            },
+                            }
                             TaskState::Ready | TaskState::Running => {
                                 t.state = TaskState::Running;
                                 // Task is ready to run
@@ -222,11 +234,13 @@ impl Scheduler {
             } else {
                 match task_id {
                     Some(task_id) => {
-                        let t = self.get_task_by_id(task_id).expect("Task must exist in task pool");
+                        let t = self
+                            .get_task_by_id(task_id)
+                            .expect("Task must exist in task pool");
                         match t.state {
                             TaskState::NotInitialized => {
                                 panic!("Task must be initialized before scheduling");
-                            },
+                            }
                             TaskState::Zombie => {
                                 let task_id = t.get_id();
                                 let parent_id = t.get_parent_id();
@@ -238,11 +252,11 @@ impl Scheduler {
                                     wake_parent_waiters(parent_id);
                                 }
                                 continue;
-                            },
+                            }
                             TaskState::Terminated => {
                                 self.task_pool.remove_task(task_id);
                                 continue;
-                            },
+                            }
                             TaskState::Blocked(_) => {
                                 // Reset current_task_id since this task is no longer current
                                 if self.current_task_id[cpu_id] == Some(task_id) {
@@ -251,9 +265,8 @@ impl Scheduler {
                                 // Put blocked task back to the end of queue without running it
                                 self.blocked_queue[cpu_id].push_back(task_id);
                                 continue;
-                            },
+                            }
                             TaskState::Ready | TaskState::Running => {
-
                                 t.time_slice = 1; // Reset time slice on dispatch
                                 let next_task_id = t.get_id();
                                 self.current_task_id[cpu_id] = Some(next_task_id);
@@ -287,11 +300,11 @@ impl Scheduler {
     }
 
     /// Schedule tasks on the CPU with kernel context switching
-    /// 
+    ///
     /// This function performs cooperative scheduling by switching between task
     /// kernel contexts. It returns to the caller, allowing the trap handler
     /// to handle user space return.
-    /// 
+    ///
     /// # Arguments
     /// * `cpu` - The CPU architecture state
     pub fn schedule(&mut self, trapframe: &mut Trapframe) {
@@ -330,7 +343,8 @@ impl Scheduler {
                 // Restore trapframe of same task
                 let current_task = self.get_task_by_id(current_task_id).unwrap();
                 Self::setup_task_execution(get_cpu(), current_task);
-            } else {            // No current task (e.g., first scheduling), just switch to next task
+            } else {
+                // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
                 // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
@@ -345,7 +359,6 @@ impl Scheduler {
         }
         // Schedule returns - trap handler will call arch_switch_to_user_space()
     }
-
 
     /* MUST NOT raise any exception in this function before the idle loop */
     pub fn start_scheduler(&mut self) {
@@ -371,7 +384,7 @@ impl Scheduler {
     pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
         match self.current_task_id[cpu_id] {
             Some(task_id) => self.task_pool.get_task(task_id),
-            None => None
+            None => None,
         }
     }
 
@@ -380,13 +393,13 @@ impl Scheduler {
     }
 
     /// Returns a mutable reference to the task with the specified ID, if found.
-    /// 
+    ///
     /// This method searches the TaskPool to find the task with the specified ID.
     /// This is needed for Waker integration.
-    /// 
+    ///
     /// # Arguments
     /// * `task_id` - The ID of the task to search for.
-    /// 
+    ///
     /// # Returns
     /// A mutable reference to the task if found, or None otherwise.
     pub fn get_task_by_id(&mut self, task_id: usize) -> Option<&mut Task> {
@@ -394,21 +407,24 @@ impl Scheduler {
     }
 
     /// Move a task from blocked queue to ready queue when it's woken up
-    /// 
+    ///
     /// This method is called by Waker when a blocked task needs to be woken up.
-    /// 
+    ///
     /// # Arguments
     /// * `task_id` - The ID of the task to move to ready queue
-    /// 
+    ///
     /// # Returns
     /// true if the task was found and moved, false otherwise
     pub fn wake_task(&mut self, task_id: usize) -> bool {
         // Search for the task in blocked queues
         for cpu_id in 0..self.blocked_queue.len() {
-            if let Some(pos) = self.blocked_queue[cpu_id].iter().position(|&id| id == task_id) {
+            if let Some(pos) = self.blocked_queue[cpu_id]
+                .iter()
+                .position(|&id| id == task_id)
+            {
                 // Remove from blocked queue
                 self.blocked_queue[cpu_id].remove(pos);
-                
+
                 // Get task from TaskPool and set state to Running
                 if let Some(task) = self.task_pool.get_task(task_id) {
                     task.state = TaskState::Running;
@@ -432,6 +448,32 @@ impl Scheduler {
             }
         }
         false
+    }
+
+    /// Clean up a zombie task after it has been waited on
+    ///
+    /// This removes the task from zombie_queue and task_pool, freeing all resources.
+    /// Should only be called from Task::wait() after confirming the task is a zombie.
+    ///
+    /// # Arguments
+    /// * `task_id` - The ID of the zombie task to clean up
+    pub fn cleanup_zombie_task(&mut self, task_id: usize) {
+        // Remove from zombie queue
+        for cpu_id in 0..NUM_OF_CPUS {
+            if let Some(pos) = self.zombie_queue[cpu_id]
+                .iter()
+                .position(|&id| id == task_id)
+            {
+                self.zombie_queue[cpu_id].remove(pos);
+                crate::println!("[Scheduler] Removed task {} from zombie_queue", task_id);
+                break;
+            }
+        }
+
+        // Remove from task pool (this frees all task resources)
+        if let Some(_task) = self.task_pool.remove_task(task_id) {
+            crate::println!("[Scheduler] Cleaned up zombie task {}", task_id);
+        }
     }
 
     /// Get IDs of all tasks across ready, blocked, and zombie queues
@@ -463,10 +505,10 @@ impl Scheduler {
     }
 
     /// Perform kernel context switch between tasks
-    /// 
+    ///
     /// This function handles the low-level kernel context switching between
     /// the current task and the next selected task.
-    /// 
+    ///
     /// # Arguments
     /// * `cpu_id` - The CPU ID
     /// * `from_task_id` - Current task ID
@@ -477,14 +519,14 @@ impl Scheduler {
             // Find tasks in all queues (ready, blocked, zombie)
             let mut from_ctx_ptr: *mut crate::arch::KernelContext = core::ptr::null_mut();
             let mut to_ctx_ptr: *const crate::arch::KernelContext = core::ptr::null();
-            
+
             if let Some(from_task) = self.task_pool.get_task(from_task_id) {
                 from_ctx_ptr = &mut from_task.kernel_context
             }
             if let Some(to_task) = self.task_pool.get_task(to_task_id) {
                 to_ctx_ptr = &to_task.kernel_context
             }
-            
+
             if !from_ctx_ptr.is_null() && !to_ctx_ptr.is_null() {
                 // Perform kernel context switch
                 unsafe {
@@ -498,14 +540,13 @@ impl Scheduler {
     }
 
     /// Setup task execution by configuring hardware and user context
-    /// 
+    ///
     /// This replaces the old dispatcher functionality with a more direct approach.
-    /// 
+    ///
     /// # Arguments
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-
         // crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
         // crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
         // let trapframe = cpu.get_trapframe();
@@ -514,14 +555,15 @@ impl Scheduler {
         // Prefer the high-VA kernel stack window if available
         let sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
             // top = base + guard + TASK_KERNEL_STACK_SIZE
-            (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+            (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE)
+                as u64
         } else {
             task.get_kernel_stack_bottom()
         };
 
         // crate::early_println!("[SCHED]   Setting kernel stack to {:#x}", sp);
         cpu.set_kernel_stack(sp);
-        
+
         // Handle trapframe and vcpu switching - use raw pointer to avoid borrow checker issues
         // This is safe because we're accessing different fields of the same struct
         let task_ptr = task as *mut Task;

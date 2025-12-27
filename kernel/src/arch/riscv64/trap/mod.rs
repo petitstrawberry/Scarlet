@@ -4,8 +4,8 @@ use crate::{early_println, println};
 
 use super::Trapframe;
 
-pub mod interrupt;
 pub mod exception;
+pub mod interrupt;
 pub mod kernel;
 pub mod user;
 

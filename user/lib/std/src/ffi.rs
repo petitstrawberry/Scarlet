@@ -3,9 +3,9 @@ extern crate alloc;
 pub use alloc::string::*;
 
 /// Converts a Rust string slice (`&str`) into a null-terminated C-style string represented as a `Vec<u8>`.
-/// 
+///
 /// # Arguments
-/// 
+///
 /// * `s` - A string slice to be converted.
 ///
 /// # Returns
@@ -37,7 +37,5 @@ pub unsafe fn cstr_ptr_to_str(ptr: *const u8) -> Option<&'static str> {
     } {
         len += 1;
     }
-    unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).ok()
-    }
+    unsafe { core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).ok() }
 }

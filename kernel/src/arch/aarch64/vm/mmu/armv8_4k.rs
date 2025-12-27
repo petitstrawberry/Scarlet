@@ -321,7 +321,13 @@ impl PageTable {
     }
 
     /// Map a memory area using this page table
-    pub fn map_memory_area(&mut self, asid: u16, mmap: VirtualMemoryMap) -> Result<(), &'static str> {
+    pub fn map_memory_area(
+        &mut self,
+        asid: u16,
+        mmap: VirtualMemoryMap,
+        accessed: bool,
+        dirty: bool,
+    ) -> Result<(), &'static str> {
         // Check alignment
         if mmap.vmarea.start % PAGE_SIZE != 0 || mmap.pmarea.start % PAGE_SIZE != 0 ||
            mmap.vmarea.size() % PAGE_SIZE != 0 || mmap.pmarea.size() % PAGE_SIZE != 0 {
@@ -332,7 +338,7 @@ impl PageTable {
         let mut paddr = mmap.pmarea.start;
         
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(asid, vaddr, paddr, mmap.permissions);
+            self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty);
             
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
@@ -348,7 +354,15 @@ impl PageTable {
     }
 
     /// Map a single page
-    pub fn map(&mut self, asid: u16, vaddr: usize, paddr: usize, permissions: usize) {
+    pub fn map(
+        &mut self,
+        asid: u16,
+        vaddr: usize,
+        paddr: usize,
+        permissions: usize,
+        _accessed: bool,  // TODO: Implement accessed flag support for AArch64
+        _dirty: bool,     // TODO: Implement dirty flag support for AArch64
+    ) {
         // Validate 48-bit virtual address
         if vaddr >= (1 << 48) {
             panic!("Virtual address {:#x} exceeds 48-bit limit", vaddr);

@@ -37,8 +37,9 @@
 use core::fmt;
 use core::fmt::Write;
 
-use crate::device::manager::DeviceManager;
 use crate::device::char::CharDevice;
+use crate::device::manager::DeviceManager;
+use crate::device::{DeviceCapability, DeviceType};
 use crate::early_println;
 
 #[macro_export]
@@ -54,31 +55,54 @@ macro_rules! println {
 
 pub fn _print(args: fmt::Arguments) {
     let manager = DeviceManager::get_manager();
-    
-    // Try to find a character device (UART)
-    if let Some(device_id) = manager.get_first_device_by_type(crate::device::DeviceType::Char) {
-        if let Some(char_device) = manager.get_device(device_id).unwrap().as_char_device() {
-            // Use CharDevice trait methods to write
-            struct CharDeviceWriter<'a>(&'a dyn CharDevice);
-            
-            impl<'a> fmt::Write for CharDeviceWriter<'a> {
-                fn write_str(&mut self, s: &str) -> fmt::Result {
-                    for byte in s.bytes() {
-                        if self.0.write_byte(byte).is_err() {
-                            return Err(fmt::Error);
-                        }
-                    }
-                    Ok(())
+
+    // Helper: write to a specific CharDevice implementation
+    struct CharDeviceWriter<'a>(&'a dyn CharDevice);
+    impl<'a> fmt::Write for CharDeviceWriter<'a> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            for byte in s.bytes() {
+                if self.0.write_byte(byte).is_err() {
+                    return Err(fmt::Error);
                 }
             }
-            
-            let mut writer = CharDeviceWriter(char_device);
-            if writer.write_fmt(args).is_ok() {
-                return;
+            Ok(())
+        }
+    }
+
+    // 1) Prefer devices that advertise Serial capability (raw UART-like)
+    let count = manager.get_devices_count();
+    for id in 1..=count {
+        if let Some(dev) = manager.get_device(id) {
+            if dev.device_type() == DeviceType::Char
+                && dev.capabilities().contains(&DeviceCapability::Serial)
+                && dev.name() != "null"
+            {
+                if let Some(char_dev) = dev.as_char_device() {
+                    let mut writer = CharDeviceWriter(char_dev);
+                    if writer.write_fmt(args).is_ok() {
+                        return;
+                    }
+                }
             }
         }
     }
-    
-    // Fallback to early_println if no character device found
-    early_println!("[print] No character device found, using early console");
+
+    // 2) Otherwise choose any Char device that is NOT TTY-capable and NOT the null sink
+    for id in 1..=count {
+        if let Some(dev) = manager.get_device(id) {
+            if dev.device_type() == DeviceType::Char
+                && !dev.capabilities().contains(&DeviceCapability::Tty)
+            {
+                if let Some(char_dev) = dev.as_char_device() {
+                    let mut writer = CharDeviceWriter(char_dev);
+                    if writer.write_fmt(args).is_ok() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Final fallback: early console
+    early_println!("[print] No usable character device found; using early console");
 }

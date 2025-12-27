@@ -1,5 +1,5 @@
 //! # VirtIO GPU Device Driver
-//! 
+//!
 //! This module provides a driver for VirtIO GPU devices, implementing the
 //! GraphicsDevice trait for integration with the kernel's graphics subsystem.
 //!
@@ -10,9 +10,17 @@ use alloc::{boxed::Box, sync::Arc};
 use spin::{Mutex, RwLock};
 
 use crate::{
-    device::{graphics::{FramebufferConfig, GraphicsDevice, PixelFormat}, Device, DeviceType},
-    drivers::virtio::{device::VirtioDevice, queue::{DescriptorFlag, VirtQueue}},
-    mem::page::{allocate_raw_pages, Page}, object::capability::{ControlOps, MemoryMappingOps}, timer::{add_timer, get_tick, ms_to_ticks, SoftwareTimer, TimerHandler},
+    device::{
+        Device, DeviceType,
+        graphics::{FramebufferConfig, GraphicsDevice, PixelFormat},
+    },
+    drivers::virtio::{
+        device::VirtioDevice,
+        queue::{DescriptorFlag, VirtQueue},
+    },
+    mem::page::{Page, allocate_raw_pages},
+    object::capability::{ControlOps, MemoryMappingOps, Selectable},
+    timer::{SoftwareTimer, TimerHandler, add_timer, get_tick, ms_to_ticks},
 };
 use core::{ptr, sync::atomic::fence};
 
@@ -170,12 +178,12 @@ impl VirtioGpuDeviceCore {
             framebuffer_addr: RwLock::new(None),
             shadow_framebuffer_addr: RwLock::new(None),
             boxed_framebuffer: RwLock::new(None),
-            boxed_shadow_framebuffer: RwLock::new(None), 
+            boxed_shadow_framebuffer: RwLock::new(None),
             resource_id: Mutex::new(1),
             initialized: Mutex::new(false),
             resources: Mutex::new(alloc::collections::BTreeMap::new()),
         };
-        
+
         // Initialize virtqueues first
         {
             let mut virtqueues = device.virtqueues.lock();
@@ -183,12 +191,12 @@ impl VirtioGpuDeviceCore {
                 queue.init();
             }
         }
-        
+
         // Initialize the VirtIO device - this will set up the queues with the device
         if device.init().is_err() {
             crate::early_println!("[Virtio GPU] Warning: Failed to initialize VirtIO device");
         }
-        
+
         // crate::early_println!("[Virtio GPU] Device created and initialized at {:#x}", base_addr);
         device
     }
@@ -208,10 +216,12 @@ impl VirtioGpuDeviceCore {
 
         // The response buffer is allocated on the stack. It's faster and
         // its memory is automatically reclaimed when the function returns.
-        let mut resp_buffer = [0u8; 64];
+        let mut resp_buffer = [0u8; 128];
 
         // Allocate descriptors
-        let cmd_desc = control_queue.alloc_desc().ok_or("Failed to allocate command descriptor")?;
+        let cmd_desc = control_queue
+            .alloc_desc()
+            .ok_or("Failed to allocate command descriptor")?;
         let resp_desc = match control_queue.alloc_desc() {
             Some(desc) => desc,
             None => {
@@ -222,7 +232,8 @@ impl VirtioGpuDeviceCore {
         };
 
         // Set up command descriptor (device readable)
-        let cmd_desc_ptr = &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        let cmd_desc_ptr =
+            &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
         unsafe {
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, (cmd as *const T) as u64);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, core::mem::size_of::<T>() as u32);
@@ -231,7 +242,8 @@ impl VirtioGpuDeviceCore {
         }
 
         // Set up response descriptor (device writable)
-        let resp_desc_ptr = &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        let resp_desc_ptr =
+            &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
         unsafe {
             core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_buffer.as_mut_ptr() as u64);
             core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32); // Use .len() for safety
@@ -322,9 +334,14 @@ impl VirtioGpuDeviceCore {
     }
 
     /// Create a 2D resource
-    fn create_2d_resource(&self, width: u32, height: u32, format: u32) -> Result<u32, &'static str> {
+    fn create_2d_resource(
+        &self,
+        width: u32,
+        height: u32,
+        format: u32,
+    ) -> Result<u32, &'static str> {
         let resource_id = self.next_resource_id();
-        
+
         let cmd = VirtioGpuResourceCreate2d {
             hdr: VirtioGpuCtrlHdr {
                 hdr_type: VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
@@ -344,7 +361,12 @@ impl VirtioGpuDeviceCore {
     }
 
     /// Attach backing memory to a resource
-    fn attach_backing_to_resource(&self, resource_id: u32, addr: usize, size: usize) -> Result<(), &'static str> {
+    fn attach_backing_to_resource(
+        &self,
+        resource_id: u32,
+        addr: usize,
+        size: usize,
+    ) -> Result<(), &'static str> {
         // Create attach backing command + memory entry in a single buffer
         #[repr(C)]
         struct AttachBackingWithEntry {
@@ -371,7 +393,7 @@ impl VirtioGpuDeviceCore {
             },
         };
 
-        // crate::early_println!("[Virtio GPU] Attaching framebuffer memory {:#x} (size {}) to resource {}", 
+        // crate::early_println!("[Virtio GPU] Attaching framebuffer memory {:#x} (size {}) to resource {}",
         //     addr, size, resource_id);
         self.send_control_command(&cmd)?;
         Ok(())
@@ -387,7 +409,8 @@ impl VirtioGpuDeviceCore {
         }
         let width = primary_display.r.width;
         let height = primary_display.r.height;
-        let resource_id = self.create_2d_resource(width, height, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM)?;
+        let resource_id =
+            self.create_2d_resource(width, height, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM)?;
         let fb_size = (width * height * 4) as usize;
         let fb_pages = (fb_size + 4095) / 4096;
         let fb_pages_ptr = allocate_raw_pages(fb_pages);
@@ -396,7 +419,9 @@ impl VirtioGpuDeviceCore {
         }
         let fb_addr = fb_pages_ptr as usize;
         // Store the framebuffer in boxed memory for easier management
-        self.boxed_framebuffer.write().replace(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(fb_pages_ptr, fb_pages)) });
+        self.boxed_framebuffer.write().replace(unsafe {
+            Box::from_raw(core::ptr::slice_from_raw_parts_mut(fb_pages_ptr, fb_pages))
+        });
         self.attach_backing_to_resource(resource_id, fb_addr, fb_size)?; // Attach backing memory to the resource
         // Set scanout to use this framebuffer
         let scanout_cmd = VirtioGpuSetScanout {
@@ -407,7 +432,12 @@ impl VirtioGpuDeviceCore {
                 ctx_id: 0,
                 padding: 0,
             },
-            r: VirtioGpuRect { x: 0, y: 0, width, height },
+            r: VirtioGpuRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
             scanout_id: 0,
             resource_id,
         };
@@ -424,7 +454,12 @@ impl VirtioGpuDeviceCore {
         }
         let shadow_addr = shadow_pages_ptr as usize;
         // Store the shadow framebuffer in boxed memory for easier management
-        self.boxed_shadow_framebuffer.write().replace(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(shadow_pages_ptr, fb_pages)) });
+        self.boxed_shadow_framebuffer.write().replace(unsafe {
+            Box::from_raw(core::ptr::slice_from_raw_parts_mut(
+                shadow_pages_ptr,
+                fb_pages,
+            ))
+        });
         // Initialize shadow framebuffer with the contents of the framebuffer
         let fb_size = fb_size as usize;
         unsafe {
@@ -441,7 +476,7 @@ impl VirtioGpuDeviceCore {
     fn get_framebuffer_config(&self) -> Result<FramebufferConfig, &'static str> {
         let display_info = self.display_info.read();
         let display_info = display_info.as_ref().ok_or("Device not initialized")?;
-        
+
         let primary_display = &display_info.pmodes[0];
         if primary_display.enabled == 0 {
             return Err("Primary display not enabled");
@@ -455,14 +490,21 @@ impl VirtioGpuDeviceCore {
     }
 
     fn get_framebuffer_address(&self) -> Result<usize, &'static str> {
-        self.framebuffer_addr.read()
+        self.framebuffer_addr
+            .read()
             .ok_or("Framebuffer not initialized")
     }
 
-    fn flush_framebuffer(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str> {
+    fn flush_framebuffer(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
         let display_info = self.display_info.read();
         let _display_info = display_info.as_ref().ok_or("Device not initialized")?;
-        
+
         // Get the resource ID from our tracked resources
         let resource_id = {
             let resources = self.resources.lock();
@@ -473,7 +515,7 @@ impl VirtioGpuDeviceCore {
             }
         };
 
-        // crate::early_println!("[Virtio GPU] Flushing framebuffer region: ({},{}) {}x{} for resource {}", 
+        // crate::early_println!("[Virtio GPU] Flushing framebuffer region: ({},{}) {}x{} for resource {}",
         //     x, y, width, height, resource_id);
 
         // Transfer to host - copies data from guest memory to host
@@ -487,7 +529,12 @@ impl VirtioGpuDeviceCore {
                 ctx_id: 0,
                 padding: 0,
             },
-            r: VirtioGpuRect { x, y, width, height },
+            r: VirtioGpuRect {
+                x,
+                y,
+                width,
+                height,
+            },
             offset: 0,
             resource_id,
             padding: 0,
@@ -505,7 +552,12 @@ impl VirtioGpuDeviceCore {
                 ctx_id: 0,
                 padding: 0,
             },
-            r: VirtioGpuRect { x, y, width, height },
+            r: VirtioGpuRect {
+                x,
+                y,
+                width,
+                height,
+            },
             resource_id,
             padding: 0,
         };
@@ -529,7 +581,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         if queue_idx >= self.get_virtqueue_count() {
             panic!("Invalid queue index: {}", queue_idx);
         }
-        
+
         let virtqueues = self.virtqueues.lock();
         virtqueues[queue_idx].get_queue_size()
     }
@@ -538,7 +590,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         if queue_idx >= self.get_virtqueue_count() {
             return None;
         }
-        
+
         let virtqueues = self.virtqueues.lock();
         Some(virtqueues[queue_idx].desc.as_ptr() as u64)
     }
@@ -547,7 +599,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         if queue_idx >= self.get_virtqueue_count() {
             return None;
         }
-        
+
         let virtqueues = self.virtqueues.lock();
         Some(virtqueues[queue_idx].avail.flags as *const u16 as u64)
     }
@@ -556,7 +608,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
         if queue_idx >= self.get_virtqueue_count() {
             return None;
         }
-        
+
         let virtqueues = self.virtqueues.lock();
         Some(virtqueues[queue_idx].used.flags as *const u16 as u64)
     }
@@ -569,7 +621,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 
 pub struct VirtioGpuDevice {
     core: Arc<Mutex<VirtioGpuDeviceCore>>,
-    handler: Option<Arc<dyn TimerHandler>>,
+    handler: RwLock<Option<Arc<dyn TimerHandler>>>,
 }
 
 impl VirtioGpuDevice {
@@ -585,7 +637,7 @@ impl VirtioGpuDevice {
     pub fn new(base_addr: usize) -> Self {
         Self {
             core: Arc::new(Mutex::new(VirtioGpuDeviceCore::new(base_addr))),
-            handler: None,
+            handler: RwLock::new(None),
         }
     }
 }
@@ -620,23 +672,28 @@ impl ControlOps for VirtioGpuDevice {
 }
 
 impl MemoryMappingOps for VirtioGpuDevice {
-    fn get_mapping_info(&self, _offset: usize, _length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         Err("Memory mapping not supported by VirtIO GPU device")
     }
-    
+
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
         // VirtIO GPU devices don't support memory mapping
     }
-    
+
     fn on_unmapped(&self, _vaddr: usize, _length: usize) {
         // VirtIO GPU devices don't support memory mapping
     }
-    
+
     fn supports_mmap(&self) -> bool {
         false
     }
 }
+
+impl Selectable for VirtioGpuDevice {} // Use default Selectable implementation
 
 impl GraphicsDevice for VirtioGpuDevice {
     fn get_display_name(&self) -> &'static str {
@@ -651,11 +708,17 @@ impl GraphicsDevice for VirtioGpuDevice {
         self.core.lock().get_framebuffer_address()
     }
 
-    fn flush_framebuffer(&self, x: u32, y: u32, width: u32, height: u32) -> Result<(), &'static str> {
+    fn flush_framebuffer(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
         self.core.lock().flush_framebuffer(x, y, width, height)
     }
 
-    fn init_graphics(&mut self) -> Result<(), &'static str> {
+    fn init_graphics(&self) -> Result<(), &'static str> {
         {
             let core = self.core.lock();
             let mut initialized = core.initialized.lock();
@@ -679,7 +742,8 @@ impl GraphicsDevice for VirtioGpuDevice {
 
         add_timer(get_tick() + ms_to_ticks(16), &handler, 0);
 
-        self.handler = Some(handler);
+        // Store handler via interior mutability
+        *self.handler.write() = Some(handler);
 
         // crate::early_println!("[Virtio GPU] Graphics subsystem initialization completed");
         Ok(())
@@ -777,36 +841,44 @@ mod tests {
     #[test_case]
     fn test_virtio_gpu_framebuffer_operations() {
         let mut device = VirtioGpuDevice::new(0x10002000);
-        
+
         // Initialize the device
         device.init_graphics().unwrap();
-        
+
         // Get framebuffer configuration
         let config = device.get_framebuffer_config().unwrap();
         assert_eq!(config.width, 1024);
         assert_eq!(config.height, 768);
         assert_eq!(config.format, PixelFormat::BGRA8888);
-        
+
         // Get framebuffer address
         let fb_addr = device.get_framebuffer_address().unwrap();
         assert_ne!(fb_addr, 0);
-        
+
         // Write some test pattern to framebuffer
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
             let pixel_count = (config.width * config.height) as usize;
-            
+
             // Fill with a gradient pattern
             for y in 0..config.height {
                 for x in 0..config.width {
                     let pixel_index = (y * config.width + x) as usize;
                     if pixel_index < pixel_count {
                         // Create a simple gradient: red increasing with x, blue with y
-                        let red = if config.width > 1 { (x * 255) / (config.width - 1) } else { 0 };
-                        let blue = if config.height > 1 { (y * 255) / (config.height - 1) } else { 0 };
+                        let red = if config.width > 1 {
+                            (x * 255) / (config.width - 1)
+                        } else {
+                            0
+                        };
+                        let blue = if config.height > 1 {
+                            (y * 255) / (config.height - 1)
+                        } else {
+                            0
+                        };
                         let green = 0x80; // Fixed green component
                         let alpha = 0xFF; // Fully opaque
-                        
+
                         // BGRA format: Blue | Green | Red | Alpha
                         let pixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
                         *fb_ptr.add(pixel_index) = pixel;
@@ -814,28 +886,31 @@ mod tests {
                 }
             }
         }
-        
+
         // Flush the entire framebuffer
-        device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
-        
+        device
+            .flush_framebuffer(0, 0, config.width, config.height)
+            .unwrap();
+
         // Verify some pixels were written correctly
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
-            
+
             // Check top-left corner (should be mostly blue)
             let top_left = *fb_ptr;
             assert_eq!((top_left >> 24) & 0xFF, 0xFF); // Alpha
             assert_eq!((top_left >> 16) & 0xFF, 0x00); // Red (should be 0 at x=0)
-            assert_eq!((top_left >> 8) & 0xFF, 0x80);  // Green
-            assert_eq!(top_left & 0xFF, 0x00);         // Blue (should be 0 at y=0)
-            
+            assert_eq!((top_left >> 8) & 0xFF, 0x80); // Green
+            assert_eq!(top_left & 0xFF, 0x00); // Blue (should be 0 at y=0)
+
             // Check bottom-right corner
-            let bottom_right_index = ((config.height - 1) * config.width + (config.width - 1)) as usize;
+            let bottom_right_index =
+                ((config.height - 1) * config.width + (config.width - 1)) as usize;
             let bottom_right = *fb_ptr.add(bottom_right_index);
             assert_eq!((bottom_right >> 24) & 0xFF, 0xFF); // Alpha
             assert_eq!((bottom_right >> 16) & 0xFF, 0xFF); // Red (should be max at x=width-1)
-            assert_eq!((bottom_right >> 8) & 0xFF, 0x80);  // Green
-            assert_eq!(bottom_right & 0xFF, 0xFF);         // Blue (should be max at y=height-1)
+            assert_eq!((bottom_right >> 8) & 0xFF, 0x80); // Green
+            assert_eq!(bottom_right & 0xFF, 0xFF); // Blue (should be max at y=height-1)
         }
     }
 
@@ -843,10 +918,10 @@ mod tests {
     fn test_virtio_gpu_pixel_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
         device.init_graphics().unwrap();
-        
+
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
-        
+
         // Helper function to set a pixel
         let set_pixel = |x: u32, y: u32, color: u32| {
             if x < config.width && y < config.height {
@@ -857,41 +932,43 @@ mod tests {
                 }
             }
         };
-        
+
         // Draw a simple test pattern
         // Red horizontal line at y=100
         for x in 0..config.width {
             set_pixel(x, 100, 0xFF0000FF); // Red in BGRA format
         }
-        
+
         // Green vertical line at x=200
         for y in 0..config.height {
             set_pixel(200, y, 0xFF00FF00); // Green in BGRA format
         }
-        
+
         // Blue diagonal line
         let min_dim = config.width.min(config.height);
         for i in 0..min_dim {
             set_pixel(i, i, 0xFFFF0000); // Blue in BGRA format
         }
-        
+
         // Flush the changes
-        device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
-        
+        device
+            .flush_framebuffer(0, 0, config.width, config.height)
+            .unwrap();
+
         // Verify some of the drawn pixels
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
-            
+
             // Check red line
             let red_pixel_index = (100 * config.width + 50) as usize;
             let red_pixel = *fb_ptr.add(red_pixel_index);
             assert_eq!(red_pixel, 0xFF0000FF);
-            
+
             // Check green line
             let green_pixel_index = (50 * config.width + 200) as usize;
             let green_pixel = *fb_ptr.add(green_pixel_index);
             assert_eq!(green_pixel, 0xFF00FF00);
-            
+
             // Check blue diagonal
             let blue_pixel_index = (100 * config.width + 100) as usize;
             let blue_pixel = *fb_ptr.add(blue_pixel_index);
@@ -903,10 +980,10 @@ mod tests {
     fn test_virtio_gpu_rectangle_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
         device.init_graphics().unwrap();
-        
+
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
-        
+
         // Helper function to draw a filled rectangle
         let draw_rectangle = |x: u32, y: u32, width: u32, height: u32, color: u32| {
             for dy in 0..height {
@@ -923,7 +1000,7 @@ mod tests {
                 }
             }
         };
-        
+
         // Clear framebuffer with black
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
@@ -932,34 +1009,36 @@ mod tests {
                 *fb_ptr.add(i) = 0xFF000000; // Black with full alpha
             }
         }
-        
+
         // Draw some rectangles
-        draw_rectangle(50, 50, 100, 75, 0xFF0000FF);   // Red rectangle
+        draw_rectangle(50, 50, 100, 75, 0xFF0000FF); // Red rectangle
         draw_rectangle(200, 100, 150, 100, 0xFF00FF00); // Green rectangle
-        draw_rectangle(400, 200, 80, 120, 0xFFFF0000);  // Blue rectangle
-        
+        draw_rectangle(400, 200, 80, 120, 0xFFFF0000); // Blue rectangle
+
         // Flush changes
-        device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
-        
+        device
+            .flush_framebuffer(0, 0, config.width, config.height)
+            .unwrap();
+
         // Verify the rectangles were drawn correctly
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
-            
+
             // Check red rectangle center
             let red_center_index = ((50 + 37) * config.width + (50 + 50)) as usize;
             let red_pixel = *fb_ptr.add(red_center_index);
             assert_eq!(red_pixel, 0xFF0000FF);
-            
+
             // Check green rectangle center
             let green_center_index = ((100 + 50) * config.width + (200 + 75)) as usize;
             let green_pixel = *fb_ptr.add(green_center_index);
             assert_eq!(green_pixel, 0xFF00FF00);
-            
+
             // Check blue rectangle center
             let blue_center_index = ((200 + 60) * config.width + (400 + 40)) as usize;
             let blue_pixel = *fb_ptr.add(blue_center_index);
             assert_eq!(blue_pixel, 0xFFFF0000);
-            
+
             // Check that area outside rectangles is still black
             let background_index = (10 * config.width + 10) as usize;
             let background_pixel = *fb_ptr.add(background_index);
@@ -971,10 +1050,10 @@ mod tests {
     fn test_virtio_gpu_border_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
         device.init_graphics().unwrap();
-        
+
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
-        
+
         // Helper function to draw a rectangle border
         let draw_border = |x: u32, y: u32, width: u32, height: u32, color: u32| {
             // Top and bottom edges
@@ -1000,7 +1079,7 @@ mod tests {
                     }
                 }
             }
-            
+
             // Left and right edges
             for dy in 0..height {
                 let py = y + dy;
@@ -1025,7 +1104,7 @@ mod tests {
                 }
             }
         };
-        
+
         // Clear framebuffer
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
@@ -1034,33 +1113,35 @@ mod tests {
                 *fb_ptr.add(i) = 0xFF000000; // Black
             }
         }
-        
+
         // Draw nested borders
-        draw_border(10, 10, 200, 150, 0xFF0000FF);    // Red outer border
-        draw_border(20, 20, 180, 130, 0xFF00FF00);    // Green middle border
-        draw_border(30, 30, 160, 110, 0xFFFF0000);    // Blue inner border
-        
-        device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
-        
+        draw_border(10, 10, 200, 150, 0xFF0000FF); // Red outer border
+        draw_border(20, 20, 180, 130, 0xFF00FF00); // Green middle border
+        draw_border(30, 30, 160, 110, 0xFFFF0000); // Blue inner border
+
+        device
+            .flush_framebuffer(0, 0, config.width, config.height)
+            .unwrap();
+
         // Verify borders
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
-            
+
             // Check red border corners
             let top_left_red = *fb_ptr.add((10 * config.width + 10) as usize);
             assert_eq!(top_left_red, 0xFF0000FF);
-            
+
             let top_right_red = *fb_ptr.add((10 * config.width + 209) as usize);
             assert_eq!(top_right_red, 0xFF0000FF);
-            
+
             // Check green border
             let green_border = *fb_ptr.add((20 * config.width + 20) as usize);
             assert_eq!(green_border, 0xFF00FF00);
-            
-            // Check blue border  
+
+            // Check blue border
             let blue_border = *fb_ptr.add((30 * config.width + 30) as usize);
             assert_eq!(blue_border, 0xFFFF0000);
-            
+
             // Check inside area is still black
             let inside = *fb_ptr.add((50 * config.width + 50) as usize);
             assert_eq!(inside, 0xFF000000);
@@ -1071,24 +1152,24 @@ mod tests {
     fn test_virtio_gpu_pixel_format_verification() {
         let mut device = VirtioGpuDevice::new(0x10002000);
         device.init_graphics().unwrap();
-        
+
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
-        
+
         // Test various pixel format interpretations
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
-            
+
             // Test pure colors in BGRA format
             let test_colors = [
-                (0xFF0000FF, "red"),     // Red in BGRA: A=FF, R=00, G=00, B=FF
-                (0xFF00FF00, "green"),   // Green in BGRA: A=FF, R=00, G=FF, B=00  
-                (0xFFFF0000, "blue"),    // Blue in BGRA: A=FF, R=FF, G=00, B=00
-                (0xFFFFFFFF, "white"),   // White in BGRA: A=FF, R=FF, G=FF, B=FF
-                (0xFF000000, "black"),   // Black in BGRA: A=FF, R=00, G=00, B=00
-                (0xFF808080, "gray"),    // Gray in BGRA: A=FF, R=80, G=80, B=80
+                (0xFF0000FF, "red"),   // Red in BGRA: A=FF, R=00, G=00, B=FF
+                (0xFF00FF00, "green"), // Green in BGRA: A=FF, R=00, G=FF, B=00
+                (0xFFFF0000, "blue"),  // Blue in BGRA: A=FF, R=FF, G=00, B=00
+                (0xFFFFFFFF, "white"), // White in BGRA: A=FF, R=FF, G=FF, B=FF
+                (0xFF000000, "black"), // Black in BGRA: A=FF, R=00, G=00, B=00
+                (0xFF808080, "gray"),  // Gray in BGRA: A=FF, R=80, G=80, B=80
             ];
-            
+
             // Write test pattern
             for (i, (color, _name)) in test_colors.iter().enumerate() {
                 let x = (i as u32 * 100) % config.width;
@@ -1098,9 +1179,11 @@ mod tests {
                     *fb_ptr.add(pixel_index) = *color;
                 }
             }
-            
-            device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
-            
+
+            device
+                .flush_framebuffer(0, 0, config.width, config.height)
+                .unwrap();
+
             // Verify the colors were written correctly
             for (i, (expected_color, _name)) in test_colors.iter().enumerate() {
                 let x = (i as u32 * 100) % config.width;
@@ -1112,16 +1195,16 @@ mod tests {
                 }
             }
         }
-        
+
         // Test partial transparency (though VirtIO GPU might not support it fully)
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
             let semi_transparent_red = 0x800000FF; // 50% transparent red
             let pixel_index = (100 * config.width + 100) as usize;
             *fb_ptr.add(pixel_index) = semi_transparent_red;
-            
+
             device.flush_framebuffer(100, 100, 1, 1).unwrap();
-            
+
             let written_pixel = *fb_ptr.add(pixel_index);
             assert_eq!(written_pixel, semi_transparent_red);
         }
@@ -1130,21 +1213,25 @@ mod tests {
     #[test_case]
     fn test_virtio_gpu_command_flow_verification() {
         let mut device = VirtioGpuDevice::new(0x10002000);
-        
+
         // Test device initialization and command flow
         crate::early_println!("[Test] Starting VirtIO GPU command flow verification");
         device.init_graphics().unwrap();
-        
+
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
-        
-        crate::early_println!("[Test] Framebuffer initialized at {:#x}, config: {}x{}", 
-            fb_addr, config.width, config.height);
-        
+
+        crate::early_println!(
+            "[Test] Framebuffer initialized at {:#x}, config: {}x{}",
+            fb_addr,
+            config.width,
+            config.height
+        );
+
         // Write a test pattern and verify the flush process
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
-            
+
             // Write a simple checkerboard pattern
             for y in 0..config.height.min(100) {
                 for x in 0..config.width.min(100) {
@@ -1158,14 +1245,16 @@ mod tests {
                 }
             }
         }
-        
+
         crate::early_println!("[Test] Written checkerboard pattern to framebuffer");
-        
+
         // Test flushing different regions
         device.flush_framebuffer(0, 0, 50, 50).unwrap();
         device.flush_framebuffer(50, 50, 50, 50).unwrap();
-        device.flush_framebuffer(0, 0, config.width, config.height).unwrap();
-        
+        device
+            .flush_framebuffer(0, 0, config.width, config.height)
+            .unwrap();
+
         crate::early_println!("[Test] VirtIO GPU command flow verification completed");
     }
 
@@ -1173,17 +1262,17 @@ mod tests {
     fn test_virtio_gpu_resource_management() {
         let mut device = VirtioGpuDevice::new(0x10002000);
         device.init_graphics().unwrap();
-        
+
         // Test that resource IDs are managed correctly
         let config = device.get_framebuffer_config().unwrap();
         let fb_addr = device.get_framebuffer_address().unwrap();
-        
+
         crate::early_println!("[Test] Testing VirtIO GPU resource management");
         crate::early_println!("[Test] Primary framebuffer resource should be ID 1");
-        
+
         // The framebuffer should be associated with resource ID 1
         // (as set up in setup_framebuffer)
-        
+
         // Write some data and flush to verify resource association
         unsafe {
             let fb_ptr = fb_addr as *mut u32;
@@ -1193,11 +1282,12 @@ mod tests {
                 *fb_ptr.add(pixel_index) = 0xFFFFFF00; // Yellow diagonal
             }
         }
-        
+
         // Flush the diagonal region
-        device.flush_framebuffer(0, 0, 
-            config.width.min(500), config.height.min(500)).unwrap();
-        
+        device
+            .flush_framebuffer(0, 0, config.width.min(500), config.height.min(500))
+            .unwrap();
+
         crate::early_println!("[Test] Resource management test completed");
     }
 }

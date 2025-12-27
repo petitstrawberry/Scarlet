@@ -5,14 +5,14 @@
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec::Vec;
     use crate::{
-        fs::{FileType, DeviceFileInfo, FileObject},
-        device::{DeviceType, char::CharDevice, Device},
-        object::capability::{ControlOps, MemoryMappingOps},
+        device::{Device, DeviceType, char::CharDevice},
+        fs::{DeviceFileInfo, FileObject, FileType},
+        object::capability::{ControlOps, MemoryMappingOps, Selectable},
     };
-    use spin::Mutex;
+    use alloc::vec::Vec;
     use core::any::Any;
+    use spin::Mutex;
 
     /// Mock character device for testing
     struct MockCharDevice {
@@ -53,6 +53,8 @@ mod tests {
         }
     }
 
+    impl Selectable for MockCharDevice {} // Use default Selectable implementation
+
     impl CharDevice for MockCharDevice {
         fn read_byte(&self) -> Option<u8> {
             let data = self.data.lock();
@@ -87,7 +89,7 @@ mod tests {
             let mut pos = self.position.lock();
             let available = data.len().saturating_sub(*pos);
             let to_read = core::cmp::min(buffer.len(), available);
-            
+
             if to_read > 0 {
                 buffer[..to_read].copy_from_slice(&data[*pos..*pos + to_read]);
                 *pos += to_read;
@@ -109,7 +111,11 @@ mod tests {
     }
 
     impl MemoryMappingOps for MockCharDevice {
-        fn get_mapping_info(&self, _offset: usize, _length: usize) -> Result<(usize, usize, bool), &'static str> {
+        fn get_mapping_info(
+            &self,
+            _offset: usize,
+            _length: usize,
+        ) -> Result<(usize, usize, bool), &'static str> {
             Err("Memory mapping not supported")
         }
     }
@@ -120,7 +126,7 @@ mod tests {
 
         // Actual tests can only be executed in an environment where
         // the device manager and ext2 filesystem are initialized.
-        // This test functions as a compilation test to ensure syntax 
+        // This test functions as a compilation test to ensure syntax
         // and trait implementations are correct.
 
         crate::early_println!("[test] ext2 character device test completed successfully");
@@ -137,22 +143,25 @@ mod tests {
         };
 
         // Test creation of Ext2CharDeviceFileObject
-        let char_device_obj = crate::fs::vfs_v2::drivers::ext2::Ext2CharDeviceFileObject::new(device_info, 1);
-        
+        let char_device_obj =
+            crate::fs::vfs_v2::drivers::ext2::Ext2CharDeviceFileObject::new(device_info, 1);
+
         // Test metadata retrieval
         let metadata = char_device_obj.metadata();
         assert!(metadata.is_ok());
-        
+
         let metadata = metadata.unwrap();
         match metadata.file_type {
             FileType::CharDevice(info) => {
                 assert_eq!(info.device_id, 123);
                 assert_eq!(info.device_type, DeviceType::Char);
-            },
+            }
             _ => panic!("Expected CharDevice file type"),
         }
 
-        crate::early_println!("[test] ext2 character device file object test completed successfully");
+        crate::early_println!(
+            "[test] ext2 character device file object test completed successfully"
+        );
     }
 
     #[test_case]
@@ -161,10 +170,10 @@ mod tests {
 
         // Test conversion from ext2 inode to character device FileType
         let mut inode = crate::fs::vfs_v2::drivers::ext2::structures::Ext2Inode::empty();
-        
+
         // Set character device mode
         inode.mode = (crate::fs::vfs_v2::drivers::ext2::structures::EXT2_S_IFCHR | 0o666).to_le();
-        
+
         // Set device information (major=1, minor=0 for tty)
         inode.block[0] = ((1u32 << 8) | 0u32).to_le();
 

@@ -3,7 +3,7 @@
 //! This module provides memory mapping functionality for handles that support
 //! memory mapping operations.
 
-use crate::syscall::{syscall6, syscall2, Syscall};
+use crate::syscall::{Syscall, syscall2, syscall6};
 
 /// Memory mapping protection flags (PROT_*)
 pub mod prot {
@@ -46,12 +46,27 @@ pub mod flags {
 /// # Examples
 /// ```no_run
 /// use scarlet_std::handle::capability::memory_mapping::{mmap, prot, flags};
-/// 
+///
 /// // Map a file handle with read/write permissions
 /// let addr = mmap(file_handle, 0, 4096, prot::READ | prot::WRITE, flags::PRIVATE, 0)?;
 /// ```
-pub fn mmap(handle: u32, addr: usize, length: usize, prot: usize, flags: usize, offset: usize) -> Result<usize, ()> {
-    let result = syscall6(Syscall::MemoryMap, handle as usize, addr, length, prot, flags, offset);
+pub fn mmap(
+    handle: u32,
+    addr: usize,
+    length: usize,
+    prot: usize,
+    flags: usize,
+    offset: usize,
+) -> Result<usize, ()> {
+    let result = syscall6(
+        Syscall::MemoryMap,
+        handle as usize,
+        addr,
+        length,
+        prot,
+        flags,
+        offset,
+    );
     if result == usize::MAX {
         Err(())
     } else {
@@ -72,7 +87,7 @@ pub fn mmap(handle: u32, addr: usize, length: usize, prot: usize, flags: usize, 
 /// # Examples
 /// ```no_run
 /// use scarlet_std::handle::capability::memory_mapping::munmap;
-/// 
+///
 /// // Unmap a previously mapped region
 /// munmap(mapped_addr, 4096)?;
 /// ```

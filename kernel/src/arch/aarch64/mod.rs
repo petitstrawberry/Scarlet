@@ -257,6 +257,64 @@ pub fn set_next_mode(mode: vcpu::Mode) {
     }
 }
 
+/// Memory barrier for device/MMIO (I/O) operations.
+///
+/// AArch64 uses DSB and DMB instructions for memory ordering.
+/// For device memory (MMIO), we use DSB to ensure all previous memory
+/// accesses are complete before proceeding.
+#[inline(always)]
+pub fn io_mb() {
+    unsafe {
+        // DSB SY - Data Synchronization Barrier, full system
+        asm!("dsb sy", options(nostack));
+    }
+}
+
+/// Read barrier for device/MMIO (I/O) operations.
+#[inline(always)]
+pub fn io_rmb() {
+    unsafe {
+        // DSB LD - Data Synchronization Barrier for loads
+        asm!("dsb ld", options(nostack));
+    }
+}
+
+/// Write barrier for device/MMIO (I/O) operations.
+#[inline(always)]
+pub fn io_wmb() {
+    unsafe {
+        // DSB ST - Data Synchronization Barrier for stores
+        asm!("dsb st", options(nostack));
+    }
+}
+
+/// General memory barrier for normal memory operations.
+#[inline(always)]
+pub fn mb() {
+    unsafe {
+        // DMB SY - Data Memory Barrier, full system
+        asm!("dmb sy", options(nostack));
+    }
+}
+
+/// Read memory barrier for normal memory operations.
+#[inline(always)]
+pub fn rmb() {
+    unsafe {
+        // DMB LD - Data Memory Barrier for loads
+        asm!("dmb ld", options(nostack));
+    }
+}
+
+/// Write memory barrier for normal memory operations.
+#[inline(always)]
+pub fn wmb() {
+    unsafe {
+        // DMB ST - Data Memory Barrier for stores
+        asm!("dmb st", options(nostack));
+    }
+}
+
 pub fn shutdown() -> ! {
     // TODO: Implement PSCI shutdown for AArch64
     early_println!("[aarch64] Shutdown requested - entering infinite loop");

@@ -28,10 +28,10 @@
 //! All drivers in this module automatically register themselves using
 //! the `driver_initcall!` macro during kernel initialization.
 
-pub mod overlayfs;
 pub mod cpiofs;
-pub mod tmpfs;
-pub mod initramfs;
 pub mod devfs;
-pub mod fat32;
 pub mod ext2;
+pub mod fat32;
+pub mod initramfs;
+pub mod overlayfs;
+pub mod tmpfs;

@@ -16,10 +16,10 @@
 //! - Type safety prevents calling unsupported operations
 //! - Direct syscall mapping for zero-cost abstractions
 
-pub mod stream;
 pub mod file;
 pub mod memory_mapping;
+pub mod stream;
 
 // Re-export capability types for convenience
-pub use stream::{StreamOps, StreamError, StreamResult};
-pub use file::{FileObject, FileError, FileResult, SeekFrom, FileMetadata};
+pub use file::{FileError, FileMetadata, FileObject, FileResult, SeekFrom};
+pub use stream::{StreamError, StreamOps, StreamResult};

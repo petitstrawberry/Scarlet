@@ -2,7 +2,9 @@
 # Scarlet Shell Initialization Script
 
 # Set environment variables
-export PATH=/bin
+export PATH=/scarlet/system/scarlet/bin
+
+export LD_LIBRARY_PATH=/scarlet/system/linux-riscv64/usr/lib:/scarlet/system/linux-riscv64/lib
 
 echo "Welcome to Scarlet Shell!"
 echo "PATH is set to: $PATH"

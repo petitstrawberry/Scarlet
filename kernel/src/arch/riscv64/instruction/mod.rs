@@ -14,9 +14,18 @@ pub fn idle() -> ! {
 /// using clobber_abi to handle register preservation automatically
 #[inline(never)]
 #[unsafe(no_mangle)]
-pub fn ecall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize) -> usize {
+pub fn ecall(
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+) -> usize {
     let ret: usize;
-    
+
     unsafe {
         asm!(
             "ecall",
@@ -39,7 +48,7 @@ pub fn ecall(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a
 /// Represents a RISC-V instruction.
 /// This struct is used to encapsulate the raw instruction data
 /// and provides methods to create an instruction from raw bytes or a usize value.
-/// 
+///
 pub struct Instruction {
     pub raw: u32,
 }

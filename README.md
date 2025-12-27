@@ -21,8 +21,8 @@ Scarlet is an operating system kernel written in Rust that implements native ABI
 
 ```bash
 # Get started with Docker (recommended)
-docker build -t scarlet-build .
-docker run -it --rm scarlet-build bash -c "cargo make build && cargo make run"
+docker build -t scarlet-dev .
+docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev bash -c "cargo make build && cargo make run"
 
 # Once Scarlet boots, you'll see:
 Login successful for user: root
@@ -34,7 +34,6 @@ Scarlet Shell (Interactive Mode)
 Hello, world!
 PID  = 5
 PPID = 3
-
 # Enter xv6 environment (experimental ABI):
 # xv6
 xv6 container
@@ -53,30 +52,45 @@ PID  = 10
 PPID = 9
 ```
 
-### Multi-ABI Vision (Extended Goals)
+### Run Linux Userspace Demo (Partial Linux ABI)
+
+See [Linux ABI Demo instructions](docs/abi/linux/demo.md) for detailed instructions on building and running the Linux userspace demo.
 
 ```bash
-# Current: Cross-ABI execution already works!
-(xv6)$ /scarlet/system/scarlet/bin/hello | cat    # ✅ Working now
-
-# Future goal: Full Linux ABI integration
-(scarlet)$ scarlet_cat /etc/passwd | linux_grep "root" | xv6_wc -l
-1
-
-# Complete vision: All ABIs in one seamless environment:
-# - scarlet_cat: Scarlet Native binary using Scarlet syscalls
-# - linux_grep: Linux binary with native Linux ABI implementation
-# - xv6_wc: xv6 binary through native xv6 ABI implementation
-# All communicating seamlessly via unified pipe system!
+# Quick summary (inside scarlet-dev container):
+bash tools/linux/build_buildroot.sh
+bash tools/linux/build_user_programs.sh
+bash tools/linux/deploy_rootfs.sh
+cargo make run
 ```
 
-This demonstrates **real Cross-ABI execution** - the xv6 environment can execute Scarlet native binaries and pipe their output through xv6 utilities! This proves that true multi-ABI functionality is already working.
+These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6.
+
+### Cross-ABI Execution Showcase
+
+Scarlet allows binaries from different operating systems to coexist and communicate via standard Unix pipes. This is not virtualization—it is a unified kernel handling multiple ABIs natively.
+
+```bash
+# ✅ Working Now: xv6 shell executing a Scarlet native binary
+# The output from 'hello' (Scarlet ABI) is piped to 'cat' (xv6 ABI)
+(xv6)$ /scarlet/system/scarlet/bin/hello | cat
+Hello, world!
+PID  = 10
+PPID = 9
+
+# 🚧 In Progress: Linux ABI Integration
+# We are expanding this capability to include Linux binaries (via BusyBox):
+(scarlet)$ scarlet_cat /etc/passwd | /system/linux-riscv64/bin/busybox grep "root" | xv6_wc -l
+```
+
+This interoperability is possible because all ABIs share the same underlying kernel objects (VFS, pipes, task structures). The goal is a seamless environment where you can use the best tool for the job, regardless of which OS it was originally written for.
 
 > **Current Status**: 
 > - ✅ **Scarlet Native ABI**: Fully implemented with interactive shell
 > - 🧪 **xv6 RISC-V 64-bit ABI**: Working with Cross-ABI execution capabilities!
+> - 🧩 **Linux RISC-V 64-bit ABI (partial)**: Buildroot-based userland demo available; syscall coverage expanding
 > - ✅ **Cross-ABI Pipes**: Already functional between xv6 and Scarlet environments
-> - 🚧 **Linux ABI**: Under development (planned for future releases)
+
 
 ## Key Features
 
@@ -105,23 +119,28 @@ Scarlet's Multi-ABI support is built around a modular ABI implementation system:
 
 - **Scarlet Native**: ✅ Complete - Direct kernel interface with optimal performance
 - **xv6 RISC-V 64-bit**: 🧪 Experimental - Largely implemented with core functionality available
-  - ✅ File operations (open, close, read, write, etc.)
-  - ✅ Process management (fork, exec, wait, exit)
-  - ✅ Memory management (sbrk)
-  - ✅ Inter-process communication (pipes)
-  - ✅ Device operations (mknod, console integration)
-- **Linux Compatibility**: 🚧 In Development - Full POSIX syscall implementation planned
+- **Linux RISC-V 64-bit (partial)**: 🧩 Early userland demo via Buildroot rootfs; syscall surface expanding toward full POSIX support
 
 This architecture enables true containerization where applications from different operating systems can coexist and communicate without modification.
 
-### Experimental Features
+### ABI Implementation Details
 
-The xv6 RISC-V 64-bit ABI implementation is currently available as an experimental feature:
+#### xv6 RISC-V 64-bit (Experimental)
+
+The xv6 ABI implementation is currently available as an experimental feature:
 
 - **Testing Ready**: Core functionality is stable and ready for testing
 - **Binary Compatibility**: Included xv6 binaries (`cat`, `grep`, `wc`, `sh`, etc.) work correctly
 - **Cross-ABI Communication**: Pipes and IPC work seamlessly with other ABI implementations
 - **Production Note**: While functional, this is an experimental implementation subject to changes
+
+#### Linux ABI (Partial)
+
+The Linux ABI implementation is currently in active development:
+
+- **Userspace Support**: Runs simple static binaries and Buildroot/BusyBox environments.
+- **Syscall Coverage**: Basic file I/O, process management, and memory operations are implemented.
+- **Limitations**: Many advanced syscalls (networking, complex signals) are stubbed or missing. See [`docs/abi/linux/status.md`](docs/abi/linux/status.md) for the compatibility matrix.
 
 ## Architecture Support
 
@@ -199,7 +218,11 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Documentation
 
 For more detailed information about the Scarlet kernel, visit our documentation:
-[Scarlet Documentation](https://docs.scarlet.ichigo.dev/kernel)
+- [Scarlet Documentation](https://docs.scarlet.ichigo.dev/kernel)
+- [Linux ABI Demo](docs/abi/linux/demo.md)
+- [Linux userspace artifacts (Buildroot + optional binaries)](docs/abi/linux/userspace-artifacts.md)
+- [Linux rootfs deployment guide](docs/abi/linux/deployment.md)
+- [Linux ABI support status and roadmap](docs/abi/linux/status.md)
 
 ### Generating Documentation
 

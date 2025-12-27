@@ -3,9 +3,19 @@
 //! The PLIC is responsible for managing external interrupts from devices and
 //! routing them to different CPUs with priority support.
 
-use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}}, driver_initcall, early_initcall, interrupt::{
-    controllers::{ExternalInterruptController, LocalInterruptType}, CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority
-}};
+use crate::{
+    device::{
+        manager::{DeviceManager, DriverPriority},
+        platform::{
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+        },
+    },
+    driver_initcall, early_initcall,
+    interrupt::{
+        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        controllers::{ExternalInterruptController, LocalInterruptType},
+    },
+};
 use alloc::{boxed::Box, vec};
 use core::ptr::{read_volatile, write_volatile};
 
@@ -39,9 +49,9 @@ pub struct Plic {
 
 impl Plic {
     /// Create a new PLIC instance
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `base_addr` - Physical base address of the PLIC
     /// * `max_interrupts` - Maximum interrupt ID supported (1-based)
     /// * `max_cpus` - Maximum number of CPUs supported
@@ -119,9 +129,12 @@ impl ExternalInterruptController for Plic {
             // Disable all interrupts for this CPU's context
             for word in 0..=(self.max_interrupts / 32) {
                 let interrupt_id_base = word * 32;
-                if interrupt_id_base > 0 { // Interrupt ID 0 is not used
+                if interrupt_id_base > 0 {
+                    // Interrupt ID 0 is not used
                     let addr = self.enable_addr(cpu_id, interrupt_id_base);
-                    unsafe { write_volatile(addr as *mut u32, 0); }
+                    unsafe {
+                        write_volatile(addr as *mut u32, 0);
+                    }
                 }
             }
             // Set threshold to 0 (allow all priorities)
@@ -137,13 +150,17 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Enable a specific interrupt for a CPU
-    fn enable_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
+    fn enable_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
         let addr = self.enable_addr(cpu_id, interrupt_id);
         let bit_offset = interrupt_id % 32;
-        
+
         unsafe {
             let current = read_volatile(addr as *const u32);
             let new_value = current | (1 << bit_offset);
@@ -154,13 +171,17 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Disable a specific interrupt for a CPU
-    fn disable_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
+    fn disable_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
         let addr = self.enable_addr(cpu_id, interrupt_id);
         let bit_offset = interrupt_id % 32;
-        
+
         unsafe {
             let current = read_volatile(addr as *const u32);
             let new_value = current & !(1 << bit_offset);
@@ -171,9 +192,13 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Set priority for a specific interrupt
-    fn set_priority(&mut self, interrupt_id: InterruptId, priority: Priority) -> InterruptResult<()> {
+    fn set_priority(
+        &mut self,
+        interrupt_id: InterruptId,
+        priority: Priority,
+    ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
-        
+
         if priority > 7 {
             return Err(InterruptError::InvalidPriority);
         }
@@ -192,14 +217,14 @@ impl ExternalInterruptController for Plic {
 
         let addr = self.priority_addr(interrupt_id);
         let priority = unsafe { read_volatile(addr as *const u32) };
-        
+
         Ok(priority)
     }
 
     /// Set priority threshold for a CPU
     fn set_threshold(&mut self, cpu_id: CpuId, threshold: Priority) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
-        
+
         if threshold > 7 {
             return Err(InterruptError::InvalidPriority);
         }
@@ -218,7 +243,7 @@ impl ExternalInterruptController for Plic {
 
         let addr = self.threshold_addr(cpu_id);
         let threshold = unsafe { read_volatile(addr as *const u32) };
-        
+
         Ok(threshold)
     }
 
@@ -228,7 +253,7 @@ impl ExternalInterruptController for Plic {
 
         let addr = self.claim_addr(cpu_id);
         let interrupt_id = unsafe { read_volatile(addr as *const u32) };
-        
+
         if interrupt_id == 0 {
             Ok(None)
         } else {
@@ -237,7 +262,11 @@ impl ExternalInterruptController for Plic {
     }
 
     /// Complete an interrupt (signal that handling is finished)
-    fn complete_interrupt(&mut self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
+    fn complete_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_id: InterruptId,
+    ) -> InterruptResult<()> {
         self.validate_cpu_id(cpu_id)?;
         self.validate_interrupt_id(interrupt_id)?;
 
@@ -257,7 +286,7 @@ impl ExternalInterruptController for Plic {
 
         let addr = self.pending_addr(interrupt_id);
         let bit_offset = interrupt_id % 32;
-        
+
         unsafe {
             let pending_word = read_volatile(addr as *const u32);
             (pending_word & (1 << bit_offset)) != 0
@@ -285,18 +314,25 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     // Get memory region resource (res_type == PlatformDeviceResourceType::MEM)
-    let mem_res = res.iter()
+    let mem_res = res
+        .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::MEM)
         .ok_or("Memory resource not found")?;
-    
+
     let base_addr = mem_res.start as usize;
 
     let controller = Box::new(Plic::new(base_addr, 1023, 4)); // Example values for max interrupts and CPUs
 
-    match InterruptManager::global().lock().register_external_controller(controller) {
+    match InterruptManager::global()
+        .lock()
+        .register_external_controller(controller)
+    {
         Ok(_) => {
-            crate::early_println!("[interrupt] PLIC registered at base address: {:#x}", base_addr);
-        },
+            crate::early_println!(
+                "[interrupt] PLIC registered at base address: {:#x}",
+                base_addr
+            );
+        }
         Err(e) => {
             crate::early_println!("[interrupt] Failed to register PLIC: {}", e);
             return Err("Failed to register PLIC");
@@ -338,23 +374,23 @@ mod tests {
     #[test_case]
     fn test_address_calculation() {
         let plic = Plic::new(0x1000_0000, 100, 8);
-        
+
         // Test priority address
         assert_eq!(plic.priority_addr(1), 0x1000_0004);
         assert_eq!(plic.priority_addr(10), 0x1000_0028);
-        
+
         // Test enable address for S-Mode
         // CPU 0 -> Context 1
         assert_eq!(plic.enable_addr(0, 10), 0x1000_2080);
         // CPU 1 -> Context 3
         assert_eq!(plic.enable_addr(1, 40), 0x1000_2184);
-        
+
         // Test threshold address for S-Mode
         // CPU 0 -> Context 1
         assert_eq!(plic.threshold_addr(0), 0x1020_1000);
         // CPU 1 -> Context 3
         assert_eq!(plic.threshold_addr(1), 0x1020_3000);
-        
+
         // Test claim address for S-Mode
         // CPU 0 -> Context 1
         assert_eq!(plic.claim_addr(0), 0x1020_1004);
@@ -365,13 +401,13 @@ mod tests {
     #[test_case]
     fn test_validation() {
         let plic = Plic::new(0x1000_0000, 100, 8);
-        
+
         // Valid IDs should pass
         assert!(plic.validate_interrupt_id(1).is_ok());
         assert!(plic.validate_interrupt_id(100).is_ok());
         assert!(plic.validate_cpu_id(0).is_ok());
         assert!(plic.validate_cpu_id(7).is_ok());
-        
+
         // Invalid IDs should fail
         assert!(plic.validate_interrupt_id(0).is_err());
         assert!(plic.validate_interrupt_id(101).is_err());

@@ -19,13 +19,13 @@ macro_rules! syscall_table {
         }
 
         /// Syscall handler
-        /// 
+        ///
         /// # Arguments
         /// * `trapframe` - The trapframe
-        /// 
+        ///
         /// # Returns
         /// The result of the syscall handler
-        /// 
+        ///
         /// # Errors
         /// Returns an error if the syscall number is invalid
         pub fn syscall_handler(trapframe: &mut Trapframe) -> Result<usize, &'static str> {

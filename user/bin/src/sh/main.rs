@@ -3,20 +3,34 @@
 
 extern crate scarlet_std as std;
 
-use std::{format, print, println, string::String, vec::Vec, task::{execve, exit, fork, waitpid}};
+use std::fs::OpenOptions;
+use std::handle::Handle;
 use std::io::Read;
+use std::{
+    format, mem, print, println,
+    string::String,
+    task::{execve, exit, fork, pipe, waitpid},
+    vec::Vec,
+};
+
+// New modules for enhanced shell
+mod history;
+mod line_editor;
+mod parser;
+
+use parser::{Command, Pipeline, RedirectType};
 
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
     // First expand environment variables
     let expanded_input = expand_variables(input);
-    
+
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = expanded_input.chars();
-    
-    while let Some(c) = chars.next() {
+    let chars = expanded_input.chars();
+
+    for c in chars {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
@@ -34,18 +48,18 @@ fn parse_command(input: &str) -> (String, Vec<String>) {
             }
         }
     }
-    
+
     if !current.is_empty() {
         parts.push(current);
     }
-    
+
     if parts.is_empty() {
         return (String::new(), Vec::new());
     }
-    
+
     let program = parts[0].clone();
     let args = parts;
-    
+
     (program, args)
 }
 
@@ -55,7 +69,7 @@ fn find_executable_in_path(program: &str) -> Option<String> {
     if program.contains('/') {
         return Some(String::from(program));
     }
-    
+
     // Get PATH environment variable
     match std::env::var("PATH") {
         Some(path_var) => {
@@ -66,11 +80,11 @@ fn find_executable_in_path(program: &str) -> Option<String> {
                 }
 
                 let full_path = if path_dir.ends_with('/') {
-                    format!("{}{}", path_dir, program)
+                    format!("{path_dir}{program}")
                 } else {
-                    format!("{}/{}", path_dir, program)
+                    format!("{path_dir}/{program}")
                 };
-                
+
                 // Check if file exists by trying to open it
                 match std::fs::File::open(&full_path) {
                     Ok(_) => return Some(full_path),
@@ -81,7 +95,7 @@ fn find_executable_in_path(program: &str) -> Option<String> {
         }
         None => {
             // No PATH set, try current directory
-            let current_path = format!("./{}", program);
+            let current_path = format!("./{program}");
             match std::fs::File::open(&current_path) {
                 Ok(_) => Some(current_path),
                 Err(_) => None,
@@ -92,11 +106,84 @@ fn find_executable_in_path(program: &str) -> Option<String> {
 
 /// Execute a command with PATH resolution
 fn execute_command(program: &str, args: &[String]) -> i32 {
+    // First, scan args for redirection tokens and prepare file handles.
+    let mut cleaned_args: Vec<String> = Vec::new();
+    let mut redirs: Vec<(Handle, u32)> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == ">" || a == ">>" {
+            // output redirection
+            if i + 1 >= args.len() {
+                println!("sh: syntax error near unexpected token `newline'");
+                return 2;
+            }
+            let filename = &args[i + 1];
+            // Open the file with appropriate flags
+            let mut opts = OpenOptions::new();
+            opts.write(true).create(true);
+            if a == ">" {
+                opts.truncate(true);
+            } else {
+                opts.append(true);
+            }
+
+            match opts.open(filename.as_str()) {
+                Ok(f) => {
+                    let h = f.into_handle();
+                    // stdout role = 3
+                    redirs.push((h, 3));
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            }
+            i += 2;
+        } else if a == "<" {
+            // input redirection
+            if i + 1 >= args.len() {
+                println!("sh: syntax error near unexpected token `newline'");
+                return 2;
+            }
+            let filename = &args[i + 1];
+            match std::fs::File::open(filename.as_str()) {
+                Ok(f) => {
+                    let h = f.into_handle();
+                    // stdin role = 2
+                    redirs.push((h, 2));
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            }
+            i += 2;
+        } else {
+            cleaned_args.push(a.clone());
+            i += 1;
+        }
+    }
+
+    // If no program specified after cleaning, nothing to do
+    if cleaned_args.is_empty() {
+        return 0;
+    }
+
+    // DEBUG: show what we're about to run and any redirections
+    crate::println!(
+        "sh: execute_command: program='{}' args={:?} redirs_count={}",
+        program,
+        cleaned_args,
+        redirs.len()
+    );
+
     // First check if it's a built-in command
     if let Some(exit_code) = handle_builtin_command(program, args) {
         return exit_code;
     }
-    
+
     let executable_path = match find_executable_in_path(program) {
         Some(path) => path,
         None => {
@@ -104,24 +191,31 @@ fn execute_command(program: &str, args: &[String]) -> i32 {
             return 127; // Standard exit code for "command not found"
         }
     };
-    
+
     match fork() {
         0 => {
             // Convert args to &[&str] for execve
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            
-            if execve(&executable_path, &arg_refs, &[]) != 0 {
+
+            // Get all environment variables and convert them to the format needed for execve
+            let env_vars = std::env::vars();
+            let env_strings: Vec<String> = env_vars
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect();
+            let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
+
+            if execve(&executable_path, &arg_refs, &env_refs) != 0 {
                 println!("sh: {}: execution failed", executable_path);
             }
             exit(126); // Standard exit code for "command not executable"
         }
         -1 => {
             println!("sh: fork failed");
-            return 1;
+            1
         }
         pid => {
             let (_, status) = waitpid(pid, 0);
-            return status;
+            status
         }
     }
 }
@@ -138,7 +232,7 @@ fn execute_script(script_path: &str) -> i32 {
             return execute_command(script_path, &[String::from(script_path)]);
         }
     };
-    
+
     execute_script_content(&script_content)
 }
 
@@ -148,7 +242,7 @@ fn read_file(file_path: &str) -> Result<String, i32> {
         Ok(mut file) => {
             let mut content = String::new();
             let mut buffer = [0u8; 1024];
-            
+
             loop {
                 match file.read(&mut buffer) {
                     Ok(0) => break, // EOF
@@ -163,7 +257,7 @@ fn read_file(file_path: &str) -> Result<String, i32> {
                     Err(_) => return Err(-1),
                 }
             }
-            
+
             Ok(content)
         }
         Err(_) => Err(-1),
@@ -173,82 +267,334 @@ fn read_file(file_path: &str) -> Result<String, i32> {
 /// Execute script content line by line
 fn execute_script_content(content: &str) -> i32 {
     let mut last_exit_code = 0;
-    
+
     for line in content.lines() {
         let trimmed_line = line.trim();
-        
+
         // Skip empty lines and comments
         if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
             continue;
         }
-        
+
         let (program, args) = parse_command(trimmed_line);
-        
+
         if program.is_empty() {
             continue;
         }
-        
+
         last_exit_code = execute_command(&program, &args);
-        
+
         // If a command fails, we could choose to continue or stop
         // For now, we continue executing the rest of the script
     }
-    
+
     last_exit_code
 }
 
-/// Interactive shell mode
-fn interactive_shell() -> i32 {
-    let mut inputs = String::new();
+/// Execute a single command from the new Command struct
+fn execute_single_command(cmd: &Command) -> i32 {
+    let program = &cmd.program;
+    let args = &cmd.args;
 
-    println!("Scarlet Shell (Interactive Mode)");
-    
-    // Try to execute .shrc on startup
-    execute_shrc();
-    
-    println!("Enter 'exit' to quit");
+    // Apply redirects using the existing logic from execute_command
+    let mut stdin_handle: Option<Handle> = None;
+    let mut stdout_handle: Option<Handle> = None;
 
-    loop {
-        inputs.clear();
-        print!("# ");
-        loop {
-            let c = std::io::get_char();            
-            
-            if c as u8 >= 0x20 && c as u8 <= 0x7e {
-                // Handle printable characters
-                inputs.push(c);
-            } else if c == '\n' {
-                break;
-            } else if c == '\x7f' {
-                // Handle backspace
-                if !inputs.is_empty() {
-                    inputs.pop();
+    for (rtype, filename) in &cmd.redirects {
+        match rtype {
+            RedirectType::Output => {
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true).truncate(true);
+                match opts.open(filename.as_str()) {
+                    Ok(f) => {
+                        println!("DEBUG: Opened {} for output redirection", filename);
+                        stdout_handle = Some(f.into_handle());
+                    }
+                    Err(_) => {
+                        println!("sh: {}: Failed to open file", filename);
+                        return 1;
+                    }
                 }
-            } else if c == '\t' {
-                // Handle tab
-                inputs.push(' ');
             }
-        }
-        
-        if inputs.trim().is_empty() {
-            continue;
-        }
-
-        let (program, args) = parse_command(inputs.trim());
-        
-        if program.is_empty() {
-            continue;
-        }
-
-        let status = execute_command(&program, &args);
-        if status != 0 {
-            // Command failed, but continue shell
+            RedirectType::Append => {
+                let mut opts = OpenOptions::new();
+                opts.write(true).create(true).append(true);
+                match opts.open(filename.as_str()) {
+                    Ok(f) => {
+                        stdout_handle = Some(f.into_handle());
+                    }
+                    Err(_) => {
+                        println!("sh: {}: Failed to open file", filename);
+                        return 1;
+                    }
+                }
+            }
+            RedirectType::Input => match std::fs::File::open(filename.as_str()) {
+                Ok(f) => {
+                    stdin_handle = Some(f.into_handle());
+                }
+                Err(_) => {
+                    println!("sh: {}: Failed to open file", filename);
+                    return 1;
+                }
+            },
         }
     }
-    // This line is unreachable because 'exit' command terminates the process
-    // But we keep it for compiler satisfaction
+
+    // Check if it's a built-in command
+    let is_builtin = match program.as_str() {
+        "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." => true,
+        _ => false,
+    };
+
+    // If builtin with no redirects, run directly
+    if is_builtin && stdin_handle.is_none() && stdout_handle.is_none() {
+        if let Some(code) = handle_builtin_command(program, args) {
+            return code;
+        }
+        return 0;
+    }
+
+    // Locate executable
+    let executable_path = if !is_builtin {
+        match find_executable_in_path(program) {
+            Some(path) => path,
+            None => {
+                println!("sh: {}: command not found", program);
+                return 127;
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    match fork() {
+        0 => {
+            // Child: apply redirects and execute
+            // For stdin: close handle 0, then dup to get handle 0
+            if let Some(h) = stdin_handle {
+                // Close stdin (handle 0)
+                let _ = unsafe { Handle::from_raw(0) }.close();
+                // Duplicate the input file handle - should get assigned to handle 0
+                if let Ok(new_h) = h.duplicate() {
+                    // If not handle 0, we have a problem, but continue anyway
+                    println!("DEBUG: Stdin redirect got handle {}", new_h.as_raw());
+                    std::mem::forget(new_h);
+                }
+                std::mem::forget(h); // Don't close the original
+            }
+            // For stdout: close handle 1, then dup to get handle 1
+            if let Some(h) = stdout_handle {
+                println!("DEBUG: Closing stdout and duplicating file");
+                // Close stdout (handle 1)
+                let _ = unsafe { Handle::from_raw(1) }.close();
+                // Duplicate the output file handle - should get assigned to handle 1
+                match h.duplicate() {
+                    Ok(new_h) => {
+                        println!("DEBUG: Stdout redirect got handle {}", new_h.as_raw());
+                        std::mem::forget(new_h);
+                    }
+                    Err(_) => {
+                        println!("DEBUG: Failed to duplicate stdout handle!");
+                    }
+                }
+                std::mem::forget(h); // Don't close the original
+            }
+
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let env_vars = std::env::vars();
+            let env_strings: Vec<String> = env_vars
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect();
+            let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
+
+            if is_builtin {
+                if let Some(code) = handle_builtin_command(program, args) {
+                    exit(code);
+                }
+            }
+
+            if execve(&executable_path, &arg_refs, &env_refs) != 0 {
+                println!("sh: {}: execution failed", executable_path);
+            }
+            exit(126);
+        }
+        -1 => {
+            println!("sh: fork failed");
+            1
+        }
+        pid => {
+            // Parent: wait for child
+            let (_, status) = waitpid(pid, 0);
+            status
+        }
+    }
+}
+
+/// Execute a pipeline of commands
+fn execute_pipeline(pipeline: &Pipeline) -> i32 {
+    let num_commands = pipeline.commands.len();
+
+    // Single command - no pipes needed
+    if num_commands == 1 {
+        return execute_single_command(&pipeline.commands[0]);
+    }
+
+    // Multiple commands - set up pipes
+    let mut pipes: Vec<(Handle, Handle)> = Vec::new();
+
+    // Create pipes between consecutive commands
+    for _ in 0..num_commands - 1 {
+        match pipe() {
+            Ok((read_end, write_end)) => {
+                pipes.push((read_end, write_end));
+            }
+            Err(_) => {
+                println!("sh: failed to create pipe");
+                return 1;
+            }
+        }
+    }
+
+    let mut pids: Vec<i32> = Vec::new();
+
+    // Fork and execute each command
+    for (i, cmd) in pipeline.commands.iter().enumerate() {
+        match fork() {
+            0 => {
+                // Child process
+
+                // Set up stdin from previous pipe
+                if i > 0 {
+                    // Not the first command - read from previous pipe
+                    if let Err(_) = pipes[i - 1].0.set_role(2) {
+                        // stdin role
+                        exit(1);
+                    }
+                }
+
+                // Set up stdout to next pipe
+                if i < num_commands - 1 {
+                    // Not the last command - write to next pipe
+                    if let Err(_) = pipes[i].1.set_role(3) {
+                        // stdout role
+                        exit(1);
+                    }
+                }
+
+                // Note: We don't close pipes here because Handle::close() consumes self
+                // The handles will be automatically closed when the child process exits
+                // or they go out of scope
+
+                // Execute the command
+                let exit_code = execute_single_command(cmd);
+                exit(exit_code);
+            }
+            -1 => {
+                println!("sh: fork failed");
+                // Clean up will happen automatically when pipes go out of scope
+                return 1;
+            }
+            pid => {
+                // Parent process
+                pids.push(pid);
+            }
+        }
+    }
+
+    // Close all pipes in parent by taking ownership
+    for (read_end, write_end) in pipes {
+        let _ = read_end.close();
+        let _ = write_end.close();
+    }
+
+    // Wait for all children
+    let mut last_status = 0;
+    for pid in pids {
+        let (_, status) = waitpid(pid, 0);
+        last_status = status;
+    }
+
+    last_status
+}
+
+/// Interactive shell mode (enhanced version with line editing and history)
+fn interactive_shell() -> i32 {
+    println!("Scarlet Shell (Enhanced Interactive Mode)");
+    println!("Features: cursor movement, command history, pipes");
+
+    // Try to execute .shrc on startup
+    execute_shrc();
+
+    println!("Enter 'exit' to quit");
+
+    // Initialize history
+    let mut history = history::History::new(100);
+    // HOME/.sh_history
+    let history_file = match std::env::var("HOME") {
+        Some(home) => format!("{}/.sh_history", home),
+        None => String::from(".sh_history"),
+    };
+
+    // Try to load history from file
+    match history.load_from_file(&history_file) {
+        Ok(_) => {
+            // Successfully loaded history
+        }
+        Err(_) => {
+            // No history file or failed to load, that's fine
+        }
+    }
+
+    // Initialize line editor with raw mode enabled
+    let mut editor = line_editor::LineEditor::new("# ");
+    if let Err(_) = editor.set_raw_mode(true) {
+        println!("Warning: Failed to enable raw mode, falling back to canonical mode");
+    }
+
+    loop {
+        // Read a line with history support
+        let input = match editor.read_line_with_history(&mut history) {
+            Ok(line) => line,
+            Err(_) => {
+                // Ctrl-C or error
+                continue;
+            }
+        };
+
+        let trimmed = input.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Add to history
+        history.add(input.clone());
+
+        // Parse the command using the new parser
+        match parser::parse_pipeline(trimmed) {
+            Ok(pipeline) => {
+                // Execute the pipeline
+                let status = execute_pipeline(&pipeline);
+                if status != 0 {
+                    // Command failed, but continue shell
+                }
+            }
+            Err(err) => {
+                println!("sh: parse error: {:?}", err);
+            }
+        }
+
+        // Save history after each command
+        let _ = history.save_to_file(&history_file);
+    }
+
+    // Save history before exiting (unreachable in practice due to exit command)
     #[allow(unreachable_code)]
-    0
+    {
+        let _ = history.save_to_file(&history_file);
+        0
+    }
 }
 
 /// Expand environment variables in a string
@@ -256,7 +602,7 @@ fn interactive_shell() -> i32 {
 fn expand_variables(input: &str) -> String {
     let mut result = String::new();
     let mut chars = input.chars().peekable();
-    
+
     while let Some(c) = chars.next() {
         if c == '$' {
             // Check if this is a variable expansion
@@ -266,15 +612,15 @@ fn expand_variables(input: &str) -> String {
                     chars.next(); // consume '{'
                     let mut var_name = String::new();
                     let mut found_close = false;
-                    
-                    while let Some(var_char) = chars.next() {
+
+                    for var_char in chars.by_ref() {
                         if var_char == '}' {
                             found_close = true;
                             break;
                         }
                         var_name.push(var_char);
                     }
-                    
+
                     if found_close && !var_name.is_empty() {
                         // Expand the variable
                         if let Some(value) = get_variable_value(&var_name) {
@@ -291,10 +637,15 @@ fn expand_variables(input: &str) -> String {
                             // This is a simplified approach
                         }
                     }
-                } else if next_char.is_alphabetic() || next_char == '_' || next_char == '?' || next_char == '$' || next_char == '0' {
+                } else if next_char.is_alphabetic()
+                    || next_char == '_'
+                    || next_char == '?'
+                    || next_char == '$'
+                    || next_char == '0'
+                {
                     // Handle $VAR syntax and special variables
                     let mut var_name = String::new();
-                    
+
                     if next_char == '?' || next_char == '$' || next_char == '0' {
                         // Special single-character variables
                         var_name.push(chars.next().unwrap());
@@ -308,7 +659,7 @@ fn expand_variables(input: &str) -> String {
                             }
                         }
                     }
-                    
+
                     if !var_name.is_empty() {
                         // Expand the variable
                         if let Some(value) = get_variable_value(&var_name) {
@@ -330,7 +681,7 @@ fn expand_variables(input: &str) -> String {
             result.push(c);
         }
     }
-    
+
     result
 }
 
@@ -380,18 +731,18 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 println!("export: usage: export NAME=VALUE");
                 return Some(1);
             }
-            
+
             let assignment = &args[1];
             if let Some(eq_pos) = assignment.find('=') {
                 let name = &assignment[..eq_pos];
-                let value = &assignment[eq_pos+1..];
-                
+                let value = &assignment[eq_pos + 1..];
+
                 // Validate variable name (basic check)
                 if name.is_empty() {
                     println!("export: invalid variable name");
                     return Some(1);
                 }
-                
+
                 // Set the environment variable
                 std::env::set_var(name, value);
                 Some(0)
@@ -424,7 +775,7 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                     }
                 }
             };
-            
+
             match std::fs::change_directory(target_dir) {
                 Ok(()) => {
                     // Success - update PWD environment variable
@@ -442,9 +793,9 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 println!("unset: usage: unset NAME");
                 return Some(1);
             }
-            
+
             let var_name = &args[1];
-            
+
             // Check if variable exists before unsetting
             match std::env::var(var_name) {
                 Some(_) => {
@@ -464,7 +815,7 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
             let mut no_newline = false;
             let mut interpret_escapes = false;
             let mut start_index = 1;
-            
+
             // Parse options
             while start_index < args.len() {
                 let arg = &args[start_index];
@@ -486,21 +837,21 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                     break;
                 }
             }
-            
+
             if start_index < args.len() {
                 let mut output = String::new();
                 for (i, arg) in args[start_index..].iter().enumerate() {
                     if i > 0 {
                         output.push(' ');
                     }
-                    
+
                     if interpret_escapes {
                         output.push_str(&process_escape_sequences(arg));
                     } else {
                         output.push_str(arg);
                     }
                 }
-                
+
                 if no_newline {
                     print!("{}", output);
                 } else {
@@ -520,7 +871,7 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
                 println!("source: usage: source FILENAME");
                 return Some(1);
             }
-            
+
             let script_path = &args[1];
             match read_file(script_path) {
                 Ok(content) => {
@@ -540,17 +891,17 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
 /// Execute .shrc file if it exists
 fn execute_shrc() {
     let mut shrc_paths = Vec::new();
-    
+
     // Add HOME/.shrc if HOME is set
     if let Some(home) = std::env::var("HOME") {
-        shrc_paths.push(format!("{}/.shrc", home));
+        shrc_paths.push(format!("{home}/.shrc"));
     }
-    
+
     // Add standard paths
     shrc_paths.push(String::from("/.shrc"));
     shrc_paths.push(String::from("/etc/shrc"));
     shrc_paths.push(String::from("./.shrc"));
-    
+
     for shrc_path in &shrc_paths {
         // Check if file exists by trying to open it
         match std::fs::File::open(shrc_path) {
@@ -565,37 +916,37 @@ fn execute_shrc() {
             Err(_) => continue,
         }
     }
-    
+
     // No .shrc file found, which is normal
 }
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     let args = std::env::args_vec();
-    
+
     // Check command line arguments
     if args.len() > 1 {
         // Non-interactive mode: execute script or command
         let script_or_command = &args[1];
-        
+
         // Check for -c flag (execute command string)
         if args.len() > 2 && args[1] == "-c" {
             let command = &args[2];
             let (program, cmd_args) = parse_command(command);
-            
+
             if program.is_empty() {
                 println!("No command specified");
                 return 1;
             }
-            
-            return execute_command(&program, &cmd_args);
+
+            execute_command(&program, &cmd_args)
         } else {
             // Execute script file
-            return execute_script(script_or_command);
+            execute_script(script_or_command)
         }
     } else {
         // Interactive mode
-        return interactive_shell();
+        interactive_shell()
     }
 }
 
@@ -603,7 +954,7 @@ fn main() -> i32 {
 fn process_escape_sequences(input: &str) -> String {
     let mut result = String::new();
     let mut chars = input.chars();
-    
+
     while let Some(c) = chars.next() {
         if c == '\\' {
             if let Some(next_char) = chars.next() {
@@ -632,6 +983,6 @@ fn process_escape_sequences(input: &str) -> String {
             result.push(c);
         }
     }
-    
+
     result
 }

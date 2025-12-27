@@ -6,15 +6,23 @@
 //! - FileSystemOperations: Driver API for filesystem operations
 
 use alloc::{
-    collections::BTreeMap, string::{String, ToString}, sync::{Arc, Weak}, vec::Vec
+    collections::BTreeMap,
+    string::{String, ToString},
+    sync::{Arc, Weak},
+    vec::Vec,
 };
-use spin::RwLock;
-use core::{any::Any, fmt::Debug};
 use core::fmt;
+use core::{any::Any, fmt::Debug};
+use spin::RwLock;
 
-use crate::fs::{FileSystemError, FileSystemErrorKind, FileMetadata, FileObject, FileType, SeekFrom};
-use crate::object::capability::{StreamOps, ControlOps, MemoryMappingOps, StreamError};
 use super::mount_tree::MountPoint;
+use crate::fs::{
+    FileMetadata, FileObject, FileSystemError, FileSystemErrorKind, FileType, SeekFrom,
+};
+use crate::object::capability::selectable::{
+    ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
+};
+use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps};
 
 /// DirectoryEntry structure used by readdir
 #[derive(Debug, Clone)]
@@ -28,13 +36,13 @@ pub struct DirectoryEntryInternal {
 pub type FileSystemRef = Arc<dyn FileSystemOperations>;
 
 /// VfsEntry represents a node in the VFS path hierarchy (similar to Linux dentry)
-/// 
+///
 /// This structure represents the VFS's in-memory filesystem hierarchy graph.
 /// It serves as:
 /// - A "name" representation within a directory
 /// - A "link" that constructs parent-child relationships in the VFS graph
 /// - A cache for fast re-access to already resolved paths
-/// 
+///
 /// VfsEntry is designed to be thread-safe and can be shared across threads.
 pub struct VfsEntry {
     /// Weak reference to parent VfsEntry (prevents circular references)
@@ -52,15 +60,19 @@ pub struct VfsEntry {
 
 impl VfsEntry {
     /// Create a new VfsEntry
-    pub fn new(
-        parent: Option<Weak<VfsEntry>>,
-        name: String,
-        node: Arc<dyn VfsNode>,
-    ) -> Arc<Self> {
+    pub fn new(parent: Option<Weak<VfsEntry>>, name: String, node: Arc<dyn VfsNode>) -> Arc<Self> {
         // Verify that node has filesystem reference when creating VfsEntry
-        debug_assert!(node.filesystem().is_some(), "VfsEntry::new - node.filesystem() is None for name '{}'", name);
-        debug_assert!(node.filesystem().unwrap().upgrade().is_some(), "VfsEntry::new - node.filesystem().upgrade() failed for name '{}'", name);
-        
+        debug_assert!(
+            node.filesystem().is_some(),
+            "VfsEntry::new - node.filesystem() is None for name '{}'",
+            name
+        );
+        debug_assert!(
+            node.filesystem().unwrap().upgrade().is_some(),
+            "VfsEntry::new - node.filesystem().upgrade() failed for name '{}'",
+            name
+        );
+
         Arc::new(Self {
             parent: RwLock::new(parent.unwrap_or_else(|| Weak::new())),
             name,
@@ -98,7 +110,7 @@ impl VfsEntry {
     /// Get a child from the cache
     pub fn get_child(&self, name: &String) -> Option<Arc<VfsEntry>> {
         let mut children = self.children.write();
-        
+
         // Try to upgrade the weak reference
         if let Some(weak_ref) = children.get(name) {
             if let Some(strong_ref) = weak_ref.upgrade() {
@@ -108,7 +120,7 @@ impl VfsEntry {
                 children.remove(name);
             }
         }
-        
+
         None
     }
 
@@ -131,7 +143,7 @@ impl VfsEntry {
 
 impl Clone for VfsEntry {
     fn clone(&self) -> Self {
-         Self {
+        Self {
             parent: RwLock::new(self.parent.read().clone()),
             name: self.name.clone(),
             node: Arc::clone(&self.node),
@@ -186,7 +198,7 @@ pub trait VfsNode: Send + Sync + Any {
     fn read_link(&self) -> Result<String, FileSystemError> {
         Err(FileSystemError::new(
             crate::fs::FileSystemErrorKind::NotSupported,
-            "Not a symbolic link"
+            "Not a symbolic link",
         ))
     }
 }
@@ -198,19 +210,24 @@ impl fmt::Debug for dyn VfsNode {
             .field("id", &self.id())
             .field("file_type", &self.file_type().unwrap_or(FileType::Unknown))
             .field("metadata", &self.metadata())
-            .field("filesystem", &self.filesystem().and_then(|fs| fs.upgrade().map(|fs| fs.name().to_string())))
+            .field(
+                "filesystem",
+                &self
+                    .filesystem()
+                    .and_then(|fs| fs.upgrade().map(|fs| fs.name().to_string())),
+            )
             .finish()
     }
 }
 
 /// FileSystemOperations trait defines the driver API for filesystem operations
-/// 
+///
 /// This trait consolidates filesystem operations that were previously scattered
 /// across different interfaces. It provides a clean contract between VFS and
 /// filesystem drivers.
 pub trait FileSystemOperations: Send + Sync {
     /// Look up a child node by name within a parent directory
-    /// 
+    ///
     /// This is the heart of the new driver API. It takes a parent directory's
     /// VfsNode and a name, returning the child's VfsNode.
     fn lookup(
@@ -220,7 +237,7 @@ pub trait FileSystemOperations: Send + Sync {
     ) -> Result<Arc<dyn VfsNode>, FileSystemError>;
 
     /// Open a file represented by a VfsNode
-    /// 
+    ///
     /// This method takes a VfsNode (file entity) and opens it, returning
     /// a stateful FileObject for read/write operations.
     fn open(
@@ -239,11 +256,7 @@ pub trait FileSystemOperations: Send + Sync {
     ) -> Result<Arc<dyn VfsNode>, FileSystemError>;
 
     /// Remove a file from the specified directory
-    fn remove(
-        &self,
-        parent_node: &Arc<dyn VfsNode>,
-        name: &String,
-    ) -> Result<(), FileSystemError>;
+    fn remove(&self, parent_node: &Arc<dyn VfsNode>, name: &String) -> Result<(), FileSystemError>;
 
     /// Read directory entries from a directory node
     fn readdir(
@@ -266,19 +279,19 @@ pub trait FileSystemOperations: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
     /// Create a hard link to an existing file
-    /// 
+    ///
     /// This method creates a hard link from `link_name` in `link_parent` to the existing
     /// file represented by `target_node`. Both the link and target will refer to the
     /// same underlying file data.
-    /// 
+    ///
     /// # Arguments
     /// * `link_parent` - Parent directory where the link will be created
     /// * `link_name` - Name for the new hard link
     /// * `target_node` - Existing file to link to
-    /// 
+    ///
     /// # Returns
     /// Returns the VfsNode representing the new hard link on success
-    /// 
+    ///
     /// # Errors
     /// * `NotSupported` - Filesystem doesn't support hard links
     /// * `InvalidOperation` - Target is a directory (most filesystems don't support directory hard links)
@@ -294,10 +307,9 @@ pub trait FileSystemOperations: Send + Sync {
         let _ = (link_parent, link_name, target_node);
         Err(FileSystemError::new(
             FileSystemErrorKind::NotSupported,
-            "Hard links not supported by this filesystem"
+            "Hard links not supported by this filesystem",
         ))
     }
-
 }
 
 impl fmt::Debug for dyn FileSystemOperations {
@@ -339,22 +351,22 @@ impl VfsFileObject {
             original_path,
         }
     }
-    
+
     /// Get the VfsEntry this FileObject was created from
     pub fn get_vfs_entry(&self) -> &Arc<VfsEntry> {
         &self.vfs_entry
     }
-    
+
     /// Get the mount point containing this VfsEntry
     pub fn get_mount_point(&self) -> &Arc<MountPoint> {
         &self.mount_point
     }
-    
+
     /// Get the original path used to open this file
     pub fn get_original_path(&self) -> &str {
         &self.original_path
     }
-    
+
     /// Enable downcasting for VfsFileObject detection
     pub fn as_any(&self) -> &dyn Any {
         self
@@ -365,7 +377,7 @@ impl StreamOps for VfsFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         self.inner.read(buffer)
     }
-    
+
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         self.inner.write(buffer)
     }
@@ -378,38 +390,77 @@ impl ControlOps for VfsFileObject {
 }
 
 impl MemoryMappingOps for VfsFileObject {
-    fn get_mapping_info(&self, offset: usize, length: usize) 
-                       -> Result<(usize, usize, bool), &'static str> {
+    fn get_mapping_info(
+        &self,
+        offset: usize,
+        length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
         self.inner.get_mapping_info(offset, length)
     }
-    
+
     fn on_mapped(&self, vaddr: usize, paddr: usize, length: usize, offset: usize) {
         self.inner.on_mapped(vaddr, paddr, length, offset);
     }
-    
+
     fn on_unmapped(&self, vaddr: usize, length: usize) {
         self.inner.on_unmapped(vaddr, length);
     }
-    
+
     fn supports_mmap(&self) -> bool {
         self.inner.supports_mmap()
+    }
+
+    fn mmap_owner_name(&self) -> alloc::string::String {
+        alloc::format!("vfs:{}", self.get_original_path())
     }
 }
 
 impl FileObject for VfsFileObject {
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.inner.read_at(offset, buffer)
+    }
+
+    fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.inner.write_at(offset, buffer)
+    }
+
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         self.inner.seek(whence)
     }
-    
+
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         self.inner.metadata()
     }
-    
+
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
         self.inner.truncate(size)
     }
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl Selectable for VfsFileObject {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        self.inner.current_ready(interest)
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        self.inner
+            .wait_until_ready(interest, trapframe, timeout_ticks)
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        self.inner.set_nonblocking(enabled)
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        self.inner.is_nonblocking()
     }
 }

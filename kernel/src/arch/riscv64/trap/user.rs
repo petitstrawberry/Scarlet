@@ -11,7 +11,8 @@ use crate::arch::{Trapframe, get_kernel_trapvector_paddr, set_trapvector};
 #[unsafe(naked)]
 pub extern "C" fn _user_trap_entry() {
     unsafe {
-        naked_asm!("
+        naked_asm!(
+            "
         .option norvc
         .option norelax
         .align 8
@@ -35,7 +36,7 @@ pub extern "C" fn _user_trap_entry() {
                 ld      sp, 24(a0)
 
                 /* Allocate space on the kernel stack for saving user context */
-                addi    sp, sp, -264 /* sizeof(Trapframe) = 264 bytes */
+                addi    sp, sp, -272 /* sizeof(Trapframe) = 272 bytes */
 
                 /* Save the context of the current hart */
                 sd      x0, 0(sp)
@@ -96,13 +97,13 @@ pub extern "C" fn _user_trap_entry() {
     }
 }
 
-
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_exit")]
 #[unsafe(naked)]
 pub extern "C" fn _user_trap_exit(trapframe: &mut Trapframe) -> ! {
     unsafe {
-        naked_asm!("
+        naked_asm!(
+            "
         .option norvc
         .option norelax
         .align 8
@@ -202,10 +203,10 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 }
 
 /// Switch to user space using the trampoline mechanism
-/// 
+///
 /// This function prepares the trapframe for user space execution
 /// and jumps to the user trap exit handler using a trampoline.
-/// 
+///
 /// # Arguments
 /// * `trapframe` - A mutable reference to the trapframe that contains the state to switch to user space.
 ///

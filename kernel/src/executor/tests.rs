@@ -7,8 +7,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use super::executor::TransparentExecutor;
-use crate::task::new_user_task;
 use crate::arch::Trapframe;
+use crate::task::new_user_task;
 
 /// Test that TransparentExecutor can backup and restore task state on exec failure
 #[test_case]
@@ -16,7 +16,7 @@ fn test_exec_backup_restore() {
     let mut task = new_user_task("BackupTestTask".to_string(), 1001);
     task.init();
     let mut trapframe = Trapframe::new();
-    
+
     // Record original state
     let original_name = task.name.clone();
     let original_text_size = task.text_size;
@@ -27,7 +27,7 @@ fn test_exec_backup_restore() {
     let original_pc = trapframe.epc;
     let original_sp = trapframe.regs.reg[2];
     let original_a0 = trapframe.regs.reg[10];
-    
+
     // Try to execute a non-existent binary (should fail and restore state)
     let result = TransparentExecutor::execute_binary(
         "/nonexistent/binary",
@@ -35,19 +35,36 @@ fn test_exec_backup_restore() {
         &["ENV=test"],
         &mut task,
         &mut trapframe,
-        true
+        true,
     );
-    
+
     // Verify the exec failed as expected
     assert!(result.is_err(), "Exec should fail for non-existent binary");
-    
+
     // Verify that all state was restored to original values
     assert_eq!(task.name, original_name, "Task name should be restored");
-    assert_eq!(task.text_size, original_text_size, "Text size should be restored");
-    assert_eq!(task.data_size, original_data_size, "Data size should be restored");
-    assert_eq!(task.stack_size, original_stack_size, "Stack size should be restored");
-    assert_eq!(task.managed_pages.len(), original_managed_pages_count, "Managed pages count should be restored");
-    assert_eq!(task.vm_manager.memmap_len(), original_vm_mappings_count, "VM mappings count should be restored");
+    assert_eq!(
+        task.text_size, original_text_size,
+        "Text size should be restored"
+    );
+    assert_eq!(
+        task.data_size, original_data_size,
+        "Data size should be restored"
+    );
+    assert_eq!(
+        task.stack_size, original_stack_size,
+        "Stack size should be restored"
+    );
+    assert_eq!(
+        task.managed_pages.len(),
+        original_managed_pages_count,
+        "Managed pages count should be restored"
+    );
+    assert_eq!(
+        task.vm_manager.memmap_len(),
+        original_vm_mappings_count,
+        "VM mappings count should be restored"
+    );
     assert_eq!(trapframe.epc, original_pc, "PC should be restored");
     assert_eq!(trapframe.regs.reg[2], original_sp, "SP should be restored");
     assert_eq!(trapframe.regs.reg[10], original_a0, "A0 should be restored");
@@ -59,7 +76,7 @@ fn test_exec_parameter_validation() {
     let mut task = new_user_task("ParamTestTask".to_string(), 1002);
     task.init();
     let mut trapframe = Trapframe::new();
-    
+
     // Test with empty arguments
     let result = TransparentExecutor::execute_binary(
         "/nonexistent/binary",
@@ -67,12 +84,15 @@ fn test_exec_parameter_validation() {
         &[],
         &mut task,
         &mut trapframe,
-        true
+        true,
     );
-    
+
     // Should fail but not panic
-    assert!(result.is_err(), "Exec should fail gracefully with empty args");
-    
+    assert!(
+        result.is_err(),
+        "Exec should fail gracefully with empty args"
+    );
+
     // Test with various argument combinations
     let result = TransparentExecutor::execute_binary(
         "/nonexistent/binary",
@@ -80,20 +100,23 @@ fn test_exec_parameter_validation() {
         &["PATH=/bin:/usr/bin", "HOME=/root", "VAR=value"],
         &mut task,
         &mut trapframe,
-        true
+        true,
     );
-    
+
     // Should fail but handle arguments correctly
-    assert!(result.is_err(), "Exec should fail gracefully with various args");
+    assert!(
+        result.is_err(),
+        "Exec should fail gracefully with various args"
+    );
 }
 
 /// Test argument array handling
-#[test_case] 
+#[test_case]
 fn test_argv_array_handling() {
     let mut task = new_user_task("ArgvTestTask".to_string(), 1003);
     task.init();
     let mut trapframe = Trapframe::new();
-    
+
     // Test with different argument patterns
     let mut test_cases = Vec::new();
     test_cases.push(Vec::from(["program"]));
@@ -101,7 +124,7 @@ fn test_argv_array_handling() {
     test_cases.push(Vec::from(["program", "arg1", "arg2", "arg3"]));
     test_cases.push(Vec::from(["program", "", "empty_arg_test"]));
     test_cases.push(Vec::from(["program", "unicode_test_あいう"]));
-    
+
     for args in test_cases {
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
         let result = TransparentExecutor::execute_binary(
@@ -110,11 +133,15 @@ fn test_argv_array_handling() {
             &["TEST=1"],
             &mut task,
             &mut trapframe,
-            true
+            true,
         );
-        
+
         // Should fail gracefully regardless of argument content
-        assert!(result.is_err(), "Exec should fail gracefully with args: {:?}", args);
+        assert!(
+            result.is_err(),
+            "Exec should fail gracefully with args: {:?}",
+            args
+        );
     }
 }
 
@@ -124,14 +151,18 @@ fn test_envp_array_handling() {
     let mut task = new_user_task("EnvpTestTask".to_string(), 1004);
     task.init();
     let mut trapframe = Trapframe::new();
-    
+
     // Test with different environment variable patterns
     let mut test_cases = Vec::new();
-    test_cases.push(Vec::<&str>::new());  // Empty environment
+    test_cases.push(Vec::<&str>::new()); // Empty environment
     test_cases.push(Vec::from(["PATH=/bin"]));
     test_cases.push(Vec::from(["PATH=/bin", "HOME=/root", "SHELL=/bin/sh"]));
-    test_cases.push(Vec::from(["EMPTY_VALUE=", "EQUALS_IN_VALUE=val=ue", "UNICODE=あいう"]));
-    
+    test_cases.push(Vec::from([
+        "EMPTY_VALUE=",
+        "EQUALS_IN_VALUE=val=ue",
+        "UNICODE=あいう",
+    ]));
+
     for envp in test_cases {
         let result = TransparentExecutor::execute_binary(
             "/nonexistent/binary",
@@ -139,10 +170,14 @@ fn test_envp_array_handling() {
             &envp,
             &mut task,
             &mut trapframe,
-            true
+            true,
         );
-        
+
         // Should fail gracefully regardless of environment content
-        assert!(result.is_err(), "Exec should fail gracefully with envp: {:?}", envp);
+        assert!(
+            result.is_err(),
+            "Exec should fail gracefully with envp: {:?}",
+            envp
+        );
     }
 }
