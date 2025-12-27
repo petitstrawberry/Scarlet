@@ -5,18 +5,20 @@
 
 use crate::{
     device::{
+        fdt::FdtManager,
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
+        DeviceInfo,
     },
-    driver_initcall, early_initcall,
+    early_initcall,
     interrupt::{
         CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
-        controllers::{ExternalInterruptController, LocalInterruptType},
+        controllers::ExternalInterruptController,
     },
 };
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::ptr::{read_volatile, write_volatile};
 
 /// PLIC register offsets
@@ -43,8 +45,12 @@ pub struct Plic {
     base_addr: usize,
     /// Maximum number of interrupts this PLIC supports
     max_interrupts: InterruptId,
-    /// Maximum number of CPUs this PLIC supports
+    /// Maximum number of CPUs (harts) this PLIC supports
     max_cpus: CpuId,
+    /// S-mode context ID for each CPU (hart).
+    /// Index = CPU ID, Value = PLIC context ID for S-mode external interrupt.
+    /// If None, use the default formula: (cpu_id * 2) + 1
+    s_mode_contexts: Option<Vec<usize>>,
 }
 
 impl Plic {
@@ -60,13 +66,40 @@ impl Plic {
             base_addr,
             max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
             max_cpus: max_cpus.min(MAX_CPUS),
+            s_mode_contexts: None,
+        }
+    }
+
+    /// Create a new PLIC instance with explicit S-mode context mapping
+    ///
+    /// # Arguments
+    ///
+    /// * `base_addr` - Physical base address of the PLIC
+    /// * `max_interrupts` - Maximum interrupt ID supported (1-based)
+    /// * `s_mode_contexts` - Vector mapping CPU ID -> PLIC context ID for S-mode
+    pub fn with_contexts(
+        base_addr: usize,
+        max_interrupts: InterruptId,
+        s_mode_contexts: Vec<usize>,
+    ) -> Self {
+        let max_cpus = s_mode_contexts.len() as CpuId;
+        Self {
+            base_addr,
+            max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
+            max_cpus: max_cpus.min(MAX_CPUS),
+            s_mode_contexts: Some(s_mode_contexts),
         }
     }
 
     /// Convert CPU ID to PLIC context ID for Supervisor mode.
-    /// Hart 0 S-Mode -> Context 1, Hart 1 S-Mode -> Context 3, etc.
+    /// If explicit mapping exists, use it; otherwise Hart 0 S-Mode -> Context 1, etc.
     fn context_id_for_cpu(&self, cpu_id: CpuId) -> usize {
-        (cpu_id as usize * 2) + 1
+        if let Some(ref contexts) = self.s_mode_contexts {
+            contexts.get(cpu_id as usize).copied().unwrap_or(0)
+        } else {
+            // Default: Hart 0 S-Mode -> Context 1, Hart 1 S-Mode -> Context 3, etc.
+            (cpu_id as usize * 2) + 1
+        }
     }
 
     /// Get the address of a priority register for an interrupt
@@ -321,7 +354,25 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let base_addr = mem_res.start as usize;
 
-    let controller = Box::new(Plic::new(base_addr, 1023, 4)); // Example values for max interrupts and CPUs
+    // Try to get PLIC configuration from FDT for proper context mapping
+    let controller = if let Some((max_interrupts, s_mode_contexts)) =
+        get_plic_config_from_fdt(device.name())
+    {
+        crate::early_println!(
+            "[interrupt] PLIC: FDT config found - ndev={}, contexts={:?}",
+            max_interrupts,
+            s_mode_contexts
+        );
+        Box::new(Plic::with_contexts(
+            base_addr,
+            max_interrupts,
+            s_mode_contexts,
+        ))
+    } else {
+        // Fallback to hardcoded values (TCG-style: M+S per hart)
+        crate::early_println!("[interrupt] PLIC: Using default config (1023 interrupts, 4 contexts)");
+        Box::new(Plic::new(base_addr, 1023, 4))
+    };
 
     match InterruptManager::global()
         .lock()
@@ -340,6 +391,69 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     }
 
     Ok(())
+}
+
+/// Extract PLIC configuration from FDT
+///
+/// Parses the `riscv,ndev` property for max interrupt count and
+/// `interrupts-extended` property to determine S-mode context IDs per hart.
+///
+/// # Arguments
+/// * `device_name` - The name of the PLIC device node (e.g., "plic@c000000")
+///
+/// # Returns
+/// * `Some((max_interrupts, s_mode_contexts))` on success
+/// * `None` if FDT is not available or properties cannot be read
+fn get_plic_config_from_fdt(device_name: &str) -> Option<(InterruptId, Vec<usize>)> {
+    let fdt_manager = FdtManager::get_manager();
+    let fdt = fdt_manager.get_fdt()?;
+
+    // Find the PLIC node in /soc
+    let soc = fdt.find_node("/soc")?;
+    let plic_node = soc.children().find(|node| node.name == device_name)?;
+
+    // Read riscv,ndev property for max interrupt count
+    let max_interrupts = plic_node
+        .property("riscv,ndev")
+        .and_then(|prop| {
+            if prop.value.len() >= 4 {
+                Some(u32::from_be_bytes([
+                    prop.value[0],
+                    prop.value[1],
+                    prop.value[2],
+                    prop.value[3],
+                ]))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1023);
+
+    // Read interrupts-extended property to find S-mode contexts
+    // Format: <phandle irq_type phandle irq_type ...>
+    // Each entry is 8 bytes (2 x u32): phandle + interrupt type
+    // irq_type 9 = Supervisor External Interrupt (SEI)
+    // irq_type 11 = Machine External Interrupt (MEI)
+    let s_mode_contexts = plic_node
+        .property("interrupts-extended")
+        .map(|prop| {
+            let mut contexts = Vec::new();
+            for (idx, chunk) in prop.value.chunks_exact(8).enumerate() {
+                let irq_type = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                if irq_type == 9 {
+                    // Supervisor External Interrupt
+                    contexts.push(idx);
+                }
+            }
+            contexts
+        })
+        .unwrap_or_else(Vec::new);
+
+    if s_mode_contexts.is_empty() {
+        return None;
+    }
+
+    Some((max_interrupts, s_mode_contexts))
 }
 
 fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {
