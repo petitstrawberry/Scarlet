@@ -290,4 +290,152 @@ mod tests {
         assert!(result.is_ok());
         assert!(unsafe { PROBE_CALLED });
     }
+
+    #[test_case]
+    fn test_virtio_pci_stub_driver_probe() {
+        // Test simulating virtio-pci devices (Red Hat vendor ID 0x1AF4)
+        // This verifies that PCI probe works with real-world device IDs
+        
+        static mut VIRTIO_NET_PROBED: bool = false;
+        static mut VIRTIO_BLK_PROBED: bool = false;
+        
+        // Create stub virtio-pci driver that supports common virtio devices
+        let id_table = alloc::vec![
+            PciDeviceId::new(0x1AF4, 0x1000), // VirtIO net (legacy)
+            PciDeviceId::new(0x1AF4, 0x1001), // VirtIO block (legacy)
+            PciDeviceId::new(0x1AF4, 0x1041), // VirtIO net (modern)
+            PciDeviceId::new(0x1AF4, 0x1042), // VirtIO block (modern)
+        ];
+        
+        let driver = PciDeviceDriver::new(
+            "virtio-pci-stub",
+            id_table,
+            |device| {
+                // Stub probe function - just verify device info
+                match device.device_id() {
+                    0x1000 | 0x1041 => {
+                        // VirtIO net
+                        unsafe { VIRTIO_NET_PROBED = true; }
+                        assert_eq!(device.vendor_id(), 0x1AF4);
+                        assert_eq!(device.base_class(), 0x02); // Network
+                    }
+                    0x1001 | 0x1042 => {
+                        // VirtIO block
+                        unsafe { VIRTIO_BLK_PROBED = true; }
+                        assert_eq!(device.vendor_id(), 0x1AF4);
+                        assert_eq!(device.base_class(), 0x01); // Storage
+                    }
+                    _ => return Err("Unknown device"),
+                }
+                Ok(())
+            },
+            |_device| Ok(()),
+        );
+        
+        // Test 1: VirtIO net device (legacy)
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let virtio_net = PciDeviceInfo::new(
+            addr,
+            0x1AF4,    // Red Hat vendor
+            0x1000,    // VirtIO net (legacy)
+            0x020000,  // Network controller
+            0x00,
+            0x1AF4,
+            0x0001,
+            0x0B,
+            0x01,
+            "virtio_pci_device",
+            1,
+        );
+        
+        assert!(driver.matches_device(&virtio_net));
+        let result = driver.probe(&virtio_net);
+        assert!(result.is_ok());
+        assert!(unsafe { VIRTIO_NET_PROBED });
+        
+        // Test 2: VirtIO block device (legacy)
+        let addr = PciAddress::new(0, 0, 2, 0);
+        let virtio_blk = PciDeviceInfo::new(
+            addr,
+            0x1AF4,    // Red Hat vendor
+            0x1001,    // VirtIO block (legacy)
+            0x010000,  // Storage controller
+            0x00,
+            0x1AF4,
+            0x0002,
+            0x0B,
+            0x01,
+            "virtio_pci_device",
+            2,
+        );
+        
+        assert!(driver.matches_device(&virtio_blk));
+        let result = driver.probe(&virtio_blk);
+        assert!(result.is_ok());
+        assert!(unsafe { VIRTIO_BLK_PROBED });
+        
+        // Test 3: Non-matching device should not be probed
+        let addr = PciAddress::new(0, 0, 3, 0);
+        let intel_device = PciDeviceInfo::new(
+            addr,
+            0x8086,    // Intel vendor
+            0x1234,
+            0x020000,
+            0x00,
+            0x0000,
+            0x0000,
+            0x0B,
+            0x01,
+            "intel_device",
+            3,
+        );
+        
+        assert!(!driver.matches_device(&intel_device));
+    }
+
+    #[test_case]
+    fn test_virtio_pci_class_based_matching() {
+        // Test class-based matching for virtio devices
+        // This is useful when you want to match all devices of a certain class
+        // regardless of vendor
+        
+        static mut MATCHED: bool = false;
+        
+        // Create driver that matches all network controllers
+        let id_table = alloc::vec![
+            PciDeviceId::from_class(0x020000, 0xFF0000), // Network class
+        ];
+        
+        let driver = PciDeviceDriver::new(
+            "network-stub",
+            id_table,
+            |device| {
+                unsafe { MATCHED = true; }
+                assert_eq!(device.base_class(), 0x02);
+                Ok(())
+            },
+            |_device| Ok(()),
+        );
+        
+        // Should match virtio-net
+        let addr = PciAddress::new(0, 0, 1, 0);
+        let virtio_net = PciDeviceInfo::new(
+            addr,
+            0x1AF4,
+            0x1000,
+            0x020000,  // Network controller
+            0x00,
+            0x1AF4,
+            0x0001,
+            0x0B,
+            0x01,
+            "virtio_net",
+            1,
+        );
+        
+        assert!(driver.matches_device(&virtio_net));
+        let result = driver.probe(&virtio_net);
+        assert!(result.is_ok());
+        assert!(unsafe { MATCHED });
+    }
 }

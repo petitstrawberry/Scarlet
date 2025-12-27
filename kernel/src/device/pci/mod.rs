@@ -196,4 +196,85 @@ mod tests {
         let addr = PciAddress::new(0, 255, 31, 7);
         assert!(!pci_bus.is_valid_address(&addr));
     }
+
+    #[test_case]
+    fn test_pci_bus_virtio_integration() {
+        use crate::device::pci::device::PciDeviceInfo;
+        use crate::device::pci::driver::{PciDeviceDriver, PciDeviceId};
+        use crate::device::DeviceDriver;
+        
+        // Simulate a PCI bus with virtio devices
+        let pci_bus = PciBus::new(0x3000_0000, 0x1000_0000);
+        
+        static mut VIRTIO_PROBED_COUNT: usize = 0;
+        
+        // Create stub virtio-pci driver
+        let id_table = alloc::vec![
+            PciDeviceId::new(0x1AF4, 0x1000), // VirtIO net
+            PciDeviceId::new(0x1AF4, 0x1001), // VirtIO block
+        ];
+        
+        let driver = PciDeviceDriver::new(
+            "virtio-pci-integration",
+            id_table,
+            |device| {
+                unsafe { VIRTIO_PROBED_COUNT += 1; }
+                // Verify this is a virtio device
+                assert_eq!(device.vendor_id(), 0x1AF4);
+                assert!(device.device_id() == 0x1000 || device.device_id() == 0x1001);
+                Ok(())
+            },
+            |_device| Ok(()),
+        );
+        
+        // Simulate discovered virtio-net device
+        let addr1 = PciAddress::new(0, 0, 1, 0);
+        let virtio_net = PciDeviceInfo::new(
+            addr1,
+            0x1AF4,
+            0x1000,
+            0x020000,
+            0x00,
+            0x1AF4,
+            0x0001,
+            0x0B,
+            0x01,
+            "virtio_net",
+            1,
+        );
+        pci_bus.add_device(virtio_net.clone());
+        
+        // Simulate discovered virtio-blk device
+        let addr2 = PciAddress::new(0, 0, 2, 0);
+        let virtio_blk = PciDeviceInfo::new(
+            addr2,
+            0x1AF4,
+            0x1001,
+            0x010000,
+            0x00,
+            0x1AF4,
+            0x0002,
+            0x0B,
+            0x01,
+            "virtio_blk",
+            2,
+        );
+        pci_bus.add_device(virtio_blk.clone());
+        
+        // Verify devices were added
+        let devices = pci_bus.devices();
+        assert_eq!(devices.len(), 2);
+        
+        // Probe devices with driver using DeviceDriver trait
+        for device in devices {
+            if driver.matches_device(&device) {
+                // Use the DeviceDriver trait's probe method
+                let result = DeviceDriver::probe(&driver, &device);
+                assert!(result.is_ok());
+            }
+        }
+        
+        // Verify both devices were probed
+        assert_eq!(unsafe { VIRTIO_PROBED_COUNT }, 2);
+    }
 }
