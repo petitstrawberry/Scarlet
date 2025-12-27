@@ -272,8 +272,10 @@ impl DeviceInfo for PciDeviceInfo {
     }
 
     fn compatible(&self) -> Vec<&'static str> {
-        // PCI devices use vendor:device format for compatibility
-        // This is a simplified version - in practice, we'd need a static allocation
+        // PCI devices use vendor:device ID matching rather than string-based
+        // compatibility matching. The PciDeviceDriver uses its own matches_device()
+        // method with PciDeviceId structures for matching, so this returns an empty
+        // vector. This is intentional and does not break driver matching for PCI devices.
         Vec::new()
     }
 

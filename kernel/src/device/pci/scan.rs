@@ -17,29 +17,22 @@ use crate::early_println;
 /// PCI scanner
 ///
 /// Handles scanning the PCI bus tree to discover devices.
-pub struct PciScanner {
+pub struct PciScanner<'a> {
     /// PCI configuration space accessor
     config: PciConfig,
     /// Bus manager reference
-    bus: *const PciBus,
+    bus: &'a PciBus,
 }
 
-impl PciScanner {
+impl<'a> PciScanner<'a> {
     /// Create a new PCI scanner
     ///
     /// # Arguments
     ///
     /// * `bus` - Reference to the PCI bus manager
-    ///
-    /// # Safety
-    ///
-    /// The bus reference must remain valid for the lifetime of the scanner.
-    pub fn new(bus: &PciBus) -> Self {
+    pub fn new(bus: &'a PciBus) -> Self {
         let config = PciConfig::new(bus.ecam_base());
-        Self {
-            config,
-            bus: bus as *const PciBus,
-        }
+        Self { config, bus }
     }
 
     /// Scan the entire PCI bus tree

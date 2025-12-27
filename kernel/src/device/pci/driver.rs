@@ -140,7 +140,10 @@ impl DeviceDriver for PciDeviceDriver {
     }
 
     fn match_table(&self) -> Vec<&'static str> {
-        // PCI drivers use device IDs rather than string matching
+        // PCI drivers use device IDs (PciDeviceId) rather than string matching.
+        // The actual matching is done by the matches_device() method which checks
+        // vendor/device IDs and class codes. This returns an empty vector as
+        // string-based matching is not used for PCI devices.
         Vec::new()
     }
 
