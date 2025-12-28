@@ -31,7 +31,22 @@ pub mod vm;
 pub use earlycon::*;
 pub use registers::IntRegisters;
 
+use crate::vm::vmem::MemoryArea;
+
 pub type Arch = Riscv64;
+
+/// Returns the device memory areas for RISC-V QEMU virt platform.
+/// These areas contain memory-mapped I/O devices and should be mapped
+/// with device memory attributes (non-cacheable, no speculation).
+pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
+    alloc::vec![
+        // QEMU virt: MMIO devices are in the low 2GB
+        MemoryArea {
+            start: 0x0000_0000,
+            end: 0x7fff_ffff,
+        },
+    ]
+}
 
 #[unsafe(link_section = ".trampoline.data")]
 static mut CPUS: [Riscv64; NUM_OF_CPUS] = [const { Riscv64::new(0) }; NUM_OF_CPUS];

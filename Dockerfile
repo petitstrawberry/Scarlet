@@ -25,6 +25,22 @@ RUN cd /opt && \
 	make -j 8 && \
 	make install
 
+# Build U-Boot for QEMU AArch64
+# U-Boot provides proper boot protocol support (DTB in x0, etc.)
+# Configure auto-boot with QEMU fw_cfg to load kernel passed via -kernel option
+RUN apt update && \
+    apt install -y bison flex libssl-dev python3-setuptools python3-pyelftools libgnutls28-dev && \
+    cd /opt && \
+    wget https://ftp.denx.de/pub/u-boot/u-boot-2025.01.tar.bz2 && \
+    tar xjf u-boot-2025.01.tar.bz2 && \
+    rm u-boot-2025.01.tar.bz2 && \
+    cd u-boot-2025.01 && \
+    make CROSS_COMPILE=aarch64-linux-gnu- qemu_arm64_defconfig && \
+    sed -i 's/CONFIG_BOOTCOMMAND=.*/CONFIG_BOOTCOMMAND="qfw load; booti $kernel_addr_r - $fdt_addr_r"/' .config && \
+    sed -i 's/CONFIG_PREBOOT=.*/CONFIG_PREBOOT=""/' .config && \
+    make CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) && \
+    cp u-boot.bin /opt/u-boot-aarch64.bin
+
 # Install Rust and architecture targets
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     rustup default nightly-2025-04-28 && \

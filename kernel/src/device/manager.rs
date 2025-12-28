@@ -356,17 +356,26 @@ impl DeviceManager {
             priority.description()
         );
 
-        let soc = fdt.find_node("/soc");
-        if soc.is_none() {
-            early_println!("No /soc node found");
-            return;
-        }
+        // Try /soc node first (RISC-V virt), then fall back to root node (AArch64 virt)
+        let parent_node = if let Some(soc) = fdt.find_node("/soc") {
+            Some(soc)
+        } else {
+            // For AArch64 virt and other platforms where devices are at root level
+            fdt.find_node("/")
+        };
 
-        let soc = soc.unwrap();
+        let parent_node = match parent_node {
+            Some(node) => node,
+            None => {
+                early_println!("No device tree root found");
+                return;
+            }
+        };
+
         let mut idx = 0;
 
         // Process each child node separately to reduce stack usage
-        for child in soc.children() {
+        for child in parent_node.children() {
             self.process_single_device_node(child, priority, &mut idx);
         }
     }

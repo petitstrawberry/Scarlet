@@ -48,14 +48,16 @@ impl PageTableEntry {
     }
 
     /// Check if this entry is a leaf (block/page entry)
-    /// In AArch64, bit 1 determines if it's a table (0) or block/page (1)
+    /// In AArch64:
+    /// - For levels 0-2: bit 1 = 0 means block (leaf), bit 1 = 1 means table (non-leaf)
+    /// - For level 3: always a page entry (leaf)
     pub fn is_leaf(&self) -> bool {
         if !self.is_valid() {
             return false;
         }
-        // For levels 0-2: bit 1 = 0 means table, bit 1 = 1 means block
-        // For level 3: always a page entry (leaf)
-        (self.entry >> 1) & 1 == 1
+        // For levels 0-2: bit 1 = 0 means block (leaf), bit 1 = 1 means table (non-leaf)
+        // We return true if it's a block (bit 1 = 0)
+        (self.entry >> 1) & 1 == 0
     }
 
     /// Mark the entry as valid
@@ -99,14 +101,20 @@ impl PageTableEntry {
     }
 
     /// Set as a table descriptor (for levels 0-2)
+    /// In AArch64: bits [1:0] = 0b11 means table descriptor
     pub fn set_table(&mut self) -> &mut Self {
-        self.entry |= 0x3; // Valid + Table descriptor
+        self.entry |= 0x3; // Valid (bit 0) + Table (bit 1)
         self
     }
 
-    /// Set as a block/page descriptor (for levels 1-3)
+    /// Set as a block descriptor (for levels 1-2) or page descriptor (for level 3)
+    /// In AArch64:
+    /// - For levels 1-2: bits [1:0] = 0b01 means block descriptor
+    /// - For level 3: bits [1:0] = 0b11 means page descriptor
     pub fn set_block_page(&mut self) -> &mut Self {
-        self.entry |= 0x3; // Valid + Block/Page descriptor
+        // For level 3, we need 0b11 (page descriptor)
+        // This function should only be called for level 3 pages
+        self.entry |= 0x3; // Valid + Page descriptor
         self
     }
 
@@ -424,6 +432,7 @@ impl PageTable {
     pub fn walk(&mut self, vaddr: usize, alloc: bool, asid: u16) -> Option<&mut PageTableEntry> {
         // Validate 48-bit address
         if vaddr >= (1 << 48) {
+            crate::early_println!("[walk] vaddr {:#x} exceeds 48-bit limit", vaddr);
             return None;
         }
 
@@ -438,6 +447,8 @@ impl PageTable {
                 if pte.is_valid() {
                     if level < 3 && pte.is_leaf() {
                         // Block entry at intermediate level (not supported for now)
+                        crate::early_println!("[walk] Block entry at level {} for vaddr {:#x}, pte={:#x}, index={}", 
+                            level, vaddr, pte.entry, index);
                         return None;
                     }
                     // Follow the pointer to the next level
@@ -449,6 +460,7 @@ impl PageTable {
                     // Allocate new page table
                     let new_table = new_raw_pagetable(asid);
                     if new_table.is_null() {
+                        crate::early_println!("[walk] new_raw_pagetable returned null for asid {}", asid);
                         return None;
                     }
                     // Set up table descriptor

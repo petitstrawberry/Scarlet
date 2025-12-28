@@ -61,6 +61,15 @@ fi
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
+# U-Boot binary path (built from source, see Dockerfile)
+UBOOT_BIN="/opt/u-boot-aarch64.bin"
+
+if [ ! -f "$UBOOT_BIN" ]; then
+    echo "Error: U-Boot binary not found at $UBOOT_BIN"
+    echo "Please build U-Boot first (see Dockerfile for instructions)"
+    exit 1
+fi
+
 if [ "$DEBUG_MODE" = true ]; then
     # Debug mode: start with gdb server
     qemu-system-aarch64 \
@@ -70,6 +79,7 @@ if [ "$DEBUG_MODE" = true ]; then
         -nographic \
         -serial mon:stdio \
         --no-reboot \
+        -bios "$UBOOT_BIN" \
         -global virtio-mmio.force-legacy=false \
         -drive id=x0,file="$KERNEL_DIR/fat32-test.img",format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
@@ -95,6 +105,7 @@ else
         -nographic \
         -serial mon:stdio \
         --no-reboot \
+        -bios "$UBOOT_BIN" \
         -global virtio-mmio.force-legacy=false \
         -drive id=x0,file="$KERNEL_DIR/fat32-test.img",format=raw,if=none \
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \

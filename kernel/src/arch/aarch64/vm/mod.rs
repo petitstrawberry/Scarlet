@@ -55,8 +55,8 @@ fn new_boxed_pagetable() -> Box<PageTable> {
         panic!("Failed to allocate a new page table");
     }
     unsafe { 
-        // Zero-initialize the page table
-        core::ptr::write_bytes(ptr, 0, 1);
+        // Zero-initialize the page table - use size_of for correct byte count
+        core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<PageTable>());
         Box::from_raw(ptr) 
     }
 }

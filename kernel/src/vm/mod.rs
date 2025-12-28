@@ -10,6 +10,7 @@ use vmem::VirtualMemoryPermission;
 
 use crate::arch::Arch;
 use crate::arch::get_cpu;
+use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
 use crate::arch::get_user_trapvector_paddr;
 use crate::arch::set_trapvector;
@@ -72,6 +73,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
     let root_page_table = get_root_pagetable(asid).unwrap();
+    
     manager.set_asid(asid);
 
     /* Map kernel space */
@@ -105,40 +107,38 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
         .unwrap();
 
-    let dev_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        pmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true, // Device memory should be shared
-        owner: None,
-    };
-    manager
-        .add_memory_map(dev_map.clone())
-        .map_err(|e| panic!("Failed to add device memory map: {}", e))
-        .unwrap();
+    // Map device memory areas (architecture-specific)
+    for dev_area in get_device_memory_areas() {
+        let dev_map = VirtualMemoryMap {
+            vmarea: dev_area,
+            pmarea: dev_area,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true, // Device memory should be shared
+            owner: None,
+        };
+        manager
+            .add_memory_map(dev_map.clone())
+            .map_err(|e| panic!("Failed to add device memory map: {}", e))
+            .unwrap();
+        root_page_table
+            .map_memory_area(asid, dev_map.clone(), true, true)
+            .map_err(|e| panic!("Failed to map device memory area: {}", e))
+            .unwrap();
+    }
 
     early_println!(
         "Kernel space mapped       : {:#018x} - {:#018x}",
         kernel_area.start,
         kernel_area.end
     );
-    early_println!(
-        "Device space mapped       : {:#018x} - {:#018x}",
-        dev_map.vmarea.start,
-        dev_map.vmarea.end
-    );
-    early_println!(
-        "Kernel space mapped       : {:#018x} - {:#018x}",
-        kernel_start,
-        kernel_end
-    );
+    for dev_area in get_device_memory_areas() {
+        early_println!(
+            "Device space mapped       : {:#018x} - {:#018x}",
+            dev_area.start,
+            dev_area.end
+        );
+    }
 
     setup_trampoline(manager);
 
@@ -200,24 +200,21 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         .map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e))
         .unwrap();
 
-    let dev_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        pmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true, // Device memory should be shared
-        owner: None,
-    };
-    task.vm_manager
-        .add_memory_map(dev_map)
-        .map_err(|e| panic!("Failed to add device memory map: {}", e))
-        .unwrap();
+    // Map device memory areas (architecture-specific)
+    for dev_area in get_device_memory_areas() {
+        let dev_map = VirtualMemoryMap {
+            vmarea: dev_area,
+            pmarea: dev_area,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true, // Device memory should be shared
+            owner: None,
+        };
+        task.vm_manager
+            .add_memory_map(dev_map)
+            .map_err(|e| panic!("Failed to add device memory map: {}", e))
+            .unwrap();
+    }
 
     setup_trampoline(&mut task.vm_manager);
 }

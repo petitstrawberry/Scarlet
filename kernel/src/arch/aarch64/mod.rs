@@ -24,7 +24,22 @@ pub use earlycon::*;
 pub use registers::IntRegisters;
 pub use context::KernelContext;
 
+use crate::vm::vmem::MemoryArea;
+
 pub type Arch = Aarch64;
+
+/// Returns the device memory areas for AArch64 QEMU virt platform.
+/// These areas contain memory-mapped I/O devices and should be mapped
+/// with device memory attributes (non-cacheable, no speculation).
+pub fn get_device_memory_areas() -> alloc::vec::Vec<MemoryArea> {
+    alloc::vec![
+        // QEMU virt: MMIO devices are below RAM base (0x4000_0000)
+        MemoryArea {
+            start: 0x0000_0000,
+            end: 0x3fff_ffff,
+        },
+    ]
+}
 
 #[unsafe(link_section = ".trampoline.data")]
 static mut CPUS: [Aarch64; NUM_OF_CPUS] = [const { Aarch64::new(0) }; NUM_OF_CPUS];
