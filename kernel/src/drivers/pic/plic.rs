@@ -5,12 +5,12 @@
 
 use crate::{
     device::{
+        DeviceInfo,
         fdt::FdtManager,
         manager::{DeviceManager, DriverPriority},
         platform::{
             PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
         },
-        DeviceInfo,
     },
     early_initcall,
     interrupt::{
@@ -169,13 +169,15 @@ impl ExternalInterruptController for Plic {
     fn init(&mut self) -> InterruptResult<()> {
         crate::early_println!(
             "[PLIC] init: max_cpus={}, max_interrupts={}, s_mode_contexts={:?}",
-            self.max_cpus, self.max_interrupts, self.s_mode_contexts
+            self.max_cpus,
+            self.max_interrupts,
+            self.s_mode_contexts
         );
-        
+
         // NOTE: We do NOT clear enable registers here because device drivers
         // may have already enabled interrupts before init() is called.
         // The firmware/bootloader should have left them in a known state.
-        
+
         // Set threshold to 0 for all CPUs (allow all priorities)
         for cpu_id in 0..self.max_cpus {
             self.set_threshold(cpu_id, 0)?;
@@ -282,7 +284,8 @@ impl ExternalInterruptController for Plic {
         let verify = unsafe { Self::mmio_write32_with_readback(addr, threshold) };
 
         assert_eq!(
-            verify, threshold,
+            verify,
+            threshold,
             "PLIC set_threshold verify failed: cpu={}, context={}, addr={:#x}, wrote={}, read={}",
             cpu_id,
             self.context_id_for_cpu(cpu_id),
@@ -380,24 +383,25 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let base_addr = mem_res.start as usize;
 
     // Try to get PLIC configuration from FDT for proper context mapping
-    let controller = if let Some((max_interrupts, s_mode_contexts)) =
-        get_plic_config_from_fdt(device.name())
-    {
-        crate::early_println!(
-            "[interrupt] PLIC: FDT config found - ndev={}, contexts={:?}",
-            max_interrupts,
-            s_mode_contexts
-        );
-        Box::new(Plic::with_contexts(
-            base_addr,
-            max_interrupts,
-            s_mode_contexts,
-        ))
-    } else {
-        // Fallback to hardcoded values (TCG-style: M+S per hart)
-        crate::early_println!("[interrupt] PLIC: Using default config (1023 interrupts, 4 contexts)");
-        Box::new(Plic::new(base_addr, 1023, 4))
-    };
+    let controller =
+        if let Some((max_interrupts, s_mode_contexts)) = get_plic_config_from_fdt(device.name()) {
+            crate::early_println!(
+                "[interrupt] PLIC: FDT config found - ndev={}, contexts={:?}",
+                max_interrupts,
+                s_mode_contexts
+            );
+            Box::new(Plic::with_contexts(
+                base_addr,
+                max_interrupts,
+                s_mode_contexts,
+            ))
+        } else {
+            // Fallback to hardcoded values (TCG-style: M+S per hart)
+            crate::early_println!(
+                "[interrupt] PLIC: Using default config (1023 interrupts, 4 contexts)"
+            );
+            Box::new(Plic::new(base_addr, 1023, 4))
+        };
 
     match InterruptManager::global()
         .lock()
