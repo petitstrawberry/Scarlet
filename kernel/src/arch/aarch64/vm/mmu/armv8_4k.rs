@@ -115,6 +115,7 @@ impl PageTableEntry {
         // For level 3, we need 0b11 (page descriptor)
         // This function should only be called for level 3 pages
         self.entry |= 0x3; // Valid + Page descriptor
+        self.entry |= 1 << 10; // Set Access Flag (AF) - required!
         self
     }
 
@@ -311,26 +312,49 @@ impl PageTable {
     /// We set both to the same page table so that identity-mapped kernel addresses work
     /// regardless of whether the VA is in the lower or upper range.
     pub fn switch(&self, asid: u16) {
+        crate::early_println!("[MMU] Preparing to switch page tables (ASID={})", asid);
+        crate::early_println!("[MMU] Page table base: {:#x}", self as *const _ as usize);
+        
         let ttbr_val = self.get_val_for_ttbr(asid);
+        crate::early_println!("[MMU] TTBR value: {:#x}", ttbr_val);
+        
         unsafe {
+            let mut sctlr: u64;
+            core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+            crate::early_println!("[MMU] Current SCTLR_EL1: {:#x} (MMU enabled: {})", sctlr, sctlr & 1);
+            
+            // Set page table base registers
             asm!(
                 "msr ttbr0_el1, {ttbr}",
                 "msr ttbr1_el1, {ttbr}",
                 "dsb sy",
                 "isb",
+                ttbr = in(reg) ttbr_val,
+            );
+            
+            crate::early_println!("[MMU] TTBR registers set");
+            
+            // Invalidate TLBs
+            asm!(
                 "tlbi vmalle1",
                 "dsb sy",
                 "isb",
-                ttbr = in(reg) ttbr_val,
             );
-        }
-            unsafe {
-                let mut sctlr: u64;
-                core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
-                if sctlr & 1 == 0 {
-                    crate::arch::aarch64::vm::mmu::armv8_4k::init_mmu_registers();
-                }
+            
+            crate::early_println!("[MMU] TLBs invalidated");
+            
+            // Enable MMU if not already enabled
+            core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+            if sctlr & 1 == 0 {
+                crate::early_println!("[MMU] Enabling MMU via init_mmu_registers()");
+                crate::arch::aarch64::vm::mmu::armv8_4k::init_mmu_registers();
+                crate::early_println!("[MMU] MMU enabled successfully");
+            } else {
+                crate::early_println!("[MMU] MMU already enabled");
             }
+        }
+        
+        crate::early_println!("[MMU] Page table switch complete");
     }
 
     /// Switch TTBR1_EL1 to this page table (for kernel high-VA mapping)
@@ -548,6 +572,7 @@ impl PageTable {
 
 /// Initialize AArch64 MMU registers
 pub fn init_mmu_registers() {
+    crate::early_println!("[init_mmu_registers] Starting MMU initialization");
     unsafe {
         // Set up MAIR_EL1 (Memory Attribute Indirection Register)
         // Index 0: Device memory (0x00)
@@ -555,6 +580,7 @@ pub fn init_mmu_registers() {
         // Index 2: Normal memory, non-cacheable (0x44)
         let mair_val: u64 = 0x44ff00;
         asm!("msr mair_el1, {}", in(reg) mair_val);
+        crate::early_println!("[init_mmu_registers] MAIR_EL1 set to {:#x}", mair_val);
 
         // Set up TCR_EL1 (Translation Control Register)
         // We need BOTH TTBR0 (lower VA) and TTBR1 (upper VA) configured.
@@ -584,16 +610,27 @@ pub fn init_mmu_registers() {
         //   tcr = lower | upper = 0xB5103510
         let tcr_val: u64 = 0xB5103510;
         asm!("msr tcr_el1, {}", in(reg) tcr_val);
+        crate::early_println!("[init_mmu_registers] TCR_EL1 set to {:#x}", tcr_val);
 
         // Enable MMU in SCTLR_EL1
         let mut sctlr: u64;
         asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+        crate::early_println!("[init_mmu_registers] Current SCTLR_EL1: {:#x}", sctlr);
         sctlr |= 1; // Set M bit to enable MMU
+        sctlr |= (1 << 2);  // Set C bit (data cache enable)
+        sctlr |= (1 << 12); // Set I bit (instruction cache enable)
+        crate::early_println!("[init_mmu_registers] Enabling MMU+caches (new SCTLR_EL1: {:#x})", sctlr);
         asm!("msr sctlr_el1, {}", in(reg) sctlr);
 
         // Memory barriers
         asm!("dsb sy");
         asm!("isb");
+        
+        crate::early_println!("[init_mmu_registers] MMU enabled and synchronized");
+        
+        // Verify we can still execute
+        asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+        crate::early_println!("[init_mmu_registers] Post-enable SCTLR_EL1: {:#x}", sctlr);
     }
 }
 
