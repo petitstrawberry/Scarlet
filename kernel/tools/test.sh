@@ -83,6 +83,8 @@ if [ "$DEBUG_MODE" = true ]; then
         -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
         -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
+        -netdev user,id=pci-net0 \
+        -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF \
         -initrd "$INITRAMFS_PATH" \
         -gdb tcp::12345 -S \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
@@ -108,6 +110,8 @@ else
         -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
         -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
+        -netdev user,id=pci-net0 \
+        -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF \
         -initrd "$INITRAMFS_PATH" \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
 fi
