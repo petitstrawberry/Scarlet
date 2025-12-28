@@ -25,6 +25,7 @@ pub use earlycon::*;
 pub use registers::IntRegisters;
 
 use crate::vm::vmem::MemoryArea;
+use crate::arch::vm::get_root_pagetable;
 
 pub type Arch = Aarch64;
 
@@ -91,8 +92,9 @@ impl Aarch64 {
     }
 
     pub fn set_next_address_space(&mut self, asid: u16) {
-        // TODO: Implement TTBR0 setup for aarch64 once VM is implemented
-        early_println!("[aarch64] TODO: set_next_address_space for ASID {}", asid);
+        let root_pagetable =
+            get_root_pagetable(asid).expect("No root page table found for ASID (aarch64)");
+        self.ttbr0 = root_pagetable.get_val_for_ttbr(asid);
     }
 
     pub fn as_paddr_cpu(&mut self) -> &mut Aarch64 {
@@ -158,23 +160,22 @@ impl Trapframe {
 }
 
 pub fn get_user_trapvector_paddr() -> usize {
-    // TODO: Implement user trap entry
-    0
+    trap::user::_user_trap_entry as usize
 }
 
 pub fn get_kernel_trapvector_paddr() -> usize {
-    // TODO: Implement kernel trap entry
-    0
+    // For now, reuse the trampoline vector base.
+    // TODO: Provide a dedicated kernel vector table.
+    trap::user::_user_trap_entry as usize
 }
 
 pub fn get_kernel_trap_handler() -> usize {
-    // TODO: Implement kernel trap handler
-    0
+    // TODO: Provide a dedicated kernel trap handler.
+    trap::user::arch_user_trap_handler as usize
 }
 
 pub fn get_user_trap_handler() -> usize {
-    // TODO: Implement user trap handler
-    0
+    trap::user::arch_user_trap_handler as usize
 }
 
 #[allow(static_mut_refs)]
@@ -198,8 +199,15 @@ fn trap_init(aarch64: &mut Aarch64) {
 }
 
 pub fn set_trapvector(addr: usize) {
-    // TODO: Implement setting VBAR_EL1 for AArch64
-    early_println!("[aarch64] TODO: set_trapvector to {:#x}", addr);
+    debug_assert_eq!(addr & 0x7ff, 0, "VBAR_EL1 base must be 2KB-aligned");
+    unsafe {
+        asm!(
+            "msr vbar_el1, {0}",
+            "isb",
+            in(reg) addr,
+            options(nostack)
+        );
+    }
 }
 
 pub fn set_arch(addr: usize) {

@@ -430,13 +430,22 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
     let arch_vaddr = trampoline_vaddr_start + arch_offset;
 
-    // early_println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    // early_println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
-    // early_println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
-    // early_println!("  Arch paddr        : {:#x}", arch_paddr);
-    // early_println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    // early_println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
-    // early_println!("  Arch vaddr        : {:#x}", arch_vaddr);
+    // Helpful when bring-up hits VMA layout issues.
+    #[cfg(any(debug_assertions, test))]
+    {
+        early_println!(
+            "Trampoline space planned  : {:#x} - {:#x}",
+            trampoline_vaddr_start, trampoline_vaddr_end
+        );
+        early_println!(
+            "  Trampoline paddr        : {:#x} - {:#x}",
+            trampoline_start, trampoline_end
+        );
+        early_println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
+        early_println!("  Arch paddr              : {:#x}", arch_paddr);
+        early_println!("  Trap entry vaddr        : {:#x}", trap_entry_vaddr);
+        early_println!("  Arch vaddr              : {:#x}", arch_vaddr);
+    }
 
     let trampoline_map = VirtualMemoryMap {
         vmarea: MemoryArea {
@@ -454,10 +463,36 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
         owner: None,
     };
 
-    manager
-        .add_memory_map(trampoline_map.clone())
-        .map_err(|e| panic!("Failed to add trampoline memory map: {}", e))
-        .unwrap();
+    if let Err(e) = manager.add_memory_map(trampoline_map.clone()) {
+        #[cfg(any(debug_assertions, test))]
+        {
+            early_println!("[vm] add trampoline map failed: {}", e);
+            if let Some(m) = manager.search_memory_map(trampoline_vaddr_start) {
+                early_println!(
+                    "[vm] map@trampoline_start: {:#x}-{:#x}",
+                    m.vmarea.start, m.vmarea.end
+                );
+            } else {
+                early_println!("[vm] map@trampoline_start: <none>");
+            }
+            if let Some(m) = manager.search_memory_map(trampoline_vaddr_end) {
+                early_println!(
+                    "[vm] map@trampoline_end  : {:#x}-{:#x}",
+                    m.vmarea.start, m.vmarea.end
+                );
+            } else {
+                early_println!("[vm] map@trampoline_end  : <none>");
+            }
+            manager.with_memmaps(|mm| {
+                early_println!("[vm] current VMA count   : {}", mm.len());
+                for (_k, m) in mm.iter() {
+                    // Keep log compact; VMA count is usually small at bring-up.
+                    early_println!("[vm]   VMA {:#x}-{:#x}", m.vmarea.start, m.vmarea.end);
+                }
+            });
+        }
+        panic!("Failed to add trampoline memory map: {}", e);
+    }
     /* Pre-map the trampoline space */
     manager
         .get_root_page_table()
