@@ -22,9 +22,13 @@ pub struct Vcpu {
 
 impl Vcpu {
     pub fn new(mode: Mode) -> Self {
+        let initial_pc = match mode {
+            Mode::User => 0x10000,
+            Mode::Kernel => 0,
+        };
         Vcpu {
             iregs: IntRegisters::new(),
-            pc: 0,
+            pc: initial_pc,
             asid: 0,
             mode,
         }
