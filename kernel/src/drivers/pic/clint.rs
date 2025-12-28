@@ -37,6 +37,8 @@ pub struct Clint {
     base_addr: usize,
     /// Maximum number of CPUs this CLINT supports
     max_cpus: CpuId,
+    /// Cached timebase frequency in Hz
+    timebase_frequency_hz: u64,
 }
 
 impl Clint {
@@ -46,13 +48,15 @@ impl Clint {
     ///
     /// * `base_addr` - Physical base address of the CLINT
     /// * `max_cpus` - Maximum number of CPUs supported
+    /// * `timebase_frequency_hz` - Timebase frequency in Hz
     ///
     /// The base address is used to calculate all register addresses using
     /// relative offsets defined in the CLINT specification.
-    pub fn new(base_addr: usize, max_cpus: CpuId) -> Self {
+    pub fn new(base_addr: usize, max_cpus: CpuId, timebase_frequency_hz: u64) -> Self {
         Self {
             base_addr,
             max_cpus: max_cpus.min(MAX_CPUS),
+            timebase_frequency_hz,
         }
     }
 
@@ -228,9 +232,7 @@ impl LocalInterruptController for Clint {
     }
 
     fn get_timer_frequency_hz(&self) -> u64 {
-        // Prefer the timebase frequency provided by the device tree.
-        // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
-        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000)
+        self.timebase_frequency_hz
     }
 }
 
@@ -251,8 +253,13 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     let base_addr = mem_res.start as usize;
 
+    // Read the timebase frequency once from device tree
+    // Prefer the timebase frequency provided by the device tree.
+    // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
+    let timebase_frequency_hz = crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+
     // Create CLINT controller
-    let mut controller = Box::new(Clint::new(base_addr, 4)); // Example: 4 CPUs for QEMU virt
+    let mut controller = Box::new(Clint::new(base_addr, 4, timebase_frequency_hz)); // Example: 4 CPUs for QEMU virt
 
     // Initialize CLINT (Currently only initializes for CPU 0)
     if let Err(e) = controller.init(0) {
@@ -307,13 +314,13 @@ mod tests {
 
     #[test_case]
     fn test_clint_creation() {
-        let clint = Clint::new(0x200_0000, 4);
+        let clint = Clint::new(0x200_0000, 4, 10_000_000);
         assert_eq!(clint.max_cpus, 4);
     }
 
     #[test_case]
     fn test_address_calculation() {
-        let clint = Clint::new(0x200_0000, 4);
+        let clint = Clint::new(0x200_0000, 4, 10_000_000);
 
         // Test MSIP addresses
         assert_eq!(clint.msip_addr(0), 0x200_0000);
@@ -332,7 +339,7 @@ mod tests {
     #[test_case]
     fn test_different_base_address() {
         // Test with different base address to ensure base_addr is properly used
-        let clint = Clint::new(0x300_0000, 4);
+        let clint = Clint::new(0x300_0000, 4, 10_000_000);
 
         // Test MSIP addresses with different base
         assert_eq!(clint.msip_addr(0), 0x300_0000);
@@ -348,7 +355,7 @@ mod tests {
 
     #[test_case]
     fn test_validation() {
-        let clint = Clint::new(0x200_0000, 4);
+        let clint = Clint::new(0x200_0000, 4, 10_000_000);
 
         // Valid CPU IDs should pass
         assert!(clint.validate_cpu_id(0).is_ok());
