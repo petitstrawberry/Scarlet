@@ -174,25 +174,26 @@ impl ExternalInterruptController for Plic {
             self.s_mode_contexts
         );
 
-        // By default we do NOT clear the enable registers here because device
-        // drivers or firmware may have already enabled specific interrupts
-        // before `init()` is called. In that case we preserve the existing
-        // enable state and only program thresholds and priorities below.
-        //
-        // If your platform firmware/bootloader does not guarantee a known and
-        // trusted state for the PLIC enable registers, you can enable the
-        // Cargo feature `plic_clear_enable_on_init` to force all enable
-        // registers to be cleared during initialization.
-        #[cfg(feature = "plic_clear_enable_on_init")]
-        unsafe {
-            let num_words = ((self.max_interrupts as usize) + 31) / 32;
-            for cpu_id in 0..self.max_cpus {
-                let context_id = self.get_s_mode_context(cpu_id);
-                let enables_base = (self.base_addr
-                    + PLIC_ENABLE_BASE
-                    + (context_id * PLIC_ENABLE_CONTEXT_STRIDE)) as *mut u32;
-                for word in 0..num_words {
-                    write_volatile(enables_base.add(word), 0u32);
+        // Establish a known baseline:
+        // - Disable all interrupts for all contexts first.
+        //   This prevents any firmware/previous-stage configuration from leaking into the kernel.
+        //   Device drivers will later enable only what they need.
+        let word_count = ((self.max_interrupts as usize) + 31) / 32;
+        for cpu_id in 0..self.max_cpus {
+            let context_id = self.context_id_for_cpu(cpu_id);
+            let context_offset = context_id * PLIC_ENABLE_CONTEXT_STRIDE;
+            for word in 0..word_count {
+                let addr = self.base_addr + PLIC_ENABLE_BASE + context_offset + (word * 4);
+                let verify = Self::mmio_write32_with_readback(addr, 0);
+                if verify != 0 {
+                    crate::early_println!(
+                        "PLIC init: clear enable verify failed: cpu={}, context={}, addr={:#x}, read={}",
+                        cpu_id,
+                        context_id,
+                        addr,
+                        verify
+                    );
+                    return Err(InterruptError::HardwareError);
                 }
             }
         }
@@ -227,11 +228,19 @@ impl ExternalInterruptController for Plic {
             let current = read_volatile(addr as *const u32);
             let new_value = current | (1 << bit_offset);
             let verify = Self::mmio_write32_with_readback(addr, new_value);
-            assert_eq!(
-                verify, new_value,
-                "PLIC enable_interrupt verify failed: irq={}, cpu={}, context={}, addr={:#x}, bit={}, wrote={}, read={}",
-                interrupt_id, cpu_id, context_id, addr, bit_offset, new_value, verify
-            );
+            if verify != new_value {
+                crate::early_println!(
+                    "PLIC enable_interrupt verify failed: irq={}, cpu={}, context={}, addr={:#x}, bit={}, wrote={}, read={}",
+                    interrupt_id,
+                    cpu_id,
+                    context_id,
+                    addr,
+                    bit_offset,
+                    new_value,
+                    verify
+                );
+                return Err(InterruptError::InvalidInterruptId);
+            }
         }
 
         Ok(())
@@ -272,11 +281,18 @@ impl ExternalInterruptController for Plic {
 
         let addr = self.priority_addr(interrupt_id);
         let verify = Self::mmio_write32_with_readback(addr, priority);
-        assert_eq!(
-            verify, priority,
-            "PLIC set_priority verify failed: irq={}, addr={:#x}, wrote={}, read={}",
-            interrupt_id, addr, priority, verify
-        );
+        if verify != priority {
+            // Verification failed: MMIO write did not persist the expected value.
+            // Return an InterruptError instead of panicking for consistent error handling.
+            crate::early_println!(
+                "PLIC set_priority verify failed: irq={}, addr={:#x}, wrote={}, read={}",
+                interrupt_id,
+                addr,
+                priority,
+                verify
+            );
+            return Err(InterruptError::InvalidPriority);
+        }
 
         Ok(())
     }
@@ -300,18 +316,20 @@ impl ExternalInterruptController for Plic {
         }
 
         let addr = self.threshold_addr(cpu_id);
-        let verify = unsafe { Self::mmio_write32_with_readback(addr, threshold) };
+        let verify = Self::mmio_write32_with_readback(addr, threshold);
 
-        assert_eq!(
-            verify,
-            threshold,
-            "PLIC set_threshold verify failed: cpu={}, context={}, addr={:#x}, wrote={}, read={}",
-            cpu_id,
-            self.context_id_for_cpu(cpu_id),
-            addr,
-            threshold,
-            verify
-        );
+        if verify != threshold {
+            // Verification failed: MMIO write did not persist the expected value.
+            // Return an InterruptError instead of panicking for consistent error handling.
+            crate::early_println!(
+                "PLIC set_threshold verify failed: cpu={}, addr={:#x}, wrote={}, read={}",
+                cpu_id,
+                addr,
+                threshold,
+                verify
+            );
+            return Err(InterruptError::InvalidPriority);
+        }
 
         Ok(())
     }
