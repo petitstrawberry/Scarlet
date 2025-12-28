@@ -383,32 +383,6 @@ impl Scheduler {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
-        // AArch64 bring-up: the generic timer/IRQ path is still a stub.
-        // Kick the first schedule directly so we can enter user space (init) in release builds.
-        #[cfg(target_arch = "aarch64")]
-        {
-            crate::early_println!("[aarch64] start_scheduler: direct first schedule (no timer)");
-            let trap_vector = get_trampoline_trap_vector();
-            let arch = get_trampoline_arch(cpu_id);
-            crate::early_println!(
-                "[aarch64][sched] start_scheduler: tramp_vec={:#x} arch_ptr={:#x}",
-                trap_vector,
-                arch
-            );
-            set_trapvector(trap_vector);
-            crate::early_println!("[aarch64][sched] start_scheduler: set_trapvector done");
-            set_arch(arch);
-            crate::early_println!("[aarch64][sched] start_scheduler: set_arch done");
-            cpu.set_trap_handler(get_user_trap_handler());
-            cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
-            crate::early_println!("[aarch64][sched] start_scheduler: set_next_address_space done");
-
-            let mut tf = Trapframe::new();
-            crate::early_println!("[aarch64][sched] start_scheduler: calling on_tick");
-            self.on_tick(cpu_id, &mut tf);
-            unreachable!();
-        }
-
         let timer = get_kernel_timer();
         timer.stop(cpu_id);
 
