@@ -36,7 +36,7 @@ RUN apt update && \
     rm u-boot-2025.01.tar.bz2 && \
     cd u-boot-2025.01 && \
     make CROSS_COMPILE=aarch64-linux-gnu- qemu_arm64_defconfig && \
-    sed -i 's/CONFIG_BOOTCOMMAND=.*/CONFIG_BOOTCOMMAND="qfw load; booti $kernel_addr_r - $fdt_addr_r"/' .config && \
+    sed -i 's/CONFIG_BOOTCOMMAND=.*/CONFIG_BOOTCOMMAND="qfw load 0x40200000 0x44000000; booti 0x40200000 0x44000000:${filesize} ${fdtcontroladdr}"/' .config && \
     sed -i 's/CONFIG_PREBOOT=.*/CONFIG_PREBOOT=""/' .config && \
     make CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) && \
     cp u-boot.bin /opt/u-boot-aarch64.bin

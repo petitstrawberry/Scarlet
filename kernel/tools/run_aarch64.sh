@@ -49,6 +49,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs.cpio"
 
+# Ensure initramfs exists (build user programs + pack cpio if needed)
+if [ ! -f "$INITRAMFS_PATH" ]; then
+    echo "initramfs not found at $INITRAMFS_PATH, generating..."
+    if [ ! -x "$PROJECT_ROOT/user/bin/dist/init" ]; then
+        echo "User programs not found, building (release)..."
+        (cd "$PROJECT_ROOT/user/bin" && cargo make build-release)
+    fi
+    (cd "$PROJECT_ROOT/mkfs" && ./make_initramfs.sh)
+fi
+
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
@@ -68,6 +78,27 @@ KERNEL_BIN="${KERNEL_PATH}.bin"
 echo "Converting kernel ELF to raw binary..."
 aarch64-linux-gnu-objcopy -O binary "$KERNEL_PATH" "$KERNEL_BIN"
 
+# Ensure U-Boot supports qfw-based boot (so we can pass initrd automatically)
+# If not, attempt to rebuild U-Boot with a qfw+initrd-aware BOOTCOMMAND.
+if ! strings -a "$UBOOT_BIN" | grep -q "qfw load"; then
+    echo "Warning: U-Boot does not seem to include qfw support; initramfs passing may fail."
+fi
+
+if strings -a "$UBOOT_BIN" | grep -q "bootcmd=.*dcache off; icache off"; then
+    if [ -d /opt/u-boot-2025.01 ]; then
+        echo "Rebuilding U-Boot with initrd-capable bootcmd (qfw load + booti initrd)..."
+        (
+            cd /opt/u-boot-2025.01 && \
+            make CROSS_COMPILE=aarch64-linux-gnu- qemu_arm64_defconfig && \
+            sed -i 's/CONFIG_BOOTCOMMAND=.*/CONFIG_BOOTCOMMAND="qfw load 0x40200000 0x44000000; booti 0x40200000 0x44000000:${filesize} ${fdtcontroladdr}"/' .config && \
+            make CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" && \
+            cp u-boot.bin /opt/u-boot-aarch64.bin
+        )
+    else
+        echo "Warning: /opt/u-boot-2025.01 not found; cannot rebuild U-Boot automatically."
+    fi
+fi
+
 # Run QEMU with U-Boot as BIOS
 # - Kernel binary (with Linux Image header) is loaded at 0x40200000
 # - U-Boot boots with booti command, passing DTB address in x0
@@ -80,7 +111,8 @@ qemu-system-aarch64 \
     -serial mon:stdio \
     --no-reboot \
     -bios "$UBOOT_BIN" \
-    -device loader,file="$KERNEL_BIN",addr=0x40200000,force-raw=on \
+    -initrd "$INITRAMFS_PATH" \
+    -kernel "$KERNEL_BIN" \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
 # Capture QEMU exit code
