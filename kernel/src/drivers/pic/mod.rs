@@ -13,4 +13,3 @@ pub mod gic;
 pub use plic::Plic;
 #[cfg(target_arch = "aarch64")]
 pub use gic::Gic;
-pub mod sbi_clint;
