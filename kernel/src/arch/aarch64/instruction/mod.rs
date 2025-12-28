@@ -23,6 +23,9 @@ impl Instruction {
 }
 
 pub fn idle() {
-    // TODO: Implement WFI (Wait For Interrupt) for AArch64
-    // This should use the WFI instruction to put the CPU into low power state
+    // Wait For Interrupt. Note that WFI may return spuriously, so callers that
+    // require non-returning behavior should wrap this in a loop.
+    unsafe {
+        core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+    }
 }
