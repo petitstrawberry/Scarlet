@@ -101,7 +101,8 @@ impl KernelContext {
     /// # Returns
     /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
-        let stack_top = self.kernel_stack.as_ptr() as usize + self.kernel_stack.len();
+        let stack_top = self.kernel_stack.as_ptr() as usize
+            + self.kernel_stack.len() * crate::environment::PAGE_SIZE;
         let trapframe_addr = stack_top - core::mem::size_of::<Trapframe>();
         unsafe { &mut *(trapframe_addr as *mut Trapframe) }
     }
