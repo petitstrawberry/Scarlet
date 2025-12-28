@@ -12,8 +12,6 @@ pub struct IntRegisters {
 
 impl IntRegisters {
     pub const fn new() -> Self {
-        IntRegisters { 
-            reg: [0; 32],
-        }
+        IntRegisters { reg: [0; 32] }
     }
 }

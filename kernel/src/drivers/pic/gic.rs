@@ -3,36 +3,46 @@
 //! The GIC is responsible for managing external interrupts from devices and
 //! routing them to different CPUs with priority support in AArch64 systems.
 
-use crate::{device::{manager::{DeviceManager, DriverPriority}, platform::{resource::PlatformDeviceResourceType, PlatformDeviceDriver, PlatformDeviceInfo}}, driver_initcall, early_initcall, interrupt::{
-    controllers::{ExternalInterruptController, LocalInterruptType}, CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority
-}};
+use crate::{
+    device::{
+        manager::{DeviceManager, DriverPriority},
+        platform::{
+            PlatformDeviceDriver, PlatformDeviceInfo, resource::PlatformDeviceResourceType,
+        },
+    },
+    driver_initcall, early_initcall,
+    interrupt::{
+        CpuId, InterruptError, InterruptId, InterruptManager, InterruptResult, Priority,
+        controllers::{ExternalInterruptController, LocalInterruptType},
+    },
+};
 use alloc::{boxed::Box, vec};
 use core::ptr::{read_volatile, write_volatile};
 
 /// GIC Distributor register offsets
-const GICD_CTLR: usize = 0x0000;           // Distributor Control Register
-const GICD_TYPER: usize = 0x0004;          // Interrupt Controller Type Register
-const GICD_IIDR: usize = 0x0008;           // Distributor Implementer Identification Register
-const GICD_IGROUPR: usize = 0x0080;        // Interrupt Group Registers
-const GICD_ISENABLER: usize = 0x0100;      // Interrupt Set-Enable Registers
-const GICD_ICENABLER: usize = 0x0180;      // Interrupt Clear-Enable Registers
-const GICD_ISPENDR: usize = 0x0200;        // Interrupt Set-Pending Registers
-const GICD_ICPENDR: usize = 0x0280;        // Interrupt Clear-Pending Registers
-const GICD_ISACTIVER: usize = 0x0300;      // Interrupt Set-Active Registers
-const GICD_ICACTIVER: usize = 0x0380;      // Interrupt Clear-Active Registers
-const GICD_IPRIORITYR: usize = 0x0400;     // Interrupt Priority Registers
-const GICD_ITARGETSR: usize = 0x0800;      // Interrupt Processor Targets Registers
-const GICD_ICFGR: usize = 0x0C00;          // Interrupt Configuration Registers
-const GICD_SGIR: usize = 0x0F00;           // Software Generated Interrupt Register
+const GICD_CTLR: usize = 0x0000; // Distributor Control Register
+const GICD_TYPER: usize = 0x0004; // Interrupt Controller Type Register
+const GICD_IIDR: usize = 0x0008; // Distributor Implementer Identification Register
+const GICD_IGROUPR: usize = 0x0080; // Interrupt Group Registers
+const GICD_ISENABLER: usize = 0x0100; // Interrupt Set-Enable Registers
+const GICD_ICENABLER: usize = 0x0180; // Interrupt Clear-Enable Registers
+const GICD_ISPENDR: usize = 0x0200; // Interrupt Set-Pending Registers
+const GICD_ICPENDR: usize = 0x0280; // Interrupt Clear-Pending Registers
+const GICD_ISACTIVER: usize = 0x0300; // Interrupt Set-Active Registers
+const GICD_ICACTIVER: usize = 0x0380; // Interrupt Clear-Active Registers
+const GICD_IPRIORITYR: usize = 0x0400; // Interrupt Priority Registers
+const GICD_ITARGETSR: usize = 0x0800; // Interrupt Processor Targets Registers
+const GICD_ICFGR: usize = 0x0C00; // Interrupt Configuration Registers
+const GICD_SGIR: usize = 0x0F00; // Software Generated Interrupt Register
 
 /// GIC CPU Interface register offsets
-const GICC_CTLR: usize = 0x0000;           // CPU Interface Control Register
-const GICC_PMR: usize = 0x0004;            // Interrupt Priority Mask Register
-const GICC_BPR: usize = 0x0008;            // Binary Point Register
-const GICC_IAR: usize = 0x000C;            // Interrupt Acknowledge Register
-const GICC_EOIR: usize = 0x0010;           // End of Interrupt Register
-const GICC_RPR: usize = 0x0014;            // Running Priority Register
-const GICC_HPPIR: usize = 0x0018;          // Highest Priority Pending Interrupt Register
+const GICC_CTLR: usize = 0x0000; // CPU Interface Control Register
+const GICC_PMR: usize = 0x0004; // Interrupt Priority Mask Register
+const GICC_BPR: usize = 0x0008; // Binary Point Register
+const GICC_IAR: usize = 0x000C; // Interrupt Acknowledge Register
+const GICC_EOIR: usize = 0x0010; // End of Interrupt Register
+const GICC_RPR: usize = 0x0014; // Running Priority Register
+const GICC_HPPIR: usize = 0x0018; // Highest Priority Pending Interrupt Register
 
 /// Maximum number of interrupts supported by this GIC implementation
 const MAX_INTERRUPTS: InterruptId = 1020;
@@ -54,14 +64,19 @@ pub struct Gic {
 
 impl Gic {
     /// Create a new GIC instance
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `dist_base_addr` - Physical base address of the GIC Distributor
     /// * `cpu_base_addr` - Physical base address of the GIC CPU Interface
     /// * `max_interrupts` - Maximum interrupt ID supported (0-based)
     /// * `max_cpus` - Maximum number of CPUs supported
-    pub fn new(dist_base_addr: usize, cpu_base_addr: usize, max_interrupts: InterruptId, max_cpus: CpuId) -> Self {
+    pub fn new(
+        dist_base_addr: usize,
+        cpu_base_addr: usize,
+        max_interrupts: InterruptId,
+        max_cpus: CpuId,
+    ) -> Self {
         Self {
             dist_base_addr,
             cpu_base_addr,
@@ -141,20 +156,24 @@ impl Gic {
     }
 
     /// Send an Inter-Processor Interrupt (IPI)
-    pub fn send_ipi(&self, target_cpu_id: CpuId, ipi_type: LocalInterruptType) -> InterruptResult<()> {
+    pub fn send_ipi(
+        &self,
+        target_cpu_id: CpuId,
+        ipi_type: LocalInterruptType,
+    ) -> InterruptResult<()> {
         self.validate_cpu_id(target_cpu_id)?;
 
         // Software Generated Interrupt Register format:
         // [31:26] reserved
         // [25:24] TargetListFilter
-        // [23:16] CPUTargetList  
+        // [23:16] CPUTargetList
         // [15] reserved
         // [14:0] INTID
         let cpu_target_list = 1u32 << (target_cpu_id + 16);
         let int_id = match ipi_type {
-            LocalInterruptType::Timer => 30,    // Private Peripheral Interrupt
-            LocalInterruptType::Software => 0,  // Software Generated Interrupt
-            LocalInterruptType::External => 1,  // Software Generated Interrupt
+            LocalInterruptType::Timer => 30,   // Private Peripheral Interrupt
+            LocalInterruptType::Software => 0, // Software Generated Interrupt
+            LocalInterruptType::External => 1, // Software Generated Interrupt
         };
 
         let sgir_value = cpu_target_list | int_id;
@@ -189,7 +208,11 @@ impl ExternalInterruptController for Gic {
         Ok(())
     }
 
-    fn enable_interrupt(&mut self, interrupt_id: InterruptId, cpu_id: CpuId) -> InterruptResult<()> {
+    fn enable_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -210,7 +233,11 @@ impl ExternalInterruptController for Gic {
         Ok(())
     }
 
-    fn disable_interrupt(&mut self, interrupt_id: InterruptId, _cpu_id: CpuId) -> InterruptResult<()> {
+    fn disable_interrupt(
+        &mut self,
+        interrupt_id: InterruptId,
+        _cpu_id: CpuId,
+    ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
 
         // Disable the interrupt
@@ -223,7 +250,11 @@ impl ExternalInterruptController for Gic {
         Ok(())
     }
 
-    fn set_priority(&mut self, interrupt_id: InterruptId, priority: Priority) -> InterruptResult<()> {
+    fn set_priority(
+        &mut self,
+        interrupt_id: InterruptId,
+        priority: Priority,
+    ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
 
         // Set interrupt priority (higher value = lower priority in GIC)
@@ -283,7 +314,11 @@ impl ExternalInterruptController for Gic {
         }
     }
 
-    fn complete_interrupt(&mut self, cpu_id: CpuId, interrupt_id: InterruptId) -> InterruptResult<()> {
+    fn complete_interrupt(
+        &mut self,
+        cpu_id: CpuId,
+        interrupt_id: InterruptId,
+    ) -> InterruptResult<()> {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
@@ -305,7 +340,7 @@ impl ExternalInterruptController for Gic {
         let word_offset = interrupt_id / 32;
         let bit_offset = interrupt_id % 32;
         let pending_addr = self.dist_reg_addr(GICD_ISPENDR + (word_offset as usize * 4));
-        
+
         let pending_word = unsafe { read_volatile(pending_addr as *const u32) };
         (pending_word & (1 << bit_offset)) != 0
     }
@@ -324,7 +359,11 @@ unsafe impl Sync for Gic {}
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Extract distributor and CPU interface base addresses from device tree
-    let dist_base_addr = match device.get_resources().iter().find(|r| matches!(r.res_type, PlatformDeviceResourceType::MEM)) {
+    let dist_base_addr = match device
+        .get_resources()
+        .iter()
+        .find(|r| matches!(r.res_type, PlatformDeviceResourceType::MEM))
+    {
         Some(resource) => resource.start as usize,
         None => return Err("No memory resource found for GIC distributor"),
     };
@@ -335,13 +374,20 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 
     // TODO: Parse actual interrupt count and CPU count from device tree
     let max_interrupts = 256; // Typical value
-    let max_cpus = 4;         // Typical value
+    let max_cpus = 4; // Typical value
 
-    let gic = Box::new(Gic::new(dist_base_addr, cpu_base_addr, max_interrupts, max_cpus));
-    
+    let gic = Box::new(Gic::new(
+        dist_base_addr,
+        cpu_base_addr,
+        max_interrupts,
+        max_cpus,
+    ));
+
     // Register with interrupt manager
     InterruptManager::with_manager(|manager| {
-        manager.register_external_controller(gic).map_err(|_| "Failed to register GIC")?;
+        manager
+            .register_external_controller(gic)
+            .map_err(|_| "Failed to register GIC")?;
         Ok(())
     })?;
 

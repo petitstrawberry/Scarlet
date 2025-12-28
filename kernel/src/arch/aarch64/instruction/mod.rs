@@ -15,7 +15,7 @@ impl Instruction {
         // TODO: Fetch instruction from memory
         Instruction { raw: 0 }
     }
-    
+
     pub fn len(&self) -> usize {
         // AArch64 instructions are 4 bytes in AArch64 state
         4

@@ -11,8 +11,8 @@ use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
 use crate::environment::PAGE_SIZE;
-use crate::vm::vmem::VirtualMemoryPermission;
 use crate::vm::vmem::VirtualMemoryMap;
+use crate::vm::vmem::VirtualMemoryPermission;
 
 /// Maximum paging levels for AArch64 4KB granule (4 levels: 0-3)
 const MAX_PAGING_LEVEL: usize = 3;
@@ -76,7 +76,7 @@ impl PageTableEntry {
         let masked_ppn = (ppn as u64) & ppn_mask;
 
         self.entry &= !(ppn_mask << 12); // Clear existing PPN
-        self.entry |= masked_ppn << 12;  // Set new PPN
+        self.entry |= masked_ppn << 12; // Set new PPN
         self
     }
 
@@ -285,8 +285,8 @@ pub enum Shareability {
 /// Memory attribute indices for MAIR_EL1 register
 #[repr(u8)]
 pub enum MemoryAttribute {
-    Device = 0,      // Device memory
-    Normal = 1,      // Normal memory, cacheable
+    Device = 0,       // Device memory
+    Normal = 1,       // Normal memory, cacheable
     NonCacheable = 2, // Normal memory, non-cacheable
 }
 
@@ -337,17 +337,20 @@ impl PageTable {
         dirty: bool,
     ) -> Result<(), &'static str> {
         // Check alignment
-        if mmap.vmarea.start % PAGE_SIZE != 0 || mmap.pmarea.start % PAGE_SIZE != 0 ||
-           mmap.vmarea.size() % PAGE_SIZE != 0 || mmap.pmarea.size() % PAGE_SIZE != 0 {
+        if mmap.vmarea.start % PAGE_SIZE != 0
+            || mmap.pmarea.start % PAGE_SIZE != 0
+            || mmap.vmarea.size() % PAGE_SIZE != 0
+            || mmap.pmarea.size() % PAGE_SIZE != 0
+        {
             return Err("Address is not aligned to PAGE_SIZE");
         }
 
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
-        
+
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
             self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty);
-            
+
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
                 None => break,
@@ -368,8 +371,8 @@ impl PageTable {
         vaddr: usize,
         paddr: usize,
         permissions: usize,
-        _accessed: bool,  // TODO: Implement accessed flag support for AArch64
-        _dirty: bool,     // TODO: Implement dirty flag support for AArch64
+        _accessed: bool, // TODO: Implement accessed flag support for AArch64
+        _dirty: bool,    // TODO: Implement dirty flag support for AArch64
     ) {
         // Validate 48-bit virtual address
         if vaddr >= (1 << 48) {
@@ -413,17 +416,12 @@ impl PageTable {
 
         // Ensure memory operations complete before TLB invalidation
         unsafe {
-            asm!(
-                "dsb sy",
-                "tlbi vmalle1",
-                "dsb sy",
-                "isb"
-            );
+            asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
         }
     }
 
     /// Walk the page table hierarchy to find or create page table entries
-    /// 
+    ///
     /// AArch64 4-level page table structure:
     /// - Level 0: bits 47:39 (9 bits) - PGD
     /// - Level 1: bits 38:30 (9 bits) - PUD  
@@ -447,8 +445,13 @@ impl PageTable {
                 if pte.is_valid() {
                     if level < 3 && pte.is_leaf() {
                         // Block entry at intermediate level (not supported for now)
-                        crate::early_println!("[walk] Block entry at level {} for vaddr {:#x}, pte={:#x}, index={}", 
-                            level, vaddr, pte.entry, index);
+                        crate::early_println!(
+                            "[walk] Block entry at level {} for vaddr {:#x}, pte={:#x}, index={}",
+                            level,
+                            vaddr,
+                            pte.entry,
+                            index
+                        );
                         return None;
                     }
                     // Follow the pointer to the next level
@@ -460,7 +463,10 @@ impl PageTable {
                     // Allocate new page table
                     let new_table = new_raw_pagetable(asid);
                     if new_table.is_null() {
-                        crate::early_println!("[walk] new_raw_pagetable returned null for asid {}", asid);
+                        crate::early_println!(
+                            "[walk] new_raw_pagetable returned null for asid {}",
+                            asid
+                        );
                         return None;
                     }
                     // Set up table descriptor
@@ -490,12 +496,7 @@ impl PageTable {
                 if pte.is_valid() {
                     pte.clear_all();
                     unsafe {
-                        asm!(
-                            "dsb sy",
-                            "tlbi vmalle1",
-                            "dsb sy", 
-                            "isb"
-                        );
+                        asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
                     }
                 }
             }
@@ -512,12 +513,7 @@ impl PageTable {
         }
         // Flush TLB
         unsafe {
-            asm!(
-                "dsb sy",
-                "tlbi vmalle1",
-                "dsb sy",
-                "isb"
-            );
+            asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
         }
     }
 }
@@ -527,7 +523,7 @@ pub fn init_mmu_registers() {
     unsafe {
         // Set up MAIR_EL1 (Memory Attribute Indirection Register)
         // Index 0: Device memory (0x00)
-        // Index 1: Normal memory, cacheable (0xff)  
+        // Index 1: Normal memory, cacheable (0xff)
         // Index 2: Normal memory, non-cacheable (0x44)
         let mair_val: u64 = 0x44ff00;
         asm!("msr mair_el1, {}", in(reg) mair_val);
@@ -565,10 +561,10 @@ mod tests {
     fn test_page_table_entry_validation() {
         let mut pte = PageTableEntry::new();
         assert!(!pte.is_valid());
-        
+
         pte.validate();
         assert!(pte.is_valid());
-        
+
         pte.invalidate();
         assert!(!pte.is_valid());
     }
@@ -577,32 +573,34 @@ mod tests {
     fn test_page_table_entry_ppn() {
         let mut pte = PageTableEntry::new();
         let test_ppn = 0x12345;
-        
+
         pte.set_ppn(test_ppn);
         assert_eq!(pte.get_ppn(), test_ppn);
     }
 
-    #[test_case] 
+    #[test_case]
     fn test_page_table_entry_permissions() {
         let mut pte = PageTableEntry::new();
-        
+
         pte.readable();
         pte.writable();
         pte.executable();
         pte.accessible_from_user();
-        
+
         // Check that the entry has been modified
         assert_ne!(pte.entry, 0);
     }
 
     #[test_case]
     fn test_page_table_ttbr_value() {
-        let page_table = PageTable { entries: [PageTableEntry::new(); 512] };
+        let page_table = PageTable {
+            entries: [PageTableEntry::new(); 512],
+        };
         let asid = 42u16;
-        
+
         let ttbr_val = page_table.get_val_for_ttbr(asid);
         let expected_asid = ((ttbr_val >> 48) & 0xffff) as u16;
-        
+
         assert_eq!(expected_asid, asid);
     }
 }

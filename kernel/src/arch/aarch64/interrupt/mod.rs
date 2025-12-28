@@ -21,7 +21,7 @@ pub fn enable_external_interrupts() {
     // TODO: Enable external interrupts for AArch64
 }
 
-pub fn with_interrupts_disabled<F, R>(f: F) -> R 
+pub fn with_interrupts_disabled<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {

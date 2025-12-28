@@ -10,7 +10,7 @@ mod entry;
 pub use entry::*;
 
 /// Initialize AArch64-specific boot components
-/// 
+///
 /// This function is called during kernel initialization to set up
 /// architecture-specific boot components and configurations.
 pub fn boot_init() {

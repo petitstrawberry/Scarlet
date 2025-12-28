@@ -6,12 +6,12 @@ pub mod mmu;
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec};
 use alloc::vec::Vec;
+use alloc::{boxed::Box, vec};
 use hashbrown::HashMap;
 use mmu::PageTable;
-use spin::RwLock;
 use spin::Once;
+use spin::RwLock;
 
 use crate::mem::page::allocate_raw_pages;
 
@@ -54,30 +54,30 @@ fn new_boxed_pagetable() -> Box<PageTable> {
     if ptr.is_null() {
         panic!("Failed to allocate a new page table");
     }
-    unsafe { 
+    unsafe {
         // Zero-initialize the page table - use size_of for correct byte count
         core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<PageTable>());
-        Box::from_raw(ptr) 
+        Box::from_raw(ptr)
     }
 }
 
 /// Allocates a new raw page table for the given ASID.
-/// 
+///
 /// # Arguments
 /// * `asid` - The Address Space ID (ASID) for which the page table is allocated.
-/// 
+///
 /// # Returns
 /// A raw pointer to the newly allocated page table.
-/// 
+///
 /// # Safety
 /// This function is unsafe because it dereferences a raw pointer, which can lead to undefined behavior
 /// if the pointer is null or invalid.
-/// 
+///
 #[allow(static_mut_refs)]
 pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
     let boxed_pagetable = new_boxed_pagetable();
     let ptr = boxed_pagetable.as_ref() as *const PageTable as *mut PageTable;
-    
+
     // Store the boxed page table in HashMap for proper lifecycle management
     let mut page_tables = get_page_tables().write();
     match page_tables.get_mut(&asid) {
@@ -87,7 +87,7 @@ pub unsafe fn new_raw_pagetable(asid: u16) -> *mut PageTable {
             panic!("ASID {} not found in page tables", asid);
         }
     }
-    
+
     ptr
 }
 
@@ -95,22 +95,25 @@ pub fn alloc_virtual_address_space() -> u16 {
     let mut asid_table = get_asid_tables().write();
     for word_idx in 0..(NUM_OF_ASID / 64) {
         let word = asid_table[word_idx];
-        if word != u64::MAX { // Check if there is a free ASID in this word
+        if word != u64::MAX {
+            // Check if there is a free ASID in this word
             let bit_pos = (!word).trailing_zeros() as usize; // Find the first free bit (Must be < 64)
             asid_table[word_idx] |= 1 << bit_pos; // Mark this ASID as used
             let asid = (word_idx * 64 + bit_pos) as u16; // Calculate the ASID
             let root_pagetable_ptr = Box::into_raw(new_boxed_pagetable());
             let mut page_tables = get_page_tables().write();
             // Insert the new root page table into the HashMap
-            unsafe { page_tables.insert(asid, vec![Box::from_raw(root_pagetable_ptr)]); }
-            
+            unsafe {
+                page_tables.insert(asid, vec![Box::from_raw(root_pagetable_ptr)]);
+            }
+
             if root_pagetable_ptr.is_null() {
                 panic!("Failed to allocate a new root page table");
             }
 
             return asid; // Return the allocated ASID
         }
-    };
+    }
     panic!("No available root page table");
 }
 
@@ -177,7 +180,7 @@ mod tests {
         assert!(page_table.is_some());
         free_virtual_address_space(asid);
     }
-    
+
     #[test_case]
     fn test_get_root_page_table_idx() {
         let asid = alloc_virtual_address_space();

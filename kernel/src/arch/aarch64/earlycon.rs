@@ -11,21 +11,21 @@ use core::ptr::{read_volatile, write_volatile};
 const UART_BASE: usize = 0x0900_0000;
 
 // PL011 UART register offsets
-const UART_DR: usize = 0x000;   // Data Register
-const UART_FR: usize = 0x018;   // Flag Register
+const UART_DR: usize = 0x000; // Data Register
+const UART_FR: usize = 0x018; // Flag Register
 
 // Flag Register bits
-const UART_FR_TXFF: u32 = 1 << 5;  // Transmit FIFO Full
+const UART_FR_TXFF: u32 = 1 << 5; // Transmit FIFO Full
 
 /// Early console putchar function for AArch64
-/// 
+///
 /// This function provides character output during early boot before
 /// the full UART driver is initialized. It directly accesses PL011
 /// UART registers on QEMU virt machine.
-/// 
+///
 /// # Arguments
 /// * `c` - Character to output
-/// 
+///
 /// # Safety
 /// This function performs raw memory access to UART registers.
 /// It should only be used during early boot when no other console
@@ -36,14 +36,14 @@ pub fn early_putc(c: u8) {
         while (read_volatile((UART_BASE + UART_FR) as *const u32) & UART_FR_TXFF) != 0 {
             core::hint::spin_loop();
         }
-        
+
         // Write character to data register
         write_volatile((UART_BASE + UART_DR) as *mut u32, c as u32);
     }
 }
 
 /// Initialize early console (currently a no-op)
-/// 
+///
 /// On QEMU virt machine, the PL011 UART is typically pre-configured
 /// by the firmware/bootloader, so no additional initialization is
 /// usually required for basic character output.
@@ -53,7 +53,7 @@ pub fn early_console_init() {
 }
 
 /// Write a string to early console
-/// 
+///
 /// # Arguments
 /// * `s` - String to write
 pub fn early_console_write(s: &str) {

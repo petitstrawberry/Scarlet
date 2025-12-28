@@ -29,32 +29,32 @@ use crate::{
 };
 
 // PL011 UART register offsets
-const UARTDR: usize = 0x000;     // Data Register
-const UARTRSR: usize = 0x004;    // Receive Status Register
-const UARTFR: usize = 0x018;     // Flag Register
-const UARTIBRD: usize = 0x024;   // Integer Baud Rate Divisor
-const UARTFBRD: usize = 0x028;   // Fractional Baud Rate Divisor
-const UARTLCR_H: usize = 0x02C;  // Line Control Register
-const UARTCR: usize = 0x030;     // Control Register
-const UARTIMSC: usize = 0x038;   // Interrupt Mask Set/Clear Register
-const UARTRIS: usize = 0x03C;    // Raw Interrupt Status Register
-const UARTICR: usize = 0x044;    // Interrupt Clear Register
+const UARTDR: usize = 0x000; // Data Register
+const UARTRSR: usize = 0x004; // Receive Status Register
+const UARTFR: usize = 0x018; // Flag Register
+const UARTIBRD: usize = 0x024; // Integer Baud Rate Divisor
+const UARTFBRD: usize = 0x028; // Fractional Baud Rate Divisor
+const UARTLCR_H: usize = 0x02C; // Line Control Register
+const UARTCR: usize = 0x030; // Control Register
+const UARTIMSC: usize = 0x038; // Interrupt Mask Set/Clear Register
+const UARTRIS: usize = 0x03C; // Raw Interrupt Status Register
+const UARTICR: usize = 0x044; // Interrupt Clear Register
 
 // Flag Register bits
-const FR_TXFE: u32 = 1 << 7;   // Transmit FIFO empty
-const FR_RXFF: u32 = 1 << 6;   // Receive FIFO full
-const FR_TXFF: u32 = 1 << 5;   // Transmit FIFO full
-const FR_RXFE: u32 = 1 << 4;   // Receive FIFO empty
-const FR_BUSY: u32 = 1 << 3;   // UART busy
+const FR_TXFE: u32 = 1 << 7; // Transmit FIFO empty
+const FR_RXFF: u32 = 1 << 6; // Receive FIFO full
+const FR_TXFF: u32 = 1 << 5; // Transmit FIFO full
+const FR_RXFE: u32 = 1 << 4; // Receive FIFO empty
+const FR_BUSY: u32 = 1 << 3; // UART busy
 
 // Control Register bits
-const CR_RXE: u32 = 1 << 9;    // Receive enable
-const CR_TXE: u32 = 1 << 8;    // Transmit enable
+const CR_RXE: u32 = 1 << 9; // Receive enable
+const CR_TXE: u32 = 1 << 8; // Transmit enable
 const CR_UARTEN: u32 = 1 << 0; // UART enable
 
 // Line Control Register bits
-const LCR_H_WLEN_8: u32 = 3 << 5;  // 8-bit word length
-const LCR_H_FEN: u32 = 1 << 4;     // Enable FIFOs
+const LCR_H_WLEN_8: u32 = 3 << 5; // 8-bit word length
+const LCR_H_FEN: u32 = 1 << 4; // Enable FIFOs
 
 // Interrupt bits
 const IMSC_RXIM: u32 = 1 << 4; // Receive interrupt mask
@@ -105,7 +105,7 @@ impl Pl011Uart {
     /// Enable UART interrupts
     pub fn enable_interrupts(&self, interrupt_id: InterruptId) -> Result<(), &'static str> {
         self.interrupt_id.write().replace(interrupt_id);
-        
+
         // Enable receive interrupt
         self.reg_write(UARTIMSC, IMSC_RXIM);
 
@@ -274,7 +274,7 @@ impl InterruptCapableDevice for Pl011Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
         // Read and clear interrupt status
         let ris = self.reg_read(UARTRIS);
-        
+
         if ris & IMSC_RXIM != 0 {
             // Receive interrupt - read all available data
             while let Some(c) = self.read_byte_internal() {

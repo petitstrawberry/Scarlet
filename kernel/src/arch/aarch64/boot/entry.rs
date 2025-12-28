@@ -2,7 +2,7 @@
 //!
 //! This module provides the low-level entry points for the AArch64 architecture,
 //! including assembly stubs for primary and secondary core initialization.
-//! 
+//!
 //! The kernel binary includes a Linux arm64 Image header at the beginning,
 //! which allows U-Boot to boot it using the `booti` command. This header
 //! contains the magic number, image size, and other metadata required by
@@ -13,11 +13,14 @@ use core::{arch::naked_asm, mem::transmute};
 use core::arch::asm;
 
 use crate::{
-    arch::{Aarch64, aarch64::{CPUS, trap_init}}, 
-    device::fdt::{init_fdt, relocate_fdt, create_bootinfo_from_fdt}, 
-    environment::STACK_SIZE, 
-    mem::{__FDT_RESERVED_START, init_bss}, 
-    start_kernel
+    arch::{
+        Aarch64,
+        aarch64::{CPUS, trap_init},
+    },
+    device::fdt::{create_bootinfo_from_fdt, init_fdt, relocate_fdt},
+    environment::STACK_SIZE,
+    mem::{__FDT_RESERVED_START, init_bss},
+    start_kernel,
 };
 
 /// QEMU virt machine RAM base address
@@ -36,7 +39,7 @@ fn looks_like_fdt(ptr: usize) -> bool {
 }
 
 /// Linux arm64 Image header
-/// 
+///
 /// This is the entry point of the kernel binary. The header is 64 bytes
 /// and conforms to the Linux arm64 boot protocol, allowing bootloaders
 /// like U-Boot to use the `booti` command.
@@ -71,8 +74,8 @@ pub extern "C" fn _head() {
 }
 
 /// Entry point for the primary core
-/// 
-/// This function is called by the bootloader/firmware following the Linux 
+///
+/// This function is called by the bootloader/firmware following the Linux
 /// AArch64 boot protocol. The register state on entry must be:
 ///
 /// Register usage on entry (Linux AArch64 boot protocol):
@@ -97,7 +100,7 @@ pub extern "C" fn _head() {
 pub extern "C" fn _entry() {
     unsafe {
         unsafe {
-        naked_asm!("
+            naked_asm!("
         // Linux AArch64 boot protocol:
         // x0 = DTB physical address (MANDATORY - contains hardware config)
         // x1 = 0 (reserved)
@@ -180,9 +183,9 @@ pub extern "C" fn _entry() {
         wfi
         b       2b
         ", 
-        stack_size = const STACK_SIZE,
-        );
-    }
+            stack_size = const STACK_SIZE,
+            );
+        }
     }
 }
 
@@ -253,35 +256,45 @@ pub extern "C" fn _entry_ap() {
 pub extern "C" fn arch_start_kernel(core_id: usize, dtb_ptr: usize) {
     // Initialize .bss section first - required before using any static variables
     init_bss();
-    
-    crate::early_println!("[aarch64] Core {}: Starting kernel with DTB at {:#x}", core_id, dtb_ptr);
-    
+
+    crate::early_println!(
+        "[aarch64] Core {}: Starting kernel with DTB at {:#x}",
+        core_id,
+        dtb_ptr
+    );
+
     // Validate DTB pointer according to boot protocol
     if dtb_ptr == 0 {
         panic!("[aarch64] Invalid DTB pointer: null address violates boot protocol");
     }
-    
+
     if !looks_like_fdt(dtb_ptr) {
         panic!("[aarch64] Invalid DTB at {:#x}: bad magic number", dtb_ptr);
     }
-    
+
     if dtb_ptr & 0x7 != 0 {
-        crate::early_println!("[aarch64] Warning: DTB pointer {:#x} not 8-byte aligned", dtb_ptr);
+        crate::early_println!(
+            "[aarch64] Warning: DTB pointer {:#x} not 8-byte aligned",
+            dtb_ptr
+        );
     }
-    
+
     // Initialize FDT - this will validate the DTB magic number
     init_fdt(dtb_ptr);
-    
+
     // Relocate FDT to safe memory
     let fdt_reloc_start = unsafe { &__FDT_RESERVED_START as *const usize as usize };
     let dest_ptr = fdt_reloc_start as *mut u8;
     let relocated_fdt_area = relocate_fdt(dest_ptr);
-    
+
     // Create BootInfo with relocated FDT address
     let bootinfo = create_bootinfo_from_fdt(core_id, relocated_fdt_area.start);
 
-    crate::early_println!("[aarch64] Core {}: Initializing architecture support...", core_id);
-    
+    crate::early_println!(
+        "[aarch64] Core {}: Initializing architecture support...",
+        core_id
+    );
+
     // Get raw Aarch64 struct
     let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[core_id] as *const _ as usize) };
     trap_init(aarch64);

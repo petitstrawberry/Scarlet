@@ -73,7 +73,7 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
     let root_page_table = get_root_pagetable(asid).unwrap();
-    
+
     manager.set_asid(asid);
 
     /* Map kernel space */

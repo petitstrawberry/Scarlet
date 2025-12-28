@@ -14,8 +14,8 @@ mod arch;
 #[path = "environment/riscv64.rs"]
 mod arch;
 
-pub use common::*;
 pub use arch::*;
+pub use common::*;
 
 // Derived constants (depend on arch-specific end addresses)
 pub const KERNEL_VM_STACK_START: usize = KERNEL_VM_STACK_END - KERNEL_VM_STACK_SIZE + 1;
