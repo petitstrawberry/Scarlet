@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND noninteractive
 
 # Install dependencies and tools
 RUN apt update && \
-	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
+	apt install -y build-essential autoconf automake autotools-dev curl bc git device-tree-compiler vim python3 python3-venv gdb-multiarch gcc-riscv64-linux-gnu gcc-aarch64-linux-gnu cpio libncurses5-dev libncursesw5-dev \
     mtools dosfstools sleuthkit libslirp-dev
 
 # # # Install QEMU
@@ -21,16 +21,17 @@ RUN cd /opt && \
 	tar xvJf qemu-10.1.2.tar.xz && \
 	rm qemu-10.1.2.tar.xz && \
 	cd qemu-10.1.2 && \
-    ./configure --target-list=riscv32-softmmu,riscv64-softmmu --prefix=/opt --enable-slirp --python=/usr/bin/python3 && \
+    ./configure --target-list=riscv32-softmmu,riscv64-softmmu,aarch64-softmmu --prefix=/opt --enable-slirp --python=/usr/bin/python3 && \
 	make -j 8 && \
 	make install
 
-# Install Rust and RISC-V target
+# Install Rust and architecture targets
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     rustup default nightly-2025-04-28 && \
     rustup install nightly-2025-04-28 && \
     rustup component add rust-src --toolchain nightly-2025-04-28 && \
-    rustup target add riscv64gc-unknown-none-elf
+    rustup target add riscv64gc-unknown-none-elf && \
+    rustup target add aarch64-unknown-none
 
 # Install cargo tools
 RUN cargo install cargo-make
