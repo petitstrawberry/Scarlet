@@ -174,9 +174,28 @@ impl ExternalInterruptController for Plic {
             self.s_mode_contexts
         );
 
-        // NOTE: We do NOT clear enable registers here because device drivers
-        // may have already enabled interrupts before init() is called.
-        // The firmware/bootloader should have left them in a known state.
+        // By default we do NOT clear the enable registers here because device
+        // drivers or firmware may have already enabled specific interrupts
+        // before `init()` is called. In that case we preserve the existing
+        // enable state and only program thresholds and priorities below.
+        //
+        // If your platform firmware/bootloader does not guarantee a known and
+        // trusted state for the PLIC enable registers, you can enable the
+        // Cargo feature `plic_clear_enable_on_init` to force all enable
+        // registers to be cleared during initialization.
+        #[cfg(feature = "plic_clear_enable_on_init")]
+        unsafe {
+            let num_words = ((self.max_interrupts as usize) + 31) / 32;
+            for cpu_id in 0..self.max_cpus {
+                let context_id = self.get_s_mode_context(cpu_id);
+                let enables_base = (self.base_addr
+                    + PLIC_ENABLE_BASE
+                    + (context_id * PLIC_ENABLE_CONTEXT_STRIDE)) as *mut u32;
+                for word in 0..num_words {
+                    write_volatile(enables_base.add(word), 0u32);
+                }
+            }
+        }
 
         // Set threshold to 0 for all CPUs (allow all priorities)
         for cpu_id in 0..self.max_cpus {
