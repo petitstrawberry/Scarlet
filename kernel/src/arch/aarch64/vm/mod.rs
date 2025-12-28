@@ -33,13 +33,6 @@ fn get_page_tables() -> &'static RwLock<HashMap<u16, Vec<Box<PageTable>>>> {
     PAGE_TABLES.call_once(|| RwLock::new(HashMap::new()))
 }
 
-/// Initialize AArch64 virtual memory system
-pub fn vm_init() {
-    // Initialize MMU registers
-    mmu::init_mmu_registers();
-    crate::early_println!("AArch64 MMU registers initialized");
-}
-
 pub fn get_pagetable(ptr: *mut PageTable) -> Option<&'static mut PageTable> {
     unsafe {
         if ptr.is_null() {

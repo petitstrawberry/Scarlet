@@ -324,6 +324,13 @@ impl PageTable {
                 ttbr = in(reg) ttbr_val,
             );
         }
+            unsafe {
+                let mut sctlr: u64;
+                core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
+                if sctlr & 1 == 0 {
+                    crate::arch::aarch64::vm::mmu::armv8_4k::init_mmu_registers();
+                }
+            }
     }
 
     /// Switch TTBR1_EL1 to this page table (for kernel high-VA mapping)
