@@ -16,6 +16,7 @@ use crate::{
 
 struct SbiClint {
     max_cpus: usize,
+    timebase_frequency_hz: u64,
 }
 
 impl SbiClint {
@@ -164,9 +165,7 @@ impl LocalInterruptController for SbiClint {
     }
 
     fn get_timer_frequency_hz(&self) -> u64 {
-        // Prefer the timebase frequency provided by the device tree.
-        // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
-        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000)
+        self.timebase_frequency_hz
     }
 }
 
@@ -174,8 +173,16 @@ unsafe impl Send for SbiClint {}
 unsafe impl Sync for SbiClint {}
 
 fn register_driver() {
+    // Read the timebase frequency once from device tree
+    // Prefer the timebase frequency provided by the device tree.
+    // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
+    let timebase_frequency_hz = crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+
     // Create the SBI timer controller
-    let mut controller = Box::new(SbiClint { max_cpus: 4 });
+    let mut controller = Box::new(SbiClint { 
+        max_cpus: 4,
+        timebase_frequency_hz,
+    });
 
     if let Err(e) = controller.init(0) {
         crate::early_println!(
