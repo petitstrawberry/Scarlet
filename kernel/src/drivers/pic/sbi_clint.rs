@@ -176,10 +176,11 @@ fn register_driver() {
     // Read the timebase frequency once from device tree
     // Prefer the timebase frequency provided by the device tree.
     // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
-    let timebase_frequency_hz = crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
+    let timebase_frequency_hz =
+        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000);
 
     // Create the SBI timer controller
-    let mut controller = Box::new(SbiClint { 
+    let mut controller = Box::new(SbiClint {
         max_cpus: 4,
         timebase_frequency_hz,
     });
