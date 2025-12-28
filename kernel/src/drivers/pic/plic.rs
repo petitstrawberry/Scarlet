@@ -152,31 +152,38 @@ impl Plic {
             Ok(())
         }
     }
+
+    /// MMIO write with readback verification
+    #[inline(always)]
+    fn mmio_write32_with_readback(addr: usize, value: u32) -> u32 {
+        unsafe {
+            write_volatile(addr as *mut u32, value);
+            crate::arch::mmio_fence();
+            read_volatile(addr as *const u32)
+        }
+    }
 }
 
 impl ExternalInterruptController for Plic {
     /// Initialize the PLIC
     fn init(&mut self) -> InterruptResult<()> {
-        // Disable all interrupts for all CPUs initially
+        crate::early_println!(
+            "[PLIC] init: max_cpus={}, max_interrupts={}, s_mode_contexts={:?}",
+            self.max_cpus, self.max_interrupts, self.s_mode_contexts
+        );
+        
+        // NOTE: We do NOT clear enable registers here because device drivers
+        // may have already enabled interrupts before init() is called.
+        // The firmware/bootloader should have left them in a known state.
+        
+        // Set threshold to 0 for all CPUs (allow all priorities)
         for cpu_id in 0..self.max_cpus {
-            // Disable all interrupts for this CPU's context
-            for word in 0..=(self.max_interrupts / 32) {
-                let interrupt_id_base = word * 32;
-                if interrupt_id_base > 0 {
-                    // Interrupt ID 0 is not used
-                    let addr = self.enable_addr(cpu_id, interrupt_id_base);
-                    unsafe {
-                        write_volatile(addr as *mut u32, 0);
-                    }
-                }
-            }
-            // Set threshold to 0 (allow all priorities)
-            let _ = self.set_threshold(cpu_id, 0);
+            self.set_threshold(cpu_id, 0)?;
         }
 
         // Set all interrupt priorities to 1 (lowest non-zero priority)
         for interrupt_id in 1..=self.max_interrupts {
-            let _ = self.set_priority(interrupt_id, 1);
+            self.set_priority(interrupt_id, 1)?;
         }
 
         Ok(())
@@ -191,13 +198,19 @@ impl ExternalInterruptController for Plic {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
+        let context_id = self.context_id_for_cpu(cpu_id);
         let addr = self.enable_addr(cpu_id, interrupt_id);
         let bit_offset = interrupt_id % 32;
 
         unsafe {
             let current = read_volatile(addr as *const u32);
             let new_value = current | (1 << bit_offset);
-            write_volatile(addr as *mut u32, new_value);
+            let verify = Self::mmio_write32_with_readback(addr, new_value);
+            assert_eq!(
+                verify, new_value,
+                "PLIC enable_interrupt verify failed: irq={}, cpu={}, context={}, addr={:#x}, bit={}, wrote={}, read={}",
+                interrupt_id, cpu_id, context_id, addr, bit_offset, new_value, verify
+            );
         }
 
         Ok(())
@@ -237,9 +250,12 @@ impl ExternalInterruptController for Plic {
         }
 
         let addr = self.priority_addr(interrupt_id);
-        unsafe {
-            write_volatile(addr as *mut u32, priority);
-        }
+        let verify = Self::mmio_write32_with_readback(addr, priority);
+        assert_eq!(
+            verify, priority,
+            "PLIC set_priority verify failed: irq={}, addr={:#x}, wrote={}, read={}",
+            interrupt_id, addr, priority, verify
+        );
 
         Ok(())
     }
@@ -263,9 +279,17 @@ impl ExternalInterruptController for Plic {
         }
 
         let addr = self.threshold_addr(cpu_id);
-        unsafe {
-            write_volatile(addr as *mut u32, threshold);
-        }
+        let verify = unsafe { Self::mmio_write32_with_readback(addr, threshold) };
+
+        assert_eq!(
+            verify, threshold,
+            "PLIC set_threshold verify failed: cpu={}, context={}, addr={:#x}, wrote={}, read={}",
+            cpu_id,
+            self.context_id_for_cpu(cpu_id),
+            addr,
+            threshold,
+            verify
+        );
 
         Ok(())
     }
@@ -306,6 +330,7 @@ impl ExternalInterruptController for Plic {
         let addr = self.claim_addr(cpu_id);
         unsafe {
             write_volatile(addr as *mut u32, interrupt_id);
+            crate::arch::mmio_fence();
         }
 
         Ok(())
@@ -408,6 +433,39 @@ fn get_plic_config_from_fdt(device_name: &str) -> Option<(InterruptId, Vec<usize
     let fdt_manager = FdtManager::get_manager();
     let fdt = fdt_manager.get_fdt()?;
 
+    fn read_be_u32(bytes: &[u8]) -> Option<u32> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn get_u32_prop<'a, 'b>(node: &fdt::node::FdtNode<'a, 'b>, name: &str) -> Option<u32> {
+        let prop = node.property(name)?;
+        read_be_u32(prop.value)
+    }
+
+    fn find_node_by_phandle<'a>(
+        fdt: &'a fdt::Fdt<'a>,
+        phandle: u32,
+    ) -> Option<fdt::node::FdtNode<'a, 'a>> {
+        let mut stack: alloc::vec::Vec<fdt::node::FdtNode<'a, 'a>> = alloc::vec::Vec::new();
+        stack.push(fdt.find_node("/")?);
+
+        while let Some(node) = stack.pop() {
+            if let Some(p) = get_u32_prop(&node, "phandle") {
+                if p == phandle {
+                    return Some(node);
+                }
+            }
+            for child in node.children() {
+                stack.push(child);
+            }
+        }
+
+        None
+    }
+
     // Find the PLIC node in /soc
     let soc = fdt.find_node("/soc")?;
     let plic_node = soc.children().find(|node| node.name == device_name)?;
@@ -429,22 +487,64 @@ fn get_plic_config_from_fdt(device_name: &str) -> Option<(InterruptId, Vec<usize
         })
         .unwrap_or(1023);
 
-    // Read interrupts-extended property to find S-mode contexts
-    // Format: <phandle irq_type phandle irq_type ...>
-    // Each entry is 8 bytes (2 x u32): phandle + interrupt type
-    // irq_type 9 = Supervisor External Interrupt (SEI)
-    // irq_type 11 = Machine External Interrupt (MEI)
+    // Read interrupts-extended property to find S-mode contexts.
+    // The entry size depends on the referenced interrupt-controller node's
+    // #interrupt-cells, so we must decode it dynamically.
+    //
+    // Typical RISC-V CPU interrupt controller uses #interrupt-cells = <1>
+    // and provides irq_type values:
+    // - 9  = Supervisor External Interrupt (SEI)
+    // - 11 = Machine External Interrupt (MEI)
     let s_mode_contexts = plic_node
         .property("interrupts-extended")
         .map(|prop| {
             let mut contexts = Vec::new();
-            for (idx, chunk) in prop.value.chunks_exact(8).enumerate() {
-                let irq_type = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            let mut offset = 0usize;
+            let mut context_id = 0usize;
+            let bytes = prop.value;
+
+            while offset + 4 <= bytes.len() {
+                let phandle = match read_be_u32(&bytes[offset..offset + 4]) {
+                    Some(v) => v,
+                    None => break,
+                };
+                offset += 4;
+
+                let intc_node = find_node_by_phandle(fdt, phandle);
+                let interrupt_cells = intc_node
+                    .as_ref()
+                    .and_then(|n| get_u32_prop(n, "#interrupt-cells"))
+                    .unwrap_or(1) as usize;
+
+                if interrupt_cells == 0 {
+                    break;
+                }
+                let needed = interrupt_cells.saturating_mul(4);
+                if offset + needed > bytes.len() {
+                    break;
+                }
+
+                // Interpret the first interrupt cell as the irq_type.
+                let irq_type = read_be_u32(&bytes[offset..offset + 4]).unwrap_or(0);
                 if irq_type == 9 {
-                    // Supervisor External Interrupt
-                    contexts.push(idx);
+                    contexts.push(context_id);
+                }
+
+                offset += needed;
+                context_id += 1;
+            }
+
+            // Backward-compatible fallback: if decoding failed (e.g. phandle lookup),
+            // fall back to fixed 2-cell entries.
+            if contexts.is_empty() {
+                for (idx, chunk) in bytes.chunks_exact(8).enumerate() {
+                    let irq_type = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                    if irq_type == 9 {
+                        contexts.push(idx);
+                    }
                 }
             }
+
             contexts
         })
         .unwrap_or_else(Vec::new);
