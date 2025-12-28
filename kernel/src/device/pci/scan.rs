@@ -9,9 +9,9 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{PciAddress, PciBus};
 use super::config::{PciConfig, vendor};
 use super::device::PciDeviceInfo;
+use super::{PciAddress, PciBus};
 use crate::early_println;
 
 /// PCI scanner
@@ -66,7 +66,13 @@ impl<'a> PciScanner<'a> {
     }
 
     /// Scan a single PCI device
-    fn scan_device(&self, bus: u8, device: u8, devices: &mut Vec<PciDeviceInfo>, id_counter: &mut usize) {
+    fn scan_device(
+        &self,
+        bus: u8,
+        device: u8,
+        devices: &mut Vec<PciDeviceInfo>,
+        id_counter: &mut usize,
+    ) {
         let addr = PciAddress::new(0, bus, device, 0);
 
         // Check if device exists by reading vendor ID
@@ -95,7 +101,13 @@ impl<'a> PciScanner<'a> {
     }
 
     /// Probe a specific PCI function
-    fn probe_function(&self, bus: u8, device: u8, function: u8, id_counter: &mut usize) -> Option<PciDeviceInfo> {
+    fn probe_function(
+        &self,
+        bus: u8,
+        device: u8,
+        function: u8,
+        id_counter: &mut usize,
+    ) -> Option<PciDeviceInfo> {
         let addr = PciAddress::new(0, bus, device, function);
 
         // Check if function exists
@@ -106,17 +118,32 @@ impl<'a> PciScanner<'a> {
             return None;
         }
 
-        early_println!("PCI: Found device with vendor {:04x} at {:02x}:{:02x}.{}", 
-                      vendor_id, bus, device, function);
+        early_println!(
+            "PCI: Found device with vendor {:04x} at {:02x}:{:02x}.{}",
+            vendor_id,
+            bus,
+            device,
+            function
+        );
 
         // Read device configuration
         let device_id = self.config.read_device_id(&addr);
         let class_code = self.config.read_class_code(&addr);
-        let revision = self.config.read_u8(&addr, super::config::offset::REVISION_ID);
-        let subsystem_vendor_id = self.config.read_u16(&addr, super::config::offset::SUBSYSTEM_VENDOR_ID);
-        let subsystem_id = self.config.read_u16(&addr, super::config::offset::SUBSYSTEM_ID);
-        let interrupt_line = self.config.read_u8(&addr, super::config::offset::INTERRUPT_LINE);
-        let interrupt_pin = self.config.read_u8(&addr, super::config::offset::INTERRUPT_PIN);
+        let revision = self
+            .config
+            .read_u8(&addr, super::config::offset::REVISION_ID);
+        let subsystem_vendor_id = self
+            .config
+            .read_u16(&addr, super::config::offset::SUBSYSTEM_VENDOR_ID);
+        let subsystem_id = self
+            .config
+            .read_u16(&addr, super::config::offset::SUBSYSTEM_ID);
+        let interrupt_line = self
+            .config
+            .read_u8(&addr, super::config::offset::INTERRUPT_LINE);
+        let interrupt_pin = self
+            .config
+            .read_u8(&addr, super::config::offset::INTERRUPT_PIN);
 
         // Generate device name
         // In a real implementation, this would use a static string pool
@@ -141,7 +168,12 @@ impl<'a> PciScanner<'a> {
 
         early_println!(
             "Found PCI device: {:04x}:{:04x} at {:02x}:{:02x}.{} (class: {:06x})",
-            vendor_id, device_id, bus, device, function, class_code
+            vendor_id,
+            device_id,
+            bus,
+            device,
+            function,
+            class_code
         );
 
         Some(device_info)
@@ -151,7 +183,13 @@ impl<'a> PciScanner<'a> {
     ///
     /// This is a simplified implementation. A real implementation would
     /// maintain a static string pool or use a more sophisticated naming scheme.
-    fn generate_device_name(_vendor_id: u16, _device_id: u16, _bus: u8, _device: u8, _function: u8) -> &'static str {
+    fn generate_device_name(
+        _vendor_id: u16,
+        _device_id: u16,
+        _bus: u8,
+        _device: u8,
+        _function: u8,
+    ) -> &'static str {
         // For now, we'll use a simple static string
         // In practice, this should use a proper string allocation strategy
         // that works in a no_std environment
@@ -192,13 +230,21 @@ impl PciBus {
         let devices = self.devices();
         let device_manager = DeviceManager::get_mut_manager();
 
-        early_println!("Registering {} PCI devices with DeviceManager", devices.len());
+        early_println!(
+            "Registering {} PCI devices with DeviceManager",
+            devices.len()
+        );
 
         for device in devices {
             let device_name = String::from(device.name());
             // Note: In a real implementation, we'd wrap the PciDeviceInfo in a
             // proper Device implementation. For now, this is just the infrastructure.
-            early_println!("  - {} ({:04x}:{:04x})", device_name, device.vendor_id(), device.device_id());
+            early_println!(
+                "  - {} ({:04x}:{:04x})",
+                device_name,
+                device.vendor_id(),
+                device.device_id()
+            );
         }
     }
 }
@@ -238,14 +284,14 @@ mod tests {
         // Get FDT to find PCI host bridge
         let fdt_manager = unsafe { FdtManager::get_mut_manager() };
         let fdt = fdt_manager.get_fdt();
-        
+
         if fdt.is_none() {
             early_println!("[PCI Test] No FDT available, skipping test");
             return;
         }
 
         let fdt = fdt.unwrap();
-        
+
         // Look for PCI host bridge in device tree
         let mut pci_found = false;
         let mut ecam_base = 0;
@@ -255,7 +301,7 @@ mod tests {
         for node_name in &["/soc/pci", "/soc/pcie", "/pci", "/pcie"] {
             if let Some(pci_node) = fdt.find_node(node_name) {
                 early_println!("[PCI Test] Found PCI node: {}", node_name);
-                
+
                 // Get reg property for ECAM base and size
                 if let Some(reg) = pci_node.reg() {
                     for region in reg {
@@ -263,7 +309,11 @@ mod tests {
                         if let Some(size) = region.size {
                             ecam_size = size;
                             pci_found = true;
-                            early_println!("[PCI Test] ECAM base: {:#x}, size: {:#x}", ecam_base, ecam_size);
+                            early_println!(
+                                "[PCI Test] ECAM base: {:#x}, size: {:#x}",
+                                ecam_base,
+                                ecam_size
+                            );
                             break;
                         }
                     }
@@ -286,12 +336,18 @@ mod tests {
         // 1. PCI node is detected in device tree
         // 2. ECAM base and size are extracted correctly
         // 3. PCI infrastructure can be initialized
-        
+
         early_println!("[PCI Test] ✓ PCI host bridge detected in device tree");
-        early_println!("[PCI Test] ✓ ECAM configuration: base={:#x}, size={:#x}", ecam_base, ecam_size);
-        early_println!("[PCI Test] Note: Actual device scanning requires ECAM virtual memory mapping");
+        early_println!(
+            "[PCI Test] ✓ ECAM configuration: base={:#x}, size={:#x}",
+            ecam_base,
+            ecam_size
+        );
+        early_println!(
+            "[PCI Test] Note: Actual device scanning requires ECAM virtual memory mapping"
+        );
         early_println!("[PCI Test] Test passed: PCI infrastructure initialized successfully");
-        
+
         // For now, we consider it a success if we found the PCI node
         // Full scanning will work when ECAM is properly mapped in the kernel
         assert!(pci_found, "PCI host bridge should be detected");

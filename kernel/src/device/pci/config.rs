@@ -198,13 +198,13 @@ mod tests {
     fn test_pci_config_address_calculation() {
         let config = PciConfig::new(0x3000_0000);
         let addr = PciAddress::new(0, 0, 0, 0);
-        
+
         // Test base address
         assert_eq!(config.config_address(&addr, 0), 0x3000_0000);
-        
+
         // Test with offset
         assert_eq!(config.config_address(&addr, 0x10), 0x3000_0010);
-        
+
         // Test with different bus
         let addr = PciAddress::new(0, 1, 0, 0);
         assert_eq!(config.config_address(&addr, 0), 0x3010_0000);

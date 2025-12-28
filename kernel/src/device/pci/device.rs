@@ -5,11 +5,11 @@
 
 extern crate alloc;
 
-use core::any::Any;
 use alloc::vec::Vec;
+use core::any::Any;
 
-use crate::device::{DeviceInfo, DeviceType};
 use super::PciAddress;
+use crate::device::{DeviceInfo, DeviceType};
 
 /// PCI device class codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
