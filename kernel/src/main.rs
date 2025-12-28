@@ -679,15 +679,24 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
                 }
             });
             early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
-            get_scheduler().add_task(task, get_cpu().get_cpuid());
+            early_println!("[Scarlet Kernel] Adding init task to scheduler...");
+            let cpu_id = get_cpu().get_cpuid();
+            early_println!("[Scarlet Kernel] cpu_id for init task: {}", cpu_id);
+            get_scheduler().add_task(task, cpu_id);
+            early_println!("[Scarlet Kernel] Init task added to scheduler");
         }
         Err(e) => early_println!("[Scarlet Kernel] Error loading ELF into task: {:?}", e),
     }
 
+    early_println!("[Scarlet Kernel] About to fence before scheduler start...");
     fence(Ordering::SeqCst); // Ensure task is added to scheduler before proceeding
+    early_println!("[Scarlet Kernel] Fence complete; about to print scheduler start...");
 
-    println!("[Scarlet Kernel] Scheduler will start...");
+    // Use early_println here to avoid any potential console lock issues.
+    early_println!("[Scarlet Kernel] Scheduler will start...");
+    early_println!("[Scarlet Kernel] Calling start_scheduler()...");
     scheduler.start_scheduler();
+    early_println!("[Scarlet Kernel] Returned from start_scheduler() (unexpected)");
     loop {}
 }
 

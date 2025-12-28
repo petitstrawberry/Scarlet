@@ -139,9 +139,19 @@ impl Gic {
 
     /// Initialize the GIC distributor
     fn init_distributor(&self) {
-        // Enable the distributor
         unsafe {
-            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 1);
+            // Disable distributor while programming.
+            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x0);
+
+            // Put all interrupts into Group 1 (non-secure) so they can be delivered at EL1.
+            // This is especially important for PPIs like the architected timer.
+            let words = (self.max_interrupts as usize + 32) / 32;
+            for i in 0..words {
+                write_volatile(self.dist_reg_addr(GICD_IGROUPR + i * 4) as *mut u32, 0xFFFF_FFFF);
+            }
+
+            // Enable the distributor (both Group0 and Group1).
+            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x3);
         }
     }
 
@@ -150,8 +160,10 @@ impl Gic {
         // Set priority mask to allow all interrupts
         unsafe {
             write_volatile(self.cpu_reg_addr(cpu_id, GICC_PMR) as *mut u32, 0xFF);
-            // Enable the CPU interface
-            write_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *mut u32, 1);
+            // No priority grouping.
+            write_volatile(self.cpu_reg_addr(cpu_id, GICC_BPR) as *mut u32, 0x0);
+            // Enable the CPU interface (both Group0 and Group1).
+            write_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *mut u32, 0x3);
         }
     }
 
@@ -205,6 +217,9 @@ impl ExternalInterruptController for Gic {
     fn init(&mut self) -> InterruptResult<()> {
         // Initialize distributor
         self.init_distributor();
+
+        // Ensure the CPU interface is enabled for the boot CPU so PPIs/IRQs can be delivered.
+        self.init_cpu_interface(0);
         Ok(())
     }
 
@@ -216,11 +231,14 @@ impl ExternalInterruptController for Gic {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
-        // Set interrupt target to the specified CPU
-        let target_addr = self.target_addr(interrupt_id);
-        let cpu_mask = 1u8 << cpu_id;
-        unsafe {
-            write_volatile(target_addr as *mut u8, cpu_mask);
+        // Set interrupt target to the specified CPU (SPIs only).
+        // SGIs/PPIs (0-31) are banked per-CPU and their ITARGETSR is RO/ignored.
+        if interrupt_id >= 32 {
+            let target_addr = self.target_addr(interrupt_id);
+            let cpu_mask = 1u8 << cpu_id;
+            unsafe {
+                write_volatile(target_addr as *mut u8, cpu_mask);
+            }
         }
 
         // Enable the interrupt
@@ -358,19 +376,25 @@ unsafe impl Send for Gic {}
 unsafe impl Sync for Gic {}
 
 fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
-    // Extract distributor and CPU interface base addresses from device tree
-    let dist_base_addr = match device
+    // Extract distributor and CPU interface base addresses from device tree.
+    // QEMU virt (GICv2) provides separate MMIO regions for distributor and CPU interface.
+    let mem_resources: alloc::vec::Vec<_> = device
         .get_resources()
         .iter()
-        .find(|r| matches!(r.res_type, PlatformDeviceResourceType::MEM))
-    {
+        .filter(|r| matches!(r.res_type, PlatformDeviceResourceType::MEM))
+        .collect();
+
+    let dist_base_addr = match mem_resources.get(0) {
         Some(resource) => resource.start as usize,
         None => return Err("No memory resource found for GIC distributor"),
     };
 
-    // For now, assume CPU interface is at dist_base + 0x1000 (typical for GICv2)
-    // In a real implementation, this should be parsed from device tree
-    let cpu_base_addr = dist_base_addr + 0x1000;
+    // Prefer the second MEM region for the CPU interface.
+    // Fallback: common GICv2 layout uses dist + 0x10000.
+    let cpu_base_addr = mem_resources
+        .get(1)
+        .map(|resource| resource.start as usize)
+        .unwrap_or(dist_base_addr + 0x10000);
 
     // TODO: Parse actual interrupt count and CPU count from device tree
     let max_interrupts = 256; // Typical value

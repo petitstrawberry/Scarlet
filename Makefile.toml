@@ -78,11 +78,27 @@ dependencies = ["build-debug"]
 
 [tasks.build-debug]
 description = "Build all components in debug mode"
-dependencies = ["build-kernel-debug", "build-userlib-debug", "build-userbin-debug", "build-initramfs-debug", "build-rootfs"]
+dependencies = ["build-debug-riscv64"]
 
 [tasks.build-release]
 description = "Build all components in release mode"
-dependencies = ["build-kernel-release", "build-userlib-release", "build-userbin-release", "build-initramfs-release", "build-rootfs"]
+dependencies = ["build-release-riscv64"]
+
+[tasks.build-debug-riscv64]
+description = "Build all components in debug mode (RISC-V)"
+dependencies = ["build-kernel-debug-riscv64", "build-userlib-debug", "build-userbin-debug", "build-initramfs-debug", "build-rootfs"]
+
+[tasks.build-release-riscv64]
+description = "Build all components in release mode (RISC-V)"
+dependencies = ["build-kernel-release-riscv64", "build-userlib-release", "build-userbin-release", "build-initramfs-release", "build-rootfs"]
+
+[tasks.build-debug-aarch64]
+description = "Build all components in debug mode (AArch64)"
+dependencies = ["build-kernel-debug-aarch64", "build-userlib-debug-aarch64", "build-userbin-debug-aarch64", "build-initramfs-aarch64", "build-rootfs"]
+
+[tasks.build-release-aarch64]
+description = "Build all components in release mode (AArch64)"
+dependencies = ["build-kernel-release-aarch64", "build-userlib-release-aarch64", "build-userbin-release-aarch64", "build-initramfs-release-aarch64", "build-rootfs"]
 
 [tasks.build-kernel]
 description = "Build the kernel (default: debug)"
@@ -94,11 +110,35 @@ cwd = "kernel"
 command = "cargo"
 args = ["build"]
 
+[tasks.build-kernel-debug-riscv64]
+description = "Build the kernel in debug mode (RISC-V)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+
+[tasks.build-kernel-debug-aarch64]
+description = "Build the kernel in debug mode (AArch64)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--target", "targets/aarch64-unknown-none-elf.json"]
+
 [tasks.build-kernel-release]
 description = "Build the kernel in release mode"
 cwd = "kernel"
 command = "cargo"
 args = ["build", "--release"]
+
+[tasks.build-kernel-release-riscv64]
+description = "Build the kernel in release mode (RISC-V)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
+
+[tasks.build-kernel-release-aarch64]
+description = "Build the kernel in release mode (AArch64)"
+cwd = "kernel"
+command = "cargo"
+args = ["build", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
 
 [tasks.build-userlib]
 description = "Build user libraries (default: debug)"
@@ -215,14 +255,14 @@ description = "Run the kernel in release mode (RISC-V)"
 cwd = "kernel"
 command = "cargo"
 args = ["run", "--release"]
-dependencies = ["build-release"]
+dependencies = ["build-release-riscv64"]
 
 [tasks.run-aarch64]
 description = "Run the kernel in release mode (AArch64)"
 cwd = "kernel"
 command = "cargo"
 args = ["run", "--release", "--target", "targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-release"]
+dependencies = ["build-release-aarch64"]
 
 [tasks.run-debug]
 description = "Run the kernel in debug mode"
@@ -233,14 +273,14 @@ description = "Run the kernel in debug mode (RISC-V)"
 cwd = "kernel"
 command = "cargo"
 args = ["run"]
-dependencies = ["build-debug"]
+dependencies = ["build-debug-riscv64"]
 
 [tasks.run-debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 cwd = "kernel"
 command = "cargo"
 args = ["run", "--target", "targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-debug"]
+dependencies = ["build-debug-aarch64"]
 
 [tasks.debug]
 description = "Run the kernel in debug mode"
@@ -251,14 +291,14 @@ description = "Run the kernel in debug mode (RISC-V)"
 cwd = "kernel"
 command = "./tools/run.sh"
 args = ["--debug", "target/riscv64gc-unknown-none-elf/debug/kernel"]
-dependencies = ["build-debug"]
+dependencies = ["build-debug-riscv64"]
 
 [tasks.debug-aarch64]
 description = "Run the kernel in debug mode (AArch64)"
 cwd = "kernel"
 command = "./tools/run_aarch64.sh"
 args = ["--debug", "target/aarch64-unknown-none-elf/debug/kernel"]
-dependencies = ["build-debug"]
+dependencies = ["build-debug-aarch64"]
 
 [tasks.debug-test]
 description = "Run kernel tests in debug mode with gdb"
@@ -278,7 +318,7 @@ cwd = "kernel"
 env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json", "--", "--debug"]
-dependencies = ["build-initramfs-debug"]
+dependencies = ["build-initramfs-aarch64"]
 
 [tasks.doc]
 description = "Generate documentation for all components"

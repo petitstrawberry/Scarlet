@@ -213,11 +213,12 @@ pub fn set_trapvector(addr: usize) {
 }
 
 pub fn set_arch(addr: usize) {
-    // Store the trampoline-visible Aarch64 pointer in TPIDR_EL0.
-    // TPIDR_EL1 is reserved for the kernel's per-CPU pointer (used by get_cpu()).
+    // Store the trampoline-visible Aarch64 pointer in TPIDRRO_EL0.
+    // TPIDRRO_EL0 is readable from EL0 but not writable by EL0, so user-space
+    // cannot clobber it (unlike TPIDR_EL0 which is commonly used for TLS).
     unsafe {
         asm!(
-            "msr tpidr_el0, {0}",
+            "msr tpidrro_el0, {0}",
             in(reg) addr,
         );
     }

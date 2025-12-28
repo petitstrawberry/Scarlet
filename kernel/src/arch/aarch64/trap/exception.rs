@@ -4,8 +4,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::abi::syscall_dispatcher;
 use crate::arch::Trapframe;
 use crate::arch::get_cpu;
+use crate::interrupt::InterruptManager;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
+use crate::timer;
 use crate::{early_println, println};
 
 /// AArch64 EC (Exception Class) values from ESR_EL1.
@@ -27,6 +29,40 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
     }).is_ok();
 
     match ec {
+        // IRQ and some non-synchronous events report EC=0.
+        // Our trampoline vector currently funnels all exception classes through
+        // the same entry path, so we do best-effort demux here.
+        0 => {
+            // 1) External interrupts via the registered controller (e.g. GIC)
+            // IMPORTANT: claim_and_handle completes (EOI) before we proceed.
+            // This is needed because timer::tick() may context-switch and not return.
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            let claimed = InterruptManager::with_manager(|mgr| {
+                mgr.claim_and_handle_external_interrupt(cpu_id).ok().flatten()
+            });
+
+            if let Some(id) = claimed {
+                if id == crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ {
+                    timer::tick(trapframe);
+                }
+                return;
+            }
+
+            // 2) Local timer pending (best-effort fallback for non-GIC wiring)
+            if crate::drivers::pic::arm_generic_timer::ArmGenericTimer::is_timer_pending() {
+                timer::tick(trapframe);
+                return;
+            }
+
+            // If nothing was pending/claimed, treat as unhandled.
+            if should_log {
+                early_println!(
+                    "[aarch64] exception: EC=0 (irq/unknown) esr={:#x} epc={:#x}",
+                    esr,
+                    trapframe.epc
+                );
+            }
+        }
         EC_SVC64 => {
             if should_log {
                 early_println!(

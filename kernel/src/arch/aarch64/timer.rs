@@ -2,56 +2,135 @@
 //!
 //! Timer functionality for AArch64 architecture.
 
-// TODO: Implement AArch64 timer functionality
-// This includes generic timer support
+use core::arch::asm;
+
+use crate::{
+    arch::get_cpu,
+    interrupt::{InterruptManager, controllers::LocalInterruptType},
+};
 
 pub fn timer_init() {
-    // TODO: Initialize AArch64 generic timer
+    // Local controller registration happens via early initcall.
 }
 
 pub fn get_time() -> u64 {
-    // TODO: Get current time from AArch64 generic timer
-    0
+    InterruptManager::with_manager(|mgr| {
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        mgr.get_time(cpu_id).unwrap_or(0)
+    })
 }
 
 pub fn set_timer(_time: u64) {
-    // TODO: Set AArch64 timer interrupt
+    InterruptManager::with_manager(|mgr| {
+        let cpu_id = get_cpu().get_cpuid() as u32;
+        let _ = mgr.set_timer(cpu_id, _time);
+    });
 }
 
-pub struct ArchTimer;
+pub struct ArchTimer {
+    next_event: u64,
+    running: bool,
+    frequency: u64,
+}
 
 impl ArchTimer {
     pub fn new() -> Self {
-        ArchTimer
+        let freq = InterruptManager::with_manager(|mgr| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            mgr.get_timer_frequency_hz(cpu_id).unwrap_or(0)
+        });
+
+        ArchTimer {
+            next_event: 0,
+            running: false,
+            frequency: freq,
+        }
     }
 
     pub fn init(&self) {
-        // TODO: Initialize AArch64 generic timer
+        // Nothing to do; the controller initializes itself.
     }
 
     pub fn get_time(&self) -> u64 {
-        // TODO: Get current time from AArch64 generic timer
-        0
+        InterruptManager::with_manager(|mgr| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            mgr.get_time(cpu_id).unwrap_or(0)
+        })
     }
 
-    pub fn set_timer(&self, _time: u64) {
-        // TODO: Set AArch64 timer interrupt
+    pub fn set_timer(&self, time: u64) {
+        InterruptManager::with_manager(|mgr| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            let _ = mgr.set_timer(cpu_id, time);
+        });
     }
 
     pub fn start(&mut self) {
-        // TODO: Start AArch64 timer
+        self.running = true;
+
+        // Program the next event before unmasking interrupts.
+        self.set_timer(self.get_next_event());
+
+        // Enable timer local interrupt and ensure the corresponding PPI is enabled in the GIC.
+        InterruptManager::with_manager(|mgr| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+                .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
+
+            // QEMU virt: CNTP PPI is 30.
+            mgr.enable_external_interrupt(
+                crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
+                cpu_id,
+            )
+            .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
+        });
+
+        // Ensure IRQ is unmasked at CPU level.
+        unsafe {
+            asm!("msr daifclr, #2", options(nostack));
+        }
     }
 
     pub fn stop(&mut self) {
-        // TODO: Stop AArch64 timer
+        self.running = false;
+
+        InterruptManager::with_manager(|mgr| {
+            let cpu_id = get_cpu().get_cpuid() as u32;
+            let _ = mgr.disable_local_interrupt(cpu_id, LocalInterruptType::Timer);
+            let _ = mgr.disable_external_interrupt(
+                crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
+                cpu_id,
+            );
+            let _ = mgr.set_timer(cpu_id, u64::MAX);
+        });
     }
 
-    pub fn set_interval_us(&mut self, _interval_us: u64) {
-        // TODO: Set timer interval in microseconds
+    pub fn set_interval_us(&mut self, interval_us: u64) {
+        let current = self.get_time();
+
+        // If frequency isn't available yet (controller missing), keep behavior safe.
+        if self.frequency == 0 {
+            self.next_event = current;
+            return;
+        }
+
+        let delta = (interval_us.saturating_mul(self.frequency)) / 1_000_000;
+        self.set_next_event(current.saturating_add(delta));
     }
 
     pub fn get_time_us(&self) -> u64 {
-        // TODO: Get current time in microseconds
-        0
+        let now = self.get_time();
+        if self.frequency == 0 {
+            return 0;
+        }
+        (now.saturating_mul(1_000_000)) / self.frequency
+    }
+
+    fn get_next_event(&self) -> u64 {
+        self.next_event
+    }
+
+    fn set_next_event(&mut self, next_event: u64) {
+        self.next_event = next_event;
     }
 }
