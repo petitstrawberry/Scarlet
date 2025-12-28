@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -o pipefail
+
 # Check for debug mode environment variable or command line argument
 DEBUG_MODE=${SCARLET_DEBUG_MODE:-false}
 KERNEL_PATH=""
@@ -47,16 +49,16 @@ fi
 # Find the project root by looking for Makefile.toml
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
-INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs.cpio"
+INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-aarch64.cpio"
 
 # Ensure initramfs exists (build user programs + pack cpio if needed)
 if [ ! -f "$INITRAMFS_PATH" ]; then
     echo "initramfs not found at $INITRAMFS_PATH, generating..."
-    if [ ! -x "$PROJECT_ROOT/user/bin/dist/init" ]; then
+    if [ ! -x "$PROJECT_ROOT/user/bin/dist/aarch64/init" ]; then
         echo "User programs not found, building (release)..."
-        (cd "$PROJECT_ROOT/user/bin" && cargo make build-release)
+        (cd "$PROJECT_ROOT/user/bin" && cargo make build-release-aarch64)
     fi
-    (cd "$PROJECT_ROOT/mkfs" && ./make_initramfs.sh)
+    (cd "$PROJECT_ROOT/mkfs" && ./make_initramfs.sh aarch64)
 fi
 
 # Create temporary file for capturing output
@@ -115,8 +117,9 @@ qemu-system-aarch64 \
     -kernel "$KERNEL_BIN" \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
-# Capture QEMU exit code
-QEMU_EXIT_CODE=$?
+# Capture pipeline exit codes (qemu is element 0, tee is element 1)
+QEMU_EXIT_CODE=${PIPESTATUS[0]}
+TEE_EXIT_CODE=${PIPESTATUS[1]}
 
 # In debug mode, don't check for test patterns since we're debugging
 if [ "$DEBUG_MODE" = "true" ]; then
@@ -135,7 +138,7 @@ elif grep -q "\[Test Runner\] All .* tests passed" "$TEMP_OUTPUT"; then
     rm -f "$TEMP_OUTPUT"
     exit 0
 else
-    echo "Could not determine test result, QEMU exit code: $QEMU_EXIT_CODE"
+    echo "Could not determine test result, QEMU exit code: $QEMU_EXIT_CODE (tee: $TEE_EXIT_CODE)"
     rm -f "$TEMP_OUTPUT"
     exit $QEMU_EXIT_CODE
 fi

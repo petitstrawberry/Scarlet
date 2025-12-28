@@ -55,6 +55,20 @@ script = [
     "cd ../framebuffer && cargo build --release"
 ]
 
+[tasks.build-userlib-debug-aarch64]
+description = "Build all user libraries for AArch64 in debug mode"
+script = [
+    "cd std && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
+]
+
+[tasks.build-userlib-release-aarch64]
+description = "Build all user libraries for AArch64 in release mode"
+script = [
+    "cd std && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
+]
+
 [tasks.clean]
 description = "Clean all user library build artifacts"
 script = [

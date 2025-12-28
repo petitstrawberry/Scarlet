@@ -284,6 +284,10 @@ impl Scheduler {
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::early_println!("[aarch64][sched] on_tick: cpu_id={}", cpu_id);
+        }
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = self.task_pool.get_task(task_id) {
                 if task.time_slice > 0 {
@@ -308,11 +312,25 @@ impl Scheduler {
     /// # Arguments
     /// * `cpu` - The CPU architecture state
     pub fn schedule(&mut self, trapframe: &mut Trapframe) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::early_println!("[aarch64][sched] schedule: enter");
+        }
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
         // Step 1: Run scheduling algorithm to get current and next task IDs
         let (current_task_id, next_task_id) = self.run(cpu);
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Keep this compact; it helps locate hangs before the first user switch.
+            crate::early_println!(
+                "[aarch64][sched] schedule: current={:?} next={:?}",
+                current_task_id,
+                next_task_id
+            );
+        }
 
         // Debug output for monitoring scheduler behavior
         // if let Some(current_id) = current_task_id {
@@ -364,6 +382,33 @@ impl Scheduler {
     pub fn start_scheduler(&mut self) {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
+
+        // AArch64 bring-up: the generic timer/IRQ path is still a stub.
+        // Kick the first schedule directly so we can enter user space (init) in release builds.
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::early_println!("[aarch64] start_scheduler: direct first schedule (no timer)");
+            let trap_vector = get_trampoline_trap_vector();
+            let arch = get_trampoline_arch(cpu_id);
+            crate::early_println!(
+                "[aarch64][sched] start_scheduler: tramp_vec={:#x} arch_ptr={:#x}",
+                trap_vector,
+                arch
+            );
+            set_trapvector(trap_vector);
+            crate::early_println!("[aarch64][sched] start_scheduler: set_trapvector done");
+            set_arch(arch);
+            crate::early_println!("[aarch64][sched] start_scheduler: set_arch done");
+            cpu.set_trap_handler(get_user_trap_handler());
+            cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
+            crate::early_println!("[aarch64][sched] start_scheduler: set_next_address_space done");
+
+            let mut tf = Trapframe::new();
+            crate::early_println!("[aarch64][sched] start_scheduler: calling on_tick");
+            self.on_tick(cpu_id, &mut tf);
+            unreachable!();
+        }
+
         let timer = get_kernel_timer();
         timer.stop(cpu_id);
 

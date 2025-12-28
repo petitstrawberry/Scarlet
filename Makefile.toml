@@ -116,6 +116,18 @@ cwd = "user/lib"
 command = "cargo"
 args = ["make", "build-userlib-release"]
 
+[tasks.build-userlib-debug-aarch64]
+description = "Build user libraries for AArch64 in debug mode"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "build-userlib-debug-aarch64"]
+
+[tasks.build-userlib-release-aarch64]
+description = "Build user libraries for AArch64 in release mode"
+cwd = "user/lib"
+command = "cargo"
+args = ["make", "build-userlib-release-aarch64"]
+
 [tasks.build-userbin]
 description = "Build user programs (default: debug)"
 dependencies = ["build-userbin-debug"]
@@ -127,12 +139,26 @@ command = "cargo"
 args = ["make", "build"]
 dependencies = ["build-userlib-debug"]
 
+[tasks.build-userbin-debug-aarch64]
+description = "Build user programs for AArch64 in debug mode"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "build-aarch64"]
+dependencies = ["build-userlib-debug-aarch64"]
+
 [tasks.build-userbin-release]
 description = "Build user programs in release mode"
 cwd = "user/bin"
 command = "cargo"
 args = ["make", "build-release"]
 dependencies = ["build-userlib-release"]
+
+[tasks.build-userbin-release-aarch64]
+description = "Build user programs for AArch64 in release mode"
+cwd = "user/bin"
+command = "cargo"
+args = ["make", "build-release-aarch64"]
+dependencies = ["build-userlib-release-aarch64"]
 
 [tasks.clean]
 description = "Clean all build artifacts"
@@ -178,7 +204,7 @@ cwd = "kernel"
 env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json"]
-dependencies = ["build-initramfs"]
+dependencies = ["build-initramfs-aarch64"]
 
 [tasks.run]
 description = "Run the kernel in release mode"
@@ -277,12 +303,26 @@ command = "sh"
 args = ["make_initramfs.sh"]
 dependencies = ["build-userbin-debug"]
 
+[tasks.build-initramfs-aarch64]
+description = "Create AArch64 initramfs archive (debug)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh", "aarch64"]
+dependencies = ["build-userbin-debug-aarch64"]
+
 [tasks.build-initramfs-release]
 description = "Create initramfs archive in release mode"
 cwd = "mkfs"
 command = "sh"
 args = ["make_initramfs.sh"]
 dependencies = ["build-userbin-release"]
+
+[tasks.build-initramfs-release-aarch64]
+description = "Create AArch64 initramfs archive (release)"
+cwd = "mkfs"
+command = "sh"
+args = ["make_initramfs.sh", "aarch64"]
+dependencies = ["build-userbin-release-aarch64"]
 
 [tasks.build-initramfs-debug]
 description = "Create initramfs archive in debug mode"
