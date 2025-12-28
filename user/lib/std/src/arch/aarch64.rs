@@ -23,18 +23,18 @@ unsafe extern "Rust" {
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_start")]
 pub fn _start(x0: usize, x1: usize) -> ! {
-    // x0 = argc, x1 = argv (set by kernel's ScarletAbi)
-    let argc = x0;
-    let argv = x1 as *const *const u8;
+    // x0 = argc, x1 = argv (set by kernel's Scarlet ABI).
+    // On AArch64 bring-up the kernel-side argv/envp wiring may be incomplete.
+    // Passing garbage pointers here can lead to an infinite loop while scanning envp.
+    // Keep startup robust by initializing with an empty environment for now.
+    let _ = (x0, x1);
 
     unsafe {
-        let envp = if !argv.is_null() && argc > 0 {
-            argv.add(argc + 1) as *const *const u8
-        } else {
-            core::ptr::null()
-        };
+        env::init_env(0, core::ptr::null(), core::ptr::null());
 
-        env::init_env(argc, argv, envp);
+        // Bring-up breadcrumb: ensure SVC path works before entering user `main()`.
+        // Ignore the return value.
+        let _ = arch_syscall0(Syscall::Getpid);
 
         let ret = main();
         exit(ret as i32);

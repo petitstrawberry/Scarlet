@@ -305,12 +305,33 @@ impl PageTable {
         }
     }
 
-    /// Switch to this page table by updating TTBR0_EL1
+    /// Switch to this page table by updating TTBR0_EL1 and TTBR1_EL1
+    ///
+    /// On AArch64, TTBR0 is for lower VA (user) and TTBR1 is for upper VA (kernel/trampoline).
+    /// We set both to the same page table so that identity-mapped kernel addresses work
+    /// regardless of whether the VA is in the lower or upper range.
     pub fn switch(&self, asid: u16) {
         let ttbr_val = self.get_val_for_ttbr(asid);
         unsafe {
             asm!(
                 "msr ttbr0_el1, {ttbr}",
+                "msr ttbr1_el1, {ttbr}",
+                "dsb sy",
+                "isb",
+                "tlbi vmalle1",
+                "dsb sy",
+                "isb",
+                ttbr = in(reg) ttbr_val,
+            );
+        }
+    }
+
+    /// Switch TTBR1_EL1 to this page table (for kernel high-VA mapping)
+    pub fn switch_ttbr1(&self, asid: u16) {
+        let ttbr_val = self.get_val_for_ttbr(asid);
+        unsafe {
+            asm!(
+                "msr ttbr1_el1, {ttbr}",
                 "dsb sy",
                 "isb",
                 "tlbi vmalle1",
@@ -529,9 +550,32 @@ pub fn init_mmu_registers() {
         asm!("msr mair_el1, {}", in(reg) mair_val);
 
         // Set up TCR_EL1 (Translation Control Register)
-        // T0SZ = 16 (48-bit VA), TG0 = 00 (4KB), SH0 = 11 (Inner Shareable)
-        // ORGN0 = 01 (Write-Back Cacheable), IRGN0 = 01 (Write-Back Cacheable)
-        let tcr_val: u64 = 0x00000000005b5503; // Configure for 48-bit VA space
+        // We need BOTH TTBR0 (lower VA) and TTBR1 (upper VA) configured.
+        //
+        // T0SZ (bits 5:0)   = 16 -> 48-bit lower VA space
+        // T1SZ (bits 21:16) = 16 -> 48-bit upper VA space
+        // TG0 (bits 15:14)  = 0b00 -> 4KB granule for TTBR0
+        // TG1 (bits 31:30)  = 0b10 -> 4KB granule for TTBR1
+        // SH0 (bits 13:12)  = 0b11 -> Inner Shareable
+        // SH1 (bits 29:28)  = 0b11 -> Inner Shareable
+        // ORGN0/IRGN0 (bits 11:10, 9:8) = 0b01 -> Write-Back Cacheable
+        // ORGN1/IRGN1 (bits 27:26, 25:24) = 0b01 -> Write-Back Cacheable
+        // IPS (bits 34:32)  = 0b000 -> 32-bit PA (enough for QEMU virt with 2GB)
+        //
+        // TCR = 0x80100010 | T0SZ=16 | T1SZ=16<<16 | TG1=0b10<<30 | SH1/ORGN1/IRGN1
+        //     = 0x80803510 (simplified for 4KB granule, 48-bit VA both)
+        //
+        // Detailed breakdown:
+        //   T0SZ=16 (0x10), IRGN0=0b01, ORGN0=0b01, SH0=0b11, TG0=0b00 -> low bits
+        //   T1SZ=16 (0x10 << 16), IRGN1=0b01, ORGN1=0b01, SH1=0b11, TG1=0b10 -> high bits
+        //   IPS=0b000 for 32-bit PA (sufficient)
+        //
+        // Compute:
+        //   lower = T0SZ(16) | IRGN0(1<<8) | ORGN0(1<<10) | SH0(3<<12) = 0x10 | 0x100 | 0x400 | 0x3000 = 0x3510
+        //   upper = T1SZ(16<<16) | IRGN1(1<<24) | ORGN1(1<<26) | SH1(3<<28) | TG1(2<<30)
+        //         = 0x100000 | 0x1000000 | 0x4000000 | 0x30000000 | 0x80000000 = 0xB5100000
+        //   tcr = lower | upper = 0xB5103510
+        let tcr_val: u64 = 0xB5103510;
         asm!("msr tcr_el1, {}", in(reg) tcr_val);
 
         // Enable MMU in SCTLR_EL1

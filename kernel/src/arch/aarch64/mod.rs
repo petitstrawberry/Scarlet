@@ -187,7 +187,7 @@ fn trap_init(aarch64: &mut Aarch64) {
 
     let trap_stack = trap_stack_start + stack_size * (aarch64.cpuid + 1) as usize;
     aarch64.kernel_stack = trap_stack as u64;
-    // TODO: Set kernel trap handler once implemented
+    aarch64.kernel_trap = trap::user::arch_user_trap_handler as u64;
 
     let scratch_addr = aarch64 as *const _ as usize;
 
@@ -272,16 +272,10 @@ pub fn get_current_cpu_id() -> usize {
 }
 
 pub fn set_next_mode(mode: vcpu::Mode) {
-    // TODO: Implement mode switching for AArch64
-    // This would involve setting SPSR_EL1 appropriately
-    match mode {
-        vcpu::Mode::User => {
-            early_println!("[aarch64] TODO: set_next_mode to User");
-        }
-        vcpu::Mode::Kernel => {
-            early_println!("[aarch64] TODO: set_next_mode to Kernel");
-        }
-    }
+    // AArch64 return mode is currently chosen in the trampoline (`_user_trap_exit`).
+    // Keep this as a no-op so shared scheduler code can call it without
+    // architecture-specific branching or noisy TODO logs.
+    let _ = mode;
 }
 
 /// Memory barrier for device/MMIO (I/O) operations.

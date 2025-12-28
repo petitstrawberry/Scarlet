@@ -1,4 +1,5 @@
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::Trapframe;
@@ -12,14 +13,29 @@ const EC_SVC64: u64 = 0x15;
 const EC_INSN_ABORT_LOWER_EL: u64 = 0x20;
 const EC_DATA_ABORT_LOWER_EL: u64 = 0x24;
 
+// Keep early bring-up logs bounded.
+static EXCEPTION_LOG_BUDGET: AtomicUsize = AtomicUsize::new(64);
+
 pub fn arch_exception_handler(trapframe: &mut Trapframe) {
     let esr: u64;
     unsafe { asm!("mrs {0}, esr_el1", out(reg) esr, options(nostack)); }
 
     let ec = (esr >> 26) & 0x3f;
 
+    let should_log = EXCEPTION_LOG_BUDGET.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        if v == 0 { None } else { Some(v - 1) }
+    }).is_ok();
+
     match ec {
         EC_SVC64 => {
+            if should_log {
+                early_println!(
+                    "[aarch64] exception: SVC64 esr={:#x} epc={:#x} nr(x8)={:#x}",
+                    esr,
+                    trapframe.epc,
+                    trapframe.get_syscall_number(),
+                );
+            }
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
                     trapframe.set_return_value(ret);
@@ -35,6 +51,18 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
         EC_INSN_ABORT_LOWER_EL | EC_DATA_ABORT_LOWER_EL => {
             let far: usize;
             unsafe { asm!("mrs {0}, far_el1", out(reg) far, options(nostack)); }
+
+            if should_log {
+                let wnr = ((esr >> 6) & 0x1) != 0;
+                early_println!(
+                    "[aarch64] exception: {} abort esr={:#x} far={:#x} epc={:#x} wnr={}",
+                    if ec == EC_INSN_ABORT_LOWER_EL { "insn" } else { "data" },
+                    esr,
+                    far,
+                    trapframe.epc,
+                    wnr as u8,
+                );
+            }
 
             let task = get_scheduler()
                 .get_current_task(get_cpu().get_cpuid())

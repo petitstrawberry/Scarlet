@@ -69,6 +69,11 @@ pub extern "C" fn _user_trap_entry() {
             mrs x15, ttbr0_el1
             msr ttbr0_el1, x17
             isb
+            // Ensure the new TTBR0 takes effect for subsequent low-VA accesses
+            // (kernel stack + trapframe live in low VA space).
+            tlbi vmalle1
+            dsb ish
+            isb
             str x15, [x16, #16]
 
             // Switch to per-task kernel stack top from cpu.kernel_stack (offset 24)
@@ -142,6 +147,10 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         mrs x15, ttbr0_el1
         msr ttbr0_el1, x17
         isb
+        // Ensure the restored TTBR0 takes effect before returning to EL0.
+        tlbi vmalle1
+        dsb ish
+        isb
         str x15, [x16, #16]
 
         // Restore x1-x30 first
@@ -174,6 +183,9 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
 
 #[unsafe(export_name = "arch_user_trap_handler")]
 pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
+    // Breadcrumb: we arrived in the trap handler from EL0.
+    early_println!("[aarch64] trap_handler: entered, tf_addr={:#x}", addr);
+
     let trapframe: &mut Trapframe = unsafe { &mut *(addr as *mut Trapframe) };
 
     // Keep trap vector pointing to trampoline base.
@@ -200,25 +212,30 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
         let tpidr_el1: usize;
         let tpidr_el0: usize;
         let ttbr0_el1: usize;
+        let ttbr1_el1: usize;
+        let vbar_el1: usize;
         core::arch::asm!(
             "mrs {0}, tpidr_el1",
             "mrs {1}, tpidr_el0",
             "mrs {2}, ttbr0_el1",
+            "mrs {3}, ttbr1_el1",
+            "mrs {4}, vbar_el1",
             out(reg) tpidr_el1,
             out(reg) tpidr_el0,
             out(reg) ttbr0_el1,
+            out(reg) ttbr1_el1,
+            out(reg) vbar_el1,
             options(nostack)
         );
         early_println!(
-            "[aarch64] arch_switch_to_user_space: tf={:#x} epc={:#x} sp_el0(saved)={:#x} tramp={:#x} exit={:#x} tpidr_el1={:#x} tpidr_el0={:#x} ttbr0_el1={:#x}",
+            "[aarch64] switch_to_user: tf={:#x} epc={:#x} sp={:#x} tramp={:#x} vbar={:#x} ttbr0={:#x} ttbr1={:#x}",
             addr,
             trapframe.epc as usize,
             trapframe.regs.reg[31],
             trampoline_base,
-            trap_exit_addr,
-            tpidr_el1,
-            tpidr_el0,
+            vbar_el1,
             ttbr0_el1,
+            ttbr1_el1,
         );
     }
 
