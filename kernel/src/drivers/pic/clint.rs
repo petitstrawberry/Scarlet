@@ -228,7 +228,9 @@ impl LocalInterruptController for Clint {
     }
 
     fn get_timer_frequency_hz(&self) -> u64 {
-        10_000_000 // Fixed frequency for QEMU virt platform... It may get from FDT.
+        // Prefer the timebase frequency provided by the device tree.
+        // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
+        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000)
     }
 }
 

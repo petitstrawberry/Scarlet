@@ -122,12 +122,12 @@ impl LocalInterruptController for SbiClint {
     }
 
     /// Send a software interrupt to a specific CPU
-    fn send_software_interrupt(&mut self, target_cpu: CpuId) -> InterruptResult<()> {
+    fn send_software_interrupt(&mut self, _target_cpu: CpuId) -> InterruptResult<()> {
         Ok(())
     }
 
     /// Clear a software interrupt for a specific CPU
-    fn clear_software_interrupt(&mut self, cpu_id: CpuId) -> InterruptResult<()> {
+    fn clear_software_interrupt(&mut self, _cpu_id: CpuId) -> InterruptResult<()> {
         // self.validate_cpu_id(cpu_id)?;
 
         // let addr = self.msip_addr(cpu_id);
@@ -164,7 +164,9 @@ impl LocalInterruptController for SbiClint {
     }
 
     fn get_timer_frequency_hz(&self) -> u64 {
-        10_000_000 // Fixed frequency for QEMU virt platform... It may get from FDT.
+        // Prefer the timebase frequency provided by the device tree.
+        // Fallback keeps QEMU virt default (10MHz) working even if FDT is unavailable.
+        crate::arch::riscv64::fdt::timebase_frequency_hz_from_fdt().unwrap_or(10_000_000)
     }
 }
 

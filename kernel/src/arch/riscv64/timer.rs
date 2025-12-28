@@ -1,10 +1,6 @@
 use core::arch::asm;
 
-use crate::{
-    arch::{get_cpu, instruction::sbi::sbi_set_timer},
-    environment::RISCV_STIMER_FREQ,
-    interrupt::InterruptManager,
-};
+use crate::{arch::get_cpu, interrupt::InterruptManager};
 
 pub type ArchTimer = Stimer;
 
