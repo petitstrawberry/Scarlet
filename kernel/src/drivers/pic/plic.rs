@@ -76,18 +76,18 @@ impl Plic {
     ///
     /// * `base_addr` - Physical base address of the PLIC
     /// * `max_interrupts` - Maximum interrupt ID supported (1-based)
-    /// * `s_mode_contexts` - Vector mapping CPU ID -> PLIC context ID for S-mode
+    /// * `s_mode_context_ids` - Vector mapping CPU ID -> PLIC context ID for S-mode
     pub fn with_contexts(
         base_addr: usize,
         max_interrupts: InterruptId,
-        s_mode_contexts: Vec<usize>,
+        s_mode_context_ids: Vec<usize>,
     ) -> Self {
-        let max_cpus = s_mode_contexts.len() as CpuId;
+        let max_cpus = s_mode_context_ids.len() as CpuId;
         Self {
             base_addr,
             max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
             max_cpus: max_cpus.min(MAX_CPUS),
-            s_mode_contexts: Some(s_mode_contexts),
+            s_mode_contexts: Some(s_mode_context_ids),
         }
     }
 
