@@ -52,7 +52,7 @@ pub fn init_arch(cpu_id: usize) {
     trap_init(aarch64);
 }
 
-#[repr(align(4))]
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Aarch64 {
     scratch: u64,      // offeset: 0 (unused, for compatibility)
@@ -102,11 +102,12 @@ impl Aarch64 {
     }
 }
 
-#[repr(align(4))]
+#[repr(C, align(16))]
 #[derive(Debug, Clone)]
 pub struct Trapframe {
     pub regs: IntRegisters,
     pub epc: u64, // Using epc name for compatibility (maps to ELR_EL1 in AArch64)
+    pub _pad: u64,
 }
 
 impl Trapframe {
@@ -114,6 +115,7 @@ impl Trapframe {
         Trapframe {
             regs: IntRegisters::new(),
             epc: 0,
+            _pad: 0,
         }
     }
 
@@ -211,10 +213,11 @@ pub fn set_trapvector(addr: usize) {
 }
 
 pub fn set_arch(addr: usize) {
-    // Set TPIDR_EL1 to point to the Aarch64 struct (equivalent to sscratch in RISC-V)
+    // Store the trampoline-visible Aarch64 pointer in TPIDR_EL0.
+    // TPIDR_EL1 is reserved for the kernel's per-CPU pointer (used by get_cpu()).
     unsafe {
         asm!(
-            "msr tpidr_el1, {0}",
+            "msr tpidr_el0, {0}",
             in(reg) addr,
         );
     }

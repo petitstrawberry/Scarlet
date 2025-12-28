@@ -3,6 +3,7 @@ use core::arch::{asm, naked_asm};
 use super::exception::arch_exception_handler;
 use crate::arch::{Trapframe, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
+use crate::early_println;
 
 // Trap vector base in the trampoline. Must be 2KB-aligned for VBAR_EL1.
 // We use this symbol as the "trapvector" base (mirroring RISC-V's _user_trap_entry usage).
@@ -60,8 +61,8 @@ pub extern "C" fn _user_trap_entry() {
             // Disable interrupts
             msr daifset, #0xf
 
-            // x16: cpu pointer (TPIDR_EL1 points to arch struct in trampoline)
-            mrs x16, tpidr_el1
+            // x16: cpu pointer (TPIDR_EL0 points to arch struct in trampoline)
+            mrs x16, tpidr_el0
 
             // Swap TTBR0_EL1 with cpu.ttbr0 (offset 16)
             ldr x17, [x16, #16]
@@ -74,8 +75,8 @@ pub extern "C" fn _user_trap_entry() {
             ldr x17, [x16, #24]
             mov sp, x17
 
-            // Allocate trapframe (AArch64 Trapframe is 264 bytes)
-            sub sp, sp, #264
+            // Allocate trapframe (keep SP 16-byte aligned; Trapframe is 272 bytes)
+            sub sp, sp, #272
 
             // Save x0-x30
             stp x0, x1, [sp, #0]
@@ -131,11 +132,12 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
 
         // Configure return to EL0t (User) for now.
         // M[3:0] = 0b0000 (EL0t)
-        mov x1, #0
+        // Also keep interrupts masked initially (D,A,I,F = 1) to avoid spurious IRQ/FIQ/SError.
+        mov x1, #0x3c0
         msr spsr_el1, x1
 
         // Swap TTBR0_EL1 with cpu.ttbr0 (offset 16)
-        mrs x16, tpidr_el1
+        mrs x16, tpidr_el0
         ldr x17, [x16, #16]
         mrs x15, ttbr0_el1
         msr ttbr0_el1, x17
@@ -191,6 +193,34 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let trap_exit_addr = trampoline_base + trap_exit_offset;
 
     set_trapvector(trampoline_base);
+
+    // Minimal breadcrumb so we can see we're about to ERET.
+    // If we time out after this, the hang is likely in trampoline return or the first user instruction.
+    unsafe {
+        let tpidr_el1: usize;
+        let tpidr_el0: usize;
+        let ttbr0_el1: usize;
+        core::arch::asm!(
+            "mrs {0}, tpidr_el1",
+            "mrs {1}, tpidr_el0",
+            "mrs {2}, ttbr0_el1",
+            out(reg) tpidr_el1,
+            out(reg) tpidr_el0,
+            out(reg) ttbr0_el1,
+            options(nostack)
+        );
+        early_println!(
+            "[aarch64] arch_switch_to_user_space: tf={:#x} epc={:#x} sp_el0(saved)={:#x} tramp={:#x} exit={:#x} tpidr_el1={:#x} tpidr_el0={:#x} ttbr0_el1={:#x}",
+            addr,
+            trapframe.epc as usize,
+            trapframe.regs.reg[31],
+            trampoline_base,
+            trap_exit_addr,
+            tpidr_el1,
+            tpidr_el0,
+            ttbr0_el1,
+        );
+    }
 
     unsafe {
         asm!(
