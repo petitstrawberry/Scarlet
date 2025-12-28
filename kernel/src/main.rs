@@ -280,7 +280,7 @@ pub mod test;
 
 extern crate alloc;
 use alloc::string::ToString;
-use device::manager::DeviceManager;
+use device::manager::{DeviceManager, DriverPriority};
 use environment::PAGE_SIZE;
 use initcall::{call_initcalls, driver::driver_initcall_call, early::early_initcall_call};
 use slab_allocator_rs::MIN_HEAP_SIZE;
@@ -291,10 +291,7 @@ use crate::{
     interrupt::InterruptManager,
 };
 use arch::get_cpu;
-use core::{
-    panic::PanicInfo,
-    sync::atomic::{Ordering, fence},
-};
+use core::sync::atomic::{Ordering, fence};
 use mem::{__KERNEL_SPACE_START, allocator::init_heap};
 use sched::scheduler::get_scheduler;
 use task::{elf_loader::load_elf_into_task, new_user_task};
@@ -304,7 +301,7 @@ use vm::{kernel_vm_init, vmem::MemoryArea};
 /// A panic handler is required in Rust, this is probably the most basic one possible
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
     use arch::instruction::idle;
 
     crate::early_println!("[Scarlet Kernel] panic: {}", info);
@@ -566,8 +563,31 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     /* Populate devices from BootInfo device source */
     early_println!("[Scarlet Kernel] Populating devices...");
     let device_manager = DeviceManager::get_mut_manager();
-    device_manager.populate_devices_from_source(&boot_info.device_source, None);
+    // Two-phase interrupt bring-up:
+    // 1) Discover critical interrupt controllers (PLIC/CLINT) first.
+    // 2) Initialize interrupt controllers.
+    // 3) Discover remaining devices (which may enable specific IRQ lines).
+    device_manager
+        .populate_devices_from_source(&boot_info.device_source, Some(&[DriverPriority::Critical]));
     fence(Ordering::SeqCst); // Ensure device population is complete before proceeding
+
+    /* Initialize interrupt controllers (stage 1) */
+    early_println!("[Scarlet Kernel] Initializing interrupt controllers...");
+    InterruptManager::get_manager().init_controllers();
+
+    fence(Ordering::SeqCst); // Ensure interrupt controllers are initialized before proceeding
+
+    /* Discover remaining devices */
+    early_println!("[Scarlet Kernel] Populating remaining devices...");
+    device_manager.populate_devices_from_source(
+        &boot_info.device_source,
+        Some(&[
+            DriverPriority::Core,
+            DriverPriority::Standard,
+            DriverPriority::Late,
+        ]),
+    );
+    fence(Ordering::SeqCst);
 
     /* After this point, we can use the device manager */
     /* Serial console also works */
@@ -603,9 +623,9 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
-    /* Initialize interrupt management system */
-    println!("[Scarlet Kernel] Initializing interrupt system...");
-    InterruptManager::get_manager().init();
+    /* Enable CPU interrupt reception (stage 2) */
+    println!("[Scarlet Kernel] Enabling CPU interrupts...");
+    InterruptManager::get_manager().enable_cpu_interrupts();
 
     fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
 

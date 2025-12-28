@@ -206,7 +206,12 @@ impl InterruptManager {
         f(&mut Self::global().lock())
     }
 
-    pub fn init(&mut self) {
+    /// Initialize interrupt controllers only (stage 1).
+    ///
+    /// This is intended to run after interrupt controller drivers (e.g., CLINT/PLIC)
+    /// are discovered/registered, but before other device drivers start enabling
+    /// per-device interrupts.
+    pub fn init_controllers(&mut self) {
         // Initialize local controllers (e.g., CLINT)
         match self.controllers.init_local_controllers() {
             Ok(()) => {}
@@ -222,11 +227,21 @@ impl InterruptManager {
                 crate::early_println!("Failed to initialize external controller: {}", e);
             }
         }
+    }
 
+    /// Enable CPU interrupt reception (stage 2).
+    ///
+    /// This should run after device drivers have registered their handlers and
+    /// enabled the desired interrupt lines in the controller.
+    pub fn enable_cpu_interrupts(&mut self) {
         enable_external_interrupts(); // Enable external interrupts
         // Timer interrupts are disabled by default, enable them if needed by scheduler or other components
         enable_interrupts(); // Enable interrupts globally
     }
+
+    // Note: We intentionally do not provide a one-shot `init()` here.
+    // The kernel boot sequence uses a strict two-stage bring-up to avoid
+    // device drivers enabling interrupts before controllers are initialized.
 
     /// Handle an external interrupt
     pub fn handle_external_interrupt(
