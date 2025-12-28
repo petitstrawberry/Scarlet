@@ -284,10 +284,6 @@ impl Scheduler {
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
-        #[cfg(target_arch = "aarch64")]
-        {
-            crate::early_println!("[aarch64][sched] on_tick: cpu_id={}", cpu_id);
-        }
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = self.task_pool.get_task(task_id) {
                 if task.time_slice > 0 {
@@ -312,25 +308,11 @@ impl Scheduler {
     /// # Arguments
     /// * `cpu` - The CPU architecture state
     pub fn schedule(&mut self, trapframe: &mut Trapframe) {
-        #[cfg(target_arch = "aarch64")]
-        {
-            crate::early_println!("[aarch64][sched] schedule: enter");
-        }
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
         // Step 1: Run scheduling algorithm to get current and next task IDs
         let (current_task_id, next_task_id) = self.run(cpu);
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            // Keep this compact; it helps locate hangs before the first user switch.
-            crate::early_println!(
-                "[aarch64][sched] schedule: current={:?} next={:?}",
-                current_task_id,
-                next_task_id
-            );
-        }
 
         // Debug output for monitoring scheduler behavior
         // if let Some(current_id) = current_task_id {
