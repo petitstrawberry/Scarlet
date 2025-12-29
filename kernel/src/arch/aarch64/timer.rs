@@ -70,46 +70,44 @@ impl ArchTimer {
     pub fn start(&mut self) {
         self.running = true;
 
-        crate::early_println!("[Timer] start() called: self={:p} next_event={:#x} initialized={}", 
-            self as *const _, self.next_event, self.initialized);
-        
-        // Read current timer value before setting compare value
+        // The common scheduler code enables interrupts *before* calling timer.start().
+        // Open the gate here so subsequent enable calls can actually unmask.
+        crate::arch::mark_interrupts_allowed();
+
+        // Avoid programming a compare value in the past. This can create an immediate
+        // interrupt storm (especially when the requested interval is 0).
         let current_time = self.get_time();
-        crate::early_println!("[Timer] Current timer count: {:#x}, compare value: {:#x}, diff: {}",
-            current_time, self.next_event, self.next_event.wrapping_sub(current_time) as i64);
-        
+        let mut next = self.get_next_event();
+        if next <= current_time {
+            next = current_time.wrapping_add(1);
+            self.set_next_event(next);
+        }
+
         // Program the next event before unmasking interrupts.
-        self.set_timer(self.get_next_event());
+        self.set_timer(next);
         
         // Only perform GIC configuration on first start
         if !self.initialized {
-            crate::early_println!("[Timer] First start - configuring GIC");
-            
             // CRITICAL: Mask interrupts before configuring GIC to avoid deadlock
             // (interrupt firing during GIC config would try to re-lock InterruptManager)
             unsafe {
                 asm!("msr daifset, #2", options(nostack));
             }
-            crate::early_println!("[Timer] Interrupts masked during GIC configuration");
 
             // Enable timer local interrupt and ensure the corresponding PPI is enabled in the GIC.
             InterruptManager::with_manager(|mgr| {
                 let cpu_id = get_cpu().get_cpuid() as u32;
-                crate::early_println!("[Timer] Enabling local timer interrupt");
                 mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
                     .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
 
                 // QEMU virt: CNTP PPI is 30.
                 // PPIs are banked per-CPU but still need to be enabled in GIC distributor.
-                crate::early_println!("[Timer] Enabling PPI 30 in GIC distributor");
                 mgr.enable_external_interrupt(
                     crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
                     cpu_id,
                 )
                 .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
             });
-            
-            crate::early_println!("[Timer] GIC configuration complete");
 
             // CRITICAL: Set initialized flag BEFORE unmasking interrupts
             // Otherwise, if an interrupt fires immediately after unmask, it will
@@ -120,11 +118,6 @@ impl ArchTimer {
             unsafe {
                 asm!("msr daifclr, #2", options(nostack));
             }
-            
-            crate::early_println!("[Timer] Timer initialization complete, self={:p} initialized={}", 
-                self as *const _, self.initialized);
-        } else {
-            crate::early_println!("[Timer] Skipping GIC config (already initialized)");
         }
         // Note: Subsequent calls just update CVAL, no DAIF/GIC manipulation
         // This prevents nested interrupts during tick handling

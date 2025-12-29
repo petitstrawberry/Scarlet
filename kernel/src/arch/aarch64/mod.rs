@@ -1,5 +1,6 @@
 use core::arch::asm;
 use core::mem::transmute;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::early_println;
 use crate::environment::NUM_OF_CPUS;
@@ -28,6 +29,23 @@ use crate::vm::vmem::MemoryArea;
 use crate::arch::vm::get_root_pagetable;
 
 pub type Arch = Aarch64;
+
+// Common scheduler code enables interrupts before calling timer.start().
+// On AArch64 we must keep global interrupts masked until the timer has been
+// programmed (and the IRQ line is configured) to avoid spurious early IRQs.
+static INTERRUPTS_ALLOWED: AtomicBool = AtomicBool::new(false);
+
+/// Allow `enable_interrupt()` to actually unmask interrupts.
+///
+/// This is called from the AArch64 timer path once the timer has been
+/// programmed at least once.
+pub fn mark_interrupts_allowed() {
+    INTERRUPTS_ALLOWED.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn interrupts_allowed() -> bool {
+    INTERRUPTS_ALLOWED.load(Ordering::Relaxed)
+}
 
 /// Returns the device memory areas for AArch64 QEMU virt platform.
 /// These areas contain memory-mapped I/O devices and should be mapped
@@ -252,14 +270,17 @@ pub fn set_arch(addr: usize) {
 }
 
 pub fn enable_interrupt() {
-    unsafe {
-        asm!("msr daifclr, #0xf");
+    // Keep interrupts globally masked until the timer has started.
+    if !interrupts_allowed() {
+        unsafe { asm!("msr daifset, #0xf", options(nostack)); }
+        return;
     }
+    unsafe { asm!("msr daifclr, #0xf", options(nostack)); }
 }
 
 pub fn disable_interrupt() {
     unsafe {
-        asm!("msr daifset, #0xf");
+        asm!("msr daifset, #0xf", options(nostack));
     }
 }
 

@@ -9,10 +9,13 @@ pub fn interrupt_init() {
 }
 
 pub fn enable_interrupts() {
-    // Unmask IRQ/FIQ/SError/Debug.
-    unsafe {
-        asm!("msr daifclr, #0xf", options(nostack));
+    // Keep interrupts masked until the timer has started at least once.
+    // See `crate::arch::aarch64::mark_interrupts_allowed`.
+    if !crate::arch::aarch64::interrupts_allowed() {
+        unsafe { asm!("msr daifset, #0xf", options(nostack)); }
+        return;
     }
+    unsafe { asm!("msr daifclr, #0xf", options(nostack)); }
 }
 
 pub fn disable_interrupts() {
@@ -23,9 +26,11 @@ pub fn disable_interrupts() {
 
 pub fn enable_external_interrupts() {
     // External interrupts arrive as IRQ.
-    unsafe {
-        asm!("msr daifclr, #0x2", options(nostack));
+    if !crate::arch::aarch64::interrupts_allowed() {
+        unsafe { asm!("msr daifset, #0xf", options(nostack)); }
+        return;
     }
+    unsafe { asm!("msr daifclr, #0x2", options(nostack)); }
 }
 
 pub fn with_interrupts_disabled<F, R>(f: F) -> R
