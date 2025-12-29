@@ -134,6 +134,34 @@ pub extern "C" fn _entry() {
         msr     spsel, x1
         isb
         
+        // Check if we're at EL1 or EL2, and if at EL2, drop to EL1
+        mrs     x1, CurrentEL
+        lsr     x1, x1, #2
+        and     x1, x1, #3              // Extract EL bits
+        cmp     x1, #2
+        b.ne    1f                       // Already at EL1 or lower, skip EL2 setup
+        
+        // We're at EL2, need to drop to EL1
+        // Configure HCR_EL2 to route physical IRQs/FIQs to EL1
+        mov     x1, #(1 << 31)           // RW bit: EL1 is AArch64
+        orr     x1, x1, #(1 << 4)        // IMO: Physical IRQ routed to EL1
+        orr     x1, x1, #(1 << 3)        // FMO: Physical FIQ routed to EL1  
+        msr     hcr_el2, x1
+        isb
+        
+        // Set SPSR_EL2 for EL1h (use SP_EL1)
+        mov     x1, #0x3c5               // EL1h + all interrupts masked initially
+        msr     spsr_el2, x1
+        
+        // Set ELR_EL2 to continue at label 1f in EL1
+        adr     x1, 1f
+        msr     elr_el2, x1
+        
+        // Drop to EL1
+        eret
+        
+    1:
+        
         // Invalidate TLB
         tlbi    vmalle1
         dsb     sy

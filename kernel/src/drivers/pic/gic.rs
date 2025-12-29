@@ -160,23 +160,44 @@ impl Gic {
             let ppi_30_bit = 1u32 << 30;
             write_volatile(self.dist_reg_addr(GICD_ISENABLER) as *mut u32, ppi_30_bit);
             crate::early_println!("[GIC] Timer PPI 30 pre-enabled");
+            
+            // Set timer PPI priority to highest (0 = highest priority)
+            crate::early_println!("[GIC] Setting PPI 30 priority to 0 (highest)");
+            write_volatile(self.priority_addr(30) as *mut u8, 0x0);
 
-            // Enable the distributor (both Group0 and Group1).
-            crate::early_println!("[GIC] Enabling distributor");
-            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x3);
-            crate::early_println!("[GIC] Distributor enabled");
+            // Enable the distributor for Group 1 interrupts.
+            // Bit 0 = Enable Group 0, Bit 1 = Enable Group 1.
+            // For EL1 non-secure, we need Group 1 enabled (bit 1).
+            crate::early_println!("[GIC] Enabling distributor (Group 1)");
+            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x2);
+            
+            // Read back to verify
+            let ctrl_val = read_volatile(self.dist_reg_addr(GICD_CTLR) as *const u32);
+            let isenabler_val = read_volatile(self.dist_reg_addr(GICD_ISENABLER) as *const u32);
+            crate::early_println!("[GIC] Distributor configured: CTLR={:#x} ISENABLER0={:#x}", ctrl_val, isenabler_val);
         }
     }
 
     /// Initialize the GIC CPU interface for a specific CPU
     fn init_cpu_interface(&self, cpu_id: CpuId) {
-        // Set priority mask to allow all interrupts
+        crate::early_println!("[GIC] init_cpu_interface for CPU {}", cpu_id);
+        // Set priority mask to allow all interrupts (lower priority = higher precedence)
         unsafe {
+            crate::early_println!("[GIC] Setting PMR to 0xFF (allow all priorities)");
             write_volatile(self.cpu_reg_addr(cpu_id, GICC_PMR) as *mut u32, 0xFF);
             // No priority grouping.
+            crate::early_println!("[GIC] Setting BPR to 0 (no priority grouping)");
             write_volatile(self.cpu_reg_addr(cpu_id, GICC_BPR) as *mut u32, 0x0);
-            // Enable the CPU interface (both Group0 and Group1).
-            write_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *mut u32, 0x3);
+            // Enable the CPU interface for Group 1 interrupts (bit 0 = Group 0, bit 1 = FIQEn for Group 1)
+            // For EL1 non-secure, we want Group 1 interrupts (bit 0), and FIQ bypass disabled.
+            // Setting to 0x1 enables Group 1 interrupts to be signaled to the CPU.
+            crate::early_println!("[GIC] Enabling GICC_CTLR (Group 1)");
+            write_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *mut u32, 0x1);
+            
+            // Read back to verify
+            let ctlr_val = read_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *const u32);
+            let pmr_val = read_volatile(self.cpu_reg_addr(cpu_id, GICC_PMR) as *const u32);
+            crate::early_println!("[GIC] CPU interface configured: CTLR={:#x} PMR={:#x}", ctlr_val, pmr_val);
         }
     }
 
