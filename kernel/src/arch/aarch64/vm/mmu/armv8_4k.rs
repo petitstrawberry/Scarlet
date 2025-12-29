@@ -119,18 +119,29 @@ impl PageTableEntry {
         self
     }
 
-    /// Set readable permission (bit 6 controls read access for EL0)
+    /// Set stage-1 access permissions AP[2:1] (bits [7:6]).
+    ///
+    /// Encoding (ARMv8-A, AArch64 stage-1):
+    /// - 0b00: EL1 RW, EL0 no access
+    /// - 0b01: EL1 RW, EL0 RW
+    /// - 0b10: EL1 RO, EL0 no access
+    /// - 0b11: EL1 RO, EL0 RO
+    pub fn set_ap(&mut self, ap: u8) -> &mut Self {
+        self.entry &= !(0x3 << 6);
+        self.entry |= ((ap as u64) & 0x3) << 6;
+        self
+    }
+
+    /// Set readable permission
     pub fn readable(&mut self) -> &mut Self {
-        // In AArch64, access permissions are controlled by AP bits [7:6]
-        // AP[1] = 0 for read/write, AP[0] controls EL0 access
-        self.entry &= !(1 << 7); // Clear AP[1] for read/write access
+        // Read permission is implied by AP; keep existing AP.
         self
     }
 
     /// Set writable permission
     pub fn writable(&mut self) -> &mut Self {
-        // AP[1] = 0 allows write access (already set by readable())
-        self.readable()
+        // Write permission is implied by AP; keep existing AP.
+        self
     }
 
     /// Set executable permission
@@ -143,7 +154,8 @@ impl PageTableEntry {
 
     /// Allow access from EL0 (user space)
     pub fn accessible_from_user(&mut self) -> &mut Self {
-        self.entry |= 1 << 6; // Set AP[0] for EL0 access
+        // EL0 access is controlled via AP[7:6].
+        // Keep existing AP; users of this API should set AP explicitly.
         self
     }
 
@@ -341,7 +353,7 @@ impl PageTable {
             
             // Invalidate TLBs
             asm!(
-                "tlbi vmalle1",
+                "tlbi vmalle1is",
                 "dsb sy",
                 "isb",
             );
@@ -370,7 +382,7 @@ impl PageTable {
                 "msr ttbr1_el1, {ttbr}",
                 "dsb sy",
                 "isb",
-                "tlbi vmalle1",
+                "tlbi vmalle1is",
                 "dsb sy",
                 "isb",
                 ttbr = in(reg) ttbr_val,
@@ -476,23 +488,28 @@ impl PageTable {
             pte.set_shareability(Shareability::InnerShareable);
         }
 
-        // Set permissions
-        if VirtualMemoryPermission::Read.contained_in(permissions) {
-            pte.readable();
-        }
-        if VirtualMemoryPermission::Write.contained_in(permissions) {
-            pte.writable();
-        }
+        // Set access permissions (AP[7:6])
+        let is_user = VirtualMemoryPermission::User.contained_in(permissions);
+        let is_write = VirtualMemoryPermission::Write.contained_in(permissions);
+
+        // If Write is not set, map read-only.
+        // (Read without Write is treated as read-only.)
+        let ap = match (is_user, is_write) {
+            (false, true) => 0b00,  // EL1 RW, EL0 NA
+            (true, true) => 0b01,   // EL1 RW, EL0 RW
+            (false, false) => 0b10, // EL1 RO, EL0 NA
+            (true, false) => 0b11,  // EL1 RO, EL0 RO
+        };
+        pte.set_ap(ap);
+
+        // Execute permissions
         if VirtualMemoryPermission::Execute.contained_in(permissions) {
             pte.executable();
-        }
-        if VirtualMemoryPermission::User.contained_in(permissions) {
-            pte.accessible_from_user();
         }
 
         // Ensure memory operations complete before TLB invalidation
         unsafe {
-            asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
+            asm!("dsb sy", "tlbi vmalle1is", "dsb sy", "isb");
         }
     }
 
@@ -572,7 +589,7 @@ impl PageTable {
                 if pte.is_valid() {
                     pte.clear_all();
                     unsafe {
-                        asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
+                        asm!("dsb sy", "tlbi vmalle1is", "dsb sy", "isb");
                     }
                 }
             }
@@ -589,7 +606,7 @@ impl PageTable {
         }
         // Flush TLB
         unsafe {
-            asm!("dsb sy", "tlbi vmalle1", "dsb sy", "isb");
+            asm!("dsb sy", "tlbi vmalle1is", "dsb sy", "isb");
         }
     }
 }

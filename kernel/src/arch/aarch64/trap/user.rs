@@ -93,15 +93,20 @@ pub extern "C" fn _user_trap_entry() {
 
             // Switch TTBR0_EL1 back to the kernel page table.
             // - Save current (user) TTBR0_EL1 into cpu.ttbr0 (offset 16)
+            // - Save current (user) TTBR1_EL1 into cpu.scratch (offset 0)
             // - Load cpu.kernel_ttbr0 (offset 40) and install it into TTBR0_EL1
             mrs x15, ttbr0_el1
             str x15, [x16, #16]
+            mrs x15, ttbr1_el1
+            str x15, [x16, #0]
             ldr x17, [x16, #40]
             msr ttbr0_el1, x17
+            msr ttbr1_el1, x17
             isb
             // Ensure the new TTBR0 takes effect for subsequent low-VA accesses
             // (kernel stack + trapframe live in low VA space).
-            tlbi vmalle1
+            dsb ish
+            tlbi vmalle1is
             dsb ish
             isb
 
@@ -306,8 +311,10 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         
         // Switch page table
         msr ttbr0_el1, x1
+        msr ttbr1_el1, x1
         isb
-        tlbi vmalle1
+        dsb ish
+        tlbi vmalle1is
         dsb ish
         isb
         

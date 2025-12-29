@@ -163,7 +163,7 @@ pub extern "C" fn _entry() {
     1:
         
         // Invalidate TLB
-        tlbi    vmalle1
+        tlbi    vmalle1is
         dsb     sy
         isb
         

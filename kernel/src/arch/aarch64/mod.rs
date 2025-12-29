@@ -106,6 +106,14 @@ impl Aarch64 {
         self.ttbr0
     }
 
+    pub fn set_scratch(&mut self, val: u64) {
+        self.scratch = val;
+    }
+
+    pub fn get_scratch(&self) -> u64 {
+        self.scratch
+    }
+
     pub fn set_kernel_ttbr0(&mut self, val: u64) {
         self.kernel_ttbr0 = val;
     }
