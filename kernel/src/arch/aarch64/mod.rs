@@ -81,6 +81,12 @@ pub struct Aarch64 {
     kernel_trap: u64,  // offset: 32
     kernel_ttbr0: u64, // offset: 40 (kernel TTBR0 value for EL0->EL1 entry)
     scratch_x1: u64,   // offset: 48 (temporary save area for EL0 return)
+
+    // Saved user registers for EL0->EL1 trampoline entry.
+    // Keep existing offsets (0/16/24/32/40/48) stable: append new fields only.
+    saved_x15: u64, // offset: 56
+    saved_x16: u64, // offset: 64
+    saved_x17: u64, // offset: 72
 }
 
 impl Aarch64 {
@@ -93,6 +99,10 @@ impl Aarch64 {
             kernel_trap: 0,
             kernel_ttbr0: 0,
             scratch_x1: 0,
+
+            saved_x15: 0,
+            saved_x16: 0,
+            saved_x17: 0,
         }
     }
 

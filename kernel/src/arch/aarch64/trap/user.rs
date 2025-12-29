@@ -81,9 +81,21 @@ pub extern "C" fn _user_trap_entry() {
             // Disable interrupts
             msr daifset, #0xf
 
-            // x16: cpu pointer (TPIDRRO_EL0 points to arch struct in trampoline)
-            // TPIDRRO_EL0 is read-only from EL0, so user-space cannot clobber it.
-            mrs x16, tpidrro_el0
+            // Preserve all user GPRs.
+            // We must use a register to fetch the per-CPU Aarch64 pointer, but that
+            // would clobber the user's value. To avoid losing any user register, we:
+            //  1) stash the user's x16 into TPIDR_EL1 (temporarily)
+            //  2) load the trampoline-visible CPU pointer from TPIDRRO_EL0 into x16
+            //  3) store the user x15/x17 directly (no clobber)
+            //  4) read the saved user x16 back from TPIDR_EL1 using x15 (already saved)
+            //  5) restore TPIDR_EL1 to the CPU pointer
+            msr tpidr_el1, x16         // TPIDR_EL1 = user x16 (temporary)
+            mrs x16, tpidrro_el0       // x16 = cpu pointer (trampoline mapping)
+            str x15, [x16, #56]        // cpu.saved_x15 = user x15
+            str x17, [x16, #72]        // cpu.saved_x17 = user x17
+            mrs x15, tpidr_el1         // x15 = saved user x16
+            str x15, [x16, #64]        // cpu.saved_x16 = user x16
+            msr tpidr_el1, x16         // TPIDR_EL1 = cpu pointer
 
             // Switch TTBR0_EL1 back to the kernel page table.
             // - Save current (user) TTBR0_EL1 into cpu.ttbr0 (offset 16)
@@ -111,7 +123,7 @@ pub extern "C" fn _user_trap_entry() {
             // Allocate trapframe (keep SP 16-byte aligned; Trapframe is 272 bytes)
             sub sp, sp, #272
 
-            // Save x0-x30
+            // Save x0-x30 (store the original user values for x15/x16/x17)
             stp x0, x1, [sp, #0]
             stp x2, x3, [sp, #16]
             stp x4, x5, [sp, #32]
@@ -119,8 +131,19 @@ pub extern "C" fn _user_trap_entry() {
             stp x8, x9, [sp, #64]
             stp x10, x11, [sp, #80]
             stp x12, x13, [sp, #96]
-            stp x14, x15, [sp, #112]
-            stp x16, x17, [sp, #128]
+
+            // x14 is still the user value; x15 is clobbered during TTBR work.
+            str x14, [sp, #112]
+            ldr x15, [x16, #56]        // user x15
+            str x15, [sp, #120]
+
+            // x16 is cpu pointer here; x17 is kernel stack top.
+            // Load original user x16/x17 from per-CPU save area.
+            ldr x14, [x16, #64]        // user x16
+            str x14, [sp, #128]
+            ldr x15, [x16, #72]        // user x17
+            str x15, [sp, #136]
+
             stp x18, x19, [sp, #144]
             stp x20, x21, [sp, #160]
             stp x22, x23, [sp, #176]
