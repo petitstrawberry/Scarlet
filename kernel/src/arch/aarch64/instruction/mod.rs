@@ -22,10 +22,14 @@ impl Instruction {
     }
 }
 
-pub fn idle() {
-    // Wait For Interrupt. Note that WFI may return spuriously, so callers that
-    // require non-returning behavior should wrap this in a loop.
-    unsafe {
-        core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+pub fn idle() -> ! {
+    // Wait For Interrupt in an infinite loop.
+    // WFI may return spuriously (e.g., on timer interrupts), so we loop forever.
+    // The scheduler expects idle() to never return - task switching happens
+    // via timer interrupts that call schedule() and context switch away.
+    loop {
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+        }
     }
 }
