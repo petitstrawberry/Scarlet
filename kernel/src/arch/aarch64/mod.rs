@@ -49,6 +49,7 @@ pub fn init_arch(cpu_id: usize) {
     early_println!("[aarch64] CPU {}: Initializing core....", cpu_id);
     // Get raw Aarch64 struct
     let aarch64: &mut Aarch64 = unsafe { transmute(&CPUS[cpu_id] as *const _ as usize) };
+    aarch64.cpuid = cpu_id as u64;
     trap_init(aarch64);
 }
 
@@ -60,6 +61,7 @@ pub struct Aarch64 {
     ttbr0: u64,        // offset: 16 (equivalent to satp in RISC-V)
     kernel_stack: u64, // offset: 24
     kernel_trap: u64,  // offset: 32
+    kernel_ttbr0: u64, // offset: 40 (kernel TTBR0 value for EL0->EL1 entry)
 }
 
 impl Aarch64 {
@@ -70,6 +72,7 @@ impl Aarch64 {
             ttbr0: 0,
             kernel_stack: 0,
             kernel_trap: 0,
+            kernel_ttbr0: 0,
         }
     }
 
@@ -94,7 +97,21 @@ impl Aarch64 {
     pub fn set_next_address_space(&mut self, asid: u16) {
         let root_pagetable =
             get_root_pagetable(asid).expect("No root page table found for ASID (aarch64)");
-        self.ttbr0 = root_pagetable.get_val_for_ttbr(asid);
+        let ttbr_val = root_pagetable.get_val_for_ttbr(asid);
+        crate::early_println!("[aarch64] set_next_address_space: asid={} ttbr={:#x}", asid, ttbr_val);
+        self.ttbr0 = ttbr_val;
+    }
+
+    pub fn get_ttbr0(&self) -> u64 {
+        self.ttbr0
+    }
+
+    pub fn set_kernel_ttbr0(&mut self, val: u64) {
+        self.kernel_ttbr0 = val;
+    }
+
+    pub fn get_kernel_ttbr0(&self) -> u64 {
+        self.kernel_ttbr0
     }
 
     pub fn as_paddr_cpu(&mut self) -> &mut Aarch64 {
@@ -191,9 +208,11 @@ fn trap_init(aarch64: &mut Aarch64) {
 
     let scratch_addr = aarch64 as *const _ as usize;
 
-    // Set up thread pointer register to point to our aarch64 struct
+    // Set up thread pointer registers to point to our aarch64 struct
+    // Use TPIDRRO_EL0 as the single source of truth (trampoline also reads this).
     unsafe {
         asm!(
+            "msr tpidrro_el0, {0}",
             "msr tpidr_el1, {0}",
             in(reg) scratch_addr,
         );
@@ -237,25 +256,40 @@ pub fn disable_interrupt() {
 }
 
 pub fn get_cpu() -> &'static mut Aarch64 {
-    // Get the Aarch64 struct address from TPIDR_EL1 (equivalent to sscratch in RISC-V)
-    let scratch_addr: usize;
+    // Prefer the EL1 thread pointer (kept at the kernel-mapped Arch address).
+    let tpidr_el1: usize;
     unsafe {
         asm!(
             "mrs {0}, tpidr_el1",
-            out(reg) scratch_addr,
+            out(reg) tpidr_el1,
         );
     }
 
-    if scratch_addr == 0 {
-        // Fallback: get CPU ID from MPIDR_EL1 and use that
+    if tpidr_el1 != 0 {
+        // Kernel context always has access to this mapping.
+        return unsafe { transmute(tpidr_el1) };
+    }
+
+    // Fallback to the trampoline-visible pointer for early bring-up or if EL1
+    // TPIDR was not initialized yet.
+    let tpidrro_el0: usize;
+    unsafe {
+        asm!(
+            "mrs {0}, tpidrro_el0",
+            out(reg) tpidrro_el0,
+        );
+    }
+
+    if tpidrro_el0 == 0 {
+        // Final fallback: derive from MPIDR_EL1 if both registers are unset.
         let core_id = get_current_cpu_id();
         early_println!(
-            "[aarch64] Warning: TPIDR_EL1 not set, using MPIDR_EL1 core {}",
+            "[aarch64] Warning: TPIDR* not set, using MPIDR_EL1 core {}",
             core_id
         );
         unsafe { &mut CPUS[core_id] }
     } else {
-        unsafe { transmute(scratch_addr) }
+        unsafe { transmute(tpidrro_el0) }
     }
 }
 

@@ -1,9 +1,14 @@
 use core::arch::{asm, naked_asm};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::exception::arch_exception_handler;
 use crate::arch::{Trapframe, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
 use crate::early_println;
+
+// Prevent log spam during bring-up when we can get stuck in a fault/retry loop.
+static USER_TRAP_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
+static USER_SWITCH_LOG_BUDGET: AtomicUsize = AtomicUsize::new(16);
 
 // Trap vector base in the trampoline. Must be 2KB-aligned for VBAR_EL1.
 // We use this symbol as the "trapvector" base (mirroring RISC-V's _user_trap_entry usage).
@@ -86,9 +91,12 @@ pub extern "C" fn _user_trap_entry() {
             // TPIDRRO_EL0 is read-only from EL0, so user-space cannot clobber it.
             mrs x16, tpidrro_el0
 
-            // Swap TTBR0_EL1 with cpu.ttbr0 (offset 16)
-            ldr x17, [x16, #16]
+            // Switch TTBR0_EL1 back to the kernel page table.
+            // - Save current (user) TTBR0_EL1 into cpu.ttbr0 (offset 16)
+            // - Load cpu.kernel_ttbr0 (offset 40) and install it into TTBR0_EL1
             mrs x15, ttbr0_el1
+            str x15, [x16, #16]
+            ldr x17, [x16, #40]
             msr ttbr0_el1, x17
             isb
             // Ensure the new TTBR0 takes effect for subsequent low-VA accesses
@@ -96,7 +104,6 @@ pub extern "C" fn _user_trap_entry() {
             tlbi vmalle1
             dsb ish
             isb
-            str x15, [x16, #16]
 
             // Switch to per-task kernel stack top from cpu.kernel_stack (offset 24)
             ldr x17, [x16, #24]
@@ -244,56 +251,28 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
     unsafe {
         naked_asm!(
             r#"
-        // x0 = trapframe
+        // x0 = trapframe pointer (kernel space address)
+        // Strategy: mimic RISC-V exactly
+        // 1. Restore all registers except x0
+        // 2. Save x0's final value to Aarch64.scratch
+        // 3. Load Aarch64 pointer to x0
+        // 4. Swap TTBR0 using x0 as base for struct access
+        // 5. Restore x0 from Aarch64.scratch
 
-        // CRITICAL: Mask all interrupts before setting up user context
-        // This prevents nested interrupts during TTBR0 swap and register restore
+        // CRITICAL: Mask all interrupts
         msr daifset, #0xf
 
-        // Breadcrumb: reached _user_trap_exit (direct PL011 putc)
-        mov w11, #'E'
-        movz x10, #0x0900, lsl #16     // x10 = 0x0900_0000
-        1:
-            ldr w12, [x10, #0x18]      // UART_FR
-            tst w12, #0x20             // TXFF
-            b.ne 1b
-        str w11, [x10, #0x0]           // UART_DR
-
-        // Restore ELR_EL1 from trapframe.epc (offset 256)
-        ldr x1, [x0, #256]
+        // Restore ELR_EL1 and SP_EL0
+        ldr x1, [x0, #256]       // ELR from trapframe.epc
         msr elr_el1, x1
-
-        // Restore user SP (SP_EL0) from regs[31] (offset 248)
-        ldr x1, [x0, #248]
+        ldr x1, [x0, #248]       // SP from regs[31]
         msr sp_el0, x1
 
-        // Configure return to EL0t (User)
-        // M[3:0] = 0b0000 (EL0t), DAIF = 0 (interrupts enabled)
+        // Configure SPSR for EL0 return
         mov x1, #0x0
         msr spsr_el1, x1
 
-        // Swap TTBR0_EL1 with cpu.ttbr0 (offset 16)
-        mrs x16, tpidrro_el0
-        ldr x17, [x16, #16]
-        mrs x15, ttbr0_el1
-        msr ttbr0_el1, x17
-        isb
-        // Ensure the restored TTBR0 takes effect before returning to EL0.
-        tlbi vmalle1
-        dsb ish
-        isb
-        str x15, [x16, #16]
-
-        // Breadcrumb: past TTBR swap (direct PL011 putc)
-        mov w11, #'R'
-        movz x10, #0x0900, lsl #16     // x10 = 0x0900_0000
-        2:
-            ldr w12, [x10, #0x18]      // UART_FR
-            tst w12, #0x20             // TXFF
-            b.ne 2b
-        str w11, [x10, #0x0]           // UART_DR
-
-        // Restore x1-x30 first
+        // Restore x1-x30 (all registers except x0)
         ldp x1, x2, [x0, #8]
         ldp x3, x4, [x0, #24]
         ldp x5, x6, [x0, #40]
@@ -301,7 +280,7 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         ldp x9, x10, [x0, #72]
         ldp x11, x12, [x0, #88]
         ldp x13, x14, [x0, #104]
-        ldr x15, [x0, #112]
+        ldr x15, [x0, #120]
         ldr x16, [x0, #128]
         ldr x17, [x0, #136]
         ldp x18, x19, [x0, #144]
@@ -312,9 +291,30 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         ldp x28, x29, [x0, #224]
         ldr x30, [x0, #240]
 
-        // Restore x0 last
+        // Load final x0 value
+        ldr x1, [x0, #0]         // x1 = final x0 value
+        
+        // Get Aarch64 pointer and swap with x0
+        // (mimicking RISC-V's csrrw a0, sscratch, a0)
+        mrs x0, tpidrro_el0      // x0 = Aarch64 pointer (x0 loses trapframe ptr)
+        
+            // Save final x0 to Aarch64.scratch (offset 0)
+        str x1, [x0, #0]
+        
+        // Load user TTBR0 from Aarch64.ttbr0 (offset 16) using x1 as temp
+        ldr x1, [x0, #16]
+        
+        // Switch page table
+        msr ttbr0_el1, x1
+        isb
+        tlbi vmalle1
+        dsb ish
+        isb
+        
+        // Restore x0 from Aarch64.scratch
         ldr x0, [x0, #0]
-
+        
+        // All registers now restored, page table switched
         eret
         "#
         );
@@ -323,8 +323,16 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
 
 #[unsafe(export_name = "arch_user_trap_handler")]
 pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
+    let should_log = USER_TRAP_LOG_BUDGET
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            if v == 0 { None } else { Some(v - 1) }
+        })
+        .is_ok();
+
     // Breadcrumb: we arrived in the trap handler from EL0.
-    early_println!("[aarch64] trap_handler: entered, tf_addr={:#x}", addr);
+    if should_log {
+        early_println!("[aarch64] trap_handler: entered, tf_addr={:#x}", addr);
+    }
 
     let trapframe: &mut Trapframe = unsafe { &mut *(addr as *mut Trapframe) };
 
@@ -340,24 +348,49 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
 
+    let should_log = USER_SWITCH_LOG_BUDGET
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            if v == 0 { None } else { Some(v - 1) }
+        })
+        .is_ok();
+
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
     let trampoline_base = get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base + trap_exit_offset;
 
-    early_println!(
-        "[aarch64] tramp calc: base={:#x} exit_off={:#x} exit_addr={:#x} sym_entry={:#x} sym_exit={:#x}",
-        trampoline_base,
-        trap_exit_offset,
-        trap_exit_addr,
-        _user_trap_entry as usize,
-        _user_trap_exit as usize,
-    );
+    // Debug: check CPU's TTBR0 field before jumping to trampoline
+    let cpu = crate::arch::get_cpu();
+    let cpu_ttbr0 = cpu.get_ttbr0();
+    if should_log {
+        early_println!("[aarch64] switch: cpu.ttbr0={:#x} (should be task page table)", cpu_ttbr0);
+
+        early_println!(
+            "[aarch64] tramp calc: base={:#x} exit_off={:#x} exit_addr={:#x} sym_entry={:#x} sym_exit={:#x}",
+            trampoline_base,
+            trap_exit_offset,
+            trap_exit_addr,
+            _user_trap_entry as usize,
+            _user_trap_exit as usize,
+        );
+    }
 
     set_trapvector(trampoline_base);
 
+    // Debug: Check trampoline's Arch struct ttbr0 value
+    if should_log {
+        unsafe {
+            let tpidrro: usize;
+            core::arch::asm!("mrs {}, tpidrro_el0", out(reg) tpidrro);
+            let tramp_ttbr0 = core::ptr::read_volatile((tpidrro + 16) as *const u64);
+            crate::early_println!("[aarch64] switch: trampoline arch={:#x} ttbr0={:#x}", 
+                tpidrro, tramp_ttbr0);
+        }
+    }
+
     // Minimal breadcrumb so we can see we're about to ERET.
     // If we time out after this, the hang is likely in trampoline return or the first user instruction.
-    unsafe {
+    if should_log {
+        unsafe {
         let current_el: usize;
         let tpidr_el1: usize;
         let tpidr_el0: usize;
@@ -367,12 +400,12 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
         let vbar_el1: usize;
         core::arch::asm!(
             "mrs {current_el}, CurrentEL",
-            "mrs {tpidr_el1}, tpidr_el1",
-            "mrs {tpidr_el0}, tpidr_el0",
-            "mrs {tpidrro_el0}, tpidrro_el0",
-            "mrs {ttbr0_el1}, ttbr0_el1",
-            "mrs {ttbr1_el1}, ttbr1_el1",
-            "mrs {vbar_el1}, vbar_el1",
+            "mrs {tpidr_el1}, tpidr_el1 ",
+            "mrs {tpidr_el0}, tpidr_el0 ",
+            "mrs {tpidrro_el0}, tpidrro_el0 ",
+            "mrs {ttbr0_el1}, ttbr0_el1 ",
+            "mrs {ttbr1_el1}, ttbr1_el1 ",
+            "mrs {vbar_el1}, vbar_el1 ",
             current_el = out(reg) current_el,
             tpidr_el1 = out(reg) tpidr_el1,
             tpidr_el0 = out(reg) tpidr_el0,
@@ -396,6 +429,21 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
             ttbr0_el1,
             ttbr1_el1,
         );
+        }
+    }
+
+    // Breadcrumb before jumping to trampoline
+    if should_log {
+        unsafe {
+            let uart_base = 0x0900_0000 as *mut u32;
+            loop {
+                let fr = core::ptr::read_volatile(uart_base.add(6)); // UART_FR at offset 0x18
+                if (fr & 0x20) == 0 { // TXFF
+                    break;
+                }
+            }
+            core::ptr::write_volatile(uart_base, 'J' as u32); // UART_DR
+        }
     }
 
     unsafe {

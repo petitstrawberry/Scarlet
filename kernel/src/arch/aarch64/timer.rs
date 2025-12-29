@@ -70,7 +70,8 @@ impl ArchTimer {
     pub fn start(&mut self) {
         self.running = true;
 
-        crate::early_println!("[Timer] Starting timer, next_event={:#x}", self.next_event);
+        crate::early_println!("[Timer] start() called: self={:p} next_event={:#x} initialized={}", 
+            self as *const _, self.next_event, self.initialized);
         
         // Read current timer value before setting compare value
         let current_time = self.get_time();
@@ -110,13 +111,20 @@ impl ArchTimer {
             
             crate::early_println!("[Timer] GIC configuration complete");
 
+            // CRITICAL: Set initialized flag BEFORE unmasking interrupts
+            // Otherwise, if an interrupt fires immediately after unmask, it will
+            // see initialized=false and reconfigure GIC again
+            self.initialized = true;
+
             // Ensure IRQ is unmasked at CPU level (first time only)
             unsafe {
                 asm!("msr daifclr, #2", options(nostack));
             }
             
-            self.initialized = true;
-            crate::early_println!("[Timer] Timer initialization complete");
+            crate::early_println!("[Timer] Timer initialization complete, self={:p} initialized={}", 
+                self as *const _, self.initialized);
+        } else {
+            crate::early_println!("[Timer] Skipping GIC config (already initialized)");
         }
         // Note: Subsequent calls just update CVAL, no DAIF/GIC manipulation
         // This prevents nested interrupts during tick handling

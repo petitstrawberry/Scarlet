@@ -668,7 +668,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     };
 
     match load_elf_into_task(file_ref, &mut task) {
-        Ok(_) => {
+        Ok(entry_point) => {
             task.vm_manager.memmaps_iter_with(|maps| {
                 for map in maps {
                     early_println!(
@@ -678,6 +678,10 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
                     );
                 }
             });
+            early_println!(
+                "[Scarlet Kernel] Init ELF loaded with entry point at {:#x}",
+                entry_point
+            );
             early_println!("[Scarlet Kernel] Successfully loaded init ELF into task");
             early_println!("[Scarlet Kernel] Adding init task to scheduler...");
             let cpu_id = get_cpu().get_cpuid();

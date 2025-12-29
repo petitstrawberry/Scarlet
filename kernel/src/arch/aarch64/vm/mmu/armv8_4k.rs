@@ -317,6 +317,11 @@ impl PageTable {
         
         let ttbr_val = self.get_val_for_ttbr(asid);
         crate::early_println!("[MMU] TTBR value: {:#x}", ttbr_val);
+
+        // Remember the kernel TTBR0 value so the trampoline can reliably switch
+        // back to the kernel page table on EL0->EL1 entry.
+        // (Task switching uses cpu.ttbr0 for the next user page table.)
+        crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
         
         unsafe {
             let mut sctlr: u64;
@@ -410,7 +415,7 @@ impl PageTable {
         }
 
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty, is_device);
+            self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty);
 
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
@@ -434,7 +439,6 @@ impl PageTable {
         permissions: usize,
         _accessed: bool, // TODO: Implement accessed flag support for AArch64
         _dirty: bool,    // TODO: Implement dirty flag support for AArch64
-        is_device: bool, // Whether this is device memory (non-cacheable)
     ) {
         // Validate 48-bit virtual address
         if vaddr >= (1 << 48) {
@@ -457,6 +461,11 @@ impl PageTable {
         // Set up page descriptor
         pte.set_block_page();
         pte.set_ppn(ppn);
+
+        // Determine if this is device memory based on permissions
+        // Device memory is typically kernel-only, non-user accessible
+        let is_device = !VirtualMemoryPermission::Execute.contained_in(permissions)
+            && !VirtualMemoryPermission::User.contained_in(permissions);
 
         // Set memory attributes based on whether this is device or normal memory
         if is_device {

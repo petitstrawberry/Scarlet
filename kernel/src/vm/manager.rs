@@ -418,7 +418,6 @@ impl VirtualMemoryManager {
                 perms,
                 true,
                 access.op == AccessOp::Store,
-                false, // Not device memory
             );
             Ok(())
         } else {
