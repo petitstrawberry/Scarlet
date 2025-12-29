@@ -400,8 +400,17 @@ impl PageTable {
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
 
+        // Device memory: is_shared WITHOUT Execute permission (kernel has Execute, device doesn't)
+        let is_device = mmap.is_shared 
+            && !VirtualMemoryPermission::Execute.contained_in(mmap.permissions)
+            && !VirtualMemoryPermission::User.contained_in(mmap.permissions);
+        
+        if is_device {
+            crate::early_println!("[MMU] Mapping as DEVICE memory: {:#x}-{:#x}", mmap.vmarea.start, mmap.vmarea.end);
+        }
+
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
-            self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty);
+            self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty, is_device);
 
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
@@ -425,6 +434,7 @@ impl PageTable {
         permissions: usize,
         _accessed: bool, // TODO: Implement accessed flag support for AArch64
         _dirty: bool,    // TODO: Implement dirty flag support for AArch64
+        is_device: bool, // Whether this is device memory (non-cacheable)
     ) {
         // Validate 48-bit virtual address
         if vaddr >= (1 << 48) {
@@ -448,9 +458,14 @@ impl PageTable {
         pte.set_block_page();
         pte.set_ppn(ppn);
 
-        // Set memory attributes (normal memory, cacheable)
-        pte.set_memory_attr(MemoryAttribute::Normal as u8);
-        pte.set_shareability(Shareability::InnerShareable);
+        // Set memory attributes based on whether this is device or normal memory
+        if is_device {
+            pte.set_memory_attr(MemoryAttribute::Device as u8);
+            pte.set_shareability(Shareability::OuterShareable);
+        } else {
+            pte.set_memory_attr(MemoryAttribute::Normal as u8);
+            pte.set_shareability(Shareability::InnerShareable);
+        }
 
         // Set permissions
         if VirtualMemoryPermission::Read.contained_in(permissions) {

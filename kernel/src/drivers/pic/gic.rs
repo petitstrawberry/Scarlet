@@ -228,25 +228,44 @@ impl ExternalInterruptController for Gic {
         interrupt_id: InterruptId,
         cpu_id: CpuId,
     ) -> InterruptResult<()> {
+        crate::early_println!("[GIC] enable_interrupt: id={} cpu={}", interrupt_id, cpu_id);
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
+
+        crate::early_println!("[GIC] Validated interrupt id and cpu id");
 
         // Set interrupt target to the specified CPU (SPIs only).
         // SGIs/PPIs (0-31) are banked per-CPU and their ITARGETSR is RO/ignored.
         if interrupt_id >= 32 {
+            crate::early_println!("[GIC] Setting target for SPI");
             let target_addr = self.target_addr(interrupt_id);
             let cpu_mask = 1u8 << cpu_id;
             unsafe {
                 write_volatile(target_addr as *mut u8, cpu_mask);
             }
+        } else {
+            crate::early_println!("[GIC] Skipping target setting for PPI/SGI");
         }
 
+        crate::early_println!("[GIC] About to enable interrupt in GICD_ISENABLER");
         // Enable the interrupt
         let enable_addr = self.enable_addr(interrupt_id);
         let bit = 1u32 << (interrupt_id % 32);
+        crate::early_println!("[GIC] enable_addr={:#x} bit={:#x}", enable_addr, bit);
+        
+        // Try reading first to test if the address is accessible
+        let current_val = unsafe {
+            crate::early_println!("[GIC] About to read from enable_addr...");
+            let val = read_volatile(enable_addr as *const u32);
+            crate::early_println!("[GIC] Read value: {:#x}", val);
+            val
+        };
+        
+        crate::early_println!("[GIC] About to write to enable_addr...");
         unsafe {
-            write_volatile(enable_addr as *mut u32, bit);
+            write_volatile(enable_addr as *mut u32, current_val | bit);
         }
+        crate::early_println!("[GIC] Interrupt enabled successfully");
 
         Ok(())
     }
