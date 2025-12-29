@@ -32,9 +32,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
         if v == 0 { None } else { Some(v - 1) }
     }).is_ok();
 
-    if should_log {
-        crate::early_println!("[aarch64] Exception handler invoked: EC={:#x}", ec);
-    }
+    // if should_log {
+    //     crate::early_println!("[aarch64] Exception handler invoked: EC={:#x}", ec);
+    // }
 
     match ec {
         // IRQ and some non-synchronous events report EC=0.
