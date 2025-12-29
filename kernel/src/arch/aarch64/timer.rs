@@ -68,27 +68,38 @@ impl ArchTimer {
     pub fn start(&mut self) {
         self.running = true;
 
+        crate::early_println!("[Timer] Starting timer, next_event={:#x}", self.next_event);
+        
         // Program the next event before unmasking interrupts.
         self.set_timer(self.get_next_event());
 
         // Enable timer local interrupt and ensure the corresponding PPI is enabled in the GIC.
         InterruptManager::with_manager(|mgr| {
             let cpu_id = get_cpu().get_cpuid() as u32;
+            crate::early_println!("[Timer] Enabling local timer interrupt");
             mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
                 .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
 
             // QEMU virt: CNTP PPI is 30.
+            // Note: PPIs are banked per-CPU and enabled via the local controller.
+            // The GIC enable_external_interrupt for PPIs might not be necessary.
+            crate::early_println!("[Timer] Skipping GIC enable for PPI 30 (handled by local controller)");
+            /*
             mgr.enable_external_interrupt(
                 crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
                 cpu_id,
             )
             .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
+            */
         });
 
+        crate::early_println!("[Timer] Unmasking IRQ at CPU level");
         // Ensure IRQ is unmasked at CPU level.
         unsafe {
             asm!("msr daifclr, #2", options(nostack));
         }
+        
+        crate::early_println!("[Timer] Timer start complete");
     }
 
     pub fn stop(&mut self) {

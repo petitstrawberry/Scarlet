@@ -315,17 +315,17 @@ impl Scheduler {
         let (current_task_id, next_task_id) = self.run(cpu);
 
         // Debug output for monitoring scheduler behavior
-        // if let Some(current_id) = current_task_id {
-        //     if let Some(next_id) = next_task_id {
-        //         if current_id != next_id {
-        //             crate::println!("[SCHED] CPU{}: Task {} -> Task {}", cpu_id, current_id, next_id);
-        //         }
-        //     } else {
-        //         crate::println!("[SCHED] CPU{}: Task {} -> idle", cpu_id, current_id);
-        //     }
-        // } else if let Some(next_id) = next_task_id {
-        //     crate::println!("[SCHED] CPU{}: idle -> Task {}", cpu_id, next_id);
-        // }
+        if let Some(current_id) = current_task_id {
+            if let Some(next_id) = next_task_id {
+                if current_id != next_id {
+                    crate::early_println!("[SCHED] CPU{}: Task {} -> Task {}", cpu_id, current_id, next_id);
+                }
+            } else {
+                crate::early_println!("[SCHED] CPU{}: Task {} -> idle", cpu_id, current_id);
+            }
+        } else if let Some(next_id) = next_task_id {
+            crate::early_println!("[SCHED] CPU{}: idle -> Task {}", cpu_id, next_id);
+        }
 
         // Step 2: Check if a context switch is needed
         if next_task_id.is_some() && current_task_id != next_task_id {
@@ -346,8 +346,9 @@ impl Scheduler {
             } else {
                 // No current task (e.g., first scheduling), just switch to next task
                 let next_task = self.get_task_by_id(next_task_id).unwrap();
-                // crate::println!("[SCHED] Setting up task {} for execution", next_task_id);
+                crate::early_println!("[SCHED] Setting up task {} for execution", next_task_id);
                 Self::setup_task_execution(get_cpu(), next_task);
+                crate::early_println!("[SCHED] About to arch_switch_to_user_space for task {}", next_task_id);
                 arch_switch_to_user_space(next_task.get_trapframe()); // Force switch to user space
             }
         }
@@ -365,6 +366,8 @@ impl Scheduler {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
 
+        crate::early_println!("[Scheduler] Starting scheduler on CPU {}", cpu_id);
+
         let timer = get_kernel_timer();
         timer.stop(cpu_id);
 
@@ -375,10 +378,17 @@ impl Scheduler {
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
 
+        crate::early_println!("[Scheduler] Setting timer interval to 0 (immediate tick)");
         /* Jump to trap handler immediately */
         timer.set_interval_us(cpu_id, 0);
+        
+        crate::early_println!("[Scheduler] Enabling interrupts");
         enable_interrupt();
+        
+        crate::early_println!("[Scheduler] Starting timer");
         timer.start(cpu_id);
+        
+        crate::early_println!("[Scheduler] Entering idle loop");
         idle();
     }
 

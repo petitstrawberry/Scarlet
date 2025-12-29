@@ -43,6 +43,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
 
             if let Some(id) = claimed {
                 if id == crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ {
+                    if should_log {
+                        early_println!("[aarch64] Timer interrupt (PPI 30) claimed, calling tick");
+                    }
                     timer::tick(trapframe);
                 }
                 return;
@@ -50,6 +53,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
 
             // 2) Local timer pending (best-effort fallback for non-GIC wiring)
             if crate::drivers::pic::arm_generic_timer::ArmGenericTimer::is_timer_pending() {
+                if should_log {
+                    early_println!("[aarch64] Local timer pending, calling tick");
+                }
                 timer::tick(trapframe);
                 return;
             }
