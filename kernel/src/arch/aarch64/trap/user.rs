@@ -4,8 +4,6 @@ use super::exception::arch_exception_handler;
 use crate::arch::{Trapframe, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
 
-// Trap vector base in the trampoline. Must be 2KB-aligned for VBAR_EL1.
-// We use this symbol as the "trapvector" base (mirroring RISC-V's _user_trap_entry usage).
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
 #[unsafe(naked)]
@@ -14,22 +12,10 @@ pub extern "C" fn _user_trap_entry() {
         naked_asm!(
             r#"
         .align 11
-
-        // Vector table (16 entries x 128 bytes = 2048 bytes)
-        // AArch64 vectors are grouped by origin:
-        //  - current EL with SP0 (0x000)
-        //  - current EL with SPx (0x200)
-        //  - lower EL using AArch64 (0x400)
-        //  - lower EL using AArch32 (0x600)
-        //
-        // We must NOT run the EL0 trampoline entry (TTBR0 swap + stack rewrite)
-        // when the exception/IRQ happens in EL1 (kernel). Doing so breaks kernel
-        // execution during WFI/idle and prevents timer IRQ bring-up.
-        //
-        // So: current-EL vectors branch to kernel path; lower-EL vectors branch
-        // to user/trampoline path.
-
-        // current EL, SP0
+        // -----------------------------------------------------------------
+        // VBAR_EL1 Vector Table (2048 bytes)
+        // -----------------------------------------------------------------
+        // Current EL with SP0
         b   2f
         .space 124
         b   2f
@@ -39,7 +25,7 @@ pub extern "C" fn _user_trap_entry() {
         b   2f
         .space 124
 
-        // current EL, SPx
+        // Current EL with SPx
         b   2f
         .space 124
         b   2f
@@ -49,7 +35,7 @@ pub extern "C" fn _user_trap_entry() {
         b   2f
         .space 124
 
-        // lower EL, AArch64
+        // Lower EL using AArch64 (User -> Kernel) <--- TARGET
         b   1f
         .space 124
         b   1f
@@ -59,7 +45,7 @@ pub extern "C" fn _user_trap_entry() {
         b   1f
         .space 124
 
-        // lower EL, AArch32 (unused)
+        // Lower EL using AArch32
         b   1f
         .space 124
         b   1f
@@ -70,60 +56,48 @@ pub extern "C" fn _user_trap_entry() {
         .space 124
 
         // -----------------------------------------------------------------
-        // EL0 -> EL1 entry (user/trampoline path):
-        // - mask interrupts
-        // - swap TTBR0 to kernel mappings
-        // - switch to cpu.kernel_stack (top)
-        // - save regs into Trapframe
-        // - tail-call cpu.kernel_trap
+        // 1: User -> Kernel Entry (Corresponds to RISC-V _user_trap_entry)
         // -----------------------------------------------------------------
         1:
-            // Disable interrupts
+            // Disable interrupts (RISC-V: csrci sstatus, 0x2)
             msr daifset, #0xf
 
-            // Preserve all user GPRs.
-            // We must use a register to fetch the per-CPU Aarch64 pointer, but that
-            // would clobber the user's value. To avoid losing any user register, we:
-            //  1) stash the user's x16 into TPIDR_EL1 (temporarily)
-            //  2) load the trampoline-visible CPU pointer from TPIDRRO_EL0 into x16
-            //  3) store the user x15/x17 directly (no clobber)
-            //  4) read the saved user x16 back from TPIDR_EL1 using x15 (already saved)
-            //  5) restore TPIDR_EL1 to the CPU pointer
-            msr tpidr_el1, x16         // TPIDR_EL1 = user x16 (temporary)
-            mrs x16, tpidrro_el0       // x16 = cpu pointer (trampoline mapping)
-            str x15, [x16, #56]        // cpu.saved_x15 = user x15
-            str x17, [x16, #72]        // cpu.saved_x17 = user x17
-            mrs x15, tpidr_el1         // x15 = saved user x16
-            str x15, [x16, #64]        // cpu.saved_x16 = user x16
-            msr tpidr_el1, x16         // TPIDR_EL1 = cpu pointer
+            // [Context Swap Strategy]
+            // RISC-V: csrrw a0, sscratch, a0
+            // AArch64: cannot swap atomicaly.
+            // 1. Hide user x16 in TPIDR_EL1 (system reg)
+            // 2. Load Struct Base from TPIDRRO_EL0 to x16
+            // 3. Save user x17 to Struct.scratch (memory)
+            // Now x16 is our "a0" (base pointer).
+            
+            msr tpidr_el1, x16          // Save x16 temporarily
+            mrs x16, tpidrro_el0        // Load Aarch64 struct ptr
+            str x17, [x16, #0]          // Save x17 to scratch (offset 0)
 
-            // Switch TTBR0_EL1 back to the kernel page table.
-            // - Save current (user) TTBR0_EL1 into cpu.ttbr0 (offset 16)
-            // - Save current (user) TTBR1_EL1 into cpu.scratch (offset 0)
-            // - Load cpu.kernel_ttbr0 (offset 40) and install it into TTBR0_EL1
-            mrs x15, ttbr0_el1
-            str x15, [x16, #16]
-            mrs x15, ttbr1_el1
-            str x15, [x16, #0]
+            // Switch to Kernel Page Table (RISC-V: csrrw sp, satp, sp logic)
+            // Save User TTBR0 (offset 16)
+            mrs x17, ttbr0_el1
+            str x17, [x16, #16]
+            
+            // Load Kernel TTBR0 (offset 40) and Switch
             ldr x17, [x16, #40]
             msr ttbr0_el1, x17
-            msr ttbr1_el1, x17
+            
+            // TLB Flush (sfence.vma equivalent)
             isb
-            // Ensure the new TTBR0 takes effect for subsequent low-VA accesses
-            // (kernel stack + trapframe live in low VA space).
             dsb ish
             tlbi vmalle1is
             dsb ish
             isb
 
-            // Switch to per-task kernel stack top from cpu.kernel_stack (offset 24)
+            // Load Kernel Stack (RISC-V: ld sp, 24(a0))
             ldr x17, [x16, #24]
             mov sp, x17
 
-            // Allocate trapframe (keep SP 16-byte aligned; Trapframe is 272 bytes)
+            // Allocate Trapframe (RISC-V: addi sp, sp, -272)
             sub sp, sp, #272
 
-            // Save x0-x30 (store the original user values for x15/x16/x17)
+            // Save General Registers
             stp x0, x1, [sp, #0]
             stp x2, x3, [sp, #16]
             stp x4, x5, [sp, #32]
@@ -131,19 +105,8 @@ pub extern "C" fn _user_trap_entry() {
             stp x8, x9, [sp, #64]
             stp x10, x11, [sp, #80]
             stp x12, x13, [sp, #96]
-
-            // x14 is still the user value; x15 is clobbered during TTBR work.
-            str x14, [sp, #112]
-            ldr x15, [x16, #56]        // user x15
-            str x15, [sp, #120]
-
-            // x16 is cpu pointer here; x17 is kernel stack top.
-            // Load original user x16/x17 from per-CPU save area.
-            ldr x14, [x16, #64]        // user x16
-            str x14, [sp, #128]
-            ldr x15, [x16, #72]        // user x17
-            str x15, [sp, #136]
-
+            stp x14, x15, [sp, #112]
+            // x16, x17 saved later
             stp x18, x19, [sp, #144]
             stp x20, x21, [sp, #160]
             stp x22, x23, [sp, #176]
@@ -152,36 +115,37 @@ pub extern "C" fn _user_trap_entry() {
             stp x28, x29, [sp, #224]
             str x30, [sp, #240]
 
-            // Save user SP (SP_EL0) into regs[31] (offset 248)
-            mrs x17, sp_el0
-            str x17, [sp, #248]
-
-            // Save ELR_EL1 into epc (offset 256)
-            mrs x17, elr_el1
+            // Save Special Registers (RISC-V: sepc, sstatus, etc)
+            mrs x17, elr_el1            // PC
             str x17, [sp, #256]
+            mrs x17, sp_el0             // User SP
+            str x17, [sp, #248]
+            mrs x17, spsr_el1           // PSTATE
+            str x17, [sp, #264]
 
-            // Jump to trap handler: cpu.kernel_trap (offset 32)
+            // Restore and Save User x16, x17
+            // User x16 is in TPIDR_EL1
+            mrs x0, tpidr_el1
+            str x0, [sp, #128]
+            // User x17 is in Struct.scratch (offset 0)
+            ldr x1, [x16, #0]
+            str x1, [sp, #136]
+
+            // Optimization: Set TPIDR_EL1 to Struct Ptr for kernel use
+            msr tpidr_el1, x16
+
+            // Jump to Rust Handler (RISC-V: ld ra, 32(a0) -> jr ra)
             ldr x17, [x16, #32]
-            mov x0, sp
+            mov x0, sp                  // arg0: trapframe ptr
             br  x17
 
         // -----------------------------------------------------------------
-        // EL1 entry (kernel path):
-        // - mask interrupts
-        // - DO NOT touch TTBR0
-        // - DO NOT rewrite SP (we must return to the interrupted kernel frame)
-        // - save regs into Trapframe on current kernel stack
-        // - call arch_kernel_trap_handler(tf)
-        // - restore regs and ERET back to EL1
+        // 2: Kernel Re-entry (Nested Trap)
         // -----------------------------------------------------------------
         2:
-            // Disable interrupts
             msr daifset, #0xf
-
-            // Allocate trapframe (keep SP 16-byte aligned; Trapframe is 272 bytes)
+            // (Minimal save for kernel panic/debug)
             sub sp, sp, #272
-
-            // Save x0-x30
             stp x0, x1, [sp, #0]
             stp x2, x3, [sp, #16]
             stp x4, x5, [sp, #32]
@@ -198,58 +162,20 @@ pub extern "C" fn _user_trap_entry() {
             stp x26, x27, [sp, #208]
             stp x28, x29, [sp, #224]
             str x30, [sp, #240]
-
-            // Save SP_EL0 into regs[31] (offset 248) (best-effort)
-            mrs x17, sp_el0
-            str x17, [sp, #248]
-
-            // Save ELR_EL1 into epc (offset 256)
             mrs x17, elr_el1
             str x17, [sp, #256]
+            mrs x17, sp_el0
+            str x17, [sp, #248]
+            mrs x17, spsr_el1
+            str x17, [sp, #264]
 
-            // Call the kernel trap handler via indirect branch
-            // x16: cpu pointer (TPIDR_EL1 points to arch struct)
             mrs x16, tpidr_el1
-            // Jump to trap handler: cpu.kernel_trap (offset 32)
             ldr x17, [x16, #32]
             mov x0, sp
             br  x17
-
-            // Restore ELR_EL1 from trapframe.epc
-            ldr x1, [sp, #256]
-            msr elr_el1, x1
-
-            // Restore x0-x30
-            ldp x0, x1, [sp, #0]
-            ldp x2, x3, [sp, #16]
-            ldp x4, x5, [sp, #32]
-            ldp x6, x7, [sp, #48]
-            ldp x8, x9, [sp, #64]
-            ldp x10, x11, [sp, #80]
-            ldp x12, x13, [sp, #96]
-            ldp x14, x15, [sp, #112]
-            ldp x16, x17, [sp, #128]
-            ldp x18, x19, [sp, #144]
-            ldp x20, x21, [sp, #160]
-            ldp x22, x23, [sp, #176]
-            ldp x24, x25, [sp, #192]
-            ldp x26, x27, [sp, #208]
-            ldp x28, x29, [sp, #224]
-            ldr x30, [sp, #240]
-
-            // Pop trapframe
-            add sp, sp, #272
-
-            eret
         "#
         );
     }
-}
-
-#[unsafe(export_name = "arch_kernel_trap_handler")]
-pub extern "C" fn arch_kernel_trap_handler(addr: usize) {
-    let trapframe: &mut Trapframe = unsafe { &mut *(addr as *mut Trapframe) };
-    arch_exception_handler(trapframe);
 }
 
 #[unsafe(link_section = ".trampoline.text")]
@@ -259,51 +185,45 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
     unsafe {
         naked_asm!(
             r#"
-        // x0 = trapframe pointer (kernel space address)
-        // Strategy: mimic RISC-V exactly
-        // 1. Restore all registers except x0
-        // 2. Save x0's final value to Aarch64.scratch
-        // 3. Load Aarch64 pointer to x0
-        // 4. Swap TTBR0 using x0 as base for struct access
-        // 5. Restore x0 from Aarch64.scratch
+        // x0 = trapframe pointer (Rust側から渡される)
 
-        // CRITICAL: Mask all interrupts
+        // Disable Interrupts
         msr daifset, #0xf
 
-        // Restore ELR_EL1 and SP_EL0
-        ldr x1, [x0, #256]       // ELR from trapframe.epc
+        // Restore System Registers (RISC-V: csrw sepc, t0)
+        ldr x1, [x0, #256]      // ELR
         msr elr_el1, x1
-        ldr x1, [x0, #248]       // SP from regs[31]
+        ldr x1, [x0, #248]      // SP_EL0
         msr sp_el0, x1
-
-        // Configure SPSR for EL0 return
-        mov x1, #0x0
+        ldr x1, [x0, #264]      // SPSR
         msr spsr_el1, x1
 
-        // Save final user x0 and user x1 into per-CPU trampoline storage.
-        // We must do this *before* restoring registers, because we will later
-        // need temporary registers for the TTBR switch and cannot touch the
-        // kernel trapframe after switching to the user TTBR.
-        //
-        // Use x2/x3/x4 as temporaries here; they will be restored from the
-        // trapframe below.
-        ldr x2, [x0, #0]         // x2 = final user x0
-        ldr x3, [x0, #8]         // x3 = user x1
-        mrs x4, tpidrro_el0      // x4 = Aarch64 pointer
-        str x2, [x4, #0]         // Aarch64.scratch   = final x0
-        str x3, [x4, #48]        // Aarch64.scratch_x1 = user x1
+        // [PREPARE SCRATCH STRATEGY]
+        // RISC-V uses sscratch swap. AArch64 needs a base pointer.
+        // We need x0 and x1 free to switch Page Table.
+        // 1. Get Struct Base (x16)
+        // 2. Load NEW x0, x1 from Trapframe
+        // 3. Store NEW x0 to Struct.scratch (Memory)
+        // 4. Store NEW x1 to TPIDR_EL1 (Register - temporary storage)
 
-        // Restore x1-x30 (all registers except x0)
-        ldp x1, x2, [x0, #8]
-        ldp x3, x4, [x0, #24]
-        ldp x5, x6, [x0, #40]
-        ldp x7, x8, [x0, #56]
-        ldp x9, x10, [x0, #72]
-        ldp x11, x12, [x0, #88]
-        ldp x13, x14, [x0, #104]
-        ldr x15, [x0, #120]
-        ldr x16, [x0, #128]
-        ldr x17, [x0, #136]
+        mrs x16, tpidrro_el0    // Get Struct Base (RISC-V: sscratch)
+
+        ldr x2, [x0, #0]        // Load x0 from Trapframe (User x0)
+        ldr x3, [x0, #8]        // Load x1 from Trapframe (User x1)
+
+        str x2, [x16, #0]       // Save User x0 to scratch (Memory)
+        msr tpidr_el1, x3       // Save User x1 to TPIDR_EL1 (Register)
+
+        // Restore All Other Registers (x2-x30) from Trapframe
+        // (RISC-V: ld x1, 8(a0) ... )
+        ldp x2, x3, [x0, #16]
+        ldp x4, x5, [x0, #32]
+        ldp x6, x7, [x0, #48]
+        ldp x8, x9, [x0, #64]
+        ldp x10, x11, [x0, #80]
+        ldp x12, x13, [x0, #96]
+        ldp x14, x15, [x0, #112]
+        ldp x16, x17, [x0, #128] // Restores User x16, x17
         ldp x18, x19, [x0, #144]
         ldp x20, x21, [x0, #160]
         ldp x22, x23, [x0, #176]
@@ -312,14 +232,11 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         ldp x28, x29, [x0, #224]
         ldr x30, [x0, #240]
 
-        // Get Aarch64 pointer (x0 loses trapframe ptr)
-        mrs x0, tpidrro_el0
-
-        // Load user TTBR0 from Aarch64.ttbr0 (offset 16) using x1 as temp.
-        // This will clobber x1, so we restore x1 from Aarch64.scratch_x1 after.
-        ldr x1, [x0, #16]
+        // Switch Page Table (Kernel -> User)
+        // (RISC-V: ld t0, 16(a0) -> csrrw t0, satp, t0)
         
-        // Switch page table
+        mrs x0, tpidrro_el0     // Get Struct Base again (x0 is free/scratch)
+        ldr x1, [x0, #16]       // Load User TTBR0 (x1 is free/scratch)
         msr ttbr0_el1, x1
         msr ttbr1_el1, x1
         isb
@@ -328,13 +245,44 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         dsb ish
         isb
 
-        // Restore x1 and x0 from trampoline scratch
-        ldr x1, [x0, #48]
-        ldr x0, [x0, #0]
+        // Final Restore of x0, x1
+        // (RISC-V: ld t0, 0(a0) -> csrrw a0, sscratch, a0)
         
-        // All registers now restored, page table switched
+        // Restore x1 from TPIDR_EL1
+        mrs x1, tpidr_el1
+        
+        // Restore x0 from Struct.scratch
+        // Note: x0 holds Struct Base.
+        // ldr x0, [x0] loads the value at address x0 into x0.
+        // This overwrites the base pointer with User x0. Perfect.
+        ldr x0, [x0, #0]
+
+        // Return to User
         eret
         "#
+        );
+    }
+}
+
+
+#[unsafe(export_name = "arch_switch_to_user_space")]
+pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+    let addr = trapframe as *mut Trapframe as usize;
+
+    let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
+    let trampoline_base = get_trampoline_trap_vector();
+    let trap_exit_addr = trampoline_base + trap_exit_offset;
+
+    // トラップベクタをTrampolineに向ける
+    set_trapvector(trampoline_base);
+
+    unsafe {
+        asm!(
+            "mov x0, {tf_addr}",
+            "br {target}",
+            tf_addr = in(reg) addr,
+            target = in(reg) trap_exit_addr,
+            options(noreturn, nostack)
         );
     }
 }
@@ -349,71 +297,4 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
     arch_exception_handler(trapframe);
 
     arch_switch_to_user_space(trapframe);
-}
-
-#[unsafe(export_name = "arch_switch_to_user_space")]
-pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
-    let addr = trapframe as *mut Trapframe as usize;
-
-    // Guard: never ERET to VA 0.
-    // If EPC is 0 here, returning to EL0 will immediately take an instruction abort.
-    // Prefer the per-task saved PC if available; otherwise fall back to the default
-    // user entry used by AArch64 VCPU bring-up.
-    if trapframe.epc == 0 {
-        let fallback_pc = crate::task::mytask()
-            .map(|t| t.vcpu.get_pc())
-            .filter(|pc| *pc != 0)
-            .unwrap_or(0x10000);
-        crate::early_println!(
-            "[aarch64] fixup user pc: epc=0 -> {:#x}",
-            fallback_pc
-        );
-        trapframe.epc = fallback_pc;
-    }
-
-    // Policy: the kernel is responsible for providing a valid initial user stack pointer.
-    // During bring-up we've observed non-canonical / out-of-range SP values reaching EL0.
-    // Keep this fix strictly AArch64-local: canonicalize and clamp SP into the allocated
-    // user stack VMA before the trampoline writes SP_EL0.
-    {
-        let raw_sp = trapframe.regs.reg[31];
-        let mut sp = raw_sp & crate::environment::VMMAX;
-
-        // USER_STACK_END is the exclusive top of the user stack.
-        // Lower bounds may change at runtime if we grow the stack on-demand
-        // in the data-abort handler, so don't clamp SP just because it moved down.
-        let stack_end = crate::environment::USER_STACK_END;
-
-        if sp >= stack_end {
-            crate::early_println!(
-                "[aarch64] fixup user sp: raw={:#x} canon={:#x} end={:#x}",
-                raw_sp,
-                sp,
-                stack_end
-            );
-            // Keep some headroom below the exclusive end so early prologues that
-            // use small positive offsets from SP don't touch `stack_end`.
-            sp = stack_end - crate::environment::PAGE_SIZE;
-        }
-
-        // AArch64 ABI requires 16-byte alignment.
-        sp &= !0xF;
-        trapframe.regs.reg[31] = sp;
-    }
-
-    let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
-    let trampoline_base = get_trampoline_trap_vector();
-    let trap_exit_addr = trampoline_base + trap_exit_offset;
-
-    set_trapvector(trampoline_base);
-
-    unsafe {
-        asm!(
-            "mov x0, {tf}",
-            "br {target}",
-            tf = in(reg) addr,
-            target = in(reg) trap_exit_addr,
-            options(noreturn, nostack)
-        );
-    }
 }
