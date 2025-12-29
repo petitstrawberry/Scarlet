@@ -69,11 +69,27 @@ impl Vcpu {
 
     pub fn store(&mut self, trapframe: &Trapframe) {
         self.iregs = trapframe.regs;
-        self.pc = trapframe.epc;
+        if self.mode == Mode::User && trapframe.epc == 0 {
+            // During bring-up we sometimes observe ELR/epc saved as 0 (e.g. around early
+            // scheduler/timer transitions). Never let that clobber the user PC, or we'll
+            // ERET to VA 0 and immediately take an instruction abort.
+            crate::early_println!(
+                "[aarch64][vcpu] ignore NULL user pc; keeping pc={:#x}",
+                self.pc
+            );
+        } else {
+            self.pc = trapframe.epc;
+        }
     }
 
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
         trapframe.regs = self.iregs;
-        trapframe.epc = self.pc;
+        let pc = if self.mode == Mode::User && self.pc == 0 {
+            crate::early_println!("[aarch64][vcpu] fixup NULL user pc -> 0x10000");
+            0x10000
+        } else {
+            self.pc
+        };
+        trapframe.epc = pc;
     }
 }

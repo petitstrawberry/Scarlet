@@ -1,16 +1,39 @@
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::print_traplog;
+use crate::abi::syscall_dispatcher;
 use crate::arch::Trapframe;
 use crate::arch::get_cpu;
 use crate::interrupt::InterruptManager;
 use crate::sched::scheduler::get_scheduler;
+use crate::task::mytask;
 use crate::timer;
 
 /// AArch64 EC (Exception Class) values from ESR_EL1.
 const EC_SVC64: u64 = 0x15;
 const EC_INSN_ABORT_LOWER_EL: u64 = 0x20;
 const EC_DATA_ABORT_LOWER_EL: u64 = 0x24;
+
+// Bring-up aid: log only a small number of user writes to confirm forward progress,
+// without reintroducing the per-SVC log flood.
+static SVC_STREAMWRITE_LOG_BUDGET: AtomicUsize = AtomicUsize::new(32);
+
+fn try_take_streamwrite_log_budget() -> bool {
+    let mut budget = SVC_STREAMWRITE_LOG_BUDGET.load(Ordering::Relaxed);
+    while budget > 0 {
+        match SVC_STREAMWRITE_LOG_BUDGET.compare_exchange(
+            budget,
+            budget - 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(new_budget) => budget = new_budget,
+        }
+    }
+    false
+}
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe) {
     let esr: u64;
@@ -46,13 +69,40 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
             }
         }
         EC_SVC64 => {
-            print_traplog(trapframe);
-            panic!(
-                "[aarch64] syscall (SVC64) is disabled: esr={:#x} epc={:#x} nr(x8)={:#x}",
-                esr,
-                trapframe.epc,
-                trapframe.get_syscall_number(),
-            );
+            let syscall_nr = trapframe.get_syscall_number();
+            
+            match syscall_dispatcher(trapframe) {
+                Ok(ret) => {
+                    trapframe.set_return_value(ret);
+                    if syscall_nr == 0xd {
+                        let brk_before = mytask().map(|t| t.get_brk()).unwrap_or(0);
+                        let brk_after = mytask().map(|t| t.get_brk()).unwrap_or(0);
+                        crate::early_println!(
+                            "[aarch64][svc][sbrk] ret={:#x} brk_before={:#x} brk_after={:#x}",
+                            ret,
+                            brk_before,
+                            brk_after,
+                        );
+                    }
+                }
+                Err(_msg) => {
+                    // Keep this path noisy for bring-up, but stay quiet on success.
+                    // Follow the existing convention: successful syscalls advance PC
+                    // inside the syscall implementation; on error, ensure we don't
+                    // re-execute SVC forever.
+                    crate::early_println!(
+                        "[aarch64][svc][err] nr={:#x} epc={:#x} arg0={:#x} arg1={:#x} arg2={:#x}",
+                        syscall_nr,
+                        trapframe.epc,
+                        trapframe.get_arg(0),
+                        trapframe.get_arg(1),
+                        trapframe.get_arg(2),
+                    );
+                    print_traplog(trapframe);
+                    trapframe.set_return_value(usize::MAX); // -1
+                    trapframe.increment_pc_next(mytask().unwrap());
+                }
+            }
         }
         EC_INSN_ABORT_LOWER_EL | EC_DATA_ABORT_LOWER_EL => {
             let far: usize;
@@ -68,7 +118,15 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
             };
 
             if fault_addr == 0 || trapframe.regs.reg[31] == 0 {
-                panic!("[aarch64] NULL pointer access or zero stack pointer detected");
+                print_traplog(trapframe);
+                panic!(
+                    "[aarch64] NULL pointer access or zero stack pointer detected (ec={:#x} esr={:#x} far={:#x} epc={:#x} sp={:#x})",
+                    ec,
+                    esr,
+                    far,
+                    trapframe.epc,
+                    trapframe.regs.reg[31]
+                );
             }
 
             let task = get_scheduler()
@@ -76,17 +134,6 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
                 .expect("No current task for fault handling");
 
             let manager = &task.vm_manager;
-            if manager.search_memory_map(fault_addr).is_none() {
-                print_traplog(trapframe);
-                panic!(
-                    "[aarch64] VMA not found for fault_addr={:#x} (ec={:#x} esr={:#x} far={:#x} epc={:#x})",
-                    fault_addr,
-                    ec,
-                    esr,
-                    far,
-                    trapframe.epc,
-                );
-            }
 
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 
@@ -108,11 +155,14 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
                 size: None,
             };
             if let Err(e) = manager.lazy_map_page_with(access) {
+                print_traplog(trapframe);
                 panic!(
-                    "[aarch64] Failed to map page for abort at vaddr={:#x} (ec={:#x} esr={:#x}): {}",
+                    "[aarch64] Failed to map page for abort at vaddr={:#x} (ec={:#x} esr={:#x} far={:#x} epc={:#x}): {}",
                     fault_addr,
                     ec,
                     esr,
+                    far,
+                    trapframe.epc,
                     e
                 );
             }

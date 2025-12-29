@@ -22,7 +22,23 @@ unsafe extern "Rust" {
 
 #[unsafe(link_section = ".init")]
 #[unsafe(export_name = "_start")]
-pub fn _start(x0: usize, x1: usize) -> ! {
+#[unsafe(naked)]
+pub extern "C" fn _start() -> ! {
+    // Policy: the kernel owns the initial user stack pointer (SP_EL0).
+    // Keep `_start` as a pure branch so it never touches the stack before
+    // the kernel-provided SP is in effect.
+    unsafe {
+        naked_asm!(
+            r#"
+        b    _start_rust
+        "#
+        );
+    }
+}
+
+#[unsafe(link_section = ".init")]
+#[unsafe(export_name = "_start_rust")]
+pub extern "C" fn _start_rust(x0: usize, x1: usize) -> ! {
     // x0 = argc, x1 = argv (set by kernel's Scarlet ABI).
     // On AArch64 bring-up the kernel-side argv/envp wiring may be incomplete.
     // Passing garbage pointers here can lead to an infinite loop while scanning envp.
@@ -30,13 +46,17 @@ pub fn _start(x0: usize, x1: usize) -> ! {
     let _ = (x0, x1);
 
     unsafe {
+        crate::println!("[user/aarch64] _start enter argc={:#x} argv={:#x}", x0, x1);
         env::init_env(0, core::ptr::null(), core::ptr::null());
+        crate::println!("[user/aarch64] env::init_env done");
 
         // Bring-up breadcrumb: ensure SVC path works before entering user `main()`.
         // Ignore the return value.
         let _ = arch_syscall0(Syscall::Getpid);
+        crate::println!("[user/aarch64] getpid syscall returned");
 
         let ret = main();
+        crate::println!("[user/aarch64] main returned ret={}", ret);
         exit(ret as i32);
     }
 }

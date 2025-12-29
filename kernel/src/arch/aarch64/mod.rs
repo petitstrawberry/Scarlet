@@ -80,6 +80,7 @@ pub struct Aarch64 {
     kernel_stack: u64, // offset: 24
     kernel_trap: u64,  // offset: 32
     kernel_ttbr0: u64, // offset: 40 (kernel TTBR0 value for EL0->EL1 entry)
+    scratch_x1: u64,   // offset: 48 (temporary save area for EL0 return)
 }
 
 impl Aarch64 {
@@ -91,6 +92,7 @@ impl Aarch64 {
             kernel_stack: 0,
             kernel_trap: 0,
             kernel_ttbr0: 0,
+            scratch_x1: 0,
         }
     }
 

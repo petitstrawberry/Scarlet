@@ -257,6 +257,19 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         mov x1, #0x0
         msr spsr_el1, x1
 
+        // Save final user x0 and user x1 into per-CPU trampoline storage.
+        // We must do this *before* restoring registers, because we will later
+        // need temporary registers for the TTBR switch and cannot touch the
+        // kernel trapframe after switching to the user TTBR.
+        //
+        // Use x2/x3/x4 as temporaries here; they will be restored from the
+        // trapframe below.
+        ldr x2, [x0, #0]         // x2 = final user x0
+        ldr x3, [x0, #8]         // x3 = user x1
+        mrs x4, tpidrro_el0      // x4 = Aarch64 pointer
+        str x2, [x4, #0]         // Aarch64.scratch   = final x0
+        str x3, [x4, #48]        // Aarch64.scratch_x1 = user x1
+
         // Restore x1-x30 (all registers except x0)
         ldp x1, x2, [x0, #8]
         ldp x3, x4, [x0, #24]
@@ -276,17 +289,11 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         ldp x28, x29, [x0, #224]
         ldr x30, [x0, #240]
 
-        // Load final x0 value
-        ldr x1, [x0, #0]         // x1 = final x0 value
-        
-        // Get Aarch64 pointer and swap with x0
-        // (mimicking RISC-V's csrrw a0, sscratch, a0)
-        mrs x0, tpidrro_el0      // x0 = Aarch64 pointer (x0 loses trapframe ptr)
-        
-            // Save final x0 to Aarch64.scratch (offset 0)
-        str x1, [x0, #0]
-        
-        // Load user TTBR0 from Aarch64.ttbr0 (offset 16) using x1 as temp
+        // Get Aarch64 pointer (x0 loses trapframe ptr)
+        mrs x0, tpidrro_el0
+
+        // Load user TTBR0 from Aarch64.ttbr0 (offset 16) using x1 as temp.
+        // This will clobber x1, so we restore x1 from Aarch64.scratch_x1 after.
         ldr x1, [x0, #16]
         
         // Switch page table
@@ -297,8 +304,9 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         tlbi vmalle1is
         dsb ish
         isb
-        
-        // Restore x0 from Aarch64.scratch
+
+        // Restore x1 and x0 from trampoline scratch
+        ldr x1, [x0, #48]
         ldr x0, [x0, #0]
         
         // All registers now restored, page table switched
@@ -323,6 +331,52 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 #[unsafe(export_name = "arch_switch_to_user_space")]
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
+
+    // Guard: never ERET to VA 0.
+    // If EPC is 0 here, returning to EL0 will immediately take an instruction abort.
+    // Prefer the per-task saved PC if available; otherwise fall back to the default
+    // user entry used by AArch64 VCPU bring-up.
+    if trapframe.epc == 0 {
+        let fallback_pc = crate::task::mytask()
+            .map(|t| t.vcpu.get_pc())
+            .filter(|pc| *pc != 0)
+            .unwrap_or(0x10000);
+        crate::early_println!(
+            "[aarch64] fixup user pc: epc=0 -> {:#x}",
+            fallback_pc
+        );
+        trapframe.epc = fallback_pc;
+    }
+
+    // Policy: the kernel is responsible for providing a valid initial user stack pointer.
+    // During bring-up we've observed non-canonical / out-of-range SP values reaching EL0.
+    // Keep this fix strictly AArch64-local: canonicalize and clamp SP into the allocated
+    // user stack VMA before the trampoline writes SP_EL0.
+    {
+        let raw_sp = trapframe.regs.reg[31];
+        let mut sp = raw_sp & crate::environment::VMMAX;
+
+        // USER_STACK_END is the exclusive top of the user stack.
+        // Lower bounds may change at runtime if we grow the stack on-demand
+        // in the data-abort handler, so don't clamp SP just because it moved down.
+        let stack_end = crate::environment::USER_STACK_END;
+
+        if sp >= stack_end {
+            crate::early_println!(
+                "[aarch64] fixup user sp: raw={:#x} canon={:#x} end={:#x}",
+                raw_sp,
+                sp,
+                stack_end
+            );
+            // Keep some headroom below the exclusive end so early prologues that
+            // use small positive offsets from SP don't touch `stack_end`.
+            sp = stack_end - crate::environment::PAGE_SIZE;
+        }
+
+        // AArch64 ABI requires 16-byte alignment.
+        sp &= !0xF;
+        trapframe.regs.reg[31] = sp;
+    }
 
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
     let trampoline_base = get_trampoline_trap_vector();
