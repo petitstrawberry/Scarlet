@@ -23,13 +23,25 @@ impl Instruction {
 }
 
 pub fn idle() -> ! {
-    // Wait For Interrupt in an infinite loop.
-    // WFI may return spuriously (e.g., on timer interrupts), so we loop forever.
-    // The scheduler expects idle() to never return - task switching happens
-    // via timer interrupts that call schedule() and context switch away.
+    crate::early_println!("[idle] ENTERED idle function");
+    
+    // TEMPORARY DEBUGGING: Don't use WFI, just busy loop and let interrupts fire
+    // This helps determine if the issue is with WFI not waking, or interrupts not firing at all
+    crate::early_println!("[idle] Using busy loop instead of WFI for debugging");
+    
+    let mut count = 0;
     loop {
+        count += 1;
+        if count % 10000000 == 0 {
+            let mut ctl: u64;
+            unsafe {
+                core::arch::asm!("mrs {0}, CNTP_CTL_EL0", out(reg) ctl);
+            }
+            crate::early_println!("[idle] Busy loop iteration {}, CNTP_CTL={:#x}", count / 10000000, ctl);
+        }
+        // Give interrupts a chance to fire
         unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            core::arch::asm!("nop", options(nomem, nostack, preserves_flags));
         }
     }
 }

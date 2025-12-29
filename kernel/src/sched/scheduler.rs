@@ -373,7 +373,9 @@ impl Scheduler {
 
         let trap_vector = get_trampoline_trap_vector();
         let arch = get_trampoline_arch(cpu_id);
+        crate::early_println!("[Scheduler] Setting trap vector to {:#x}", trap_vector);
         set_trapvector(trap_vector);
+        crate::early_println!("[Scheduler] Setting arch to {:#x}", arch);
         set_arch(arch);
         cpu.set_trap_handler(get_user_trap_handler());
         cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
@@ -383,13 +385,32 @@ impl Scheduler {
         timer.set_interval_us(cpu_id, 0);
         
         crate::early_println!("[Scheduler] Enabling interrupts");
+        unsafe {
+            core::arch::asm!("dsb sy", "isb");
+        }
+        crate::early_println!("[Scheduler] About to enable interrupts...");
         enable_interrupt();
+        unsafe {
+            core::arch::asm!("dsb sy", "isb");
+        }
+        crate::early_println!("[Scheduler] Interrupts enabled, still here!");
         
         crate::early_println!("[Scheduler] Starting timer");
         timer.start(cpu_id);
+        unsafe {
+            core::arch::asm!("dsb sy", "isb");
+        }
+        crate::early_println!("[Scheduler] Timer started, still here!");
         
         crate::early_println!("[Scheduler] Entering idle loop");
+        unsafe {
+            core::arch::asm!("dsb sy", "isb");
+        }
+        crate::early_println!("[Scheduler] About to call idle() function...");
+        crate::early_println!("[Scheduler] idle function address: {:#x}", idle as usize);
         idle();
+        // Never reached
+        crate::early_println!("[Scheduler] ERROR: idle() returned!");
     }
 
     pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
