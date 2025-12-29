@@ -139,19 +139,32 @@ impl Gic {
 
     /// Initialize the GIC distributor
     fn init_distributor(&self) {
+        crate::early_println!("[GIC] init_distributor: dist_base={:#x}", self.dist_base_addr);
         unsafe {
             // Disable distributor while programming.
+            crate::early_println!("[GIC] Writing to GICD_CTLR to disable distributor");
             write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x0);
+            crate::early_println!("[GIC] Distributor disabled");
 
             // Put all interrupts into Group 1 (non-secure) so they can be delivered at EL1.
             // This is especially important for PPIs like the architected timer.
             let words = (self.max_interrupts as usize + 32) / 32;
+            crate::early_println!("[GIC] Setting {} words in GICD_IGROUPR", words);
             for i in 0..words {
                 write_volatile(self.dist_reg_addr(GICD_IGROUPR + i * 4) as *mut u32, 0xFFFF_FFFF);
             }
+            crate::early_println!("[GIC] GICD_IGROUPR configured");
+
+            // Pre-enable timer PPI (ID 30) since writes to ISENABLER hang later
+            crate::early_println!("[GIC] Pre-enabling timer PPI 30 in GICD_ISENABLER");
+            let ppi_30_bit = 1u32 << 30;
+            write_volatile(self.dist_reg_addr(GICD_ISENABLER) as *mut u32, ppi_30_bit);
+            crate::early_println!("[GIC] Timer PPI 30 pre-enabled");
 
             // Enable the distributor (both Group0 and Group1).
+            crate::early_println!("[GIC] Enabling distributor");
             write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x3);
+            crate::early_println!("[GIC] Distributor enabled");
         }
     }
 
@@ -254,16 +267,16 @@ impl ExternalInterruptController for Gic {
         crate::early_println!("[GIC] enable_addr={:#x} bit={:#x}", enable_addr, bit);
         
         // Try reading first to test if the address is accessible
-        let current_val = unsafe {
+        unsafe {
             crate::early_println!("[GIC] About to read from enable_addr...");
             let val = read_volatile(enable_addr as *const u32);
             crate::early_println!("[GIC] Read value: {:#x}", val);
-            val
         };
         
-        crate::early_println!("[GIC] About to write to enable_addr...");
+        // GICD_ISENABLER is write-1-to-set, so just write the bit we want to enable
+        crate::early_println!("[GIC] About to write bit {:#x} to enable_addr...", bit);
         unsafe {
-            write_volatile(enable_addr as *mut u32, current_val | bit);
+            write_volatile(enable_addr as *mut u32, bit);
         }
         crate::early_println!("[GIC] Interrupt enabled successfully");
 

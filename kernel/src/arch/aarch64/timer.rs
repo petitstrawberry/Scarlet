@@ -81,13 +81,16 @@ impl ArchTimer {
                 .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
 
             // QEMU virt: CNTP PPI is 30.
-            // PPIs must be enabled in the GIC distributor for them to be delivered to the CPU interface.
+            // PPIs are banked per-CPU. Try skipping GIC enable since local controller handles it.
+            crate::early_println!("[Timer] Skipping GIC enable for PPI 30 - using local controller only");
+            /*
             crate::early_println!("[Timer] Enabling PPI 30 in GIC distributor");
             mgr.enable_external_interrupt(
                 crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
                 cpu_id,
             )
             .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
+            */
         });
 
         crate::early_println!("[Timer] Unmasking IRQ at CPU level");
