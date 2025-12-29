@@ -161,15 +161,17 @@ impl Gic {
             write_volatile(self.dist_reg_addr(GICD_ISENABLER) as *mut u32, ppi_30_bit);
             crate::early_println!("[GIC] Timer PPI 30 pre-enabled");
             
-            // Set timer PPI priority to highest (0 = highest priority)
-            crate::early_println!("[GIC] Setting PPI 30 priority to 0 (highest)");
-            write_volatile(self.priority_addr(30) as *mut u8, 0x0);
+            // Set timer PPI priority
+            // For Group 1 non-secure interrupts, use priority 0x80 (bit 7 set)
+            crate::early_println!("[GIC] Setting PPI 30 priority to 0x80 (Group 1 non-secure)");
+            write_volatile(self.priority_addr(30) as *mut u8, 0x80);
 
-            // Enable the distributor for Group 1 interrupts.
+            // Enable the distributor for both Group 0 and Group 1 interrupts.
             // Bit 0 = Enable Group 0, Bit 1 = Enable Group 1.
             // For EL1 non-secure, we need Group 1 enabled (bit 1).
-            crate::early_println!("[GIC] Enabling distributor (Group 1)");
-            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x2);
+            // DEBUG: Also enable Group 0 (bit 0) to test if interrupts are being sent as Group 0.
+            crate::early_println!("[GIC] Enabling distributor (Group 0 + Group 1)");
+            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x3);
             
             // Read back to verify
             let ctrl_val = read_volatile(self.dist_reg_addr(GICD_CTLR) as *const u32);
@@ -188,11 +190,12 @@ impl Gic {
             // No priority grouping.
             crate::early_println!("[GIC] Setting BPR to 0 (no priority grouping)");
             write_volatile(self.cpu_reg_addr(cpu_id, GICC_BPR) as *mut u32, 0x0);
-            // Enable the CPU interface for Group 1 interrupts (bit 0 = Group 0, bit 1 = FIQEn for Group 1)
-            // For EL1 non-secure, we want Group 1 interrupts (bit 0), and FIQ bypass disabled.
-            // Setting to 0x1 enables Group 1 interrupts to be signaled to the CPU.
-            crate::early_println!("[GIC] Enabling GICC_CTLR (Group 1)");
-            write_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *mut u32, 0x1);
+            // Enable the CPU interface for both Group 0 and Group 1 interrupts.
+            // Bit 0 = Enable Group 0 (FIQ), Bit 1 = Enable Group 1 (IRQ).
+            // For EL1 non-secure, we want Group 1 interrupts (bit 0).
+            // DEBUG: Also enable Group 0 to test if interrupts are coming as Group 0.
+            crate::early_println!("[GIC] Enabling GICC_CTLR (Group 0 + Group 1)");
+            write_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *mut u32, 0x3);
             
             // Read back to verify
             let ctlr_val = read_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *const u32);
@@ -267,6 +270,18 @@ impl ExternalInterruptController for Gic {
         self.validate_cpu_id(cpu_id)?;
 
         crate::early_println!("[GIC] Validated interrupt id and cpu id");
+
+        // Configure interrupt as Group 1
+        // GICD_IGROUPR: 1 bit per interrupt, 1=Group 1, 0=Group 0
+        let word_offset = interrupt_id / 32;
+        let bit_offset = interrupt_id % 32;
+        let igroupr_addr = self.dist_reg_addr(GICD_IGROUPR + (word_offset as usize * 4));
+        unsafe {
+            let current = read_volatile(igroupr_addr as *const u32);
+            let new_value = current | (1u32 << bit_offset);
+            write_volatile(igroupr_addr as *mut u32, new_value);
+        }
+        crate::early_println!("[GIC] Configured interrupt {} as Group 1", interrupt_id);
 
         // Set interrupt target to the specified CPU (SPIs only).
         // SGIs/PPIs (0-31) are banked per-CPU and their ITARGETSR is RO/ignored.
@@ -377,8 +392,23 @@ impl ExternalInterruptController for Gic {
         // Extract interrupt ID (bits 0-9)
         let interrupt_id = iar & 0x3FF;
 
+        // DEBUG: Log interrupt ID to debug spurious interrupts
+        static mut CLAIM_LOG_BUDGET: usize = 20;
+        unsafe {
+            if CLAIM_LOG_BUDGET > 0 {
+                crate::early_println!("[GIC] claim_interrupt: IAR={:#x}, interrupt_id={}", iar, interrupt_id);
+                CLAIM_LOG_BUDGET -= 1;
+            }
+        }
+
         // Check for spurious interrupt (1023 or higher)
         if interrupt_id >= 1020 {
+            // CRITICAL: Even for spurious interrupts, we must write EOI
+            // Otherwise the GIC will not deliver the next interrupt
+            let eoir_addr = self.cpu_reg_addr(cpu_id, GICC_EOIR);
+            unsafe {
+                write_volatile(eoir_addr as *mut u32, interrupt_id);
+            }
             Ok(None)
         } else {
             Ok(Some(interrupt_id))

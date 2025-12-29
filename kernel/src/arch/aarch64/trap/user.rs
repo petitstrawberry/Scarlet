@@ -178,9 +178,13 @@ pub extern "C" fn _user_trap_entry() {
             mrs x17, elr_el1
             str x17, [sp, #256]
 
-            // Call the kernel trap handler
+            // Call the kernel trap handler via indirect branch
+            // x16: cpu pointer (TPIDR_EL1 points to arch struct)
+            mrs x16, tpidr_el1
+            // Jump to trap handler: cpu.kernel_trap (offset 32)
+            ldr x17, [x16, #32]
             mov x0, sp
-            bl  arch_kernel_trap_handler
+            br  x17
 
             // Restore ELR_EL1 from trapframe.epc
             ldr x1, [sp, #256]
@@ -215,6 +219,20 @@ pub extern "C" fn _user_trap_entry() {
 
 #[unsafe(export_name = "arch_kernel_trap_handler")]
 pub extern "C" fn arch_kernel_trap_handler(addr: usize) {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    
+    static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static LAST_SP: AtomicUsize = AtomicUsize::new(0);
+    
+    let count = CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let current_sp = addr;
+    let last_sp = LAST_SP.swap(current_sp, Ordering::Relaxed);
+    
+    if count <= 5 {
+        crate::early_println!("[kernel_trap] call #{}, sp={:#x}, last_sp={:#x}, diff={}",
+            count, current_sp, last_sp, current_sp as isize - last_sp as isize);
+    }
+    
     let trapframe: &mut Trapframe = unsafe { &mut *(addr as *mut Trapframe) };
     arch_exception_handler(trapframe);
 }
@@ -227,6 +245,10 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         naked_asm!(
             r#"
         // x0 = trapframe
+
+        // CRITICAL: Mask all interrupts before setting up user context
+        // This prevents nested interrupts during TTBR0 swap and register restore
+        msr daifset, #0xf
 
         // Breadcrumb: reached _user_trap_exit (direct PL011 putc)
         mov w11, #'E'
@@ -245,10 +267,9 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         ldr x1, [x0, #248]
         msr sp_el0, x1
 
-        // Configure return to EL0t (User) for now.
-        // M[3:0] = 0b0000 (EL0t)
-        // Also keep interrupts masked initially (D,A,I,F = 1) to avoid spurious IRQ/FIQ/SError.
-        mov x1, #0x3c0
+        // Configure return to EL0t (User)
+        // M[3:0] = 0b0000 (EL0t), DAIF = 0 (interrupts enabled)
+        mov x1, #0x0
         msr spsr_el1, x1
 
         // Swap TTBR0_EL1 with cpu.ttbr0 (offset 16)

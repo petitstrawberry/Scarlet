@@ -31,6 +31,7 @@ pub struct ArchTimer {
     next_event: u64,
     running: bool,
     frequency: u64,
+    initialized: bool,
 }
 
 impl ArchTimer {
@@ -44,6 +45,7 @@ impl ArchTimer {
             next_event: 0,
             running: false,
             frequency: freq,
+            initialized: false,
         }
     }
 
@@ -70,44 +72,54 @@ impl ArchTimer {
 
         crate::early_println!("[Timer] Starting timer, next_event={:#x}", self.next_event);
         
+        // Read current timer value before setting compare value
+        let current_time = self.get_time();
+        crate::early_println!("[Timer] Current timer count: {:#x}, compare value: {:#x}, diff: {}",
+            current_time, self.next_event, self.next_event.wrapping_sub(current_time) as i64);
+        
         // Program the next event before unmasking interrupts.
         self.set_timer(self.get_next_event());
-
-        // Enable timer local interrupt and ensure the corresponding PPI is enabled in the GIC.
-        InterruptManager::with_manager(|mgr| {
-            let cpu_id = get_cpu().get_cpuid() as u32;
-            crate::early_println!("[Timer] Enabling local timer interrupt");
-            mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
-                .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
-
-            // QEMU virt: CNTP PPI is 30.
-            // PPIs are banked per-CPU. Try skipping GIC enable since local controller handles it.
-            crate::early_println!("[Timer] Skipping GIC enable for PPI 30 - using local controller only");
-            /*
-            crate::early_println!("[Timer] Enabling PPI 30 in GIC distributor");
-            mgr.enable_external_interrupt(
-                crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
-                cpu_id,
-            )
-            .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
-            */
-        });
-
-        crate::early_println!("[Timer] Unmasking IRQ at CPU level");
-        // Ensure IRQ is unmasked at CPU level.
-        unsafe {
-            asm!("msr daifclr, #2", options(nostack));
-        }
         
-        // Read back timer control to verify it's enabled
-        let ctl: u64;
-        unsafe {
-            asm!("mrs {0}, cntp_ctl_el0", out(reg) ctl, options(nostack));
+        // Only perform GIC configuration on first start
+        if !self.initialized {
+            crate::early_println!("[Timer] First start - configuring GIC");
+            
+            // CRITICAL: Mask interrupts before configuring GIC to avoid deadlock
+            // (interrupt firing during GIC config would try to re-lock InterruptManager)
+            unsafe {
+                asm!("msr daifset, #2", options(nostack));
+            }
+            crate::early_println!("[Timer] Interrupts masked during GIC configuration");
+
+            // Enable timer local interrupt and ensure the corresponding PPI is enabled in the GIC.
+            InterruptManager::with_manager(|mgr| {
+                let cpu_id = get_cpu().get_cpuid() as u32;
+                crate::early_println!("[Timer] Enabling local timer interrupt");
+                mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
+                    .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
+
+                // QEMU virt: CNTP PPI is 30.
+                // PPIs are banked per-CPU but still need to be enabled in GIC distributor.
+                crate::early_println!("[Timer] Enabling PPI 30 in GIC distributor");
+                mgr.enable_external_interrupt(
+                    crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
+                    cpu_id,
+                )
+                .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
+            });
+            
+            crate::early_println!("[Timer] GIC configuration complete");
+
+            // Ensure IRQ is unmasked at CPU level (first time only)
+            unsafe {
+                asm!("msr daifclr, #2", options(nostack));
+            }
+            
+            self.initialized = true;
+            crate::early_println!("[Timer] Timer initialization complete");
         }
-        crate::early_println!("[Timer] CNTP_CTL after start: {:#x} (ENABLE={} IMASK={} ISTATUS={})",
-            ctl, ctl & 1, (ctl >> 1) & 1, (ctl >> 2) & 1);
-        
-        crate::early_println!("[Timer] Timer start complete");
+        // Note: Subsequent calls just update CVAL, no DAIF/GIC manipulation
+        // This prevents nested interrupts during tick handling
     }
 
     pub fn stop(&mut self) {

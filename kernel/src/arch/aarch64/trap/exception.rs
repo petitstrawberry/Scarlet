@@ -16,7 +16,7 @@ const EC_INSN_ABORT_LOWER_EL: u64 = 0x20;
 const EC_DATA_ABORT_LOWER_EL: u64 = 0x24;
 
 // Keep early bring-up logs bounded.
-static EXCEPTION_LOG_BUDGET: AtomicUsize = AtomicUsize::new(64);
+static EXCEPTION_LOG_BUDGET: AtomicUsize = AtomicUsize::new(128);
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe) {
     let esr: u64;
@@ -28,6 +28,10 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
         if v == 0 { None } else { Some(v - 1) }
     }).is_ok();
 
+    if should_log {
+        crate::early_println!("[aarch64] Exception handler invoked: EC={:#x}", ec);
+    }
+
     match ec {
         // IRQ and some non-synchronous events report EC=0.
         // Our trampoline vector currently funnels all exception classes through
@@ -37,9 +41,21 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
             // IMPORTANT: claim_and_handle completes (EOI) before we proceed.
             // This is needed because timer::tick() may context-switch and not return.
             let cpu_id = get_cpu().get_cpuid() as u32;
+            
+            if should_log {
+                early_println!("[aarch64] EC=0, attempting to access InterruptManager...");
+            }
+            
             let claimed = InterruptManager::with_manager(|mgr| {
+                if should_log {
+                    early_println!("[aarch64] Inside InterruptManager, claiming interrupt...");
+                }
                 mgr.claim_and_handle_external_interrupt(cpu_id).ok().flatten()
             });
+            
+            if should_log {
+                early_println!("[aarch64] InterruptManager access complete, claimed={:?}", claimed);
+            }
 
             if let Some(id) = claimed {
                 if id == crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ {
@@ -94,16 +110,19 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
             let far: usize;
             unsafe { asm!("mrs {0}, far_el1", out(reg) far, options(nostack)); }
 
-            if should_log {
-                let wnr = ((esr >> 6) & 0x1) != 0;
-                early_println!(
-                    "[aarch64] exception: {} abort esr={:#x} far={:#x} epc={:#x} wnr={}",
-                    if ec == EC_INSN_ABORT_LOWER_EL { "insn" } else { "data" },
-                    esr,
-                    far,
-                    trapframe.epc,
-                    wnr as u8,
-                );
+            let wnr = ((esr >> 6) & 0x1) != 0;
+            early_println!(
+                "[aarch64] exception: {} abort esr={:#x} far={:#x} epc={:#x} wnr={} sp={:#x}",
+                if ec == EC_INSN_ABORT_LOWER_EL { "insn" } else { "data" },
+                esr,
+                far,
+                trapframe.epc,
+                wnr as u8,
+                trapframe.regs.reg[31],
+            );
+
+            if far == 0 || trapframe.regs.reg[31] == 0 {
+                panic!("[aarch64] NULL pointer access or zero stack pointer detected");
             }
 
             let task = get_scheduler()
