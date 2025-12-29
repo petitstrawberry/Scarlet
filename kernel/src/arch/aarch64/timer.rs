@@ -6,6 +6,7 @@ use core::arch::asm;
 
 use crate::{
     arch::get_cpu,
+    arch::interrupt,
     interrupt::{InterruptManager, controllers::LocalInterruptType},
 };
 
@@ -88,26 +89,20 @@ impl ArchTimer {
         
         // Only perform GIC configuration on first start
         if !self.initialized {
-            // CRITICAL: Mask interrupts before configuring GIC to avoid deadlock
-            // (interrupt firing during GIC config would try to re-lock InterruptManager)
-            unsafe {
-                asm!("msr daifset, #2", options(nostack));
-            }
+            // CRITICAL: Mask IRQs before configuring the interrupt controller to avoid deadlock
+            // (an interrupt firing during InterruptManager access could try to re-lock it).
+            interrupt::disable_external_interrupts();
 
-            // Enable timer local interrupt and ensure the corresponding PPI is enabled in the GIC.
-            InterruptManager::with_manager(|mgr| {
-                let cpu_id = get_cpu().get_cpuid() as u32;
-                mgr.enable_local_interrupt(cpu_id, LocalInterruptType::Timer)
-                    .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
+            // Enable timer at two levels:
+            // - core-local interrupt (InterruptManager local controller)
+            // - external PPI line in the GIC distributor
+            interrupt::enable_core_local_interrupt(LocalInterruptType::Timer)
+                .unwrap_or_else(|e| panic!("Failed to enable local timer interrupt: {e}"));
 
-                // QEMU virt: CNTP PPI is 30.
-                // PPIs are banked per-CPU but still need to be enabled in GIC distributor.
-                mgr.enable_external_interrupt(
-                    crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
-                    cpu_id,
-                )
-                .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
-            });
+            interrupt::enable_external_interrupt_line(
+                crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ,
+            )
+            .unwrap_or_else(|e| panic!("Failed to enable timer PPI in GIC: {e}"));
 
             // CRITICAL: Set initialized flag BEFORE unmasking interrupts
             // Otherwise, if an interrupt fires immediately after unmask, it will
@@ -115,10 +110,12 @@ impl ArchTimer {
             self.initialized = true;
 
             // Ensure IRQ is unmasked at CPU level (first time only)
-            unsafe {
-                asm!("msr daifclr, #2", options(nostack));
-            }
+            interrupt::enable_external_interrupts();
         }
+
+        // Finally, unmask the timer interrupt at the timer source itself.
+        // (This is analogous to a per-source enable bit like RISC-V STIE.)
+        interrupt::enable_timer_source_interrupt();
         // Note: Subsequent calls just update CVAL, no DAIF/GIC manipulation
         // This prevents nested interrupts during tick handling
     }
