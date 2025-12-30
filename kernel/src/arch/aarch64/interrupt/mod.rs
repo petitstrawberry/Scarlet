@@ -19,10 +19,14 @@ pub fn enable_interrupts() {
     // Keep interrupts masked until the timer has started at least once.
     // See `crate::arch::aarch64::mark_interrupts_allowed`.
     if !crate::arch::aarch64::interrupts_allowed() {
-        unsafe { asm!("msr daifset, #0xf", options(nostack)); }
+        unsafe {
+            asm!("msr daifset, #0xf", options(nostack));
+        }
         return;
     }
-    unsafe { asm!("msr daifclr, #0xf", options(nostack)); }
+    unsafe {
+        asm!("msr daifclr, #0xf", options(nostack));
+    }
 }
 
 /// Disable interrupts globally (IRQ/FIQ/SError/Debug) at CPU level.
@@ -39,15 +43,21 @@ pub fn disable_interrupts() {
 pub fn enable_external_interrupts() {
     // External interrupts arrive as IRQ.
     if !crate::arch::aarch64::interrupts_allowed() {
-        unsafe { asm!("msr daifset, #0xf", options(nostack)); }
+        unsafe {
+            asm!("msr daifset, #0xf", options(nostack));
+        }
         return;
     }
-    unsafe { asm!("msr daifclr, #0x2", options(nostack)); }
+    unsafe {
+        asm!("msr daifclr, #0x2", options(nostack));
+    }
 }
 
 /// Disable external interrupts (IRQ) at CPU level.
 pub fn disable_external_interrupts() {
-    unsafe { asm!("msr daifset, #0x2", options(nostack)); }
+    unsafe {
+        asm!("msr daifset, #0x2", options(nostack));
+    }
 }
 
 /// Enable a core-local interrupt source via the InterruptManager.
@@ -135,7 +145,9 @@ where
 
 pub fn are_interrupts_enabled() -> bool {
     let daif: u64;
-    unsafe { asm!("mrs {0}, daif", out(reg) daif, options(nostack)); }
+    unsafe {
+        asm!("mrs {0}, daif", out(reg) daif, options(nostack));
+    }
     // DAIF.I (IRQ mask) bit is set when IRQs are disabled.
     (daif & (1 << 7)) == 0
 }

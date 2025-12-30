@@ -147,13 +147,16 @@ impl Gic {
             // This is especially important for PPIs like the architected timer.
             let words = (self.max_interrupts as usize + 32) / 32;
             for i in 0..words {
-                write_volatile(self.dist_reg_addr(GICD_IGROUPR + i * 4) as *mut u32, 0xFFFF_FFFF);
+                write_volatile(
+                    self.dist_reg_addr(GICD_IGROUPR + i * 4) as *mut u32,
+                    0xFFFF_FFFF,
+                );
             }
 
             // Pre-enable timer PPI (ID 30) since writes to ISENABLER hang later
             let ppi_30_bit = 1u32 << 30;
             write_volatile(self.dist_reg_addr(GICD_ISENABLER) as *mut u32, ppi_30_bit);
-            
+
             // Set timer PPI priority
             // For Group 1 non-secure interrupts, use priority 0x80 (bit 7 set)
             write_volatile(self.priority_addr(30) as *mut u8, 0x80);

@@ -32,7 +32,6 @@ pub unsafe extern "C" fn switch_to(prev_ctx: *mut KernelContext, next_ctx: *cons
         "stp x23, x24, [x0, #48]",
         "stp x25, x26, [x0, #64]",
         "stp x27, x28, [x0, #80]",
-
         // Restore next context (next_ctx)
         "ldr x30, [x1, #8]", // LR
         "ldr x9, [x1, #0]",  // SP

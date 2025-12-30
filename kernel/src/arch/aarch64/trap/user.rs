@@ -264,7 +264,6 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
     }
 }
 
-
 #[unsafe(export_name = "arch_switch_to_user_space")]
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;

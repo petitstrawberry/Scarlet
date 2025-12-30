@@ -86,7 +86,7 @@ impl ArchTimer {
 
         // Program the next event before unmasking interrupts.
         self.set_timer(next);
-        
+
         // Only perform GIC configuration on first start
         if !self.initialized {
             // CRITICAL: Mask IRQs before configuring the interrupt controller to avoid deadlock

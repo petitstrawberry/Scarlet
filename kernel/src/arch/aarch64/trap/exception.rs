@@ -37,7 +37,9 @@ fn try_take_streamwrite_log_budget() -> bool {
 
 pub fn arch_exception_handler(trapframe: &mut Trapframe) {
     let esr: u64;
-    unsafe { asm!("mrs {0}, esr_el1", out(reg) esr, options(nostack)); }
+    unsafe {
+        asm!("mrs {0}, esr_el1", out(reg) esr, options(nostack));
+    }
 
     let ec = (esr >> 26) & 0x3f;
 
@@ -52,7 +54,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
             let cpu_id = get_cpu().get_cpuid() as u32;
 
             let claimed = InterruptManager::with_manager(|mgr| {
-                mgr.claim_and_handle_external_interrupt(cpu_id).ok().flatten()
+                mgr.claim_and_handle_external_interrupt(cpu_id)
+                    .ok()
+                    .flatten()
             });
 
             if let Some(id) = claimed {
@@ -70,7 +74,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
         }
         EC_SVC64 => {
             let syscall_nr = trapframe.get_syscall_number();
-            
+
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
                     trapframe.set_return_value(ret);
@@ -106,7 +110,9 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
         }
         EC_INSN_ABORT_LOWER_EL | EC_DATA_ABORT_LOWER_EL => {
             let far: usize;
-            unsafe { asm!("mrs {0}, far_el1", out(reg) far, options(nostack)); }
+            unsafe {
+                asm!("mrs {0}, far_el1", out(reg) far, options(nostack));
+            }
 
             // For instruction aborts, FAR_EL1 is expected to match ELR_EL1, but during bring-up
             // we occasionally observe mismatches in logs. Use EPC (ELR_EL1) as the authoritative
@@ -121,11 +127,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
                 print_traplog(trapframe);
                 panic!(
                     "[aarch64] NULL pointer access or zero stack pointer detected (ec={:#x} esr={:#x} far={:#x} epc={:#x} sp={:#x})",
-                    ec,
-                    esr,
-                    far,
-                    trapframe.epc,
-                    trapframe.regs.reg[31]
+                    ec, esr, far, trapframe.epc, trapframe.regs.reg[31]
                 );
             }
 
@@ -142,11 +144,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
             } else {
                 // Best-effort: treat as Store if WnR is set, else Load.
                 let wnr = ((esr >> 6) & 0x1) != 0;
-                if wnr {
-                    AccessOp::Store
-                } else {
-                    AccessOp::Load
-                }
+                if wnr { AccessOp::Store } else { AccessOp::Load }
             };
 
             let access = AccessKind {
@@ -158,12 +156,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
                 print_traplog(trapframe);
                 panic!(
                     "[aarch64] Failed to map page for abort at vaddr={:#x} (ec={:#x} esr={:#x} far={:#x} epc={:#x}): {}",
-                    fault_addr,
-                    ec,
-                    esr,
-                    far,
-                    trapframe.epc,
-                    e
+                    fault_addr, ec, esr, far, trapframe.epc, e
                 );
             }
         }

@@ -326,7 +326,7 @@ impl PageTable {
     pub fn switch(&self, asid: u16) {
         crate::early_println!("[MMU] Preparing to switch page tables (ASID={})", asid);
         crate::early_println!("[MMU] Page table base: {:#x}", self as *const _ as usize);
-        
+
         let ttbr_val = self.get_val_for_ttbr(asid);
         crate::early_println!("[MMU] TTBR value: {:#x}", ttbr_val);
 
@@ -334,12 +334,16 @@ impl PageTable {
         // back to the kernel page table on EL0->EL1 entry.
         // (Task switching uses cpu.ttbr0 for the next user page table.)
         crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
-        
+
         unsafe {
             let mut sctlr: u64;
             core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
-            crate::early_println!("[MMU] Current SCTLR_EL1: {:#x} (MMU enabled: {})", sctlr, sctlr & 1);
-            
+            crate::early_println!(
+                "[MMU] Current SCTLR_EL1: {:#x} (MMU enabled: {})",
+                sctlr,
+                sctlr & 1
+            );
+
             // Set page table base registers
             asm!(
                 "msr ttbr0_el1, {ttbr}",
@@ -348,18 +352,14 @@ impl PageTable {
                 "isb",
                 ttbr = in(reg) ttbr_val,
             );
-            
+
             crate::early_println!("[MMU] TTBR registers set");
-            
+
             // Invalidate TLBs
-            asm!(
-                "tlbi vmalle1is",
-                "dsb sy",
-                "isb",
-            );
-            
+            asm!("tlbi vmalle1is", "dsb sy", "isb",);
+
             crate::early_println!("[MMU] TLBs invalidated");
-            
+
             // Enable MMU if not already enabled
             core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr);
             if sctlr & 1 == 0 {
@@ -370,7 +370,7 @@ impl PageTable {
                 crate::early_println!("[MMU] MMU already enabled");
             }
         }
-        
+
         crate::early_println!("[MMU] Page table switch complete");
     }
 
@@ -418,12 +418,16 @@ impl PageTable {
         let mut paddr = mmap.pmarea.start;
 
         // Device memory: is_shared WITHOUT Execute permission (kernel has Execute, device doesn't)
-        let is_device = mmap.is_shared 
+        let is_device = mmap.is_shared
             && !VirtualMemoryPermission::Execute.contained_in(mmap.permissions)
             && !VirtualMemoryPermission::User.contained_in(mmap.permissions);
-        
+
         if is_device {
-            crate::early_println!("[MMU] Mapping as DEVICE memory: {:#x}-{:#x}", mmap.vmarea.start, mmap.vmarea.end);
+            crate::early_println!(
+                "[MMU] Mapping as DEVICE memory: {:#x}-{:#x}",
+                mmap.vmarea.start,
+                mmap.vmarea.end
+            );
         }
 
         while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
@@ -658,17 +662,20 @@ pub fn init_mmu_registers() {
         asm!("mrs {}, sctlr_el1", out(reg) sctlr);
         crate::early_println!("[init_mmu_registers] Current SCTLR_EL1: {:#x}", sctlr);
         sctlr |= 1; // Set M bit to enable MMU
-        sctlr |= (1 << 2);  // Set C bit (data cache enable)
+        sctlr |= (1 << 2); // Set C bit (data cache enable)
         sctlr |= (1 << 12); // Set I bit (instruction cache enable)
-        crate::early_println!("[init_mmu_registers] Enabling MMU+caches (new SCTLR_EL1: {:#x})", sctlr);
+        crate::early_println!(
+            "[init_mmu_registers] Enabling MMU+caches (new SCTLR_EL1: {:#x})",
+            sctlr
+        );
         asm!("msr sctlr_el1, {}", in(reg) sctlr);
 
         // Memory barriers
         asm!("dsb sy");
         asm!("isb");
-        
+
         crate::early_println!("[init_mmu_registers] MMU enabled and synchronized");
-        
+
         // Verify we can still execute
         asm!("mrs {}, sctlr_el1", out(reg) sctlr);
         crate::early_println!("[init_mmu_registers] Post-enable SCTLR_EL1: {:#x}", sctlr);

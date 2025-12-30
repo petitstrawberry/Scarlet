@@ -25,8 +25,8 @@ pub use context::KernelContext;
 pub use earlycon::*;
 pub use registers::IntRegisters;
 
-use crate::vm::vmem::MemoryArea;
 use crate::arch::vm::get_root_pagetable;
+use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Aarch64;
 
@@ -116,7 +116,11 @@ impl Aarch64 {
         let root_pagetable =
             get_root_pagetable(asid).expect("No root page table found for ASID (aarch64)");
         let ttbr_val = root_pagetable.get_val_for_ttbr(asid);
-        crate::early_println!("[aarch64] set_next_address_space: asid={} ttbr={:#x}", asid, ttbr_val);
+        crate::early_println!(
+            "[aarch64] set_next_address_space: asid={} ttbr={:#x}",
+            asid,
+            ttbr_val
+        );
         self.ttbr0 = ttbr_val;
     }
 
@@ -272,10 +276,14 @@ pub fn set_arch(addr: usize) {
 pub fn enable_interrupt() {
     // Keep interrupts globally masked until the timer has started.
     if !interrupts_allowed() {
-        unsafe { asm!("msr daifset, #0xf", options(nostack)); }
+        unsafe {
+            asm!("msr daifset, #0xf", options(nostack));
+        }
         return;
     }
-    unsafe { asm!("msr daifclr, #0xf", options(nostack)); }
+    unsafe {
+        asm!("msr daifclr, #0xf", options(nostack));
+    }
 }
 
 pub fn disable_interrupt() {

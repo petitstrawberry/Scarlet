@@ -12,8 +12,8 @@
 use core::arch::asm;
 
 use crate::environment::NUM_OF_CPUS;
-use crate::interrupt::{CpuId, InterruptError, InterruptManager, InterruptResult};
 use crate::interrupt::controllers::{LocalInterruptController, LocalInterruptType};
+use crate::interrupt::{CpuId, InterruptError, InterruptManager, InterruptResult};
 
 /// CNTP_CTL_EL0 bit definitions
 const CNTP_CTL_ENABLE: u64 = 1 << 0;
@@ -28,21 +28,27 @@ pub const CNTP_PPI_IRQ: u32 = 30;
 #[inline]
 fn read_cntfrq_el0() -> u64 {
     let v: u64;
-    unsafe { asm!("mrs {0}, cntfrq_el0", out(reg) v, options(nostack)); }
+    unsafe {
+        asm!("mrs {0}, cntfrq_el0", out(reg) v, options(nostack));
+    }
     v
 }
 
 #[inline]
 fn read_cntpct_el0() -> u64 {
     let v: u64;
-    unsafe { asm!("mrs {0}, cntpct_el0", out(reg) v, options(nostack)); }
+    unsafe {
+        asm!("mrs {0}, cntpct_el0", out(reg) v, options(nostack));
+    }
     v
 }
 
 #[inline]
 fn read_cntp_ctl_el0() -> u64 {
     let v: u64;
-    unsafe { asm!("mrs {0}, cntp_ctl_el0", out(reg) v, options(nostack)); }
+    unsafe {
+        asm!("mrs {0}, cntp_ctl_el0", out(reg) v, options(nostack));
+    }
     v
 }
 

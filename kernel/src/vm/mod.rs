@@ -435,11 +435,13 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
     {
         early_println!(
             "Trampoline space planned  : {:#x} - {:#x}",
-            trampoline_vaddr_start, trampoline_vaddr_end
+            trampoline_vaddr_start,
+            trampoline_vaddr_end
         );
         early_println!(
             "  Trampoline paddr        : {:#x} - {:#x}",
-            trampoline_start, trampoline_end
+            trampoline_start,
+            trampoline_end
         );
         early_println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
         early_println!("  Arch paddr              : {:#x}", arch_paddr);
@@ -470,7 +472,8 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
             if let Some(m) = manager.search_memory_map(trampoline_vaddr_start) {
                 early_println!(
                     "[vm] map@trampoline_start: {:#x}-{:#x}",
-                    m.vmarea.start, m.vmarea.end
+                    m.vmarea.start,
+                    m.vmarea.end
                 );
             } else {
                 early_println!("[vm] map@trampoline_start: <none>");
@@ -478,7 +481,8 @@ pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
             if let Some(m) = manager.search_memory_map(trampoline_vaddr_end) {
                 early_println!(
                     "[vm] map@trampoline_end  : {:#x}-{:#x}",
-                    m.vmarea.start, m.vmarea.end
+                    m.vmarea.start,
+                    m.vmarea.end
                 );
             } else {
                 early_println!("[vm] map@trampoline_end  : <none>");

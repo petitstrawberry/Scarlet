@@ -17,13 +17,13 @@ use crate::{
     arch::{Trapframe, vm},
     early_initcall,
     fs::{
-        drivers::overlayfs::OverlayFS, FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager,
+        FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
     },
     register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
-        analyze_and_load_elf_with_strategy, build_auxiliary_vector, setup_auxiliary_vector_on_stack,
-        ExecutionMode, LoadStrategy, LoadTarget,
+        ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
+        build_auxiliary_vector, setup_auxiliary_vector_on_stack,
     },
     vm::{setup_trampoline, setup_user_stack},
 };
