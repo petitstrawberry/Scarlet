@@ -60,8 +60,8 @@ jobs:
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make fmt-check
 
     - name: Build scarlet kernel 
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-riscv64
       
     - name: Test scarlet kernel
-      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test
+      run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-riscv64
       timeout-minutes: 5

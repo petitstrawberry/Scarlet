@@ -4,7 +4,7 @@
     "version": "2.0.0",
     "tasks": [
         {
-            // NOTE: Copilot must NOT run this task. Use "cargo make run" in terminal to run the kernel.
+            // NOTE: Copilot must NOT run this task. Use "cargo make run-riscv64" or "cargo make run-aarch64" in terminal to run the kernel.
             "label": "kernel-riscv64",
             "type": "shell",
             "isBackground": true,
@@ -27,7 +27,7 @@
             ],
         },
         {
-            // NOTE: Copilot must NOT run this task. Use "cargo make test" in terminal to run the test kernel.
+            // NOTE: Copilot must NOT run this task. Use "cargo make test-riscv64" or "cargo make test-aarch64" in terminal to run tests.
             "label": "test-riscv64",
             "type": "shell",
             "isBackground": true,

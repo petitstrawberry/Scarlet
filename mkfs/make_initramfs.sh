@@ -10,7 +10,7 @@ USER_DIST_DIR="../user/bin/dist/${ARCH}"
 
 if [ ! -d "$USER_DIST_DIR" ]; then
 	echo "Error: user dist directory not found: $USER_DIST_DIR" >&2
-	echo "Hint: build user programs first (e.g. cargo make build-userbin-debug-${ARCH})" >&2
+	echo "Hint: build user programs first (e.g. cargo make build-userbin-${ARCH})" >&2
 	exit 1
 fi
 

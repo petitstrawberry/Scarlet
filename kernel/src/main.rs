@@ -214,10 +214,10 @@
 //!
 //! The kernel integrates with `cargo-make` for streamlined development:
 //!
-//! - `cargo make build`: Full kernel build with user programs
-//! - `cargo make test`: Run all kernel tests
-//! - `cargo make debug`: Launch kernel with GDB support
-//! - `cargo make run`: Quick development cycle execution
+//! - `cargo make build-debug-riscv64` / `cargo make build-debug-aarch64`: Full build with user programs
+//! - `cargo make test-riscv64` / `cargo make test-aarch64`: Run kernel tests
+//! - `cargo make debug-riscv64` / `cargo make debug-aarch64`: Launch kernel with GDB support
+//! - `cargo make run-riscv64` / `cargo make run-aarch64`: Quick development cycle execution
 //!
 //! ## Entry Points
 //!

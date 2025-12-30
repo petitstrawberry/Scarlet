@@ -22,7 +22,7 @@ Scarlet is an operating system kernel written in Rust that implements native ABI
 ```bash
 # Get started with Docker (recommended)
 docker build -t scarlet-dev .
-docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev bash -c "cargo make build && cargo make run"
+docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev bash -c "cargo make run-riscv64"
 
 # Once Scarlet boots, you'll see:
 Login successful for user: root
@@ -61,7 +61,7 @@ See [Linux ABI Demo instructions](docs/abi/linux/demo.md) for detailed instructi
 bash tools/linux/build_buildroot.sh
 bash tools/linux/build_user_programs.sh
 bash tools/linux/deploy_rootfs.sh
-cargo make run
+cargo make run-riscv64
 ```
 
 These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6.
@@ -175,9 +175,9 @@ docker build -t scarlet-dev .
 docker run -it --rm -v $(pwd):/workspaces/Scarlet scarlet-dev
 
 # Common commands:
-cargo make build && cargo make run    # Build and run
-cargo make test                       # Run tests  
-cargo make debug                      # Debug with GDB
+cargo make run-riscv64                        # Build (release) and run (RISC-V)
+cargo make test-riscv64               # Run tests (RISC-V)
+cargo make debug-riscv64              # Debug with GDB
 ```
 
 ### Local Development
@@ -187,27 +187,28 @@ Requirements: Rust nightly, `cargo-make`, `qemu`, RISC-V toolchain
 ### Build Commands
 
 ```bash
-# Full build (recommended for first time)
-cargo make build
+# Full build (RISC-V, debug)
+cargo make build-riscv64
 
 # Individual components
-cargo make build-kernel    # Kernel only
-cargo make build-userlib   # User space library
-cargo make build-userbin   # User programs
-cargo make build-initramfs # Initial RAM filesystem
+cargo make build-kernel-debug-riscv64     # Kernel only
+cargo make build-userlib-debug-riscv64    # User space library
+cargo make build-userbin-debug-riscv64    # User programs
+cargo make build-initramfs-debug-riscv64  # Initial RAM filesystem
+cargo make build-rootfs-riscv64           # Root filesystem image
 
 # Clean build artifacts
-cargo make clean
+cargo make clean-riscv64
 ```
 
 ### Testing and Debugging
 
 ```bash
 # Run all tests
-cargo make test
+cargo make test-riscv64
 
 # Debug kernel with GDB
-cargo make debug
+cargo make debug-riscv64
 # Then in another terminal: gdb and connect to :1234
 ```
 
@@ -230,7 +231,7 @@ To generate the documentation, run:
 
 ```bash
 # Generate documentation
-cargo make doc             # Generate docs for all components
+cargo make doc-riscv64      # Generate docs for all components (RISC-V)
 cargo make doc-kernel      # Generate kernel docs only
 cargo make doc-userlib     # Generate user library docs only
 ```
