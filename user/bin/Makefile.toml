@@ -53,12 +53,18 @@ dependencies = ["build-only-release-aarch64", "set-osabi-release-aarch64"]
 [tasks.build-only-debug-aarch64]
 description = "Build user programs for AArch64 in debug mode without OSABI setting (internal)"
 env = { "DIST_DIR" = "dist/aarch64", "TARGET_SPEC" = "../targets/aarch64-unknown-scarlet-elf.json" }
-script = 'cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+script = [
+    'rm -rf "${DIST_DIR}" && mkdir -p "${DIST_DIR}"',
+    'cargo build --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+]
 
 [tasks.build-only-release-aarch64]
 description = "Build user programs for AArch64 in release mode without OSABI setting (internal)"
 env = { "DIST_DIR" = "dist/aarch64", "TARGET_SPEC" = "../targets/aarch64-unknown-scarlet-elf.json" }
-script = 'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+script = [
+    'rm -rf "${DIST_DIR}" && mkdir -p "${DIST_DIR}"',
+    'cargo build --release --target "${TARGET_SPEC}" --out-dir "${DIST_DIR}"'
+]
 
 [tasks.set-osabi-debug-aarch64]
 description = "Set OSABI to 83 for all user program binaries (AArch64 debug)"
