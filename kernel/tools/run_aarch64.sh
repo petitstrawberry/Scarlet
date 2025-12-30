@@ -51,16 +51,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-aarch64.cpio"
 
-# Ensure initramfs exists (build user programs + pack cpio if needed)
-if [ ! -f "$INITRAMFS_PATH" ]; then
-    echo "initramfs not found at $INITRAMFS_PATH, generating..."
-    if [ ! -x "$PROJECT_ROOT/user/bin/dist/aarch64/init" ]; then
-        echo "User programs not found, building (release)..."
-        (cd "$PROJECT_ROOT/user/bin" && cargo make build-release-aarch64)
-    fi
-    (cd "$PROJECT_ROOT/mkfs" && ./make_initramfs.sh aarch64)
-fi
-
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
@@ -84,21 +74,6 @@ aarch64-linux-gnu-objcopy -O binary "$KERNEL_PATH" "$KERNEL_BIN"
 # If not, attempt to rebuild U-Boot with a qfw+initrd-aware BOOTCOMMAND.
 if ! strings -a "$UBOOT_BIN" | grep -q "qfw load"; then
     echo "Warning: U-Boot does not seem to include qfw support; initramfs passing may fail."
-fi
-
-if strings -a "$UBOOT_BIN" | grep -q "bootcmd=.*dcache off; icache off"; then
-    if [ -d /opt/u-boot-2025.01 ]; then
-        echo "Rebuilding U-Boot with initrd-capable bootcmd (qfw load + booti initrd)..."
-        (
-            cd /opt/u-boot-2025.01 && \
-            make CROSS_COMPILE=aarch64-linux-gnu- qemu_arm64_defconfig && \
-            sed -i 's/CONFIG_BOOTCOMMAND=.*/CONFIG_BOOTCOMMAND="qfw load 0x40200000 0x44000000; booti 0x40200000 0x44000000:${filesize} ${fdtcontroladdr}"/' .config && \
-            make CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" && \
-            cp u-boot.bin /opt/u-boot-aarch64.bin
-        )
-    else
-        echo "Warning: /opt/u-boot-2025.01 not found; cannot rebuild U-Boot automatically."
-    fi
 fi
 
 # Run QEMU with U-Boot as BIOS
