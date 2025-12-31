@@ -229,6 +229,17 @@ pub struct PageTable {
 }
 
 impl PageTable {
+    #[inline(always)]
+    fn is_canonical_48(vaddr: usize) -> bool {
+        // For 48-bit VA, bits[63:48] must be all 0 when bit47=0, or all 1 when bit47=1.
+        let sign = (vaddr >> 47) & 1;
+        if sign == 0 {
+            (vaddr >> 48) == 0
+        } else {
+            (vaddr >> 48) == 0xffff
+        }
+    }
+
     pub fn new() -> Self {
         PageTable {
             entries: [PageTableEntry::new(); 512],
@@ -243,10 +254,10 @@ impl PageTable {
         crate::arch::aarch64::get_cpu().set_kernel_ttbr0(ttbr_val);
 
         unsafe {
-            // Set both TTBR0 and TTBR1 to the same table
+            // Update TTBR0 (user translation base) only.
+            // TTBR1 is managed separately and is expected to stay fixed to the kernel table.
             asm!(
                 "msr ttbr0_el1, {ttbr}",
-                "msr ttbr1_el1, {ttbr}",
                 "isb",
                 "tlbi vmalle1is",
                 "dsb ish",
@@ -303,7 +314,8 @@ impl PageTable {
 
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
-        while vaddr + (PAGE_SIZE - 1) <= mmap.vmarea.end {
+        // Avoid overflow when mapping regions near usize::MAX.
+        while vaddr <= mmap.vmarea.end.saturating_sub(PAGE_SIZE - 1) {
             self.map(asid, vaddr, paddr, mmap.permissions, accessed, dirty);
             match vaddr.checked_add(PAGE_SIZE) {
                 Some(addr) => vaddr = addr,
@@ -328,8 +340,8 @@ impl PageTable {
         _accessed: bool,
         _dirty: bool,
     ) {
-        if vaddr >= (1 << 48) {
-            panic!("Virtual address {:#x} exceeds 48-bit limit", vaddr);
+        if !Self::is_canonical_48(vaddr) {
+            panic!("Virtual address {:#x} is not canonical for 48-bit VA", vaddr);
         }
 
         let vaddr = vaddr & !0xfff;
@@ -400,7 +412,7 @@ impl PageTable {
     /// - L2: bits 29:21 (9 bits)
     /// - L3: bits 20:12 (9 bits)
     pub fn walk(&mut self, vaddr: usize, alloc: bool, asid: u16) -> Option<&mut PageTableEntry> {
-        if vaddr >= (1 << 48) {
+        if !Self::is_canonical_48(vaddr) {
             return None;
         }
 
@@ -450,8 +462,8 @@ impl PageTable {
 
     /// Unmap a single page (like RISC-V's unmap())
     pub fn unmap(&mut self, _asid: u16, vaddr: usize) {
-        if vaddr >= (1 << 48) {
-            panic!("Virtual address {:#x} exceeds 48-bit limit", vaddr);
+        if !Self::is_canonical_48(vaddr) {
+            panic!("Virtual address {:#x} is not canonical for 48-bit VA", vaddr);
         }
 
         let vaddr = vaddr & !0xfff;

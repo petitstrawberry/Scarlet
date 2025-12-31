@@ -25,7 +25,7 @@ use crate::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
         build_auxiliary_vector, setup_auxiliary_vector_on_stack,
     },
-    vm::{setup_trampoline, setup_user_stack},
+    vm::setup_user_stack,
 };
 
 use crate::abi::AbiModule;
@@ -156,7 +156,6 @@ impl AbiModule for ScarletAbi {
                         root_page_table.unmap_all();
 
                         // Setup the new memory environment
-                        setup_trampoline(&mut task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
                         // Handle different execution modes

@@ -1,12 +1,17 @@
 //! AArch64 kernel trap vector
 //!
-//! RISC-V style: keep a dedicated kernel vector active while executing in EL1,
-//! and switch VBAR_EL1 to the user/trampoline vector only right before
-//! returning to EL0.
+//! Simple vector table for handling traps occurring within EL1 (kernel mode).
+//! No context switching (TTBR/Stack) needed.
 
 use core::arch::naked_asm;
+use crate::arch::Trapframe;
+use super::exception::arch_exception_handler;
+use super::interrupt::arch_irq_handler;
 
-#[unsafe(link_section = ".trampoline.text")]
+// -------------------------------------------------------------------------
+// Kernel Trap Vector
+// -------------------------------------------------------------------------
+#[unsafe(link_section = ".text")] // カーネル内コードなので通常の.textでOK
 #[unsafe(export_name = "_kernel_trap_entry")]
 #[unsafe(naked)]
 pub extern "C" fn _kernel_trap_entry() {
@@ -17,93 +22,86 @@ pub extern "C" fn _kernel_trap_entry() {
         // -----------------------------------------------------------------
         // VBAR_EL1 Kernel Vector Table (2048 bytes)
         // -----------------------------------------------------------------
-        // Current EL with SP0 (sync/irq/fiq/serror)
-        b   30f
+        // Current EL with SP0 (Invalid for OS use)
+        b   .
         .space 124
-        b   31f
+        b   .
         .space 124
-        b   32f
+        b   .
         .space 124
-        b   33f
-        .space 124
-
-        // Current EL with SPx (sync/irq/fiq/serror)
-        b   30f
-        .space 124
-        b   31f
-        .space 124
-        b   32f
-        .space 124
-        b   33f
+        b   .
         .space 124
 
-        // Lower EL using AArch64 (should not happen while kernel vector is active)
-        b   34f
+        // Current EL with SPx (Kernel -> Kernel Trap)
+        // This is the main entry point for exceptions inside kernel.
+        b   30f // Sync
         .space 124
-        b   34f
+        b   31f // IRQ
         .space 124
-        b   34f
+        b   32f // FIQ
         .space 124
-        b   34f
+        b   33f // SError
         .space 124
 
-        // Lower EL using AArch32 (not expected)
-        b   34f
+        // Lower EL (Should not happen if VBAR is managed correctly)
+        // If this happens, it means we are in Userspace but VBAR points to Kernel Vector!
+        b   .
         .space 124
-        b   34f
+        b   .
         .space 124
-        b   34f
+        b   .
         .space 124
-        b   34f
+        b   .
+        .space 124
+
+        // Lower EL using AArch32
+        b   .
+        .space 124
+        b   .
+        .space 124
+        b   .
+        .space 124
+        b   .
         .space 124
 
         // -----------------------------------------------------------------
-        // Kernel trap entry: save registers on current kernel stack and
-        // dispatch to arch_kernel_trap_handler.
-        // Aarch64 per-CPU struct is at TPIDRRO_EL0.
-        // trap_kind offset is +48.
+        // Entry Points
         // -----------------------------------------------------------------
-        30:
+        // [CRITICAL] Save registers to stack BEFORE clobbering them!
+        
+        30: // Sync
+            msr daifset, #0xf       // Mask interrupts
+            sub sp, sp, #272        // Alloc Trapframe
+            stp x0, x1, [sp, #0]    // Save x0, x1 first
+            mov x1, #0              // x1 (Arg2) = Kind: Sync
+            b   40f
+
+        31: // IRQ
             msr daifset, #0xf
-            msr spsel, #1
-            mrs x16, tpidrro_el0
-            mov x17, #0
-            str x17, [x16, #48]
-            b 35f
-
-        31:
-            msr daifset, #0xf
-            msr spsel, #1
-            mrs x16, tpidrro_el0
-            mov x17, #1
-            str x17, [x16, #48]
-            b 35f
-
-        32:
-            msr daifset, #0xf
-            msr spsel, #1
-            mrs x16, tpidrro_el0
-            mov x17, #2
-            str x17, [x16, #48]
-            b 35f
-
-        33:
-            msr daifset, #0xf
-            msr spsel, #1
-            mrs x16, tpidrro_el0
-            mov x17, #3
-            str x17, [x16, #48]
-            b 35f
-
-        // If we ever take a lower-EL trap with the kernel vector installed,
-        // it means we failed to switch VBAR_EL1 before entering EL0.
-        34:
-            b 34b
-
-        35:
-            // Allocate and save trapframe on the current kernel stack
             sub sp, sp, #272
             stp x0, x1, [sp, #0]
+            mov x1, #1              // x1 (Arg2) = Kind: IRQ
+            b   40f
+
+        32: // FIQ
+            msr daifset, #0xf
+            sub sp, sp, #272
+            stp x0, x1, [sp, #0]
+            mov x1, #2              // x1 (Arg2) = Kind: FIQ
+            b   40f
+
+        33: // SError
+            msr daifset, #0xf
+            sub sp, sp, #272
+            stp x0, x1, [sp, #0]
+            mov x1, #3              // x1 (Arg2) = Kind: SError
+            b   40f
+
+        // -----------------------------------------------------------------
+        // Common Handler
+        // -----------------------------------------------------------------
+        40: 
+            // Save remaining GPRs
             stp x2, x3, [sp, #16]
             stp x4, x5, [sp, #32]
             stp x6, x7, [sp, #48]
@@ -119,19 +117,72 @@ pub extern "C" fn _kernel_trap_entry() {
             stp x26, x27, [sp, #208]
             stp x28, x29, [sp, #224]
             str x30, [sp, #240]
-            mrs x17, elr_el1
-            str x17, [sp, #256]
-            mrs x17, sp_el0
-            str x17, [sp, #248]
-            mrs x17, spsr_el1
-            str x17, [sp, #264]
 
-            // Call kernel trap handler (address in per-CPU struct at +32)
-            mrs x16, tpidrro_el0
-            ldr x17, [x16, #32]
-            mov x0, sp
-            br  x17
+            // Save System Registers
+            mrs x19, elr_el1
+            str x19, [sp, #256]
+            mrs x19, sp_el0
+            str x19, [sp, #248]
+            mrs x19, spsr_el1
+            str x19, [sp, #264]
+
+            // Call Rust Handler
+            // fn arch_kernel_trap_handler(tf: &mut Trapframe, kind: usize)
+            mov x0, sp              // x0 (Arg1) = &Trapframe
+            
+            // Branch with Link (bl) because we expect it to return!
+            bl  arch_kernel_trap_handler
+
+            // -------------------------------------------------------------
+            // Exit Point (Restore Context)
+            // -------------------------------------------------------------
+            // Disable interrupts (just in case)
+            msr daifset, #0xf
+
+            // Restore System Registers
+            ldr x19, [sp, #256]
+            msr elr_el1, x19
+            ldr x19, [sp, #248]
+            msr sp_el0, x19
+            ldr x19, [sp, #264]
+            msr spsr_el1, x19
+
+            // Restore GPRs
+            ldp x2, x3, [sp, #16]
+            ldp x4, x5, [sp, #32]
+            ldp x6, x7, [sp, #48]
+            ldp x8, x9, [sp, #64]
+            ldp x10, x11, [sp, #80]
+            ldp x12, x13, [sp, #96]
+            ldp x14, x15, [sp, #112]
+            ldp x16, x17, [sp, #128]
+            ldp x18, x19, [sp, #144]
+            ldp x20, x21, [sp, #160]
+            ldp x22, x23, [sp, #176]
+            ldp x24, x25, [sp, #192]
+            ldp x26, x27, [sp, #208]
+            ldp x28, x29, [sp, #224]
+            ldr x30, [sp, #240]
+
+            // Restore x0, x1 and Free Stack
+            ldp x0, x1, [sp, #0]
+            add sp, sp, #272
+
+            eret
         "#
         );
+    }
+}
+
+// Rust側ハンドラ
+// 戻り値なし(void)にする = 普通に関数から戻る
+#[unsafe(export_name = "arch_kernel_trap_handler")]
+pub extern "C" fn arch_kernel_trap_handler(trapframe: &mut Trapframe, trap_kind: usize) {
+    if trap_kind == 1 {
+        // IRQ
+        arch_irq_handler(trapframe);
+    } else {
+        // Exception (Sync/SError/FIQ)
+        arch_exception_handler(trapframe);
     }
 }

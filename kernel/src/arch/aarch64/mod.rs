@@ -78,10 +78,9 @@ pub fn init_arch(cpu_id: usize) {
 ///   8: cpuid
 ///  16: ttbr0 (user TTBR saved on entry)
 ///  24: kernel_stack
-///  32: kernel_trap (kernel trap handler address)
+///  32: kernel_trap (EL0->EL1 trap handler address; trampoline jumps here)
 ///  40: kernel_ttbr0 (kernel TTBR for EL0->EL1 entry)
 ///  48: trap_kind (0=sync,1=irq,2=fiq,3=serror)
-///  56: user_trap (user trap handler address)
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Aarch64 {
@@ -92,7 +91,6 @@ pub struct Aarch64 {
     kernel_trap: u64,  // offset: 32
     kernel_ttbr0: u64, // offset: 40
     trap_kind: u64,    // offset: 48
-    user_trap: u64,    // offset: 56
 }
 
 impl Aarch64 {
@@ -105,7 +103,6 @@ impl Aarch64 {
             kernel_trap: 0,
             kernel_ttbr0: 0,
             trap_kind: 0,
-            user_trap: 0,
         }
     }
 
@@ -126,10 +123,6 @@ impl Aarch64 {
     pub fn set_trap_handler(&mut self, addr: usize) {
         // This setter is used by the common scheduler code.
         // On AArch64, this should configure the handler used for EL0->EL1 traps.
-        self.user_trap = addr as u64;
-    }
-
-    pub fn set_kernel_trap_handler(&mut self, addr: usize) {
         self.kernel_trap = addr as u64;
     }
 
@@ -184,6 +177,7 @@ impl Aarch64 {
 #[derive(Debug, Clone)]
 pub struct Trapframe {
     pub regs: IntRegisters,
+    pub sp: u64,
     pub epc: u64,  // ELR_EL1
     pub spsr: u64, // SPSR_EL1
 }
@@ -192,6 +186,7 @@ impl Trapframe {
     pub fn new() -> Self {
         Trapframe {
             regs: IntRegisters::new(),
+            sp: 0,
             epc: 0,
             spsr: 0,
         }
@@ -248,7 +243,7 @@ pub fn get_kernel_trapvector_paddr() -> usize {
 }
 
 pub fn get_kernel_trap_handler() -> usize {
-    trap::user::arch_kernel_trap_handler as usize
+    trap::kernel::arch_kernel_trap_handler as usize
 }
 
 pub fn get_user_trap_handler() -> usize {
@@ -262,16 +257,14 @@ fn trap_init(aarch64: &mut Aarch64) {
 
     let trap_stack = trap_stack_start + stack_size * (aarch64.cpuid + 1) as usize;
     aarch64.kernel_stack = trap_stack as u64;
-    aarch64.kernel_trap = get_kernel_trap_handler() as u64;
-    aarch64.user_trap = get_user_trap_handler() as u64;
+    // Trampoline (EL0->EL1) jumps to this handler via CPU struct.
+    aarch64.kernel_trap = get_user_trap_handler() as u64;
 
     let scratch_addr = aarch64 as *const _ as usize;
 
     // Set up thread pointer registers to point to our aarch64 struct
-    // Use TPIDRRO_EL0 as the single source of truth (trampoline also reads this).
     unsafe {
         asm!(
-            "msr tpidrro_el0, {0}",
             "msr tpidr_el1, {0}",
             in(reg) scratch_addr,
         );
@@ -294,12 +287,10 @@ pub fn set_trapvector(addr: usize) {
 }
 
 pub fn set_arch(addr: usize) {
-    // Store the trampoline-visible Aarch64 pointer in TPIDRRO_EL0.
-    // TPIDRRO_EL0 is readable from EL0 but not writable by EL0, so user-space
-    // cannot clobber it (unlike TPIDR_EL0 which is commonly used for TLS).
+    // Store the trampoline-visible Aarch64 pointer in TPIDR_EL1.
     unsafe {
         asm!(
-            "msr tpidrro_el0, {0}",
+            "msr tpidr_el1, {0}",
             in(reg) addr,
         );
     }
@@ -334,28 +325,8 @@ pub fn get_cpu() -> &'static mut Aarch64 {
         );
     }
 
-    if tpidr_el1 != 0 {
-        // Kernel context always has access to this mapping.
-        return unsafe { transmute(tpidr_el1) };
-    }
-
-    // Fallback to the trampoline-visible pointer for early bring-up or if EL1
-    // TPIDR was not initialized yet.
-    let tpidrro_el0: usize;
-    unsafe {
-        asm!(
-            "mrs {0}, tpidrro_el0",
-            out(reg) tpidrro_el0,
-        );
-    }
-
-    if tpidrro_el0 == 0 {
-        // Final fallback: derive from MPIDR_EL1 if both registers are unset.
-        let core_id = get_current_cpu_id();
-        unsafe { &mut CPUS[core_id] }
-    } else {
-        unsafe { transmute(tpidrro_el0) }
-    }
+    // Kernel context always has access to this mapping.
+    return unsafe { transmute(tpidr_el1) };    
 }
 
 /// Get current CPU core ID from MPIDR_EL1 register

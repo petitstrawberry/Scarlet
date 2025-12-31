@@ -7,12 +7,12 @@
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntRegisters {
-    /// General-purpose registers X0-X30 + SP (32 total to match RISC-V structure)
-    pub reg: [usize; 32],
+    /// General-purpose registers X0-X30
+    pub reg: [usize; 31],
 }
 
 impl IntRegisters {
     pub const fn new() -> Self {
-        IntRegisters { reg: [0; 32] }
+        IntRegisters { reg: [0; 31] }
     }
 }

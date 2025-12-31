@@ -15,6 +15,7 @@ pub enum Mode {
 #[derive(Debug, Clone)]
 pub struct Vcpu {
     pub iregs: IntRegisters,
+    pub sp: u64,
     pc: u64,
     asid: usize,
     mode: Mode,
@@ -28,6 +29,7 @@ impl Vcpu {
         };
         Vcpu {
             iregs: IntRegisters::new(),
+            sp: 0,
             pc: initial_pc,
             asid: 0,
             mode,
@@ -48,7 +50,7 @@ impl Vcpu {
 
     pub fn set_sp(&mut self, sp: usize) {
         // SP is register 31 in AArch64 (index 31 in our array)
-        self.iregs.reg[31] = sp;
+        self.sp = sp as u64;
     }
 
     pub fn get_mode(&self) -> Mode {
@@ -69,27 +71,13 @@ impl Vcpu {
 
     pub fn store(&mut self, trapframe: &Trapframe) {
         self.iregs = trapframe.regs;
-        if self.mode == Mode::User && trapframe.epc == 0 {
-            // During bring-up we sometimes observe ELR/epc saved as 0 (e.g. around early
-            // scheduler/timer transitions). Never let that clobber the user PC, or we'll
-            // ERET to VA 0 and immediately take an instruction abort.
-            crate::early_println!(
-                "[aarch64][vcpu] ignore NULL user pc; keeping pc={:#x}",
-                self.pc
-            );
-        } else {
-            self.pc = trapframe.epc;
-        }
+        self.sp = trapframe.sp;
+        self.pc = trapframe.epc;
     }
 
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
         trapframe.regs = self.iregs;
-        let pc = if self.mode == Mode::User && self.pc == 0 {
-            crate::early_println!("[aarch64][vcpu] fixup NULL user pc -> 0x10000");
-            0x10000
-        } else {
-            self.pc
-        };
-        trapframe.epc = pc;
+        trapframe.sp = self.sp;
+        trapframe.epc = self.pc;
     }
 }

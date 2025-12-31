@@ -9,10 +9,8 @@ use vmem::VirtualMemoryMap;
 use vmem::VirtualMemoryPermission;
 
 use crate::arch::Arch;
-use crate::arch::get_cpu;
 use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
-use crate::arch::get_user_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
@@ -22,7 +20,6 @@ use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
-use crate::environment::VMMAX;
 use crate::environment::{
     KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOT_SIZE,
     KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
@@ -35,13 +32,6 @@ extern crate alloc;
 
 pub mod manager;
 pub mod vmem;
-
-unsafe extern "C" {
-    static __KERNEL_SPACE_START: usize;
-    static __KERNEL_SPACE_END: usize;
-    static __TRAMPOLINE_START: usize;
-    static __TRAMPOLINE_END: usize;
-}
 
 static mut KERNEL_VM_MANAGER: Option<VirtualMemoryManager> = None;
 
@@ -70,6 +60,9 @@ static mut KERNEL_AREA: Option<MemoryArea> = None;
 #[allow(static_mut_refs)]
 pub fn kernel_vm_init(kernel_area: MemoryArea) {
     let manager = get_kernel_vm_manager();
+
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: start");
 
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
     let root_page_table = get_root_pagetable(asid).unwrap();
@@ -140,9 +133,30 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         );
     }
 
-    setup_trampoline(manager);
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: setup_trampoline_for_kernel...");
 
+    crate::arch::vm::setup_trampoline_for_kernel(manager);
+
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: trampoline ok");
+
+    // AArch64: keep TTBR1 fixed to the kernel page table (trampoline/high-VA live there).
+    #[cfg(target_arch = "aarch64")]
+    {
+        #[cfg(any(debug_assertions, test))]
+        early_println!("[vm] kernel_vm_init: switch_ttbr1...");
+        root_page_table.switch_ttbr1(manager.get_asid());
+        #[cfg(any(debug_assertions, test))]
+        early_println!("[vm] kernel_vm_init: switch_ttbr1 ok");
+    }
+
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     root_page_table.switch(manager.get_asid());
+
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: done");
 }
 
 pub fn user_vm_init(task: &mut Task) {
@@ -161,7 +175,7 @@ pub fn user_vm_init(task: &mut Task) {
         .map_err(|e| panic!("Failed to allocate guard page: {}", e))
         .unwrap();
 
-    setup_trampoline(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
 }
 
 pub fn user_kernel_vm_init(task: &mut Task) {
@@ -216,7 +230,7 @@ pub fn user_kernel_vm_init(task: &mut Task) {
             .unwrap();
     }
 
-    setup_trampoline(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
 }
 
 // --------------------
@@ -411,103 +425,6 @@ pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
 
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
 static mut TRAMPOLINE_ARCH: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
-
-pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
-    let trampoline_start = unsafe { &__TRAMPOLINE_START as *const usize as usize };
-    let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
-    let trampoline_size = trampoline_end - trampoline_start;
-
-    let arch = get_cpu().as_paddr_cpu();
-    let trampoline_vaddr_start = VMMAX - trampoline_size;
-    let trampoline_vaddr_end = VMMAX;
-
-    let trap_entry_paddr = get_user_trapvector_paddr();
-    // let trapframe_paddr = arch.get_trapframe_paddr();
-    let arch_paddr = arch as *const Arch as usize;
-    let trap_entry_offset = trap_entry_paddr - trampoline_start;
-    let arch_offset = arch_paddr - trampoline_start;
-
-    let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
-    let arch_vaddr = trampoline_vaddr_start + arch_offset;
-
-    // Helpful when bring-up hits VMA layout issues.
-    #[cfg(any(debug_assertions, test))]
-    {
-        early_println!(
-            "Trampoline space planned  : {:#x} - {:#x}",
-            trampoline_vaddr_start,
-            trampoline_vaddr_end
-        );
-        early_println!(
-            "  Trampoline paddr        : {:#x} - {:#x}",
-            trampoline_start,
-            trampoline_end
-        );
-        early_println!("  Trap entry paddr        : {:#x}", trap_entry_paddr);
-        early_println!("  Arch paddr              : {:#x}", arch_paddr);
-        early_println!("  Trap entry vaddr        : {:#x}", trap_entry_vaddr);
-        early_println!("  Arch vaddr              : {:#x}", arch_vaddr);
-    }
-
-    let trampoline_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: trampoline_vaddr_start,
-            end: trampoline_vaddr_end,
-        },
-        pmarea: MemoryArea {
-            start: trampoline_start,
-            end: trampoline_end,
-        },
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize
-            | VirtualMemoryPermission::Execute as usize,
-        is_shared: true, // Trampoline should be shared across all processes
-        owner: None,
-    };
-
-    if let Err(e) = manager.add_memory_map(trampoline_map.clone()) {
-        #[cfg(any(debug_assertions, test))]
-        {
-            early_println!("[vm] add trampoline map failed: {}", e);
-            if let Some(m) = manager.search_memory_map(trampoline_vaddr_start) {
-                early_println!(
-                    "[vm] map@trampoline_start: {:#x}-{:#x}",
-                    m.vmarea.start,
-                    m.vmarea.end
-                );
-            } else {
-                early_println!("[vm] map@trampoline_start: <none>");
-            }
-            if let Some(m) = manager.search_memory_map(trampoline_vaddr_end) {
-                early_println!(
-                    "[vm] map@trampoline_end  : {:#x}-{:#x}",
-                    m.vmarea.start,
-                    m.vmarea.end
-                );
-            } else {
-                early_println!("[vm] map@trampoline_end  : <none>");
-            }
-            manager.with_memmaps(|mm| {
-                early_println!("[vm] current VMA count   : {}", mm.len());
-                for (_k, m) in mm.iter() {
-                    // Keep log compact; VMA count is usually small at bring-up.
-                    early_println!("[vm]   VMA {:#x}-{:#x}", m.vmarea.start, m.vmarea.end);
-                }
-            });
-        }
-        panic!("Failed to add trampoline memory map: {}", e);
-    }
-    /* Pre-map the trampoline space */
-    manager
-        .get_root_page_table()
-        .unwrap()
-        .map_memory_area(manager.get_asid(), trampoline_map, true, true)
-        .map_err(|e| panic!("Failed to map trampoline memory area: {}", e))
-        .unwrap();
-
-    set_trampoline_trap_vector(trap_entry_vaddr);
-    set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
-}
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
     unsafe {

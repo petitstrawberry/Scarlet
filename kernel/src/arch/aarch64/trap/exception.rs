@@ -61,16 +61,29 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
     let ec = ExceptionClass::from(esr);
     
     // Debug: log every trap using early_println
-    crate::early_println!("[trap] ESR={:#x} EC={:#x} FAR={:#x} ELR={:#x}",
-        esr, (esr >> 26) & 0x3f, get_far_el1(), trapframe.epc);
-    
-    crate::early_println!("[trap] Handling exception of class: {:?}", ec);
+    crate::early_println!("[trap] ESR={:#x} EC={:?} FAR={:#x} ELR={:#x}",
+        esr, ec, get_far_el1(), trapframe.epc);
 
     match ec {
         // SVC from AArch64 user mode (syscall)
         ExceptionClass::SvcAarch64 => {
+            // Minimal syscall trace for debugging AArch64 SVC path.
+            // AArch64 syscall number: x8, args: x0-x5.
+            crate::early_println!(
+                "[syscall/aarch64] nr={} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} sp={:#x} elr={:#x}",
+                trapframe.get_syscall_number(),
+                trapframe.get_arg(0),
+                trapframe.get_arg(1),
+                trapframe.get_arg(2),
+                trapframe.get_arg(3),
+                trapframe.get_arg(4),
+                trapframe.get_arg(5),
+                trapframe.sp,
+                trapframe.epc,
+            );
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
+                    crate::early_println!("[syscall/aarch64] -> ret={:#x}", ret);
                     trapframe.set_return_value(ret);
                 }
                 Err(msg) => {

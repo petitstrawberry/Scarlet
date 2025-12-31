@@ -33,7 +33,7 @@ use crate::{
     },
     register_abi,
     task::elf_loader::load_elf_into_task,
-    vm::{setup_trampoline, setup_user_stack},
+    vm::setup_user_stack,
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -237,7 +237,7 @@ impl AbiModule for Xv6Riscv64Abi {
                         let root_page_table = arch::vm::get_pagetable(idx).unwrap();
                         root_page_table.unmap_all();
                         // Setup the trapframe
-                        setup_trampoline(&mut task.vm_manager);
+                        arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
                         // Setup the stack
                         let (_, stack_top) = setup_user_stack(task);
                         let mut stack_pointer = stack_top as usize;
