@@ -32,16 +32,16 @@ pub fn _start(x0: usize, x1: usize) -> ! {
         // envp starts right after argv[] (which has argc+1 entries including NULL)
 
         // Handle NULL argv case - if argv is NULL, envp calculation is not safe
-        // let envp = if !argv.is_null() && argc > 0 {
-        //     argv.add(argc + 1) as *const *const u8
-        // } else {
-        //     core::ptr::null()
-        // };
+        let envp = if !argv.is_null() && argc > 0 {
+            argv.add(argc + 1) as *const *const u8
+        } else {
+            core::ptr::null()
+        };
         // let envp = core::ptr::null();
 
         // Initialize environment before calling main
-        // env::init_env(argc, argv, envp);
-        env::init_env(0, core::ptr::null(), core::ptr::null());
+        env::init_env(argc, argv, envp);
+        // env::init_env(0, core::ptr::null(), core::ptr::null());
 
         let ret = main();
         exit(ret as i32);
