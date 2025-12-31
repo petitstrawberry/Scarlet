@@ -51,6 +51,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && pwd)"
 INITRAMFS_PATH="$PROJECT_ROOT/mkfs/dist/initramfs-aarch64.cpio"
 
+# Ensure initramfs exists (do NOT auto-generate here; keep behavior consistent across architectures)
+if [ ! -f "$INITRAMFS_PATH" ]; then
+    echo "Error: initramfs not found at $INITRAMFS_PATH"
+    echo "Please build it explicitly before running QEMU. Example:"
+    echo "  cargo make build-initramfs-aarch64"
+    echo "  cargo make build-initramfs-release-aarch64"
+    exit 1
+fi
+
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
