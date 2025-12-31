@@ -16,6 +16,25 @@ use super::interrupt::arch_irq_handler;
 use crate::arch::{Trapframe, get_current_cpu_id, get_kernel_trapvector_paddr, set_arch, set_trapvector};
 use crate::vm::get_trampoline_trap_vector;
 
+#[unsafe(export_name = "aarch64_first_switch_to_user_naked")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn aarch64_first_switch_to_user_naked(
+    kernel_sp: u64,
+    trapframe_addr: usize,
+    trap_exit_addr: usize,
+) -> ! {
+    naked_asm!(
+        r#"
+        // x0 = kernel_sp
+        // x1 = trapframe_addr
+        // x2 = trap_exit_addr
+        mov sp, x0
+        mov x0, x1
+        br  x2
+        "#
+    );
+}
+
 #[unsafe(link_section = ".trampoline.text")]
 #[unsafe(export_name = "_user_trap_entry")]
 #[unsafe(naked)]
@@ -180,7 +199,9 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         // We must switch TTBR back to the user page table.
         // After the switch, kernel memory (including the trapframe) may not be accessible.
         // So we stash the necessary values in the trampoline-mapped CPU struct and sysregs.
-        mrs x16, tpidrro_el0        // x16 = CPU struct ptr (clobbers user x16 for now)
+        // CPU struct pointer is stored in TPIDR_EL1.
+        // (TPIDRRO_EL0 is not initialized in our current bring-up.)
+        mrs x16, tpidr_el1          // x16 = CPU struct ptr (clobbers user x16 for now)
 
         // Stash user x0/x1 and user x16 before restoring registers.
         ldr x2, [x0, #0]            // user x0

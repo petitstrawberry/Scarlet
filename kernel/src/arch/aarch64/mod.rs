@@ -71,6 +71,58 @@ pub fn init_arch(cpu_id: usize) {
     trap_init(aarch64);
 }
 
+/// AArch64-only: perform the very first transition into a runnable user task.
+///
+/// This avoids bootstrapping the first user entry via a timer IRQ (which makes the
+/// initial control-flow sensitive to VBAR timing and can be unstable during bring-up).
+///
+/// The function:
+/// - Chooses the task-provided kernel stack (SP_EL1) for the upcoming EL0->EL1 traps.
+/// - Programs per-CPU trampoline-visible state (kernel stack top, trap handler, TTBR0).
+/// - Performs a direct transition via the trampoline exit path.
+pub fn first_switch_to_user(task: &mut Task) -> ! {
+    // Prefer the high-VA kernel stack window if available.
+    let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+    } else {
+        task.get_kernel_stack_bottom()
+    };
+
+    // Update trampoline-visible CPU struct.
+    let cpu = crate::arch::get_cpu();
+    cpu.set_kernel_stack(kernel_sp);
+    cpu.set_trap_handler(get_user_trap_handler());
+    cpu.set_next_address_space(task.vm_manager.get_asid());
+
+    // Populate the trapframe from the task VCPU state.
+    // Use a raw pointer to avoid borrow checker conflicts with get_trapframe().
+    let task_ptr = task as *mut Task;
+    unsafe {
+        let trapframe = (*task_ptr).get_trapframe();
+        (*task_ptr).vcpu.switch(trapframe);
+    }
+
+    // Compute trampoline exit target.
+    let trap_exit_offset = crate::arch::aarch64::trap::user::_user_trap_exit as usize
+        - crate::arch::aarch64::trap::user::_user_trap_entry as usize;
+    let trampoline_base = crate::vm::get_trampoline_trap_vector();
+    let trap_exit_addr = trampoline_base + trap_exit_offset;
+
+    // Program per-CPU arch pointer and VBAR to the trampoline right before the jump.
+    let cpu_id = get_current_cpu_id();
+    set_arch(crate::vm::get_trampoline_arch(cpu_id));
+    set_trapvector(trampoline_base);
+
+    // Final transition must not touch the stack after switching SP.
+    unsafe {
+        crate::arch::aarch64::trap::user::aarch64_first_switch_to_user_naked(
+            kernel_sp,
+            task.get_trapframe() as *mut Trapframe as usize,
+            trap_exit_addr,
+        )
+    }
+}
+
 /// Per-CPU state for AArch64
 /// 
 /// Layout (offsets must match trampoline assembly):
