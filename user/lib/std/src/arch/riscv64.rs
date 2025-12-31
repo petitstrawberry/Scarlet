@@ -43,8 +43,7 @@ pub fn _start(a0: usize, a1: usize) -> ! {
         };
 
         // Initialize environment before calling main
-        // env::init_env(argc, argv, envp);
-        env::init_env(0, core::ptr::null(), core::ptr::null());
+        env::init_env(argc, argv, envp);
 
         let ret = main();
         exit(ret as i32);
