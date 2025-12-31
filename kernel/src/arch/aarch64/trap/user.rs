@@ -249,6 +249,13 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
 
 #[unsafe(export_name = "arch_switch_to_user_space")]
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+    crate::arch::configure_user_entry(
+        trapframe,
+        crate::arch::UserEntryOptions {
+            irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
+        },
+    );
+
     let addr = trapframe as *mut Trapframe as usize;
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
     let trampoline_base = get_trampoline_trap_vector();

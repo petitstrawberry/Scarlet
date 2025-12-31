@@ -35,6 +35,72 @@ use crate::vm::vmem::MemoryArea;
 
 pub type Arch = Riscv64;
 
+/// Apply user-entry options for the upcoming `sret`.
+///
+/// This does not enable interrupts in the kernel immediately; it only controls the
+/// sstatus.SPIE bit which is copied into SIE by the `sret` instruction.
+pub fn configure_user_entry(_trapframe: &mut Trapframe, options: crate::arch::UserEntryOptions) {
+    use crate::arch::UserReturnIrqPolicy;
+
+    // Reflect into sstatus.SPIE for the next `sret`.
+    const SPIE: usize = 1 << 5;
+    match options.irq_policy {
+        UserReturnIrqPolicy::Inherit => {}
+        UserReturnIrqPolicy::Enable => unsafe {
+            let mut sstatus: usize;
+            asm!("csrr {0}, sstatus", out(reg) sstatus);
+            sstatus |= SPIE;
+            asm!("csrw sstatus, {0}", in(reg) sstatus);
+        },
+        UserReturnIrqPolicy::Disable => unsafe {
+            let mut sstatus: usize;
+            asm!("csrr {0}, sstatus", out(reg) sstatus);
+            sstatus &= !SPIE;
+            asm!("csrw sstatus, {0}", in(reg) sstatus);
+        },
+    }
+}
+
+/// RISC-V: perform the very first transition into a runnable user task.
+///
+/// This avoids bootstrapping the first user entry via a timer IRQ.
+/// The function prepares trampoline-visible per-CPU state and then
+/// jumps to the trampoline exit path which performs `sret` into user mode.
+pub fn first_switch_to_user(task: &mut Task) -> ! {
+    // Prefer the high-VA kernel stack window if available.
+    let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+        (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
+    } else {
+        task.get_kernel_stack_bottom()
+    };
+
+    // Switch sscratch to the trampoline-visible per-CPU struct.
+    let cpu_id = crate::arch::get_cpu().get_cpuid();
+    set_arch(crate::vm::get_trampoline_arch(cpu_id));
+
+    // Update trampoline-visible CPU struct.
+    let cpu = crate::arch::get_cpu();
+    cpu.set_kernel_stack(kernel_sp);
+    cpu.set_trap_handler(get_user_trap_handler());
+    cpu.set_next_address_space(task.vm_manager.get_asid());
+
+    // Populate the trapframe from the task VCPU state.
+    let task_ptr = task as *mut Task;
+    unsafe {
+        let trapframe = (*task_ptr).get_trapframe();
+        (*task_ptr).vcpu.switch(trapframe);
+    }
+
+    // Ensure the next return is to the correct privilege mode.
+    set_next_mode(task.vcpu.get_mode());
+
+    // Program trampoline trap vector right before the jump.
+    set_trapvector(crate::vm::get_trampoline_trap_vector());
+
+    // Final transition via trampoline exit path.
+    crate::arch::riscv64::trap::user::arch_switch_to_user_space(task.get_trapframe())
+}
+
 /// Returns the device memory areas for RISC-V QEMU virt platform.
 /// These areas contain memory-mapped I/O devices and should be mapped
 /// with device memory attributes (non-cacheable, no speculation).

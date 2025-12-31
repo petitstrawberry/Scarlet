@@ -22,14 +22,14 @@ use crate::print;
 use crate::println;
 use crate::{
     arch::{
-        Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle,
-        interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector,
+        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
+        interrupt::enable_external_interrupts, set_next_mode, set_trapvector,
         trap::user::arch_switch_to_user_space,
     },
     environment::NUM_OF_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
-    vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector},
+    vm::get_trampoline_trap_vector,
 };
 
 use crate::task::Task;
@@ -366,52 +366,23 @@ impl Scheduler {
         // Schedule returns - trap handler will call arch_switch_to_user_space()
     }
 
-    /* MUST NOT raise any exception in this function before the idle loop */
-    pub fn start_scheduler(&mut self) {
+    /// Start the scheduler and return the first runnable task ID (if any).
+    ///
+    /// This function intentionally avoids performing the initial user-mode transition.
+    /// The very first switch is architecture-specific and should be performed by
+    /// `crate::arch::first_switch_to_user()` from the boot path.
+    pub fn start_scheduler(&mut self) -> Option<usize> {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
         let timer = get_kernel_timer();
         timer.stop(cpu_id);
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            // AArch64 bring-up: avoid bootstrapping the first user entry from a timer IRQ.
-            // Instead, directly pick the first runnable task and transition via the
-            // architecture-specific helper.
-            let arch = get_trampoline_arch(cpu_id);
-            set_arch(arch);
-            cpu.set_trap_handler(get_user_trap_handler());
-            cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
+        // Program the periodic timer, but do not force/require the first switch via IRQ.
+        timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
+        timer.start(cpu_id);
 
-            // Start the periodic timer, but do not rely on the IRQ for the first switch.
-            timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
-            enable_interrupt();
-            timer.start(cpu_id);
-
-            let (_current_task_id, next_task_id) = self.run(cpu);
-            if let Some(next_task_id) = next_task_id {
-                let next_task = self.get_task_by_id(next_task_id).unwrap();
-                crate::arch::aarch64::first_switch_to_user(next_task);
-            }
-
-            idle();
-        }
-
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            let trap_vector = get_trampoline_trap_vector();
-            let arch = get_trampoline_arch(cpu_id);
-            set_trapvector(trap_vector);
-            set_arch(arch);
-            cpu.set_trap_handler(get_user_trap_handler());
-            cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
-
-            /* Jump to trap handler immediately */
-            timer.set_interval_us(cpu_id, 0);
-            enable_interrupt();
-            timer.start(cpu_id);
-            idle();
-        }
+        let (_current_task_id, next_task_id) = self.run(cpu);
+        next_task_id
     }
 
     pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {

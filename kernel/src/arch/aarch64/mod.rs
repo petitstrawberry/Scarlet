@@ -100,6 +100,14 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     unsafe {
         let trapframe = (*task_ptr).get_trapframe();
         (*task_ptr).vcpu.switch(trapframe);
+
+        // Ensure IRQs are unmasked in the user PSTATE after `eret`.
+        crate::arch::configure_user_entry(
+            trapframe,
+            crate::arch::UserEntryOptions {
+                irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
+            },
+        );
     }
 
     // Compute trampoline exit target.
@@ -335,6 +343,25 @@ pub fn set_trapvector(addr: usize) {
             in(reg) addr,
             options(nostack)
         );
+    }
+}
+
+/// Apply user-entry options for the upcoming `eret`.
+///
+/// This only affects the user PSTATE restored from `trapframe.spsr`.
+pub fn configure_user_entry(trapframe: &mut Trapframe, options: crate::arch::UserEntryOptions) {
+    use crate::arch::UserReturnIrqPolicy;
+
+    // DAIF bits in PSTATE/SPSR: D=9, A=8, I=7, F=6. 1 means masked.
+    const DAIF_I: u64 = 1 << 7;
+    match options.irq_policy {
+        UserReturnIrqPolicy::Inherit => {}
+        UserReturnIrqPolicy::Enable => {
+            trapframe.spsr &= !DAIF_I;
+        }
+        UserReturnIrqPolicy::Disable => {
+            trapframe.spsr |= DAIF_I;
+        }
     }
 }
 

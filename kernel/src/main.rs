@@ -699,9 +699,19 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     // Use early_println here to avoid any potential console lock issues.
     early_println!("[Scarlet Kernel] Scheduler will start...");
     early_println!("[Scarlet Kernel] Calling start_scheduler()...");
-    scheduler.start_scheduler();
-    early_println!("[Scarlet Kernel] Returned from start_scheduler() (unexpected)");
-    loop {}
+
+    let next_task_id = scheduler.start_scheduler();
+    if let Some(next_task_id) = next_task_id {
+        let next_task = scheduler
+            .get_task_by_id(next_task_id)
+            .expect("First runnable task must exist");
+        crate::arch::first_switch_to_user(next_task);
+    }
+
+    early_println!("[Scarlet Kernel] No runnable task; entering idle loop");
+    loop {
+        crate::arch::instruction::idle();
+    }
 }
 
 #[unsafe(no_mangle)]

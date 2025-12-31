@@ -216,6 +216,14 @@ pub extern "C" fn arch_user_trap_handler(addr: usize) -> ! {
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
 
+    // Configure the upcoming user return. This affects sstatus.SPIE, not the current kernel SIE.
+    crate::arch::configure_user_entry(
+        trapframe,
+        crate::arch::UserEntryOptions {
+            irq_policy: crate::arch::UserReturnIrqPolicy::Enable,
+        },
+    );
+
     // Get the trampoline address for _user_trap_exit
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
     // crate::early_println!("_user_trap_entry: {:#x}, _user_trap_exit: {:#x}, offset: {:#x}", _user_trap_entry as usize, _user_trap_exit as usize, trap_exit_offset);
