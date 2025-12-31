@@ -8,6 +8,8 @@ use crate::arch::Trapframe;
 use crate::early_println;
 
 pub mod exception;
+pub mod interrupt;
+pub mod kernel;
 pub mod user;
 
 pub fn trap_init() {

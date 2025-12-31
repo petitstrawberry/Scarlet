@@ -71,15 +71,28 @@ pub fn init_arch(cpu_id: usize) {
     trap_init(aarch64);
 }
 
+/// Per-CPU state for AArch64
+/// 
+/// Layout (offsets must match trampoline assembly):
+///   0: scratch (temporary storage)
+///   8: cpuid
+///  16: ttbr0 (user TTBR saved on entry)
+///  24: kernel_stack
+///  32: kernel_trap (kernel trap handler address)
+///  40: kernel_ttbr0 (kernel TTBR for EL0->EL1 entry)
+///  48: trap_kind (0=sync,1=irq,2=fiq,3=serror)
+///  56: user_trap (user trap handler address)
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Aarch64 {
-    scratch: u64,      // offeset: 0
+    scratch: u64,      // offset: 0
     pub cpuid: u64,    // offset: 8
     ttbr0: u64,        // offset: 16
     kernel_stack: u64, // offset: 24
     kernel_trap: u64,  // offset: 32
-    kernel_ttbr0: u64, // offset: 40 (kernel TTBR0 value for EL0->EL1 entry)
+    kernel_ttbr0: u64, // offset: 40
+    trap_kind: u64,    // offset: 48
+    user_trap: u64,    // offset: 56
 }
 
 impl Aarch64 {
@@ -91,6 +104,8 @@ impl Aarch64 {
             kernel_stack: 0,
             kernel_trap: 0,
             kernel_ttbr0: 0,
+            trap_kind: 0,
+            user_trap: 0,
         }
     }
 
@@ -109,19 +124,35 @@ impl Aarch64 {
     }
 
     pub fn set_trap_handler(&mut self, addr: usize) {
+        // This setter is used by the common scheduler code.
+        // On AArch64, this should configure the handler used for EL0->EL1 traps.
+        self.user_trap = addr as u64;
+    }
+
+    pub fn set_kernel_trap_handler(&mut self, addr: usize) {
         self.kernel_trap = addr as u64;
+    }
+
+    pub fn set_trap_kind(&mut self, kind: u64) {
+        self.trap_kind = kind;
+    }
+
+    pub fn get_trap_kind(&self) -> u64 {
+        self.trap_kind
     }
 
     pub fn set_next_address_space(&mut self, asid: u16) {
         let root_pagetable =
             get_root_pagetable(asid).expect("No root page table found for ASID (aarch64)");
-        let ttbr_val = root_pagetable.get_val_for_ttbr(asid);
-        crate::early_println!(
-            "[aarch64] set_next_address_space: asid={} ttbr={:#x}",
-            asid,
-            ttbr_val
+        let ttbr_val_raw = root_pagetable.get_val_for_ttbr(asid);
+        self.ttbr0 = ttbr_val_raw;
+
+        // Clean this CPU struct from D-cache so that the trampoline assembly
+        // (which may read via a different VA alias) sees the updated ttbr0.
+        crate::arch::aarch64::clean_dcache_to_poc_range(
+            self as *const _ as usize,
+            core::mem::size_of::<Aarch64>(),
         );
-        self.ttbr0 = ttbr_val;
     }
 
     pub fn get_ttbr0(&self) -> u64 {
@@ -153,8 +184,8 @@ impl Aarch64 {
 #[derive(Debug, Clone)]
 pub struct Trapframe {
     pub regs: IntRegisters,
-    pub epc: u64, // Using epc name for compatibility (maps to ELR_EL1 in AArch64)
-    pub _pad: u64,
+    pub epc: u64,  // ELR_EL1
+    pub spsr: u64, // SPSR_EL1
 }
 
 impl Trapframe {
@@ -162,7 +193,7 @@ impl Trapframe {
         Trapframe {
             regs: IntRegisters::new(),
             epc: 0,
-            _pad: 0,
+            spsr: 0,
         }
     }
 
@@ -213,14 +244,11 @@ pub fn get_user_trapvector_paddr() -> usize {
 }
 
 pub fn get_kernel_trapvector_paddr() -> usize {
-    // For now, reuse the trampoline vector base.
-    // TODO: Provide a dedicated kernel vector table.
-    trap::user::_user_trap_entry as usize
+    trap::kernel::_kernel_trap_entry as usize
 }
 
 pub fn get_kernel_trap_handler() -> usize {
-    // TODO: Provide a dedicated kernel trap handler.
-    trap::user::arch_user_trap_handler as usize
+    trap::user::arch_kernel_trap_handler as usize
 }
 
 pub fn get_user_trap_handler() -> usize {
@@ -234,7 +262,8 @@ fn trap_init(aarch64: &mut Aarch64) {
 
     let trap_stack = trap_stack_start + stack_size * (aarch64.cpuid + 1) as usize;
     aarch64.kernel_stack = trap_stack as u64;
-    aarch64.kernel_trap = trap::user::arch_user_trap_handler as u64;
+    aarch64.kernel_trap = get_kernel_trap_handler() as u64;
+    aarch64.user_trap = get_user_trap_handler() as u64;
 
     let scratch_addr = aarch64 as *const _ as usize;
 
@@ -247,6 +276,9 @@ fn trap_init(aarch64: &mut Aarch64) {
             in(reg) scratch_addr,
         );
     }
+
+    // Default to kernel vector while executing in EL1.
+    set_trapvector(get_kernel_trapvector_paddr());
 }
 
 pub fn set_trapvector(addr: usize) {
@@ -320,10 +352,6 @@ pub fn get_cpu() -> &'static mut Aarch64 {
     if tpidrro_el0 == 0 {
         // Final fallback: derive from MPIDR_EL1 if both registers are unset.
         let core_id = get_current_cpu_id();
-        early_println!(
-            "[aarch64] Warning: TPIDR* not set, using MPIDR_EL1 core {}",
-            core_id
-        );
         unsafe { &mut CPUS[core_id] }
     } else {
         unsafe { transmute(tpidrro_el0) }
@@ -405,6 +433,70 @@ pub fn wmb() {
     unsafe {
         // DMB ST - Data Memory Barrier for stores
         asm!("dmb st", options(nostack));
+    }
+}
+
+#[inline(always)]
+fn cache_line_bytes_dcache() -> usize {
+    // CTR_EL0.DminLine is log2(number of 32-bit words in the smallest D-cache line).
+    // LineBytes = 4 << DminLine.
+    let ctr: u64;
+    unsafe {
+        asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nostack));
+    }
+    let dminline = ((ctr >> 16) & 0xf) as usize;
+    4usize << dminline
+}
+
+/// Clean D-cache to Point of Coherency (PoC) for the given virtual address range.
+///
+/// This is primarily useful for ensuring page-table updates become visible to the
+/// hardware table walker during bring-up/debugging.
+#[inline(always)]
+pub fn clean_dcache_to_poc_range(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    let line = cache_line_bytes_dcache();
+    let mut addr = start_vaddr & !(line - 1);
+    let end = start_vaddr.saturating_add(len);
+
+    unsafe {
+        while addr < end {
+            asm!("dc cvac, {0}", in(reg) addr, options(nostack));
+            addr = addr.saturating_add(line);
+        }
+        // Ensure the clean completes before subsequent operations (e.g. TLBI).
+        asm!("dsb sy", options(nostack));
+    }
+}
+
+/// Clean D-cache to Point of Unification (PoU) for the given virtual address range.
+///
+/// Required when code is written via the data cache and will later be executed
+/// (self-modifying code / JIT / loading user text). The canonical sequence is:
+/// - clean D-cache to PoU over the modified range
+/// - `dsb ishst`
+/// - invalidate I-cache (`ic ivau` per-line or `ic iallu`)
+/// - `dsb ish; isb`
+#[inline(always)]
+pub fn clean_dcache_to_pou_range(start_vaddr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    let line = cache_line_bytes_dcache();
+    let mut addr = start_vaddr & !(line - 1);
+    let end = start_vaddr.saturating_add(len);
+
+    unsafe {
+        while addr < end {
+            asm!("dc cvau, {0}", in(reg) addr, options(nostack));
+            addr = addr.saturating_add(line);
+        }
+        // Ensure the clean completes before subsequent I-cache invalidation.
+        asm!("dsb ishst", options(nostack));
     }
 }
 

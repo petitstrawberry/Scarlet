@@ -1,168 +1,192 @@
-use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+//! AArch64 exception handler
+//!
+//! Strategy follows RISC-V implementation: simple cause-based matching
+//! with lazy page mapping on page faults.
 
-use super::print_traplog;
+use core::arch::asm;
+use core::panic;
+
 use crate::abi::syscall_dispatcher;
-use crate::arch::Trapframe;
-use crate::arch::get_cpu;
-use crate::interrupt::InterruptManager;
+use crate::arch::{Trapframe, get_cpu};
+use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
-use crate::timer;
+use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 
-/// AArch64 EC (Exception Class) values from ESR_EL1.
-const EC_SVC64: u64 = 0x15;
-const EC_INSN_ABORT_LOWER_EL: u64 = 0x20;
-const EC_DATA_ABORT_LOWER_EL: u64 = 0x24;
-
-// Bring-up aid: log only a small number of user writes to confirm forward progress,
-// without reintroducing the per-SVC log flood.
-static SVC_STREAMWRITE_LOG_BUDGET: AtomicUsize = AtomicUsize::new(32);
-
-fn try_take_streamwrite_log_budget() -> bool {
-    let mut budget = SVC_STREAMWRITE_LOG_BUDGET.load(Ordering::Relaxed);
-    while budget > 0 {
-        match SVC_STREAMWRITE_LOG_BUDGET.compare_exchange(
-            budget,
-            budget - 1,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return true,
-            Err(new_budget) => budget = new_budget,
-        }
-    }
-    false
+/// Get ESR_EL1 value
+fn get_esr_el1() -> u64 {
+    let val: u64;
+    unsafe { asm!("mrs {}, esr_el1", out(reg) val) };
+    val
 }
 
-pub fn arch_exception_handler(trapframe: &mut Trapframe) {
-    let esr: u64;
-    unsafe {
-        asm!("mrs {0}, esr_el1", out(reg) esr, options(nostack));
-    }
+/// Get FAR_EL1 value  
+fn get_far_el1() -> u64 {
+    let val: u64;
+    unsafe { asm!("mrs {}, far_el1", out(reg) val) };
+    val
+}
 
-    let ec = (esr >> 26) & 0x3f;
+/// Exception Class (ESR_EL1[31:26])
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
+pub enum ExceptionClass {
+    Unknown = 0x00,
+    SvcAarch64 = 0x15,
+    InstructionAbortLowerEl = 0x20,
+    InstructionAbortSameEl = 0x21,
+    DataAbortLowerEl = 0x24,
+    DataAbortSameEl = 0x25,
+    Other = 0xFF,
+}
+
+impl From<u64> for ExceptionClass {
+    fn from(val: u64) -> Self {
+        let ec = ((val >> 26) & 0x3f) as u8;
+        match ec {
+            0x00 => ExceptionClass::Unknown,
+            0x15 => ExceptionClass::SvcAarch64,
+            0x20 => ExceptionClass::InstructionAbortLowerEl,
+            0x21 => ExceptionClass::InstructionAbortSameEl,
+            0x24 => ExceptionClass::DataAbortLowerEl,
+            0x25 => ExceptionClass::DataAbortSameEl,
+            _ => ExceptionClass::Other,
+        }
+    }
+}
+
+/// Main exception handler
+pub fn arch_exception_handler(trapframe: &mut Trapframe) {
+    let esr = get_esr_el1();
+    let ec = ExceptionClass::from(esr);
+    
+    // Debug: log every trap using early_println
+    crate::early_println!("[trap] ESR={:#x} EC={:#x} FAR={:#x} ELR={:#x}",
+        esr, (esr >> 26) & 0x3f, get_far_el1(), trapframe.epc);
+    
+    crate::early_println!("[trap] Handling exception of class: {:?}", ec);
 
     match ec {
-        // IRQ and some non-synchronous events report EC=0.
-        // Our trampoline vector currently funnels all exception classes through
-        // the same entry path, so we do best-effort demux here.
-        0 => {
-            // 1) External interrupts via the registered controller (e.g. GIC)
-            // IMPORTANT: claim_and_handle completes (EOI) before we proceed.
-            // This is needed because timer::tick() may context-switch and not return.
-            let cpu_id = get_cpu().get_cpuid() as u32;
-
-            let claimed = InterruptManager::with_manager(|mgr| {
-                mgr.claim_and_handle_external_interrupt(cpu_id)
-                    .ok()
-                    .flatten()
-            });
-
-            if let Some(id) = claimed {
-                if id == crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ {
-                    timer::tick(trapframe);
-                }
-                return;
-            }
-
-            // 2) Local timer pending (best-effort fallback for non-GIC wiring)
-            if crate::drivers::pic::arm_generic_timer::ArmGenericTimer::is_timer_pending() {
-                timer::tick(trapframe);
-                return;
-            }
-        }
-        EC_SVC64 => {
-            let syscall_nr = trapframe.get_syscall_number();
-
+        // SVC from AArch64 user mode (syscall)
+        ExceptionClass::SvcAarch64 => {
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
                     trapframe.set_return_value(ret);
-                    if syscall_nr == 0xd {
-                        let brk_before = mytask().map(|t| t.get_brk()).unwrap_or(0);
-                        let brk_after = mytask().map(|t| t.get_brk()).unwrap_or(0);
-                        crate::early_println!(
-                            "[aarch64][svc][sbrk] ret={:#x} brk_before={:#x} brk_after={:#x}",
-                            ret,
-                            brk_before,
-                            brk_after,
-                        );
-                    }
                 }
-                Err(_msg) => {
-                    // Keep this path noisy for bring-up, but stay quiet on success.
-                    // Follow the existing convention: successful syscalls advance PC
-                    // inside the syscall implementation; on error, ensure we don't
-                    // re-execute SVC forever.
-                    crate::early_println!(
-                        "[aarch64][svc][err] nr={:#x} epc={:#x} arg0={:#x} arg1={:#x} arg2={:#x}",
-                        syscall_nr,
-                        trapframe.epc,
-                        trapframe.get_arg(0),
-                        trapframe.get_arg(1),
-                        trapframe.get_arg(2),
-                    );
-                    print_traplog(trapframe);
-                    trapframe.set_return_value(usize::MAX); // -1
+                Err(msg) => {
+                    println!("Syscall error: {}", msg);
+                    trapframe.set_return_value(usize::MAX);
                     trapframe.increment_pc_next(mytask().unwrap());
                 }
             }
         }
-        EC_INSN_ABORT_LOWER_EL | EC_DATA_ABORT_LOWER_EL => {
-            let far: usize;
-            unsafe {
-                asm!("mrs {0}, far_el1", out(reg) far, options(nostack));
-            }
 
-            // For instruction aborts, FAR_EL1 is expected to match ELR_EL1, but during bring-up
-            // we occasionally observe mismatches in logs. Use EPC (ELR_EL1) as the authoritative
-            // fault VA for instruction abort handling.
-            let fault_addr: usize = if ec == EC_INSN_ABORT_LOWER_EL {
-                trapframe.epc as usize
-            } else {
-                far
-            };
-
-            if fault_addr == 0 || trapframe.regs.reg[31] == 0 {
-                print_traplog(trapframe);
-                panic!(
-                    "[aarch64] NULL pointer access or zero stack pointer detected (ec={:#x} esr={:#x} far={:#x} epc={:#x} sp={:#x})",
-                    ec, esr, far, trapframe.epc, trapframe.regs.reg[31]
-                );
-            }
-
-            let task = get_scheduler()
-                .get_current_task(get_cpu().get_cpuid())
-                .expect("No current task for fault handling");
-
-            let manager = &task.vm_manager;
-
-            use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
-
-            let op = if ec == EC_INSN_ABORT_LOWER_EL {
-                AccessOp::Instruction
-            } else {
-                // Best-effort: treat as Store if WnR is set, else Load.
-                let wnr = ((esr >> 6) & 0x1) != 0;
-                if wnr { AccessOp::Store } else { AccessOp::Load }
-            };
-
-            let access = AccessKind {
-                op,
-                vaddr: fault_addr,
-                size: None,
-            };
-            if let Err(e) = manager.lazy_map_page_with(access) {
-                print_traplog(trapframe);
-                panic!(
-                    "[aarch64] Failed to map page for abort at vaddr={:#x} (ec={:#x} esr={:#x} far={:#x} epc={:#x}): {}",
-                    fault_addr, ec, esr, far, trapframe.epc, e
-                );
-            }
+        // Instruction abort from lower EL
+        ExceptionClass::InstructionAbortLowerEl => {
+            let vaddr = trapframe.epc as usize;
+            handle_instruction_fault(trapframe, vaddr);
         }
+
+        // Data abort from lower EL
+        ExceptionClass::DataAbortLowerEl => {
+            let far = get_far_el1() as usize;
+            let is_write = (esr >> 6) & 1 == 1; // WnR bit
+            handle_data_fault(trapframe, far, is_write);
+        }
+
+        // Instruction abort from same EL (kernel bug)
+        ExceptionClass::InstructionAbortSameEl => {
+            let far = get_far_el1();
+            print_trap_info(trapframe, esr);
+            panic!("Kernel instruction abort at FAR={:#x}", far);
+        }
+
+        // Data abort from same EL (kernel bug)
+        ExceptionClass::DataAbortSameEl => {
+            let far = get_far_el1();
+            print_trap_info(trapframe, esr);
+            panic!("Kernel data abort at FAR={:#x}", far);
+        }
+
+        // Unknown or unhandled exception
         _ => {
-            print_traplog(trapframe);
-            panic!("Unhandled AArch64 exception: ec={:#x} esr={:#x}", ec, esr);
+            print_trap_info(trapframe, esr);
+            panic!("Unhandled exception: EC={:#x}", (esr >> 26) & 0x3f);
         }
     }
+}
+
+/// Handle instruction page fault (like RISC-V cause 12)
+fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
+    let task = get_scheduler()
+        .get_current_task(get_cpu().get_cpuid())
+        .unwrap();
+    let manager = &mut task.vm_manager;
+
+    let access = AccessKind {
+        op: AccessOp::Instruction,
+        vaddr,
+        size: None,
+    };
+
+    match manager.lazy_map_page_with(access) {
+        Ok(_) => (),
+        Err(_) => {
+            print_trap_info(trapframe, get_esr_el1());
+            panic!(
+                "Failed to map page for instruction fault at vaddr: {:#x}",
+                vaddr
+            );
+        }
+    }
+}
+
+/// Handle data page fault (like RISC-V cause 13/15)
+fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
+    let task = get_scheduler()
+        .get_current_task(get_cpu().get_cpuid())
+        .unwrap();
+    let manager = &mut task.vm_manager;
+
+    let op = if is_write {
+        AccessOp::Store
+    } else {
+        AccessOp::Load
+    };
+
+    let access = AccessKind {
+        op,
+        vaddr,
+        size: None,
+    };
+
+    match manager.lazy_map_page_with(access) {
+        Ok(_) => (),
+        Err(_) => {
+            print_trap_info(trapframe, get_esr_el1());
+            panic!(
+                "Failed to map page for data fault at vaddr: {:#x} (write={})",
+                vaddr, is_write
+            );
+        }
+    }
+}
+
+/// Print trap information for debugging
+fn print_trap_info(trapframe: &Trapframe, esr: u64) {
+    let far = get_far_el1();
+    let ec = (esr >> 26) & 0x3f;
+    let iss = esr & 0x1ffffff;
+    let fsc = iss & 0x3f;
+
+    println!("=== Trap Info ===");
+    println!("ESR_EL1: {:#018x} (EC={:#x}, FSC={:#x})", esr, ec, fsc);
+    println!("FAR_EL1: {:#018x}", far);
+    println!("ELR_EL1: {:#018x}", trapframe.epc);
+
+    // Print first 8 general registers
+    println!("x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+        trapframe.regs.reg[0], trapframe.regs.reg[1], trapframe.regs.reg[2], trapframe.regs.reg[3]);
+    println!("x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+        trapframe.regs.reg[4], trapframe.regs.reg[5], trapframe.regs.reg[6], trapframe.regs.reg[7]);
 }

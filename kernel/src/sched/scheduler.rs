@@ -284,12 +284,18 @@ impl Scheduler {
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
+        crate::early_println!("[SCHED] CPU{}: on_tick called", cpu_id);
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = self.task_pool.get_task(task_id) {
                 if task.time_slice > 0 {
                     task.time_slice -= 1;
                 }
                 if task.time_slice == 0 {
+                    crate::early_println!(
+                        "[SCHED] CPU{}: Time slice expired for Task {}",
+                        cpu_id,
+                        task_id
+                    );
                     // Time slice expired, trigger reschedule
                     self.schedule(trapframe);
                 }
@@ -315,17 +321,17 @@ impl Scheduler {
         let (current_task_id, next_task_id) = self.run(cpu);
 
         // Debug output for monitoring scheduler behavior
-        // if let Some(current_id) = current_task_id {
-        //     if let Some(next_id) = next_task_id {
-        //         if current_id != next_id {
-        //             crate::println!("[SCHED] CPU{}: Task {} -> Task {}", cpu_id, current_id, next_id);
-        //         }
-        //     } else {
-        //         crate::println!("[SCHED] CPU{}: Task {} -> idle", cpu_id, current_id);
-        //     }
-        // } else if let Some(next_id) = next_task_id {
-        //     crate::println!("[SCHED] CPU{}: idle -> Task {}", cpu_id, next_id);
-        // }
+        if let Some(current_id) = current_task_id {
+            if let Some(next_id) = next_task_id {
+                if current_id != next_id {
+                    crate::println!("[SCHED] CPU{}: Task {} -> Task {}", cpu_id, current_id, next_id);
+                }
+            } else {
+                crate::println!("[SCHED] CPU{}: Task {} -> idle", cpu_id, current_id);
+            }
+        } else if let Some(next_id) = next_task_id {
+            crate::println!("[SCHED] CPU{}: idle -> Task {}", cpu_id, next_id);
+        }
 
         // Step 2: Check if a context switch is needed
         if next_task_id.is_some() && current_task_id != next_task_id {
@@ -547,8 +553,8 @@ impl Scheduler {
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-        // crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
-        // crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
+        crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
+        crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
         // let trapframe = cpu.get_trapframe();
         // crate::early_println!("[SCHED]   before Trapframe {:#x?}", trapframe);
 
