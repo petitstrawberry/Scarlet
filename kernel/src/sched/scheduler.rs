@@ -551,8 +551,8 @@ impl Scheduler {
     /// * `cpu` - The CPU architecture state
     /// * `task` - The task to setup for execution
     pub fn setup_task_execution(cpu: &mut Arch, task: &mut Task) {
-        crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
-        crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
+        // crate::early_println!("[SCHED] Setting up Task {} for execution", task.get_id());
+        // crate::early_println!("[SCHED]   before CPU {:#x?}", cpu);
         // let trapframe = cpu.get_trapframe();
         // crate::early_println!("[SCHED]   before Trapframe {:#x?}", trapframe);
 

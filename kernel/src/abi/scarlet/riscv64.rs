@@ -35,7 +35,7 @@ pub struct ScarletAbi;
 
 impl AbiModule for ScarletAbi {
     fn name() -> &'static str {
-        "scarlet-riscv64"
+        "scarlet"
     }
 
     fn get_name(&self) -> alloc::string::String {
