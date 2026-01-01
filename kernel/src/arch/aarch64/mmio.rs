@@ -6,6 +6,10 @@
 //!
 //! To keep trapped accesses predictable and decodable, we force single-instruction
 //! accesses (ldr/str/ldrb/strb) via inline assembly.
+//!
+//! # Memory Barriers
+//! All write operations include a DSB (Data Synchronization Barrier) to ensure
+//! writes complete before continuing. This is critical for device memory.
 
 use core::arch::asm;
 
@@ -37,6 +41,7 @@ pub unsafe fn write8(addr: usize, val: u8) {
     unsafe {
         asm!(
             "strb {val:w}, [{addr}]",
+            "dsb sy",  // Ensure write completes before continuing
             val = in(reg) val32,
             addr = in(reg) addr,
             options(nostack, preserves_flags)
@@ -72,6 +77,7 @@ pub unsafe fn write16(addr: usize, val: u16) {
     unsafe {
         asm!(
             "strh {val:w}, [{addr}]",
+            "dsb sy",  // Ensure write completes before continuing
             val = in(reg) val32,
             addr = in(reg) addr,
             options(nostack, preserves_flags)
@@ -106,6 +112,7 @@ pub unsafe fn write32(addr: usize, val: u32) {
     unsafe {
         asm!(
             "str {val:w}, [{addr}]",
+            "dsb sy",  // Ensure write completes before continuing
             val = in(reg) val,
             addr = in(reg) addr,
             options(nostack, preserves_flags)
@@ -140,6 +147,7 @@ pub unsafe fn write64(addr: usize, val: u64) {
     unsafe {
         asm!(
             "str {val}, [{addr}]",
+            "dsb sy",  // Ensure write completes before continuing
             val = in(reg) val,
             addr = in(reg) addr,
             options(nostack, preserves_flags)
