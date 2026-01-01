@@ -49,13 +49,12 @@ pub fn _start(x0: usize, x1: usize) -> ! {
 }
 
 pub fn arch_syscall0(syscall: Syscall) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     unsafe {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            lateout("x0") ret,
-            clobber_abi("C"),
+            out("x0") ret,
             options(nostack)
         );
     }
@@ -63,13 +62,12 @@ pub fn arch_syscall0(syscall: Syscall) -> usize {
 }
 
 pub fn arch_syscall1(syscall: Syscall, arg1: usize) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     unsafe {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
-            clobber_abi("C"),
+            inout("x0") arg1 => ret,
             options(nostack)
         );
     }
@@ -77,14 +75,13 @@ pub fn arch_syscall1(syscall: Syscall, arg1: usize) -> usize {
 }
 
 pub fn arch_syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     unsafe {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
+            inout("x0") arg1 => ret,
             in("x1") arg2,
-            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -92,15 +89,14 @@ pub fn arch_syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usize {
 }
 
 pub fn arch_syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: usize) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     unsafe {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
+            inout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
-            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -114,16 +110,15 @@ pub fn arch_syscall4(
     arg3: usize,
     arg4: usize,
 ) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     unsafe {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
+            inout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
             in("x3") arg4,
-            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -138,17 +133,16 @@ pub fn arch_syscall5(
     arg4: usize,
     arg5: usize,
 ) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     unsafe {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
+            inout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
             in("x3") arg4,
             in("x4") arg5,
-            clobber_abi("C"),
             options(nostack)
         );
     }
@@ -164,18 +158,17 @@ pub fn arch_syscall6(
     arg5: usize,
     arg6: usize,
 ) -> usize {
-    let mut ret: usize;
+    let ret: usize;
     unsafe {
         asm!(
             "svc #0",
             in("x8") syscall as usize,
-            inlateout("x0") arg1 => ret,
+            inout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
             in("x3") arg4,
             in("x4") arg5,
             in("x5") arg6,
-            clobber_abi("C"),
             options(nostack)
         );
     }

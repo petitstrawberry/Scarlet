@@ -93,22 +93,22 @@ pub extern "C" fn _user_trap_entry() {
         // User -> Kernel Entry (Lower EL)
         // -----------------------------------------------------------------
         10: // Sync
-            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            sub sp, sp, #304 // Allocate space for Trapframe (16-byte aligned)
             str x9, [sp, #72] // Save x9
             mov x9, #0         // Kind = Sync
             b   1f
         11: // IRQ
-            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            sub sp, sp, #304 // Allocate space for Trapframe (16-byte aligned)
             str x9, [sp, #72] // Save x9
             mov x9, #1         // Kind = IRQ
             b   1f
         12: // FIQ
-            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            sub sp, sp, #304 // Allocate space for Trapframe (16-byte aligned)
             str x9, [sp, #72] // Save x9
             mov x9, #2         // Kind = FIQ
             b   1f
         13: // SError
-            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            sub sp, sp, #304 // Allocate space for Trapframe (16-byte aligned)
             str x9, [sp, #72] // Save x9
             mov x9, #3         // Kind = SError
             b   1f
@@ -117,7 +117,7 @@ pub extern "C" fn _user_trap_entry() {
         // PRE: x9=Kind, sp=Trapframe ptr
         1:
             // 1. Save Context
-            // Trapframe layout is 288 bytes (16-byte aligned)
+            // Trapframe layout is 304 bytes (16-byte aligned)
             stp x0, x1, [sp, #0]
             stp x2, x3, [sp, #16]
             stp x4, x5, [sp, #32]
@@ -148,6 +148,10 @@ pub extern "C" fn _user_trap_entry() {
             str x10, [sp, #272] // Trapframe.tpidr_el0 = user TPIDR_EL0
             mrs x10, tpidrro_el0 // load user TPIDRRO_EL0
             str x10, [sp, #280] // Trapframe.tpidrro_el0 = user TPIDRRO_EL0
+
+            // Save ESR_EL1
+            mrs x10, esr_el1 // load user ESR_EL1
+            str x10, [sp, #288] // Trapframe.esr_el1 = user ESR_EL1
 
             // 2. Switch TTBR (User -> Kernel)
             mrs x10, tpidr_el1    // x10 = CPU struct ptr
@@ -185,13 +189,14 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         mov sp, x0 // Set SP to trapframe pointer for easy access
 
         // Restore system registers from trapframe
-        // Layout (288 bytes):
+        // Layout (304 bytes):
         //   0..240: x0-x30
         //   248:    sp (SP_EL0)
         //   256:    epc (ELR_EL1)
         //   264:    spsr (SPSR_EL1)
         //   272:    tpidr_el0 (TLS)
         //   280:    tpidrro_el0 (read-only at EL0)
+        //   288:    esr_el1 (not restore)
 
         // Switch TTBR back to user
         mrs x10, tpidr_el1 // x10 = CPU struct ptr
@@ -236,7 +241,7 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
         ldr x30, [sp, #240]
 
         // Deallocate trapframe space
-        add sp, sp, #288
+        add sp, sp, #304
 
         eret
         "#
@@ -252,8 +257,6 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     //     "[aarch64] arch_switch_to_user_space: Trapframe at {:x?}",
     //     trapframe
     // );
-
-    // loop {}
 
     crate::arch::configure_user_entry(
         trapframe,

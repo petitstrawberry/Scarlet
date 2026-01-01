@@ -91,8 +91,8 @@ impl From<u64> for ExceptionClass {
 
 /// Main exception handler
 pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
-    let esr = get_esr_el1();
-    let ec = ExceptionClass::from(esr);
+    let ec = ExceptionClass::from(trapframe.esr_el1);
+    let esr = trapframe.esr_el1;
 
     // Decode useful fields for Data/Instruction aborts.
     // ISS layout differs by EC, but WnR(bit 6) and DFSC/IFSC(bits 5:0) are consistent
@@ -122,7 +122,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         fsc,
         wnr,
         get_far_el1(),
-        trapframe.epc,
+        trapframe.elr,
         sctlr,
         (sctlr & 1) as u8,
         get_daif(),
@@ -149,7 +149,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 trapframe.get_arg(4),
                 trapframe.get_arg(5),
                 trapframe.sp,
-                trapframe.epc,
+                trapframe.elr,
             );
             // panic!("AArch64 syscall handler not implemented");
             match syscall_dispatcher(trapframe) {
@@ -167,7 +167,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
         // Instruction abort from lower EL
         ExceptionClass::InstructionAbortLowerEl => {
-            let vaddr = trapframe.epc as usize;
+            let vaddr = trapframe.elr as usize;
             handle_instruction_fault(trapframe, vaddr);
         }
 
@@ -210,7 +210,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 kind_str,
                 esr,
                 get_far_el1(),
-                trapframe.epc,
+                trapframe.elr,
             );
 
             loop {
@@ -287,7 +287,7 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
     crate::early_println!("=== Trap Info ===");
     crate::early_println!("ESR_EL1: {:#018x} (EC={:#x}, FSC={:#x})", esr, ec, fsc);
     crate::early_println!("FAR_EL1: {:#018x}", far);
-    crate::early_println!("ELR_EL1: {:#018x}", trapframe.epc);
+    crate::early_println!("ELR_EL1: {:#018x}", trapframe.elr);
 
     // Print first 8 general registers
     crate::early_println!(

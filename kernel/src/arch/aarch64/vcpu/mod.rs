@@ -78,7 +78,7 @@ impl Vcpu {
     pub fn store(&mut self, trapframe: &Trapframe) {
         self.iregs = trapframe.regs;
         self.sp = trapframe.sp;
-        self.pc = trapframe.epc;
+        self.pc = trapframe.elr;
         self.spsr = trapframe.spsr;
         self.tpidr_el0 = trapframe.tpidr_el0;
         self.tpidrro_el0 = trapframe.tpidrro_el0;
@@ -87,7 +87,7 @@ impl Vcpu {
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
         trapframe.regs = self.iregs;
         trapframe.sp = self.sp;
-        trapframe.epc = self.pc;
+        trapframe.elr = self.pc;
         trapframe.spsr = self.spsr;
         trapframe.tpidr_el0 = self.tpidr_el0;
         trapframe.tpidrro_el0 = self.tpidrro_el0;

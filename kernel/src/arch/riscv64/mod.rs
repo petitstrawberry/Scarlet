@@ -218,6 +218,10 @@ impl Trapframe {
         self.regs.reg[index + 10] = value; // a0 - a7
     }
 
+    pub fn get_current_pc(&self) -> u64 {
+        self.epc
+    }
+
     /// Increment the program counter (epc) to the next instruction
     /// This is typically used after handling a trap or syscall to continue execution.
     ///

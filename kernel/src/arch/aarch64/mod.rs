@@ -247,12 +247,14 @@ impl Aarch64 {
 pub struct Trapframe {
     pub regs: IntRegisters,
     pub sp: u64,
-    pub epc: u64,  // ELR_EL1
+    pub elr: u64,  // ELR_EL1
     pub spsr: u64, // SPSR_EL1
     /// User thread pointer (TLS) register.
     pub tpidr_el0: u64,
     /// Reserved: currently used as a trampoline scratch (TPIDRRO_EL0).
     pub tpidrro_el0: u64,
+    // exception information
+    pub esr_el1: u64,
 }
 
 impl Trapframe {
@@ -260,10 +262,11 @@ impl Trapframe {
         Trapframe {
             regs: IntRegisters::new(),
             sp: 0,
-            epc: 0,
+            elr: 0,
             spsr: 0,
             tpidr_el0: 0,
             tpidrro_el0: 0,
+            esr_el1: 0,
         }
     }
 
@@ -300,12 +303,24 @@ impl Trapframe {
         // TODO: Handle arguments on stack
     }
 
+    pub fn get_current_pc(&self) -> u64 {
+        let esr = self.esr_el1;
+        let ec = trap::exception::ExceptionClass::from(esr);
+        match ec {
+            trap::exception::ExceptionClass::SvcAarch64 => self.elr - 4,
+            _ => self.elr,
+        }
+    }
+
     /// Increment the program counter (epc) to the next instruction
     /// This is typically used after handling a trap or syscall to continue execution.
     ///
     pub fn increment_pc_next(&mut self, _task: &Task) {
-        // AArch64 instructions are 4 bytes (32-bit) in AArch64 state
-        self.epc += 4;
+        // NOTE:
+        // For AArch64 `svc` (and most synchronous exceptions in this kernel path),
+        // ELR_EL1 already contains the address of the *next* instruction.
+        // Incrementing here would skip the instruction immediately following `svc`
+        // in userspace, breaking syscall wrappers that spill x0 to memory.
     }
 }
 

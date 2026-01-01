@@ -436,7 +436,7 @@ macro_rules! register_abi {
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
     // 1. Get the program counter (sepc) from trapframe
-    let pc = trapframe.epc as usize;
+    let pc = trapframe.get_current_pc() as usize;
 
     // 2. Get mutable reference to current task
     let task = mytask().unwrap();
