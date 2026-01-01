@@ -92,6 +92,28 @@ else
     DEBUG_FLAGS=""
 fi
 
+QEMU_DEBUG_ARGS=""
+
+# Optional QEMU debug logging
+# - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
+# - Or pass explicit QEMU -d flags: SCARLET_QEMU_DEBUG_FLAGS=virtio (comma-separated)
+QEMU_DEBUG_FLAGS=""
+if [ -n "${SCARLET_QEMU_DEBUG_FLAGS:-}" ]; then
+    QEMU_DEBUG_FLAGS="${SCARLET_QEMU_DEBUG_FLAGS}"
+elif [ "${SCARLET_QEMU_GUEST_ERRORS:-0}" = "1" ] || [ "${SCARLET_QEMU_GUEST_ERRORS:-}" = "true" ]; then
+    QEMU_DEBUG_FLAGS="guest_errors"
+fi
+
+if [ -n "$QEMU_DEBUG_FLAGS" ]; then
+    if [ "$QEMU_DEBUG_FLAGS" = "guest_errors" ]; then
+        QEMU_DEBUG_LOG="${SCARLET_QEMU_GUEST_ERRORS_LOG:-$PROJECT_ROOT/qemu-guest-errors-aarch64.log}"
+    else
+        QEMU_DEBUG_LOG="${SCARLET_QEMU_DEBUG_LOG:-$PROJECT_ROOT/qemu-debug-aarch64.log}"
+    fi
+    echo "QEMU debug logging enabled (-d $QEMU_DEBUG_FLAGS): $QEMU_DEBUG_LOG"
+    QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
+fi
+
 # Run QEMU with U-Boot as BIOS
 # Use gic-version=3 to match run_aarch64.sh configuration
 # Add Virtio devices for comprehensive testing
@@ -118,6 +140,7 @@ qemu-system-aarch64 \
     -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
     -initrd "$INITRAMFS_PATH" \
     -kernel "$KERNEL_BIN" \
+    $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
 # Capture pipeline exit codes (qemu is element 0, tee is element 1)

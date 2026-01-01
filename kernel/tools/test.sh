@@ -61,6 +61,28 @@ fi
 # Create temporary file for capturing output
 TEMP_OUTPUT=$(mktemp)
 
+QEMU_DEBUG_ARGS=""
+
+# Optional QEMU debug logging
+# - Enable guest errors: SCARLET_QEMU_GUEST_ERRORS=1
+# - Or pass explicit QEMU -d flags: SCARLET_QEMU_DEBUG_FLAGS=virtio (comma-separated)
+QEMU_DEBUG_FLAGS=""
+if [ -n "${SCARLET_QEMU_DEBUG_FLAGS:-}" ]; then
+    QEMU_DEBUG_FLAGS="${SCARLET_QEMU_DEBUG_FLAGS}"
+elif [ "${SCARLET_QEMU_GUEST_ERRORS:-0}" = "1" ] || [ "${SCARLET_QEMU_GUEST_ERRORS:-}" = "true" ]; then
+    QEMU_DEBUG_FLAGS="guest_errors"
+fi
+
+if [ -n "$QEMU_DEBUG_FLAGS" ]; then
+    if [ "$QEMU_DEBUG_FLAGS" = "guest_errors" ]; then
+        QEMU_DEBUG_LOG="${SCARLET_QEMU_GUEST_ERRORS_LOG:-$PROJECT_ROOT/qemu-guest-errors-riscv64.log}"
+    else
+        QEMU_DEBUG_LOG="${SCARLET_QEMU_DEBUG_LOG:-$PROJECT_ROOT/qemu-debug-riscv64.log}"
+    fi
+    echo "QEMU debug logging enabled (-d $QEMU_DEBUG_FLAGS): $QEMU_DEBUG_LOG"
+    QEMU_DEBUG_ARGS="-d $QEMU_DEBUG_FLAGS -D $QEMU_DEBUG_LOG"
+fi
+
 if [ "$DEBUG_MODE" = true ]; then
     # Debug mode: start with gdb server
     qemu-system-riscv64 \
@@ -83,6 +105,7 @@ if [ "$DEBUG_MODE" = true ]; then
         -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
         -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
+        $QEMU_DEBUG_ARGS \
         -initrd "$INITRAMFS_PATH" \
         -gdb tcp::12345 -S \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
@@ -108,6 +131,7 @@ else
         -device virtio-net-device,netdev=net0,mac=52:54:00:12:34:56,bus=virtio-mmio-bus.2 \
         -device virtio-net-device,netdev=net1,mac=52:54:00:12:34:57,bus=virtio-mmio-bus.3 \
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
+        $QEMU_DEBUG_ARGS \
         -initrd "$INITRAMFS_PATH" \
         -kernel "$KERNEL_BINARY" | tee "$TEMP_OUTPUT"
 fi
