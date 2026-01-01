@@ -43,9 +43,9 @@ RUN apt update && \
 
 # Install Rust and architecture targets
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
-    rustup default nightly-2025-04-28 && \
-    rustup install nightly-2025-04-28 && \
-    rustup component add rust-src --toolchain nightly-2025-04-28 && \
+    rustup default nightly-2025-12-31 && \
+    rustup install nightly-2025-12-31 && \
+    rustup component add rust-src --toolchain nightly-2025-12-31 && \
     rustup target add riscv64gc-unknown-none-elf && \
     rustup target add aarch64-unknown-none
 
