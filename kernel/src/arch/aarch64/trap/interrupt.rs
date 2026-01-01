@@ -5,7 +5,7 @@ use crate::interrupt::InterruptManager;
 
 /// Handle an IRQ taken at EL1.
 ///
-/// On QEMU virt (GICv2), the EL1 physical timer arrives as a PPI (typically ID 30).
+/// On QEMU virt (GICv2), the virtual timer arrives as a PPI (typically ID 27).
 /// The generic InterruptManager path will acknowledge+EOI the interrupt, but the
 /// kernel still needs to run the timer tick logic to advance scheduling.
 pub fn arch_irq_handler(trapframe: &mut Trapframe) {
@@ -16,7 +16,7 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe) {
 
     match claimed {
         Ok(Some(interrupt_id)) => {
-            if interrupt_id == crate::drivers::pic::arm_generic_timer::CNTP_PPI_IRQ {
+            if interrupt_id == crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ {
                 crate::timer::tick(trapframe);
             }
         }

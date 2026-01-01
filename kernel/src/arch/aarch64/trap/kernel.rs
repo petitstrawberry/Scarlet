@@ -71,6 +71,7 @@ pub extern "C" fn _kernel_trap_entry() {
         
         30: // Sync
             msr daifset, #0xf       // Mask interrupts
+            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #288        // Alloc Trapframe
             stp x0, x1, [sp, #0]    // Save x0, x1 first
             mov x1, #0              // x1 (Arg2) = Kind: Sync
@@ -78,6 +79,7 @@ pub extern "C" fn _kernel_trap_entry() {
 
         31: // IRQ
             msr daifset, #0xf
+            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #288
             stp x0, x1, [sp, #0]
             mov x1, #1              // x1 (Arg2) = Kind: IRQ
@@ -85,6 +87,7 @@ pub extern "C" fn _kernel_trap_entry() {
 
         32: // FIQ
             msr daifset, #0xf
+            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #288
             stp x0, x1, [sp, #0]
             mov x1, #2              // x1 (Arg2) = Kind: FIQ
@@ -92,6 +95,7 @@ pub extern "C" fn _kernel_trap_entry() {
 
         33: // SError
             msr daifset, #0xf
+            mov x20, sp             // Capture current SP (SP_EL1)
             sub sp, sp, #288
             stp x0, x1, [sp, #0]
             mov x1, #3              // x1 (Arg2) = Kind: SError
@@ -117,6 +121,10 @@ pub extern "C" fn _kernel_trap_entry() {
             stp x26, x27, [sp, #208]
             stp x28, x29, [sp, #224]
             str x30, [sp, #240]
+
+            // Save captured kernel SP (SP_EL1 at exception entry)
+            // Reuse Trapframe.tpidrro_el0 field for kernel traps (unused here).
+            str x20, [sp, #280]
 
             // Save System Registers
             mrs x19, elr_el1
@@ -183,6 +191,6 @@ pub extern "C" fn arch_kernel_trap_handler(trapframe: &mut Trapframe, trap_kind:
         arch_irq_handler(trapframe);
     } else {
         // Exception (Sync/SError/FIQ)
-        arch_exception_handler(trapframe);
+        arch_exception_handler(trapframe, trap_kind);
     }
 }

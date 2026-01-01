@@ -101,16 +101,16 @@ pub fn disable_external_interrupt_line(interrupt_id: u32) -> Result<(), &'static
 /// Unmask the architectural timer interrupt at the timer source.
 ///
 /// This is the closest equivalent to RISC-V's per-source enable bit like STIE,
-/// but on AArch64 it lives in CNTP_CTL_EL0.
+/// but on AArch64 we use CNTV_CTL_EL0 (virtual timer).
 pub fn enable_timer_source_interrupt() {
     unsafe {
         let mut ctl: u64;
-        asm!("mrs {0}, cntp_ctl_el0", out(reg) ctl, options(nostack));
+        asm!("mrs {0}, cntv_ctl_el0", out(reg) ctl, options(nostack));
         // IMASK bit (1): 0 = unmask timer interrupt.
         ctl &= !(1 << 1);
         // ENABLE bit (0): 1 = enable timer.
         ctl |= 1;
-        asm!("msr cntp_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
         asm!("isb", options(nostack));
     }
 }
@@ -119,10 +119,10 @@ pub fn enable_timer_source_interrupt() {
 pub fn disable_timer_source_interrupt() {
     unsafe {
         let mut ctl: u64;
-        asm!("mrs {0}, cntp_ctl_el0", out(reg) ctl, options(nostack));
+        asm!("mrs {0}, cntv_ctl_el0", out(reg) ctl, options(nostack));
         // IMASK bit (1): 1 = mask timer interrupt.
         ctl |= 1 << 1;
-        asm!("msr cntp_ctl_el0, {0}", in(reg) ctl, options(nostack));
+        asm!("msr cntv_ctl_el0, {0}", in(reg) ctl, options(nostack));
         asm!("isb", options(nostack));
     }
 }

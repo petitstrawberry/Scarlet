@@ -110,6 +110,12 @@ pub extern "C" fn _entry() {
         
         // Preserve x0 (DTB pointer) in a callee-saved register
         mov     x19, x0
+
+        // Mask all exceptions early (Debug, SError, IRQ, FIQ).
+        // When booting directly into EL1 (no EL2 drop), the incoming DAIF
+        // state is not guaranteed, and a pending IRQ can trap before the
+        // interrupt subsystem is initialized.
+        msr     daifset, #0xf
         
         // Disable MMU, D-cache, and I-cache to ensure we run in identity-mapped mode
         // This is required because U-Boot may have left MMU enabled
@@ -147,6 +153,24 @@ pub extern "C" fn _entry() {
         orr     x1, x1, #(1 << 4)        // IMO: Physical IRQ routed to EL1
         orr     x1, x1, #(1 << 3)        // FMO: Physical FIQ routed to EL1  
         msr     hcr_el2, x1
+        isb
+
+        // Allow EL1 access to the architected timer registers.
+        // Some accelerators (including HVF) will trap CNTP/CNTV sysreg accesses
+        // from an EL1 guest unless CNTHCTL_EL2 enables them.
+        //
+        // CNTHCTL_EL2:
+        // - EL1PCTEN (bit 0): EL1 access to physical counter
+        // - EL1PCEN  (bit 1): EL1 access to physical timer
+        // - EL1VCTEN (bit 8): EL1 access to virtual counter
+        // - EL1VCEN  (bit 9): EL1 access to virtual timer
+        mov     x1, #(1 << 0)
+        orr     x1, x1, #(1 << 1)
+        orr     x1, x1, #(1 << 8)
+        orr     x1, x1, #(1 << 9)
+        msr     cnthctl_el2, x1
+        // Ensure virtual counter offset is 0 for predictable CNTVCT at EL1.
+        msr     cntvoff_el2, xzr
         isb
         
         // Set SPSR_EL2 for EL1h (use SP_EL1)
@@ -317,6 +341,12 @@ pub extern "C" fn arch_start_kernel(core_id: usize, dtb_ptr: usize) {
 
     // Create BootInfo with relocated FDT address
     let bootinfo = create_bootinfo_from_fdt(core_id, relocated_fdt_area.start);
+
+    // Some accelerators (e.g. HVF) can fault on exclusive accesses while the
+    // MMU is disabled (memory treated as Device). The kernel allocator and
+    // many locks rely on exclusives, so enable a minimal identity mapping
+    // before entering the common kernel init path.
+    super::enable_identity_mmu_if_disabled(bootinfo.usable_memory.end);
 
     crate::early_println!(
         "[aarch64] Core {}: Initializing architecture support...",

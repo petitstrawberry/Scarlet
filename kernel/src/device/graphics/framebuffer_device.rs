@@ -365,11 +365,19 @@ impl CharDevice for FramebufferCharDevice {
         let available = fb_resource.size - start_pos;
         let to_read = buffer.len().min(available);
 
-        // Read data from framebuffer memory
+        // Read data from framebuffer memory.
+        //
+        // NOTE: On QEMU+HVF, some non-volatile memcpy-style accesses to MMIO-like
+        // framebuffer regions can VM-exit as EC_DATAABORT without ISV set, which
+        // causes QEMU's HVF backend to abort (assert(isv)). Use byte-wise volatile
+        // accesses to keep the trapped instruction decodable.
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *const u8;
             let src_ptr = fb_ptr.add(start_pos);
-            core::ptr::copy_nonoverlapping(src_ptr, buffer.as_mut_ptr(), to_read);
+
+            for i in 0..to_read {
+                buffer[i] = core::ptr::read_volatile(src_ptr.add(i));
+            }
         }
 
         Ok(to_read)
@@ -401,11 +409,15 @@ impl CharDevice for FramebufferCharDevice {
         let available = fb_resource.size - start_pos;
         let to_write = buffer.len().min(available);
 
-        // Write data to framebuffer memory
+        // Write data to framebuffer memory.
+        // See note in read_at() about QEMU+HVF and ISV.
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *mut u8;
             let dst_ptr = fb_ptr.add(start_pos);
-            core::ptr::copy_nonoverlapping(buffer.as_ptr(), dst_ptr, to_write);
+
+            for i in 0..to_write {
+                core::ptr::write_volatile(dst_ptr.add(i), buffer[i]);
+            }
         }
 
         Ok(to_write)

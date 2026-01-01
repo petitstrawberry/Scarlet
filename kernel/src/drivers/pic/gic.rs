@@ -60,6 +60,12 @@ pub struct Gic {
     max_interrupts: InterruptId,
     /// Maximum number of CPUs this GIC supports
     max_cpus: CpuId,
+
+    /// Last acknowledged interrupt value (raw GICC_IAR) per CPU.
+    ///
+    /// GICv2 requires writing the same value returned by GICC_IAR back to
+    /// GICC_EOIR to complete the interrupt (it includes CPUID bits).
+    last_iar: [u32; MAX_CPUS as usize],
 }
 
 impl Gic {
@@ -82,6 +88,7 @@ impl Gic {
             cpu_base_addr,
             max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
             max_cpus: max_cpus.min(MAX_CPUS),
+            last_iar: [0; MAX_CPUS as usize],
         }
     }
 
@@ -153,13 +160,17 @@ impl Gic {
                 );
             }
 
-            // Pre-enable timer PPI (ID 30) since writes to ISENABLER hang later
-            let ppi_30_bit = 1u32 << 30;
-            write_volatile(self.dist_reg_addr(GICD_ISENABLER) as *mut u32, ppi_30_bit);
+            // Pre-enable the virtual timer PPI (ID 27).
+            let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
+            let timer_ppi_bit = 1u32 << timer_ppi;
+            write_volatile(
+                self.dist_reg_addr(GICD_ISENABLER) as *mut u32,
+                timer_ppi_bit,
+            );
 
-            // Set timer PPI priority
-            // For Group 1 non-secure interrupts, use priority 0x80 (bit 7 set)
-            write_volatile(self.priority_addr(30) as *mut u8, 0x80);
+            // Set timer PPI priority.
+            // For Group 1 non-secure interrupts, use priority 0x80 (bit 7 set).
+            write_volatile(self.priority_addr(timer_ppi) as *mut u8, 0x80);
 
             // Enable the distributor for both Group 0 and Group 1 interrupts.
             // Bit 0 = Enable Group 0, Bit 1 = Enable Group 1.
@@ -200,7 +211,7 @@ impl Gic {
         // [14:0] INTID
         let cpu_target_list = 1u32 << (target_cpu_id + 16);
         let int_id = match ipi_type {
-            LocalInterruptType::Timer => 30,   // Private Peripheral Interrupt
+            LocalInterruptType::Timer => crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ,
             LocalInterruptType::Software => 0, // Software Generated Interrupt
             LocalInterruptType::External => 1, // Software Generated Interrupt
         };
@@ -350,6 +361,9 @@ impl ExternalInterruptController for Gic {
         let iar_addr = self.cpu_reg_addr(cpu_id, GICC_IAR);
         let iar = unsafe { read_volatile(iar_addr as *const u32) };
 
+        // Remember the raw acknowledge value for correct EOI later.
+        self.last_iar[cpu_id as usize] = iar;
+
         // Extract interrupt ID (bits 0-9)
         let interrupt_id = iar & 0x3FF;
 
@@ -359,7 +373,7 @@ impl ExternalInterruptController for Gic {
             // Otherwise the GIC will not deliver the next interrupt
             let eoir_addr = self.cpu_reg_addr(cpu_id, GICC_EOIR);
             unsafe {
-                write_volatile(eoir_addr as *mut u32, interrupt_id);
+                write_volatile(eoir_addr as *mut u32, iar);
             }
             Ok(None)
         } else {
@@ -378,8 +392,13 @@ impl ExternalInterruptController for Gic {
         // Write to End of Interrupt Register
         let eoir_addr = self.cpu_reg_addr(cpu_id, GICC_EOIR);
         unsafe {
-            write_volatile(eoir_addr as *mut u32, interrupt_id);
+            // GICv2 expects the raw value read from GICC_IAR (includes CPUID bits).
+            let iar = self.last_iar[cpu_id as usize];
+            let eoi_value = if iar != 0 { iar } else { interrupt_id };
+            write_volatile(eoir_addr as *mut u32, eoi_value);
         }
+
+        self.last_iar[cpu_id as usize] = 0;
 
         Ok(())
     }

@@ -291,7 +291,7 @@ pub extern "C" fn arch_user_trap_handler(trapframe: &mut Trapframe, trap_kind: u
     if trap_kind == 1 {
         arch_irq_handler(trapframe);
     } else {
-        arch_exception_handler(trapframe);
+        arch_exception_handler(trapframe, trap_kind);
     }
 
     arch_switch_to_user_space(trapframe);

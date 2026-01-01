@@ -3,10 +3,12 @@
 //! This implements the CPU-local timer and (optionally) software interrupt control
 //! using the architected system registers.
 //!
-//! We use the EL1 Physical Timer (CNTP) because Scarlet runs at EL1 on QEMU virt.
-//! - Counter: CNTpct_EL0
-//! - Compare: CNTp_CVAL_EL0
-//! - Control: CNTp_CTL_EL0
+//! We use the Virtual Timer (CNTV).
+//!
+//! When running under an EL2 hypervisor, guests typically use the virtual timer.
+//! - Counter: CNTVCT_EL0
+//! - Compare: CNTV_CVAL_EL0
+//! - Control: CNTV_CTL_EL0
 //! - Frequency: CNTFRQ_EL0
 
 use core::arch::asm;
@@ -15,15 +17,15 @@ use crate::environment::NUM_OF_CPUS;
 use crate::interrupt::controllers::{LocalInterruptController, LocalInterruptType};
 use crate::interrupt::{CpuId, InterruptError, InterruptManager, InterruptResult};
 
-/// CNTP_CTL_EL0 bit definitions
-const CNTP_CTL_ENABLE: u64 = 1 << 0;
-const CNTP_CTL_IMASK: u64 = 1 << 1;
-const CNTP_CTL_ISTATUS: u64 = 1 << 2;
+/// CNTV_CTL_EL0 bit definitions
+const CNTV_CTL_ENABLE: u64 = 1 << 0;
+const CNTV_CTL_IMASK: u64 = 1 << 1;
+const CNTV_CTL_ISTATUS: u64 = 1 << 2;
 
-/// QEMU virt / ARM Generic Timer: Non-secure EL1 physical timer interrupt is typically PPI 30.
+/// QEMU virt / ARM Generic Timer: Virtual Timer PPI is 27.
 ///
 /// We keep this as a constant so the IRQ handler can cheaply sanity-check timer pending state.
-pub const CNTP_PPI_IRQ: u32 = 30;
+pub const CNTV_PPI_IRQ: u32 = 27;
 
 #[inline]
 fn read_cntfrq_el0() -> u64 {
@@ -35,28 +37,28 @@ fn read_cntfrq_el0() -> u64 {
 }
 
 #[inline]
-fn read_cntpct_el0() -> u64 {
+fn read_cntvct_el0() -> u64 {
     let v: u64;
     unsafe {
-        asm!("mrs {0}, cntpct_el0", out(reg) v, options(nostack));
+        asm!("mrs {0}, cntvct_el0", out(reg) v, options(nostack));
     }
     v
 }
 
 #[inline]
-fn read_cntp_ctl_el0() -> u64 {
+fn read_cntv_ctl_el0() -> u64 {
     let v: u64;
     unsafe {
-        asm!("mrs {0}, cntp_ctl_el0", out(reg) v, options(nostack));
+        asm!("mrs {0}, cntv_ctl_el0", out(reg) v, options(nostack));
     }
     v
 }
 
 #[inline]
-fn write_cntp_ctl_el0(v: u64) {
+fn write_cntv_ctl_el0(v: u64) {
     unsafe {
         asm!(
-            "msr cntp_ctl_el0, {0}",
+            "msr cntv_ctl_el0, {0}",
             "isb",
             in(reg) v,
             options(nostack)
@@ -65,10 +67,10 @@ fn write_cntp_ctl_el0(v: u64) {
 }
 
 #[inline]
-fn write_cntp_cval_el0(v: u64) {
+fn write_cntv_cval_el0(v: u64) {
     unsafe {
         asm!(
-            "msr cntp_cval_el0, {0}",
+            "msr cntv_cval_el0, {0}",
             "isb",
             in(reg) v,
             options(nostack)
@@ -87,22 +89,22 @@ impl ArmGenericTimer {
     }
 
     pub fn is_timer_pending() -> bool {
-        (read_cntp_ctl_el0() & CNTP_CTL_ISTATUS) != 0
+        (read_cntv_ctl_el0() & CNTV_CTL_ISTATUS) != 0
     }
 
     fn enable_timer_interrupt() {
         // Enable timer and unmask interrupt.
-        let mut ctl = read_cntp_ctl_el0();
-        ctl |= CNTP_CTL_ENABLE;
-        ctl &= !CNTP_CTL_IMASK;
-        write_cntp_ctl_el0(ctl);
+        let mut ctl = read_cntv_ctl_el0();
+        ctl |= CNTV_CTL_ENABLE;
+        ctl &= !CNTV_CTL_IMASK;
+        write_cntv_ctl_el0(ctl);
     }
 
     fn disable_timer_interrupt() {
         // Mask timer interrupt; keep ENABLE as-is.
-        let mut ctl = read_cntp_ctl_el0();
-        ctl |= CNTP_CTL_IMASK;
-        write_cntp_ctl_el0(ctl);
+        let mut ctl = read_cntv_ctl_el0();
+        ctl |= CNTV_CTL_IMASK;
+        write_cntv_ctl_el0(ctl);
     }
 }
 
@@ -171,12 +173,12 @@ impl LocalInterruptController for ArmGenericTimer {
 
     fn set_timer(&mut self, _cpu_id: CpuId, time: u64) -> InterruptResult<()> {
         // Program absolute compare value.
-        write_cntp_cval_el0(time);
+        write_cntv_cval_el0(time);
         Ok(())
     }
 
     fn get_time(&self) -> u64 {
-        read_cntpct_el0()
+        read_cntvct_el0()
     }
 
     fn get_timer_frequency_hz(&self) -> u64 {
