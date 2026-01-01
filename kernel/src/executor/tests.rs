@@ -24,7 +24,7 @@ fn test_exec_backup_restore() {
     let original_stack_size = task.stack_size;
     let original_managed_pages_count = task.managed_pages.len();
     let original_vm_mappings_count = task.vm_manager.memmap_len();
-    let original_pc = trapframe.epc;
+    let original_pc = trapframe.get_current_pc();
     let original_sp = trapframe.regs.reg[2];
     let original_a0 = trapframe.regs.reg[10];
 

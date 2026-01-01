@@ -789,7 +789,7 @@ impl ControlOps for VirtioBlockDevice {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "riscv64"))]
 pub mod tests {
     use super::*;
     use alloc::vec;

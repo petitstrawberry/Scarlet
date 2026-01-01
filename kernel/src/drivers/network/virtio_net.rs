@@ -644,7 +644,7 @@ impl NetworkDevice for VirtioNetDevice {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "riscv64"))]
 mod tests {
     use super::*;
     use alloc::vec;

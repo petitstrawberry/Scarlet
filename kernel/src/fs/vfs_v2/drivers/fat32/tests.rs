@@ -477,6 +477,7 @@ fn create_test_fat32_device() -> MockBlockDevice {
 }
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_fat32_virtio_blk_filesystem() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
     use crate::early_println;
@@ -559,6 +560,7 @@ fn test_fat32_virtio_blk_filesystem() {
 }
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_fat32_virtio_blk_file_operations() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
     use crate::early_println;
@@ -776,6 +778,7 @@ fn test_fat32_virtio_blk_file_operations() {
 }
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_fat32_virtio_blk_write_operations() {
     early_println!("[Test] Starting FAT32 virtio-blk write operations test...");
 

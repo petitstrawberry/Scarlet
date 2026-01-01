@@ -581,7 +581,31 @@ pub fn clean_dcache_to_pou_range(start_vaddr: usize, len: usize) {
 }
 
 pub fn shutdown() -> ! {
-    // TODO: Implement PSCI shutdown for AArch64
+    // Prefer PSCI to power off the machine. QEMU virt advertises PSCI and will
+    // terminate the emulator on SYSTEM_OFF.
+    const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
+
+    #[inline(always)]
+    unsafe fn psci_hvc(fid: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
+        let ret: u64;
+        unsafe {
+            asm!(
+                "hvc #0",
+                inout("x0") fid => ret,
+                in("x1") arg0,
+                in("x2") arg1,
+                in("x3") arg2,
+                options(nostack)
+            );
+        }
+        ret
+    }
+
+    early_println!("[aarch64] Shutdown requested (PSCI SYSTEM_OFF)");
+    unsafe {
+        let _ = psci_hvc(PSCI_SYSTEM_OFF, 0, 0, 0);
+    }
+
     early_println!("[aarch64] Shutdown requested - entering infinite loop");
     loop {
         unsafe {
@@ -596,7 +620,29 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 }
 
 pub fn reboot() -> ! {
-    // TODO: Implement PSCI reboot for AArch64
+    const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
+
+    #[inline(always)]
+    unsafe fn psci_hvc(fid: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
+        let ret: u64;
+        unsafe {
+            asm!(
+                "hvc #0",
+                inout("x0") fid => ret,
+                in("x1") arg0,
+                in("x2") arg1,
+                in("x3") arg2,
+                options(nostack)
+            );
+        }
+        ret
+    }
+
+    early_println!("[aarch64] Reboot requested (PSCI SYSTEM_RESET)");
+    unsafe {
+        let _ = psci_hvc(PSCI_SYSTEM_RESET, 0, 0, 0);
+    }
+
     early_println!("[aarch64] Reboot requested - entering infinite loop");
     loop {
         unsafe {

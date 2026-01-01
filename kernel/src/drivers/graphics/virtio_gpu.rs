@@ -832,12 +832,14 @@ mod tests {
         assert!(device.get_framebuffer_address().is_err());
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_init_graphics() {
         let mut device = VirtioGpuDevice::new(0x10002000);
         device.init_graphics().unwrap();
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_framebuffer_operations() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -914,6 +916,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_pixel_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -976,6 +979,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_rectangle_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1046,6 +1050,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_border_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1148,6 +1153,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_pixel_format_verification() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1210,6 +1216,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_command_flow_verification() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1258,6 +1265,7 @@ mod tests {
         crate::early_println!("[Test] VirtIO GPU command flow verification completed");
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_resource_management() {
         let mut device = VirtioGpuDevice::new(0x10002000);

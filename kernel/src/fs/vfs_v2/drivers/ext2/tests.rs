@@ -595,6 +595,7 @@ fn test_ext2_comprehensive_mock_operations() {
 // The following tests use the actual virtio-blk device with real ext2 images
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_ext2_virtio_blk_filesystem() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
@@ -664,6 +665,7 @@ fn test_ext2_virtio_blk_filesystem() {
 }
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_ext2_virtio_blk_file_operations() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
@@ -831,6 +833,7 @@ fn test_ext2_virtio_blk_file_operations() {
 }
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_ext2_virtio_blk_write_operations() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
@@ -1099,6 +1102,7 @@ fn test_ext2_virtio_blk_write_operations() {
 
 /// Test ext2 delete operations with virtio-blk
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_ext2_virtio_blk_delete_operations() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
@@ -1467,6 +1471,7 @@ fn test_ext2_virtio_blk_delete_operations() {
 }
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_ext2_virtio_blk_symlink_operations() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
@@ -1677,6 +1682,7 @@ fn test_ext2_virtio_blk_symlink_operations() {
 }
 
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_ext2_virtio_blk_symlink_edge_cases() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
 
@@ -1842,6 +1848,7 @@ fn test_ext2_virtio_blk_symlink_edge_cases() {
 
 // Test device file creation with ext2
 #[test_case]
+#[cfg(target_arch = "riscv64")]
 fn test_ext2_device_file_creation() {
     use crate::drivers::block::virtio_blk::VirtioBlockDevice;
     use crate::{

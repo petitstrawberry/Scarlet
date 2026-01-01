@@ -112,49 +112,49 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         _ => "UnknownKind",
     };
 
-    crate::early_println!(
-        "[trap] kind={}({}) ESR={:#x} EC={:?} ISS={:#x} FSC={:#x} WnR={} FAR={:#x} ELR={:#x} SCTLR={:#x} M={} DAIF={:#x} CurrentEL={:#x}(EL{}) SPSR={:#x} SP_EL0={:#x} KernelSP={:#x} ISR_EL1={:#x}",
-        trap_kind,
-        kind_str,
-        esr,
-        ec,
-        iss,
-        fsc,
-        wnr,
-        get_far_el1(),
-        trapframe.elr,
-        sctlr,
-        (sctlr & 1) as u8,
-        get_daif(),
-        get_current_el(),
-        current_el_number(),
-        trapframe.spsr,
-        trapframe.sp,
-        trapframe.tpidrro_el0,
-        get_isr_el1(),
-    );
+    // crate::early_println!(
+    //     "[trap] kind={}({}) ESR={:#x} EC={:?} ISS={:#x} FSC={:#x} WnR={} FAR={:#x} ELR={:#x} SCTLR={:#x} M={} DAIF={:#x} CurrentEL={:#x}(EL{}) SPSR={:#x} SP_EL0={:#x} KernelSP={:#x} ISR_EL1={:#x}",
+    //     trap_kind,
+    //     kind_str,
+    //     esr,
+    //     ec,
+    //     iss,
+    //     fsc,
+    //     wnr,
+    //     get_far_el1(),
+    //     trapframe.elr,
+    //     sctlr,
+    //     (sctlr & 1) as u8,
+    //     get_daif(),
+    //     get_current_el(),
+    //     current_el_number(),
+    //     trapframe.spsr,
+    //     trapframe.sp,
+    //     trapframe.tpidrro_el0,
+    //     get_isr_el1(),
+    // );
 
     match ec {
         // SVC from AArch64 user mode (syscall)
         ExceptionClass::SvcAarch64 => {
             // Minimal syscall trace for debugging AArch64 SVC path.
             // AArch64 syscall number: x8, args: x0-x5.
-            crate::early_println!(
-                "[syscall/aarch64] nr={} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} sp={:#x} elr={:#x}",
-                trapframe.get_syscall_number(),
-                trapframe.get_arg(0),
-                trapframe.get_arg(1),
-                trapframe.get_arg(2),
-                trapframe.get_arg(3),
-                trapframe.get_arg(4),
-                trapframe.get_arg(5),
-                trapframe.sp,
-                trapframe.elr,
-            );
+            // crate::early_println!(
+            //     "[syscall/aarch64] nr={} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} sp={:#x} elr={:#x}",
+            //     trapframe.get_syscall_number(),
+            //     trapframe.get_arg(0),
+            //     trapframe.get_arg(1),
+            //     trapframe.get_arg(2),
+            //     trapframe.get_arg(3),
+            //     trapframe.get_arg(4),
+            //     trapframe.get_arg(5),
+            //     trapframe.sp,
+            //     trapframe.elr,
+            // );
             // panic!("AArch64 syscall handler not implemented");
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
-                    crate::early_println!("[syscall/aarch64] -> ret={:#x}", ret);
+                    // crate::early_println!("[syscall/aarch64] -> ret={:#x}", ret);
                     trapframe.set_return_value(ret);
                 }
                 Err(msg) => {

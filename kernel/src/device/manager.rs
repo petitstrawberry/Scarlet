@@ -611,6 +611,7 @@ mod tests {
     use crate::device::{GenericDevice, platform::*};
     use alloc::vec;
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_populate_driver() {
         static mut TEST_RESULT: bool = false;
