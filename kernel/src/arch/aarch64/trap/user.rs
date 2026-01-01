@@ -19,18 +19,15 @@ use crate::vm::get_trampoline_trap_vector;
 #[unsafe(export_name = "aarch64_first_switch_to_user_naked")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn aarch64_first_switch_to_user_naked(
-    kernel_sp: u64,
     trapframe_addr: usize,
     trap_exit_addr: usize,
 ) -> ! {
     naked_asm!(
         r#"
-        // x0 = kernel_sp
-        // x1 = trapframe_addr
-        // x2 = trap_exit_addr
-        mov sp, x0
-        mov x0, x1
-        br  x2
+        // x0 = trapframe_addr
+        // x1 = trap_exit_addr
+        mov x0, x0
+        br  x1
         "#
     );
 }
@@ -56,12 +53,12 @@ pub extern "C" fn _user_trap_entry() {
         b   .
         .space 124
 
-        // Current EL with SPx (Kernel Re-entry, First timer interrupt only)
+        // Current EL with SPx (Kernel Re-entry, Invalid for User)
         // Sync
         b   .
         .space 124
         // IRQ
-        b   11f
+        b   .
         .space 124
         // FIQ
         b   .
@@ -94,52 +91,41 @@ pub extern "C" fn _user_trap_entry() {
         // User -> Kernel Entry (Lower EL)
         // -----------------------------------------------------------------
         10: // Sync
-            stp x16, x17, [sp, #-16]! // Save x16, x17
-            mrs x16, tpidr_el1 // x16 = CPU struct ptr
-            mov x17, #0         // Kind = Sync
+            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            str x9, [sp, #72] // Save x9
+            mov x9, #0         // Kind = Sync
             b   1f
         11: // IRQ
-            stp x16, x17, [sp, #-16]! // Save x16, x17
-            mrs x16, tpidr_el1 // x16 = CPU struct ptr
-            mov x17, #1         // Kind = IRQ
+            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            str x9, [sp, #72] // Save x9
+            mov x9, #1         // Kind = IRQ
             b   1f
         12: // FIQ
-            stp x16, x17, [sp, #-16]! // Save x16, x17
-            mrs x16, tpidr_el1 // x16 = CPU struct ptr
-            mov x17, #2         // Kind = FIQ
+            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            str x9, [sp, #72] // Save x9
+            mov x9, #2         // Kind = FIQ
             b   1f
         13: // SError
-            stp x16, x17, [sp, #-16]! // Save x16, x17
-            mrs x16, tpidr_el1 // x16 = CPU struct ptr
-            mov x17, #3         // Kind = SError
+            sub sp, sp, #288 // Allocate space for Trapframe (16-byte aligned)
+            str x9, [sp, #72] // Save x9
+            mov x9, #3         // Kind = SError
             b   1f
 
         // Common User Trap Entry
-        // PRE: x16=Struct ptr, x17=Kind. User x16 at [x16,#48], user x17 at [x16,#0].
+        // PRE: x9=Kind, sp=Trapframe ptr
         1:
-            // 1. Switch TTBR (User -> Kernel)
-            mrs x18, ttbr0_el1
-            str x18, [x16, #16] // arch.ttbr0 = user TTBR
-            
-            ldr x18, [x16, #40] // arch.kernel_ttbr0
-            msr ttbr0_el1, x18
-
-            isb
-            tlbi vmalle1is
-            dsb ish
-            isb
-
-            // 2. Save Context
-            sub sp, sp, #272
+            // 1. Save Context
+            // Trapframe layout is 288 bytes (16-byte aligned)
             stp x0, x1, [sp, #0]
             stp x2, x3, [sp, #16]
             stp x4, x5, [sp, #32]
             stp x6, x7, [sp, #48]
-            stp x8, x9, [sp, #64]
+            str x8, [sp, #64]
+            // x9 is saved above
             stp x10, x11, [sp, #80]
             stp x12, x13, [sp, #96]
             stp x14, x15, [sp, #112]
-            // x16, x17 saved later
+            stp x16, x17, [sp, #128]
             stp x18, x19, [sp, #144]
             stp x20, x21, [sp, #160]
             stp x22, x23, [sp, #176]
@@ -148,26 +134,39 @@ pub extern "C" fn _user_trap_entry() {
             stp x28, x29, [sp, #224]
             str x30, [sp, #240]
 
-            mrs x18, elr_el1
-            str x18, [sp, #256]
-            mrs x18, sp_el0
-            str x18, [sp, #248]
-            mrs x18, spsr_el1
-            str x18, [sp, #264]
+            mrs x10, sp_el0 // load user SP
+            str x10, [sp, #248] // Trapframe.sp = user SP
+            mrs x10, elr_el1 // load user PC
+            str x10, [sp, #256] // Trapframe.epc = user PC
+            mrs x10, spsr_el1 // load user SPSR
+            str x10, [sp, #264] // Trapframe.spsr = user SPSR
 
-            // Restore/Save x16, x17
-            ldr x0, [x16, #48]  // User x16
-            str x0, [sp, #128]
-            ldr x1, [x16, #0]   // User x17
-            str x1, [sp, #136]
+            // Save user thread pointer registers
+            mrs x10, tpidr_el0 // load user TPIDR_EL0
+            str x10, [sp, #272] // Trapframe.tpidr_el0 = user TPIDR_EL0
+            mrs x10, tpidrro_el0 // load user TPIDRRO_EL0
+            str x10, [sp, #280] // Trapframe.tpidrro_el0 = user TPIDRRO_EL0
 
-            // 4. Call Handler
+            // 2. Switch TTBR (User -> Kernel)
+            mrs x10, tpidr_el1    // x10 = CPU struct ptr
+            mrs x11, ttbr0_el1   // Save current TTBR0 (user)
+            str x11, [x10, #16] // arch.ttbr0 = user TTBR
+            
+            ldr x11, [x10, #40] // arch.kernel_ttbr0
+            msr ttbr0_el1, x11 // Switch to kernel TTBR
+
+            isb
+            tlbi vmalle1is
+            dsb ish
+            isb
+
+            // 3. Call Handler
             // fn arch_user_trap_handler(tf: &mut Trapframe, kind: usize)
-            mov x1, x17         // arg1 = Kind
+            mov x1, x9         // arg1 = Kind
             mov x0, sp          // arg0 = Trapframe ptr
             
-            ldr x18, [x16, #32] // arch_user_trap_handler (trampoline target)
-            br  x18
+            ldr x10, [x10, #32] // arch_user_trap_handler (trampoline target)
+            br  x10
         "#
         );
     }
@@ -180,66 +179,62 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
     unsafe {
         naked_asm!(
             r#"
-        // x0 = trapframe pointer
-        msr daifset, #0xf
+        // x0 = trapframe pointer --> sp = trapframe pointer
+        mov sp, x0 // Set SP to trapframe pointer for easy access
 
         // Restore system registers from trapframe
-        // Layout (272 bytes):
+        // Layout (288 bytes):
         //   0..240: x0-x30
         //   248:    sp (SP_EL0)
         //   256:    epc (ELR_EL1)
         //   264:    spsr (SPSR_EL1)
-        ldr x1, [x0, #256]
-        msr elr_el1, x1
-        ldr x1, [x0, #248]
-        msr sp_el0, x1
-        ldr x1, [x0, #264]
-        msr spsr_el1, x1
-
-        // We must switch TTBR back to the user page table.
-        // After the switch, kernel memory (including the trapframe) may not be accessible.
-        // So we stash the necessary values in the trampoline-mapped CPU struct and sysregs.
-        // CPU struct pointer is stored in TPIDR_EL1.
-        // (TPIDRRO_EL0 is not initialized in our current bring-up.)
-        mrs x16, tpidr_el1          // x16 = CPU struct ptr (clobbers user x16 for now)
-
-        // Stash user x0/x1 and user x16 before restoring registers.
-        ldr x2, [x0, #0]            // user x0
-        str x2, [x16, #0]           // cpu.scratch = user x0
-        ldr x3, [x0, #8]            // user x1
-        str x3, [x16, #48]          // cpu.trap_kind (repurposed) = user x1
-        ldr x3, [x0, #128]          // user x16
-        msr tpidr_el0, x3           // TPIDR_EL0 = user x16
-
-        // Restore GPRs except x0/x1 (handled last) and x16 (restored from TPIDR_EL0).
-        ldp x2, x3, [x0, #16]
-        ldp x4, x5, [x0, #32]
-        ldp x6, x7, [x0, #48]
-        ldp x8, x9, [x0, #64]
-        ldp x10, x11, [x0, #80]
-        ldp x12, x13, [x0, #96]
-        ldp x14, x15, [x0, #112]
-        ldr x17, [x0, #136]
-        ldp x18, x19, [x0, #144]
-        ldp x20, x21, [x0, #160]
-        ldp x22, x23, [x0, #176]
-        ldp x24, x25, [x0, #192]
-        ldp x26, x27, [x0, #208]
-        ldp x28, x29, [x0, #224]
-        ldr x30, [x0, #240]
+        //   272:    tpidr_el0 (TLS)
+        //   280:    tpidrro_el0 (read-only at EL0)
 
         // Switch TTBR back to user
-        ldr x1, [x16, #16]          // user ttbr0
-        msr ttbr0_el1, x1
+        mrs x10, tpidr_el1 // x10 = CPU struct ptr
+        ldr x9, [x10, #16]  // user ttbr0
+        msr ttbr0_el1, x9   // Switch to user TTBR
         isb
         tlbi vmalle1is
         dsb ish
         isb
 
-        // Restore remaining registers
-        ldr x1, [x16, #48]          // user x1
-        ldr x0, [x16, #0]           // user x0
-        mrs x16, tpidr_el0          // user x16
+        // Restore user SP/PC/SPSR
+        ldr x9, [sp, #248]  // Load Trapframe.sp
+        msr sp_el0, x9    // Restore user SP
+        ldr x9, [sp, #256]   // Load Trapframe.epc
+        msr elr_el1, x9     // Restore user PC
+        ldr x9, [sp, #264]  // Load Trapframe.spsr
+        msr spsr_el1, x9
+    
+
+        // Restore user TLS
+        ldr x9, [sp, #272]
+        msr tpidr_el0, x9
+        ldr x9, [sp, #280]
+        msr tpidrro_el0, x9
+
+        // Restore GPRs
+        ldp x0, x1, [sp, #0]
+        ldp x2, x3, [sp, #16]
+        ldp x4, x5, [sp, #32]
+        ldp x6, x7, [sp, #48]
+        ldp x8, x9, [sp, #64]
+        ldp x10, x11, [sp, #80]
+        ldp x12, x13, [sp, #96]
+        ldp x14, x15, [sp, #112]
+        ldp x16, x17, [sp, #128]
+        ldp x18, x19, [sp, #144]
+        ldp x20, x21, [sp, #160]
+        ldp x22, x23, [sp, #176]
+        ldp x24, x25, [sp, #192]
+        ldp x26, x27, [sp, #208]
+        ldp x28, x29, [sp, #224]
+        ldr x30, [sp, #240]
+
+        // Deallocate trapframe space
+        add sp, sp, #288
 
         eret
         "#
@@ -249,6 +244,15 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
 
 #[unsafe(export_name = "arch_switch_to_user_space")]
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
+    let addr = trapframe as *mut Trapframe as usize;
+
+    // crate::early_println!(
+    //     "[aarch64] arch_switch_to_user_space: Trapframe at {:x?}",
+    //     trapframe
+    // );
+
+    // loop {}
+
     crate::arch::configure_user_entry(
         trapframe,
         crate::arch::UserEntryOptions {
@@ -256,15 +260,10 @@ pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
         },
     );
 
-    let addr = trapframe as *mut Trapframe as usize;
+    // Calculate the address of _user_trap_exit in the trampoline
     let trap_exit_offset = _user_trap_exit as usize - _user_trap_entry as usize;
     let trampoline_base = get_trampoline_trap_vector();
     let trap_exit_addr = trampoline_base + trap_exit_offset;
-
-    let cpu_id = get_current_cpu_id();
-    set_arch(crate::vm::get_trampoline_arch(cpu_id));
-    
-    // Trampolineベクタをセット
     set_trapvector(trampoline_base);
 
     unsafe {

@@ -207,6 +207,7 @@ impl InterruptManager {
     }
 
     pub fn init(&mut self) {
+        disable_interrupts();
         // Initialize local controllers (e.g., CLINT)
         match self.controllers.init_local_controllers() {
             Ok(()) => {}
@@ -225,7 +226,6 @@ impl InterruptManager {
 
         enable_external_interrupts(); // Enable external interrupts
         // Timer interrupts are disabled by default, enable them if needed by scheduler or other components
-        enable_interrupts(); // Enable interrupts globally
     }
 
     /// Handle an external interrupt

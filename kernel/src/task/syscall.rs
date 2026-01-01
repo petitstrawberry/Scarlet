@@ -207,8 +207,13 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             // we should respect that value instead of hardcoding 0
             trapframe.get_return_value()
         }
-        Err(_) => {
-            // crate::println!("[EXECVE] Task {}: execute_binary failed", task.get_id());
+        Err(e) => {
+            crate::println!(
+                "[EXECVE] Task {}: execute_binary failed for path='{}': {}",
+                task.get_id(),
+                path_str,
+                e
+            );
             // Execution failed - return error code
             // The trap handler will automatically set trapframe return value from our return
             usize::MAX // Error return value

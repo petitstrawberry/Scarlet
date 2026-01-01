@@ -71,28 +71,28 @@ pub extern "C" fn _kernel_trap_entry() {
         
         30: // Sync
             msr daifset, #0xf       // Mask interrupts
-            sub sp, sp, #272        // Alloc Trapframe
+            sub sp, sp, #288        // Alloc Trapframe
             stp x0, x1, [sp, #0]    // Save x0, x1 first
             mov x1, #0              // x1 (Arg2) = Kind: Sync
             b   40f
 
         31: // IRQ
             msr daifset, #0xf
-            sub sp, sp, #272
+            sub sp, sp, #288
             stp x0, x1, [sp, #0]
             mov x1, #1              // x1 (Arg2) = Kind: IRQ
             b   40f
 
         32: // FIQ
             msr daifset, #0xf
-            sub sp, sp, #272
+            sub sp, sp, #288
             stp x0, x1, [sp, #0]
             mov x1, #2              // x1 (Arg2) = Kind: FIQ
             b   40f
 
         33: // SError
             msr daifset, #0xf
-            sub sp, sp, #272
+            sub sp, sp, #288
             stp x0, x1, [sp, #0]
             mov x1, #3              // x1 (Arg2) = Kind: SError
             b   40f
@@ -166,7 +166,7 @@ pub extern "C" fn _kernel_trap_entry() {
 
             // Restore x0, x1 and Free Stack
             ldp x0, x1, [sp, #0]
-            add sp, sp, #272
+            add sp, sp, #288
 
             eret
         "#

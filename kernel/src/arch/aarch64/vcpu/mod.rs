@@ -17,6 +17,9 @@ pub struct Vcpu {
     pub iregs: IntRegisters,
     pub sp: u64,
     pc: u64,
+    spsr: u64,
+    tpidr_el0: u64,
+    tpidrro_el0: u64,
     asid: usize,
     mode: Mode,
 }
@@ -31,6 +34,9 @@ impl Vcpu {
             iregs: IntRegisters::new(),
             sp: 0,
             pc: initial_pc,
+            spsr: 0,
+            tpidr_el0: 0,
+            tpidrro_el0: 0,
             asid: 0,
             mode,
         }
@@ -73,11 +79,17 @@ impl Vcpu {
         self.iregs = trapframe.regs;
         self.sp = trapframe.sp;
         self.pc = trapframe.epc;
+        self.spsr = trapframe.spsr;
+        self.tpidr_el0 = trapframe.tpidr_el0;
+        self.tpidrro_el0 = trapframe.tpidrro_el0;
     }
 
     pub fn switch(&mut self, trapframe: &mut Trapframe) {
         trapframe.regs = self.iregs;
         trapframe.sp = self.sp;
         trapframe.epc = self.pc;
+        trapframe.spsr = self.spsr;
+        trapframe.tpidr_el0 = self.tpidr_el0;
+        trapframe.tpidrro_el0 = self.tpidrro_el0;
     }
 }

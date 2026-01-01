@@ -82,11 +82,18 @@ pub fn init_arch(cpu_id: usize) {
 /// - Performs a direct transition via the trampoline exit path.
 pub fn first_switch_to_user(task: &mut Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
-    let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
     } else {
-        task.get_kernel_stack_bottom()
+        panic!("Task has no kernel stack window");
     };
+
+    crate::early_println!(
+        "[aarch64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
+        crate::arch::get_current_cpu_id(),
+        task.get_id(),
+        kernel_sp,
+    );
 
     // Update trampoline-visible CPU struct.
     let cpu = crate::arch::get_cpu();
@@ -121,11 +128,12 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     set_arch(crate::vm::get_trampoline_arch(cpu_id));
     set_trapvector(trampoline_base);
 
+    let trapframe_addr = kernel_sp as usize - core::mem::size_of::<Trapframe>();
+
     // Final transition must not touch the stack after switching SP.
     unsafe {
         crate::arch::aarch64::trap::user::aarch64_first_switch_to_user_naked(
-            kernel_sp,
-            task.get_trapframe() as *mut Trapframe as usize,
+            trapframe_addr,
             trap_exit_addr,
         )
     }
@@ -147,7 +155,7 @@ pub struct Aarch64 {
     scratch: u64,      // offset: 0
     pub cpuid: u64,    // offset: 8
     ttbr0: u64,        // offset: 16
-    kernel_stack: u64, // offset: 24
+    kernel_stack: u64, // offset: 24　// Deprecated
     kernel_trap: u64,  // offset: 32
     kernel_ttbr0: u64, // offset: 40
     trap_kind: u64,    // offset: 48
@@ -240,6 +248,10 @@ pub struct Trapframe {
     pub sp: u64,
     pub epc: u64,  // ELR_EL1
     pub spsr: u64, // SPSR_EL1
+    /// User thread pointer (TLS) register.
+    pub tpidr_el0: u64,
+    /// Reserved: currently used as a trampoline scratch (TPIDRRO_EL0).
+    pub tpidrro_el0: u64,
 }
 
 impl Trapframe {
@@ -249,6 +261,8 @@ impl Trapframe {
             sp: 0,
             epc: 0,
             spsr: 0,
+            tpidr_el0: 0,
+            tpidrro_el0: 0,
         }
     }
 

@@ -71,8 +71,15 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
     } else {
-        task.get_kernel_stack_bottom()
+        panic!("Task has no kernel stack window");
     };
+
+    crate::early_println!(
+        "[riscv64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
+        crate::arch::get_cpu().get_cpuid(),
+        task.get_id(),
+        kernel_sp,
+    );
 
     // Switch sscratch to the trampoline-visible per-CPU struct.
     let cpu_id = crate::arch::get_cpu().get_cpuid();
