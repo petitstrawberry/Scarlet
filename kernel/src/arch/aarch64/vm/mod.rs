@@ -63,14 +63,14 @@ fn new_boxed_pagetable() -> Box<PageTable> {
     unsafe {
         // Zero-initialize the page table - use size_of for correct byte count
         core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<PageTable>());
-        
+
         // Clean the page table from D-cache so the hardware table walker sees zeros.
         // This is critical for AArch64 where the MMU walker reads from memory directly.
         crate::arch::aarch64::clean_dcache_to_poc_range(
             ptr as usize,
             crate::environment::PAGE_SIZE,
         );
-        
+
         Box::from_raw(ptr)
     }
 }

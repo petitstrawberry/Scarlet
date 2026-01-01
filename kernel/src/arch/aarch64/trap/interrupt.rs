@@ -11,7 +11,8 @@ use crate::interrupt::InterruptManager;
 pub fn arch_irq_handler(trapframe: &mut Trapframe) {
     let cpu_id = get_cpu().get_cpuid() as u32;
 
-    let claimed = InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(cpu_id));
+    let claimed =
+        InterruptManager::with_manager(|mgr| mgr.claim_and_handle_external_interrupt(cpu_id));
 
     match claimed {
         Ok(Some(interrupt_id)) => {
@@ -27,7 +28,10 @@ pub fn arch_irq_handler(trapframe: &mut Trapframe) {
             }
         }
         Err(e) => {
-            crate::early_println!("[aarch64][irq] failed to claim/handle external interrupt: {}", e);
+            crate::early_println!(
+                "[aarch64][irq] failed to claim/handle external interrupt: {}",
+                e
+            );
         }
     }
 }

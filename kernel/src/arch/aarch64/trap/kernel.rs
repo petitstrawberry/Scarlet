@@ -3,10 +3,10 @@
 //! Simple vector table for handling traps occurring within EL1 (kernel mode).
 //! No context switching (TTBR/Stack) needed.
 
-use core::arch::naked_asm;
-use crate::arch::Trapframe;
 use super::exception::arch_exception_handler;
 use super::interrupt::arch_irq_handler;
+use crate::arch::Trapframe;
+use core::arch::naked_asm;
 
 // -------------------------------------------------------------------------
 // Kernel Trap Vector

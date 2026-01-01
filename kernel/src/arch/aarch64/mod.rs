@@ -82,7 +82,7 @@ pub fn init_arch(cpu_id: usize) {
 /// - Performs a direct transition via the trampoline exit path.
 pub fn first_switch_to_user(task: &mut Task) -> ! {
     // Prefer the high-VA kernel stack window if available.
-     let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
+    let kernel_sp = if let Some((_slot, base)) = task.get_kernel_stack_window_base() {
         (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE) as u64
     } else {
         panic!("Task has no kernel stack window");
@@ -140,7 +140,7 @@ pub fn first_switch_to_user(task: &mut Task) -> ! {
 }
 
 /// Per-CPU state for AArch64
-/// 
+///
 /// Layout (offsets must match trampoline assembly):
 ///   0: scratch (temporary storage)
 ///   8: cpuid
@@ -419,7 +419,7 @@ pub fn get_cpu() -> &'static mut Aarch64 {
     }
 
     // Kernel context always has access to this mapping.
-    return unsafe { transmute(tpidr_el1) };    
+    return unsafe { transmute(tpidr_el1) };
 }
 
 /// Get current CPU core ID from MPIDR_EL1 register

@@ -24,6 +24,5 @@ pub const USER_STACK_END: usize = (VMMAX_EXCLUSIVE - TRAMPOLINE_VA_RESERVE) & !(
 // Kernel VM stack addresses (within 48-bit address space)
 // Keep kernel stack window below the trampoline-reserved region at the top of the
 // upper canonical address space so it can live in TTBR1.
-pub const KERNEL_VM_STACK_END: usize = (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE)
-	& !(PAGE_SIZE - 1))
-	- 1);
+pub const KERNEL_VM_STACK_END: usize =
+    (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1);

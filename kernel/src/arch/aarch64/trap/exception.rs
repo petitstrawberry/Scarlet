@@ -8,10 +8,10 @@ use core::panic;
 
 use crate::abi::syscall_dispatcher;
 use crate::arch::{Trapframe, get_cpu};
+use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
-use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
 
 /// Get ESR_EL1 value
 fn get_esr_el1() -> u64 {
@@ -59,10 +59,15 @@ impl From<u64> for ExceptionClass {
 pub fn arch_exception_handler(trapframe: &mut Trapframe) {
     let esr = get_esr_el1();
     let ec = ExceptionClass::from(esr);
-    
+
     // Debug: log every trap using early_println
-    crate::early_println!("[trap] ESR={:#x} EC={:?} FAR={:#x} ELR={:#x}",
-        esr, ec, get_far_el1(), trapframe.epc);
+    crate::early_println!(
+        "[trap] ESR={:#x} EC={:?} FAR={:#x} ELR={:#x}",
+        esr,
+        ec,
+        get_far_el1(),
+        trapframe.epc
+    );
 
     match ec {
         // SVC from AArch64 user mode (syscall)
@@ -81,6 +86,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe) {
                 trapframe.sp,
                 trapframe.epc,
             );
+            // panic!("AArch64 syscall handler not implemented");
             match syscall_dispatcher(trapframe) {
                 Ok(ret) => {
                     crate::early_println!("[syscall/aarch64] -> ret={:#x}", ret);
@@ -198,8 +204,12 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
     println!("ELR_EL1: {:#018x}", trapframe.epc);
 
     // Print first 8 general registers
-    println!("x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
-        trapframe.regs.reg[0], trapframe.regs.reg[1], trapframe.regs.reg[2], trapframe.regs.reg[3]);
-    println!("x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
-        trapframe.regs.reg[4], trapframe.regs.reg[5], trapframe.regs.reg[6], trapframe.regs.reg[7]);
+    println!(
+        "x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+        trapframe.regs.reg[0], trapframe.regs.reg[1], trapframe.regs.reg[2], trapframe.regs.reg[3]
+    );
+    println!(
+        "x4={:#x} x5={:#x} x6={:#x} x7={:#x}",
+        trapframe.regs.reg[4], trapframe.regs.reg[5], trapframe.regs.reg[6], trapframe.regs.reg[7]
+    );
 }

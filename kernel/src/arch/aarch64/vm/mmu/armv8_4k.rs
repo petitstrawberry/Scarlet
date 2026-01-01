@@ -341,7 +341,10 @@ impl PageTable {
         _dirty: bool,
     ) {
         if !Self::is_canonical_48(vaddr) {
-            panic!("Virtual address {:#x} is not canonical for 48-bit VA", vaddr);
+            panic!(
+                "Virtual address {:#x} is not canonical for 48-bit VA",
+                vaddr
+            );
         }
 
         let vaddr = vaddr & !0xfff;
@@ -463,7 +466,10 @@ impl PageTable {
     /// Unmap a single page (like RISC-V's unmap())
     pub fn unmap(&mut self, _asid: u16, vaddr: usize) {
         if !Self::is_canonical_48(vaddr) {
-            panic!("Virtual address {:#x} is not canonical for 48-bit VA", vaddr);
+            panic!(
+                "Virtual address {:#x} is not canonical for 48-bit VA",
+                vaddr
+            );
         }
 
         let vaddr = vaddr & !0xfff;
@@ -514,8 +520,8 @@ pub fn init_mmu_registers() {
         // SCTLR_EL1: System Control Register
         let mut sctlr: u64;
         asm!("mrs {}, sctlr_el1", out(reg) sctlr);
-        sctlr |= 1;       // M: MMU enable
-        sctlr |= 1 << 2;  // C: Data cache enable
+        sctlr |= 1; // M: MMU enable
+        sctlr |= 1 << 2; // C: Data cache enable
         sctlr |= 1 << 12; // I: Instruction cache enable
         asm!("msr sctlr_el1, {}", in(reg) sctlr);
         asm!("dsb sy", "isb");
