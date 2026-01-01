@@ -7,6 +7,7 @@
 //! The distributor / redistributor are still configured via MMIO during init.
 
 use crate::{
+    arch::mmio,
     device::{
         manager::{DeviceManager, DriverPriority},
         platform::{
@@ -21,10 +22,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, vec};
-use core::{
-    arch::asm,
-    ptr::{read_volatile, write_volatile},
-};
+use core::arch::asm;
 
 /// Maximum number of interrupts supported by this implementation.
 const MAX_INTERRUPTS: InterruptId = 1020;
@@ -111,7 +109,7 @@ fn write_icc_igrpen1_el1(v: u64) {
 fn gicd_max_interrupt_id(dist_base_addr: usize) -> InterruptId {
     // GICD_TYPER.ITLinesNumber[4:0] gives (#interrupts / 32) - 1.
     // Convert this into a 0-based maximum interrupt ID.
-    let typer = unsafe { read_volatile((dist_base_addr + GICD_TYPER) as *const u32) };
+    let typer = unsafe { mmio::read32(dist_base_addr + GICD_TYPER) };
     let it_lines = (typer & 0x1f) as InterruptId;
     let total = (it_lines + 1) * 32;
     total.saturating_sub(1)
@@ -175,21 +173,37 @@ impl GicV3 {
     }
 
     fn init_distributor(&self) {
+        // Put all interrupts into Group 1 (non-secure).
+        let words = (self.max_interrupts as usize + 32) / 32;
+
+        crate::early_println!(
+            "[interrupt] GICv3 dist: CTLR@{:#x} <= 0",
+            self.dist_reg_addr(GICD_CTLR)
+        );
         unsafe {
             // Disable distributor while programming.
-            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x0);
+            mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x0);
+        }
 
-            // Put all interrupts into Group 1 (non-secure).
-            let words = (self.max_interrupts as usize + 32) / 32;
-            for i in 0..words {
-                write_volatile(
-                    self.dist_reg_addr(GICD_IGROUPR + i * 4) as *mut u32,
-                    0xFFFF_FFFF,
-                );
+        crate::early_println!(
+            "[interrupt] GICv3 dist: IGROUPR words={} base={:#x}",
+            words,
+            self.dist_reg_addr(GICD_IGROUPR)
+        );
+        for i in 0..words {
+            // Keep per-iteration logging off; HVF aborts are synchronous so the last marker is enough.
+            unsafe {
+                mmio::write32(self.dist_reg_addr(GICD_IGROUPR + i * 4), 0xFFFF_FFFF);
             }
+        }
 
+        crate::early_println!(
+            "[interrupt] GICv3 dist: CTLR@{:#x} <= 3",
+            self.dist_reg_addr(GICD_CTLR)
+        );
+        unsafe {
             // Enable Group 0 + Group 1.
-            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x3);
+            mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x3);
         }
     }
 
@@ -197,29 +211,26 @@ impl GicV3 {
         // Wake up redistributor (best-effort).
         let waker = self.redist_reg_addr(cpu_id, GICR_WAKER);
         unsafe {
-            let mut v = read_volatile(waker as *const u32);
+            let mut v = mmio::read32(waker);
             // Clear ProcessorSleep (bit 1).
             v &= !(1 << 1);
-            write_volatile(waker as *mut u32, v);
+            mmio::write32(waker, v);
 
             // Wait for ChildrenAsleep (bit 2) to clear.
             for _ in 0..1_000_000 {
-                let cur = read_volatile(waker as *const u32);
+                let cur = mmio::read32(waker);
                 if (cur & (1 << 2)) == 0 {
                     break;
                 }
             }
 
             // Group 1 for SGI/PPI.
-            write_volatile(
-                self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0) as *mut u32,
-                0xFFFF_FFFF,
-            );
+            mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_IGROUPR0), 0xFFFF_FFFF);
 
             // Set virtual timer PPI priority to 0x80.
             let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
-            write_volatile(
-                (self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize) as *mut u8,
+            mmio::write8(
+                self.redist_sgi_reg_addr(cpu_id, GICR_IPRIORITYR) + timer_ppi as usize,
                 0x80,
             );
         }
@@ -252,10 +263,23 @@ impl GicV3 {
 
 impl ExternalInterruptController for GicV3 {
     fn init(&mut self) -> InterruptResult<()> {
+        crate::early_println!(
+            "[interrupt] GICv3 init: dist={:#x} redist={:#x}",
+            self.dist_base_addr,
+            self.redist_base_addr
+        );
         // Configure distributor + redistributor for CPU0.
+
+        crate::early_println!("[interrupt] GICv3 init: distributor...");
         self.init_distributor();
+
+        crate::early_println!("[interrupt] GICv3 init: redistributor...");
         self.init_redistributor(0);
+
+        crate::early_println!("[interrupt] GICv3 init: sysregs...");
         self.init_cpu_interface_sysregs();
+
+        crate::early_println!("[interrupt] GICv3 init: done");
         Ok(())
     }
 
@@ -272,12 +296,9 @@ impl ExternalInterruptController for GicV3 {
         unsafe {
             if interrupt_id < 32 {
                 // SGI/PPI live in redistributor.
-                write_volatile(
-                    self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0) as *mut u32,
-                    bit,
-                );
+                mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_ISENABLER0), bit);
             } else {
-                write_volatile(self.dist_enable_addr(interrupt_id) as *mut u32, bit);
+                mmio::write32(self.dist_enable_addr(interrupt_id), bit);
             }
         }
 
@@ -296,12 +317,9 @@ impl ExternalInterruptController for GicV3 {
 
         unsafe {
             if interrupt_id < 32 {
-                write_volatile(
-                    self.redist_sgi_reg_addr(cpu_id, GICR_ICENABLER0) as *mut u32,
-                    bit,
-                );
+                mmio::write32(self.redist_sgi_reg_addr(cpu_id, GICR_ICENABLER0), bit);
             } else {
-                write_volatile(self.dist_disable_addr(interrupt_id) as *mut u32, bit);
+                mmio::write32(self.dist_disable_addr(interrupt_id), bit);
             }
         }
 
@@ -317,16 +335,12 @@ impl ExternalInterruptController for GicV3 {
 
         unsafe {
             if interrupt_id < 32 {
-                write_volatile(
-                    (self.redist_sgi_reg_addr(0, GICR_IPRIORITYR) + interrupt_id as usize)
-                        as *mut u8,
+                mmio::write8(
+                    self.redist_sgi_reg_addr(0, GICR_IPRIORITYR) + interrupt_id as usize,
                     priority as u8,
                 );
             } else {
-                write_volatile(
-                    self.dist_priority_addr(interrupt_id) as *mut u8,
-                    priority as u8,
-                );
+                mmio::write8(self.dist_priority_addr(interrupt_id), priority as u8);
             }
         }
 
@@ -338,12 +352,9 @@ impl ExternalInterruptController for GicV3 {
 
         let v = unsafe {
             if interrupt_id < 32 {
-                read_volatile(
-                    (self.redist_sgi_reg_addr(0, GICR_IPRIORITYR) + interrupt_id as usize)
-                        as *const u8,
-                )
+                mmio::read8(self.redist_sgi_reg_addr(0, GICR_IPRIORITYR) + interrupt_id as usize)
             } else {
-                read_volatile(self.dist_priority_addr(interrupt_id) as *const u8)
+                mmio::read8(self.dist_priority_addr(interrupt_id))
             }
         };
 
@@ -395,14 +406,13 @@ impl ExternalInterruptController for GicV3 {
 
         unsafe {
             if interrupt_id < 32 {
-                let pending =
-                    read_volatile(self.redist_sgi_reg_addr(0, GICR_ISPENDR0) as *const u32);
+                let pending = mmio::read32(self.redist_sgi_reg_addr(0, GICR_ISPENDR0));
                 (pending & (1 << (interrupt_id % 32))) != 0
             } else {
                 let word_offset = interrupt_id / 32;
                 let bit_offset = interrupt_id % 32;
                 let pending_addr = self.dist_reg_addr(GICD_ISPENDR + (word_offset as usize * 4));
-                let pending = read_volatile(pending_addr as *const u32);
+                let pending = mmio::read32(pending_addr);
                 (pending & (1 << bit_offset)) != 0
             }
         }

@@ -20,7 +20,7 @@
 //! to the console. After all initialization routines have been executed, the
 //! processor enters an idle state.
 
-use crate::println;
+use crate::early_println;
 
 pub mod driver;
 pub mod early;
@@ -37,7 +37,7 @@ pub fn call_initcalls() {
     unsafe {
         let size = core::mem::size_of::<fn()>();
 
-        println!("Running initcalls... ");
+        early_println!("[initcall] Running initcalls...");
         let mut func_addr = &__INITCALL_DRIVER_END as *const usize as usize;
         let end_addr = &__INITCALL_END as *const usize as usize;
 
@@ -46,5 +46,7 @@ pub fn call_initcalls() {
             initcall();
             func_addr += size;
         }
+
+        early_println!("[initcall] Initcalls completed");
     }
 }

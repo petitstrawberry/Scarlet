@@ -14,6 +14,7 @@ pub mod earlycon;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
+pub mod mmio;
 pub mod registers;
 pub mod switch;
 pub mod timer;

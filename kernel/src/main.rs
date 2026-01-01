@@ -599,29 +599,31 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     test_main();
 
     /* Initcalls */
+    early_println!("[boot] entering initcalls");
     call_initcalls();
+    early_println!("[boot] leaving initcalls");
 
     fence(Ordering::SeqCst); // Ensure all initcalls are completed before proceeding
 
     /* Initialize interrupt management system */
-    println!("[Scarlet Kernel] Initializing interrupt system...");
+    early_println!("[boot] Initializing interrupt system...");
     InterruptManager::get_manager().init();
 
     fence(Ordering::SeqCst); // Ensure interrupt manager is initialized before proceeding
 
     /* Initialize timer */
-    println!("[Scarlet Kernel] Initializing timer...");
+    early_println!("[boot] Initializing timer...");
     get_kernel_timer().init();
 
     fence(Ordering::SeqCst); // Ensure timer is initialized before proceeding
 
     /* Initialize scheduler */
-    println!("[Scarlet Kernel] Initializing scheduler...");
+    early_println!("[boot] Initializing scheduler...");
     let scheduler = get_scheduler();
     fence(Ordering::SeqCst); // Ensure scheduler is initialized before proceeding
 
     /* Initialize global VFS */
-    println!("[Scarlet Kernel] Initializing global VFS...");
+    early_println!("[boot] Initializing global VFS...");
     let manager = init_global_vfs_manager();
 
     /* Initialize initramfs from BootInfo if available */
@@ -640,7 +642,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
 
     /* Make init task */
-    println!("[Scarlet Kernel] Creating initial user task...");
+    early_println!("[boot] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);
 
     task.init();

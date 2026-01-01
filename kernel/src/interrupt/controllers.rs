@@ -244,9 +244,18 @@ impl InterruptControllers {
     /// Initialize the external controller
     pub fn init_external_controller(&mut self) -> InterruptResult<()> {
         if let Some(controller) = self.external_controller.as_mut() {
+            crate::early_println!(
+                "[interrupt] init_external_controller: calling controller.init()"
+            );
             controller.init()?;
+            crate::early_println!(
+                "[interrupt] init_external_controller: controller.init() returned"
+            );
             Ok(())
         } else {
+            crate::early_println!(
+                "[interrupt] init_external_controller: no external controller registered"
+            );
             Err(InterruptError::ControllerNotFound)
         }
     }
