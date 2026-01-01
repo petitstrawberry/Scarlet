@@ -4,6 +4,7 @@
 //! routing them to different CPUs with priority support in AArch64 systems.
 
 use crate::{
+    arch::mmio,
     device::{
         manager::{DeviceManager, DriverPriority},
         platform::{
@@ -17,7 +18,6 @@ use crate::{
     },
 };
 use alloc::{boxed::Box, vec};
-use core::ptr::{read_volatile, write_volatile};
 
 /// GIC Distributor register offsets
 const GICD_CTLR: usize = 0x0000; // Distributor Control Register
@@ -148,35 +148,29 @@ impl Gic {
     fn init_distributor(&self) {
         unsafe {
             // Disable distributor while programming.
-            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x0);
+            mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x0);
 
             // Put all interrupts into Group 1 (non-secure) so they can be delivered at EL1.
             // This is especially important for PPIs like the architected timer.
             let words = (self.max_interrupts as usize + 32) / 32;
             for i in 0..words {
-                write_volatile(
-                    self.dist_reg_addr(GICD_IGROUPR + i * 4) as *mut u32,
-                    0xFFFF_FFFF,
-                );
+                mmio::write32(self.dist_reg_addr(GICD_IGROUPR + i * 4), 0xFFFF_FFFF);
             }
 
             // Pre-enable the virtual timer PPI (ID 27).
             let timer_ppi = crate::drivers::pic::arm_generic_timer::CNTV_PPI_IRQ;
             let timer_ppi_bit = 1u32 << timer_ppi;
-            write_volatile(
-                self.dist_reg_addr(GICD_ISENABLER) as *mut u32,
-                timer_ppi_bit,
-            );
+            mmio::write32(self.dist_reg_addr(GICD_ISENABLER), timer_ppi_bit);
 
             // Set timer PPI priority.
             // For Group 1 non-secure interrupts, use priority 0x80 (bit 7 set).
-            write_volatile(self.priority_addr(timer_ppi) as *mut u8, 0x80);
+            mmio::write8(self.priority_addr(timer_ppi), 0x80);
 
             // Enable the distributor for both Group 0 and Group 1 interrupts.
             // Bit 0 = Enable Group 0, Bit 1 = Enable Group 1.
             // For EL1 non-secure, we need Group 1 enabled (bit 1).
             // DEBUG: Also enable Group 0 (bit 0) to test if interrupts are being sent as Group 0.
-            write_volatile(self.dist_reg_addr(GICD_CTLR) as *mut u32, 0x3);
+            mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x3);
         }
     }
 
@@ -184,14 +178,14 @@ impl Gic {
     fn init_cpu_interface(&self, cpu_id: CpuId) {
         // Set priority mask to allow all interrupts (lower priority = higher precedence)
         unsafe {
-            write_volatile(self.cpu_reg_addr(cpu_id, GICC_PMR) as *mut u32, 0xFF);
+            mmio::write32(self.cpu_reg_addr(cpu_id, GICC_PMR), 0xFF);
             // No priority grouping.
-            write_volatile(self.cpu_reg_addr(cpu_id, GICC_BPR) as *mut u32, 0x0);
+            mmio::write32(self.cpu_reg_addr(cpu_id, GICC_BPR), 0x0);
             // Enable the CPU interface for both Group 0 and Group 1 interrupts.
             // Bit 0 = Enable Group 0 (FIQ), Bit 1 = Enable Group 1 (IRQ).
             // For EL1 non-secure, we want Group 1 interrupts (bit 0).
             // DEBUG: Also enable Group 0 to test if interrupts are coming as Group 0.
-            write_volatile(self.cpu_reg_addr(cpu_id, GICC_CTLR) as *mut u32, 0x3);
+            mmio::write32(self.cpu_reg_addr(cpu_id, GICC_CTLR), 0x3);
         }
     }
 
@@ -218,9 +212,7 @@ impl Gic {
 
         let sgir_value = cpu_target_list | int_id;
         let sgir_addr = self.dist_reg_addr(GICD_SGIR);
-        unsafe {
-            write_volatile(sgir_addr as *mut u32, sgir_value);
-        }
+        unsafe { mmio::write32(sgir_addr, sgir_value) }
 
         Ok(())
     }
@@ -265,9 +257,9 @@ impl ExternalInterruptController for Gic {
         let bit_offset = interrupt_id % 32;
         let igroupr_addr = self.dist_reg_addr(GICD_IGROUPR + (word_offset as usize * 4));
         unsafe {
-            let current = read_volatile(igroupr_addr as *const u32);
+            let current = mmio::read32(igroupr_addr);
             let new_value = current | (1u32 << bit_offset);
-            write_volatile(igroupr_addr as *mut u32, new_value);
+            mmio::write32(igroupr_addr, new_value);
         }
 
         // Set interrupt target to the specified CPU (SPIs only).
@@ -275,18 +267,14 @@ impl ExternalInterruptController for Gic {
         if interrupt_id >= 32 {
             let target_addr = self.target_addr(interrupt_id);
             let cpu_mask = 1u8 << cpu_id;
-            unsafe {
-                write_volatile(target_addr as *mut u8, cpu_mask);
-            }
+            unsafe { mmio::write8(target_addr, cpu_mask) }
         }
         // Enable the interrupt
         let enable_addr = self.enable_addr(interrupt_id);
         let bit = 1u32 << (interrupt_id % 32);
 
         // GICD_ISENABLER is write-1-to-set, so just write the bit we want to enable
-        unsafe {
-            write_volatile(enable_addr as *mut u32, bit);
-        }
+        unsafe { mmio::write32(enable_addr, bit) }
 
         Ok(())
     }
@@ -301,9 +289,7 @@ impl ExternalInterruptController for Gic {
         // Disable the interrupt
         let disable_addr = self.disable_addr(interrupt_id);
         let bit = 1u32 << (interrupt_id % 32);
-        unsafe {
-            write_volatile(disable_addr as *mut u32, bit);
-        }
+        unsafe { mmio::write32(disable_addr, bit) }
 
         Ok(())
     }
@@ -317,9 +303,7 @@ impl ExternalInterruptController for Gic {
 
         // Set interrupt priority (higher value = lower priority in GIC)
         let priority_addr = self.priority_addr(interrupt_id);
-        unsafe {
-            write_volatile(priority_addr as *mut u8, priority as u8);
-        }
+        unsafe { mmio::write8(priority_addr, priority as u8) }
 
         Ok(())
     }
@@ -328,7 +312,7 @@ impl ExternalInterruptController for Gic {
         self.validate_interrupt_id(interrupt_id)?;
 
         let priority_addr = self.priority_addr(interrupt_id);
-        let priority = unsafe { read_volatile(priority_addr as *const u8) };
+        let priority = unsafe { mmio::read8(priority_addr) };
 
         Ok(priority as Priority)
     }
@@ -338,9 +322,7 @@ impl ExternalInterruptController for Gic {
 
         // Set priority mask register (threshold)
         let pmr_addr = self.cpu_reg_addr(cpu_id, GICC_PMR);
-        unsafe {
-            write_volatile(pmr_addr as *mut u32, threshold as u32);
-        }
+        unsafe { mmio::write32(pmr_addr, threshold as u32) }
 
         Ok(())
     }
@@ -349,7 +331,7 @@ impl ExternalInterruptController for Gic {
         self.validate_cpu_id(cpu_id)?;
 
         let pmr_addr = self.cpu_reg_addr(cpu_id, GICC_PMR);
-        let threshold = unsafe { read_volatile(pmr_addr as *const u32) };
+        let threshold = unsafe { mmio::read32(pmr_addr) };
 
         Ok(threshold as Priority)
     }
@@ -359,7 +341,7 @@ impl ExternalInterruptController for Gic {
 
         // Read interrupt acknowledge register
         let iar_addr = self.cpu_reg_addr(cpu_id, GICC_IAR);
-        let iar = unsafe { read_volatile(iar_addr as *const u32) };
+        let iar = unsafe { mmio::read32(iar_addr) };
 
         // Remember the raw acknowledge value for correct EOI later.
         self.last_iar[cpu_id as usize] = iar;
@@ -373,7 +355,7 @@ impl ExternalInterruptController for Gic {
             // Otherwise the GIC will not deliver the next interrupt
             let eoir_addr = self.cpu_reg_addr(cpu_id, GICC_EOIR);
             unsafe {
-                write_volatile(eoir_addr as *mut u32, iar);
+                mmio::write32(eoir_addr, iar);
             }
             Ok(None)
         } else {
@@ -395,7 +377,7 @@ impl ExternalInterruptController for Gic {
             // GICv2 expects the raw value read from GICC_IAR (includes CPUID bits).
             let iar = self.last_iar[cpu_id as usize];
             let eoi_value = if iar != 0 { iar } else { interrupt_id };
-            write_volatile(eoir_addr as *mut u32, eoi_value);
+            mmio::write32(eoir_addr, eoi_value);
         }
 
         self.last_iar[cpu_id as usize] = 0;
@@ -413,7 +395,7 @@ impl ExternalInterruptController for Gic {
         let bit_offset = interrupt_id % 32;
         let pending_addr = self.dist_reg_addr(GICD_ISPENDR + (word_offset as usize * 4));
 
-        let pending_word = unsafe { read_volatile(pending_addr as *const u32) };
+        let pending_word = unsafe { mmio::read32(pending_addr) };
         (pending_word & (1 << bit_offset)) != 0
     }
 

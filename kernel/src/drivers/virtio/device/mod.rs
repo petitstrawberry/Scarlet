@@ -219,7 +219,7 @@ pub trait VirtioDevice {
     #[inline(never)]
     fn write32_register_slowpath(&self, addr: usize, value: u32) {
         io_mb();
-        unsafe { core::ptr::write_volatile(addr as *mut u32, value) };
+        unsafe { crate::arch::mmio::write32(addr, value) };
         io_mb();
         // Some environments effectively require a read to flush a posted MMIO write.
         // Do NOT read back the just-written register: many virtio-mmio registers are write-only
@@ -227,7 +227,7 @@ pub trait VirtioDevice {
         // Reading STATUS is safe and provides a single well-defined flush point.
         let status_addr = self.get_base_addr() + Register::Status.offset();
         unsafe {
-            core::ptr::read_volatile(status_addr as *const u32);
+            crate::arch::mmio::read32(status_addr);
         }
         io_mb();
     }
@@ -610,7 +610,37 @@ pub trait VirtioDevice {
     /// The configuration value of type T
     fn read_config<T: Sized>(&self, offset: usize) -> T {
         let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
-        unsafe { core::ptr::read_volatile(addr as *const T) }
+        // Prefer single-instruction sized accesses for MMIO on AArch64/HVF.
+        // Fall back to byte-wise access for unusual sizes.
+        unsafe {
+            match core::mem::size_of::<T>() {
+                1 => {
+                    let v = crate::arch::mmio::read8(addr);
+                    core::mem::transmute_copy::<u8, T>(&v)
+                }
+                2 => {
+                    let v = crate::arch::mmio::read16(addr);
+                    core::mem::transmute_copy::<u16, T>(&v)
+                }
+                4 => {
+                    let v = crate::arch::mmio::read32(addr);
+                    core::mem::transmute_copy::<u32, T>(&v)
+                }
+                8 => {
+                    let v = crate::arch::mmio::read64(addr);
+                    core::mem::transmute_copy::<u64, T>(&v)
+                }
+                _ => {
+                    let mut out = core::mem::MaybeUninit::<T>::uninit();
+                    let dst = out.as_mut_ptr() as *mut u8;
+                    for i in 0..core::mem::size_of::<T>() {
+                        let b = crate::arch::mmio::read8(addr + i);
+                        core::ptr::write(dst.add(i), b);
+                    }
+                    out.assume_init()
+                }
+            }
+        }
     }
 
     /// Write device-specific configuration
@@ -623,7 +653,35 @@ pub trait VirtioDevice {
     /// * `value` - The value to write
     fn write_config<T: Sized>(&self, offset: usize, value: T) {
         let addr = self.get_base_addr() + Register::DeviceConfig.offset() + offset;
-        unsafe { core::ptr::write_volatile(addr as *mut T, value) }
+        // Prefer single-instruction sized accesses for MMIO on AArch64/HVF.
+        // Fall back to byte-wise access for unusual sizes.
+        unsafe {
+            match core::mem::size_of::<T>() {
+                1 => {
+                    let v = core::mem::transmute_copy::<T, u8>(&value);
+                    crate::arch::mmio::write8(addr, v);
+                }
+                2 => {
+                    let v = core::mem::transmute_copy::<T, u16>(&value);
+                    crate::arch::mmio::write16(addr, v);
+                }
+                4 => {
+                    let v = core::mem::transmute_copy::<T, u32>(&value);
+                    crate::arch::mmio::write32(addr, v);
+                }
+                8 => {
+                    let v = core::mem::transmute_copy::<T, u64>(&value);
+                    crate::arch::mmio::write64(addr, v);
+                }
+                _ => {
+                    let src = &value as *const T as *const u8;
+                    for i in 0..core::mem::size_of::<T>() {
+                        let b = core::ptr::read(src.add(i));
+                        crate::arch::mmio::write8(addr + i, b);
+                    }
+                }
+            }
+        }
     }
 
     /// Get device and vendor IDs
@@ -702,7 +760,7 @@ pub trait VirtioDevice {
     fn read32_register(&self, register: Register) -> u32 {
         let addr = self.get_base_addr() + register.offset();
         io_mb();
-        let val = unsafe { core::ptr::read_volatile(addr as *const u32) };
+        let val = unsafe { crate::arch::mmio::read32(addr) };
         io_mb();
         val
     }
@@ -726,7 +784,7 @@ pub trait VirtioDevice {
         #[cfg(debug_assertions)]
         {
             io_mb();
-            unsafe { core::ptr::write_volatile(addr as *mut u32, value) };
+            unsafe { crate::arch::mmio::write32(addr, value) };
             io_mb();
         }
 
@@ -751,7 +809,7 @@ pub trait VirtioDevice {
     fn read64_register(&self, register: Register) -> u64 {
         let addr = self.get_base_addr() + register.offset();
         io_mb();
-        let val = unsafe { core::ptr::read_volatile(addr as *const u64) };
+        let val = unsafe { crate::arch::mmio::read64(addr) };
         io_mb();
         val
     }
@@ -765,7 +823,7 @@ pub trait VirtioDevice {
     fn write64_register(&self, register: Register, value: u64) {
         let addr = self.get_base_addr() + register.offset();
         io_mb();
-        unsafe { core::ptr::write_volatile(addr as *mut u64, value) };
+        unsafe { crate::arch::mmio::write64(addr, value) };
         io_mb();
     }
 

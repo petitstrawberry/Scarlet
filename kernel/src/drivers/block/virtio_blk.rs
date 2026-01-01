@@ -296,7 +296,7 @@ impl VirtioBlockDevice {
         }
 
         // Check status
-        let status_val = unsafe { *status_ptr };
+        let status_val = unsafe { core::ptr::read_volatile(status_ptr) };
         let result = match status_val {
             VIRTIO_BLK_S_OK => {
                 // For read requests, copy data to the buffer
@@ -584,7 +584,7 @@ impl VirtioBlockDevice {
                     pending_requests.remove(&desc_idx)
                 {
                     // Check status
-                    let status_val = unsafe { *status_ptr };
+                    let status_val = unsafe { core::ptr::read_volatile(status_ptr) };
                     results[req_idx] = match status_val {
                         VIRTIO_BLK_S_OK => {
                             // For read requests, copy data back to the buffer

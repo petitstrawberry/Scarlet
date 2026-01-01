@@ -2,11 +2,7 @@
 
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
 use core::fmt::Write;
-use core::{
-    any::Any,
-    fmt,
-    ptr::{read_volatile, write_volatile},
-};
+use core::{any::Any, fmt};
 use spin::{Mutex, RwLock};
 
 use crate::{
@@ -112,12 +108,12 @@ impl Uart {
 
     fn reg_write(&self, offset: usize, value: u8) {
         let addr = self.base + offset;
-        unsafe { write_volatile(addr as *mut u8, value) }
+        unsafe { crate::arch::mmio::write8(addr, value) }
     }
 
     fn reg_read(&self, offset: usize) -> u8 {
         let addr = self.base + offset;
-        unsafe { read_volatile(addr as *const u8) }
+        unsafe { crate::arch::mmio::read8(addr) }
     }
 
     fn write_byte_internal(&self, c: u8) {
