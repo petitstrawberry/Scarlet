@@ -89,7 +89,10 @@ pub fn enable_identity_mmu_if_disabled(dram_end: usize) {
         zero_table((&raw mut EARLY_L1.0[0]) as *mut u64);
 
         // L0[0] -> L1.
-        core::ptr::write_volatile((&raw mut EARLY_L0.0[0]) as *mut u64, table_desc(&raw const EARLY_L1 as usize));
+        core::ptr::write_volatile(
+            (&raw mut EARLY_L0.0[0]) as *mut u64,
+            table_desc(&raw const EARLY_L1 as usize),
+        );
 
         // 0x0000_0000..0x3fff_ffff : device.
         core::ptr::write_volatile(
@@ -114,8 +117,14 @@ pub fn enable_identity_mmu_if_disabled(dram_end: usize) {
         }
 
         // Make table writes visible to the hardware walker.
-        clean_dcache_to_poc_range(&raw const EARLY_L0 as usize, core::mem::size_of::<PageTable>());
-        clean_dcache_to_poc_range(&raw const EARLY_L1 as usize, core::mem::size_of::<PageTable>());
+        clean_dcache_to_poc_range(
+            &raw const EARLY_L0 as usize,
+            core::mem::size_of::<PageTable>(),
+        );
+        clean_dcache_to_poc_range(
+            &raw const EARLY_L1 as usize,
+            core::mem::size_of::<PageTable>(),
+        );
 
         // Program MAIR/TCR (match `arch/aarch64/vm/mmu/armv8_4k.rs`).
         let mair_val: u64 = 0x44ff00;
