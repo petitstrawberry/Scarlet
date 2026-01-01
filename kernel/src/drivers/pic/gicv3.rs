@@ -34,6 +34,7 @@ const MAX_CPUS: CpuId = 8;
 
 // Distributor register offsets (GICD)
 const GICD_CTLR: usize = 0x0000;
+const GICD_TYPER: usize = 0x0004;
 const GICD_IGROUPR: usize = 0x0080;
 const GICD_ISENABLER: usize = 0x0100;
 const GICD_ICENABLER: usize = 0x0180;
@@ -106,13 +107,22 @@ fn write_icc_igrpen1_el1(v: u64) {
     }
 }
 
+#[inline]
+fn gicd_max_interrupt_id(dist_base_addr: usize) -> InterruptId {
+    // GICD_TYPER.ITLinesNumber[4:0] gives (#interrupts / 32) - 1.
+    // Convert this into a 0-based maximum interrupt ID.
+    let typer = unsafe { read_volatile((dist_base_addr + GICD_TYPER) as *const u32) };
+    let it_lines = (typer & 0x1f) as InterruptId;
+    let total = (it_lines + 1) * 32;
+    total.saturating_sub(1)
+}
+
 /// ARM GICv3 implementation.
 pub struct GicV3 {
     dist_base_addr: usize,
     redist_base_addr: usize,
     max_interrupts: InterruptId,
     max_cpus: CpuId,
-    last_iar: [u32; MAX_CPUS as usize],
 }
 
 impl GicV3 {
@@ -127,7 +137,6 @@ impl GicV3 {
             redist_base_addr,
             max_interrupts: max_interrupts.min(MAX_INTERRUPTS),
             max_cpus: max_cpus.min(MAX_CPUS),
-            last_iar: [0; MAX_CPUS as usize],
         }
     }
 
@@ -138,10 +147,10 @@ impl GicV3 {
 
     #[inline]
     fn redist_reg_addr(&self, cpu_id: CpuId, offset: usize) -> usize {
-        // Minimal implementation: assume a single redistributor region and CPU0.
-        // This matches the current single-core bring-up.
-        let _ = cpu_id;
-        self.redist_base_addr + offset
+        // GICv3 redistributor frames are typically laid out per-CPU with a 128KB stride
+        // (64KB RD frame + 64KB SGI/PPI frame).
+        const GICR_STRIDE: usize = 0x20000;
+        self.redist_base_addr + (cpu_id as usize * GICR_STRIDE) + offset
     }
 
     #[inline]
@@ -356,9 +365,9 @@ impl ExternalInterruptController for GicV3 {
         self.validate_cpu_id(cpu_id)?;
 
         let iar = read_icc_iar1_el1();
-        self.last_iar[cpu_id as usize] = iar;
 
-        let intid = iar & 0x3FF;
+        // ICC_IAR1_EL1 returns INTID in bits [23:0] in system register mode.
+        let intid = iar & 0x00FF_FFFF;
         if intid >= 1020 {
             Ok(None)
         } else {
@@ -374,10 +383,8 @@ impl ExternalInterruptController for GicV3 {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
-        let iar = self.last_iar[cpu_id as usize];
-        let eoi_value = if iar != 0 { iar } else { interrupt_id };
-        write_icc_eoir1_el1(eoi_value);
-        self.last_iar[cpu_id as usize] = 0;
+        // Stateless completion: write INTID back.
+        write_icc_eoir1_el1(interrupt_id);
         Ok(())
     }
 
@@ -431,9 +438,17 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .map(|r| r.start as usize)
         .ok_or("No memory resource found for GICv3 redistributor")?;
 
-    // TODO: Parse actual interrupt/CPU counts from DT.
-    let max_interrupts = 256;
-    let max_cpus = 4;
+    let max_interrupts = gicd_max_interrupt_id(dist_base_addr);
+    // PlatformDeviceInfo doesn't expose CPU topology here; current bring-up is single-core.
+    let max_cpus = 1;
+
+    crate::early_println!(
+        "[interrupt] GICv3 selected: dist={:#x} redist={:#x} max_intid={} max_cpus={}",
+        dist_base_addr,
+        redist_base_addr,
+        max_interrupts,
+        max_cpus
+    );
 
     let gic = Box::new(GicV3::new(
         dist_base_addr,
