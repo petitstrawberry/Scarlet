@@ -235,7 +235,7 @@ description = "Run kernel tests (RISC-V)"
 cwd = "kernel"
 env = { "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUNNER" = "tools/test.sh" }
 command = "cargo"
-args = ["test"]
+args = ["test", "--target", "targets/riscv64gc-unknown-none-elf.json"]
 dependencies = ["build-initramfs-debug-riscv64"]
 
 [tasks.test-kernel-aarch64]
@@ -250,7 +250,7 @@ dependencies = ["build-initramfs-debug-aarch64"]
 description = "Run the kernel in release mode (RISC-V)"
 cwd = "kernel"
 command = "cargo"
-args = ["run", "--release"]
+args = ["run", "--release", "--target", "targets/riscv64gc-unknown-none-elf.json"]
 dependencies = ["build-release-riscv64"]
 
 [tasks.run-aarch64]
@@ -264,7 +264,7 @@ dependencies = ["build-release-aarch64"]
 description = "Run the kernel in debug mode (RISC-V)"
 cwd = "kernel"
 command = "cargo"
-args = ["run"]
+args = ["run", "--target", "targets/riscv64gc-unknown-none-elf.json"]
 dependencies = ["build-debug-riscv64"]
 
 [tasks.run-debug-aarch64]
