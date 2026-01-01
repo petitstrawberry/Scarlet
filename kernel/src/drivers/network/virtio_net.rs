@@ -175,6 +175,17 @@ impl VirtioNetDevice {
         // Read device configuration with the negotiated features
         device.read_device_config(negotiated_features);
 
+        // Prefill RX virtqueue buffers early.
+        // Without RX descriptors posted, QEMU may log
+        // `virtio: bogus descriptor or out of resources` when it tries to
+        // deliver packets to a ready virtio-net device.
+        if let Err(e) = device.init_network() {
+            crate::early_println!(
+                "[virtio-net] Warning: failed to initialize RX buffers early: {}",
+                e
+            );
+        }
+
         device
     }
 

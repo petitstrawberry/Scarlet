@@ -211,12 +211,18 @@ impl VirtioGpuDeviceCore {
 
     /// Send a command to the control queue
     fn send_control_command<T>(&self, cmd: &T) -> Result<(), &'static str> {
+        let mut resp_buffer = [0u8; 128];
+        self.send_control_command_with_resp_buffer(cmd, &mut resp_buffer)
+    }
+
+    /// Send a command to the control queue, using a caller-provided response buffer.
+    fn send_control_command_with_resp_buffer<T>(
+        &self,
+        cmd: &T,
+        resp_buffer: &mut [u8],
+    ) -> Result<(), &'static str> {
         let mut virtqueues = self.virtqueues.lock();
         let control_queue = &mut virtqueues[0]; // Control queue is index 0
-
-        // The response buffer is allocated on the stack. It's faster and
-        // its memory is automatically reclaimed when the function returns.
-        let mut resp_buffer = [0u8; 128];
 
         // Allocate descriptors
         let cmd_desc = control_queue
@@ -300,8 +306,13 @@ impl VirtioGpuDeviceCore {
             padding: 0,
         };
 
-        // Send command
-        self.send_control_command(&cmd)?;
+        // Send command.
+        // GET_DISPLAY_INFO returns a `virtio_gpu_resp_display_info`, which is 408 bytes
+        // (header + 16 scanouts). If we provide a smaller response buffer, QEMU logs:
+        // `virtio_gpu_ctrl_response: response size incorrect 128 vs 408`.
+        // Avoid allocating this response buffer on the stack; use the heap instead.
+        let mut resp_buffer = alloc::vec![0u8; core::mem::size_of::<VirtioGpuRespDisplayInfo>()];
+        self.send_control_command_with_resp_buffer(&cmd, &mut resp_buffer)?;
 
         // For now, create a default display configuration
         let mut display_info = VirtioGpuRespDisplayInfo {
