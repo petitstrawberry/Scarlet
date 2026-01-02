@@ -34,7 +34,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(4) as isize;
     let offset = trapframe.get_arg(5);
 
-    // crate::println!("linux-riscv64: sys_mmap called: pc={:#x} addr={:#x} length={} prot={:#x} flags={:#x} fd={} offset={:#x}",
+    // crate::println!("linux-generic: sys_mmap called: pc={:#x} addr={:#x} length={} prot={:#x} flags={:#x} fd={} offset={:#x}",
     //     trapframe.get_current_pc(), addr, length, prot, flags, fd, offset);
 
     trapframe.increment_pc_next(task);
@@ -43,7 +43,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Input validation
     if length == 0 {
-        // crate::println!("linux-riscv64: sys_mmap error: length == 0");
+        // crate::println!("linux-generic: sys_mmap error: length == 0");
         return usize::MAX; // -EINVAL
     }
 
@@ -57,9 +57,9 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Handle ANONYMOUS mappings specially
     if (flags & MAP_ANONYMOUS) != 0 {
-        // crate::println!("linux-riscv64: sys_mmap - handling anonymous mapping (addr={:#x}, length={})", addr, aligned_length);
+        // crate::println!("linux-generic: sys_mmap - handling anonymous mapping (addr={:#x}, length={})", addr, aligned_length);
         if fd != -1 {
-            // crate::println!("linux-riscv64: sys_mmap error: anonymous mapping with fd != -1 (fd={})", fd);
+            // crate::println!("linux-generic: sys_mmap error: anonymous mapping with fd != -1 (fd={})", fd);
             return to_result(errno::EINVAL);
         }
         let result = handle_anonymous_mapping(task, addr, aligned_length, num_pages, prot, flags);
@@ -80,12 +80,12 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Get handle from Linux fd
     let handle = match abi.get_handle(fd as usize) {
         Some(h) => {
-            // crate::println!("linux-riscv64: sys_mmap - fd {} -> handle {}", fd, h);
+            // crate::println!("linux-generic: sys_mmap - fd {} -> handle {}", fd, h);
             h
         }
         None => {
             crate::println!(
-                "linux-riscv64: sys_mmap error - invalid file descriptor {}",
+                "linux-generic: sys_mmap error - invalid file descriptor {}",
                 fd
             );
             return to_result(errno::EBADF);
@@ -111,12 +111,12 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Check if object supports MemoryMappingOps
     let memory_mappable = match kernel_obj.as_memory_mappable() {
         Some(mappable) => {
-            // crate::println!("linux-riscv64: sys_mmap - object supports memory mapping");
+            // crate::println!("linux-generic: sys_mmap - object supports memory mapping");
             mappable
         }
         None => {
             crate::println!(
-                "linux-riscv64: sys_mmap error - object doesn't support memory mapping"
+                "linux-generic: sys_mmap error - object doesn't support memory mapping"
             );
             return to_result(errno::ENODEV);
         }
@@ -131,7 +131,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     // crate::println!("sys_mmap: Step 13 - Getting mapping info (offset={}, length={})", offset, length);
-    // crate::println!("linux-riscv64: sys_mmap - requesting mapping info (offset={:#x}, length={})", offset, length);
+    // crate::println!("linux-generic: sys_mmap - requesting mapping info (offset={:#x}, length={})", offset, length);
 
     // Get mapping information from the object.
     // Some backends reject length that extends beyond file size. We try to clamp
@@ -141,7 +141,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         match memory_mappable.get_mapping_info(offset, ok_len) {
             Ok(info) => {
                 // crate::println!(
-                //     "linux-riscv64: sys_mmap - get_mapping_info returned paddr={:#x}, obj_perm={:#x}, is_shared={}, ok_len={}",
+                //     "linux-generic: sys_mmap - get_mapping_info returned paddr={:#x}, obj_perm={:#x}, is_shared={}, ok_len={}",
                 //     info.0, info.1, info.2, ok_len
                 // );
                 break info;
@@ -154,7 +154,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
                 if ok_len == 0 {
                     // crate::println!(
-                    //     "linux-riscv64: sys_mmap - object rejected requested length (offset={:#x}, length={}), no mappable bytes: {:?}",
+                    //     "linux-generic: sys_mmap - object rejected requested length (offset={:#x}, length={}), no mappable bytes: {:?}",
                     //     offset, length, e
                     // );
                     break (0, 0, false);
@@ -174,12 +174,12 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             .find_unmapped_area(aligned_length, PAGE_SIZE)
         {
             Some(vaddr) => {
-                // crate::println!("linux-riscv64: sys_mmap - found unmapped area at {:#x}", vaddr);
+                // crate::println!("linux-generic: sys_mmap - found unmapped area at {:#x}", vaddr);
                 vaddr
             }
             None => {
                 crate::println!(
-                    "linux-riscv64: sys_mmap error - no suitable unmapped area for length={}",
+                    "linux-generic: sys_mmap error - no suitable unmapped area for length={}",
                     aligned_length
                 );
                 return to_result(errno::ENOMEM);
@@ -188,7 +188,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     } else {
         if addr % PAGE_SIZE != 0 {
             crate::println!(
-                "linux-riscv64: sys_mmap error - requested addr {:#x} not page aligned",
+                "linux-generic: sys_mmap error - requested addr {:#x} not page aligned",
                 addr
             );
             return to_result(errno::EINVAL);
@@ -208,28 +208,28 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     .find_unmapped_area(aligned_length, PAGE_SIZE)
                 {
                     Some(vaddr) => {
-                        // crate::println!("linux-riscv64: sys_mmap - hint address {:#x} overlaps, alternative {:#x}", addr, vaddr);
+                        // crate::println!("linux-generic: sys_mmap - hint address {:#x} overlaps, alternative {:#x}", addr, vaddr);
                         vaddr
                     }
                     None => {
                         crate::println!(
-                            "linux-riscv64: sys_mmap error - no suitable unmapped area for length={}",
+                            "linux-generic: sys_mmap error - no suitable unmapped area for length={}",
                             aligned_length
                         );
                         return to_result(errno::ENOMEM);
                     }
                 }
             } else {
-                // crate::println!("linux-riscv64: sys_mmap - using hint address {:#x} (no overlap)", addr);
+                // crate::println!("linux-generic: sys_mmap - using hint address {:#x} (no overlap)", addr);
                 addr
             }
         } else {
-            // crate::println!("linux-riscv64: sys_mmap - using fixed address {:#x} (MAP_FIXED set)", addr);
+            // crate::println!("linux-generic: sys_mmap - using fixed address {:#x} (MAP_FIXED set)", addr);
             addr
         }
     };
 
-    // crate::println!("linux-riscv64: sys_mmap - creating mapping vaddr={:#x} paddr={:#x} length={} perms_req={:#x} obj_perm={:#x} is_shared={}",
+    // crate::println!("linux-generic: sys_mmap - creating mapping vaddr={:#x} paddr={:#x} length={} perms_req={:#x} obj_perm={:#x} is_shared={}",
     //     final_vaddr, paddr, aligned_length, prot, obj_permissions, is_shared);
 
     // crate::println!("sys_mmap: Step 19 - Creating memory areas (vaddr={:#x}, paddr={:#x})", final_vaddr, paddr);
@@ -410,7 +410,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // Partial (< PAGE_SIZE) tail only is not representable as shared mapping safely
             // without a COW-like helper; reject for now.
             crate::println!(
-                "linux-riscv64: sys_mmap - only subpage tail available; rejecting shared mapping"
+                "linux-generic: sys_mmap - only subpage tail available; rejecting shared mapping"
             );
             return to_result(errno::EINVAL);
         }

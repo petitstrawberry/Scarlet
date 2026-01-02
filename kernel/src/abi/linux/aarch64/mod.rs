@@ -311,7 +311,7 @@ impl LinuxAarch64Abi {
 
 impl AbiModule for LinuxAarch64Abi {
     fn name() -> &'static str {
-        "linux-riscv64"
+        "linux-aarch64"
     }
 
     fn get_name(&self) -> alloc::string::String {
@@ -519,7 +519,7 @@ impl AbiModule for LinuxAarch64Abi {
                             requested.map(|path| {
                                 if path.starts_with("/lib/ld-") || path.starts_with("/lib64/ld-") {
                                     // Map to our system path
-                                    format!("/scarlet/system/linux-riscv64{}", path)
+                                    format!("/scarlet/system/linux-aarch64{}", path)
                                 } else {
                                     path.to_string()
                                 }

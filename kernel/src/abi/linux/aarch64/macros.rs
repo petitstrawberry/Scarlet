@@ -1,4 +1,4 @@
-/// Define syscall table and syscall handler for linux-riscv64
+/// Define syscall table and syscall handler for linux-aarch64
 ///
 /// # Example
 /// ```
