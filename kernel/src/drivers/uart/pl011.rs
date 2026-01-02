@@ -5,6 +5,8 @@ use core::fmt::Write;
 use core::{any::Any, fmt};
 use spin::{Mutex, RwLock};
 
+use crate::arch::early_putc;
+use crate::initcall::early;
 use crate::{
     device::{
         Device, DeviceInfo, DeviceType,
@@ -122,12 +124,16 @@ impl Pl011Uart {
     fn reg_read(&self, offset: usize) -> u32 {
         let addr = self.base + offset;
         unsafe { crate::arch::mmio::read32(addr) }
+        // unsafe { core::ptr::read_volatile(addr as *const u32) }
     }
 
     fn write_byte_internal(&self, c: u8) {
-        // Wait until transmit FIFO is not full
-        while self.reg_read(UARTFR) & FR_TXFF != 0 {}
+        // // Wait until transmit FIFO is not full
+        while self.reg_read(UARTFR) & FR_TXFF != 0 {
+            core::hint::spin_loop();
+        }
         self.reg_write(UARTDR, c as u32);
+        // early_putc(c);
     }
 
     fn read_byte_internal(&self) -> Option<u8> {
@@ -300,7 +306,7 @@ fn register_pl011() {
         "pl011-uart-driver",
         pl011_probe,
         pl011_remove,
-        vec!["arm,pl011", "arm,primecell"],
+        vec!["arm,pl011"],
     ));
 
     // Register with Core priority since UART is essential
@@ -317,6 +323,7 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("No memory resource found for PL011")?;
 
     let base_addr = memory_resource.start;
+    // let base_addr = 0x0900_0000;
     crate::early_println!("PL011 base address: 0x{:x}", base_addr);
 
     let uart = Arc::new(Pl011Uart::new(base_addr));
