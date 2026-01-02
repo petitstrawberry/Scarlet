@@ -513,8 +513,8 @@ pub fn init_mmu_registers() {
         // SH0/SH1 = 0b11 (Inner Shareable)
         // ORGN0/ORGN1 = 0b01 (Write-Back)
         // IRGN0/IRGN1 = 0b01 (Write-Back)
-        // IPS = 0b000 (32-bit PA, sufficient for QEMU virt 2GB)
-        let tcr_val: u64 = 0xB5103510;
+        // IPS = 0b001 (36-bit PA, supports up to 64GB) - bit[34:32]
+        let tcr_val: u64 = 0x1_B510_3510;
         asm!("msr tcr_el1, {}", in(reg) tcr_val);
 
         // SCTLR_EL1: System Control Register

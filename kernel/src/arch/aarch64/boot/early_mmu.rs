@@ -130,7 +130,8 @@ pub fn enable_identity_mmu_if_disabled(dram_end: usize) {
         let mair_val: u64 = 0x44ff00;
         asm!("msr mair_el1, {}", in(reg) mair_val, options(nostack));
 
-        let tcr_val: u64 = 0xB5103510;
+        // IPS = 0b001 (36-bit PA, supports up to 64GB) - bit[34:32]
+        let tcr_val: u64 = 0x1_B510_3510;
         asm!("msr tcr_el1, {}", in(reg) tcr_val, options(nostack));
 
         // TTBR0 points to EARLY_L0. (ASID=0)
