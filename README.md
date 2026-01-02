@@ -64,12 +64,6 @@ bash tools/linux/build_buildroot.sh
 bash tools/linux/build_user_programs.sh
 bash tools/linux/deploy_rootfs.sh
 cargo make run-riscv64
-
-# For AArch64
-ARCH=aarch64 bash tools/linux/build_buildroot.sh
-ARCH=aarch64 bash tools/linux/build_user_programs.sh
-ARCH=aarch64 bash tools/linux/deploy_rootfs.sh
-ARCH=aarch64 cargo make run-aarch64
 ```
 
 These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6.
@@ -168,7 +162,7 @@ cargo make run-riscv64
 
 # AArch64
 ARCH=aarch64 cargo make build
-ARCH=aarch64 cargo make run-aarch64
+cargo make run-aarch64
 ```
 
 See [Multi-Architecture Support documentation](docs/multi-architecture.md) for detailed information on cross-architecture development.
