@@ -709,8 +709,8 @@ impl AbiModule for LinuxAarch64Abi {
 
                         // Initialize trapframe with clean state
                         trapframe.regs = task.vcpu.iregs;
-                        trapframe.epc = load_result.entry_point;
-                        // crate::println!("DEBUG: Set trapframe.epc to {:#x}", trapframe.epc);
+                        trapframe.elr = load_result.entry_point;
+                        // crate::println!("DEBUG: Set trapframe.elr to {:#x}", trapframe.elr);
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);

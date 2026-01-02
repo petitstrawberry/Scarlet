@@ -314,7 +314,7 @@ pub fn sys_openat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
         Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
-    // crate::println!("sys_openat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.epc, dirfd, path_str, flags);
+    // crate::println!("sys_openat: epc={:#x}, dirfd={}, path='{}', flags={:#o}", trapframe.elr, dirfd, path_str, flags);
 
     let vfs = task.vfs.as_ref().unwrap();
 
@@ -675,7 +675,7 @@ pub fn sys_read(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
         //             },
         //             StreamError::WouldBlock => {
         //                 // If the stream would block, we need to set the trapframe's EPC
-        //                 // trapframe.epc = epc;
+        //                 // trapframe.elr = epc;
         //                 // task.vcpu.store(trapframe); // Store the trapframe in the task's vcpu
         //                 get_scheduler().schedule(trapframe); // Yield to the scheduler
         //             },
@@ -2225,8 +2225,8 @@ pub fn sys_faccessat(_abi: &mut LinuxAarch64Abi, trapframe: &mut crate::arch::Tr
     };
 
     crate::println!(
-        "sys_faccessat: epc={:#x}, dirfd={}, path='{}', flags={:#o}",
-        trapframe.epc,
+        "sys_faccessat: elr={:#x}, dirfd={}, path='{}', flags={:#o}",
+        trapframe.elr,
         dirfd,
         path_str,
         flags
