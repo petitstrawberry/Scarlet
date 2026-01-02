@@ -55,34 +55,20 @@ impl KernelContext {
     }
 
     /// Get the bottom of the kernel stack
-    pub fn get_kernel_stack_bottom(&self) -> u64 {
+    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
         (self.kernel_stack.as_ptr() as u64)
             + (self.kernel_stack.len() as u64 * crate::environment::PAGE_SIZE as u64)
     }
 
-    pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
+    pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
         MemoryArea::new(
             self.kernel_stack.as_ptr() as usize,
-            (self.get_kernel_stack_bottom() as usize) - 1,
+            (self.get_kernel_stack_bottom_paddr() as usize) - 1,
         )
     }
 
-    pub fn get_kernel_stack_ptr(&self) -> *const u8 {
+    pub fn get_kernel_stack_paddr(&self) -> *const u8 {
         self.kernel_stack.as_ptr() as *const u8
-    }
-
-    /// Set the kernel stack for this context
-    /// # Arguments
-    /// * `stack` - Boxed slice representing the kernel stack memory
-    ///
-    pub fn set_kernel_stack(&mut self, stack: Box<[Page]>) {
-        self.kernel_stack = stack;
-        let stack_top = self.get_kernel_stack_bottom() as usize;
-        let trapframe_size = core::mem::size_of::<Trapframe>();
-        let trapframe_align = core::mem::align_of::<Trapframe>();
-        debug_assert!(trapframe_align.is_power_of_two());
-        let trapframe_addr = (stack_top - trapframe_size) & !(trapframe_align - 1);
-        self.sp = trapframe_addr as u64;
     }
 
     /// Set entry point for this context
@@ -101,6 +87,11 @@ impl KernelContext {
     /// Function address of the entry point
     pub fn get_entry_point(&self) -> u64 {
         self.ra
+    }
+
+    // Set stack pointer for this context (VA)
+    pub fn set_sp(&mut self, sp_vaddr: u64) {
+        self.sp = sp_vaddr;
     }
 
     /// Get a mutable reference to the trapframe

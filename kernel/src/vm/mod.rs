@@ -295,7 +295,7 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
         .ok_or("No free kernel stack window slots")?;
 
     // Physical (identity) address range of the task's kernel stack
-    let km_area = task.get_kernel_stack_memory_area();
+    let km_area = task.get_kernel_stack_memory_area_paddr();
     let paddr_start = km_area.start;
     let paddr_end = paddr_start + TASK_KERNEL_STACK_SIZE - 1;
 

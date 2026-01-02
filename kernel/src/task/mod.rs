@@ -1403,8 +1403,8 @@ impl Task {
     ///
     /// # Returns
     /// The kernel stack bottom address as u64, or 0 if no kernel stack is allocated
-    pub fn get_kernel_stack_bottom(&self) -> u64 {
-        self.kernel_context.get_kernel_stack_bottom()
+    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
+        self.kernel_context.get_kernel_stack_bottom_paddr()
     }
 
     /// Get the kernel stack memory area for this task
@@ -1412,8 +1412,8 @@ impl Task {
     /// # Returns
     /// The kernel stack memory area as a MemoryArea
     ///
-    pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
-        self.kernel_context.get_kernel_stack_memory_area()
+    pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
+        self.kernel_context.get_kernel_stack_memory_area_paddr()
     }
 
     /// Get a mutable reference to the trapframe for this task

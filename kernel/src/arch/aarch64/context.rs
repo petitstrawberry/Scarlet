@@ -42,35 +42,32 @@ impl KernelContext {
 
         Self {
             sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
-            lr: crate::task::task_initial_kernel_entrypoint as u64,
+            lr: crate::task::task_initial_kernel_entrypoint  as *const () as u64,
             x: [0; 10],
             kernel_stack,
         }
     }
 
     /// Get the bottom of the kernel stack
-    pub fn get_kernel_stack_bottom(&self) -> u64 {
+    pub fn get_kernel_stack_bottom_paddr(&self) -> u64 {
         self.kernel_stack.as_ptr() as u64 + self.kernel_stack.len() as u64
     }
 
-    pub fn get_kernel_stack_memory_area(&self) -> MemoryArea {
+    pub fn get_kernel_stack_memory_area_paddr(&self) -> MemoryArea {
         MemoryArea::new(
             self.kernel_stack.as_ptr() as usize,
-            self.get_kernel_stack_bottom() as usize - 1,
+            self.get_kernel_stack_bottom_paddr() as usize - 1,
         )
     }
 
-    pub fn get_kernel_stack_ptr(&self) -> *const u8 {
+    pub fn get_kernel_stack_paddr(&self) -> *const u8 {
         self.kernel_stack.as_ptr()
     }
 
-    /// Set the kernel stack for this context
-    /// # Arguments
-    /// * `stack` - Boxed slice representing the kernel stack memory
-    ///
-    pub fn set_kernel_stack(&mut self, stack: Box<[u8]>) {
-        self.kernel_stack = stack;
-        self.sp = self.get_kernel_stack_bottom();
+    
+    /// Set stack pointer for this context (VA)
+    pub fn set_sp(&mut self, sp_vaddr: u64) {
+        self.sp = sp_vaddr;
     }
 
     /// Set entry point for this context

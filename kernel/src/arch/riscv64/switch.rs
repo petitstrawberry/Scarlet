@@ -92,25 +92,6 @@ pub fn init_kernel_context(ctx: &mut KernelContext, entry_point: fn(), stack_top
     ctx.s = [0; 12];
 }
 
-/// Wrapper function for safe context switching
-///
-/// This provides a safe interface to the low-level switch_to function.
-///
-/// # Arguments
-/// * `prev_ctx` - Mutable reference to store the current context
-/// * `next_ctx` - Reference to the context to switch to
-///
-/// # Safety
-/// Both contexts must have valid stack pointers and be properly initialized.
-pub fn kernel_switch_to(prev_ctx: &mut KernelContext, next_ctx: &KernelContext) {
-    unsafe {
-        switch_to(
-            prev_ctx as *mut KernelContext,
-            next_ctx as *const KernelContext,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

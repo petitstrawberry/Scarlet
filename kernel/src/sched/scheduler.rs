@@ -562,7 +562,7 @@ impl Scheduler {
             (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE)
                 as u64
         } else {
-            task.get_kernel_stack_bottom()
+            task.get_kernel_stack_bottom_paddr()
         };
 
         // crate::early_println!("[SCHED]   Setting kernel stack to {:#x}", sp);
