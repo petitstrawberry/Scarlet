@@ -343,6 +343,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'
     let sp = (stack_top - tf_size) & !(tf_align - 1);
     task.get_kernel_context_mut().set_sp(sp);
 
+    #[cfg(any(debug_assertions, test))]
     crate::early_println!(
         "Mapped kernel stack window for Task {}: slot {} {:#x} - {:#x}",
         task.get_id(),
