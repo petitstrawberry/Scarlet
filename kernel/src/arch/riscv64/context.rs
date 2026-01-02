@@ -16,7 +16,7 @@ use crate::vm::vmem::MemoryArea;
 /// Contains callee-saved registers that need to be preserved across
 /// function calls and context switches in kernel mode, as well as
 /// the kernel stack information.
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Clone)]
 pub struct KernelContext {
     /// Stack pointer
@@ -41,8 +41,13 @@ impl KernelContext {
         let stack_top = kernel_stack.as_ptr() as u64
             + (kernel_stack.len() * crate::environment::PAGE_SIZE) as u64;
 
+        let trapframe_size = core::mem::size_of::<Trapframe>() as u64;
+        let trapframe_align = core::mem::align_of::<Trapframe>() as u64;
+        debug_assert!(trapframe_align.is_power_of_two());
+        let trapframe_addr = (stack_top - trapframe_size) & !(trapframe_align - 1);
+
         Self {
-            sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
+            sp: trapframe_addr, // Reserve aligned space for trapframe
             ra: crate::task::task_initial_kernel_entrypoint as u64,
             s: [0; 12],
             kernel_stack,
@@ -72,7 +77,12 @@ impl KernelContext {
     ///
     pub fn set_kernel_stack(&mut self, stack: Box<[Page]>) {
         self.kernel_stack = stack;
-        self.sp = self.get_kernel_stack_bottom();
+        let stack_top = self.get_kernel_stack_bottom() as usize;
+        let trapframe_size = core::mem::size_of::<Trapframe>();
+        let trapframe_align = core::mem::align_of::<Trapframe>();
+        debug_assert!(trapframe_align.is_power_of_two());
+        let trapframe_addr = (stack_top - trapframe_size) & !(trapframe_align - 1);
+        self.sp = trapframe_addr as u64;
     }
 
     /// Set entry point for this context
@@ -101,8 +111,14 @@ impl KernelContext {
     /// # Returns
     /// A mutable reference to the Trapframe, or None if no kernel stack is allocated
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
-        let stack_top = self.kernel_stack.as_ptr() as usize + self.kernel_stack.len();
-        let trapframe_addr = stack_top - core::mem::size_of::<Trapframe>();
+        let stack_top = self.kernel_stack.as_ptr() as usize
+            + (self.kernel_stack.len() * crate::environment::PAGE_SIZE);
+        let trapframe_size = core::mem::size_of::<Trapframe>();
+        let trapframe_align = core::mem::align_of::<Trapframe>();
+        debug_assert!(trapframe_align.is_power_of_two());
+
+        let trapframe_addr = (stack_top - trapframe_size) & !(trapframe_align - 1);
+        debug_assert_eq!(trapframe_addr % trapframe_align, 0);
         unsafe { &mut *(trapframe_addr as *mut Trapframe) }
     }
 }
