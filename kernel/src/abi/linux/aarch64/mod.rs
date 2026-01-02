@@ -1,6 +1,6 @@
 #[macro_use]
 mod macros;
-mod errno;
+pub use super::generic::errno;
 mod fs;
 mod futex;
 mod mm;
