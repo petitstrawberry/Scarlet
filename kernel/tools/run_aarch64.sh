@@ -121,6 +121,12 @@ qemu-system-aarch64 \
     -bios "$UBOOT_BIN" \
     -initrd "$INITRAMFS_PATH" \
     -kernel "$KERNEL_BIN" \
+    -global virtio-mmio.force-legacy=false \
+    -drive id=x0,file="$PROJECT_ROOT/mkfs/dist/rootfs.img",format=raw,if=none \
+    -device virtio-blk-device,drive=x0 \
+    -device virtio-gpu-device \
+    -netdev user,id=net0 \
+    -device virtio-net-device,netdev=net0 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
