@@ -276,17 +276,26 @@ impl InterruptCapableDevice for Pl011Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
         // Read and clear interrupt status
         let ris = self.reg_read(UARTRIS);
+        
+        // Clear ALL interrupts first to prevent re-triggering
+        self.reg_write(UARTICR, 0x7FF);
 
         if ris & IMSC_RXIM != 0 {
             // Receive interrupt - read all available data
+            let mut count = 0;
             while let Some(c) = self.read_byte_internal() {
                 // Emit received character event
                 self.emit_event(&InputEvent { data: c });
                 // Also store in buffer
                 self.rx_buffer.lock().push_back(c);
+                count += 1;
+                
+                // Safety limit to prevent infinite loop
+                if count > 128 {
+                    crate::early_println!("[PL011] Warning: read limit reached in interrupt handler");
+                    break;
+                }
             }
-            // Clear receive interrupt
-            self.reg_write(UARTICR, IMSC_RXIM);
         }
 
         Ok(())
@@ -323,7 +332,6 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .ok_or("No memory resource found for PL011")?;
 
     let base_addr = memory_resource.start;
-    // let base_addr = 0x0900_0000;
     crate::early_println!("PL011 base address: 0x{:x}", base_addr);
 
     let uart = Arc::new(Pl011Uart::new(base_addr));
@@ -337,7 +345,18 @@ fn pl011_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
         .iter()
         .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
     {
-        let uart_interrupt_id = irq_resource.start as u32;
+        // Translate interrupt ID using metadata if available (for ARM GIC)
+        let uart_interrupt_id = if let Some(ref metadata) = irq_resource.irq_metadata {
+            // ARM GIC 3-cell format: translate type + number to actual IRQ
+            // Type 0 = SPI (Shared Peripheral Interrupt): base 32
+            // Type 1 = PPI (Private Peripheral Interrupt): base 16
+            let base = if metadata.irq_type == 0 { 32 } else { 16 };
+            base + metadata.irq_number
+        } else {
+            // No metadata: use raw interrupt number (RISC-V PLIC, etc.)
+            irq_resource.start as u32
+        };
+
         crate::early_println!("PL011 interrupt ID: {}", uart_interrupt_id);
 
         if let Err(e) = uart.enable_interrupts(uart_interrupt_id) {

@@ -14,6 +14,19 @@ pub struct PlatformDeviceResource {
     pub res_type: PlatformDeviceResourceType,
     pub start: usize,
     pub end: usize,
+    /// Optional metadata for IRQ resources (e.g., type, flags from Device Tree)
+    pub irq_metadata: Option<IrqMetadata>,
+}
+
+/// IRQ metadata from Device Tree interrupt specifiers
+#[derive(Debug, Clone, Copy)]
+pub struct IrqMetadata {
+    /// Interrupt type (e.g., 0=SPI, 1=PPI for ARM GIC)
+    pub irq_type: u32,
+    /// Interrupt number (before controller-specific translation)
+    pub irq_number: u32,
+    /// Interrupt flags (e.g., trigger type, polarity)
+    pub irq_flags: u32,
 }
 
 /// PlatformDeviceResourceType enum

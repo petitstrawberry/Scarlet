@@ -429,6 +429,7 @@ impl DeviceManager {
                     res_type: PlatformDeviceResourceType::MEM,
                     start: region.starting_address as usize,
                     end: region.starting_address as usize + region.size.unwrap() - 1,
+                    irq_metadata: None, // No IRQ metadata for memory regions
                 };
                 resources.push(res);
             }
@@ -436,11 +437,94 @@ impl DeviceManager {
 
         // Add IRQs
         if let Some(irqs) = child.interrupts() {
+            // Standard path: fdt-rs successfully parsed interrupts
             for irq in irqs {
                 let res = PlatformDeviceResource {
                     res_type: PlatformDeviceResourceType::IRQ,
                     start: irq,
                     end: irq,
+                    irq_metadata: None, // No metadata when fdt-rs handles it
+                };
+                resources.push(res);
+            }
+        } else if let Some(prop) = child.property("interrupts") {
+            // Fallback: Parse raw interrupts property when fdt-rs fails
+            // This preserves interrupt controller metadata for later translation
+            let value = prop.value;
+            
+            // Detect cell format based on property length
+            let cell_size = if value.len() % 12 == 0 {
+                3 // 3-cell format (e.g., ARM GIC: <type, number, flags>)
+            } else if value.len() % 8 == 0 {
+                2 // 2-cell format
+            } else if value.len() % 4 == 0 {
+                1 // 1-cell format (just interrupt number)
+            } else {
+                return resources; // Unknown format, skip
+            };
+            
+            let num_irqs = value.len() / (cell_size * 4);
+            
+            for i in 0..num_irqs {
+                let offset = i * cell_size * 4;
+                
+                let (irq_num, metadata) = match cell_size {
+                    3 => {
+                        // 3-cell format: <type, number, flags>
+                        let irq_type = u32::from_be_bytes([
+                            value[offset], value[offset + 1],
+                            value[offset + 2], value[offset + 3]
+                        ]);
+                        let irq_number = u32::from_be_bytes([
+                            value[offset + 4], value[offset + 5],
+                            value[offset + 6], value[offset + 7]
+                        ]);
+                        let irq_flags = u32::from_be_bytes([
+                            value[offset + 8], value[offset + 9],
+                            value[offset + 10], value[offset + 11]
+                        ]);
+                        
+                        // Store raw number, let interrupt controller translate
+                        (irq_number as usize, Some(crate::device::platform::resource::IrqMetadata {
+                            irq_type,
+                            irq_number,
+                            irq_flags,
+                        }))
+                    }
+                    2 => {
+                        // 2-cell format: <number, flags>
+                        let irq_number = u32::from_be_bytes([
+                            value[offset], value[offset + 1],
+                            value[offset + 2], value[offset + 3]
+                        ]);
+                        let irq_flags = u32::from_be_bytes([
+                            value[offset + 4], value[offset + 5],
+                            value[offset + 6], value[offset + 7]
+                        ]);
+                        
+                        (irq_number as usize, Some(crate::device::platform::resource::IrqMetadata {
+                            irq_type: 0, // No type in 2-cell format
+                            irq_number,
+                            irq_flags,
+                        }))
+                    }
+                    1 => {
+                        // 1-cell format: just interrupt number
+                        let irq_number = u32::from_be_bytes([
+                            value[offset], value[offset + 1],
+                            value[offset + 2], value[offset + 3]
+                        ]);
+                        
+                        (irq_number as usize, None)
+                    }
+                    _ => unreachable!(),
+                };
+                
+                let res = PlatformDeviceResource {
+                    res_type: PlatformDeviceResourceType::IRQ,
+                    start: irq_num,
+                    end: irq_num,
+                    irq_metadata: metadata,
                 };
                 resources.push(res);
             }

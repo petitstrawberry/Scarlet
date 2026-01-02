@@ -92,6 +92,40 @@ impl Gic {
         }
     }
 
+    /// Translate Device Tree interrupt metadata to actual GIC interrupt ID
+    ///
+    /// ARM GIC uses a 3-cell interrupt format in Device Tree:
+    /// - Cell 0: Interrupt type (0 = SPI, 1 = PPI)
+    /// - Cell 1: Interrupt number (within type)
+    /// - Cell 2: Flags (edge/level triggered, polarity)
+    ///
+    /// The actual GIC interrupt ID is calculated based on the type:
+    /// - SPI (Shared Peripheral Interrupt): 32 + number
+    /// - PPI (Private Peripheral Interrupt): 16 + number
+    ///
+    /// # Arguments
+    ///
+    /// * `metadata` - Interrupt metadata from Device Tree
+    ///
+    /// # Returns
+    ///
+    /// The actual GIC interrupt ID to use for enabling/registering the interrupt
+    pub fn translate_interrupt(
+        &self,
+        metadata: &crate::device::platform::resource::IrqMetadata,
+    ) -> InterruptId {
+        let irq_type = metadata.irq_type;
+        let irq_number = metadata.irq_number;
+
+        if irq_type == 0 {
+            // SPI (Shared Peripheral Interrupt): base at 32
+            32 + irq_number as InterruptId
+        } else {
+            // PPI (Private Peripheral Interrupt): base at 16
+            16 + irq_number as InterruptId
+        }
+    }
+
     /// Get the address of a distributor register
     fn dist_reg_addr(&self, offset: usize) -> usize {
         self.dist_base_addr + offset
