@@ -267,18 +267,23 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
     // Get ESR to determine fault type
     let esr = get_esr_el1();
     let dfsc = esr & 0x3f; // Data Fault Status Code (bits 5:0)
-    
+
     // Debug permission faults
     if dfsc >= 0x0d && dfsc <= 0x0f {
         early_println!(
             "[PF] PERMISSION FAULT: vaddr={:#x} write={} PC={:#x} DFSC={:#x}",
-            vaddr, is_write, trapframe.get_current_pc(), dfsc
+            vaddr,
+            is_write,
+            trapframe.get_current_pc(),
+            dfsc
         );
         // Print current memory mapping for this address
         if let Some(map) = manager.search_memory_map(vaddr) {
             early_println!(
                 "[PF] Mapping found: vmarea=[{:#x}..{:#x}] perms={:#x} (R={} W={} X={} U={})",
-                map.vmarea.start, map.vmarea.end, map.permissions,
+                map.vmarea.start,
+                map.vmarea.end,
+                map.permissions,
                 map.permissions & 0x1 != 0,
                 map.permissions & 0x2 != 0,
                 map.permissions & 0x4 != 0,
@@ -295,7 +300,7 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
             trapframe.regs.reg[2],
             trapframe.regs.reg[3],
         );
-        
+
         // Check if this is actually a TLB issue by reading back TTBR0
         let current_ttbr0: u64;
         unsafe { asm!("mrs {}, ttbr0_el1", out(reg) current_ttbr0) };

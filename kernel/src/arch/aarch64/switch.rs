@@ -28,7 +28,7 @@ pub unsafe extern "C" fn switch_to(prev_ctx: *mut KernelContext, next_ctx: *cons
         "str x30, [x0, #8]",  // LR
         "str x29, [x0, #16]", // FP
         "mov x9, sp",
-        "str x9, [x0, #0]",   // SP
+        "str x9, [x0, #0]", // SP
         "stp x19, x20, [x0, #24]",
         "stp x21, x22, [x0, #40]",
         "stp x23, x24, [x0, #56]",

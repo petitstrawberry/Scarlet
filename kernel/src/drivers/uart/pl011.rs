@@ -276,7 +276,7 @@ impl InterruptCapableDevice for Pl011Uart {
     fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
         // Read and clear interrupt status
         let ris = self.reg_read(UARTRIS);
-        
+
         // Clear ALL interrupts first to prevent re-triggering
         self.reg_write(UARTICR, 0x7FF);
 
@@ -289,10 +289,12 @@ impl InterruptCapableDevice for Pl011Uart {
                 // Also store in buffer
                 self.rx_buffer.lock().push_back(c);
                 count += 1;
-                
+
                 // Safety limit to prevent infinite loop
                 if count > 128 {
-                    crate::early_println!("[PL011] Warning: read limit reached in interrupt handler");
+                    crate::early_println!(
+                        "[PL011] Warning: read limit reached in interrupt handler"
+                    );
                     break;
                 }
             }

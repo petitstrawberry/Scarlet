@@ -1107,7 +1107,7 @@ impl Task {
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
         child.brk = self.brk; // Copy brk (program break / heap top)
-        
+
         // Copy scheduling and event handling state
         child.time_slice = self.time_slice;
         // Note: software_timers_handlers, sleep_waker, event_queue are NOT copied
