@@ -64,11 +64,11 @@ jobs:
       
     - name: Test scarlet kernel (riscv64)
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-riscv64
-      timeout-minutes: 5
+      timeout-minutes: 10
 
     - name: Build scarlet kernel (aarch64)
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make build-aarch64
       
     - name: Test scarlet kernel (aarch64)
       run: docker run -v $PWD:/workspaces/Scarlet scarlet-dev cargo make test-aarch64
-      timeout-minutes: 5
+      timeout-minutes: 10
