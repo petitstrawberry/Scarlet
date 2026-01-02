@@ -240,8 +240,12 @@ impl VirtioGpuDeviceCore {
         // Set up command descriptor (device readable)
         let cmd_desc_ptr =
             &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        let cmd_virt_addr = cmd as *const T as usize;
+        let cmd_phys_addr = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(cmd_virt_addr)
+            .ok_or("Failed to translate cmd vaddr to paddr")?;
         unsafe {
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, (cmd as *const T) as u64);
+            core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_phys_addr as u64);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, core::mem::size_of::<T>() as u32);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).flags, DescriptorFlag::Next as u16);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).next, resp_desc as u16);
@@ -250,8 +254,12 @@ impl VirtioGpuDeviceCore {
         // Set up response descriptor (device writable)
         let resp_desc_ptr =
             &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        let resp_virt_addr = resp_buffer.as_mut_ptr() as usize;
+        let resp_phys_addr = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(resp_virt_addr)
+            .ok_or("Failed to translate resp_buffer vaddr to paddr")?;
         unsafe {
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_buffer.as_mut_ptr() as u64);
+            core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_phys_addr as u64);
             core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32); // Use .len() for safety
             core::ptr::write_volatile(&mut (*resp_desc_ptr).flags, DescriptorFlag::Write as u16);
         }
