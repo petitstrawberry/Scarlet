@@ -7,6 +7,7 @@
 [![Version](https://img.shields.io/badge/version-0.15.0-blue.svg)](https://github.com/petitstrawberry/Scarlet)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![RISC-V](https://img.shields.io/badge/arch-RISC--V%2064-green)](https://riscv.org/)
+[![AArch64](https://img.shields.io/badge/arch-AArch64-orange)](https://www.arm.com/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/petitstrawberry/Scarlet)
 
 </div>
@@ -58,10 +59,17 @@ See [Linux ABI Demo instructions](docs/abi/linux/demo.md) for detailed instructi
 
 ```bash
 # Quick summary (inside scarlet-dev container):
+# For RISC-V (default)
 bash tools/linux/build_buildroot.sh
 bash tools/linux/build_user_programs.sh
 bash tools/linux/deploy_rootfs.sh
 cargo make run-riscv64
+
+# For AArch64
+ARCH=aarch64 bash tools/linux/build_buildroot.sh
+ARCH=aarch64 bash tools/linux/build_user_programs.sh
+ARCH=aarch64 bash tools/linux/deploy_rootfs.sh
+ARCH=aarch64 cargo make run-aarch64
 ```
 
 These commands rebuild the Buildroot-based Linux rootfs (providing standard utilities via BusyBox) and optional demo binaries, showcasing the initial Linux ABI support alongside Scarlet and xv6.
@@ -144,7 +152,26 @@ The Linux ABI implementation is currently in active development:
 
 ## Architecture Support
 
-Currently supports RISC-V 64-bit architecture with plans for additional architectures. The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers.
+Scarlet supports multiple CPU architectures with a unified codebase:
+
+- **RISC-V 64-bit** - Primary development platform, fully supported
+- **AArch64 (ARM 64-bit)** - Fully supported with all core features
+
+The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
+
+### Building for Different Architectures
+
+```bash
+# RISC-V (default)
+cargo make build
+cargo make run-riscv64
+
+# AArch64
+ARCH=aarch64 cargo make build
+ARCH=aarch64 cargo make run-aarch64
+```
+
+See [Multi-Architecture Support documentation](docs/multi-architecture.md) for detailed information on cross-architecture development.
 
 ## Filesystem Support
 
