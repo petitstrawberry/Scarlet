@@ -122,23 +122,26 @@ impl KernelContext {
 pub unsafe extern "C" fn switch_to(current: *mut KernelContext, target: *const KernelContext) {
     naked_asm!(
         // Save current context
-        "str x30, [x0, #8]", // Save link register (lr)
+        // Layout: sp(0x00), lr(0x08), fp(0x10), x[0..9](0x18..0x60)
+        "str x30, [x0, #8]",  // Save link register (lr)
+        "str x29, [x0, #16]", // Save frame pointer (fp)
         "mov x9, sp",
         "str x9, [x0, #0]",        // Save stack pointer
-        "stp x19, x20, [x0, #16]", // Save x19, x20
-        "stp x21, x22, [x0, #32]", // Save x21, x22
-        "stp x23, x24, [x0, #48]", // Save x23, x24
-        "stp x25, x26, [x0, #64]", // Save x25, x26
-        "stp x27, x28, [x0, #80]", // Save x27, x28
+        "stp x19, x20, [x0, #24]", // Save x19, x20 at offset 0x18
+        "stp x21, x22, [x0, #40]", // Save x21, x22
+        "stp x23, x24, [x0, #56]", // Save x23, x24
+        "stp x25, x26, [x0, #72]", // Save x25, x26
+        "stp x27, x28, [x0, #88]", // Save x27, x28
         // Load target context
-        "ldr x30, [x1, #8]", // Load link register (lr)
-        "ldr x9, [x1, #0]",  // Load stack pointer
+        "ldr x30, [x1, #8]",  // Load link register (lr)
+        "ldr x29, [x1, #16]", // Load frame pointer (fp)
+        "ldr x9, [x1, #0]",   // Load stack pointer
         "mov sp, x9",
-        "ldp x19, x20, [x1, #16]", // Load x19, x20
-        "ldp x21, x22, [x1, #32]", // Load x21, x22
-        "ldp x23, x24, [x1, #48]", // Load x23, x24
-        "ldp x25, x26, [x1, #64]", // Load x25, x26
-        "ldp x27, x28, [x1, #80]", // Load x27, x28
+        "ldp x19, x20, [x1, #24]", // Load x19, x20
+        "ldp x21, x22, [x1, #40]", // Load x21, x22
+        "ldp x23, x24, [x1, #56]", // Load x23, x24
+        "ldp x25, x26, [x1, #72]", // Load x25, x26
+        "ldp x27, x28, [x1, #88]", // Load x27, x28
         // Return to target context
         "ret",
     );
