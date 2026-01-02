@@ -1,4 +1,4 @@
-use crate::abi::linux::aarch64::LinuxAarch64Abi;
+use crate::abi::linux::LinuxAbi;
 use crate::arch::Trapframe;
 use crate::sync::waker::Waker;
 use alloc::collections::BTreeMap;
@@ -57,7 +57,7 @@ pub fn wake_address(uaddr: usize, max: usize) -> usize {
 }
 
 /// Linux futex syscall (minimal implementation: WAIT/WAKE)
-pub fn sys_futex(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_futex(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match crate::task::mytask() {
         Some(t) => t,
         None => return super::errno::to_result(super::errno::EPERM),

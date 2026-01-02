@@ -5,6 +5,12 @@
 //! modules (linux::riscv64, linux::aarch64) re-export these and add
 //! their own syscall tables with architecture-specific configurations.
 
-#[macro_use]
-pub mod macros;
 pub mod errno;
+pub mod fs;
+pub mod futex;
+pub mod mm;
+pub mod pipe;
+pub mod proc;
+pub mod signal;
+pub mod socket;
+pub mod time;

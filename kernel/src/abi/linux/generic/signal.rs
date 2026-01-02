@@ -1,9 +1,9 @@
-//! Linux RISC-V 64 signal syscalls and signal handling
+//! Linux generic signal syscalls and signal handling
 //!
 //! Implements POSIX signals with Linux-compatible semantics, integrated with Scarlet's
 //! event system for cross-ABI signal delivery.
 
-use crate::abi::linux::riscv64::LinuxRiscv64Abi;
+use crate::abi::linux::LinuxAbi;
 use crate::arch::Trapframe;
 use crate::ipc::event::{Event, EventContent, ProcessControlType};
 use crate::task::mytask;
@@ -227,7 +227,7 @@ impl SignalState {
 /// Linux rt_sigaction system call implementation
 ///
 /// int rt_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact, size_t sigsetsize);
-pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_rt_sigaction(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     let signum = trapframe.get_arg(0) as u32;
@@ -273,7 +273,7 @@ pub fn sys_rt_sigaction(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 /// Linux rt_sigprocmask system call implementation
 ///
 /// int rt_sigprocmask(int how, const sigset_t *set, sigset_t *oldset, size_t sigsetsize);
-pub fn sys_rt_sigprocmask(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     let how = trapframe.get_arg(0);
@@ -347,7 +347,7 @@ pub fn handle_event_to_signal(event: &Event) -> Option<LinuxSignal> {
 }
 
 /// Deliver a signal to a task's signal state
-pub fn deliver_signal_to_task(abi: &LinuxRiscv64Abi, signal: LinuxSignal) {
+pub fn deliver_signal_to_task(abi: &LinuxAbi, signal: LinuxSignal) {
     // Add signal to pending if it's not already pending
     let mut signal_state = abi.signal_state.lock();
     if !signal_state.is_pending(signal) {
@@ -356,7 +356,7 @@ pub fn deliver_signal_to_task(abi: &LinuxRiscv64Abi, signal: LinuxSignal) {
 }
 
 /// Check if task has pending signals and return the next one to handle
-pub fn get_next_pending_signal(abi: &LinuxRiscv64Abi) -> Option<LinuxSignal> {
+pub fn get_next_pending_signal(abi: &LinuxAbi) -> Option<LinuxSignal> {
     let signal_state = abi.signal_state.lock();
     signal_state.next_deliverable_signal()
 }

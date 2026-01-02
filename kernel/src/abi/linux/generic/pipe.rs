@@ -1,10 +1,13 @@
-//! Linux RISC-V 64 pipe syscalls (minimum implementation)
+//! Linux generic pipe syscalls (minimum implementation)
 //!
 
 use crate::{
-    abi::linux::riscv64::{
-        LinuxRiscv64Abi, errno,
-        fs::{FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK},
+    abi::linux::{
+        LinuxAbi,
+        generic::{
+            errno,
+            fs::{FD_CLOEXEC, O_CLOEXEC, O_NONBLOCK},
+        },
     },
     arch::Trapframe,
     ipc::UnidirectionalPipe,
@@ -13,7 +16,7 @@ use crate::{
 };
 
 /// Minimal sys_pipe2 implementation for Linux ABI (returns 0 on success, -1 on error)
-pub fn sys_pipe2(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_pipe2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return errno::to_result(errno::EIO),

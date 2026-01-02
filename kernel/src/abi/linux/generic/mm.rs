@@ -1,8 +1,6 @@
 use crate::{
-    abi::linux::riscv64::{
-        LinuxRiscv64Abi,
-        errno::{self, to_result},
-    },
+    abi::linux::LinuxAbi,
+    abi::linux::generic::errno::{self, to_result},
     arch::Trapframe,
     environment::PAGE_SIZE,
     mem::page::allocate_raw_pages,
@@ -11,7 +9,7 @@ use crate::{
 };
 use alloc::boxed::Box;
 
-pub fn sys_mmap(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Linux mmap constants
     const MAP_ANONYMOUS: usize = 0x20;
     #[allow(dead_code)]
@@ -635,7 +633,7 @@ fn handle_anonymous_mapping(
     }
 }
 
-pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Linux protection flags
     const PROT_READ: usize = 0x1;
     const PROT_WRITE: usize = 0x2;
@@ -740,7 +738,7 @@ pub fn sys_mprotect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> us
     }
 }
 
-pub fn sys_munmap(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return usize::MAX,

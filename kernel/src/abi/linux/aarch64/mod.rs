@@ -1,26 +1,20 @@
 #[macro_use]
 mod macros;
-pub use super::generic::errno;
-mod fs;
-mod futex;
-mod mm;
-mod pipe;
 mod proc;
-mod signal;
-mod socket;
-mod time;
 
+pub use super::generic::errno;
 // pub mod drivers;
 
 use alloc::{
     boxed::Box, collections::BTreeMap, format, string::ToString, sync::Arc, vec, vec::Vec,
 };
-// use file::{sys_dup, sys_exec, sys_mknod, sys_open, sys_write};
-// use proc::{sys_exit, sys_fork, sys_wait, sys_getpid};
 
-use self::time::PosixTimer;
+use super::generic::time::PosixTimer;
 use crate::{
-    abi::AbiModule,
+    abi::{
+        AbiModule,
+        linux::generic::{self, fs, futex, mm, pipe, signal, socket, time},
+    },
     arch::{self, IntRegisters, Trapframe},
     early_initcall,
     fs::{
@@ -194,7 +188,7 @@ impl LinuxAarch64Abi {
 
     /// Set file descriptor flags
     pub fn set_fd_flags(&mut self, fd: usize, flags: u32) -> Result<(), &'static str> {
-        use crate::abi::linux::aarch64::fs::FD_CLOEXEC;
+        use crate::abi::linux::generic::fs::FD_CLOEXEC;
         use crate::{object::handle::SpecialSemantics, task::mytask};
 
         if fd < MAX_FDS && self.fd_to_handle[fd].is_some() {
@@ -317,7 +311,7 @@ impl LinuxAarch64Abi {
 
 impl AbiModule for LinuxAarch64Abi {
     fn name() -> &'static str {
-        "linux-aarch64"
+        "linux-riscv64"
     }
 
     fn get_name(&self) -> alloc::string::String {
@@ -422,7 +416,7 @@ impl AbiModule for LinuxAarch64Abi {
                     *(paddr as *mut i32) = 0;
                 }
                 // Wake one waiter on the TID address as per Linux semantics
-                let _ = futex::wake_address(ptr, 1);
+                let _ = super::generic::futex::wake_address(ptr, 1);
             }
         }
         // TODO: robust list-based wakeups for owned mutexes at thread exit.
@@ -525,7 +519,7 @@ impl AbiModule for LinuxAarch64Abi {
                             requested.map(|path| {
                                 if path.starts_with("/lib/ld-") || path.starts_with("/lib64/ld-") {
                                     // Map to our system path
-                                    format!("/scarlet/system/linux-aarch64{}", path)
+                                    format!("/scarlet/system/linux-riscv64{}", path)
                                 } else {
                                     path.to_string()
                                 }
@@ -860,7 +854,7 @@ impl AbiModule for LinuxAarch64Abi {
 }
 
 syscall_table! {
-    Invalid = 0 => |_abi: &mut crate::abi::linux::aarch64::LinuxAarch64Abi, _trapframe: &mut crate::arch::Trapframe| {
+    Invalid = 0 => |_abi: &mut crate::abi::linux::LinuxAbi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
     Getcwd = 17 => fs::sys_getcwd,
@@ -894,11 +888,11 @@ syscall_table! {
     NewFstat = 80 => fs::sys_newfstat,
     ReadLinkAt = 78 => fs::sys_readlinkat,
     Fsync = 82 => fs::sys_fsync,
-    Exit = 93 => proc::sys_exit,
-    ExitGroup = 94 => proc::sys_exit_group,
-    SetTidAddress = 96 => proc::sys_set_tid_address,
+    Exit = 93 => generic::proc::sys_exit,
+    ExitGroup = 94 => generic::proc::sys_exit_group,
+    SetTidAddress = 96 => generic::proc::sys_set_tid_address,
     Futex = 98 => futex::sys_futex,
-    SetRobustList = 99 => proc::sys_set_robust_list,
+    SetRobustList = 99 => generic::proc::sys_set_robust_list,
     Nanosleep = 101 => time::sys_nanosleep,
     TimerCreate = 107 => time::sys_timer_create,
     TimerGettime = 108 => time::sys_timer_gettime,
@@ -909,28 +903,28 @@ syscall_table! {
     ClockGetres = 114 => time::sys_clock_getres,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
-    SetGid = 144 => proc::sys_setgid,
-    SetUid = 146 => proc::sys_setuid,
-    SetPgid = 154 => proc::sys_setpgid,
-    GetPgid = 155 => proc::sys_getpgid,
+    SetGid = 144 => generic::proc::sys_setgid,
+    SetUid = 146 => generic::proc::sys_setuid,
+    SetPgid = 154 => generic::proc::sys_setpgid,
+    GetPgid = 155 => generic::proc::sys_getpgid,
     Uname = 160 => proc::sys_uname,
     Umask = 166 => fs::sys_umask,
-    GetPid = 172 => proc::sys_getpid,
-    GetPpid = 173 => proc::sys_getppid,
-    GetUid = 174 => proc::sys_getuid,
-    GetEuid = 175 => proc::sys_geteuid,
-    GetGid = 176 => proc::sys_getgid,
-    GetEgid = 177 => proc::sys_getegid,
-    GetTid = 178 => proc::sys_gettid,
-    Brk = 214 => proc::sys_brk,
+    GetPid = 172 => generic::proc::sys_getpid,
+    GetPpid = 173 => generic::proc::sys_getppid,
+    GetUid = 174 => generic::proc::sys_getuid,
+    GetEuid = 175 => generic::proc::sys_geteuid,
+    GetGid = 176 => generic::proc::sys_getgid,
+    GetEgid = 177 => generic::proc::sys_getegid,
+    GetTid = 178 => generic::proc::sys_gettid,
+    Brk = 214 => generic::proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
-    Clone = 220 => proc::sys_clone,
+    Clone = 220 => generic::proc::sys_clone,
     Execve = 221 => fs::sys_execve,
     Mmap = 222 => mm::sys_mmap,
     Mprotect = 226 => mm::sys_mprotect,
     EpollWait = 232 => fs::sys_epoll_wait,
-    Wait4 = 260 => proc::sys_wait4,
-    Prlimit64 = 261 => proc::sys_prlimit64,
+    Wait4 = 260 => generic::proc::sys_wait4,
+    Prlimit64 = 261 => generic::proc::sys_prlimit64,
     Socket = 198 => socket::sys_socket,
     Bind = 200 => socket::sys_bind,
     Listen = 201 => socket::sys_listen,
@@ -940,7 +934,7 @@ syscall_table! {
     SetSockopt = 208 => socket::sys_setsockopt,
     GetSockopt = 209 => socket::sys_getsockopt,
     RenameAt2 = 276 => fs::sys_renameat2,
-    Membarrier = 283 => proc::sys_membarrier,
+    Membarrier = 283 => generic::proc::sys_membarrier,
 }
 
 fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {

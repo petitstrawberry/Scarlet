@@ -1,5 +1,5 @@
 use crate::{
-    abi::linux::aarch64::LinuxAarch64Abi,
+    abi::linux::LinuxAbi,
     arch::Trapframe,
     device::manager::DeviceManager,
     executor::TransparentExecutor,
@@ -220,14 +220,14 @@ const MAX_ARG_COUNT: usize = 64;
 /// Also allows passing arguments and environment variables to the new program.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
 #[allow(dead_code)]
-pub fn sys_exec(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     // Increment PC to avoid infinite loop if execve fails
@@ -290,13 +290,13 @@ enum OpenMode {
 /// Uses VfsManager::open_relative for safe and efficient path resolution.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///
 /// Returns:
 /// - File descriptor on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_openat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = task
@@ -502,7 +502,7 @@ pub fn sys_openat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
     }
 }
 
-pub fn sys_dup(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_dup(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
@@ -529,7 +529,7 @@ pub fn sys_dup(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_dup3(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let oldfd = trapframe.get_arg(0) as usize;
     let newfd = trapframe.get_arg(1) as usize;
@@ -582,7 +582,7 @@ pub fn sys_dup3(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_close(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     trapframe.increment_pc_next(task);
@@ -599,7 +599,7 @@ pub fn sys_close(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
-pub fn sys_read(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
@@ -723,7 +723,7 @@ pub fn sys_read(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-pub fn sys_write(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
@@ -773,7 +773,7 @@ pub fn sys_write(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
     }
 }
 
-pub fn sys_pread64(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_addr = trapframe.get_arg(1);
@@ -862,7 +862,7 @@ pub fn sys_pread64(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usiz
     }
 }
 
-pub fn sys_pwrite64(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_addr = trapframe.get_arg(1);
@@ -979,7 +979,7 @@ fn stream_error_to_errno(err: StreamError) -> usize {
 /// # Returns
 /// - Number of bytes written on success
 /// - usize::MAX on error
-pub fn sys_writev(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_writev(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let iovec_ptr = trapframe.get_arg(1);
@@ -1093,7 +1093,7 @@ pub fn sys_writev(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
     total_written
 }
 
-pub fn sys_lseek(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_lseek(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let offset = trapframe.get_arg(1) as i64;
@@ -1135,7 +1135,7 @@ pub fn sys_lseek(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 }
 
 // // Create device file
-// pub fn sys_mknod(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+// pub fn sys_mknod(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 //     let task = mytask().unwrap();
 //     trapframe.increment_pc_next(task);
 //     let name_ptr = task.vm_manager.translate_vaddr(trapframe.get_arg(0)).unwrap() as *const u8;
@@ -1166,7 +1166,7 @@ pub fn sys_lseek(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 //     0
 // }
 
-// pub fn sys_fstat(abi: &mut LinuxAarch64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+// pub fn sys_fstat(abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
 //     let fd = trapframe.get_arg(0) as usize;
 
 //     let task = mytask()
@@ -1226,13 +1226,13 @@ pub fn sys_lseek(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 /// Uses VfsManager::resolve_path_from for safe and efficient path resolution.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_newfstatat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
     let path_ptr = task
@@ -1322,7 +1322,7 @@ pub fn sys_newfstatat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> u
 }
 
 #[allow(dead_code)]
-pub fn sys_mkdir(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mkdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
@@ -1344,7 +1344,7 @@ pub fn sys_mkdir(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
 }
 
 #[allow(dead_code)]
-pub fn sys_unlink(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_unlink(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
@@ -1366,7 +1366,7 @@ pub fn sys_unlink(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usiz
 }
 
 #[allow(dead_code)]
-pub fn sys_link(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_link(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
 
@@ -1405,7 +1405,7 @@ pub fn sys_link(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 /// can be relative to their respective directory file descriptors.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: olddirfd (old directory file descriptor)
 ///   - arg1: oldpath_ptr (pointer to source path string)
@@ -1416,7 +1416,7 @@ pub fn sys_link(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_linkat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_linkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -1618,7 +1618,7 @@ fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
 /// # Returns
 /// - 0 or positive value on success
 /// - usize::MAX on error (-1 in Linux)
-pub fn sys_ioctl(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let request = trapframe.get_arg(1) as u32;
@@ -1692,13 +1692,13 @@ pub fn sys_ioctl(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 /// environment variables to the new program.
 ///
 /// # Arguments
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///
 /// # Returns
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_execve(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
 
     // Increment PC to avoid infinite loop if execve fails
@@ -1788,7 +1788,7 @@ pub struct IoVec {
 /// This is a minimal implementation that logs the fcntl commands being used
 /// to help understand what functionality needs to be implemented.
 const LOG_FCNTL: bool = false;
-pub fn sys_fcntl(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let cmd = trapframe.get_arg(1) as u32;
@@ -2022,7 +2022,7 @@ impl LinuxDirent64 {
 }
 
 /// getdents64 syscall implementation
-pub fn sys_getdents64(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_getdents64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let buf_ptr = task
@@ -2096,7 +2096,7 @@ pub fn sys_getdents64(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> u
 /// # Returns
 /// - On success: number of bytes read
 /// - On error: usize::MAX
-pub fn sys_readv(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_readv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let iovec_ptr = trapframe.get_arg(1);
@@ -2191,7 +2191,7 @@ pub fn sys_readv(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 /// Returns:
 /// - 0 on success
 /// - usize::MAX on error
-pub fn sys_fsync(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_fsync(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let _fd = trapframe.get_arg(0);
     trapframe.increment_pc_next(task);
@@ -2204,12 +2204,12 @@ pub fn sys_fsync(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
 /// Linux sys_faccessat implementation (dummy: always returns 0)
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///
 /// Returns:
 /// - 0 (success)
-pub fn sys_faccessat(_abi: &mut LinuxAarch64Abi, trapframe: &mut crate::arch::Trapframe) -> usize {
+pub fn sys_faccessat(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
     trapframe.increment_pc_next(task);
 
@@ -2239,7 +2239,7 @@ pub fn sys_faccessat(_abi: &mut LinuxAarch64Abi, trapframe: &mut crate::arch::Tr
 ///
 /// Currently supports only AT_FDCWD (current working directory) as dirfd.
 ///
-pub fn sys_mkdirat(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -2280,7 +2280,7 @@ pub fn sys_mkdirat(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usi
 /// This is equivalent to stat() but uses a file descriptor instead of a path.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: fd (file descriptor)
 ///   - arg1: stat_ptr (pointer to LinuxStat structure)
@@ -2288,7 +2288,7 @@ pub fn sys_mkdirat(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usi
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_newfstat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -2377,7 +2377,7 @@ pub fn sys_newfstat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usi
 /// Otherwise, resolves the base directory from the file descriptor.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: dirfd (directory file descriptor)
 ///   - arg1: path_ptr (pointer to path string)
@@ -2386,7 +2386,7 @@ pub fn sys_newfstat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usi
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_unlinkat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_unlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -2507,14 +2507,14 @@ pub fn sys_unlinkat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usi
 /// Real epoll functionality is not implemented.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context  
+/// - abi: LinuxAbi context  
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: flags (epoll creation flags)
 ///
 /// Returns:
 /// - file descriptor on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_epoll_create1(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_epoll_create1(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -2547,7 +2547,7 @@ pub fn sys_epoll_create1(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -
 /// that simply returns success without doing anything.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: epfd (epoll file descriptor)
 ///   - arg1: op (operation: EPOLL_CTL_ADD, EPOLL_CTL_MOD, EPOLL_CTL_DEL)
@@ -2557,7 +2557,7 @@ pub fn sys_epoll_create1(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_epoll_ctl(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_epoll_ctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -2586,7 +2586,7 @@ pub fn sys_epoll_ctl(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> u
 /// that immediately returns 0 (no events ready) to prevent blocking.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: epfd (epoll file descriptor)
 ///   - arg1: events (pointer to epoll_event array)
@@ -2596,7 +2596,7 @@ pub fn sys_epoll_ctl(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> u
 /// Returns:
 /// - number of ready events
 /// - usize::MAX (Linux -1) on error
-pub fn sys_epoll_wait(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_epoll_wait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -2625,7 +2625,7 @@ pub fn sys_epoll_wait(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> 
 /// that immediately returns 0 (no events ready).
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: epfd (epoll file descriptor)  
 ///   - arg1: events (pointer to epoll_event array)
@@ -2636,7 +2636,7 @@ pub fn sys_epoll_wait(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> 
 /// Returns:
 /// - number of ready events
 /// - usize::MAX (Linux -1) on error
-pub fn sys_epoll_pwait(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_epoll_pwait(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -2670,7 +2670,7 @@ pub fn sys_epoll_pwait(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) ->
 ///   arg5: sigmask pointer (ignored)
 ///
 /// Returns: number of ready descriptors, or -1 (usize::MAX) on error.
-pub fn sys_pselect6(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     use crate::object::capability::selectable::{ReadyInterest, ReadySet};
     use crate::timer::ns_to_ticks;
 
@@ -2890,7 +2890,7 @@ pub fn sys_pselect6(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usi
 ///   arg4: sigsetsize (ignored)
 ///
 /// Returns: number of fds with non-zero revents, or -1 (usize::MAX) on error.
-pub fn sys_ppoll(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     use crate::object::capability::selectable::{ReadyInterest, ReadySet};
     use crate::timer::ns_to_ticks;
 
@@ -3098,7 +3098,7 @@ pub fn sys_ppoll(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 /// and returns success without actually changing permissions.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: fd (file descriptor)
 ///   - arg1: mode (new file permissions)
@@ -3106,7 +3106,7 @@ pub fn sys_ppoll(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize 
 /// Returns:
 /// - 0 on success (if fd is valid)
 /// - usize::MAX (Linux -1) on error (if fd is invalid)
-pub fn sys_fchmod(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -3142,13 +3142,13 @@ pub fn sys_fchmod(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
 /// without actually storing or using it for file creation permissions.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: mask (new file creation mask)
 ///
 /// Returns:
 /// - The provided mask value (simulating the previous umask)
-pub fn sys_umask(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_umask(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -3175,7 +3175,7 @@ pub fn sys_umask(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
 /// Properly queries the VFS and does not append a null terminator.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context  
+/// - abi: LinuxAbi context  
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: dirfd (directory file descriptor or AT_FDCWD)
 ///   - arg1: pathname (pointer to path string)
@@ -3185,7 +3185,7 @@ pub fn sys_umask(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize
 /// Returns:
 /// - Number of bytes placed in buf on success
 /// - usize::MAX (Linux -1) on error
-pub fn sys_readlinkat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return errno::to_result(errno::EIO),
@@ -3295,7 +3295,7 @@ pub fn sys_readlinkat(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> u
 /// Returns:
 /// - Number of bytes written to buffer on success
 /// - usize::MAX on error
-pub fn sys_getcwd(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_getcwd(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let buf_ptr = trapframe.get_arg(0);
     let size = trapframe.get_arg(1);
@@ -3345,7 +3345,7 @@ pub fn sys_getcwd(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usiz
 /// Returns:
 /// - 0 on success
 /// - usize::MAX on error (path not found, not a directory, permission denied, etc.)
-pub fn sys_chdir(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_chdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -3442,7 +3442,7 @@ const RENAME_WHITEOUT: u32 = 1 << 2; // Create whiteout object
 /// Returns:
 /// - 0 on success
 /// - usize::MAX on error
-pub fn sys_renameat2(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_renameat2(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,

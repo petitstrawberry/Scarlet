@@ -1,4 +1,4 @@
-//! Time-related system calls for Linux ABI on RISC-V 64
+//! Time-related system calls for generic Linux ABI
 //!
 //! This module implements Linux time system calls for the Scarlet kernel,
 //! providing compatibility with Linux userspace programs that need time information.
@@ -8,7 +8,7 @@ use super::{
     signal::{LinuxSignal, SignalState},
 };
 use crate::{
-    abi::linux::aarch64::LinuxAarch64Abi,
+    abi::linux::LinuxAbi,
     arch::Trapframe,
     sched::scheduler::get_scheduler,
     task::mytask,
@@ -313,7 +313,7 @@ pub const CLOCK_BOOTTIME: i32 = 7;
 /// Linux `timer_create` implementation.
 ///
 /// Returns 0 on success or negative errno on failure.
-pub fn sys_timer_create(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_timer_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EFAULT),
@@ -396,7 +396,7 @@ pub fn sys_timer_create(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) ->
 }
 
 /// Linux `timer_settime` implementation.
-pub fn sys_timer_settime(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_timer_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EFAULT),
@@ -462,7 +462,7 @@ pub fn sys_timer_settime(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -
 }
 
 /// Linux `timer_gettime` implementation.
-pub fn sys_timer_gettime(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_timer_gettime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EFAULT),
@@ -502,7 +502,7 @@ pub fn sys_timer_gettime(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -
 }
 
 /// Linux `timer_getoverrun` implementation (simple stub returning 0).
-pub fn sys_timer_getoverrun(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_timer_getoverrun(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EFAULT),
@@ -527,7 +527,7 @@ pub fn sys_timer_getoverrun(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe
 }
 
 /// Linux `timer_delete` implementation.
-pub fn sys_timer_delete(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_timer_delete(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EFAULT),
@@ -558,7 +558,7 @@ pub fn sys_timer_delete(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) ->
 /// - 0 on success
 /// - -EINVAL (-22) for invalid clock_id
 /// - -EFAULT (-14) for invalid timespec pointer
-pub fn sys_clock_gettime(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().expect("No current task found");
     let clock_id = trapframe.get_arg(0) as i32; // a0
 
@@ -628,7 +628,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) 
 /// - 0 on success
 /// - -EFAULT (-14) for invalid pointer
 /// - -EINTR (-4) if interrupted by signal (not implemented, always 0)
-pub fn sys_nanosleep(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_nanosleep(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Get current task
     let task = match mytask() {
         Some(task) => task,
@@ -666,7 +666,7 @@ pub fn sys_nanosleep(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> u
 /// returns a reasonable resolution for the specified clock.
 ///
 /// Arguments:
-/// - abi: LinuxAarch64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: clk_id (clock ID)
 ///   - arg1: res (pointer to timespec structure for resolution)
@@ -674,7 +674,7 @@ pub fn sys_nanosleep(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> u
 /// Returns:
 /// - 0 on success
 /// - usize::MAX on error
-pub fn sys_clock_getres(_abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_clock_getres(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,

@@ -1,7 +1,4 @@
-use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi, arch::Trapframe, ipc::pipe::UnidirectionalPipe,
-    task::mytask,
-};
+use crate::{abi::linux::LinuxAbi, arch::Trapframe, ipc::pipe::UnidirectionalPipe, task::mytask};
 
 /// Linux socket domains
 pub const AF_UNIX: i32 = 1; // Unix domain sockets
@@ -22,7 +19,7 @@ pub const SOCK_SEQPACKET: i32 = 5; // Sequenced packet socket
 /// network communication won't work.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: domain (communication domain, e.g., AF_UNIX, AF_INET)
 ///   - arg1: type (socket type, e.g., SOCK_STREAM, SOCK_DGRAM)
@@ -31,7 +28,7 @@ pub const SOCK_SEQPACKET: i32 = 5; // Sequenced packet socket
 /// Returns:
 /// - file descriptor on success (mock socket using pipe)
 /// - usize::MAX (Linux -1) on error
-pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -71,7 +68,7 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 /// always succeeds to allow applications to proceed.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: sockfd (socket file descriptor)
 ///   - arg1: addr (pointer to socket address structure)
@@ -80,7 +77,7 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_bind(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_bind(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -103,7 +100,7 @@ pub fn sys_bind(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 /// implementation that always succeeds to allow applications to proceed.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: sockfd (socket file descriptor)
 ///   - arg1: backlog (maximum queue length for pending connections)
@@ -111,7 +108,7 @@ pub fn sys_bind(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_listen(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_listen(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -133,7 +130,7 @@ pub fn sys_listen(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 /// creates a new pipe and returns it as a "connected" socket fd.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: sockfd (socket file descriptor)
 ///   - arg1: addr (pointer to socket address structure for peer)
@@ -142,7 +139,7 @@ pub fn sys_listen(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 /// Returns:
 /// - new socket file descriptor on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_accept(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_accept(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -176,7 +173,7 @@ pub fn sys_accept(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 /// always succeeds to allow applications to proceed.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: sockfd (socket file descriptor)
 ///   - arg1: addr (pointer to socket address structure)
@@ -185,7 +182,7 @@ pub fn sys_accept(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_connect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_connect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -208,7 +205,7 @@ pub fn sys_connect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
 /// writes dummy data and succeeds to allow applications to proceed.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: sockfd (socket file descriptor)
 ///   - arg1: addr (pointer to socket address structure)
@@ -217,7 +214,7 @@ pub fn sys_connect(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usi
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_getsockname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_getsockname(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -260,7 +257,7 @@ pub fn sys_getsockname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 /// writes dummy data and succeeds to allow applications to proceed.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: sockfd (socket file descriptor)
 ///   - arg1: level (protocol level)
@@ -271,7 +268,7 @@ pub fn sys_getsockname(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) ->
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_getsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_getsockopt(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -316,7 +313,7 @@ pub fn sys_getsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
 /// always succeeds to allow applications to proceed.
 ///
 /// Arguments:
-/// - abi: LinuxRiscv64Abi context
+/// - abi: LinuxAbi context
 /// - trapframe: Trapframe containing syscall arguments
 ///   - arg0: sockfd (socket file descriptor)
 ///   - arg1: level (protocol level)
@@ -327,7 +324,7 @@ pub fn sys_getsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> 
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_setsockopt(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_setsockopt(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
