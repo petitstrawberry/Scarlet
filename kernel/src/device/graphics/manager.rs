@@ -443,11 +443,16 @@ impl GraphicsManager {
             return 0;
         }
 
-        // Read bytes from framebuffer memory
+        // Read bytes from framebuffer memory.
+        //
+        // NOTE: For QEMU+HVF, avoid memcpy-style accesses that may VM-exit as
+        // EC_DATAABORT without ISV and abort the host (assert(isv)).
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *const u8;
             let src = fb_ptr.add(position);
-            core::ptr::copy_nonoverlapping(src, buffer.as_mut_ptr(), bytes_to_read);
+            for i in 0..bytes_to_read {
+                buffer[i] = core::ptr::read_volatile(src.add(i));
+            }
         }
 
         bytes_to_read
@@ -481,11 +486,14 @@ impl GraphicsManager {
             return Err("No space available in framebuffer");
         }
 
-        // Write bytes to framebuffer memory
+        // Write bytes to framebuffer memory.
+        // See note in read_framebuffer() about QEMU+HVF and ISV.
         unsafe {
             let fb_ptr = fb_resource.physical_addr as *mut u8;
             let dst = fb_ptr.add(position);
-            core::ptr::copy_nonoverlapping(buffer.as_ptr(), dst, bytes_to_write);
+            for i in 0..bytes_to_write {
+                core::ptr::write_volatile(dst.add(i), buffer[i]);
+            }
         }
 
         Ok(bytes_to_write)

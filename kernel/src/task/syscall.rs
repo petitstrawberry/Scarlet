@@ -119,7 +119,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             let child_id = child_task.get_id();
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
-            child_task.vcpu.iregs.reg[10] = 0; /* Set the return value to 0 in the child task */
+            child_task.vcpu.iregs.set_return_value(0); /* Set the return value to 0 in the child task */
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
             /* Return the child task ID to the parent task */
@@ -207,8 +207,13 @@ pub fn sys_execve(trapframe: &mut Trapframe) -> usize {
             // we should respect that value instead of hardcoding 0
             trapframe.get_return_value()
         }
-        Err(_) => {
-            // crate::println!("[EXECVE] Task {}: execute_binary failed", task.get_id());
+        Err(e) => {
+            crate::println!(
+                "[EXECVE] Task {}: execute_binary failed for path='{}': {}",
+                task.get_id(),
+                path_str,
+                e
+            );
             // Execution failed - return error code
             // The trap handler will automatically set trapframe return value from our return
             usize::MAX // Error return value

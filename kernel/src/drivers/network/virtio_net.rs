@@ -175,6 +175,17 @@ impl VirtioNetDevice {
         // Read device configuration with the negotiated features
         device.read_device_config(negotiated_features);
 
+        // Prefill RX virtqueue buffers early.
+        // Without RX descriptors posted, QEMU may log
+        // `virtio: bogus descriptor or out of resources` when it tries to
+        // deliver packets to a ready virtio-net device.
+        if let Err(e) = device.init_network() {
+            crate::early_println!(
+                "[virtio-net] Warning: failed to initialize RX buffers early: {}",
+                e
+            );
+        }
+
         device
     }
 
@@ -253,7 +264,10 @@ impl VirtioNetDevice {
                 .ok_or("Failed to allocate RX descriptor")?;
 
             // Setup descriptor - device writes virtio-net header + packet data here
-            rx_queue.desc[desc_idx].addr = buffer_ptr as *mut u8 as u64;
+            let buffer_phys = crate::vm::get_kernel_vm_manager()
+                .translate_vaddr(buffer_ptr as *mut u8 as usize)
+                .ok_or("Failed to translate RX buffer vaddr")?;
+            rx_queue.desc[desc_idx].addr = buffer_phys as u64;
             rx_queue.desc[desc_idx].len = total_size as u32;
             rx_queue.desc[desc_idx].flags = DescriptorFlag::Write as u16; // Device writes
             rx_queue.desc[desc_idx].next = 0; // No chaining
@@ -315,7 +329,10 @@ impl VirtioNetDevice {
                 .ok_or("Failed to allocate TX descriptor")?;
 
             // Setup descriptor for the combined buffer (device readable)
-            tx_queue.desc[desc_idx].addr = buffer_ptr as *mut u8 as u64;
+            let buffer_phys = crate::vm::get_kernel_vm_manager()
+                .translate_vaddr(buffer_ptr as *mut u8 as usize)
+                .ok_or("Failed to translate TX buffer vaddr")?;
+            tx_queue.desc[desc_idx].addr = buffer_phys as u64;
             tx_queue.desc[desc_idx].len = total_size as u32;
             tx_queue.desc[desc_idx].flags = 0; // No flags, single descriptor
             tx_queue.desc[desc_idx].next = 0; // No chaining
@@ -644,7 +661,7 @@ impl NetworkDevice for VirtioNetDevice {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "riscv64"))]
 mod tests {
     use super::*;
     use alloc::vec;

@@ -30,7 +30,7 @@ use crate::{
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
     },
-    vm::{setup_trampoline, setup_user_stack},
+    vm::setup_user_stack,
 };
 
 const MAX_FDS: usize = 1024; // Maximum number of file descriptors
@@ -554,7 +554,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         let root_page_table = arch::vm::get_pagetable(idx).unwrap();
                         root_page_table.unmap_all();
                         // Setup the trampoline
-                        setup_trampoline(&mut task.vm_manager);
+                        arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
                         // Setup the stack following Linux ABI standard layout
                         let (_, stack_top) = setup_user_stack(task);
                         let mut sp = stack_top as usize;

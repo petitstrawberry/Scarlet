@@ -9,9 +9,8 @@ use vmem::VirtualMemoryMap;
 use vmem::VirtualMemoryPermission;
 
 use crate::arch::Arch;
-use crate::arch::get_cpu;
+use crate::arch::get_device_memory_areas;
 use crate::arch::get_kernel_trapvector_paddr;
-use crate::arch::get_user_trapvector_paddr;
 use crate::arch::set_trapvector;
 use crate::arch::vm::alloc_virtual_address_space;
 use crate::arch::vm::get_root_pagetable;
@@ -21,7 +20,6 @@ use crate::environment::KERNEL_VM_STACK_START;
 use crate::environment::NUM_OF_CPUS;
 use crate::environment::PAGE_SIZE;
 use crate::environment::USER_STACK_END;
-use crate::environment::VMMAX;
 use crate::environment::{
     KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, KERNEL_KSTACK_SLOT_SIZE,
     KERNEL_KSTACK_SLOTS, TASK_KERNEL_STACK_SIZE,
@@ -34,13 +32,6 @@ extern crate alloc;
 
 pub mod manager;
 pub mod vmem;
-
-unsafe extern "C" {
-    static __KERNEL_SPACE_START: usize;
-    static __KERNEL_SPACE_END: usize;
-    static __TRAMPOLINE_START: usize;
-    static __TRAMPOLINE_END: usize;
-}
 
 static mut KERNEL_VM_MANAGER: Option<VirtualMemoryManager> = None;
 
@@ -70,8 +61,12 @@ static mut KERNEL_AREA: Option<MemoryArea> = None;
 pub fn kernel_vm_init(kernel_area: MemoryArea) {
     let manager = get_kernel_vm_manager();
 
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: start");
+
     let asid = alloc_virtual_address_space(); /* Kernel ASID */
     let root_page_table = get_root_pagetable(asid).unwrap();
+
     manager.set_asid(asid);
 
     /* Map kernel space */
@@ -105,44 +100,53 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
         .map_err(|e| panic!("Failed to map kernel memory area: {}", e))
         .unwrap();
 
-    let dev_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        pmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true, // Device memory should be shared
-        owner: None,
-    };
-    manager
-        .add_memory_map(dev_map.clone())
-        .map_err(|e| panic!("Failed to add device memory map: {}", e))
-        .unwrap();
+    // Map device memory areas (architecture-specific)
+    for dev_area in get_device_memory_areas() {
+        let dev_map = VirtualMemoryMap {
+            vmarea: dev_area,
+            pmarea: dev_area,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true, // Device memory should be shared
+            owner: None,
+        };
+        manager
+            .add_memory_map(dev_map.clone())
+            .map_err(|e| panic!("Failed to add device memory map: {}", e))
+            .unwrap();
+        root_page_table
+            .map_memory_area(asid, dev_map.clone(), true, true)
+            .map_err(|e| panic!("Failed to map device memory area: {}", e))
+            .unwrap();
+    }
 
     early_println!(
         "Kernel space mapped       : {:#018x} - {:#018x}",
         kernel_area.start,
         kernel_area.end
     );
-    early_println!(
-        "Device space mapped       : {:#018x} - {:#018x}",
-        dev_map.vmarea.start,
-        dev_map.vmarea.end
-    );
-    early_println!(
-        "Kernel space mapped       : {:#018x} - {:#018x}",
-        kernel_start,
-        kernel_end
-    );
+    for dev_area in get_device_memory_areas() {
+        early_println!(
+            "Device space mapped       : {:#018x} - {:#018x}",
+            dev_area.start,
+            dev_area.end
+        );
+    }
 
-    setup_trampoline(manager);
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: setup_trampoline_for_kernel...");
 
+    crate::arch::vm::setup_trampoline_for_kernel(manager);
+
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: trampoline ok");
+
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     root_page_table.switch(manager.get_asid());
+
+    #[cfg(any(debug_assertions, test))]
+    early_println!("[vm] kernel_vm_init: done");
 }
 
 pub fn user_vm_init(task: &mut Task) {
@@ -161,7 +165,13 @@ pub fn user_vm_init(task: &mut Task) {
         .map_err(|e| panic!("Failed to allocate guard page: {}", e))
         .unwrap();
 
-    setup_trampoline(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+
+    // Trampoline-managed high-VA infrastructure also includes per-task kstack windows.
+    // Keep this in the VM init flow so callers don't need a separate map_* step.
+    setup_trampoline_for_task_kstack_window(task)
+        .map_err(|e| panic!("Failed to setup task kstack window: {}", e))
+        .unwrap();
 }
 
 pub fn user_kernel_vm_init(task: &mut Task) {
@@ -200,26 +210,27 @@ pub fn user_kernel_vm_init(task: &mut Task) {
         .map_err(|e| panic!("Failed to allocate kernel stack pages: {}", e))
         .unwrap();
 
-    let dev_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        pmarea: MemoryArea {
-            start: 0x00,
-            end: 0x7fff_ffff,
-        },
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize,
-        is_shared: true, // Device memory should be shared
-        owner: None,
-    };
-    task.vm_manager
-        .add_memory_map(dev_map)
-        .map_err(|e| panic!("Failed to add device memory map: {}", e))
-        .unwrap();
+    // Map device memory areas (architecture-specific)
+    for dev_area in get_device_memory_areas() {
+        let dev_map = VirtualMemoryMap {
+            vmarea: dev_area,
+            pmarea: dev_area,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true, // Device memory should be shared
+            owner: None,
+        };
+        task.vm_manager
+            .add_memory_map(dev_map)
+            .map_err(|e| panic!("Failed to add device memory map: {}", e))
+            .unwrap();
+    }
 
-    setup_trampoline(&mut task.vm_manager);
+    crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+
+    setup_trampoline_for_task_kstack_window(task)
+        .map_err(|e| panic!("Failed to setup task kstack window: {}", e))
+        .unwrap();
 }
 
 // --------------------
@@ -276,7 +287,7 @@ fn kstack_alloc() -> &'static Mutex<KernelKstackAllocator> {
 /// Map the task's kernel stack physical pages into the shared kernel PT at a unique high VA window.
 /// Adds an unmapped guard page at the bottom of the window.
 #[allow(static_mut_refs)]
-pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str> {
+pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'static str> {
     // Allocate a window slot
     let (slot_idx, base, _top) = kstack_alloc()
         .lock()
@@ -284,7 +295,7 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
         .ok_or("No free kernel stack window slots")?;
 
     // Physical (identity) address range of the task's kernel stack
-    let km_area = task.get_kernel_stack_memory_area();
+    let km_area = task.get_kernel_stack_memory_area_paddr();
     let paddr_start = km_area.start;
     let paddr_end = paddr_start + TASK_KERNEL_STACK_SIZE - 1;
 
@@ -320,6 +331,29 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
     // Record base for later SP and teardown
     task.set_kernel_stack_window_base(Some((slot_idx, base)));
 
+    // Update the task's kernel context SP to point into the high-VA window.
+    // After boot, tasks are scheduled via `switch_to` which restores KernelContext.sp.
+    // If we keep SP pointing to the raw allocated stack pointer, AArch64 can fault at
+    // exception entry (SP_EL1) and the kernel may also miss the intended trampoline-managed
+    // stack window. The window top is page-aligned, so stack alignment is also guaranteed.
+    let stack_top = (base + crate::environment::PAGE_SIZE + TASK_KERNEL_STACK_SIZE) as u64;
+    let tf_size = core::mem::size_of::<crate::arch::Trapframe>() as u64;
+    let tf_align = core::mem::align_of::<crate::arch::Trapframe>() as u64;
+    debug_assert!(tf_align.is_power_of_two());
+    let sp = (stack_top - tf_size) & !(tf_align - 1);
+    task.get_kernel_context_mut().set_sp(sp);
+
+    #[cfg(any(debug_assertions, test))]
+    crate::early_println!(
+        "Mapped kernel stack window for Task {}: slot {} {:#x} - {:#x}",
+        task.get_id(),
+        slot_idx,
+        base,
+        base + KERNEL_KSTACK_SLOT_SIZE - 1
+    );
+
+    // NOTE: vcpu.sp (user sp) is set separately; this is kernel SP for `switch_to`/traps.
+
     // Debug verification in test / debug builds: ensure guard page is unmapped
     #[cfg(any(debug_assertions, test))]
     {
@@ -337,7 +371,7 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
 
 /// Unmap and free the task's kernel stack window from the shared kernel PT.
 #[allow(static_mut_refs)]
-pub fn unmap_task_kernel_stack_window(task: &mut Task) {
+pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
     if let Some((slot_idx, base)) = task.get_kernel_stack_window_base() {
         let vstart = base + crate::environment::PAGE_SIZE;
         let vend = vstart + TASK_KERNEL_STACK_SIZE - 1;
@@ -414,64 +448,6 @@ pub fn setup_user_stack(task: &mut Task) -> (usize, usize) {
 
 static mut TRAMPOLINE_TRAP_VECTOR: Option<usize> = None;
 static mut TRAMPOLINE_ARCH: [Option<usize>; NUM_OF_CPUS] = [None; NUM_OF_CPUS];
-
-pub fn setup_trampoline(manager: &mut VirtualMemoryManager) {
-    let trampoline_start = unsafe { &__TRAMPOLINE_START as *const usize as usize };
-    let trampoline_end = unsafe { &__TRAMPOLINE_END as *const usize as usize } - 1;
-    let trampoline_size = trampoline_end - trampoline_start;
-
-    let arch = get_cpu().as_paddr_cpu();
-    let trampoline_vaddr_start = VMMAX - trampoline_size;
-    let trampoline_vaddr_end = VMMAX;
-
-    let trap_entry_paddr = get_user_trapvector_paddr();
-    // let trapframe_paddr = arch.get_trapframe_paddr();
-    let arch_paddr = arch as *const Arch as usize;
-    let trap_entry_offset = trap_entry_paddr - trampoline_start;
-    let arch_offset = arch_paddr - trampoline_start;
-
-    let trap_entry_vaddr = trampoline_vaddr_start + trap_entry_offset;
-    let arch_vaddr = trampoline_vaddr_start + arch_offset;
-
-    // early_println!("Trampoline space mapped   : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    // early_println!("  Trampoline paddr  : {:#x} - {:#x}", trampoline_start, trampoline_end);
-    // early_println!("  Trap entry paddr  : {:#x}", trap_entry_paddr);
-    // early_println!("  Arch paddr        : {:#x}", arch_paddr);
-    // early_println!("  Trampoline vaddr  : {:#x} - {:#x}", trampoline_vaddr_start, trampoline_vaddr_end);
-    // early_println!("  Trap entry vaddr  : {:#x}", trap_entry_vaddr);
-    // early_println!("  Arch vaddr        : {:#x}", arch_vaddr);
-
-    let trampoline_map = VirtualMemoryMap {
-        vmarea: MemoryArea {
-            start: trampoline_vaddr_start,
-            end: trampoline_vaddr_end,
-        },
-        pmarea: MemoryArea {
-            start: trampoline_start,
-            end: trampoline_end,
-        },
-        permissions: VirtualMemoryPermission::Read as usize
-            | VirtualMemoryPermission::Write as usize
-            | VirtualMemoryPermission::Execute as usize,
-        is_shared: true, // Trampoline should be shared across all processes
-        owner: None,
-    };
-
-    manager
-        .add_memory_map(trampoline_map.clone())
-        .map_err(|e| panic!("Failed to add trampoline memory map: {}", e))
-        .unwrap();
-    /* Pre-map the trampoline space */
-    manager
-        .get_root_page_table()
-        .unwrap()
-        .map_memory_area(manager.get_asid(), trampoline_map, true, true)
-        .map_err(|e| panic!("Failed to map trampoline memory area: {}", e))
-        .unwrap();
-
-    set_trampoline_trap_vector(trap_entry_vaddr);
-    set_trampoline_arch(arch.get_cpuid(), arch_vaddr);
-}
 
 pub fn set_trampoline_trap_vector(trap_vector: usize) {
     unsafe {

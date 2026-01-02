@@ -212,6 +212,10 @@ impl InterruptManager {
     /// are discovered/registered, but before other device drivers start enabling
     /// per-device interrupts.
     pub fn init_controllers(&mut self) {
+        // Disable interrupts during initialization
+        disable_interrupts();
+        crate::early_println!("[interrupt] init: local controllers...");
+
         // Initialize local controllers (e.g., CLINT)
         match self.controllers.init_local_controllers() {
             Ok(()) => {}
@@ -220,6 +224,9 @@ impl InterruptManager {
             }
         }
 
+        crate::early_println!("[interrupt] init: local controllers done");
+
+        crate::early_println!("[interrupt] init: external controller...");
         // Initialize external controller (e.g., PLIC)
         match self.controllers.init_external_controller() {
             Ok(()) => {}
@@ -227,6 +234,7 @@ impl InterruptManager {
                 crate::early_println!("Failed to initialize external controller: {}", e);
             }
         }
+        crate::early_println!("[interrupt] init: external controller done");
     }
 
     /// Enable CPU interrupt reception (stage 2).
@@ -236,7 +244,6 @@ impl InterruptManager {
     pub fn enable_cpu_interrupts(&mut self) {
         enable_external_interrupts(); // Enable external interrupts
         // Timer interrupts are disabled by default, enable them if needed by scheduler or other components
-        enable_interrupts(); // Enable interrupts globally
     }
 
     // Note: We intentionally do not provide a one-shot `init()` here.

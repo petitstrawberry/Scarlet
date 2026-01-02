@@ -14,4 +14,14 @@ impl IntRegisters {
     pub const fn new() -> Self {
         IntRegisters { reg: [0; 32] }
     }
+
+    pub fn get_return_value(&self) -> usize {
+        // RISC-V syscall return value: a0 (x10)
+        self.reg[10]
+    }
+
+    pub fn set_return_value(&mut self, value: usize) {
+        // RISC-V syscall return value: a0 (x10)
+        self.reg[10] = value;
+    }
 }

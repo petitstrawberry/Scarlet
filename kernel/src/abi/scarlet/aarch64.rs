@@ -1,9 +1,8 @@
-//! Scarlet Native ABI Module
+//! Scarlet Native ABI Module (AArch64)
 //!
 //! This module implements the Scarlet ABI for the Scarlet kernel.
 //! It provides the necessary functionality for handling system calls
 //! and interacting with the Scarlet kernel.
-//!
 
 use alloc::{
     boxed::Box,
@@ -15,7 +14,7 @@ use alloc::{
 };
 
 use crate::{
-    arch::{IntRegisters, Trapframe, vm},
+    arch::{Trapframe, vm},
     early_initcall,
     fs::{
         FileSystemError, FileSystemErrorKind, SeekFrom, VfsManager, drivers::overlayfs::OverlayFS,
@@ -26,10 +25,10 @@ use crate::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
         build_auxiliary_vector, setup_auxiliary_vector_on_stack,
     },
-    vm::{setup_trampoline, setup_user_stack},
+    vm::setup_user_stack,
 };
 
-use super::AbiModule;
+use crate::abi::AbiModule;
 
 #[derive(Default, Copy, Clone)]
 pub struct ScarletAbi;
@@ -130,13 +129,12 @@ impl AbiModule for ScarletAbi {
 
                 // Create Scarlet-specific loading strategy
                 let strategy = LoadStrategy {
-                    choose_base_address: |target, needs_relocation| {
-                        match (target, needs_relocation) {
-                            (LoadTarget::MainProgram, false) => 0, // ET_EXEC: absolute
-                            (LoadTarget::MainProgram, true) => 0x10000, // ET_DYN: PIE
-                            (LoadTarget::Interpreter, _) => 0x40000000, // Dynamic linker
-                            (LoadTarget::SharedLib, _) => 0x50000000, // Shared libraries
-                        }
+                    choose_base_address: |target, needs_relocation| match (target, needs_relocation)
+                    {
+                        (LoadTarget::MainProgram, false) => 0, // ET_EXEC: absolute
+                        (LoadTarget::MainProgram, true) => 0x10000, // ET_DYN: PIE
+                        (LoadTarget::Interpreter, _) => 0x40000000, // Dynamic linker
+                        (LoadTarget::SharedLib, _) => 0x50000000, // Shared libraries
                     },
                     resolve_interpreter: |requested| {
                         // Scarlet ABI: use interpreter as specified in ELF
@@ -158,7 +156,6 @@ impl AbiModule for ScarletAbi {
                         root_page_table.unmap_all();
 
                         // Setup the new memory environment
-                        setup_trampoline(&mut task.vm_manager);
                         let stack_pointer = setup_user_stack(task).1;
 
                         // Handle different execution modes
@@ -203,22 +200,16 @@ impl AbiModule for ScarletAbi {
                         task.vcpu.reset_iregs();
                         task.vcpu.set_sp(stack_pointer);
 
-                        // Setup argv/envp on stack following Unix and RISC-V conventions
+                        // Setup argv/envp on stack following Unix conventions
                         let (adjusted_sp, argv_ptr) =
                             self.setup_arguments_on_stack(task, argv, envp, stack_pointer)?;
                         task.vcpu.set_sp(adjusted_sp);
 
-                        // Set RISC-V calling convention registers
-                        // a0 (reg[10]) = argc
-                        // a1 (reg[11]) = argv pointer
-                        task.vcpu.iregs.reg[10] = argv.len(); // argc
-                        task.vcpu.iregs.reg[11] = argv_ptr; // argv array pointer
-
-                        // crate::println!("Executing binary: {} with entry point: {:#x}", task.name, entry_point);
-                        // crate::println!("Arguments: {:?}", argv);
-                        // crate::println!("Environment: {:?}", envp);
-                        // crate::println!("argv pointer set to: {:#x}", argv_ptr);
-                        // crate::println!("Environment pointer set to: {:#x}", env_ptr);
+                        // Set AArch64 calling convention registers
+                        // x0 (reg[0]) = argc
+                        // x1 (reg[1]) = argv pointer
+                        task.vcpu.iregs.reg[0] = argv.len(); // argc
+                        task.vcpu.iregs.reg[1] = argv_ptr; // argv array pointer
 
                         // Switch to the new task
                         task.vcpu.switch(trapframe);
@@ -255,7 +246,7 @@ impl AbiModule for ScarletAbi {
                 }
                 LoadTarget::SharedLib => {
                     // Shared libraries: medium memory area
-                    Some(0x50000000) // 1.25GB base  
+                    Some(0x50000000) // 1.25GB base
                 }
             }
         } else {
@@ -337,7 +328,6 @@ impl AbiModule for ScarletAbi {
         system_path: &str,
         config_path: &str,
     ) -> Result<(), &'static str> {
-        // crate::println!("Setting up Scarlet overlay environment with system path: {} and config path: {}", system_path, config_path);
         // Scarlet ABI uses overlay mount with system Scarlet tools and config persistence
         let lower_vfs_list = alloc::vec![(base_vfs, system_path)];
         let upper_vfs = base_vfs;
@@ -373,7 +363,6 @@ impl AbiModule for ScarletAbi {
         target_vfs: &Arc<VfsManager>,
         base_vfs: &Arc<VfsManager>,
     ) -> Result<(), &'static str> {
-        // crate::println!("Setting up Scarlet shared resources with base VFS");
         // Scarlet shared resource setup: bind mount common directories and Scarlet gateway
         match create_dir_if_not_exists(target_vfs, "/home") {
             Ok(()) => {}
@@ -388,9 +377,7 @@ impl AbiModule for ScarletAbi {
 
         match target_vfs.bind_mount_from(base_vfs, "/home", "/home") {
             Ok(()) => {}
-            Err(_e) => {
-                // crate::println!("Failed to bind mount /home for Scarlet: {}", e.message);
-            }
+            Err(_e) => {}
         }
 
         match create_dir_if_not_exists(target_vfs, "/data") {
@@ -406,9 +393,7 @@ impl AbiModule for ScarletAbi {
 
         match target_vfs.bind_mount_from(base_vfs, "/data/shared", "/data/shared") {
             Ok(()) => {}
-            Err(_e) => {
-                // crate::println!("Failed to bind mount /data/shared for Scarlet: {}", e.message);
-            }
+            Err(_e) => {}
         }
 
         // Bind mount /dev for device access
@@ -458,7 +443,7 @@ impl ScarletAbi {
     /// ```
     /// [high addresses]
     /// envp strings (null-terminated)
-    /// argv strings (null-terminated)  
+    /// argv strings (null-terminated)
     /// envp[] array (null-terminated pointer array)
     /// argv[] array (null-terminated pointer array)
     /// argc (integer)
@@ -497,7 +482,7 @@ impl ScarletAbi {
         let total_size =
             argc_size + argv_array_size + envp_array_size + argv_strings_size + envp_strings_size;
 
-        // Align to 16-byte boundary for RISC-V ABI compliance
+        // Align to 16-byte boundary for ABI compliance
         let aligned_total_size = (total_size + 15) & !15;
 
         // Calculate new stack pointer

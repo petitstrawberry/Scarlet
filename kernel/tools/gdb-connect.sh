@@ -29,7 +29,7 @@ if [ "$1" = "--test" ]; then
             -ex "target remote :12345" \
             -ex "set confirm off"
     else
-        echo "Test binary not found. Please run 'cargo make debug-test' first."
+        echo "Test binary not found. Please run 'cargo make debug-test-riscv64' first."
         exit 1
     fi
 else
@@ -41,7 +41,7 @@ else
             -ex "target remote :12345" \
             -ex "set confirm off"
     else
-        echo "Kernel binary not found. Please run 'cargo make debug' first."
+        echo "Kernel binary not found. Please run 'cargo make debug-riscv64' first."
         exit 1
     fi
 fi

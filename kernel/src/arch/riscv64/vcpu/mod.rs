@@ -64,6 +64,14 @@ impl Vcpu {
         self.iregs = *iregs;
     }
 
+    /// Clone the entire VCPU state to another VCPU
+    ///
+    /// This copies all registers including general-purpose registers and PC.
+    pub fn clone_to(&self, other: &mut Vcpu) {
+        other.iregs = self.iregs;
+        other.pc = self.pc;
+    }
+
     pub fn store(&mut self, trapframe: &Trapframe) {
         self.iregs = trapframe.regs;
         self.pc = trapframe.epc;

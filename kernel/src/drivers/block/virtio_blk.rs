@@ -233,13 +233,19 @@ impl VirtioBlockDevice {
         };
 
         // Set up header descriptor
-        virtqueues[0].desc[header_desc].addr = (header_ptr as usize) as u64;
+        let header_phys = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(header_ptr as usize)
+            .ok_or("Failed to translate header vaddr")?;
+        virtqueues[0].desc[header_desc].addr = header_phys as u64;
         virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
         virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
         virtqueues[0].desc[header_desc].next = data_desc as u16;
 
         // Set up data descriptor
-        virtqueues[0].desc[data_desc].addr = (data_ptr as *mut u8 as usize) as u64;
+        let data_phys = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(data_ptr as *mut u8 as usize)
+            .ok_or("Failed to translate data vaddr")?;
+        virtqueues[0].desc[data_desc].addr = data_phys as u64;
         virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
 
         // Set flags based on request type
@@ -256,7 +262,10 @@ impl VirtioBlockDevice {
         virtqueues[0].desc[data_desc].next = status_desc as u16;
 
         // Set up status descriptor
-        virtqueues[0].desc[status_desc].addr = (status_ptr as usize) as u64;
+        let status_phys = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(status_ptr as usize)
+            .ok_or("Failed to translate status vaddr")?;
+        virtqueues[0].desc[status_desc].addr = status_phys as u64;
         virtqueues[0].desc[status_desc].len = 1;
         virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
 
@@ -296,7 +305,7 @@ impl VirtioBlockDevice {
         }
 
         // Check status
-        let status_val = unsafe { *status_ptr };
+        let status_val = unsafe { core::ptr::read_volatile(status_ptr) };
         let result = match status_val {
             VIRTIO_BLK_S_OK => {
                 // For read requests, copy data to the buffer
@@ -441,12 +450,35 @@ impl VirtioBlockDevice {
                 virtqueues[0].alloc_desc(),
             ) {
                 // Set up descriptors
-                virtqueues[0].desc[header_desc].addr = (header_ptr as usize) as u64;
+                let header_phys =
+                    match crate::vm::get_kernel_vm_manager().translate_vaddr(header_ptr as usize) {
+                        Some(phys) => phys,
+                        None => {
+                            virtqueues[0].free_desc(status_desc);
+                            virtqueues[0].free_desc(data_desc);
+                            virtqueues[0].free_desc(header_desc);
+                            results[idx] = Err("Failed to translate header vaddr");
+                            continue;
+                        }
+                    };
+                virtqueues[0].desc[header_desc].addr = header_phys as u64;
                 virtqueues[0].desc[header_desc].len = mem::size_of::<VirtioBlkReqHeader>() as u32;
                 virtqueues[0].desc[header_desc].flags = DescriptorFlag::Next as u16;
                 virtqueues[0].desc[header_desc].next = data_desc as u16;
 
-                virtqueues[0].desc[data_desc].addr = (data_ptr as *mut u8 as usize) as u64;
+                let data_phys = match crate::vm::get_kernel_vm_manager()
+                    .translate_vaddr(data_ptr as *mut u8 as usize)
+                {
+                    Some(phys) => phys,
+                    None => {
+                        virtqueues[0].free_desc(status_desc);
+                        virtqueues[0].free_desc(data_desc);
+                        virtqueues[0].free_desc(header_desc);
+                        results[idx] = Err("Failed to translate data vaddr");
+                        continue;
+                    }
+                };
+                virtqueues[0].desc[data_desc].addr = data_phys as u64;
                 virtqueues[0].desc[data_desc].len = req.buffer.len() as u32;
 
                 match req.request_type {
@@ -461,7 +493,18 @@ impl VirtioBlockDevice {
 
                 virtqueues[0].desc[data_desc].next = status_desc as u16;
 
-                virtqueues[0].desc[status_desc].addr = (status_ptr as usize) as u64;
+                let status_phys =
+                    match crate::vm::get_kernel_vm_manager().translate_vaddr(status_ptr as usize) {
+                        Some(phys) => phys,
+                        None => {
+                            virtqueues[0].free_desc(status_desc);
+                            virtqueues[0].free_desc(data_desc);
+                            virtqueues[0].free_desc(header_desc);
+                            results[idx] = Err("Failed to translate status vaddr");
+                            continue;
+                        }
+                    };
+                virtqueues[0].desc[status_desc].addr = status_phys as u64;
                 virtqueues[0].desc[status_desc].len = 1;
                 virtqueues[0].desc[status_desc].flags |= DescriptorFlag::Write as u16;
 
@@ -584,7 +627,7 @@ impl VirtioBlockDevice {
                     pending_requests.remove(&desc_idx)
                 {
                     // Check status
-                    let status_val = unsafe { *status_ptr };
+                    let status_val = unsafe { core::ptr::read_volatile(status_ptr) };
                     results[req_idx] = match status_val {
                         VIRTIO_BLK_S_OK => {
                             // For read requests, copy data back to the buffer
@@ -789,7 +832,7 @@ impl ControlOps for VirtioBlockDevice {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "riscv64"))]
 pub mod tests {
     use super::*;
     use alloc::vec;

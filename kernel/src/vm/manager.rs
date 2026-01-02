@@ -409,7 +409,7 @@ impl VirtualMemoryManager {
             }
         }
 
-        // Map this single page to the MMU
+        // Map this single page to the MMU (not device memory)
         if let Some(root_pagetable) = self.get_root_page_table() {
             root_pagetable.map(
                 self.get_asid(),

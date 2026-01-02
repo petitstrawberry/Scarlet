@@ -503,6 +503,7 @@ mod integration_tests {
     }
 
     #[test_case]
+    #[cfg(target_arch = "riscv64")]
     fn test_dev_fb0_gradient_drawing() {
         // Setup clean graphics manager for this test
         let graphics_manager = GraphicsManager::get_mut_manager();

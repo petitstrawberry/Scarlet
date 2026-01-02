@@ -43,8 +43,8 @@ bash tools/linux/deploy_rootfs.sh
 Build the kernel and the root filesystem image, then run Scarlet:
 
 ```bash
-cargo make build
-cargo make run
+cargo make build-riscv64
+cargo make run-riscv64
 ```
 
 ### 4. Execute Linux Binaries

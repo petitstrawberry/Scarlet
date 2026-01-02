@@ -211,12 +211,18 @@ impl VirtioGpuDeviceCore {
 
     /// Send a command to the control queue
     fn send_control_command<T>(&self, cmd: &T) -> Result<(), &'static str> {
+        let mut resp_buffer = [0u8; 128];
+        self.send_control_command_with_resp_buffer(cmd, &mut resp_buffer)
+    }
+
+    /// Send a command to the control queue, using a caller-provided response buffer.
+    fn send_control_command_with_resp_buffer<T>(
+        &self,
+        cmd: &T,
+        resp_buffer: &mut [u8],
+    ) -> Result<(), &'static str> {
         let mut virtqueues = self.virtqueues.lock();
         let control_queue = &mut virtqueues[0]; // Control queue is index 0
-
-        // The response buffer is allocated on the stack. It's faster and
-        // its memory is automatically reclaimed when the function returns.
-        let mut resp_buffer = [0u8; 128];
 
         // Allocate descriptors
         let cmd_desc = control_queue
@@ -234,8 +240,12 @@ impl VirtioGpuDeviceCore {
         // Set up command descriptor (device readable)
         let cmd_desc_ptr =
             &mut control_queue.desc[cmd_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        let cmd_virt_addr = cmd as *const T as usize;
+        let cmd_phys_addr = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(cmd_virt_addr)
+            .ok_or("Failed to translate cmd vaddr to paddr")?;
         unsafe {
-            core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, (cmd as *const T) as u64);
+            core::ptr::write_volatile(&mut (*cmd_desc_ptr).addr, cmd_phys_addr as u64);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).len, core::mem::size_of::<T>() as u32);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).flags, DescriptorFlag::Next as u16);
             core::ptr::write_volatile(&mut (*cmd_desc_ptr).next, resp_desc as u16);
@@ -244,8 +254,12 @@ impl VirtioGpuDeviceCore {
         // Set up response descriptor (device writable)
         let resp_desc_ptr =
             &mut control_queue.desc[resp_desc] as *mut crate::drivers::virtio::queue::Descriptor;
+        let resp_virt_addr = resp_buffer.as_mut_ptr() as usize;
+        let resp_phys_addr = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(resp_virt_addr)
+            .ok_or("Failed to translate resp_buffer vaddr to paddr")?;
         unsafe {
-            core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_buffer.as_mut_ptr() as u64);
+            core::ptr::write_volatile(&mut (*resp_desc_ptr).addr, resp_phys_addr as u64);
             core::ptr::write_volatile(&mut (*resp_desc_ptr).len, resp_buffer.len() as u32); // Use .len() for safety
             core::ptr::write_volatile(&mut (*resp_desc_ptr).flags, DescriptorFlag::Write as u16);
         }
@@ -300,8 +314,13 @@ impl VirtioGpuDeviceCore {
             padding: 0,
         };
 
-        // Send command
-        self.send_control_command(&cmd)?;
+        // Send command.
+        // GET_DISPLAY_INFO returns a `virtio_gpu_resp_display_info`, which is 408 bytes
+        // (header + 16 scanouts). If we provide a smaller response buffer, QEMU logs:
+        // `virtio_gpu_ctrl_response: response size incorrect 128 vs 408`.
+        // Avoid allocating this response buffer on the stack; use the heap instead.
+        let mut resp_buffer = alloc::vec![0u8; core::mem::size_of::<VirtioGpuRespDisplayInfo>()];
+        self.send_control_command_with_resp_buffer(&cmd, &mut resp_buffer)?;
 
         // For now, create a default display configuration
         let mut display_info = VirtioGpuRespDisplayInfo {
@@ -832,12 +851,14 @@ mod tests {
         assert!(device.get_framebuffer_address().is_err());
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_init_graphics() {
         let mut device = VirtioGpuDevice::new(0x10002000);
         device.init_graphics().unwrap();
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_framebuffer_operations() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -914,6 +935,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_pixel_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -976,6 +998,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_rectangle_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1046,6 +1069,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_border_drawing() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1148,6 +1172,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_pixel_format_verification() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1210,6 +1235,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_command_flow_verification() {
         let mut device = VirtioGpuDevice::new(0x10002000);
@@ -1258,6 +1284,7 @@ mod tests {
         crate::early_println!("[Test] VirtIO GPU command flow verification completed");
     }
 
+    #[cfg(target_arch = "riscv64")]
     #[test_case]
     fn test_virtio_gpu_resource_management() {
         let mut device = VirtioGpuDevice::new(0x10002000);

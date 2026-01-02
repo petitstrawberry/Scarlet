@@ -7,6 +7,10 @@ use crate::early_println;
 use crate::vm::vmem::MemoryArea;
 
 #[global_allocator]
+// Keep the allocator state out of .bss to avoid relying on late-bss pages being
+// accessible on all accelerators (e.g. HVF). The value is still initialized to
+// the same zero state.
+#[unsafe(link_section = ".data")]
 static mut ALLOCATOR: Allocator = Allocator::new();
 
 struct Allocator {

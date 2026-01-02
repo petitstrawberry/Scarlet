@@ -3,14 +3,18 @@ set -euo pipefail
 
 # This script extracts the prebuilt rootfs tarball into the mounted workspace.
 # Optional environment variables:
+#  ARCH       - target architecture (riscv64 or aarch64), defaults to riscv64
 #  TARGET_UID - if set, chown the deployed files to this UID
 #  TARGET_GID - if set, chown the deployed files to this GID
 
-TAR_SRC="/opt/prebuilt/linux-riscv64.tar"
-DEST_DIR="/workspaces/Scarlet/mkfs/rootfs/system/linux-riscv64"
+ARCH="${ARCH:-riscv64}"
+TAR_SRC="/opt/prebuilt/linux-${ARCH}.tar"
+DEST_DIR="/workspaces/Scarlet/mkfs/rootfs/system/linux-${ARCH}"
 
 if [ ! -f "$TAR_SRC" ]; then
   echo "Error: prebuilt tar not found at $TAR_SRC"
+  echo "Available architectures:"
+  ls -1 /opt/prebuilt/*.tar 2>/dev/null || echo "  (none found)"
   exit 1
 fi
 
@@ -21,6 +25,7 @@ if [ "$(ls -A "$DEST_DIR")" ]; then
   rm -rf -- "$DEST_DIR"/*
 fi
 
+echo "Deploying prebuilt Linux rootfs for ${ARCH}"
 echo "Extracting $TAR_SRC -> $DEST_DIR"
 tar -xf "$TAR_SRC" -C "$DEST_DIR"
 

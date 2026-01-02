@@ -22,14 +22,14 @@ use crate::print;
 use crate::println;
 use crate::{
     arch::{
-        Arch, Trapframe, enable_interrupt, get_cpu, get_user_trap_handler, instruction::idle,
-        interrupt::enable_external_interrupts, set_arch, set_next_mode, set_trapvector,
+        Arch, Trapframe, get_cpu, get_user_trap_handler, instruction::idle,
+        interrupt::enable_external_interrupts, set_next_mode, set_trapvector,
         trap::user::arch_switch_to_user_space,
     },
     environment::NUM_OF_CPUS,
     task::{TaskState, new_kernel_task, wake_parent_waiters, wake_task_waiters},
     timer::get_kernel_timer,
-    vm::{get_kernel_vm_manager, get_trampoline_arch, get_trampoline_trap_vector},
+    vm::get_trampoline_trap_vector,
 };
 
 use crate::task::Task;
@@ -284,12 +284,18 @@ impl Scheduler {
     /// Called every timer tick. Decrements the current task's time_slice.
     /// If time_slice reaches 0, triggers a reschedule.
     pub fn on_tick(&mut self, cpu_id: usize, trapframe: &mut Trapframe) {
+        // crate::early_println!("[SCHED] CPU{}: on_tick called", cpu_id);
         if let Some(task_id) = self.get_current_task_id(cpu_id) {
             if let Some(task) = self.task_pool.get_task(task_id) {
                 if task.time_slice > 0 {
                     task.time_slice -= 1;
                 }
                 if task.time_slice == 0 {
+                    // crate::early_println!(
+                    //     "[SCHED] CPU{}: Time slice expired for Task {}",
+                    //     cpu_id,
+                    //     task_id
+                    // );
                     // Time slice expired, trigger reschedule
                     self.schedule(trapframe);
                 }
@@ -360,25 +366,23 @@ impl Scheduler {
         // Schedule returns - trap handler will call arch_switch_to_user_space()
     }
 
-    /* MUST NOT raise any exception in this function before the idle loop */
-    pub fn start_scheduler(&mut self) {
+    /// Start the scheduler and return the first runnable task ID (if any).
+    ///
+    /// This function intentionally avoids performing the initial user-mode transition.
+    /// The very first switch is architecture-specific and should be performed by
+    /// `crate::arch::first_switch_to_user()` from the boot path.
+    pub fn start_scheduler(&mut self) -> Option<usize> {
         let cpu = get_cpu();
         let cpu_id = cpu.get_cpuid();
         let timer = get_kernel_timer();
         timer.stop(cpu_id);
 
-        let trap_vector = get_trampoline_trap_vector();
-        let arch = get_trampoline_arch(cpu_id);
-        set_trapvector(trap_vector);
-        set_arch(arch);
-        cpu.set_trap_handler(get_user_trap_handler());
-        cpu.set_next_address_space(get_kernel_vm_manager().get_asid());
-
-        /* Jump to trap handler immediately */
-        timer.set_interval_us(cpu_id, 0);
-        enable_interrupt();
+        // Program the periodic timer, but do not force/require the first switch via IRQ.
+        timer.set_interval_us(cpu_id, crate::timer::TICK_INTERVAL_US);
         timer.start(cpu_id);
-        idle();
+
+        let (_current_task_id, next_task_id) = self.run(cpu);
+        next_task_id
     }
 
     pub fn get_current_task(&mut self, cpu_id: usize) -> Option<&mut Task> {
@@ -558,7 +562,7 @@ impl Scheduler {
             (base + crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE)
                 as u64
         } else {
-            task.get_kernel_stack_bottom()
+            task.get_kernel_stack_bottom_paddr()
         };
 
         // crate::early_println!("[SCHED]   Setting kernel stack to {:#x}", sp);

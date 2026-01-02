@@ -4,11 +4,11 @@
     "version": "2.0.0",
     "tasks": [
         {
-            // NOTE: Copilot must NOT run this task. Use "cargo make run" in terminal to run the kernel.
-            "label": "kernel",
+            // NOTE: Copilot must NOT run this task. Use "cargo make run-riscv64" or "cargo make run-aarch64" in terminal to run the kernel.
+            "label": "kernel-riscv64",
             "type": "shell",
             "isBackground": true,
-            "command": "cargo make debug",
+            "command": "cargo make debug-riscv64",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
@@ -27,11 +27,55 @@
             ],
         },
         {
-            // NOTE: Copilot must NOT run this task. Use "cargo make test" in terminal to run the test kernel.
-            "label": "test",
+            // NOTE: Copilot must NOT run this task. Use "cargo make test-riscv64" or "cargo make test-aarch64" in terminal to run tests.
+            "label": "test-riscv64",
             "type": "shell",
             "isBackground": true,
-            "command": "cargo make debug-test",
+            "command": "cargo make debug-test-riscv64",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                {
+                    "pattern": {
+                    "regexp": "Starting",
+                    "line": 1,
+                    },
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "Starting",
+                        "endsPattern": "Starting"
+                    }
+                }
+            ]
+        },
+        {
+            "label": "kernel-aarch64",
+            "type": "shell",
+            "isBackground": true,
+            "command": "cargo make debug-aarch64",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                {
+                    "pattern": {
+                    "regexp": "Starting",
+                    "line": 1,
+                    },
+                    "background": {
+                        "activeOnStart": true,
+                        "beginsPattern": "Starting",
+                        "endsPattern": "Starting"
+                    }
+                }
+            ],
+        },
+        {
+            "label": "test-aarch64",
+            "type": "shell",
+            "isBackground": true,
+            "command": "cargo make debug-test-aarch64",
             "options": {
                 "cwd": "${workspaceFolder}"
             },

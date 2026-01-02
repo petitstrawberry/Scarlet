@@ -18,7 +18,7 @@
 
 pub mod executor;
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "riscv64"))]
 mod tests;
 
 // TODO: Update VFS tests to use new API after refactoring

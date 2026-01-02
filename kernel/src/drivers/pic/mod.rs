@@ -4,6 +4,20 @@
 //! used in different platforms and architectures.
 
 // pub mod clint; // Currently not used
+#[cfg(target_arch = "aarch64")]
+pub mod arm_generic_timer;
+#[cfg(target_arch = "aarch64")]
+pub mod gic;
+#[cfg(target_arch = "aarch64")]
+pub mod gicv3;
+#[cfg(target_arch = "riscv64")]
 pub mod plic;
 #[cfg(target_arch = "riscv64")]
 pub mod sbi_clint;
+
+#[cfg(target_arch = "aarch64")]
+pub use gic::Gic;
+#[cfg(target_arch = "aarch64")]
+pub use gicv3::GicV3;
+#[cfg(target_arch = "riscv64")]
+pub use plic::Plic;
