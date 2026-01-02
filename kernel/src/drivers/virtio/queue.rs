@@ -300,6 +300,10 @@ impl<'a> VirtQueue<'a> {
             return Err("Invalid descriptor index");
         }
 
+        // Ensure all descriptor writes are visible before publishing the descriptor index.
+        // Using the architecture-provided I/O barrier is conservative but safe for virtio.
+        crate::arch::io_mb();
+
         let ring_ptr =
             &mut self.avail.ring[(*self.avail.idx as usize) % self.avail.size] as *mut u16;
 
@@ -307,7 +311,8 @@ impl<'a> VirtQueue<'a> {
             core::ptr::write_volatile(ring_ptr, desc_idx as u16);
         }
 
-        fence(core::sync::atomic::Ordering::SeqCst);
+        // Ensure the ring entry is visible before updating idx.
+        crate::arch::io_mb();
 
         // *self.avail.idx = (*self.avail.idx).wrapping_add(1);
 
@@ -316,7 +321,8 @@ impl<'a> VirtQueue<'a> {
             core::ptr::write_volatile(self.avail.idx, new_idx);
         }
 
-        fence(core::sync::atomic::Ordering::SeqCst);
+        // Ensure idx is visible before any subsequent device notification.
+        crate::arch::io_mb();
 
         Ok(())
     }
