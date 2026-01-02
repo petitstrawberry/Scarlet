@@ -22,6 +22,8 @@ pub struct KernelContext {
     pub sp: u64,
     /// Link register (LR/X30)
     pub lr: u64,
+    /// Frame pointer (FP/X29)
+    pub fp: u64,
     /// Callee-saved registers X19-X28
     pub x: [u64; 10],
     /// Kernel stack for this context
@@ -43,6 +45,7 @@ impl KernelContext {
         Self {
             sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
             lr: crate::task::task_initial_kernel_entrypoint as *const () as u64,
+            fp: 0,
             x: [0; 10],
             kernel_stack,
         }
