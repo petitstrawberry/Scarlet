@@ -69,8 +69,8 @@ RUN cd /opt && \
     rm buildroot-2025.02.6.tar.gz && \
     mv buildroot-2025.02.6 buildroot
 
-# Copy configuration files for Buildroot
-COPY docker/.config /opt/buildroot/.config
+# Buildroot configuration files are in tools/linux/configs/buildroot_config_{riscv64,aarch64}
+# and will be copied during build by tools/linux/build_buildroot.sh
 
 # # Create patches directory and copy LTP musl compatibility patch
 # RUN mkdir -p /opt/buildroot/package/ltp-testsuite/patches
