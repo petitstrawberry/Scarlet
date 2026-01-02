@@ -718,3 +718,42 @@ pub fn sys_membarrier(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Always succeed - stub implementation
     0
 }
+
+/// Linux sys_process_mrelease implementation (syscall 448)
+///
+/// Release memory of a dying process.
+/// This syscall allows a process to proactively release memory of another
+/// process that is being killed, potentially improving OOM handling.
+///
+/// Arguments:
+/// - pidfd: file descriptor representing the process
+/// - flags: reserved flags (must be 0)
+///
+/// Returns:
+/// - 0 on success
+/// - Negative error code on failure
+///
+/// Note: This is a stub implementation. Scarlet doesn't currently support
+/// pidfd or advanced memory reclamation, so we return success without
+/// doing anything. This allows musl-based applications to call this
+/// syscall without failing.
+pub fn sys_process_mrelease(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return usize::MAX - 1, // -EPERM
+    };
+
+    let _pidfd = trapframe.get_arg(0);
+    let _flags = trapframe.get_arg(1);
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Stub implementation - just succeed
+    // In a real implementation, this would:
+    // 1. Validate the pidfd file descriptor
+    // 2. Check that flags is 0
+    // 3. Attempt to reclaim memory from the target process
+    // 4. Return appropriate error codes (EBADF, EINVAL, ESRCH, etc.)
+    0
+}

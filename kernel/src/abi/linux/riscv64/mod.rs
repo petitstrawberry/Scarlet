@@ -937,6 +937,7 @@ syscall_table! {
     GetSockopt = 209 => socket::sys_getsockopt,
     RenameAt2 = 276 => fs::sys_renameat2,
     Membarrier = 283 => generic::proc::sys_membarrier,
+    ProcessMrelease = 448 => generic::proc::sys_process_mrelease,
 }
 
 fn create_dir_if_not_exists(vfs: &Arc<VfsManager>, path: &str) -> Result<(), FileSystemError> {
