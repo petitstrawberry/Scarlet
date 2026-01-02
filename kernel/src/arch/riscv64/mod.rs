@@ -18,6 +18,7 @@ use crate::task::Task;
 pub mod boot;
 pub mod context;
 pub mod earlycon;
+pub mod fdt;
 pub mod instruction;
 pub mod interrupt;
 pub mod kernel;
@@ -177,7 +178,7 @@ impl Riscv64 {
     }
 }
 
-#[repr(align(16))]
+#[repr(C, align(16))]
 #[derive(Debug, Clone)]
 pub struct Trapframe {
     pub regs: IntRegisters,

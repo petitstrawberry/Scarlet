@@ -4,6 +4,7 @@
 //! The register file is responsible for storing the general-purpose registers
 //! of the CPU.
 
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntRegisters {
     pub reg: [usize; 32],
