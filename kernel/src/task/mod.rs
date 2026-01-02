@@ -34,7 +34,7 @@ use crate::{
     timer::{TimerHandler, add_timer, get_tick},
     vm::{
         manager::VirtualMemoryManager,
-        map_task_kernel_stack_window, user_kernel_vm_init, user_vm_init,
+        user_kernel_vm_init, user_vm_init,
         vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryRegion},
     },
 };
@@ -411,10 +411,6 @@ impl Task {
                 /* PC will be set when loading the ELF binary */
             }
         }
-
-        // Map kernel stack into shared kernel PT at unique high VA window
-        // This must be done after VM initialization so kernel PT is ready
-        map_task_kernel_stack_window(self).expect("Failed to map kernel stack window");
 
         /* Set the task state to Ready */
         self.state = TaskState::Ready;
@@ -1130,8 +1126,13 @@ impl Task {
             }
         }
 
-        // Initialize kernel context
-        child.kernel_context = KernelContext::new();
+        // Ensure the cloned task has its own high-VA kernel stack window.
+        // Task::new() already allocates a per-task kernel stack (KernelContext), but clone paths
+        // intentionally avoid Task::init() (especially for user tasks). That means the trampoline-
+        // managed kstack window mapping must be set up here.
+        if child.get_kernel_stack_window_base().is_none() {
+            crate::vm::setup_trampoline_for_task_kstack_window(&mut child)?;
+        }
         // Set the state to Ready
         child.state = self.state;
 
@@ -1422,10 +1423,22 @@ impl Task {
     /// at the top of the kernel stack. This provides access to modify the
     /// user context during system calls, interrupts, and context switches.
     ///
+    /// If a kernel stack window is mapped (high-VA), this returns a reference
+    /// via the mapped virtual address. Otherwise, it returns a reference via
+    /// the physical address directly.
+    ///
     /// # Returns
     /// A mutable reference to the Trapframe
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
-        self.kernel_context.get_trapframe()
+        // If we have a kernel stack window mapped, use the high-VA address
+        if let Some((_slot, base)) = self.kernel_stack_window_base {
+            let trapframe_offset = crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE - core::mem::size_of::<Trapframe>();
+            let trapframe_vaddr = base + trapframe_offset;
+            unsafe { &mut *(trapframe_vaddr as *mut Trapframe) }
+        } else {
+            // Fallback to physical address (should not happen for user tasks after init)
+            self.kernel_context.get_trapframe()
+        }
     }
 
     /// Internal: set kernel stack window base (slot index and base vaddr)
@@ -1459,7 +1472,7 @@ impl WaitError {
 impl Drop for Task {
     fn drop(&mut self) {
         // Best-effort teardown of kernel stack window mapping
-        crate::vm::unmap_task_kernel_stack_window(self);
+        crate::vm::teardown_trampoline_for_task_kstack_window(self);
     }
 }
 

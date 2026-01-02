@@ -141,16 +141,6 @@ pub fn kernel_vm_init(kernel_area: MemoryArea) {
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: trampoline ok");
 
-    // AArch64: keep TTBR1 fixed to the kernel page table (trampoline/high-VA live there).
-    #[cfg(target_arch = "aarch64")]
-    {
-        #[cfg(any(debug_assertions, test))]
-        early_println!("[vm] kernel_vm_init: switch_ttbr1...");
-        root_page_table.switch_ttbr1(manager.get_asid());
-        #[cfg(any(debug_assertions, test))]
-        early_println!("[vm] kernel_vm_init: switch_ttbr1 ok");
-    }
-
     #[cfg(any(debug_assertions, test))]
     early_println!("[vm] kernel_vm_init: switch (ttbr0/arch-dependent)...");
     root_page_table.switch(manager.get_asid());
@@ -176,6 +166,12 @@ pub fn user_vm_init(task: &mut Task) {
         .unwrap();
 
     crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+
+    // Trampoline-managed high-VA infrastructure also includes per-task kstack windows.
+    // Keep this in the VM init flow so callers don't need a separate map_* step.
+    setup_trampoline_for_task_kstack_window(task)
+        .map_err(|e| panic!("Failed to setup task kstack window: {}", e))
+        .unwrap();
 }
 
 pub fn user_kernel_vm_init(task: &mut Task) {
@@ -231,6 +227,10 @@ pub fn user_kernel_vm_init(task: &mut Task) {
     }
 
     crate::arch::vm::setup_trampoline_for_user(&mut task.vm_manager);
+
+    setup_trampoline_for_task_kstack_window(task)
+        .map_err(|e| panic!("Failed to setup task kstack window: {}", e))
+        .unwrap();
 }
 
 // --------------------
@@ -287,7 +287,7 @@ fn kstack_alloc() -> &'static Mutex<KernelKstackAllocator> {
 /// Map the task's kernel stack physical pages into the shared kernel PT at a unique high VA window.
 /// Adds an unmapped guard page at the bottom of the window.
 #[allow(static_mut_refs)]
-pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str> {
+pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'static str> {
     // Allocate a window slot
     let (slot_idx, base, _top) = kstack_alloc()
         .lock()
@@ -331,6 +331,28 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
     // Record base for later SP and teardown
     task.set_kernel_stack_window_base(Some((slot_idx, base)));
 
+    // Update the task's kernel context SP to point into the high-VA window.
+    // After boot, tasks are scheduled via `switch_to` which restores KernelContext.sp.
+    // If we keep SP pointing to the raw allocated stack pointer, AArch64 can fault at
+    // exception entry (SP_EL1) and the kernel may also miss the intended trampoline-managed
+    // stack window. The window top is page-aligned, so stack alignment is also guaranteed.
+    let stack_top = (base + crate::environment::PAGE_SIZE + TASK_KERNEL_STACK_SIZE) as u64;
+    let tf_size = core::mem::size_of::<crate::arch::Trapframe>() as u64;
+    let tf_align = core::mem::align_of::<crate::arch::Trapframe>() as u64;
+    debug_assert!(tf_align.is_power_of_two());
+    let sp = (stack_top - tf_size) & !(tf_align - 1);
+    task.get_kernel_context_mut().set_sp(sp);
+
+    crate::early_println!(
+        "Mapped kernel stack window for Task {}: slot {} {:#x} - {:#x}",
+        task.get_id(),
+        slot_idx,
+        base,
+        base + KERNEL_KSTACK_SLOT_SIZE - 1
+    );
+    
+    // NOTE: vcpu.sp (user sp) is set separately; this is kernel SP for `switch_to`/traps.
+
     // Debug verification in test / debug builds: ensure guard page is unmapped
     #[cfg(any(debug_assertions, test))]
     {
@@ -348,7 +370,7 @@ pub fn map_task_kernel_stack_window(task: &mut Task) -> Result<(), &'static str>
 
 /// Unmap and free the task's kernel stack window from the shared kernel PT.
 #[allow(static_mut_refs)]
-pub fn unmap_task_kernel_stack_window(task: &mut Task) {
+pub fn teardown_trampoline_for_task_kstack_window(task: &mut Task) {
     if let Some((slot_idx, base)) = task.get_kernel_stack_window_base() {
         let vstart = base + crate::environment::PAGE_SIZE;
         let vend = vstart + TASK_KERNEL_STACK_SIZE - 1;

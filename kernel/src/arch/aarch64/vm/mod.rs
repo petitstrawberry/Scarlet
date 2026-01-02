@@ -19,7 +19,7 @@ use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
 use crate::early_println;
-use crate::environment::TRAMPOLINE_VA_END;
+use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
@@ -277,6 +277,29 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
 
 pub fn setup_trampoline_for_kernel(manager: &mut VirtualMemoryManager) {
     setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
+
+    // Sanity check: the per-task kernel stack windows are part of the same high-VA
+    // (trampoline-managed) TTBR1 address space.
+    #[cfg(any(debug_assertions, test))]
+    {
+        crate::early_println!(
+            "[vm] aarch64 high-va(kstack) region: {:#x}-{:#x}",
+            KERNEL_KSTACK_REGION_START,
+            KERNEL_KSTACK_REGION_END
+        );
+        debug_assert!(KERNEL_KSTACK_REGION_START <= KERNEL_KSTACK_REGION_END);
+        debug_assert!(KERNEL_KSTACK_REGION_END < TRAMPOLINE_VA_END);
+    }
+
+    // Keep TTBR1 fixed to the kernel page table (trampoline/high-VA live there).
+    #[cfg(any(debug_assertions, test))]
+    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1...");
+    manager
+        .get_root_page_table()
+        .expect("Kernel root page table not set")
+        .switch_ttbr1(manager.get_asid());
+    #[cfg(any(debug_assertions, test))]
+    crate::early_println!("[vm] setup_trampoline_for_kernel: switch_ttbr1 ok");
 }
 
 /// AArch64: trampoline/high-VA live in the fixed TTBR1 kernel mapping.

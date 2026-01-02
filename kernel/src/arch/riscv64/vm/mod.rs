@@ -22,7 +22,7 @@ use crate::arch::Arch;
 use crate::arch::get_cpu;
 use crate::arch::get_user_trapvector_paddr;
 use crate::early_println;
-use crate::environment::VMMAX;
+use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
 use crate::vm::manager::VirtualMemoryManager;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 
@@ -267,11 +267,22 @@ fn setup_trampoline_at_end(manager: &mut VirtualMemoryManager, trampoline_vaddr_
 }
 
 pub fn setup_trampoline_for_kernel(manager: &mut VirtualMemoryManager) {
-    setup_trampoline_at_end(manager, VMMAX);
+    setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
+
+    #[cfg(any(debug_assertions, test))]
+    {
+        crate::early_println!(
+            "[vm] riscv64 high-va(kstack) region: {:#x}-{:#x}",
+            KERNEL_KSTACK_REGION_START,
+            KERNEL_KSTACK_REGION_END
+        );
+        debug_assert!(KERNEL_KSTACK_REGION_START <= KERNEL_KSTACK_REGION_END);
+        debug_assert!(KERNEL_KSTACK_REGION_END < TRAMPOLINE_VA_END);
+    }
 }
 
 pub fn setup_trampoline_for_user(manager: &mut VirtualMemoryManager) {
-    setup_trampoline_at_end(manager, VMMAX);
+    setup_trampoline_at_end(manager, TRAMPOLINE_VA_END);
 }
 
 #[cfg(test)]

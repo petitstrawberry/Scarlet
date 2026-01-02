@@ -253,11 +253,6 @@ pub extern "C" fn _user_trap_exit(_trapframe: &mut Trapframe) -> ! {
 pub fn arch_switch_to_user_space(trapframe: &mut Trapframe) -> ! {
     let addr = trapframe as *mut Trapframe as usize;
 
-    // crate::early_println!(
-    //     "[aarch64] arch_switch_to_user_space: Trapframe at {:x?}",
-    //     trapframe
-    // );
-
     crate::arch::configure_user_entry(
         trapframe,
         crate::arch::UserEntryOptions {
