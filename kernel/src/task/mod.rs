@@ -1074,8 +1074,8 @@ impl Task {
             })?;
         }
 
-        // Copy register states
-        self.vcpu.copy_iregs_to(&mut child.vcpu.iregs);
+        // Copy register states (architecture-specific VCPU state)
+        self.vcpu.clone_to(&mut child.vcpu);
 
         // Clone the default ABI and ABI zones
         child.default_abi = Some(
@@ -1107,9 +1107,8 @@ impl Task {
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
 
-        // Set the same entry point and PC
+        // Set the same entry point
         child.entry = self.entry;
-        child.vcpu.set_pc(self.vcpu.get_pc());
 
         if flags.is_set(CloneFlagsDef::Files) {
             // Clone the file descriptor table
@@ -1432,7 +1431,9 @@ impl Task {
     pub fn get_trapframe(&mut self) -> &mut Trapframe {
         // If we have a kernel stack window mapped, use the high-VA address
         if let Some((_slot, base)) = self.kernel_stack_window_base {
-            let trapframe_offset = crate::environment::PAGE_SIZE + crate::environment::TASK_KERNEL_STACK_SIZE - core::mem::size_of::<Trapframe>();
+            let trapframe_offset = crate::environment::PAGE_SIZE
+                + crate::environment::TASK_KERNEL_STACK_SIZE
+                - core::mem::size_of::<Trapframe>();
             let trapframe_vaddr = base + trapframe_offset;
             unsafe { &mut *(trapframe_vaddr as *mut Trapframe) }
         } else {

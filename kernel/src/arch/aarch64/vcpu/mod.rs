@@ -75,6 +75,47 @@ impl Vcpu {
         self.iregs = *iregs;
     }
 
+    /// Clone the entire VCPU state to another VCPU
+    ///
+    /// This copies all registers, including general-purpose registers,
+    /// SP, PC, SPSR, and thread-local storage registers.
+    pub fn clone_to(&self, other: &mut Vcpu) {
+        other.iregs = self.iregs;
+        other.sp = self.sp;
+        other.pc = self.pc;
+        other.spsr = self.spsr;
+        other.tpidr_el0 = self.tpidr_el0;
+        other.tpidrro_el0 = self.tpidrro_el0;
+    }
+
+    pub fn get_sp(&self) -> usize {
+        self.sp as usize
+    }
+
+    pub fn get_spsr(&self) -> u64 {
+        self.spsr
+    }
+
+    pub fn set_spsr(&mut self, spsr: u64) {
+        self.spsr = spsr;
+    }
+
+    pub fn get_tpidr_el0(&self) -> u64 {
+        self.tpidr_el0
+    }
+
+    pub fn set_tpidr_el0(&mut self, tpidr_el0: u64) {
+        self.tpidr_el0 = tpidr_el0;
+    }
+
+    pub fn get_tpidrro_el0(&self) -> u64 {
+        self.tpidrro_el0
+    }
+
+    pub fn set_tpidrro_el0(&mut self, tpidrro_el0: u64) {
+        self.tpidrro_el0 = tpidrro_el0;
+    }
+
     pub fn store(&mut self, trapframe: &Trapframe) {
         self.iregs = trapframe.regs;
         self.sp = trapframe.sp;

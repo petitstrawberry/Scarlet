@@ -9,9 +9,9 @@ use core::panic;
 use crate::abi::syscall_dispatcher;
 use crate::arch::{Trapframe, get_cpu};
 use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
-use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
+use crate::{early_println, println};
 
 /// Get CurrentEL value
 fn get_current_el() -> u64 {
@@ -268,9 +268,21 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
         Ok(_) => (),
         Err(_) => {
             print_trap_info(trapframe, get_esr_el1());
+            if let Some(task) = get_scheduler().get_current_task(get_cpu().get_cpuid()) {
+                early_println!(
+                    "Task {} (PID {}) caused data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
+                    task.name,
+                    task.get_id(),
+                    vaddr,
+                    is_write,
+                    trapframe.get_current_pc()
+                );
+            }
             panic!(
-                "Failed to map page for data fault at vaddr: {:#x} (write={})",
-                vaddr, is_write
+                "Failed to map page for data fault at vaddr: {:#x} (write={}) from PC: {:#x}",
+                vaddr,
+                is_write,
+                trapframe.get_current_pc()
             );
         }
     }

@@ -23,7 +23,7 @@ pub const TRAMPOLINE_VA_RESERVE: usize = PAGE_SIZE;
 // User stack end address (exclusive)
 // NOTE: avoid `TRAMPOLINE_VA_END + 1` because TRAMPOLINE_VA_END may be `usize::MAX`.
 pub const USER_STACK_END: usize =
-	(TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE + 1) & !(PAGE_SIZE - 1);
+    (TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE + 1) & !(PAGE_SIZE - 1);
 
 // Kernel VM stack end address (inclusive)
 pub const KERNEL_VM_STACK_END: usize = USER_STACK_END - 1;

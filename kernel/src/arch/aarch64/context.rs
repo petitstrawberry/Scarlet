@@ -42,7 +42,7 @@ impl KernelContext {
 
         Self {
             sp: stack_top - core::mem::size_of::<Trapframe>() as u64, // Reserve space for trapframe
-            lr: crate::task::task_initial_kernel_entrypoint  as *const () as u64,
+            lr: crate::task::task_initial_kernel_entrypoint as *const () as u64,
             x: [0; 10],
             kernel_stack,
         }
@@ -64,7 +64,6 @@ impl KernelContext {
         self.kernel_stack.as_ptr()
     }
 
-    
     /// Set stack pointer for this context (VA)
     pub fn set_sp(&mut self, sp_vaddr: u64) {
         self.sp = sp_vaddr;

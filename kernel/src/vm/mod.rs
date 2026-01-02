@@ -350,7 +350,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &mut Task) -> Result<(), &'
         base,
         base + KERNEL_KSTACK_SLOT_SIZE - 1
     );
-    
+
     // NOTE: vcpu.sp (user sp) is set separately; this is kernel SP for `switch_to`/traps.
 
     // Debug verification in test / debug builds: ensure guard page is unmapped
