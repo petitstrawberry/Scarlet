@@ -15,4 +15,14 @@ impl IntRegisters {
     pub const fn new() -> Self {
         IntRegisters { reg: [0; 31] }
     }
+
+    pub fn get_return_value(&self) -> usize {
+        // AArch64 syscall return value: X0
+        self.reg[0]
+    }
+
+    pub fn set_return_value(&mut self, value: usize) {
+        // AArch64 syscall return value: X0
+        self.reg[0] = value;
+    }
 }
