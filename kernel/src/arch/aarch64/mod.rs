@@ -312,6 +312,11 @@ impl Trapframe {
         }
     }
 
+    /// Set the program counter (elr) to a new value
+    pub fn set_current_pc(&mut self, pc: u64) {
+        self.elr = pc;
+    }
+
     /// Increment the program counter (epc) to the next instruction
     /// This is typically used after handling a trap or syscall to continue execution.
     ///

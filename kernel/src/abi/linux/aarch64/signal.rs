@@ -426,7 +426,7 @@ fn setup_signal_handler(trapframe: &mut Trapframe, handler_addr: usize, signal: 
     trapframe.set_arg(0, signal as usize);
 
     // Jump to signal handler
-    trapframe.elr = handler_addr as u64;
+    trapframe.set_current_pc(handler_addr as u64);
 
     // TODO: Implement signal return mechanism
     // - Set up return address to rt_sigreturn trampoline

@@ -37,7 +37,7 @@ pub fn sys_mmap(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
     let offset = trapframe.get_arg(5);
 
     // crate::println!("linux-riscv64: sys_mmap called: pc={:#x} addr={:#x} length={} prot={:#x} flags={:#x} fd={} offset={:#x}",
-    //     trapframe.elr, addr, length, prot, flags, fd, offset);
+    //     trapframe.get_current_pc(), addr, length, prot, flags, fd, offset);
 
     trapframe.increment_pc_next(task);
 
