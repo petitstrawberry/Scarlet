@@ -24,7 +24,7 @@ use crate::object::capability::{CloneOps, Selectable};
 /// These are stable only within Scarlet and must be mapped by ABI adapters.
 pub mod socket_ctl {
     /// Magic 'SS' (0x53, 0x53) followed by sequential IDs to avoid collisions.
-    
+
     /// Bind socket to an address (arg = address structure pointer)
     pub const SCTL_SOCKET_BIND: u32 = 0x5353_0001;
     /// Connect to remote address (arg = address structure pointer)

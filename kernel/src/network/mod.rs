@@ -30,18 +30,28 @@ use alloc::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Once, RwLock};
 
-pub mod socket;
 pub mod protocol_stack;
+pub mod socket;
 
 // Re-export commonly used types
-pub use socket::{
-    Inet4SocketAddress, Inet6SocketAddress, LocalSocketAddress, ShutdownHow, SocketAddress,
-    SocketControl, SocketDomain, SocketError, SocketObject, SocketProtocol, SocketState,
-    SocketType, UnixSocketAddress, // Keep for backwards compatibility
-};
 pub use protocol_stack::{
-    LayerContext, NetworkLayer, NetworkLayerStats, ProtocolStack, ProtocolStackManager, 
+    LayerContext, NetworkLayer, NetworkLayerStats, ProtocolStack, ProtocolStackManager,
     ProtocolStackStats, SocketConfig,
+};
+pub use socket::{
+    Inet4SocketAddress,
+    Inet6SocketAddress,
+    LocalSocketAddress,
+    ShutdownHow,
+    SocketAddress,
+    SocketControl,
+    SocketDomain,
+    SocketError,
+    SocketObject,
+    SocketProtocol,
+    SocketState,
+    SocketType,
+    UnixSocketAddress, // Keep for backwards compatibility
 };
 
 use crate::object::KernelObject;
@@ -50,9 +60,10 @@ use crate::object::KernelObject;
 pub type SocketId = usize;
 
 /// Socket factory function type
-/// 
+///
 /// ABI modules register socket factories for their specific implementations
-pub type SocketFactory = fn(SocketType, SocketProtocol) -> Result<Arc<dyn SocketObject>, SocketError>;
+pub type SocketFactory =
+    fn(SocketType, SocketProtocol) -> Result<Arc<dyn SocketObject>, SocketError>;
 
 /// Network Manager - Global socket and connection manager
 ///
@@ -85,7 +96,7 @@ pub struct NetworkManager {
 
     /// Protocol stacks for network protocols (TCP/IP, UDP, etc.)
     protocol_stacks: protocol_stack::ProtocolStackManager,
-    
+
     /// Protocol layers registry (shared instances like VFS filesystems)
     /// Maps layer name -> shared layer instance
     /// Examples: "ethernet" -> EthernetLayer, "ip" -> IpLayer, "tcp" -> TcpLayer
@@ -181,12 +192,10 @@ impl NetworkManager {
         let factories = self.socket_factories.read();
         if let Some(factory) = factories.get(&domain) {
             let socket = factory(socket_type, protocol)?;
-            
+
             // Register the socket
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-            self.connections
-                .write()
-                .insert(socket_id, socket.clone());
+            self.connections.write().insert(socket_id, socket.clone());
 
             return Ok(KernelObject::Socket(socket));
         }
@@ -195,12 +204,10 @@ impl NetworkManager {
         // Then try protocol stacks (for TCP/IP, etc.)
         if let Some(stack) = self.protocol_stacks.get_stack(domain) {
             let socket = stack.create_socket(socket_type, protocol)?;
-            
+
             // Register the socket
             let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-            self.connections
-                .write()
-                .insert(socket_id, socket.clone());
+            self.connections.write().insert(socket_id, socket.clone());
 
             return Ok(KernelObject::Socket(socket));
         }
@@ -315,7 +322,10 @@ impl NetworkManager {
     /// # Returns
     ///
     /// The protocol stack for this domain, or None if not registered
-    pub fn get_protocol_stack(&self, domain: SocketDomain) -> Option<Arc<dyn protocol_stack::ProtocolStack>> {
+    pub fn get_protocol_stack(
+        &self,
+        domain: SocketDomain,
+    ) -> Option<Arc<dyn protocol_stack::ProtocolStack>> {
         self.protocol_stacks.get_stack(domain)
     }
 
@@ -330,7 +340,10 @@ impl NetworkManager {
     /// # Errors
     ///
     /// Returns an error if no protocol stack can handle the packet
-    pub fn process_packet(&self, packet: &crate::device::network::DevicePacket) -> Result<(), SocketError> {
+    pub fn process_packet(
+        &self,
+        packet: &crate::device::network::DevicePacket,
+    ) -> Result<(), SocketError> {
         self.protocol_stacks.process_packet(packet)
     }
 
@@ -383,9 +396,7 @@ impl NetworkManager {
         let sockets = self.named_sockets.read();
 
         match sockets.get(name) {
-            Some(weak_socket) => weak_socket
-                .upgrade()
-                .ok_or(SocketError::ConnectionRefused),
+            Some(weak_socket) => weak_socket.upgrade().ok_or(SocketError::ConnectionRefused),
             None => Err(SocketError::ConnectionRefused),
         }
     }
@@ -458,7 +469,7 @@ mod tests {
         );
         assert!(result.is_err());
         match result {
-            Err(SocketError::NotSupported) => {},
+            Err(SocketError::NotSupported) => {}
             _ => panic!("Expected NotSupported error"),
         }
     }

@@ -106,7 +106,7 @@ pub struct ProtocolStackStats {
 pub struct LayerContext {
     /// Protocol-agnostic key-value store for routing information
     /// Each layer can add/read arbitrary data needed for packet delivery
-    /// 
+    ///
     /// Common keys (convention, not enforced):
     /// - "ip_src", "ip_dst": IPv4/IPv6 addresses
     /// - "tcp_src_port", "tcp_dst_port": TCP ports  
@@ -122,17 +122,17 @@ impl LayerContext {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Set a value in the context
     pub fn set(&mut self, key: &str, value: &[u8]) {
         self.info.insert(String::from(key), value.to_vec());
     }
-    
+
     /// Get a value from the context
     pub fn get(&self, key: &str) -> Option<&[u8]> {
         self.info.get(key).map(|v| v.as_slice())
     }
-    
+
     /// Check if a key exists
     pub fn contains(&self, key: &str) -> bool {
         self.info.contains_key(key)
@@ -147,7 +147,7 @@ impl LayerContext {
 ///
 /// # Design Philosophy
 ///
-/// - **Solves @petitstrawberry's question**: How does IP layer get IP address? 
+/// - **Solves @petitstrawberry's question**: How does IP layer get IP address?
 ///   How does TCP layer get port number? Answer: Through SocketConfig at socket creation.
 /// - **Protocol-agnostic**: Generic key-value store, not tied to specific protocols
 /// - **Per-socket configuration**: Each socket gets configured independently
@@ -176,7 +176,7 @@ impl LayerContext {
 #[derive(Debug, Clone, Default)]
 pub struct SocketConfig {
     /// Protocol-agnostic configuration parameters
-    /// 
+    ///
     /// Common keys (convention, not enforced):
     /// - "ip_local": Local IP address (IPv4 or IPv6 bytes)
     /// - "ip_remote": Remote IP address
@@ -193,17 +193,17 @@ impl SocketConfig {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Set a configuration parameter
     pub fn set(&mut self, key: &str, value: &[u8]) {
         self.params.insert(String::from(key), value.to_vec());
     }
-    
+
     /// Get a configuration parameter
     pub fn get(&self, key: &str) -> Option<&[u8]> {
         self.params.get(key).map(|v| v.as_slice())
     }
-    
+
     /// Get a u16 value (for ports)
     pub fn get_u16(&self, key: &str) -> Option<u16> {
         self.get(key).and_then(|v| {
@@ -214,7 +214,7 @@ impl SocketConfig {
             }
         })
     }
-    
+
     /// Get an IPv4 address
     pub fn get_ipv4(&self, key: &str) -> Option<[u8; 4]> {
         self.get(key).and_then(|v| {
@@ -277,7 +277,7 @@ impl SocketConfig {
 /// }
 ///
 /// impl NetworkLayer for IpLayer {
-///     fn send(&self, packet: &[u8], context: &LayerContext, 
+///     fn send(&self, packet: &[u8], context: &LayerContext,
 ///             next_layers: &[Arc<dyn NetworkLayer>]) -> Result<(), SocketError> {
 ///         // Extract destination IP from protocol-agnostic context
 ///         let dest_ip = context.get("ip_dst")
@@ -380,8 +380,12 @@ pub trait NetworkLayer: Send + Sync {
     /// ctx.set("ip_dst", &[192, 168, 1, 1]);
     /// ip_layer.send(&ip_packet, &ctx, &[ethernet_layer])?;
     /// ```
-    fn send(&self, packet: &[u8], context: &LayerContext, next_layers: &[Arc<dyn NetworkLayer>])
-        -> Result<(), SocketError>;
+    fn send(
+        &self,
+        packet: &[u8],
+        context: &LayerContext,
+        next_layers: &[Arc<dyn NetworkLayer>],
+    ) -> Result<(), SocketError>;
 
     /// Receive and process a packet at this layer
     ///
@@ -411,6 +415,60 @@ pub trait NetworkLayer: Send + Sync {
     /// Get layer statistics
     fn stats(&self) -> NetworkLayerStats {
         NetworkLayerStats::default()
+    }
+
+    /// Configure this layer with socket-specific parameters
+    ///
+    /// Called at socket bind time to configure the layer for a specific socket.
+    /// The configuration flows DOWN through the protocol stack, with each layer
+    /// extracting relevant parameters and passing the config to lower layers.
+    ///
+    /// # Purpose
+    ///
+    /// Solves the "reception configuration problem": How does IP layer know
+    /// "deliver packets for 192.168.1.100 to this socket"? Answer: This method
+    /// allows each layer to register itself for packet delivery based on the
+    /// socket's configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Socket configuration with protocol-agnostic key-value pairs
+    /// * `next_layers` - Lower layers to pass configuration to
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if configuration successful, Err if required parameters missing
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // User binds socket to 192.168.1.100:5000
+    /// let mut config = SocketConfig::new();
+    /// config.set("tcp_local_port", &5000u16.to_be_bytes());
+    /// config.set("ip_local", &[192, 168, 1, 100]);
+    ///
+    /// // TCP layer
+    /// tcp_layer.configure(&config, &[ip_layer, eth_layer])?;
+    ///
+    /// // Inside TCP configure():
+    /// let port = config.get_u16("tcp_local_port").ok_or(...)?;
+    /// self.register_socket(port, socket_handle);
+    /// ip_layer.configure(&config, &[eth_layer])?;  // Pass down
+    ///
+    /// // IP layer registers for this address
+    /// let addr = config.get_ipv4("ip_local").ok_or(...)?;
+    /// self.register_address(addr, tcp_handler);
+    /// ```
+    fn configure(
+        &self,
+        config: &SocketConfig,
+        next_layers: &[Arc<dyn NetworkLayer>],
+    ) -> Result<(), SocketError> {
+        // Default implementation: just pass config down
+        for layer in next_layers {
+            layer.configure(config, &[])?;
+        }
+        Ok(())
     }
 }
 
@@ -444,7 +502,7 @@ pub struct NetworkLayerStats {
 ///         SocketDomain::Inet
 ///     }
 ///
-///     fn create_socket(&self, socket_type: SocketType, protocol: SocketProtocol) 
+///     fn create_socket(&self, socket_type: SocketType, protocol: SocketProtocol)
 ///         -> Result<Arc<dyn SocketObject>, SocketError> {
 ///         match (socket_type, protocol) {
 ///             (SocketType::Stream, SocketProtocol::Tcp) => {
@@ -584,7 +642,7 @@ impl ProtocolStackManager {
     pub fn process_packet(&self, packet: &DevicePacket) -> Result<(), SocketError> {
         // In a real implementation, we would parse the packet header to determine
         // which protocol stack should handle it (e.g., check IP version, protocol field)
-        
+
         // For now, try each registered stack
         let stacks = self.stacks.read();
         for stack in stacks.values() {
@@ -592,8 +650,10 @@ impl ProtocolStackManager {
                 return Ok(());
             }
         }
-        
-        Err(SocketError::Other("No protocol stack could handle packet".into()))
+
+        Err(SocketError::Other(
+            "No protocol stack could handle packet".into(),
+        ))
     }
 
     /// Get statistics for all protocol stacks
@@ -636,20 +696,20 @@ mod tests {
     fn test_layer_context_generic() {
         // Test that LayerContext is protocol-agnostic
         let mut ctx = LayerContext::new();
-        
+
         // TCP layer can add its info
         ctx.set("tcp_src_port", &5000u16.to_be_bytes());
         ctx.set("tcp_dst_port", &80u16.to_be_bytes());
-        
+
         // IP layer can add its info
         ctx.set("ip_src", &[192, 168, 1, 100]);
         ctx.set("ip_dst", &[192, 168, 1, 1]);
         ctx.set("ip_protocol", &[6]); // TCP
-        
+
         // Ethernet layer can add its info
         ctx.set("eth_src_mac", &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
         ctx.set("eth_dst_mac", &[0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
-        
+
         // Verify all info is stored
         assert_eq!(ctx.get("tcp_src_port"), Some(&[0x13, 0x88][..])); // 5000 in big-endian
         assert_eq!(ctx.get("tcp_dst_port"), Some(&[0x00, 0x50][..])); // 80 in big-endian
@@ -663,15 +723,15 @@ mod tests {
     fn test_socket_config() {
         // Test SocketConfig for socket creation
         let mut config = SocketConfig::new();
-        
+
         // Set local bind address and port
         config.set("ip_local", &[192, 168, 1, 100]);
         config.set("tcp_local_port", &5000u16.to_be_bytes());
-        
+
         // Set remote address (for connect)
         config.set("ip_remote", &[192, 168, 1, 1]);
         config.set("tcp_remote_port", &80u16.to_be_bytes());
-        
+
         // Test helper methods
         assert_eq!(config.get_ipv4("ip_local"), Some([192, 168, 1, 100]));
         assert_eq!(config.get_ipv4("ip_remote"), Some([192, 168, 1, 1]));
@@ -682,7 +742,7 @@ mod tests {
     // ============================================================================
     // Realistic TCP/IP/Ethernet Mock Protocol Layers
     // ============================================================================
-    
+
     /// Mock Ethernet layer simulating real Ethernet II frames
     ///
     /// Frame format:
@@ -711,8 +771,14 @@ mod tests {
                 last_sent_frame: RwLock::new(Vec::new()),
             };
             // Pre-populate some ARP entries for testing
-            layer.arp_table.write().insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
-            layer.arp_table.write().insert([192, 168, 1, 100], [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+            layer
+                .arp_table
+                .write()
+                .insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
+            layer
+                .arp_table
+                .write()
+                .insert([192, 168, 1, 100], [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
             layer
         }
 
@@ -733,40 +799,51 @@ mod tests {
             _next_layers: &[Arc<dyn NetworkLayer>],
         ) -> Result<(), SocketError> {
             // Extract destination IP from context for ARP lookup
-            let dest_ip = context.get("ip_dst")
-                .and_then(|ip| if ip.len() >= 4 { Some([ip[0], ip[1], ip[2], ip[3]]) } else { None })
+            let dest_ip = context
+                .get("ip_dst")
+                .and_then(|ip| {
+                    if ip.len() >= 4 {
+                        Some([ip[0], ip[1], ip[2], ip[3]])
+                    } else {
+                        None
+                    }
+                })
                 .ok_or(SocketError::InvalidPacket)?;
 
             // Perform ARP lookup
-            let dest_mac = self.arp_table.read().get(&dest_ip).copied()
+            let dest_mac = self
+                .arp_table
+                .read()
+                .get(&dest_ip)
+                .copied()
                 .ok_or(SocketError::NoRoute)?;
 
             // Build Ethernet frame
             let mut frame = Vec::with_capacity(14 + packet.len());
-            frame.extend_from_slice(&dest_mac);  // Destination MAC
-            frame.extend_from_slice(&self.mac_address);  // Source MAC
-            frame.extend_from_slice(&[0x08, 0x00]);  // EtherType: IPv4
-            frame.extend_from_slice(packet);  // IP packet
+            frame.extend_from_slice(&dest_mac); // Destination MAC
+            frame.extend_from_slice(&self.mac_address); // Source MAC
+            frame.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+            frame.extend_from_slice(packet); // IP packet
 
             *self.last_sent_frame.write() = frame.clone();
             self.packets_sent.fetch_add(1, Ordering::SeqCst);
-            
+
             Ok(())
         }
 
         fn receive(&self, frame: &[u8]) -> Result<(), SocketError> {
             self.packets_received.fetch_add(1, Ordering::SeqCst);
-            
+
             // Parse Ethernet header
             if frame.len() < 14 {
                 return Err(SocketError::InvalidPacket);
             }
-            
+
             let _dest_mac = &frame[0..6];
             let _src_mac = &frame[6..12];
             let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
             let payload = &frame[14..];
-            
+
             // For IPv4 (0x0800), would pass to IP layer
             // In this mock, just verify the frame is valid
             if ethertype == 0x0800 && !payload.is_empty() {
@@ -827,33 +904,48 @@ mod tests {
             next_layers: &[Arc<dyn NetworkLayer>],
         ) -> Result<(), SocketError> {
             // Extract addresses from context
-            let src_ip = context.get("ip_src")
-                .and_then(|ip| if ip.len() >= 4 { Some([ip[0], ip[1], ip[2], ip[3]]) } else { None })
+            let src_ip = context
+                .get("ip_src")
+                .and_then(|ip| {
+                    if ip.len() >= 4 {
+                        Some([ip[0], ip[1], ip[2], ip[3]])
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(self.local_ip);
-            
-            let dest_ip = context.get("ip_dst")
-                .and_then(|ip| if ip.len() >= 4 { Some([ip[0], ip[1], ip[2], ip[3]]) } else { None })
+
+            let dest_ip = context
+                .get("ip_dst")
+                .and_then(|ip| {
+                    if ip.len() >= 4 {
+                        Some([ip[0], ip[1], ip[2], ip[3]])
+                    } else {
+                        None
+                    }
+                })
                 .ok_or(SocketError::InvalidPacket)?;
-            
-            let protocol = context.get("ip_protocol")
+
+            let protocol = context
+                .get("ip_protocol")
                 .and_then(|p| if !p.is_empty() { Some(p[0]) } else { None })
                 .unwrap_or(6); // Default to TCP
 
             // Build simplified IPv4 header (20 bytes)
             let total_len = (20 + packet.len()) as u16;
             let mut ip_packet = Vec::with_capacity(20 + packet.len());
-            
-            ip_packet.push(0x45);  // Version=4, IHL=5 (20 bytes)
-            ip_packet.push(0x00);  // TOS
-            ip_packet.extend_from_slice(&total_len.to_be_bytes());  // Total Length
-            ip_packet.extend_from_slice(&[0x00, 0x00]);  // Identification
-            ip_packet.extend_from_slice(&[0x00, 0x00]);  // Flags + Fragment Offset
-            ip_packet.push(64);  // TTL
-            ip_packet.push(protocol);  // Protocol
-            ip_packet.extend_from_slice(&[0x00, 0x00]);  // Checksum (simplified, not calculated)
-            ip_packet.extend_from_slice(&src_ip);  // Source IP
-            ip_packet.extend_from_slice(&dest_ip);  // Destination IP
-            ip_packet.extend_from_slice(packet);  // Payload
+
+            ip_packet.push(0x45); // Version=4, IHL=5 (20 bytes)
+            ip_packet.push(0x00); // TOS
+            ip_packet.extend_from_slice(&total_len.to_be_bytes()); // Total Length
+            ip_packet.extend_from_slice(&[0x00, 0x00]); // Identification
+            ip_packet.extend_from_slice(&[0x00, 0x00]); // Flags + Fragment Offset
+            ip_packet.push(64); // TTL
+            ip_packet.push(protocol); // Protocol
+            ip_packet.extend_from_slice(&[0x00, 0x00]); // Checksum (simplified, not calculated)
+            ip_packet.extend_from_slice(&src_ip); // Source IP
+            ip_packet.extend_from_slice(&dest_ip); // Destination IP
+            ip_packet.extend_from_slice(packet); // Payload
 
             self.packets_sent.fetch_add(1, Ordering::SeqCst);
 
@@ -909,7 +1001,7 @@ mod tests {
         packets_sent: AtomicU64,
         packets_received: AtomicU64,
         last_received_payload: RwLock<Vec<u8>>,
-        received_payloads: RwLock<Vec<Vec<u8>>>,  // Store all received payloads
+        received_payloads: RwLock<Vec<Vec<u8>>>, // Store all received payloads
     }
 
     impl MockTcpLayer {
@@ -926,7 +1018,7 @@ mod tests {
         fn get_last_received(&self) -> Vec<u8> {
             self.last_received_payload.read().clone()
         }
-        
+
         fn get_all_received(&self) -> Vec<Vec<u8>> {
             self.received_payloads.read().clone()
         }
@@ -944,26 +1036,40 @@ mod tests {
             next_layers: &[Arc<dyn NetworkLayer>],
         ) -> Result<(), SocketError> {
             // Extract ports from context
-            let src_port = context.get("tcp_src_port")
-                .and_then(|p| if p.len() >= 2 { Some(u16::from_be_bytes([p[0], p[1]])) } else { None })
+            let src_port = context
+                .get("tcp_src_port")
+                .and_then(|p| {
+                    if p.len() >= 2 {
+                        Some(u16::from_be_bytes([p[0], p[1]]))
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or(0);
-            
-            let dst_port = context.get("tcp_dst_port")
-                .and_then(|p| if p.len() >= 2 { Some(u16::from_be_bytes([p[0], p[1]])) } else { None })
+
+            let dst_port = context
+                .get("tcp_dst_port")
+                .and_then(|p| {
+                    if p.len() >= 2 {
+                        Some(u16::from_be_bytes([p[0], p[1]]))
+                    } else {
+                        None
+                    }
+                })
                 .ok_or(SocketError::InvalidPacket)?;
 
             // Build simplified TCP header (20 bytes minimum)
             let mut tcp_segment = Vec::with_capacity(20 + payload.len());
-            
-            tcp_segment.extend_from_slice(&src_port.to_be_bytes());  // Source Port
-            tcp_segment.extend_from_slice(&dst_port.to_be_bytes());  // Destination Port
-            tcp_segment.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);  // Sequence Number
-            tcp_segment.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);  // Acknowledgment Number
-            tcp_segment.extend_from_slice(&[0x50, 0x18]);  // Data Offset=5 (20 bytes), Flags (PSH+ACK)
-            tcp_segment.extend_from_slice(&[0xFF, 0xFF]);  // Window Size
-            tcp_segment.extend_from_slice(&[0x00, 0x00]);  // Checksum (not calculated)
-            tcp_segment.extend_from_slice(&[0x00, 0x00]);  // Urgent Pointer
-            tcp_segment.extend_from_slice(payload);  // Payload
+
+            tcp_segment.extend_from_slice(&src_port.to_be_bytes()); // Source Port
+            tcp_segment.extend_from_slice(&dst_port.to_be_bytes()); // Destination Port
+            tcp_segment.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // Sequence Number
+            tcp_segment.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Acknowledgment Number
+            tcp_segment.extend_from_slice(&[0x50, 0x18]); // Data Offset=5 (20 bytes), Flags (PSH+ACK)
+            tcp_segment.extend_from_slice(&[0xFF, 0xFF]); // Window Size
+            tcp_segment.extend_from_slice(&[0x00, 0x00]); // Checksum (not calculated)
+            tcp_segment.extend_from_slice(&[0x00, 0x00]); // Urgent Pointer
+            tcp_segment.extend_from_slice(payload); // Payload
 
             self.packets_sent.fetch_add(1, Ordering::SeqCst);
 
@@ -989,17 +1095,17 @@ mod tests {
 
             let _src_port = u16::from_be_bytes([segment[0], segment[1]]);
             let _dst_port = u16::from_be_bytes([segment[2], segment[3]]);
-            let data_offset = (segment[12] >> 4) * 4;  // Data offset in bytes
-            
+            let data_offset = (segment[12] >> 4) * 4; // Data offset in bytes
+
             if segment.len() < data_offset as usize {
                 return Err(SocketError::InvalidPacket);
             }
 
             let payload = &segment[data_offset as usize..];
-            
+
             *self.last_received_payload.write() = payload.to_vec();
             self.received_payloads.write().push(payload.to_vec());
-            
+
             Ok(())
         }
 
@@ -1016,8 +1122,8 @@ mod tests {
     fn test_realistic_tcp_ip_ethernet_stack_send() {
         // Create realistic protocol stack
         let ethernet = Arc::new(MockEthernetLayer::new(
-            "eth0", 
-            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
         ));
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
@@ -1044,28 +1150,31 @@ mod tests {
 
         // Verify Ethernet frame structure
         let frame = ethernet.get_last_frame();
-        assert!(frame.len() > 14);  // Ethernet header + IP + TCP + payload
-        
+        assert!(frame.len() > 14); // Ethernet header + IP + TCP + payload
+
         // Check Ethernet header
-        assert_eq!(&frame[0..6], &[0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);  // Dest MAC (from ARP)
-        assert_eq!(&frame[6..12], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);  // Src MAC
-        assert_eq!(&frame[12..14], &[0x08, 0x00]);  // EtherType: IPv4
-        
+        assert_eq!(&frame[0..6], &[0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]); // Dest MAC (from ARP)
+        assert_eq!(&frame[6..12], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Src MAC
+        assert_eq!(&frame[12..14], &[0x08, 0x00]); // EtherType: IPv4
+
         // Check IP header starts at offset 14
-        assert_eq!(frame[14], 0x45);  // IPv4 version + IHL
-        assert_eq!(frame[23], 6);  // Protocol: TCP
-        assert_eq!(&frame[26..30], &[192, 168, 1, 100]);  // Source IP
-        assert_eq!(&frame[30..34], &[192, 168, 1, 1]);  // Destination IP
-        
+        assert_eq!(frame[14], 0x45); // IPv4 version + IHL
+        assert_eq!(frame[23], 6); // Protocol: TCP
+        assert_eq!(&frame[26..30], &[192, 168, 1, 100]); // Source IP
+        assert_eq!(&frame[30..34], &[192, 168, 1, 1]); // Destination IP
+
         // Check TCP header starts at offset 34
-        assert_eq!(&frame[34..36], &5000u16.to_be_bytes());  // Source port
-        assert_eq!(&frame[36..38], &80u16.to_be_bytes());  // Destination port
+        assert_eq!(&frame[34..36], &5000u16.to_be_bytes()); // Source port
+        assert_eq!(&frame[36..38], &80u16.to_be_bytes()); // Destination port
     }
 
     #[test_case]
     fn test_realistic_tcp_ip_ethernet_receive() {
         // Create protocol stack
-        let ethernet = Arc::new(MockEthernetLayer::new("eth0", [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]));
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
@@ -1077,33 +1186,33 @@ mod tests {
         let mut frame = Vec::new();
 
         // Ethernet header
-        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);  // Dest MAC
-        frame.extend_from_slice(&[0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);  // Src MAC
-        frame.extend_from_slice(&[0x08, 0x00]);  // EtherType: IPv4
+        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Dest MAC
+        frame.extend_from_slice(&[0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]); // Src MAC
+        frame.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
 
         // IP header
         let ip_total_len = (20 + 20 + payload.len()) as u16;
-        frame.push(0x45);  // Version + IHL
-        frame.push(0x00);  // TOS
-        frame.extend_from_slice(&ip_total_len.to_be_bytes());  // Total Length
-        frame.extend_from_slice(&[0x00, 0x00]);  // ID
-        frame.extend_from_slice(&[0x00, 0x00]);  // Flags
-        frame.push(64);  // TTL
-        frame.push(6);  // Protocol: TCP
-        frame.extend_from_slice(&[0x00, 0x00]);  // Checksum
-        frame.extend_from_slice(&[192, 168, 1, 1]);  // Source IP
-        frame.extend_from_slice(&[192, 168, 1, 100]);  // Dest IP
+        frame.push(0x45); // Version + IHL
+        frame.push(0x00); // TOS
+        frame.extend_from_slice(&ip_total_len.to_be_bytes()); // Total Length
+        frame.extend_from_slice(&[0x00, 0x00]); // ID
+        frame.extend_from_slice(&[0x00, 0x00]); // Flags
+        frame.push(64); // TTL
+        frame.push(6); // Protocol: TCP
+        frame.extend_from_slice(&[0x00, 0x00]); // Checksum
+        frame.extend_from_slice(&[192, 168, 1, 1]); // Source IP
+        frame.extend_from_slice(&[192, 168, 1, 100]); // Dest IP
 
         // TCP header
-        frame.extend_from_slice(&80u16.to_be_bytes());  // Source port
-        frame.extend_from_slice(&5000u16.to_be_bytes());  // Dest port
-        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);  // Sequence
-        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);  // Ack
-        frame.extend_from_slice(&[0x50, 0x18]);  // Data offset + flags
-        frame.extend_from_slice(&[0xFF, 0xFF]);  // Window
-        frame.extend_from_slice(&[0x00, 0x00]);  // Checksum
-        frame.extend_from_slice(&[0x00, 0x00]);  // Urgent pointer
-        frame.extend_from_slice(payload);  // Payload
+        frame.extend_from_slice(&80u16.to_be_bytes()); // Source port
+        frame.extend_from_slice(&5000u16.to_be_bytes()); // Dest port
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // Sequence
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Ack
+        frame.extend_from_slice(&[0x50, 0x18]); // Data offset + flags
+        frame.extend_from_slice(&[0xFF, 0xFF]); // Window
+        frame.extend_from_slice(&[0x00, 0x00]); // Checksum
+        frame.extend_from_slice(&[0x00, 0x00]); // Urgent pointer
+        frame.extend_from_slice(payload); // Payload
 
         // Receive through Ethernet layer
         let result = ethernet.receive(&frame);
@@ -1122,12 +1231,15 @@ mod tests {
     #[test_case]
     fn test_realistic_two_socket_communication() {
         // Simulate two sockets communicating through shared protocol layers
-        
+
         // Create shared protocol layers
-        let ethernet = Arc::new(MockEthernetLayer::new("eth0", [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]));
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
-        
+
         ip.register_protocol(6, tcp.clone());
 
         // Socket 1: Client (192.168.1.100:5000 -> 192.168.1.1:80)
@@ -1137,7 +1249,7 @@ mod tests {
         client_ctx.set("tcp_src_port", &5000u16.to_be_bytes());
         client_ctx.set("tcp_dst_port", &80u16.to_be_bytes());
 
-        // Socket 2: Server (192.168.1.1:80 -> 192.168.1.100:5000)  
+        // Socket 2: Server (192.168.1.1:80 -> 192.168.1.100:5000)
         let mut server_ctx = LayerContext::new();
         server_ctx.set("ip_src", &[192, 168, 1, 1]);
         server_ctx.set("ip_dst", &[192, 168, 1, 100]);
@@ -1163,11 +1275,14 @@ mod tests {
     #[test_case]
     fn test_realistic_end_to_end_with_protocol_agnostic_context() {
         // Test that LayerContext is truly protocol-agnostic
-        
-        let ethernet = Arc::new(MockEthernetLayer::new("eth0", [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]));
+
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
-        
+
         ip.register_protocol(6, tcp.clone());
 
         // Create context using only generic set/get methods
@@ -1176,7 +1291,7 @@ mod tests {
         ctx.set("ip_dst", &[192, 168, 1, 1]);
         ctx.set("tcp_src_port", &5000u16.to_be_bytes());
         ctx.set("tcp_dst_port", &80u16.to_be_bytes());
-        ctx.set("custom_metadata", b"arbitrary data");  // Can add any custom data
+        ctx.set("custom_metadata", b"arbitrary data"); // Can add any custom data
 
         // Verify context is protocol-agnostic
         assert!(ctx.contains("ip_src"));
@@ -1193,5 +1308,461 @@ mod tests {
         assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 1);
         let frame = ethernet.get_last_frame();
         assert!(!frame.is_empty());
+    }
+
+    // ============================================================================
+    // Final Design Tests - Comprehensive Test Suite
+    // ============================================================================
+
+    /// Simulates a socket that holds ONLY the top-level layer (TCP)
+    struct MockTcpSocket {
+        tcp_layer: Arc<dyn NetworkLayer>, // ONLY top layer
+        local_port: u16,
+        remote_port: u16,
+        local_ip: [u8; 4],
+        remote_ip: [u8; 4],
+    }
+
+    impl MockTcpSocket {
+        fn new(
+            tcp_layer: Arc<dyn NetworkLayer>,
+            config: &SocketConfig,
+        ) -> Result<Self, SocketError> {
+            let local_port = config
+                .get_u16("tcp_local_port")
+                .ok_or(SocketError::InvalidPacket)?;
+            let local_ip = config
+                .get_ipv4("ip_local")
+                .ok_or(SocketError::InvalidPacket)?;
+
+            Ok(Self {
+                tcp_layer,
+                local_port,
+                remote_port: 0,
+                local_ip,
+                remote_ip: [0, 0, 0, 0],
+            })
+        }
+
+        fn connect(&mut self, config: &SocketConfig) -> Result<(), SocketError> {
+            self.remote_port = config
+                .get_u16("tcp_remote_port")
+                .ok_or(SocketError::InvalidPacket)?;
+            self.remote_ip = config
+                .get_ipv4("ip_remote")
+                .ok_or(SocketError::InvalidPacket)?;
+            Ok(())
+        }
+
+        fn send(
+            &self,
+            data: &[u8],
+            ip_layer: &Arc<dyn NetworkLayer>,
+            eth_layer: &Arc<dyn NetworkLayer>,
+        ) -> Result<(), SocketError> {
+            // Build context with hints
+            let mut ctx = LayerContext::new();
+            ctx.set("tcp_src_port", &self.local_port.to_be_bytes());
+            ctx.set("tcp_dst_port", &self.remote_port.to_be_bytes());
+            ctx.set("ip_src", &self.local_ip);
+            ctx.set("ip_dst", &self.remote_ip);
+
+            // Send through TCP layer - it handles the rest
+            self.tcp_layer
+                .send(data, &ctx, &[ip_layer.clone(), eth_layer.clone()])
+        }
+    }
+
+    #[test_case]
+    fn test_final_design_socket_with_top_layer_only() {
+        // Test: Socket holds ONLY TCP layer, not IP or Ethernet
+        let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        let mut config = SocketConfig::new();
+        config.set("tcp_local_port", &5000u16.to_be_bytes());
+        config.set("ip_local", &[192, 168, 1, 100]);
+
+        let socket = MockTcpSocket::new(tcp.clone(), &config);
+        assert!(socket.is_ok());
+
+        let socket = socket.unwrap();
+        assert_eq!(socket.local_port, 5000);
+        assert_eq!(socket.local_ip, [192, 168, 1, 100]);
+
+        // Socket only knows about TCP layer
+        // IP and Ethernet are passed at send time
+    }
+
+    #[test_case]
+    fn test_final_design_send_with_hints() {
+        // Test: Sending with LayerContext hints - each layer routes autonomously
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
+        let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
+        let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        ip.register_protocol(6, tcp.clone());
+
+        let mut config = SocketConfig::new();
+        config.set("tcp_local_port", &5000u16.to_be_bytes());
+        config.set("ip_local", &[192, 168, 1, 100]);
+
+        let mut socket = MockTcpSocket::new(tcp.clone(), &config).unwrap();
+
+        let mut connect_config = SocketConfig::new();
+        connect_config.set("tcp_remote_port", &80u16.to_be_bytes());
+        connect_config.set("ip_remote", &[192, 168, 1, 1]);
+        socket.connect(&connect_config).unwrap();
+
+        // Send - each layer adds info and routes based on hints
+        let data = b"Hello, World!";
+        let result = socket.send(data, &ip, &ethernet);
+        assert!(result.is_ok());
+
+        // Verify all layers processed packet
+        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(ip.packets_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(ethernet.packets_sent.load(Ordering::SeqCst), 1);
+    }
+
+    #[test_case]
+    fn test_final_design_configure_flow() {
+        // Test: SocketConfig flows down through layers at bind time
+
+        // Mock layer that tracks configure calls
+        struct ConfigTrackingLayer {
+            name: &'static str,
+            configured: AtomicU64,
+        }
+
+        impl ConfigTrackingLayer {
+            fn new(name: &'static str) -> Self {
+                Self {
+                    name,
+                    configured: AtomicU64::new(0),
+                }
+            }
+        }
+
+        impl NetworkLayer for ConfigTrackingLayer {
+            fn register_protocol(&self, _proto_num: u16, _handler: Arc<dyn NetworkLayer>) {}
+
+            fn send(
+                &self,
+                _packet: &[u8],
+                _context: &LayerContext,
+                _next_layers: &[Arc<dyn NetworkLayer>],
+            ) -> Result<(), SocketError> {
+                Ok(())
+            }
+
+            fn receive(&self, _packet: &[u8]) -> Result<(), SocketError> {
+                Ok(())
+            }
+
+            fn name(&self) -> &'static str {
+                self.name
+            }
+
+            fn configure(
+                &self,
+                config: &SocketConfig,
+                next_layers: &[Arc<dyn NetworkLayer>],
+            ) -> Result<(), SocketError> {
+                self.configured.fetch_add(1, Ordering::SeqCst);
+
+                // Pass config down to lower layers
+                for layer in next_layers {
+                    layer.configure(config, &[])?;
+                }
+                Ok(())
+            }
+        }
+
+        let tcp = Arc::new(ConfigTrackingLayer::new("tcp"));
+        let ip = Arc::new(ConfigTrackingLayer::new("ip"));
+        let eth = Arc::new(ConfigTrackingLayer::new("eth"));
+
+        let mut config = SocketConfig::new();
+        config.set("tcp_local_port", &5000u16.to_be_bytes());
+        config.set("ip_local", &[192, 168, 1, 100]);
+
+        // Configure flows TCP -> IP -> Ethernet
+        tcp.configure(&config, &[ip.clone(), eth.clone()]).unwrap();
+
+        // Verify all layers were configured
+        assert_eq!(tcp.configured.load(Ordering::SeqCst), 1);
+        assert_eq!(ip.configured.load(Ordering::SeqCst), 1);
+        assert_eq!(eth.configured.load(Ordering::SeqCst), 1);
+    }
+
+    #[test_case]
+    fn test_final_design_receive_routing() {
+        // Test: Packet receive routing up through layers
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
+        let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
+        let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        // Register TCP with IP (proto=6)
+        ip.register_protocol(6, tcp.clone());
+
+        // Build complete packet: Ethernet -> IP -> TCP
+        let payload = b"Received data";
+        let mut frame = Vec::new();
+
+        // Ethernet header
+        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Dest MAC
+        frame.extend_from_slice(&[0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]); // Src MAC
+        frame.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+
+        // IP header (20 bytes)
+        let ip_total_len = (20 + 20 + payload.len()) as u16;
+        frame.push(0x45); // Version + IHL
+        frame.push(0x00); // TOS
+        frame.extend_from_slice(&ip_total_len.to_be_bytes());
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // ID + Flags
+        frame.push(64); // TTL
+        frame.push(6); // Protocol: TCP
+        frame.extend_from_slice(&[0x00, 0x00]); // Checksum
+        frame.extend_from_slice(&[192, 168, 1, 1]); // Src IP
+        frame.extend_from_slice(&[192, 168, 1, 100]); // Dst IP
+
+        // TCP header (20 bytes)
+        frame.extend_from_slice(&80u16.to_be_bytes()); // Src port
+        frame.extend_from_slice(&5000u16.to_be_bytes()); // Dst port
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]); // Seq + Ack
+        frame.extend_from_slice(&[0x50, 0x18, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00]); // Offset + flags + window + checksum + urgent
+        frame.extend_from_slice(payload);
+
+        // Receive through layers
+        assert!(ethernet.receive(&frame).is_ok());
+
+        let ip_packet = &frame[14..];
+        assert!(ip.receive(ip_packet).is_ok());
+
+        // Verify TCP received payload
+        assert_eq!(tcp.packets_received.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp.get_last_received(), payload);
+    }
+
+    #[test_case]
+    fn test_final_design_client_server() {
+        // Test: Full bidirectional communication between client and server
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
+        let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
+        let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        ip.register_protocol(6, tcp.clone());
+
+        // Client socket: 192.168.1.100:5000
+        let mut client_config = SocketConfig::new();
+        client_config.set("tcp_local_port", &5000u16.to_be_bytes());
+        client_config.set("ip_local", &[192, 168, 1, 100]);
+        let mut client = MockTcpSocket::new(tcp.clone(), &client_config).unwrap();
+
+        let mut client_connect = SocketConfig::new();
+        client_connect.set("tcp_remote_port", &80u16.to_be_bytes());
+        client_connect.set("ip_remote", &[192, 168, 1, 1]);
+        client.connect(&client_connect).unwrap();
+
+        // Server socket: 192.168.1.1:80
+        let mut server_config = SocketConfig::new();
+        server_config.set("tcp_local_port", &80u16.to_be_bytes());
+        server_config.set("ip_local", &[192, 168, 1, 1]);
+        let mut server = MockTcpSocket::new(tcp.clone(), &server_config).unwrap();
+
+        let mut server_connect = SocketConfig::new();
+        server_connect.set("tcp_remote_port", &5000u16.to_be_bytes());
+        server_connect.set("ip_remote", &[192, 168, 1, 100]);
+        server.connect(&server_connect).unwrap();
+
+        // Client sends request
+        let request = b"GET / HTTP/1.1\r\n\r\n";
+        assert!(client.send(request, &ip, &ethernet).is_ok());
+
+        // Server sends response
+        let response = b"HTTP/1.1 200 OK\r\n\r\n";
+        assert!(server.send(response, &ip, &ethernet).is_ok());
+
+        // Verify bidirectional communication
+        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
+    }
+
+    #[test_case]
+    fn test_final_design_error_handling() {
+        // Test: NoRoute error when hints insufficient
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
+        let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
+        let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        // Missing destination IP in context
+        let mut ctx = LayerContext::new();
+        ctx.set("tcp_src_port", &5000u16.to_be_bytes());
+        ctx.set("tcp_dst_port", &80u16.to_be_bytes());
+        // Missing: ctx.set("ip_dst", ...)
+
+        let data = b"test";
+        let result = tcp.send(data, &ctx, &[ip.clone(), ethernet.clone()]);
+
+        // Should fail with InvalidPacket due to missing IP destination
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_final_design_multiple_sockets() {
+        // Test: Multiple sockets sharing layers, proper routing
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
+        let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
+        let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        ip.register_protocol(6, tcp.clone());
+
+        // Socket 1: Port 5000
+        let mut config1 = SocketConfig::new();
+        config1.set("tcp_local_port", &5000u16.to_be_bytes());
+        config1.set("ip_local", &[192, 168, 1, 100]);
+        let mut socket1 = MockTcpSocket::new(tcp.clone(), &config1).unwrap();
+
+        let mut connect1 = SocketConfig::new();
+        connect1.set("tcp_remote_port", &80u16.to_be_bytes());
+        connect1.set("ip_remote", &[192, 168, 1, 1]);
+        socket1.connect(&connect1).unwrap();
+
+        // Socket 2: Port 6000
+        let mut config2 = SocketConfig::new();
+        config2.set("tcp_local_port", &6000u16.to_be_bytes());
+        config2.set("ip_local", &[192, 168, 1, 100]);
+        let mut socket2 = MockTcpSocket::new(tcp.clone(), &config2).unwrap();
+
+        let mut connect2 = SocketConfig::new();
+        connect2.set("tcp_remote_port", &443u16.to_be_bytes());
+        connect2.set("ip_remote", &[192, 168, 1, 2]);
+        socket2.connect(&connect2).unwrap();
+
+        // Both sockets send data
+        assert!(socket1.send(b"data1", &ip, &ethernet).is_ok());
+        assert!(socket2.send(b"data2", &ip, &ethernet).is_ok());
+
+        // Both packets sent successfully
+        assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
+    }
+
+    #[test_case]
+    fn test_final_design_protocol_agnostic() {
+        // Test: Verify LayerContext is truly protocol-agnostic
+        let mut ctx = LayerContext::new();
+
+        // Can store any protocol data
+        ctx.set(
+            "ipv6_src",
+            &[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        );
+        ctx.set(
+            "ipv6_dst",
+            &[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+        );
+        ctx.set("sctp_src_port", &9000u16.to_be_bytes());
+        ctx.set("custom_protocol_field", b"arbitrary");
+        ctx.set("qos_class", &[1]);
+        ctx.set("debug_trace_id", &12345u32.to_be_bytes());
+
+        // All data retrievable
+        assert_eq!(ctx.get("ipv6_src").unwrap().len(), 16);
+        assert_eq!(ctx.get("sctp_src_port"), Some(&[0x23, 0x28][..]));
+        assert_eq!(
+            ctx.get("custom_protocol_field"),
+            Some(b"arbitrary" as &[u8])
+        );
+        assert!(ctx.contains("qos_class"));
+        assert!(ctx.contains("debug_trace_id"));
+    }
+
+    #[test_case]
+    fn test_final_design_tcp_ip_ethernet_stack() {
+        // Test: Complete realistic stack with all layers
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
+        let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
+        let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        ip.register_protocol(6, tcp.clone());
+
+        // Create socket and send data
+        let mut config = SocketConfig::new();
+        config.set("tcp_local_port", &5000u16.to_be_bytes());
+        config.set("ip_local", &[192, 168, 1, 100]);
+        let mut socket = MockTcpSocket::new(tcp.clone(), &config).unwrap();
+
+        let mut connect_config = SocketConfig::new();
+        connect_config.set("tcp_remote_port", &80u16.to_be_bytes());
+        connect_config.set("ip_remote", &[192, 168, 1, 1]);
+        socket.connect(&connect_config).unwrap();
+
+        let payload = b"Real packet data";
+        assert!(socket.send(payload, &ip, &ethernet).is_ok());
+
+        // Verify complete packet structure
+        let frame = ethernet.get_last_frame();
+        assert!(frame.len() > 54); // Eth(14) + IP(20) + TCP(20)
+
+        // Check all headers present
+        assert_eq!(&frame[12..14], &[0x08, 0x00]); // EtherType
+        assert_eq!(frame[14], 0x45); // IPv4
+        assert_eq!(frame[23], 6); // TCP protocol
+        assert_eq!(&frame[34..36], &5000u16.to_be_bytes()); // TCP src port
+        assert_eq!(&frame[36..38], &80u16.to_be_bytes()); // TCP dst port
+    }
+
+    #[test_case]
+    fn test_final_design_layer_isolation() {
+        // Test: Layers operate independently without tight coupling
+        let tcp1 = Arc::new(MockTcpLayer::new("tcp1"));
+        let tcp2 = Arc::new(MockTcpLayer::new("tcp2"));
+        let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
+        let ethernet = Arc::new(MockEthernetLayer::new(
+            "eth0",
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        ));
+
+        // Both TCP layers can use same IP and Ethernet
+        ip.register_protocol(6, tcp1.clone());
+
+        let mut ctx1 = LayerContext::new();
+        ctx1.set("ip_dst", &[192, 168, 1, 1]);
+        ctx1.set("tcp_dst_port", &80u16.to_be_bytes());
+
+        let mut ctx2 = LayerContext::new();
+        ctx2.set("ip_dst", &[192, 168, 1, 2]);
+        ctx2.set("tcp_dst_port", &443u16.to_be_bytes());
+
+        // Both send independently
+        assert!(
+            tcp1.send(b"data1", &ctx1, &[ip.clone(), ethernet.clone()])
+                .is_ok()
+        );
+        assert!(
+            tcp2.send(b"data2", &ctx2, &[ip.clone(), ethernet.clone()])
+                .is_ok()
+        );
+
+        // Verify independence
+        assert_eq!(tcp1.packets_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(tcp2.packets_sent.load(Ordering::SeqCst), 1);
     }
 }
