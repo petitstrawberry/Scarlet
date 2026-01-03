@@ -696,11 +696,13 @@ mod tests {
         ));
 
         // First registration should succeed
+        // Keep socket1 alive by cloning the Arc
+        let _socket1_ref = socket1.clone();
         assert!(manager
             .register_named_socket("/tmp/test.sock", socket1)
             .is_ok());
 
-        // Second registration should fail
+        // Second registration should fail (socket1 is still alive)
         let result = manager.register_named_socket("/tmp/test.sock", socket2);
         assert!(result.is_err());
         match result {
@@ -744,16 +746,21 @@ mod tests {
                 SocketProtocol::Default,
             ));
 
+            // Register socket - manager stores a Weak reference
+            // We keep the strong reference 'socket' alive in this scope
             manager
                 .register_named_socket("/tmp/test.sock", socket.clone())
                 .unwrap();
 
-            // Socket is alive, lookup succeeds
+            // Socket is alive (socket variable holds strong ref), lookup succeeds
             assert!(manager.lookup_named_socket("/tmp/test.sock").is_ok());
+            
+            // Keep socket alive until end of scope
+            drop(socket);
         }
-        // Socket dropped here
+        // All strong references dropped here
 
-        // Socket is dead, lookup fails
+        // Socket is dead (all Arc dropped), weak reference can't upgrade, lookup fails
         let result = manager.lookup_named_socket("/tmp/test.sock");
         assert!(result.is_err());
         match result {
