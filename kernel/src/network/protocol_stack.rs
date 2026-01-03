@@ -45,7 +45,12 @@
 //! - Send packets to multiple lower layers
 //! - Route based on protocol numbers
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 use spin::RwLock;
 
 use super::socket::{SocketDomain, SocketError, SocketObject, SocketProtocol, SocketType};
@@ -335,16 +340,34 @@ pub trait NetworkLayer: Send + Sync {
     /// Upper layer protocols register themselves with their protocol number.
     /// For example, TCP registers as protocol 6 with the IP layer.
     ///
+    /// # Important: Avoid Circular References
+    ///
+    /// **Registration is one-way only: lower layers register upper layers.**
+    ///
+    /// - ✅ **Correct**: Ethernet registers IP (for receive routing)
+    /// - ✅ **Correct**: IP registers TCP (for receive routing)
+    /// - ❌ **Wrong**: IP registers Ethernet (would create cycle)
+    ///
+    /// For sending, upper layers pass lower layers as **temporary references**
+    /// via the `send(next_layers)` parameter, not as permanent registrations.
+    /// This prevents circular Arc references.
+    ///
     /// # Arguments
     ///
-    /// * `proto_num` - Protocol number (e.g., 6 for TCP, 17 for UDP)
+    /// * `proto_num` - Protocol number (e.g., 6 for TCP, 17 for UDP, 0x0800 for IPv4)
     /// * `handler` - Protocol handler for this protocol number
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// // TCP layer registers with IP layer
-    /// ip_layer.register_protocol(6, Arc::new(tcp_layer));
+    /// // Setup protocol hierarchy (initialization time)
+    /// ethernet.register_protocol(0x0800, ip.clone());  // IPv4 = 0x0800
+    /// ip.register_protocol(6, tcp.clone());            // TCP = 6
+    /// ip.register_protocol(17, udp.clone());           // UDP = 17
+    ///
+    /// // Sending (runtime) - pass lower layers temporarily
+    /// tcp.send(&segment, &ctx, &[ip.clone(), ethernet.clone()])?;
+    /// // No permanent reference stored, no circular dependency
     /// ```
     fn register_protocol(&self, proto_num: u16, handler: Arc<dyn NetworkLayer>);
 
@@ -672,6 +695,174 @@ impl Default for ProtocolStackManager {
     }
 }
 
+/// Network layer manager
+///
+/// Global registry for protocol layer instances, following the VFS pattern.
+/// Each layer (Ethernet, IP, TCP) is registered once and shared across all sockets.
+///
+/// # Design Philosophy
+///
+/// - **Singleton layers**: Each protocol layer is instantiated once and shared
+/// - **Global registry**: Similar to VfsManager, provides centralized layer management
+/// - **Namespace isolation**: Future support for per-task network namespaces
+///
+/// # Example Usage
+///
+/// ```rust,ignore
+/// // During system initialization
+/// let net_manager = NetworkManager::new();
+///
+/// // Register shared protocol layers
+/// let ethernet = Arc::new(EthernetLayer::new());
+/// let ip = Arc::new(IpLayer::new());
+/// let tcp = Arc::new(TcpLayer::new());
+///
+/// net_manager.register_layer("ethernet", ethernet.clone());
+/// net_manager.register_layer("ip", ip.clone());
+/// net_manager.register_layer("tcp", tcp.clone());
+///
+/// // Setup protocol hierarchy - ONE WAY ONLY (lower -> upper)
+/// ethernet.register_protocol(0x0800, ip.clone()); // Ethernet knows about IP
+/// ip.register_protocol(6, tcp.clone());           // IP knows about TCP
+/// // ❌ DON'T: tcp.register_protocol(X, ip.clone()) - creates circular reference!
+///
+/// // Socket creation retrieves shared layers
+/// let tcp_layer = net_manager.get_layer("tcp")?;
+/// let ip_layer = net_manager.get_layer("ip")?;
+/// let eth_layer = net_manager.get_layer("ethernet")?;
+///
+/// // Create socket with references to shared layers (temporary, no cycle)
+/// let socket = TcpSocket::new(tcp_layer, ip_layer, eth_layer);
+/// ```
+///
+/// # Avoiding Circular References
+///
+/// Protocol registration creates **permanent Arc references** for receive routing.
+/// To avoid cycles:
+///
+/// 1. **Registration**: Only lower layers register upper layers (one-way)
+///    - Ethernet → IP → TCP (receive path)
+/// 2. **Sending**: Upper layers pass lower layers as temporary parameters
+///    - `send(packet, context, &[next_layer])` (no permanent storage)
+/// 3. **Sockets**: Hold references to all layers they need (temporary per-socket)
+pub struct NetworkManager {
+    /// Registered network layers by name
+    layers: RwLock<BTreeMap<String, Arc<dyn NetworkLayer>>>,
+}
+
+impl NetworkManager {
+    /// Create a new network manager
+    pub const fn new() -> Self {
+        Self {
+            layers: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Register a network layer
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Unique name for this layer (e.g., "ethernet", "ip", "tcp")
+    /// * `layer` - The layer implementation to register
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let manager = NetworkManager::new();
+    /// manager.register_layer("tcp", Arc::new(TcpLayer::new()));
+    /// ```
+    pub fn register_layer(&self, name: &str, layer: Arc<dyn NetworkLayer>) {
+        self.layers.write().insert(name.to_string(), layer);
+    }
+
+    /// Get a registered network layer by name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name of the layer to retrieve
+    ///
+    /// # Returns
+    ///
+    /// The layer if registered, None otherwise
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// if let Some(tcp_layer) = manager.get_layer("tcp") {
+    ///     // Use the shared TCP layer
+    /// }
+    /// ```
+    pub fn get_layer(&self, name: &str) -> Option<Arc<dyn NetworkLayer>> {
+        self.layers.read().get(name).cloned()
+    }
+
+    /// Remove a network layer
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name of the layer to remove
+    ///
+    /// # Returns
+    ///
+    /// The removed layer if it existed, None otherwise
+    pub fn unregister_layer(&self, name: &str) -> Option<Arc<dyn NetworkLayer>> {
+        self.layers.write().remove(name)
+    }
+
+    /// List all registered layer names
+    ///
+    /// # Returns
+    ///
+    /// Vector of layer names currently registered
+    pub fn list_layers(&self) -> Vec<String> {
+        self.layers.read().keys().cloned().collect()
+    }
+
+    /// Check if a layer is registered
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name of the layer to check
+    ///
+    /// # Returns
+    ///
+    /// true if the layer is registered, false otherwise
+    pub fn has_layer(&self, name: &str) -> bool {
+        self.layers.read().contains_key(name)
+    }
+
+    /// Get the number of registered layers
+    pub fn layer_count(&self) -> usize {
+        self.layers.read().len()
+    }
+}
+
+impl Default for NetworkManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Global network manager instance
+static GLOBAL_NETWORK_MANAGER: spin::Once<NetworkManager> = spin::Once::new();
+
+/// Get the global network manager
+///
+/// Returns a reference to the global NetworkManager singleton.
+/// The manager is initialized on first access.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let manager = get_network_manager();
+/// if let Some(tcp_layer) = manager.get_layer("tcp") {
+///     // Use TCP layer
+/// }
+/// ```
+pub fn get_network_manager() -> &'static NetworkManager {
+    GLOBAL_NETWORK_MANAGER.call_once(|| NetworkManager::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +881,146 @@ mod tests {
         assert_eq!(stats.packets_sent, 0);
         assert_eq!(stats.bytes_sent, 0);
         assert_eq!(stats.packets_received, 0);
+    }
+
+    #[test_case]
+    fn test_network_manager_creation() {
+        let manager = NetworkManager::new();
+        assert_eq!(manager.layer_count(), 0);
+        assert!(!manager.has_layer("tcp"));
+    }
+
+    #[test_case]
+    fn test_network_manager_register_and_get() {
+        let manager = NetworkManager::new();
+
+        // Create a simple mock layer for testing
+        struct SimpleMockLayer;
+        impl NetworkLayer for SimpleMockLayer {
+            fn register_protocol(&self, _: u16, _: Arc<dyn NetworkLayer>) {}
+            fn send(
+                &self,
+                _: &[u8],
+                _: &LayerContext,
+                _: &[Arc<dyn NetworkLayer>],
+            ) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "simple"
+            }
+        }
+
+        let layer = Arc::new(SimpleMockLayer);
+        manager.register_layer("test", layer.clone());
+
+        assert_eq!(manager.layer_count(), 1);
+        assert!(manager.has_layer("test"));
+        assert!(manager.get_layer("test").is_some());
+        assert!(manager.get_layer("nonexistent").is_none());
+    }
+
+    #[test_case]
+    fn test_network_manager_list_layers() {
+        let manager = NetworkManager::new();
+
+        struct SimpleMockLayer(&'static str);
+        impl NetworkLayer for SimpleMockLayer {
+            fn register_protocol(&self, _: u16, _: Arc<dyn NetworkLayer>) {}
+            fn send(
+                &self,
+                _: &[u8],
+                _: &LayerContext,
+                _: &[Arc<dyn NetworkLayer>],
+            ) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                self.0
+            }
+        }
+
+        manager.register_layer("tcp", Arc::new(SimpleMockLayer("tcp")));
+        manager.register_layer("udp", Arc::new(SimpleMockLayer("udp")));
+        manager.register_layer("ip", Arc::new(SimpleMockLayer("ip")));
+
+        let layers = manager.list_layers();
+        assert_eq!(layers.len(), 3);
+        assert!(layers.contains(&"tcp".to_string()));
+        assert!(layers.contains(&"udp".to_string()));
+        assert!(layers.contains(&"ip".to_string()));
+    }
+
+    #[test_case]
+    fn test_network_manager_unregister() {
+        let manager = NetworkManager::new();
+
+        struct SimpleMockLayer;
+        impl NetworkLayer for SimpleMockLayer {
+            fn register_protocol(&self, _: u16, _: Arc<dyn NetworkLayer>) {}
+            fn send(
+                &self,
+                _: &[u8],
+                _: &LayerContext,
+                _: &[Arc<dyn NetworkLayer>],
+            ) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "simple"
+            }
+        }
+
+        let layer = Arc::new(SimpleMockLayer);
+        manager.register_layer("test", layer);
+
+        assert!(manager.has_layer("test"));
+
+        let removed = manager.unregister_layer("test");
+        assert!(removed.is_some());
+        assert!(!manager.has_layer("test"));
+        assert_eq!(manager.layer_count(), 0);
+    }
+
+    #[test_case]
+    fn test_global_network_manager() {
+        // Test that we can get the global manager
+        let manager = get_network_manager();
+
+        // It should start empty (or have layers from other tests, but be valid)
+        let initial_count = manager.layer_count();
+
+        struct SimpleMockLayer;
+        impl NetworkLayer for SimpleMockLayer {
+            fn register_protocol(&self, _: u16, _: Arc<dyn NetworkLayer>) {}
+            fn send(
+                &self,
+                _: &[u8],
+                _: &LayerContext,
+                _: &[Arc<dyn NetworkLayer>],
+            ) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn receive(&self, _: &[u8]) -> Result<(), SocketError> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "global_test"
+            }
+        }
+
+        manager.register_layer("global_test", Arc::new(SimpleMockLayer));
+        assert_eq!(manager.layer_count(), initial_count + 1);
+        assert!(manager.has_layer("global_test"));
     }
 
     #[test_case]
@@ -748,13 +1079,14 @@ mod tests {
     /// Frame format:
     /// - Destination MAC (6 bytes)
     /// - Source MAC (6 bytes)  
-    /// - EtherType (2 bytes): 0x0800 for IPv4
+    /// - EtherType (2 bytes): 0x0800 for IPv4, 0x0806 for ARP
     /// - Payload (variable)
     /// - FCS (omitted in this mock)
     struct MockEthernetLayer {
         name: &'static str,
         mac_address: [u8; 6],
         arp_table: RwLock<BTreeMap<[u8; 4], [u8; 6]>>, // IP -> MAC mapping
+        protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>, // EtherType -> Handler
         packets_sent: AtomicU64,
         packets_received: AtomicU64,
         last_sent_frame: RwLock<Vec<u8>>,
@@ -762,10 +1094,11 @@ mod tests {
 
     impl MockEthernetLayer {
         fn new(name: &'static str, mac: [u8; 6]) -> Self {
-            let mut layer = Self {
+            let layer = Self {
                 name,
                 mac_address: mac,
                 arp_table: RwLock::new(BTreeMap::new()),
+                protocols: RwLock::new(BTreeMap::new()),
                 packets_sent: AtomicU64::new(0),
                 packets_received: AtomicU64::new(0),
                 last_sent_frame: RwLock::new(Vec::new()),
@@ -788,8 +1121,9 @@ mod tests {
     }
 
     impl NetworkLayer for MockEthernetLayer {
-        fn register_protocol(&self, _proto_num: u16, _handler: Arc<dyn NetworkLayer>) {
-            // Ethernet doesn't register upper protocols in this simple mock
+        fn register_protocol(&self, proto_num: u16, handler: Arc<dyn NetworkLayer>) {
+            // EtherType registration (e.g., 0x0800 for IPv4, 0x0806 for ARP)
+            self.protocols.write().insert(proto_num, handler);
         }
 
         fn send(
@@ -844,12 +1178,12 @@ mod tests {
             let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
             let payload = &frame[14..];
 
-            // For IPv4 (0x0800), would pass to IP layer
-            // In this mock, just verify the frame is valid
-            if ethertype == 0x0800 && !payload.is_empty() {
-                Ok(())
+            // Route to registered protocol handler based on EtherType
+            if let Some(handler) = self.protocols.read().get(&ethertype) {
+                handler.receive(payload)
             } else {
-                Err(SocketError::ProtocolNotSupported)
+                // No handler for this EtherType, but frame is valid
+                Ok(())
             }
         }
 
@@ -1129,10 +1463,10 @@ mod tests {
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
         // Setup ARP entry for destination
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 1],
-            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
-        );
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
 
         // Register TCP with IP layer
         ip.register_protocol(6, tcp.clone());
@@ -1410,10 +1744,10 @@ mod tests {
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
         // Setup ARP entry
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 1],
-            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
-        );
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
 
         ip.register_protocol(6, tcp.clone());
 
@@ -1430,7 +1764,11 @@ mod tests {
 
         // Send - each layer adds info and routes based on hints
         let data = b"Hello, World!";
-        let result = socket.send(data, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>));
+        let result = socket.send(
+            data,
+            &(ip.clone() as Arc<dyn NetworkLayer>),
+            &(ethernet.clone() as Arc<dyn NetworkLayer>),
+        );
         assert!(result.is_ok());
 
         // Verify all layers processed packet
@@ -1573,14 +1911,14 @@ mod tests {
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
         // Setup ARP entries for both client and server destinations
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 1],
-            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
-        );
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 100],
-            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
-        );
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 100], [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
 
         ip.register_protocol(6, tcp.clone());
 
@@ -1608,11 +1946,27 @@ mod tests {
 
         // Client sends request
         let request = b"GET / HTTP/1.1\r\n\r\n";
-        assert!(client.send(request, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
+        assert!(
+            client
+                .send(
+                    request,
+                    &(ip.clone() as Arc<dyn NetworkLayer>),
+                    &(ethernet.clone() as Arc<dyn NetworkLayer>)
+                )
+                .is_ok()
+        );
 
         // Server sends response
         let response = b"HTTP/1.1 200 OK\r\n\r\n";
-        assert!(server.send(response, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
+        assert!(
+            server
+                .send(
+                    response,
+                    &(ip.clone() as Arc<dyn NetworkLayer>),
+                    &(ethernet.clone() as Arc<dyn NetworkLayer>)
+                )
+                .is_ok()
+        );
 
         // Verify bidirectional communication
         assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
@@ -1652,14 +2006,14 @@ mod tests {
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
         // Setup ARP entries for both destinations
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 1],
-            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
-        );
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 2],
-            [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
-        );
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 2], [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
 
         ip.register_protocol(6, tcp.clone());
 
@@ -1686,8 +2040,24 @@ mod tests {
         socket2.connect(&connect2).unwrap();
 
         // Both sockets send data
-        assert!(socket1.send(b"data1", &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
-        assert!(socket2.send(b"data2", &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
+        assert!(
+            socket1
+                .send(
+                    b"data1",
+                    &(ip.clone() as Arc<dyn NetworkLayer>),
+                    &(ethernet.clone() as Arc<dyn NetworkLayer>)
+                )
+                .is_ok()
+        );
+        assert!(
+            socket2
+                .send(
+                    b"data2",
+                    &(ip.clone() as Arc<dyn NetworkLayer>),
+                    &(ethernet.clone() as Arc<dyn NetworkLayer>)
+                )
+                .is_ok()
+        );
 
         // Both packets sent successfully
         assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
@@ -1734,10 +2104,10 @@ mod tests {
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
         // Setup ARP entry
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 1],
-            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
-        );
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
 
         ip.register_protocol(6, tcp.clone());
 
@@ -1753,7 +2123,15 @@ mod tests {
         socket.connect(&connect_config).unwrap();
 
         let payload = b"Real packet data";
-        assert!(socket.send(payload, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
+        assert!(
+            socket
+                .send(
+                    payload,
+                    &(ip.clone() as Arc<dyn NetworkLayer>),
+                    &(ethernet.clone() as Arc<dyn NetworkLayer>)
+                )
+                .is_ok()
+        );
 
         // Verify complete packet structure
         let frame = ethernet.get_last_frame();
@@ -1779,14 +2157,14 @@ mod tests {
         ));
 
         // Setup ARP entries for both destinations
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 1],
-            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
-        );
-        ethernet.arp_table.write().insert(
-            [192, 168, 1, 2],
-            [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
-        );
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 1], [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
+        ethernet
+            .arp_table
+            .write()
+            .insert([192, 168, 1, 2], [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
 
         // Both TCP layers can use same IP and Ethernet
         ip.register_protocol(6, tcp1.clone());
