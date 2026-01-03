@@ -1128,6 +1128,12 @@ mod tests {
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
+        // Setup ARP entry for destination
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 1],
+            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+
         // Register TCP with IP layer
         ip.register_protocol(6, tcp.clone());
 
@@ -1403,6 +1409,12 @@ mod tests {
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
+        // Setup ARP entry
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 1],
+            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+
         ip.register_protocol(6, tcp.clone());
 
         let mut config = SocketConfig::new();
@@ -1560,6 +1572,16 @@ mod tests {
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
+        // Setup ARP entries for both client and server destinations
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 1],
+            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 100],
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        );
+
         ip.register_protocol(6, tcp.clone());
 
         // Client socket: 192.168.1.100:5000
@@ -1628,6 +1650,16 @@ mod tests {
         ));
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
+
+        // Setup ARP entries for both destinations
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 1],
+            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 2],
+            [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        );
 
         ip.register_protocol(6, tcp.clone());
 
@@ -1701,6 +1733,12 @@ mod tests {
         let ip = Arc::new(MockIpLayer::new("ip", [192, 168, 1, 100]));
         let tcp = Arc::new(MockTcpLayer::new("tcp"));
 
+        // Setup ARP entry
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 1],
+            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+
         ip.register_protocol(6, tcp.clone());
 
         // Create socket and send data
@@ -1739,6 +1777,16 @@ mod tests {
             "eth0",
             [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
         ));
+
+        // Setup ARP entries for both destinations
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 1],
+            [0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        );
+        ethernet.arp_table.write().insert(
+            [192, 168, 1, 2],
+            [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        );
 
         // Both TCP layers can use same IP and Ethernet
         ip.register_protocol(6, tcp1.clone());
