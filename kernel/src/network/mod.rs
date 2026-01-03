@@ -38,7 +38,9 @@ pub use socket::{
     SocketControl, SocketDomain, SocketError, SocketObject, SocketProtocol, SocketState,
     SocketType, UnixSocketAddress, // Keep for backwards compatibility
 };
-pub use protocol_stack::{ProtocolStack, ProtocolStackManager, ProtocolStackStats};
+pub use protocol_stack::{
+    NetworkLayer, NetworkLayerStats, ProtocolStack, ProtocolStackManager, ProtocolStackStats,
+};
 
 use crate::object::KernelObject;
 

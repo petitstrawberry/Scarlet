@@ -289,6 +289,12 @@ pub enum SocketError {
     InvalidArgument,
     /// Not supported
     NotSupported,
+    /// No route to destination
+    NoRoute,
+    /// Protocol not supported
+    ProtocolNotSupported,
+    /// Invalid packet format
+    InvalidPacket,
     /// Custom error message
     Other(String),
 }
