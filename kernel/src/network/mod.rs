@@ -451,6 +451,165 @@ static GLOBAL_NETWORK_MANAGER: Once<NetworkManager> = Once::new();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::StreamIpcOps;
+    use crate::object::capability::CloneOps;
+
+    // Mock socket implementation for testing
+    struct MockSocket {
+        socket_type: SocketType,
+        domain: SocketDomain,
+        protocol: SocketProtocol,
+        state: RwLock<SocketState>,
+        local_addr: RwLock<Option<SocketAddress>>,
+        peer_addr: RwLock<Option<SocketAddress>>,
+    }
+
+    impl MockSocket {
+        fn new(
+            socket_type: SocketType,
+            domain: SocketDomain,
+            protocol: SocketProtocol,
+        ) -> Self {
+            Self {
+                socket_type,
+                domain,
+                protocol,
+                state: RwLock::new(SocketState::Unconnected),
+                local_addr: RwLock::new(None),
+                peer_addr: RwLock::new(None),
+            }
+        }
+    }
+
+    impl crate::object::capability::StreamOps for MockSocket {
+        fn read(&self, _buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
+            Ok(0)
+        }
+
+        fn write(&self, data: &[u8]) -> Result<usize, crate::object::capability::StreamError> {
+            Ok(data.len())
+        }
+    }
+
+    impl StreamIpcOps for MockSocket {
+        fn is_connected(&self) -> bool {
+            *self.state.read() == SocketState::Connected
+        }
+
+        fn peer_count(&self) -> usize {
+            if StreamIpcOps::is_connected(self) { 1 } else { 0 }
+        }
+
+        fn description(&self) -> String {
+            alloc::format!("MockSocket({:?}, {:?})", self.domain, self.socket_type)
+        }
+    }
+
+    impl SocketControl for MockSocket {
+        fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
+            *self.local_addr.write() = Some(address.clone());
+            Ok(())
+        }
+
+        fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
+            *self.peer_addr.write() = Some(address.clone());
+            *self.state.write() = SocketState::Connected;
+            Ok(())
+        }
+
+        fn listen(&self, _backlog: usize) -> Result<(), SocketError> {
+            *self.state.write() = SocketState::Listening;
+            Ok(())
+        }
+
+        fn accept(&self) -> Result<Arc<dyn SocketObject>, SocketError> {
+            Err(SocketError::NotSupported)
+        }
+
+        fn getpeername(&self) -> Result<SocketAddress, SocketError> {
+            self.peer_addr
+                .read()
+                .clone()
+                .ok_or(SocketError::NotConnected)
+        }
+
+        fn getsockname(&self) -> Result<SocketAddress, SocketError> {
+            self.local_addr
+                .read()
+                .clone()
+                .ok_or(SocketError::InvalidAddress)
+        }
+
+        fn shutdown(&self, _how: ShutdownHow) -> Result<(), SocketError> {
+            *self.state.write() = SocketState::Closed;
+            Ok(())
+        }
+
+        fn is_connected(&self) -> bool {
+            *self.state.read() == SocketState::Connected
+        }
+
+        fn state(&self) -> SocketState {
+            *self.state.read()
+        }
+    }
+
+    impl CloneOps for MockSocket {
+        fn custom_clone(&self) -> KernelObject {
+            KernelObject::Socket(Arc::new(MockSocket::new(
+                self.socket_type,
+                self.domain,
+                self.protocol,
+            )))
+        }
+    }
+
+    impl SocketObject for MockSocket {
+        fn socket_type(&self) -> SocketType {
+            self.socket_type
+        }
+
+        fn socket_domain(&self) -> SocketDomain {
+            self.domain
+        }
+
+        fn socket_protocol(&self) -> SocketProtocol {
+            self.protocol
+        }
+
+        fn sendto(
+            &self,
+            data: &[u8],
+            _address: &SocketAddress,
+            _flags: u32,
+        ) -> Result<usize, SocketError> {
+            Ok(data.len())
+        }
+
+        fn recvfrom(
+            &self,
+            _buffer: &mut [u8],
+            _flags: u32,
+        ) -> Result<(usize, SocketAddress), SocketError> {
+            Err(SocketError::WouldBlock)
+        }
+
+        fn as_selectable(&self) -> Option<&dyn crate::object::capability::selectable::Selectable> {
+            None
+        }
+    }
+
+    // Mock socket factory
+    fn mock_socket_factory(
+        socket_type: SocketType,
+        protocol: SocketProtocol,
+    ) -> Result<Arc<dyn SocketObject>, SocketError> {
+        Ok(Arc::new(MockSocket::new(
+            socket_type,
+            SocketDomain::Local,
+            protocol,
+        )))
+    }
 
     #[test_case]
     fn test_network_manager_creation() {
@@ -472,5 +631,222 @@ mod tests {
             Err(SocketError::NotSupported) => {}
             _ => panic!("Expected NotSupported error"),
         }
+    }
+
+    #[test_case]
+    fn test_register_and_create_socket() {
+        let manager = NetworkManager::new();
+
+        // Register factory
+        manager.register_socket_factory(SocketDomain::Local, mock_socket_factory);
+
+        // Create socket
+        let result = manager.create_socket(
+            SocketDomain::Local,
+            SocketType::Stream,
+            SocketProtocol::Default,
+        );
+
+        assert!(result.is_ok());
+        let socket_obj = result.unwrap();
+        assert!(matches!(socket_obj, KernelObject::Socket(_)));
+
+        // Verify socket was registered
+        assert_eq!(manager.connection_count(), 1);
+    }
+
+    #[test_case]
+    fn test_named_socket_registration() {
+        let manager = NetworkManager::new();
+
+        // Create a mock socket
+        let socket = Arc::new(MockSocket::new(
+            SocketType::Stream,
+            SocketDomain::Local,
+            SocketProtocol::Default,
+        ));
+
+        // Register with name
+        let result = manager.register_named_socket("/tmp/test.sock", socket.clone());
+        assert!(result.is_ok());
+
+        // Lookup socket
+        let lookup_result = manager.lookup_named_socket("/tmp/test.sock");
+        assert!(lookup_result.is_ok());
+
+        let found_socket = lookup_result.unwrap();
+        assert_eq!(found_socket.socket_domain(), SocketDomain::Local);
+        assert_eq!(found_socket.socket_type(), SocketType::Stream);
+    }
+
+    #[test_case]
+    fn test_named_socket_duplicate_registration() {
+        let manager = NetworkManager::new();
+
+        let socket1 = Arc::new(MockSocket::new(
+            SocketType::Stream,
+            SocketDomain::Local,
+            SocketProtocol::Default,
+        ));
+
+        let socket2 = Arc::new(MockSocket::new(
+            SocketType::Stream,
+            SocketDomain::Local,
+            SocketProtocol::Default,
+        ));
+
+        // First registration should succeed
+        assert!(manager
+            .register_named_socket("/tmp/test.sock", socket1)
+            .is_ok());
+
+        // Second registration should fail
+        let result = manager.register_named_socket("/tmp/test.sock", socket2);
+        assert!(result.is_err());
+        match result {
+            Err(SocketError::AddressInUse) => {}
+            _ => panic!("Expected AddressInUse error"),
+        }
+    }
+
+    #[test_case]
+    fn test_named_socket_unregister() {
+        let manager = NetworkManager::new();
+
+        let socket = Arc::new(MockSocket::new(
+            SocketType::Stream,
+            SocketDomain::Local,
+            SocketProtocol::Default,
+        ));
+
+        // Register and verify
+        manager
+            .register_named_socket("/tmp/test.sock", socket)
+            .unwrap();
+        assert!(manager.lookup_named_socket("/tmp/test.sock").is_ok());
+
+        // Unregister
+        manager.unregister_named_socket("/tmp/test.sock");
+
+        // Lookup should fail
+        let result = manager.lookup_named_socket("/tmp/test.sock");
+        assert!(result.is_err());
+    }
+
+    #[test_case]
+    fn test_named_socket_weak_reference() {
+        let manager = NetworkManager::new();
+
+        {
+            let socket = Arc::new(MockSocket::new(
+                SocketType::Stream,
+                SocketDomain::Local,
+                SocketProtocol::Default,
+            ));
+
+            manager
+                .register_named_socket("/tmp/test.sock", socket.clone())
+                .unwrap();
+
+            // Socket is alive, lookup succeeds
+            assert!(manager.lookup_named_socket("/tmp/test.sock").is_ok());
+        }
+        // Socket dropped here
+
+        // Socket is dead, lookup fails
+        let result = manager.lookup_named_socket("/tmp/test.sock");
+        assert!(result.is_err());
+        match result {
+            Err(SocketError::ConnectionRefused) => {}
+            _ => panic!("Expected ConnectionRefused error"),
+        }
+    }
+
+    #[test_case]
+    fn test_protocol_layer_registration() {
+        use crate::network::protocol_stack::NetworkLayer;
+        use core::sync::atomic::AtomicU64;
+
+        // Simple mock layer
+        struct MockLayer {
+            name: &'static str,
+            packets_sent: AtomicU64,
+        }
+
+        impl MockLayer {
+            fn new(name: &'static str) -> Self {
+                Self {
+                    name,
+                    packets_sent: AtomicU64::new(0),
+                }
+            }
+        }
+
+        impl NetworkLayer for MockLayer {
+            fn register_protocol(&self, _proto_num: u16, _handler: Arc<dyn NetworkLayer>) {}
+
+            fn send(
+                &self,
+                _packet: &[u8],
+                _context: &LayerContext,
+                _next_layers: &[Arc<dyn NetworkLayer>],
+            ) -> Result<(), SocketError> {
+                self.packets_sent.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn receive(&self, _packet: &[u8]) -> Result<(), SocketError> {
+                Ok(())
+            }
+
+            fn name(&self) -> &'static str {
+                self.name
+            }
+        }
+
+        let manager = NetworkManager::new();
+
+        // Register layers
+        let tcp = Arc::new(MockLayer::new("tcp"));
+        let ip = Arc::new(MockLayer::new("ip"));
+        let eth = Arc::new(MockLayer::new("ethernet"));
+
+        manager.register_layer("tcp", tcp.clone());
+        manager.register_layer("ip", ip.clone());
+        manager.register_layer("ethernet", eth.clone());
+
+        // Verify layers registered
+        let layers = manager.list_layers();
+        assert_eq!(layers.len(), 3);
+        assert!(layers.contains(&"tcp".to_string()));
+        assert!(layers.contains(&"ip".to_string()));
+        assert!(layers.contains(&"ethernet".to_string()));
+
+        // Retrieve layer
+        let retrieved_tcp = manager.get_layer("tcp");
+        assert!(retrieved_tcp.is_some());
+        assert_eq!(retrieved_tcp.unwrap().name(), "tcp");
+
+        // Non-existent layer
+        assert!(manager.get_layer("nonexistent").is_none());
+    }
+
+    #[test_case]
+    fn test_multiple_socket_creation() {
+        let manager = NetworkManager::new();
+        manager.register_socket_factory(SocketDomain::Local, mock_socket_factory);
+
+        // Create multiple sockets
+        for _ in 0..5 {
+            let result = manager.create_socket(
+                SocketDomain::Local,
+                SocketType::Stream,
+                SocketProtocol::Default,
+            );
+            assert!(result.is_ok());
+        }
+
+        // Verify all registered
+        assert_eq!(manager.connection_count(), 5);
     }
 }
