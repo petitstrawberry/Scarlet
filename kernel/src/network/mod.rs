@@ -40,7 +40,8 @@ pub use socket::{
     SocketType, UnixSocketAddress, // Keep for backwards compatibility
 };
 pub use protocol_stack::{
-    LayerContext, NetworkLayer, NetworkLayerStats, ProtocolStack, ProtocolStackManager, ProtocolStackStats,
+    LayerContext, NetworkLayer, NetworkLayerStats, ProtocolStack, ProtocolStackManager, 
+    ProtocolStackStats, SocketConfig,
 };
 
 use crate::object::KernelObject;

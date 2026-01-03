@@ -15,7 +15,7 @@
 //!
 //! Socket control operations use the SCTL_SOCKET_* namespace (magic 'SS' = 0x53, 0x53)
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc};
 
 use crate::ipc::StreamIpcOps;
 use crate::object::capability::{CloneOps, Selectable};
