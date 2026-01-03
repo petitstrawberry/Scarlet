@@ -466,11 +466,7 @@ mod tests {
     }
 
     impl MockSocket {
-        fn new(
-            socket_type: SocketType,
-            domain: SocketDomain,
-            protocol: SocketProtocol,
-        ) -> Self {
+        fn new(socket_type: SocketType, domain: SocketDomain, protocol: SocketProtocol) -> Self {
             Self {
                 socket_type,
                 domain,
@@ -483,7 +479,10 @@ mod tests {
     }
 
     impl crate::object::capability::StreamOps for MockSocket {
-        fn read(&self, _buffer: &mut [u8]) -> Result<usize, crate::object::capability::StreamError> {
+        fn read(
+            &self,
+            _buffer: &mut [u8],
+        ) -> Result<usize, crate::object::capability::StreamError> {
             Ok(0)
         }
 
@@ -498,7 +497,11 @@ mod tests {
         }
 
         fn peer_count(&self) -> usize {
-            if StreamIpcOps::is_connected(self) { 1 } else { 0 }
+            if StreamIpcOps::is_connected(self) {
+                1
+            } else {
+                0
+            }
         }
 
         fn description(&self) -> String {
@@ -699,9 +702,11 @@ mod tests {
         // First registration should succeed
         // Keep socket1 alive by cloning the Arc
         let _socket1_ref = socket1.clone();
-        assert!(manager
-            .register_named_socket("/tmp/test.sock", socket1)
-            .is_ok());
+        assert!(
+            manager
+                .register_named_socket("/tmp/test.sock", socket1)
+                .is_ok()
+        );
 
         // Second registration should fail (socket1 is still alive)
         let result = manager.register_named_socket("/tmp/test.sock", socket2);
@@ -727,8 +732,12 @@ mod tests {
             .register_named_socket("/tmp/test.sock", socket.clone())
             .unwrap();
         let result = manager.lookup_named_socket("/tmp/test.sock");
-        assert!(result.is_ok(), "Expected lookup to succeed, but got error: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Expected lookup to succeed, but got error: {:?}",
+            result.err()
+        );
+
         // Unregister
         manager.unregister_named_socket("/tmp/test.sock");
 
@@ -756,9 +765,13 @@ mod tests {
 
             // Socket is alive ('socket' variable holds strong ref), lookup succeeds
             let result = manager.lookup_named_socket("/tmp/test.sock");
-            assert!(result.is_ok(), "Expected lookup to succeed, but got error: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "Expected lookup to succeed, but got error: {:?}",
+                result.err()
+            );
         }
-        
+
         // Now drop the socket - all strong references gone
         drop(socket);
 

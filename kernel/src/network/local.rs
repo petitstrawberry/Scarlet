@@ -31,8 +31,8 @@ use super::{
     SocketError, SocketObject, SocketProtocol, SocketState, SocketType,
 };
 use crate::ipc::StreamIpcOps;
-use crate::object::capability::{CloneOps, StreamError, StreamOps};
 use crate::object::KernelObject;
+use crate::object::capability::{CloneOps, StreamError, StreamOps};
 
 /// Maximum buffer size per socket (64 KB)
 const MAX_BUFFER_SIZE: usize = 65536;
@@ -204,11 +204,7 @@ impl StreamIpcOps for LocalSocket {
     fn description(&self) -> String {
         let local = self.local_addr.read();
         let peer = self.peer_addr.read();
-        format!(
-            "LocalSocket[{:?} -> {:?}]",
-            local.as_ref(),
-            peer.as_ref()
-        )
+        format!("LocalSocket[{:?} -> {:?}]", local.as_ref(), peer.as_ref())
     }
 }
 
@@ -306,9 +302,7 @@ impl SocketControl for LocalSocket {
 
         // Add client connection to server's backlog
         // Safety: We know server_socket is a LocalSocket since we created it
-        let server_local = unsafe {
-            &*(Arc::as_ptr(&server_socket) as *const LocalSocket)
-        };
+        let server_local = unsafe { &*(Arc::as_ptr(&server_socket) as *const LocalSocket) };
         let mut server_backlog = server_local.backlog.write();
         let max_backlog = *server_local.max_backlog.read();
 
@@ -352,7 +346,8 @@ impl SocketControl for LocalSocket {
         let peer = self.peer_addr.read();
         match peer.as_ref() {
             Some(path) => Ok(SocketAddress::Local(
-                LocalSocketAddress::from_path(path).unwrap_or_else(|_| LocalSocketAddress::unnamed()),
+                LocalSocketAddress::from_path(path)
+                    .unwrap_or_else(|_| LocalSocketAddress::unnamed()),
             )),
             None => Err(SocketError::NotConnected),
         }
@@ -362,7 +357,8 @@ impl SocketControl for LocalSocket {
         let local = self.local_addr.read();
         match local.as_ref() {
             Some(path) => Ok(SocketAddress::Local(
-                LocalSocketAddress::from_path(path).unwrap_or_else(|_| LocalSocketAddress::unnamed()),
+                LocalSocketAddress::from_path(path)
+                    .unwrap_or_else(|_| LocalSocketAddress::unnamed()),
             )),
             None => Err(SocketError::InvalidOperation),
         }
@@ -430,15 +426,17 @@ mod tests {
 
     #[test_case]
     fn test_connected_pair() {
-        let (sock1, sock2) = LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
         assert_eq!(sock1.state(), SocketState::Connected);
         assert_eq!(sock2.state(), SocketState::Connected);
     }
 
     #[test_case]
     fn test_read_write() {
-        let (sock1, sock2) = LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
-        
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
         // Write from sock1 to sock2
         let data = b"Hello, World!";
         let written = sock1.write(data).unwrap();
@@ -453,8 +451,9 @@ mod tests {
 
     #[test_case]
     fn test_bidirectional_communication() {
-        let (sock1, sock2) = LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
-        
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
         // sock1 -> sock2
         sock1.write(b"ping").unwrap();
         let mut buf = [0u8; 4];
