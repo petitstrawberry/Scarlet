@@ -58,8 +58,8 @@ pub struct LocalSocket {
     /// Peer address (if connected)
     peer_addr: RwLock<Option<String>>,
 
-    /// Read buffer: data received from peer
-    read_buffer: RwLock<VecDeque<u8>>,
+    /// Read buffer: data received from peer (shared with peer for writing)
+    read_buffer: Arc<RwLock<VecDeque<u8>>>,
 
     /// Write buffer reference: shared with peer socket for writing
     /// When we write, we push to peer's read_buffer
@@ -91,7 +91,7 @@ impl LocalSocket {
             state: RwLock::new(SocketState::Unconnected),
             local_addr: RwLock::new(None),
             peer_addr: RwLock::new(None),
-            read_buffer: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
+            read_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE))),
             peer_read_buffer: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
@@ -111,39 +111,37 @@ impl LocalSocket {
     ///
     /// A tuple of (local_socket, peer_socket) that are connected
     fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
-        // Create local socket with its read buffer
+        // Create shared buffers for bidirectional communication
         let local_read_buffer = Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)));
         let peer_read_buffer = Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)));
 
         // Create local socket (server side)
+        // It reads from local_read_buffer, writes to peer_read_buffer
         let local_socket = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
             state: RwLock::new(SocketState::Connected),
             local_addr: RwLock::new(Some(local_addr.clone())),
             peer_addr: RwLock::new(Some(peer_addr.clone())),
-            read_buffer: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
+            read_buffer: local_read_buffer.clone(),
             peer_read_buffer: RwLock::new(Some(peer_read_buffer.clone())),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
         });
 
         // Create peer socket (client side)
+        // It reads from peer_read_buffer, writes to local_read_buffer
         let peer_socket = Arc::new(Self {
             socket_type: SocketType::Stream,
             protocol: SocketProtocol::Default,
             state: RwLock::new(SocketState::Connected),
             local_addr: RwLock::new(Some(peer_addr)),
             peer_addr: RwLock::new(Some(local_addr)),
-            read_buffer: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
+            read_buffer: peer_read_buffer.clone(),
             peer_read_buffer: RwLock::new(Some(local_read_buffer.clone())),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
         });
-
-        // Set up cross-references: each socket writes to the other's read buffer
-        *local_socket.read_buffer.write() = (*local_read_buffer.read()).clone();
-        *peer_socket.read_buffer.write() = (*peer_read_buffer.read()).clone();
 
         (local_socket, peer_socket)
     }
@@ -237,7 +235,7 @@ impl SocketControl for LocalSocket {
             state: RwLock::new(*state),
             local_addr: RwLock::new(Some(path.to_string())),
             peer_addr: RwLock::new(None),
-            read_buffer: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
+            read_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE))),
             peer_read_buffer: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
@@ -393,7 +391,7 @@ impl CloneOps for LocalSocket {
             state: RwLock::new(*self.state.read()),
             local_addr: RwLock::new(self.local_addr.read().clone()),
             peer_addr: RwLock::new(self.peer_addr.read().clone()),
-            read_buffer: RwLock::new(self.read_buffer.read().clone()),
+            read_buffer: self.read_buffer.clone(),
             peer_read_buffer: RwLock::new(self.peer_read_buffer.read().clone()),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(*self.max_backlog.read()),
