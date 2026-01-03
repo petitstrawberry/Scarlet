@@ -634,15 +634,22 @@ The architecture is ready for implementation and addresses all concerns raised i
 
 ### Phase 2: NetworkManager and Socket Infrastructure ✅ COMPLETED
 - ✅ SocketObject and SocketControl traits
-- ✅ Socket syscalls (socket, bind, connect, listen, accept, sendto, recvfrom)
 - ✅ SocketDomain, SocketType, SocketAddress types
 - ✅ NetworkManager with factory pattern and named socket registry
 - ✅ LocalSocket implementation (VecDeque-based IPC sockets)
 - ✅ Socket factory registration and creation
 - ✅ Named socket registration, lookup, and lifecycle management
 - ✅ KernelObject::Socket variant
+- ✅ **Scarlet Native socket syscalls (900-906)**
+  - ✅ sys_socket_create (900): Create IPC socket
+  - ✅ sys_socket_bind (901): Bind socket to path
+  - ✅ sys_socket_listen (902): Start listening for connections
+  - ✅ sys_socket_connect (903): Connect to named socket
+  - ✅ sys_socket_accept (904): Accept incoming connection
+  - ✅ sys_socketpair (905): Create connected socket pair
+  - ✅ sys_socket_shutdown (906): Shutdown socket
 
-**Location**: `kernel/src/network/{mod.rs, socket.rs, local.rs, syscall.rs}`
+**Location**: `kernel/src/network/{mod.rs, socket.rs, local.rs, syscall.rs}`, `kernel/src/syscall/mod.rs`
 
 **Tests**: 441 tests passing including:
 - Socket factory registration and creation
@@ -653,6 +660,7 @@ The architecture is ready for implementation and addresses all concerns raised i
 - Multiple socket creation
 - Bidirectional LocalSocket communication
 - Socket state transitions
+- System call infrastructure integration
 
 ### Phase 3: ABI Module Implementation (PLANNED)
 - [ ] Linux ABI: Local socket (Unix domain socket equivalent)
@@ -691,3 +699,4 @@ The architecture is ready for implementation and addresses all concerns raised i
 - 2026-01-03: Initial design document
 - 2026-01-03: Updated with Phase 1 completion status and test results
 - 2026-01-03: Phase 2 completed - NetworkManager with LocalSocket implementation and comprehensive socket infrastructure (441 tests passing)
+- 2026-01-03: Scarlet Native socket syscalls (900-906) implemented - handle-based IPC syscalls for LocalSocket communication
