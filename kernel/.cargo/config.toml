@@ -1,8 +1,8 @@
 [profile.dev]
-opt-level = 3
+opt-level = 0
 
 [profile.test]
-opt-level = 3
+opt-level = 0
 
 [target.riscv64gc-unknown-none-elf]
 # Use different runners for different contexts
