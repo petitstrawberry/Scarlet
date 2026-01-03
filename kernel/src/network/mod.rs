@@ -30,6 +30,7 @@ use alloc::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Once, RwLock};
 
+pub mod local;
 pub mod protocol_stack;
 pub mod socket;
 

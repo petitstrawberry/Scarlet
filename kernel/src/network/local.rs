@@ -419,22 +419,22 @@ mod tests {
     #[test_case]
     fn test_socket_creation() {
         let socket = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
-        assert_eq!(socket.get_state(), SocketState::Unconnected);
-        assert_eq!(socket.domain(), SocketDomain::Local);
+        assert_eq!(socket.state(), SocketState::Unconnected);
+        assert_eq!(socket.socket_domain(), SocketDomain::Local);
     }
 
     #[test_case]
     fn test_socket_factory() {
         let socket = local_socket_factory(SocketType::Stream, SocketProtocol::Default).unwrap();
-        assert_eq!(socket.domain(), SocketDomain::Local);
+        assert_eq!(socket.socket_domain(), SocketDomain::Local);
         assert_eq!(socket.socket_type(), SocketType::Stream);
     }
 
     #[test_case]
     fn test_connected_pair() {
         let (sock1, sock2) = LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
-        assert_eq!(sock1.get_state(), SocketState::Connected);
-        assert_eq!(sock2.get_state(), SocketState::Connected);
+        assert_eq!(sock1.state(), SocketState::Connected);
+        assert_eq!(sock2.state(), SocketState::Connected);
     }
 
     #[test_case]
