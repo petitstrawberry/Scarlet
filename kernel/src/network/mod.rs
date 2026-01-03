@@ -30,6 +30,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Once, RwLock};
 
 pub mod socket;
+pub mod protocol_stack;
 
 // Re-export commonly used types
 pub use socket::{
@@ -37,6 +38,7 @@ pub use socket::{
     SocketControl, SocketDomain, SocketError, SocketObject, SocketProtocol, SocketState,
     SocketType, UnixSocketAddress, // Keep for backwards compatibility
 };
+pub use protocol_stack::{ProtocolStack, ProtocolStackManager, ProtocolStackStats};
 
 use crate::object::KernelObject;
 
@@ -58,9 +60,15 @@ pub type SocketFactory = fn(SocketType, SocketProtocol) -> Result<Arc<dyn Socket
 /// The NetworkManager provides infrastructure for socket management but does not
 /// implement specific socket types. ABI modules (Linux, xv6, etc.) register their
 /// own socket implementations through factory functions.
+///
+/// For network protocols (TCP/IP, UDP, etc.), protocol stacks can be registered
+/// and will be used to create sockets for those domains.
 pub struct NetworkManager {
     /// Socket factories per domain (registered by ABI modules)
     socket_factories: RwLock<BTreeMap<SocketDomain, SocketFactory>>,
+
+    /// Protocol stacks for network protocols (TCP/IP, UDP, etc.)
+    protocol_stacks: protocol_stack::ProtocolStackManager,
 
     /// Named sockets namespace (path/name -> socket)
     /// Used by ABI modules for Unix domain socket-like functionality
@@ -78,6 +86,7 @@ impl NetworkManager {
     const fn new() -> Self {
         Self {
             socket_factories: RwLock::new(BTreeMap::new()),
+            protocol_stacks: protocol_stack::ProtocolStackManager::new(),
             named_sockets: RwLock::new(BTreeMap::new()),
             connections: RwLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
@@ -118,11 +127,11 @@ impl NetworkManager {
         self.socket_factories.write().insert(domain, factory);
     }
 
-    /// Create a new socket using registered factory
+    /// Create a new socket using registered factory or protocol stack
     ///
     /// # Arguments
     ///
-    /// * `domain` - Socket domain (Unix, Inet, Inet6, etc.)
+    /// * `domain` - Socket domain (Local, Inet, Inet6, etc.)
     /// * `socket_type` - Socket type (Stream, Datagram, etc.)
     /// * `protocol` - Socket protocol (Default, Tcp, Udp, etc.)
     ///
@@ -134,28 +143,94 @@ impl NetworkManager {
     ///
     /// Returns an error if no factory is registered for the domain or if
     /// the factory fails to create the socket.
+    ///
+    /// # Socket Creation Priority
+    ///
+    /// 1. First tries registered socket factories (for ABI-specific implementations)
+    /// 2. Then tries registered protocol stacks (for TCP/IP, UDP, etc.)
+    /// 3. Returns NotSupported if neither is available
     pub fn create_socket(
         &self,
-            domain: SocketDomain,
+        domain: SocketDomain,
         socket_type: SocketType,
         protocol: SocketProtocol,
     ) -> Result<KernelObject, SocketError> {
+        // First try socket factories (ABI-specific implementations)
         let factories = self.socket_factories.read();
-        
-        match factories.get(&domain) {
-            Some(factory) => {
-                let socket = factory(socket_type, protocol)?;
-                
-                // Register the socket
-                let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-                self.connections
-                    .write()
-                    .insert(socket_id, socket.clone());
+        if let Some(factory) = factories.get(&domain) {
+            let socket = factory(socket_type, protocol)?;
+            
+            // Register the socket
+            let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
+            self.connections
+                .write()
+                .insert(socket_id, socket.clone());
 
-                Ok(KernelObject::Socket(socket))
-            }
-            None => Err(SocketError::NotSupported),
+            return Ok(KernelObject::Socket(socket));
         }
+        drop(factories);
+
+        // Then try protocol stacks (for TCP/IP, etc.)
+        if let Some(stack) = self.protocol_stacks.get_stack(domain) {
+            let socket = stack.create_socket(socket_type, protocol)?;
+            
+            // Register the socket
+            let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
+            self.connections
+                .write()
+                .insert(socket_id, socket.clone());
+
+            return Ok(KernelObject::Socket(socket));
+        }
+
+        Err(SocketError::NotSupported)
+    }
+
+    /// Register a protocol stack
+    ///
+    /// Protocol stacks handle network protocols like TCP/IP, UDP, etc.
+    ///
+    /// # Arguments
+    ///
+    /// * `stack` - Protocol stack implementation
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // In a network driver or ABI module
+    /// let tcp_ip_stack = Arc::new(TcpIpStack::new());
+    /// NetworkManager::get_manager().register_protocol_stack(tcp_ip_stack);
+    /// ```
+    pub fn register_protocol_stack(&self, stack: Arc<dyn protocol_stack::ProtocolStack>) {
+        self.protocol_stacks.register_stack(stack);
+    }
+
+    /// Get a registered protocol stack
+    ///
+    /// # Arguments
+    ///
+    /// * `domain` - Socket domain
+    ///
+    /// # Returns
+    ///
+    /// The protocol stack for this domain, or None if not registered
+    pub fn get_protocol_stack(&self, domain: SocketDomain) -> Option<Arc<dyn protocol_stack::ProtocolStack>> {
+        self.protocol_stacks.get_stack(domain)
+    }
+
+    /// Process an incoming network packet
+    ///
+    /// Routes the packet to the appropriate protocol stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `packet` - Raw packet from network device
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no protocol stack can handle the packet
+    pub fn process_packet(&self, packet: &crate::device::network::DevicePacket) -> Result<(), SocketError> {
+        self.protocol_stacks.process_packet(packet)
     }
 
     /// Register a named socket (for Unix domain socket-like functionality)
@@ -276,11 +351,14 @@ mod tests {
     fn test_no_factory_registered() {
         let manager = NetworkManager::new();
         let result = manager.create_socket(
-            SocketDomain::Unix,
+            SocketDomain::Local,
             SocketType::Stream,
             SocketProtocol::Default,
         );
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), SocketError::NotSupported);
+        match result {
+            Err(SocketError::NotSupported) => {},
+            _ => panic!("Expected NotSupported error"),
+        }
     }
 }

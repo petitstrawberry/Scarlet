@@ -18,6 +18,9 @@ use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 use crate::network::SocketObject;
 
 /// Unified representation of all kernel-managed resources
+///
+/// Note: Debug is not implemented for KernelObject because it contains
+/// trait objects that may not implement Debug. Use introspection methods instead.
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
