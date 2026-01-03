@@ -33,6 +33,7 @@ use spin::{Once, RwLock};
 pub mod local;
 pub mod protocol_stack;
 pub mod socket;
+pub mod syscall;
 
 // Re-export commonly used types
 pub use protocol_stack::{
