@@ -1418,7 +1418,7 @@ mod tests {
 
         // Send - each layer adds info and routes based on hints
         let data = b"Hello, World!";
-        let result = socket.send(data, &ip, &ethernet);
+        let result = socket.send(data, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>));
         assert!(result.is_ok());
 
         // Verify all layers processed packet
@@ -1586,11 +1586,11 @@ mod tests {
 
         // Client sends request
         let request = b"GET / HTTP/1.1\r\n\r\n";
-        assert!(client.send(request, &ip, &ethernet).is_ok());
+        assert!(client.send(request, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
 
         // Server sends response
         let response = b"HTTP/1.1 200 OK\r\n\r\n";
-        assert!(server.send(response, &ip, &ethernet).is_ok());
+        assert!(server.send(response, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
 
         // Verify bidirectional communication
         assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
@@ -1654,8 +1654,8 @@ mod tests {
         socket2.connect(&connect2).unwrap();
 
         // Both sockets send data
-        assert!(socket1.send(b"data1", &ip, &ethernet).is_ok());
-        assert!(socket2.send(b"data2", &ip, &ethernet).is_ok());
+        assert!(socket1.send(b"data1", &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
+        assert!(socket2.send(b"data2", &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
 
         // Both packets sent successfully
         assert_eq!(tcp.packets_sent.load(Ordering::SeqCst), 2);
@@ -1715,7 +1715,7 @@ mod tests {
         socket.connect(&connect_config).unwrap();
 
         let payload = b"Real packet data";
-        assert!(socket.send(payload, &ip, &ethernet).is_ok());
+        assert!(socket.send(payload, &(ip.clone() as Arc<dyn NetworkLayer>), &(ethernet.clone() as Arc<dyn NetworkLayer>)).is_ok());
 
         // Verify complete packet structure
         let frame = ethernet.get_last_frame();
