@@ -264,6 +264,8 @@ pub mod interrupt;
 pub mod ipc;
 pub mod library;
 pub mod mem;
+#[cfg(feature = "network")]
+pub mod network;
 pub mod object;
 pub mod profiler;
 pub mod sched;

@@ -14,16 +14,20 @@ use crate::ipc::pipe::PipeObject;
 use alloc::{sync::Arc, vec::Vec};
 use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 
+#[cfg(feature = "network")]
+use crate::network::SocketObject;
+
 /// Unified representation of all kernel-managed resources
 pub enum KernelObject {
     File(Arc<dyn FileObject>),
     Pipe(Arc<dyn PipeObject>),
     EventChannel(Arc<EventChannelObject>),
     EventSubscription(Arc<EventSubscriptionObject>),
+    #[cfg(feature = "network")]
+    Socket(Arc<dyn SocketObject>),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
     // SharedMemory(Arc<dyn SharedMemoryObject>),
-    // Socket(Arc<dyn SocketObject>),
     // CharDevice(Arc<dyn CharDevice>),
 }
 
@@ -48,6 +52,12 @@ impl KernelObject {
         KernelObject::EventSubscription(event_subscription)
     }
 
+    /// Create a KernelObject from a SocketObject
+    #[cfg(feature = "network")]
+    pub fn from_socket_object(socket: Arc<dyn SocketObject>) -> Self {
+        KernelObject::Socket(socket)
+    }
+
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -59,6 +69,12 @@ impl KernelObject {
             KernelObject::Pipe(pipe_object) => {
                 // PipeObject automatically implements StreamOps
                 let stream_ops: &dyn StreamOps = pipe_object.as_ref();
+                Some(stream_ops)
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => {
+                // SocketObject implements StreamOps
+                let stream_ops: &dyn StreamOps = socket.as_ref();
                 Some(stream_ops)
             }
             KernelObject::EventChannel(_) => {
@@ -84,6 +100,12 @@ impl KernelObject {
                 let stream_ipc_ops: &dyn StreamIpcOps = pipe_object.as_ref();
                 Some(stream_ipc_ops)
             }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => {
+                // SocketObject implements StreamIpcOps
+                let stream_ipc_ops: &dyn StreamIpcOps = socket.as_ref();
+                Some(stream_ipc_ops)
+            }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide stream IPC operations
                 None
@@ -105,6 +127,11 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide file operations
+                None
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide file operations
                 None
             }
             KernelObject::EventChannel(_) => {
@@ -129,6 +156,11 @@ impl KernelObject {
                 let pipe_ops: &dyn PipeObject = pipe_object.as_ref();
                 Some(pipe_ops)
             }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide pipe operations
+                None
+            }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide pipe operations
                 None
@@ -137,6 +169,18 @@ impl KernelObject {
                 // Event subscriptions don't provide pipe operations
                 None
             }
+        }
+    }
+
+    /// Try to get SocketObject that provides socket-specific operations
+    #[cfg(feature = "network")]
+    pub fn as_socket(&self) -> Option<&dyn SocketObject> {
+        match self {
+            KernelObject::Socket(socket) => {
+                let socket_ops: &dyn SocketObject = socket.as_ref();
+                Some(socket_ops)
+            }
+            _ => None,
         }
     }
 
@@ -149,6 +193,12 @@ impl KernelObject {
             KernelObject::Pipe(pipe_object) => {
                 // Check if PipeObject implements CloneOps
                 let cloneable: &dyn CloneOps = pipe_object.as_ref();
+                Some(cloneable)
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => {
+                // SocketObject implements CloneOps
+                let cloneable: &dyn CloneOps = socket.as_ref();
                 Some(cloneable)
             }
             KernelObject::EventChannel(event_channel) => {
@@ -176,6 +226,11 @@ impl KernelObject {
                 // Pipes don't provide control operations
                 None
             }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide control operations
+                None
+            }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide control operations
                 None
@@ -197,6 +252,11 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide memory mapping operations
+                None
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide memory mapping operations
                 None
             }
             KernelObject::EventChannel(_) => {
@@ -221,6 +281,11 @@ impl KernelObject {
             }
             KernelObject::Pipe(_) => {
                 // Pipes don't provide memory mapping operations
+                None
+            }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets don't provide memory mapping operations
                 None
             }
             KernelObject::EventChannel(_) => {
@@ -265,6 +330,8 @@ impl KernelObject {
                 Some(sel)
             }
             KernelObject::Pipe(pipe_object) => pipe_object.as_selectable(),
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => socket.as_selectable(),
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
         }
@@ -281,6 +348,8 @@ impl Clone for KernelObject {
             match self {
                 KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
                 KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
+                #[cfg(feature = "network")]
+                KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
                 KernelObject::EventChannel(event_channel) => {
                     KernelObject::EventChannel(Arc::clone(event_channel))
                 }
