@@ -23,8 +23,9 @@
 
 use alloc::{
     collections::BTreeMap,
-    string::String,
+    string::{String, ToString},
     sync::{Arc, Weak},
+    vec::Vec,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Once, RwLock};
@@ -39,7 +40,7 @@ pub use socket::{
     SocketType, UnixSocketAddress, // Keep for backwards compatibility
 };
 pub use protocol_stack::{
-    NetworkLayer, NetworkLayerStats, ProtocolStack, ProtocolStackManager, ProtocolStackStats,
+    LayerContext, NetworkLayer, NetworkLayerStats, ProtocolStack, ProtocolStackManager, ProtocolStackStats,
 };
 
 use crate::object::KernelObject;
@@ -65,12 +66,29 @@ pub type SocketFactory = fn(SocketType, SocketProtocol) -> Result<Arc<dyn Socket
 ///
 /// For network protocols (TCP/IP, UDP, etc.), protocol stacks can be registered
 /// and will be used to create sockets for those domains.
+///
+/// # VFS Pattern: Shared Protocol Layers
+///
+/// Following VfsManager's pattern where filesystem instances are shared:
+/// - **NetworkLayer instances** are shared, singleton-like protocol implementations
+/// - **SocketObject** is the per-socket handle that references these shared layers
+/// - Like FileSystem (ext2, tmpfs) vs FileObject (file handle)
+///
+/// This enables:
+/// - Protocol layers shared across all sockets (like filesystems across files)
+/// - Per-task NetworkManager for network namespace isolation (future)
+/// - Efficient routing table and protocol state management
 pub struct NetworkManager {
     /// Socket factories per domain (registered by ABI modules)
     socket_factories: RwLock<BTreeMap<SocketDomain, SocketFactory>>,
 
     /// Protocol stacks for network protocols (TCP/IP, UDP, etc.)
     protocol_stacks: protocol_stack::ProtocolStackManager,
+    
+    /// Protocol layers registry (shared instances like VFS filesystems)
+    /// Maps layer name -> shared layer instance
+    /// Examples: "ethernet" -> EthernetLayer, "ip" -> IpLayer, "tcp" -> TcpLayer
+    protocol_layers: RwLock<BTreeMap<String, Arc<dyn protocol_stack::NetworkLayer>>>,
 
     /// Named sockets namespace (path/name -> socket)
     /// Used by ABI modules for Unix domain socket-like functionality
@@ -89,6 +107,7 @@ impl NetworkManager {
         Self {
             socket_factories: RwLock::new(BTreeMap::new()),
             protocol_stacks: protocol_stack::ProtocolStackManager::new(),
+            protocol_layers: RwLock::new(BTreeMap::new()),
             named_sockets: RwLock::new(BTreeMap::new()),
             connections: RwLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
@@ -205,6 +224,85 @@ impl NetworkManager {
     /// ```
     pub fn register_protocol_stack(&self, stack: Arc<dyn protocol_stack::ProtocolStack>) {
         self.protocol_stacks.register_stack(stack);
+    }
+
+    /// Register a protocol layer (VFS pattern: like mounting a filesystem)
+    ///
+    /// Protocol layers are shared, singleton-like instances that implement
+    /// network protocol logic. Like filesystems in VFS, they are registered
+    /// once and shared across all sockets.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Layer name (e.g., "ethernet", "ip", "tcp", "udp")
+    /// * `layer` - Shared protocol layer implementation
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Register shared protocol layer instances
+    /// let ethernet = Arc::new(EthernetLayer::new());
+    /// let ip = Arc::new(IpLayer::new());
+    /// let tcp = Arc::new(TcpLayer::new());
+    ///
+    /// NetworkManager::get_manager().register_layer("ethernet", ethernet);
+    /// NetworkManager::get_manager().register_layer("ip", ip.clone());
+    /// NetworkManager::get_manager().register_layer("tcp", tcp);
+    ///
+    /// // Connect layers
+    /// ip.register_protocol(6, tcp); // TCP protocol number
+    /// ```
+    ///
+    /// # Design Note
+    ///
+    /// This follows the VFS pattern where FileSystem instances are registered
+    /// and shared across all FileObject handles. Similarly, NetworkLayer instances
+    /// are shared across all SocketObject handles.
+    pub fn register_layer(&self, name: &str, layer: Arc<dyn protocol_stack::NetworkLayer>) {
+        self.protocol_layers.write().insert(name.to_string(), layer);
+    }
+
+    /// Get a registered protocol layer (VFS pattern: like getting a filesystem)
+    ///
+    /// Returns a reference to a shared protocol layer instance. SocketObject
+    /// implementations hold references to these shared layers, similar to how
+    /// FileObject references a filesystem.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Layer name (e.g., "ethernet", "ip", "tcp")
+    ///
+    /// # Returns
+    ///
+    /// The shared protocol layer, or None if not registered
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // When creating a socket, get references to shared layers
+    /// let tcp = NetworkManager::get_manager()
+    ///     .get_layer("tcp")
+    ///     .ok_or(SocketError::NotSupported)?;
+    /// let ip = NetworkManager::get_manager()
+    ///     .get_layer("ip")
+    ///     .ok_or(SocketError::NotSupported)?;
+    ///
+    /// // Socket holds references to shared layers
+    /// let socket = TcpSocket {
+    ///     tcp_layer: tcp,
+    ///     ip_layer: ip,
+    ///     // per-socket state...
+    /// };
+    /// ```
+    pub fn get_layer(&self, name: &str) -> Option<Arc<dyn protocol_stack::NetworkLayer>> {
+        self.protocol_layers.read().get(name).cloned()
+    }
+
+    /// List all registered protocol layers
+    ///
+    /// Returns names of all registered protocol layers for debugging/introspection.
+    pub fn list_layers(&self) -> Vec<String> {
+        self.protocol_layers.read().keys().cloned().collect()
     }
 
     /// Get a registered protocol stack

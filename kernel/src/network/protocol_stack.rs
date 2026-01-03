@@ -48,7 +48,7 @@
 use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use spin::RwLock;
 
-use super::socket::{SocketDomain, SocketError, SocketObject, SocketProtocol, SocketType};
+use super::socket::{SocketAddress, SocketDomain, SocketError, SocketObject, SocketProtocol, SocketType};
 use crate::device::network::DevicePacket;
 
 /// Protocol stack statistics
@@ -70,25 +70,107 @@ pub struct ProtocolStackStats {
     pub active_connections: u64,
 }
 
+/// Context passed between network layers for routing decisions
+///
+/// This structure carries routing information through the protocol stack,
+/// allowing each layer to add or consume information needed for proper
+/// packet delivery. This solves the problem of how to pass destination
+/// addresses and other routing info without tight coupling between layers.
+///
+/// # Design Philosophy
+///
+/// - Each layer adds the information it needs (e.g., IP adds addresses)
+/// - Lower layers consume routing info to make forwarding decisions
+/// - Flexible key-value store for protocol-specific information
+/// - Enables proper layer composition following @petitstrawberry's guidance
+///
+/// # Example Flow
+///
+/// ```rust,ignore
+/// // Application layer creates context
+/// let mut ctx = LayerContext::new();
+/// ctx.destination_address = Some(SocketAddress::Inet4(...));
+/// ctx.protocol_number = 6; // TCP
+///
+/// // TCP layer sends to IP
+/// tcp_layer.send(&data, &ctx, &[ip_layer])?;
+///
+/// // IP layer extracts destination IP, adds IP header
+/// // IP layer sends to Ethernet
+/// ip_layer.send(&ip_packet, &ctx, &[eth_layer])?;
+///
+/// // Ethernet performs ARP lookup using destination IP from ctx
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct LayerContext {
+    /// Destination address (full socket address with IP + port)
+    pub destination_address: Option<SocketAddress>,
+    
+    /// Source address (full socket address with IP + port)
+    pub source_address: Option<SocketAddress>,
+    
+    /// Protocol number for upper layer (e.g., 6=TCP, 17=UDP)
+    pub protocol_number: u16,
+    
+    /// Additional protocol-specific information
+    /// Used for things like TCP flags, TTL, QoS markers, etc.
+    pub additional_info: BTreeMap<String, Vec<u8>>,
+}
+
+impl LayerContext {
+    /// Create a new empty LayerContext
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Create context with destination and protocol
+    pub fn with_destination(destination: SocketAddress, protocol: u16) -> Self {
+        Self {
+            destination_address: Some(destination),
+            protocol_number: protocol,
+            ..Default::default()
+        }
+    }
+}
+
 /// Network layer trait for composable protocol stacks
 ///
 /// This trait enables building flexible protocol stacks where each layer
 /// is independent and can be composed at runtime. Layers communicate through
 /// protocol numbers (e.g., IP uses protocol 6 for TCP, 17 for UDP).
 ///
-/// # Design Philosophy
+/// # Design Philosophy (VFS Pattern)
 ///
-/// - Each layer is autonomous and registers protocol handlers for upper layers
-/// - Multiple lower layers can be supported (e.g., IP over Ethernet or InfiniBand)
-/// - Protocol numbers enable routing between layers without tight coupling
-/// - When a socket is created, the full protocol stack route is determined
+/// Following VFS architecture where filesystems are shared singletons:
+/// - **NetworkLayer = FileSystemOperations**: Shared protocol implementation
+/// - **SocketObject = FileObject**: Per-connection handle with references to layers
+/// - **NetworkManager = VfsManager**: Global registry of protocol layer instances
 ///
-/// # Example: IP Layer
+/// Each NetworkLayer instance is shared across all sockets, similar to how
+/// a filesystem (ext2, tmpfs) is shared across all file handles. Per-socket
+/// state lives in SocketObject, not in NetworkLayer.
+///
+/// # Shared vs Per-Socket State
+///
+/// **NetworkLayer (shared, stateless):**
+/// - Protocol logic and packet processing
+/// - Routing tables, ARP cache (shared state)
+/// - Registered protocol handlers
+/// - Like: ext2 driver, tmpfs implementation
+///
+/// **SocketObject (per-socket, stateful):**
+/// - Connection state (ports, addresses)
+/// - Send/receive buffers
+/// - References to NetworkLayer instances
+/// - Like: FileObject with seek position, flags
+///
+/// # Example: IP Layer (Shared Singleton)
 ///
 /// ```rust,ignore
 /// struct IpLayer {
-///     protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>,
-///     lower_layers: Vec<Arc<dyn NetworkLayer>>,
+///     protocols: RwLock<BTreeMap<u16, Arc<dyn NetworkLayer>>>, // Shared routing
+///     routing_table: RwLock<RoutingTable>,  // Shared routing
+///     arp_cache: RwLock<ArpCache>,          // Shared ARP cache
 /// }
 ///
 /// impl NetworkLayer for IpLayer {
@@ -96,13 +178,20 @@ pub struct ProtocolStackStats {
 ///         self.protocols.write().insert(proto_num, handler);
 ///     }
 ///
-///     fn send(&self, packet: &[u8], next_layers: &[Arc<dyn NetworkLayer>]) -> Result<(), SocketError> {
-///         // Add IP header
-///         let ip_packet = add_ip_header(packet);
+///     fn send(&self, packet: &[u8], context: &LayerContext, 
+///             next_layers: &[Arc<dyn NetworkLayer>]) -> Result<(), SocketError> {
+///         // Extract destination from context
+///         let dest_ip = context.destination_address
+///             .as_ref()
+///             .ok_or(SocketError::InvalidPacket)?
+///             .get_ip();
+///
+///         // Add IP header with destination
+///         let ip_packet = add_ip_header(packet, dest_ip);
 ///         
-///         // Send to first available lower layer
+///         // Route to lower layer (Ethernet, InfiniBand, etc.)
 ///         for layer in next_layers {
-///             if let Ok(()) = layer.send(&ip_packet, &[]) {
+///             if let Ok(()) = layer.send(&ip_packet, context, &[]) {
 ///                 return Ok(());
 ///             }
 ///         }
@@ -121,6 +210,27 @@ pub struct ProtocolStackStats {
 ///         }
 ///     }
 /// }
+/// ```
+///
+/// # Per-Task NetworkManager (Future)
+///
+/// Like VfsManager can be per-task for filesystem namespace isolation,
+/// NetworkManager can be per-task for network namespace isolation:
+///
+/// ```rust,ignore
+/// // Container gets isolated NetworkManager
+/// let container_net = Arc::new(NetworkManager::new());
+///
+/// // Share Ethernet layer (driver access), but separate IP/TCP
+/// let shared_eth = global_net_manager.get_layer("ethernet")?;
+/// container_net.register_layer("ethernet", shared_eth);
+///
+/// // Container gets its own IP and TCP layer instances
+/// container_net.register_layer("ip", Arc::new(IpLayer::new()));
+/// container_net.register_layer("tcp", Arc::new(TcpLayer::new()));
+///
+/// // Assign to task
+/// task.network_manager = Some(container_net);
 /// ```
 pub trait NetworkLayer: Send + Sync {
     /// Register a protocol handler for this layer
@@ -144,12 +254,13 @@ pub trait NetworkLayer: Send + Sync {
     /// Send a packet through this layer
     ///
     /// The layer encapsulates the packet with its own header and passes it
-    /// to one or more lower layers. If routing information is insufficient,
-    /// returns an error.
+    /// to one or more lower layers. The context contains routing information
+    /// like destination address that may be needed for proper forwarding.
     ///
     /// # Arguments
     ///
     /// * `packet` - Packet data to send
+    /// * `context` - Routing context with destination, protocol, etc.
     /// * `next_layers` - Lower layer options for transmission
     ///
     /// # Returns
@@ -160,11 +271,11 @@ pub trait NetworkLayer: Send + Sync {
     /// # Example
     ///
     /// ```rust,ignore
-    /// // TCP sends to IP, IP has choice of Ethernet or InfiniBand
-    /// tcp_layer.send(&tcp_packet, &[ip_layer])?;
-    /// ip_layer.send(&ip_packet, &[ethernet_layer, infiniband_layer])?;
+    /// let ctx = LayerContext::with_destination(remote_addr, 6); // TCP
+    /// tcp_layer.send(&tcp_segment, &ctx, &[ip_layer])?;
+    /// ip_layer.send(&ip_packet, &ctx, &[ethernet_layer, infiniband_layer])?;
     /// ```
-    fn send(&self, packet: &[u8], next_layers: &[Arc<dyn NetworkLayer>])
+    fn send(&self, packet: &[u8], context: &LayerContext, next_layers: &[Arc<dyn NetworkLayer>])
         -> Result<(), SocketError>;
 
     /// Receive and process a packet at this layer
@@ -449,6 +560,7 @@ mod tests {
         fn send(
             &self,
             packet: &[u8],
+            _context: &LayerContext,
             _next_layers: &[Arc<dyn NetworkLayer>],
         ) -> Result<(), SocketError> {
             // Simulate sending packet (store it for inspection)
@@ -496,6 +608,7 @@ mod tests {
         fn send(
             &self,
             packet: &[u8],
+            context: &LayerContext,
             next_layers: &[Arc<dyn NetworkLayer>],
         ) -> Result<(), SocketError> {
             // Add simple "IP" header (just 2 bytes: protocol number)
@@ -507,7 +620,7 @@ mod tests {
 
             // Try to send through available lower layers
             for layer in next_layers {
-                if layer.send(&ip_packet, &[]).is_ok() {
+                if layer.send(&ip_packet, context, &[]).is_ok() {
                     return Ok(());
                 }
             }
@@ -573,6 +686,7 @@ mod tests {
         fn send(
             &self,
             packet: &[u8],
+            context: &LayerContext,
             next_layers: &[Arc<dyn NetworkLayer>],
         ) -> Result<(), SocketError> {
             // Add transport header (protocol number + payload)
@@ -584,7 +698,7 @@ mod tests {
 
             // Send to network layer
             if !next_layers.is_empty() {
-                next_layers[0].send(&transport_packet, &next_layers[1..])
+                next_layers[0].send(&transport_packet, context, &next_layers[1..])
             } else {
                 Err(SocketError::NoRoute)
             }
@@ -608,9 +722,10 @@ mod tests {
         let transport_layer = Arc::new(MockTransportLayer::new("MockTCP", 6));
 
         let payload = b"Hello, Network!";
+        let context = LayerContext::new();
 
         // Send packet from transport to link
-        let result = transport_layer.send(payload, &[link_layer.clone()]);
+        let result = transport_layer.send(payload, &context, &[link_layer.clone()]);
         assert!(result.is_ok());
 
         // Verify packet was sent
@@ -634,9 +749,10 @@ mod tests {
         network_layer.register_protocol(6, transport_layer.clone());
 
         let payload = b"Test Data";
+        let context = LayerContext::new();
 
         // Send: Transport -> Network -> Link
-        let result = transport_layer.send(payload, &[network_layer.clone(), link_layer.clone()]);
+        let result = transport_layer.send(payload, &context, &[network_layer.clone(), link_layer.clone()]);
         assert!(result.is_ok());
 
         // Verify all layers processed the packet
@@ -679,9 +795,10 @@ mod tests {
         let network_layer = Arc::new(MockNetworkLayer::new("IP"));
 
         let payload = b"Multi-path test";
+        let context = LayerContext::new();
 
         // Network layer tries both link layers
-        let result = network_layer.send(payload, &[ethernet.clone(), infiniband.clone()]);
+        let result = network_layer.send(payload, &context, &[ethernet.clone(), infiniband.clone()]);
         assert!(result.is_ok());
 
         // First layer should succeed
@@ -694,9 +811,10 @@ mod tests {
     fn test_network_layer_no_route_error() {
         let transport_layer = Arc::new(MockTransportLayer::new("TCP", 6));
         let payload = b"No route";
+        let context = LayerContext::new();
 
         // Try to send with no lower layers
-        let result = transport_layer.send(payload, &[]);
+        let result = transport_layer.send(payload, &context, &[]);
         assert!(result.is_err());
         assert!(matches!(result, Err(SocketError::NoRoute)));
     }
@@ -728,7 +846,8 @@ mod tests {
 
         // Send data down the stack
         let original_data = b"End-to-end test data";
-        let result = tcp_layer.send(original_data, &[network_layer.clone(), link_layer.clone()]);
+        let context = LayerContext::new();
+        let result = tcp_layer.send(original_data, &context, &[network_layer.clone(), link_layer.clone()]);
         assert!(result.is_ok());
 
         // Get the packet from link layer
@@ -748,5 +867,22 @@ mod tests {
         assert_eq!(tcp_layer.packets_received.load(Ordering::SeqCst), 1);
         let received_data = tcp_layer.get_last_received();
         assert_eq!(received_data, original_data);
+    }
+
+    #[test_case]
+    fn test_layer_context_usage() {
+        // Test LayerContext with destination address
+        use super::socket::{Inet4SocketAddress, SocketAddress};
+
+        let dest_addr = SocketAddress::Inet4(Inet4SocketAddress {
+            addr: [192, 168, 1, 100],
+            port: 80,
+        });
+        
+        let context = LayerContext::with_destination(dest_addr.clone(), 6); // TCP
+        
+        assert_eq!(context.protocol_number, 6);
+        assert!(context.destination_address.is_some());
+        assert_eq!(context.destination_address.unwrap(), dest_addr);
     }
 }
