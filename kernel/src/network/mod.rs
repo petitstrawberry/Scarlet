@@ -721,12 +721,13 @@ mod tests {
             SocketProtocol::Default,
         ));
 
-        // Register and verify
+        // Register and verify - use socket.clone() to keep original alive
         manager
-            .register_named_socket("/tmp/test.sock", socket)
+            .register_named_socket("/tmp/test.sock", socket.clone())
             .unwrap();
-        assert!(manager.lookup_named_socket("/tmp/test.sock").is_ok());
-
+        let result = manager.lookup_named_socket("/tmp/test.sock");
+        assert!(result.is_ok(), "Expected lookup to succeed, but got error: {:?}", result.err());
+        
         // Unregister
         manager.unregister_named_socket("/tmp/test.sock");
 
@@ -739,26 +740,26 @@ mod tests {
     fn test_named_socket_weak_reference() {
         let manager = NetworkManager::new();
 
-        {
-            let socket = Arc::new(MockSocket::new(
-                SocketType::Stream,
-                SocketDomain::Local,
-                SocketProtocol::Default,
-            ));
+        let socket = Arc::new(MockSocket::new(
+            SocketType::Stream,
+            SocketDomain::Local,
+            SocketProtocol::Default,
+        ));
 
+        {
             // Register socket - manager stores a Weak reference
-            // We keep the strong reference 'socket' alive in this scope
+            // We keep 'socket' alive outside this scope for the assertion to succeed
             manager
                 .register_named_socket("/tmp/test.sock", socket.clone())
                 .unwrap();
 
-            // Socket is alive (socket variable holds strong ref), lookup succeeds
-            assert!(manager.lookup_named_socket("/tmp/test.sock").is_ok());
-            
-            // Keep socket alive until end of scope
-            drop(socket);
+            // Socket is alive ('socket' variable holds strong ref), lookup succeeds
+            let result = manager.lookup_named_socket("/tmp/test.sock");
+            assert!(result.is_ok(), "Expected lookup to succeed, but got error: {:?}", result.err());
         }
-        // All strong references dropped here
+        
+        // Now drop the socket - all strong references gone
+        drop(socket);
 
         // Socket is dead (all Arc dropped), weak reference can't upgrade, lookup fails
         let result = manager.lookup_named_socket("/tmp/test.sock");
