@@ -1,8 +1,8 @@
-# Scarlet Network Architecture - Final Design
+# Scarlet Network Architecture
 
 ## Executive Summary
 
-This document presents the final network architecture design for Scarlet, informed by extensive discussion and iteration. The design balances simplicity, flexibility, and practical implementation concerns.
+This document presents the network architecture design and implementation status for Scarlet. The design balances simplicity, flexibility, and practical implementation concerns, providing OS-agnostic socket infrastructure with protocol-agnostic layer composition.
 
 ## Core Design Principles
 
@@ -611,3 +611,71 @@ This design achieves the goals discussed:
 ✅ Supports both monolithic (ProtocolStack) and layered (NetworkLayer) approaches
 
 The architecture is ready for implementation and addresses all concerns raised in the discussion.
+
+## Implementation Status
+
+### Phase 1: Core Infrastructure ✅ COMPLETED
+- ✅ Protocol-agnostic NetworkLayer trait with composable layer design
+- ✅ NetworkManager with global registry (VFS-like pattern)
+- ✅ LayerContext for protocol-agnostic routing hints
+- ✅ SocketConfig for reception configuration flow
+- ✅ Comprehensive test suite with realistic TCP/IP/Ethernet mock layers
+- ✅ Circular reference prevention through one-way registration pattern
+- ✅ Documentation with safety guidelines and usage examples
+
+**Location**: `kernel/src/network/protocol_stack.rs`
+
+**Tests**: 424 tests passing including:
+- NetworkManager creation and layer registration
+- Protocol registration and routing
+- Realistic TCP/IP/Ethernet stack send/receive simulation
+- Two-socket communication scenarios
+- Error handling and edge cases
+
+### Phase 2: Socket Infrastructure (IN PROGRESS)
+- ✅ SocketObject and SocketControl traits
+- ✅ SCTL_SOCKET_* control opcodes
+- ✅ SocketDomain, SocketType, SocketAddress types
+- ✅ ProtocolStack trait and ProtocolStackManager
+- ✅ KernelObject::Socket variant
+- 🚧 Socket factory pattern integration
+- 🚧 Named socket registry for Local IPC
+
+**Location**: `kernel/src/network/{mod.rs, socket.rs}`
+
+### Phase 3: ABI Module Implementation (PLANNED)
+- [ ] Linux ABI: Local socket (Unix domain socket equivalent)
+- [ ] Linux ABI: System call translation (socket, bind, connect, etc.)
+- [ ] Linux ABI: Address structure conversion
+- [ ] xv6 ABI: Socket support (if needed)
+- [ ] Unit tests for socket implementations
+
+### Phase 4: Protocol Stack Implementation (FUTURE)
+- [ ] TCP/IP protocol stack
+- [ ] UDP socket support
+- [ ] IPv4/IPv6 address handling
+- [ ] Packet routing and processing
+- [ ] Network device integration
+
+### Phase 5: Advanced Features (FUTURE)
+- [ ] VFS integration for named sockets
+- [ ] Credential passing (SCM_CREDENTIALS)
+- [ ] File descriptor passing (SCM_RIGHTS)
+- [ ] Ancillary data support
+- [ ] Raw socket support
+- [ ] Per-task network namespace isolation
+
+## References
+
+- [Pull Request #270](https://github.com/petitstrawberry/Scarlet/pull/270): Implement OS-agnostic network socket infrastructure
+- POSIX Socket API Specification
+- Linux socket(7) and unix(7) man pages
+- Stevens, W. Richard. "Unix Network Programming"
+- Scarlet VFS v2 design (`kernel/src/fs/vfs_v2/`)
+- Scarlet IPC design (`kernel/src/ipc/`)
+- Scarlet Device Manager (`kernel/src/device/manager.rs`)
+
+## Revision History
+
+- 2026-01-03: Initial design document
+- 2026-01-03: Updated with Phase 1 completion status and test results
