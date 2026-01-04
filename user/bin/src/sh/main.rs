@@ -42,7 +42,10 @@ fn init_jobs() {
 
 /// Add a job to the job list
 fn add_job(pid: i32, command: String) -> usize {
-    println!("DEBUG: add_job called with pid={}, command={}", pid, command);
+    println!(
+        "DEBUG: add_job called with pid={}, command={}",
+        pid, command
+    );
     unsafe {
         let next_id_ptr = core::ptr::addr_of_mut!(NEXT_JOB_ID);
         let job_id = *next_id_ptr;
@@ -51,7 +54,7 @@ fn add_job(pid: i32, command: String) -> usize {
 
         let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
         println!("DEBUG: Got JOB_LIST_ARRAY pointer: {:p}", jobs_ptr);
-        
+
         // Find an empty slot
         for i in 0..MAX_JOBS {
             if (*jobs_ptr)[i].is_none() {
@@ -66,7 +69,7 @@ fn add_job(pid: i32, command: String) -> usize {
                 return job_id;
             }
         }
-        
+
         println!("DEBUG: No empty slot found, job list full!");
         job_id
     }
