@@ -29,36 +29,45 @@ struct Job {
     is_running: bool,
 }
 
-/// Global job list (static for simplicity)
-static mut JOB_LIST: Option<Vec<Job>> = None;
+const MAX_JOBS: usize = 16;
+
+/// Global job list (static for simplicity, using fixed-size array to avoid heap allocation issues with fork)
+static mut JOB_LIST_ARRAY: [Option<Job>; MAX_JOBS] = [const { None }; MAX_JOBS];
 static mut NEXT_JOB_ID: usize = 1;
 
 /// Initialize the job list
 fn init_jobs() {
-    unsafe {
-        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
-        if (*jobs_ptr).is_none() {
-            *jobs_ptr = Some(Vec::new());
-        }
-    }
+    // No initialization needed for array
 }
 
 /// Add a job to the job list
 fn add_job(pid: i32, command: String) -> usize {
+    println!("DEBUG: add_job called with pid={}, command={}", pid, command);
     unsafe {
-        let job_id = NEXT_JOB_ID;
-        NEXT_JOB_ID += 1;
+        let next_id_ptr = core::ptr::addr_of_mut!(NEXT_JOB_ID);
+        let job_id = *next_id_ptr;
+        *next_id_ptr += 1;
+        println!("DEBUG: job_id={}", job_id);
 
-        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
-        if let Some(jobs) = &mut *jobs_ptr {
-            jobs.push(Job {
-                job_id,
-                pid,
-                command,
-                is_running: true,
-            });
+        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
+        println!("DEBUG: Got JOB_LIST_ARRAY pointer: {:p}", jobs_ptr);
+        
+        // Find an empty slot
+        for i in 0..MAX_JOBS {
+            if (*jobs_ptr)[i].is_none() {
+                println!("DEBUG: Found empty slot at index {}", i);
+                (*jobs_ptr)[i] = Some(Job {
+                    job_id,
+                    pid,
+                    command,
+                    is_running: true,
+                });
+                println!("DEBUG: Job added successfully at index {}", i);
+                return job_id;
+            }
         }
-
+        
+        println!("DEBUG: No empty slot found, job list full!");
         job_id
     }
 }
@@ -66,24 +75,22 @@ fn add_job(pid: i32, command: String) -> usize {
 /// Remove completed jobs from the job list
 fn cleanup_jobs() {
     unsafe {
-        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
-        if let Some(jobs) = &mut *jobs_ptr {
-            let mut has_completed = false;
-            jobs.retain(|job| {
+        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
+        let mut has_completed = false;
+        for i in 0..MAX_JOBS {
+            if let Some(job) = &(*jobs_ptr)[i] {
                 // Check if the process is still running using waitpid with WNOHANG (0x1)
                 let (wait_pid, _status) = waitpid(job.pid, 1);
                 if wait_pid == job.pid {
                     println!("\n[{}] Done: {}", job.job_id, job.command);
+                    (*jobs_ptr)[i] = None; // Remove from list
                     has_completed = true;
-                    false // Remove from list
-                } else {
-                    true // Keep in list
                 }
-            });
-            // Print a newline after job completion messages to separate from prompt
-            if has_completed {
-                // This helps keep the prompt visible
             }
+        }
+        // Print a newline after job completion messages to separate from prompt
+        if has_completed {
+            // This helps keep the prompt visible
         }
     }
 }
@@ -91,12 +98,14 @@ fn cleanup_jobs() {
 /// Get all jobs
 fn get_jobs() -> Vec<Job> {
     unsafe {
-        let jobs_ptr = core::ptr::addr_of!(JOB_LIST);
-        if let Some(jobs) = &*jobs_ptr {
-            jobs.clone()
-        } else {
-            Vec::new()
+        let jobs_ptr = core::ptr::addr_of!(JOB_LIST_ARRAY);
+        let mut result = Vec::new();
+        for i in 0..MAX_JOBS {
+            if let Some(job) = &(*jobs_ptr)[i] {
+                result.push(job.clone());
+            }
         }
+        result
     }
 }
 
@@ -536,11 +545,15 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
         pid => {
             // Parent: wait for child or add to job list if background
             if is_background {
+                println!("DEBUG: Parent process, about to add job");
                 let cmd_str = cmd.args.join(" ");
+                println!("DEBUG: Command string created: {}", cmd_str);
                 let job_id = add_job(pid, cmd_str);
                 println!("[{}] {} &", job_id, pid);
+                println!("DEBUG: Job added, about to restore raw mode");
                 // Restore raw mode for shell after background job starts
                 restore_raw_mode();
+                println!("DEBUG: Raw mode restored");
                 // Return immediately to shell prompt
                 0
             } else {
@@ -920,20 +933,21 @@ fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
 
             // Find and wait for the job
             unsafe {
-                let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
-                if let Some(jobs) = &mut *jobs_ptr {
-                    if let Some(idx) = jobs.iter().position(|j| j.job_id == job_id) {
-                        let job = jobs.remove(idx);
-                        println!("{}", job.command);
-                        let (_, status) = waitpid(job.pid, 0);
-                        return Some(status);
-                    } else {
-                        println!("fg: {}: no such job", job_id);
-                        return Some(1);
+                let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST_ARRAY);
+                for i in 0..MAX_JOBS {
+                    if let Some(job) = &(*jobs_ptr)[i] {
+                        if job.job_id == job_id {
+                            let job_copy = job.clone();
+                            (*jobs_ptr)[i] = None; // Remove from list
+                            println!("{}", job_copy.command);
+                            let (_, status) = waitpid(job_copy.pid, 0);
+                            return Some(status);
+                        }
                     }
                 }
+                println!("fg: {}: no such job", job_id);
+                return Some(1);
             }
-            Some(1)
         }
         "bg" => {
             // Resume a stopped job in background (simplified - just show message)
