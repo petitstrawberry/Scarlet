@@ -242,59 +242,6 @@ impl LocalSocket {
             // When woken, loop back to check for data
         }
     }
-
-    /// Connect to a listening socket and return the connected client socket
-    ///
-    /// This is a special method for LocalSocket that returns a new connected socket
-    /// instead of modifying self. This is necessary because we cannot update self
-    /// to properly maintain wake-up references.
-    pub fn connect_and_get_socket(&self, address: &SocketAddress) -> Result<Arc<LocalSocket>, SocketError> {
-        let state = self.state.read();
-        if *state != SocketState::Unconnected {
-            return Err(SocketError::AlreadyConnected);
-        }
-        drop(state);
-
-        // Extract path from address
-        let path = match address {
-            SocketAddress::Local(addr) => addr.path(),
-            _ => return Err(SocketError::InvalidAddress),
-        };
-
-        // Lookup listening socket in NetworkManager
-        let manager = NetworkManager::get_manager();
-        let server_socket = match manager.lookup_named_socket(path) {
-            Ok(socket) => socket,
-            Err(e) => return Err(e),
-        };
-
-        // Check server is listening
-        if server_socket.state() != SocketState::Listening {
-            return Err(SocketError::ConnectionRefused);
-        }
-
-        // Create connected socket pair
-        let local_addr = format!("anon-{}", self as *const _ as usize);
-        let (server_conn, client_conn) = Self::create_connected_pair(path.to_string(), local_addr);
-
-        // Add server connection to server's backlog
-        // Safety: We know server_socket is a LocalSocket since we created it
-        let server_local = unsafe { &*(Arc::as_ptr(&server_socket) as *const LocalSocket) };
-        let mut server_backlog = server_local.backlog.write();
-        let max_backlog = *server_local.max_backlog.read();
-
-        if server_backlog.len() >= max_backlog {
-            return Err(SocketError::ConnectionRefused);
-        }
-        server_backlog.push(server_conn);
-        drop(server_backlog); // Release lock before waking
-
-        // Wake up any task waiting in accept()
-        server_local.accept_waker.wake_one();
-
-        // Return the client socket for the caller to use
-        Ok(client_conn)
-    }
 }
 
 impl StreamOps for LocalSocket {
@@ -438,13 +385,67 @@ impl SocketControl for LocalSocket {
     }
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
-        // Note: This implementation has a limitation where we cannot properly
-        // update self to become the connected socket while maintaining wake-up
-        // functionality. The caller (syscall layer) should use connect_and_get_socket()
-        // and replace the socket object in the handle table.
-        //
-        // For now, we just return an error to indicate this needs special handling.
-        Err(SocketError::InvalidOperation)
+        // Validate current state
+        let mut state = self.state.write();
+        if *state != SocketState::Unconnected {
+            return Err(SocketError::AlreadyConnected);
+        }
+        drop(state);
+
+        // Extract path from address
+        let path = match address {
+            SocketAddress::Local(addr) => addr.path(),
+            _ => return Err(SocketError::InvalidAddress),
+        };
+
+        // Lookup listening socket in NetworkManager
+        let manager = NetworkManager::get_manager();
+        let server_socket = match manager.lookup_named_socket(path) {
+            Ok(socket) => socket,
+            Err(e) => return Err(e),
+        };
+
+        // Check server is listening
+        if server_socket.state() != SocketState::Listening {
+            return Err(SocketError::ConnectionRefused);
+        }
+
+        // Create connected socket pair
+        let local_addr = format!("anon-{}", self as *const _ as usize);
+        let (server_conn, client_conn) =
+            Self::create_connected_pair(path.to_string(), local_addr.clone());
+
+        // Update self's internal state to match client_conn
+        // This allows the same socket object to become connected without changing handle
+        *self.read_buffer.write() = client_conn.read_buffer.read().clone();
+        *self.peer_read_buffer.write() = client_conn.peer_read_buffer.read().clone();
+        *self.peer_socket.write() = client_conn.peer_socket.read().clone();
+        *self.local_addr.write() = Some(local_addr);
+        *self.peer_addr.write() = Some(path.to_string());
+        *self.state.write() = SocketState::Connected;
+
+        // Add server connection to server's backlog
+        // Safety: We know server_socket is a LocalSocket since we created it
+        let server_local = unsafe { &*(Arc::as_ptr(&server_socket) as *const LocalSocket) };
+        let mut server_backlog = server_local.backlog.write();
+        let max_backlog = *server_local.max_backlog.read();
+
+        if server_backlog.len() >= max_backlog {
+            // Rollback state change
+            *self.state.write() = SocketState::Unconnected;
+            *self.local_addr.write() = None;
+            *self.peer_addr.write() = None;
+            *self.peer_read_buffer.write() = None;
+            *self.peer_socket.write() = None;
+            return Err(SocketError::ConnectionRefused);
+        }
+        server_backlog.push(server_conn);
+        drop(server_backlog); // Release lock before waking
+
+        // Wake up any task waiting in accept()
+        server_local.accept_waker.wake_one();
+
+        Ok(())
     }
 
     fn shutdown(&self, how: ShutdownHow) -> Result<(), SocketError> {

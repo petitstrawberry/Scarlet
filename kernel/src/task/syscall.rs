@@ -295,7 +295,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     let pid = trapframe.get_arg(0) as i32;
     let status_ptr = trapframe.get_arg(1) as *mut i32;
     let options = trapframe.get_arg(2) as i32;
-    
+
     // WNOHANG flag (0x1): Return immediately if no child has exited
     let wnohang = (options & 0x1) != 0;
 
@@ -335,7 +335,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 trapframe.increment_pc_next(task);
                 return 0; // Return 0 to indicate no child has exited
             }
-            
+
             // Block until a child exits
             let parent_waker = get_parent_waitpid_waker(task.get_id());
             parent_waker.wait(task.get_id(), trapframe);
@@ -377,7 +377,7 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                             trapframe.increment_pc_next(task);
                             return 0; // Return 0 to indicate child has not exited
                         }
-                        
+
                         // Block until child exits
                         let child_waker = get_waitpid_waker(pid as usize);
                         child_waker.wait(task.get_id(), trapframe);
