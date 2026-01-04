@@ -371,6 +371,32 @@ fn execute_script_content(content: &str) -> i32 {
     last_exit_code
 }
 
+// TTY control opcodes
+const SCTL_TTY_SET_ECHO: u32 = 0x5354_0001;
+const SCTL_TTY_SET_CANONICAL: u32 = 0x5354_0003;
+const SCTL_TTY_SET_READ_POLICY: u32 = 0x5354_0007;
+const SCTL_TTY_SET_KBMODE: u32 = 0x5354_000C;
+const KB_XLATE: usize = 0;
+
+/// Restore TTY to canonical mode before executing external commands
+fn restore_canonical_mode() {
+    let stdin_handle = unsafe { Handle::from_raw(0) };
+    let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 1); // canonical mode
+    let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 1); // echo enabled
+    core::mem::forget(stdin_handle); // Don't close stdin
+}
+
+/// Restore TTY to raw mode after external command finishes
+fn restore_raw_mode() {
+    let stdin_handle = unsafe { Handle::from_raw(0) };
+    let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0); // raw mode (non-canonical)
+    let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0); // echo disabled
+    let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE); // keyboard mode
+    let read_policy = (0 << 16) | 1; // min=1, timeout=0
+    let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, read_policy);
+    core::mem::forget(stdin_handle); // Don't close stdin
+}
+
 /// Execute a single command from the new Command struct
 fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
     let program = &cmd.program;
@@ -448,6 +474,10 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
         String::new()
     };
 
+    // Restore TTY to canonical mode before forking
+    // This ensures child processes get line-buffered input
+    restore_canonical_mode();
+
     match fork() {
         0 => {
             // Child: apply redirects and execute
@@ -509,10 +539,14 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
                 let cmd_str = cmd.args.join(" ");
                 let job_id = add_job(pid, cmd_str);
                 println!("[{}] {} &", job_id, pid);
+                // Restore raw mode for shell after background job starts
+                restore_raw_mode();
                 // Return immediately to shell prompt
                 0
             } else {
                 let (_, status) = waitpid(pid, 0);
+                // Restore raw mode for shell after foreground command completes
+                restore_raw_mode();
                 status
             }
         }
@@ -564,6 +598,9 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
     }
 
     let mut pids: Vec<i32> = Vec::new();
+
+    // Restore TTY to canonical mode before forking pipeline
+    restore_canonical_mode();
 
     // Fork and execute each command
     for (i, cmd) in pipeline.commands.iter().enumerate() {
@@ -627,6 +664,8 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 
         let job_id = add_job(pids[0], cmd_str);
         println!("[{}] {} &", job_id, pids[0]);
+        // Restore raw mode for shell after background job starts
+        restore_raw_mode();
         // Return immediately to shell prompt
         return 0;
     }
@@ -637,6 +676,9 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
         let (_, status) = waitpid(pid, 0);
         last_status = status;
     }
+
+    // Restore raw mode for shell after pipeline completes
+    restore_raw_mode();
 
     last_status
 }

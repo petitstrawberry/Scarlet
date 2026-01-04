@@ -1,19 +1,23 @@
-//! Socket Echo Client Example
+//! Interactive Socket Client Example
 //!
-//! This program demonstrates a simple echo client using Scarlet Native sockets.
-//! It connects to the echo server and sends/receives test messages.
+//! This program demonstrates an interactive client using Scarlet Native sockets.
+//! It connects to the reverse server and allows interactive message sending.
 
 #![no_std]
 #![no_main]
 
 extern crate scarlet_std as std;
 
+use std::io::stdin;
+use std::print;
 use std::println;
 use std::socket::{ShutdownHow, Socket};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
-    println!("=== Scarlet Socket Echo Client ===");
+    println!("=== Interactive String Reverse Client ===");
+    println!("Type messages to reverse them. Type 'exit' to quit.");
+    println!();
 
     // Create client socket
     let client = match Socket::new() {
@@ -25,7 +29,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     };
 
     // Connect to server
-    let socket_path = "/tmp/echo.sock";
+    let socket_path = "/tmp/reverse.sock";
     println!("Connecting to {}...", socket_path);
 
     match client.connect(socket_path) {
@@ -37,50 +41,89 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         }
     };
 
-    // Send test messages
-    let messages: &[&[u8]] = &[
-        b"Hello, Server!",
-        b"This is a test message.",
-        b"Scarlet Native Sockets",
-    ];
+    println!();
 
-    for (i, msg) in messages.iter().enumerate() {
-        println!("\n--- Message {} ---", i + 1);
-        println!("Sending: {:?}", core::str::from_utf8(msg).unwrap());
+    let stream = match client.as_stream() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("Failed to get stream: {:?}", e);
+            return 1;
+        }
+    };
 
-        // Send message
-        let stream = match client.as_stream() {
-            Ok(s) => s,
-            Err(e) => {
-                println!("Failed to get stream: {:?}", e);
-                return 1;
+    let stdin = stdin();
+    let mut input_buffer = [0u8; 256];
+
+    loop {
+        // Display prompt
+        print!("> ");
+
+        // Read user input (canonical mode: waits for Enter)
+        let bytes_read = match stdin.read(&mut input_buffer) {
+            Ok(n) => n,
+            Err(_) => {
+                println!("\nFailed to read input");
+                break;
             }
         };
 
-        match stream.write(msg) {
-            Ok(n) => {
-                println!("Sent {} bytes", n);
+        if bytes_read == 0 {
+            println!("\nEnd of input");
+            break;
+        }
+
+        // Convert to string and trim newline
+        let mut input_len = bytes_read;
+        if input_len > 0 && input_buffer[input_len - 1] == b'\n' {
+            input_len -= 1;
+        }
+        if input_len > 0 && input_buffer[input_len - 1] == b'\r' {
+            input_len -= 1;
+        }
+
+        let input = match core::str::from_utf8(&input_buffer[..input_len]) {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Invalid UTF-8 input");
+                continue;
             }
+        };
+
+        // Skip empty input
+        if input.is_empty() {
+            continue;
+        }
+
+        // Check for exit command
+        if input == "exit" {
+            println!("Exiting...");
+            break;
+        }
+
+        // Send message to server
+        match stream.write(input.as_bytes()) {
+            Ok(_) => {}
             Err(e) => {
                 println!("Failed to send: {:?}", e);
-                return 1;
+                break;
             }
         }
 
-        // Receive echo
-        let mut buffer = [0u8; 256];
-        match stream.read(&mut buffer) {
+        // Receive response from server
+        let mut response_buffer = [0u8; 256];
+        match stream.read(&mut response_buffer) {
             Ok(n) if n > 0 => {
-                println!("Received {} bytes: {:?}", n, &buffer[..n]);
-                let received = core::str::from_utf8(&buffer[..n]).unwrap_or("<invalid utf8>");
-                println!("Echo: {}", received);
+                let received =
+                    core::str::from_utf8(&response_buffer[..n]).unwrap_or("<invalid utf8>");
+                println!("{}", received);
             }
             Ok(_) => {
-                println!("No data received from server");
+                println!("Server disconnected");
+                break;
             }
             Err(e) => {
                 println!("Failed to receive: {:?}", e);
-                return 1;
+                break;
             }
         }
     }
@@ -92,6 +135,6 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         Err(e) => println!("Shutdown error: {:?}", e),
     };
 
-    println!("Client finished successfully");
+    println!("Client finished");
     0
 }
