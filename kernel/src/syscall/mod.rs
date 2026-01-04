@@ -16,6 +16,7 @@
 //! - **500-599**: Filesystem operations (fs_mount, fs_umount, fs_pivot_root)
 //! - **600-699**: IPC operations (pipe, shared memory, message queues)
 //! - **700-799**: Memory mapping operations (memory_map, memory_unmap)
+//! - **900-999**: Socket operations (socket_create, bind, connect, accept, etc.)
 //!
 //! Legacy POSIX-like system calls (20-35) are maintained for backward compatibility
 //! and redirect to the appropriate capability-based implementations.
@@ -50,6 +51,10 @@
 //! ### Memory Mapping Operations (700-799)
 //! - MemoryMap (700), MemoryUnmap (701)
 //!
+//! ### Socket Operations (900-999)
+//! - SocketCreate (900), SocketBind (901), SocketListen (902), SocketConnect (903)
+//! - SocketAccept (904), Socketpair (905), SocketShutdown (906)
+//!
 //! ### Task Event Operations (800-899)  
 //! - Basic Events: Send (800), SetAction (801), Block (802)
 //! - Event Status: GetPending (803), HasPending (804)
@@ -77,6 +82,10 @@ use crate::fs::vfs_v2::syscall::{
 use crate::ipc::syscall::{
     sys_event_channel_create, sys_event_handler_register, sys_event_publish, sys_event_send_direct,
     sys_event_subscribe, sys_event_unsubscribe, sys_pipe,
+};
+use crate::network::syscall::{
+    sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
+    sys_socket_shutdown, sys_socketpair,
 };
 use crate::object::capability::file::{sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
@@ -186,6 +195,15 @@ syscall_table! {
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
+
+    // === Socket Operations (Scarlet Native) ===
+    SocketCreate = 900 => sys_socket_create,     // Create a local socket
+    SocketBind = 901 => sys_socket_bind,         // Bind socket to path
+    SocketListen = 902 => sys_socket_listen,     // Start listening
+    SocketConnect = 903 => sys_socket_connect,   // Connect to socket
+    SocketAccept = 904 => sys_socket_accept,     // Accept connection
+    Socketpair = 905 => sys_socketpair,          // Create socket pair
+    SocketShutdown = 906 => sys_socket_shutdown, // Shutdown socket
 
     // === Task Event Operations ===
 

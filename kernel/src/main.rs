@@ -264,6 +264,8 @@ pub mod interrupt;
 pub mod ipc;
 pub mod library;
 pub mod mem;
+#[cfg(feature = "network")]
+pub mod network;
 pub mod object;
 pub mod profiler;
 pub mod sched;
@@ -660,6 +662,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     }
 
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
+
+    /* Initialize NetworkManager */
+    #[cfg(feature = "network")]
+    {
+        early_println!("[boot] Initializing NetworkManager...");
+        let _network_manager = crate::network::NetworkManager::init();
+        fence(Ordering::SeqCst); // Ensure NetworkManager is initialized before proceeding
+    }
 
     /* Make init task */
     early_println!("[boot] Creating initial user task...");

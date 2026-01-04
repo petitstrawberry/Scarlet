@@ -48,8 +48,8 @@ use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{DirectoryEntryInternal, FileSystemOperations, VfsEntry, VfsNode};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::fs::{
-    FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError,
-    FileSystemErrorKind, FileType, SeekFrom, VfsManager, get_fs_driver_manager,
+    FileMetadata, FileObject, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType,
+    SeekFrom, VfsManager, get_fs_driver_manager,
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps};
 use crate::vm::vmem::MemoryArea;
@@ -949,11 +949,11 @@ impl FileSystemOperations for OverlayFS {
         let new_node = match fs.create(&upper_parent, name, file_type, mode) {
             Ok(node) => node,
             Err(e) => {
-                crate::println!(
-                    "OverlayFS: Failed to create file '{}' in upper layer: {}",
-                    name,
-                    e.message
-                );
+                // crate::println!(
+                //     "OverlayFS: Failed to create file '{}' in upper layer: {}",
+                //     name,
+                //     e.message
+                // );
                 return Err(e);
             }
         };

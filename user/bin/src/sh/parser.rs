@@ -42,12 +42,14 @@ impl Command {
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub commands: Vec<Command>,
+    pub is_background: bool,
 }
 
 impl Pipeline {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            is_background: false,
         }
     }
 
@@ -78,6 +80,7 @@ enum Token {
     RedirectOut,    // >
     RedirectAppend, // >>
     RedirectIn,     // <
+    Background,     // &
 }
 
 /// Tokenize an input string into tokens
@@ -160,6 +163,19 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                 }
             }
 
+            // Background operator
+            '&' => {
+                if in_quotes {
+                    current_word.push(c);
+                } else {
+                    if !current_word.is_empty() {
+                        tokens.push(Token::Word(current_word.clone()));
+                        current_word.clear();
+                    }
+                    tokens.push(Token::Background);
+                }
+            }
+
             // Regular character
             _ => {
                 current_word.push(c);
@@ -191,7 +207,15 @@ fn parse_tokens(tokens: &[Token]) -> Result<Pipeline, ParseError> {
     let mut expect_redirect_target = false;
     let mut redirect_type: Option<RedirectType> = None;
 
-    for token in tokens {
+    // Check if the last token is Background
+    let has_background = tokens.last() == Some(&Token::Background);
+    let tokens_to_process = if has_background {
+        &tokens[..tokens.len() - 1]
+    } else {
+        tokens
+    };
+
+    for token in tokens_to_process {
         match token {
             Token::Word(word) => {
                 if expect_redirect_target {
@@ -252,6 +276,11 @@ fn parse_tokens(tokens: &[Token]) -> Result<Pipeline, ParseError> {
                 expect_redirect_target = true;
                 redirect_type = Some(RedirectType::Input);
             }
+
+            Token::Background => {
+                // Should not reach here since we filtered it out
+                return Err(ParseError::UnexpectedToken(String::from("&")));
+            }
         }
     }
 
@@ -271,6 +300,9 @@ fn parse_tokens(tokens: &[Token]) -> Result<Pipeline, ParseError> {
     if pipeline.is_empty() {
         return Err(ParseError::EmptyPipeline);
     }
+
+    // Set background flag
+    pipeline.is_background = has_background;
 
     Ok(pipeline)
 }

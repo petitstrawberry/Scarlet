@@ -58,6 +58,15 @@ pub enum Syscall {
     MemoryMap = 700,   // Memory map operation (mmap)
     MemoryUnmap = 701, // Memory unmap operation (munmap)
 
+    // === Socket Operations (Scarlet Native) ===
+    SocketCreate = 900,   // Create a local socket
+    SocketBind = 901,     // Bind socket to path
+    SocketListen = 902,   // Start listening
+    SocketConnect = 903,  // Connect to socket
+    SocketAccept = 904,   // Accept connection
+    Socketpair = 905,     // Create socket pair
+    SocketShutdown = 906, // Shutdown socket
+
     // === Debug/Profiler Operations ===
     ProfilerDump = 999, // Dump profiler statistics (debug only)
 }

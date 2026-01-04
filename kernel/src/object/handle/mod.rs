@@ -84,6 +84,11 @@ impl HandleTable {
                 // ConfigFile, LogOutput, etc.
                 HandleType::Regular
             }
+            #[cfg(feature = "network")]
+            KernelObject::Socket(_) => {
+                // Sockets are used for network and IPC communication
+                HandleType::IpcChannel
+            }
             KernelObject::EventChannel(_) => {
                 // Event channels are used for pub/sub communication
                 HandleType::EventChannel
@@ -213,6 +218,12 @@ impl HandleTable {
                     writable,
                 )),
                 KernelObject::Pipe(_) => Some(introspection::KernelObjectInfo::for_pipe(
+                    handle_role,
+                    readable,
+                    writable,
+                )),
+                #[cfg(feature = "network")]
+                KernelObject::Socket(_) => Some(introspection::KernelObjectInfo::for_pipe(
                     handle_role,
                     readable,
                     writable,

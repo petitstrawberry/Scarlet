@@ -40,7 +40,7 @@ use alloc::collections::btree_map::Values;
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use spin::RwLock;
 
-use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
+use crate::object::capability::memory_mapping::AccessOp;
 use crate::{
     arch::vm::{free_virtual_address_space, get_root_pagetable, is_asid_used, mmu::PageTable},
     environment::PAGE_SIZE,
