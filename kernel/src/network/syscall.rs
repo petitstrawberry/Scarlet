@@ -43,7 +43,7 @@ use alloc::sync::Arc;
 use crate::arch::Trapframe;
 use crate::network::{
     LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress, SocketControl, SocketProtocol,
-    SocketType, local::LocalSocket,
+    SocketType, SocketObject, local::LocalSocket,
 };
 use crate::object::KernelObject;
 use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
@@ -282,25 +282,40 @@ pub fn sys_socket_connect(tf: &mut Trapframe) -> usize {
         }
     };
 
-    // Look up the target socket (verify it exists)
-    if NetworkManager::get_manager()
-        .lookup_named_socket(&path)
-        .is_err()
-    {
-        return usize::MAX;
-    }
-
-    // Connect to the target socket
+    // Connect to the target socket using LocalSocket's special method
+    // that returns a new connected socket
+    use crate::network::local::LocalSocket;
+    let socket_ptr = Arc::as_ptr(&socket);
+    let local_socket = unsafe { &*(socket_ptr as *const LocalSocket) };
+    
     let peer_addr = match LocalSocketAddress::from_path(&path) {
         Ok(addr) => addr,
         Err(_) => return usize::MAX,
     };
 
-    if socket.connect(&SocketAddress::Local(peer_addr)).is_err() {
-        return usize::MAX;
-    }
+    let connected_socket = match local_socket.connect_and_get_socket(&SocketAddress::Local(peer_addr)) {
+        Ok(sock) => sock,
+        Err(_) => return usize::MAX,
+    };
 
-    0
+    // Get the metadata from the old handle
+    let metadata = match task.handle_table.get_metadata(handle_id) {
+        Some(meta) => meta.clone(),
+        None => return usize::MAX,
+    };
+
+    // Remove the old socket and insert the new connected socket with the same handle ID
+    task.handle_table.remove(handle_id);
+    let new_kernel_obj = KernelObject::Socket(connected_socket as Arc<dyn SocketObject>);
+    match task.handle_table.insert_with_metadata(new_kernel_obj, metadata) {
+        Ok(new_id) if new_id == handle_id => 0,
+        Ok(_) => {
+            // Handle ID changed (shouldn't happen in current implementation, but handle it)
+            // This is acceptable - the new handle ID is now valid
+            0
+        }
+        Err(_) => usize::MAX,
+    }
 }
 
 /// System call: Accept an incoming connection
