@@ -949,11 +949,11 @@ impl FileSystemOperations for OverlayFS {
         let new_node = match fs.create(&upper_parent, name, file_type, mode) {
             Ok(node) => node,
             Err(e) => {
-                crate::println!(
-                    "OverlayFS: Failed to create file '{}' in upper layer: {}",
-                    name,
-                    e.message
-                );
+                // crate::println!(
+                //     "OverlayFS: Failed to create file '{}' in upper layer: {}",
+                //     name,
+                //     e.message
+                // );
                 return Err(e);
             }
         };
