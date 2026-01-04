@@ -38,6 +38,7 @@
 //! ```
 
 use alloc::sync::Arc;
+use alloc::string::String;
 
 use crate::arch::Trapframe;
 use crate::network::{
@@ -397,20 +398,14 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    // Create a connected socket pair using LocalSocket::new and manual connection
-    // Since create_connected_pair is private, we'll create two simple sockets and connect them manually
-    // For now, we'll create two simple sockets - a proper implementation would use private API
-    let socket1 = Arc::new(LocalSocket::new(
-        SocketType::Stream,
-        SocketProtocol::Default,
-    ));
-    let socket2 = Arc::new(LocalSocket::new(
-        SocketType::Stream,
-        SocketProtocol::Default,
-    ));
+    // Create a connected socket pair using LocalSocket::create_connected_pair
+    let (socket1, socket2) = LocalSocket::create_connected_pair(
+        String::from("socketpair:0"),
+        String::from("socketpair:1"),
+    );
 
     // Add both sockets to handle table
-    let kernel_obj1 = KernelObject::Socket(socket1.clone());
+    let kernel_obj1 = KernelObject::Socket(socket1);
     let metadata = HandleMetadata {
         handle_type: HandleType::IpcChannel,
         access_mode: AccessMode::ReadWrite,
@@ -425,7 +420,7 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
-    let kernel_obj2 = KernelObject::Socket(socket2.clone());
+    let kernel_obj2 = KernelObject::Socket(socket2);
     let handle2 = match task
         .handle_table
         .insert_with_metadata(kernel_obj2, metadata)
@@ -437,9 +432,6 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
             return usize::MAX;
         }
     };
-
-    // TODO: Actually connect the sockets - need to expose create_connected_pair or similar API
-    // For now, this creates two unconnected sockets
 
     // Write handle IDs to user space array
     unsafe {

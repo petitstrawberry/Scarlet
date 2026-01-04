@@ -646,8 +646,17 @@ The architecture is ready for implementation and addresses all concerns raised i
   - ✅ sys_socket_listen (902): Start listening for connections
   - ✅ sys_socket_connect (903): Connect to named socket
   - ✅ sys_socket_accept (904): Accept incoming connection
-  - ✅ sys_socketpair (905): Create connected socket pair
+  - ✅ sys_socketpair (905): Create connected socket pair (uses LocalSocket::create_connected_pair)
   - ✅ sys_socket_shutdown (906): Shutdown socket
+- ✅ **Userspace socket API (user/lib/std/src/socket.rs)**
+  - ✅ Socket struct with RAII handle management
+  - ✅ High-level methods: new, bind, listen, connect, accept, pair, shutdown
+  - ✅ StreamOps integration via as_stream() for read/write
+  - ✅ Automatic cleanup via Drop trait
+- ✅ **Sample programs (user/bin/src/)**
+  - ✅ socket_server.rs: Echo server demonstrating bind/listen/accept
+  - ✅ socket_client.rs: Echo client demonstrating connect/send/receive
+  - ✅ socket_pair.rs: Bidirectional IPC via socketpair()
 
 **Location**: `kernel/src/network/{mod.rs, socket.rs, local.rs, syscall.rs}`, `kernel/src/syscall/mod.rs`
 
@@ -700,3 +709,4 @@ The architecture is ready for implementation and addresses all concerns raised i
 - 2026-01-03: Updated with Phase 1 completion status and test results
 - 2026-01-03: Phase 2 completed - NetworkManager with LocalSocket implementation and comprehensive socket infrastructure (441 tests passing)
 - 2026-01-03: Scarlet Native socket syscalls (900-906) implemented - handle-based IPC syscalls for LocalSocket communication
+- 2026-01-04: Fixed sys_socketpair implementation to use LocalSocket::create_connected_pair for proper bidirectional IPC

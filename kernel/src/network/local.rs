@@ -110,7 +110,7 @@ impl LocalSocket {
     /// # Returns
     ///
     /// A tuple of (local_socket, peer_socket) that are connected
-    fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
+    pub fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
         // Create shared buffers for bidirectional communication
         let local_read_buffer = Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)));
         let peer_read_buffer = Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)));

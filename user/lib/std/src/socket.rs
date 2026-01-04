@@ -257,6 +257,25 @@ impl Socket {
         self.handle
     }
 
+    /// Get StreamOps capability for this socket
+    ///
+    /// # Returns
+    ///
+    /// StreamOps capability for reading and writing data through this socket.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let socket = Socket::new().unwrap();
+    /// let stream = socket.as_stream().unwrap();
+    /// stream.write(b"Hello").unwrap();
+    /// ```
+    pub fn as_stream(&self) -> Result<crate::handle::capability::StreamOps> {
+        Ok(crate::handle::capability::StreamOps::from_handle(
+            self.handle as i32,
+        ))
+    }
+
     /// Create a socket from a raw handle
     ///
     /// # Safety
