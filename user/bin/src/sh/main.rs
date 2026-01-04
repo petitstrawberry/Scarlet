@@ -20,6 +20,86 @@ mod parser;
 
 use parser::{Command, Pipeline, RedirectType};
 
+/// Background job information
+#[derive(Debug, Clone)]
+struct Job {
+    job_id: usize,
+    pid: i32,
+    command: String,
+    is_running: bool,
+}
+
+/// Global job list (static for simplicity)
+static mut JOB_LIST: Option<Vec<Job>> = None;
+static mut NEXT_JOB_ID: usize = 1;
+
+/// Initialize the job list
+fn init_jobs() {
+    unsafe {
+        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
+        if (*jobs_ptr).is_none() {
+            *jobs_ptr = Some(Vec::new());
+        }
+    }
+}
+
+/// Add a job to the job list
+fn add_job(pid: i32, command: String) -> usize {
+    unsafe {
+        let job_id = NEXT_JOB_ID;
+        NEXT_JOB_ID += 1;
+
+        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
+        if let Some(jobs) = &mut *jobs_ptr {
+            jobs.push(Job {
+                job_id,
+                pid,
+                command,
+                is_running: true,
+            });
+        }
+
+        job_id
+    }
+}
+
+/// Remove completed jobs from the job list
+fn cleanup_jobs() {
+    unsafe {
+        let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
+        if let Some(jobs) = &mut *jobs_ptr {
+            let mut has_completed = false;
+            jobs.retain(|job| {
+                // Check if the process is still running using waitpid with WNOHANG (0x1)
+                let (wait_pid, _status) = waitpid(job.pid, 1);
+                if wait_pid == job.pid {
+                    println!("\n[{}] Done: {}", job.job_id, job.command);
+                    has_completed = true;
+                    false // Remove from list
+                } else {
+                    true // Keep in list
+                }
+            });
+            // Print a newline after job completion messages to separate from prompt
+            if has_completed {
+                // This helps keep the prompt visible
+            }
+        }
+    }
+}
+
+/// Get all jobs
+fn get_jobs() -> Vec<Job> {
+    unsafe {
+        let jobs_ptr = core::ptr::addr_of!(JOB_LIST);
+        if let Some(jobs) = &*jobs_ptr {
+            jobs.clone()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 /// Parse a command line into a program and arguments
 fn parse_command(input: &str) -> (String, Vec<String>) {
     // First expand environment variables
@@ -292,7 +372,7 @@ fn execute_script_content(content: &str) -> i32 {
 }
 
 /// Execute a single command from the new Command struct
-fn execute_single_command(cmd: &Command) -> i32 {
+fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
     let program = &cmd.program;
     let args = &cmd.args;
 
@@ -424,9 +504,17 @@ fn execute_single_command(cmd: &Command) -> i32 {
             1
         }
         pid => {
-            // Parent: wait for child
-            let (_, status) = waitpid(pid, 0);
-            status
+            // Parent: wait for child or add to job list if background
+            if is_background {
+                let cmd_str = cmd.args.join(" ");
+                let job_id = add_job(pid, cmd_str);
+                println!("[{}] {} &", job_id, pid);
+                // Return immediately to shell prompt
+                0
+            } else {
+                let (_, status) = waitpid(pid, 0);
+                status
+            }
         }
     }
 }
@@ -437,7 +525,26 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 
     // Single command - no pipes needed
     if num_commands == 1 {
-        return execute_single_command(&pipeline.commands[0]);
+        let cmd = &pipeline.commands[0];
+
+        // Check if it's a built-in command
+        let is_builtin = match cmd.program.as_str() {
+            "exit" | "env" | "export" | "cd" | "unset" | "echo" | "source" | "." | "jobs"
+            | "fg" | "bg" => true,
+            _ => false,
+        };
+
+        // Built-in commands cannot be run in background
+        if is_builtin && pipeline.is_background {
+            println!(
+                "sh: {}: builtin command cannot be run in background",
+                cmd.program
+            );
+            return 1;
+        }
+
+        let status = execute_single_command(&pipeline.commands[0], pipeline.is_background);
+        return status;
     }
 
     // Multiple commands - set up pipes
@@ -486,8 +593,8 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
                 // The handles will be automatically closed when the child process exits
                 // or they go out of scope
 
-                // Execute the command
-                let exit_code = execute_single_command(cmd);
+                // Execute the command (never background for pipeline components)
+                let exit_code = execute_single_command(cmd, false);
                 exit(exit_code);
             }
             -1 => {
@@ -508,6 +615,22 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
         let _ = write_end.close();
     }
 
+    // If background, add to job list and return immediately
+    if pipeline.is_background {
+        // Build command string from pipeline
+        let cmd_str = pipeline
+            .commands
+            .iter()
+            .map(|c| c.args.join(" "))
+            .collect::<Vec<_>>()
+            .join(" | ");
+
+        let job_id = add_job(pids[0], cmd_str);
+        println!("[{}] {} &", job_id, pids[0]);
+        // Return immediately to shell prompt
+        return 0;
+    }
+
     // Wait for all children
     let mut last_status = 0;
     for pid in pids {
@@ -521,7 +644,11 @@ fn execute_pipeline(pipeline: &Pipeline) -> i32 {
 /// Interactive shell mode (enhanced version with line editing and history)
 fn interactive_shell() -> i32 {
     println!("Scarlet Shell (Enhanced Interactive Mode)");
-    println!("Features: cursor movement, command history, pipes");
+    println!("Features: cursor movement, command history, pipes, background jobs");
+    println!("Tip: After starting a background job, press Enter to see the prompt");
+
+    // Initialize job list
+    init_jobs();
 
     // Try to execute .shrc on startup
     execute_shrc();
@@ -553,6 +680,9 @@ fn interactive_shell() -> i32 {
     }
 
     loop {
+        // Clean up completed background jobs before showing prompt
+        cleanup_jobs();
+
         // Read a line with history support
         let input = match editor.read_line_with_history(&mut history) {
             Ok(line) => line,
@@ -579,6 +709,7 @@ fn interactive_shell() -> i32 {
                 if status != 0 {
                     // Command failed, but continue shell
                 }
+                println!("DEBUG: About to loop back to read next command...");
             }
             Err(err) => {
                 println!("sh: parse error: {:?}", err);
@@ -710,6 +841,63 @@ fn get_variable_value(var_name: &str) -> Option<String> {
 /// Handle built-in shell commands
 fn handle_builtin_command(program: &str, args: &[String]) -> Option<i32> {
     match program {
+        "jobs" => {
+            // Display background jobs
+            cleanup_jobs(); // Clean up completed jobs first
+            let jobs = get_jobs();
+            if jobs.is_empty() {
+                // No jobs
+            } else {
+                for job in jobs {
+                    let status = if job.is_running { "Running" } else { "Stopped" };
+                    println!("[{}] {} {}", job.job_id, status, job.command);
+                }
+            }
+            Some(0)
+        }
+        "fg" => {
+            // Bring a background job to foreground
+            cleanup_jobs();
+            let job_id = if args.len() > 1 {
+                match args[1].trim_start_matches('%').parse::<usize>() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        println!("fg: invalid job id");
+                        return Some(1);
+                    }
+                }
+            } else {
+                // Get the most recent job
+                let jobs = get_jobs();
+                if jobs.is_empty() {
+                    println!("fg: no current job");
+                    return Some(1);
+                }
+                jobs.last().unwrap().job_id
+            };
+
+            // Find and wait for the job
+            unsafe {
+                let jobs_ptr = core::ptr::addr_of_mut!(JOB_LIST);
+                if let Some(jobs) = &mut *jobs_ptr {
+                    if let Some(idx) = jobs.iter().position(|j| j.job_id == job_id) {
+                        let job = jobs.remove(idx);
+                        println!("{}", job.command);
+                        let (_, status) = waitpid(job.pid, 0);
+                        return Some(status);
+                    } else {
+                        println!("fg: {}: no such job", job_id);
+                        return Some(1);
+                    }
+                }
+            }
+            Some(1)
+        }
+        "bg" => {
+            // Resume a stopped job in background (simplified - just show message)
+            println!("bg: not fully implemented (no job control signals yet)");
+            Some(0)
+        }
         "exit" => {
             let exit_code = if args.len() > 1 {
                 args[1].parse::<i32>().unwrap_or(0)

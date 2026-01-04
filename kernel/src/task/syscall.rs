@@ -294,7 +294,10 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let pid = trapframe.get_arg(0) as i32;
     let status_ptr = trapframe.get_arg(1) as *mut i32;
-    let _options = trapframe.get_arg(2) as i32; // Not used in this implementation
+    let options = trapframe.get_arg(2) as i32;
+    
+    // WNOHANG flag (0x1): Return immediately if no child has exited
+    let wnohang = (options & 0x1) != 0;
 
     // Loop until a child exits or an error occurs
     loop {
@@ -326,7 +329,14 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                 }
             }
 
-            // No child has exited yet, block until one does
+            // No child has exited yet
+            if wnohang {
+                // WNOHANG: Return immediately without blocking
+                trapframe.increment_pc_next(task);
+                return 0; // Return 0 to indicate no child has exited
+            }
+            
+            // Block until a child exits
             let parent_waker = get_parent_waitpid_waker(task.get_id());
             parent_waker.wait(task.get_id(), trapframe);
             // Continue the loop to re-check after waking up
@@ -361,7 +371,14 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                         return usize::MAX;
                     }
                     WaitError::ChildNotExited(_) => {
-                        // If the child task is not exited, we need to wait for it
+                        // Child has not exited yet
+                        if wnohang {
+                            // WNOHANG: Return immediately without blocking
+                            trapframe.increment_pc_next(task);
+                            return 0; // Return 0 to indicate child has not exited
+                        }
+                        
+                        // Block until child exits
                         let child_waker = get_waitpid_waker(pid as usize);
                         child_waker.wait(task.get_id(), trapframe);
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
