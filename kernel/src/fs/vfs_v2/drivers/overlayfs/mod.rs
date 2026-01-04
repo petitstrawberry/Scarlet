@@ -48,8 +48,8 @@ use crate::driver_initcall;
 use crate::fs::vfs_v2::core::{DirectoryEntryInternal, FileSystemOperations, VfsEntry, VfsNode};
 use crate::fs::vfs_v2::mount_tree::MountPoint;
 use crate::fs::{
-    FileMetadata, FileObject, FilePermission, FileSystemDriver, FileSystemError,
-    FileSystemErrorKind, FileType, SeekFrom, VfsManager, get_fs_driver_manager,
+    FileMetadata, FileObject, FileSystemDriver, FileSystemError, FileSystemErrorKind, FileType,
+    SeekFrom, VfsManager, get_fs_driver_manager,
 };
 use crate::object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps};
 use crate::vm::vmem::MemoryArea;

@@ -8,8 +8,8 @@
 
 extern crate scarlet_std as std;
 
-use std::socket::{ShutdownHow, Socket};
 use std::println;
+use std::socket::{ShutdownHow, Socket};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
@@ -45,7 +45,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     println!("Waiting for connections...");
 
-    // Accept one client connection
+    // Accept client connection (now blocking)
     let client = match server.accept() {
         Ok(c) => {
             println!("Client connected!");
@@ -59,7 +59,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     // Echo loop - read and write back data
     println!("Echo loop started. Waiting for data...");
-    
+
     let stream = match client.as_stream() {
         Ok(s) => s,
         Err(e) => {
@@ -67,7 +67,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
             return 1;
         }
     };
-    
+
     let mut buffer = [0u8; 256];
     let mut total_bytes = 0;
 

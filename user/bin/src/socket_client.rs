@@ -8,8 +8,8 @@
 
 extern crate scarlet_std as std;
 
-use std::socket::{ShutdownHow, Socket};
 use std::println;
+use std::socket::{ShutdownHow, Socket};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
@@ -56,7 +56,7 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
                 return 1;
             }
         };
-        
+
         match stream.write(msg) {
             Ok(n) => {
                 println!("Sent {} bytes", n);

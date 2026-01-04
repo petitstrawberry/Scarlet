@@ -1,4 +1,4 @@
-use core::{ptr::read_volatile, sync::atomic::compiler_fence};
+use core::ptr::read_volatile;
 
 use crate::early_println;
 

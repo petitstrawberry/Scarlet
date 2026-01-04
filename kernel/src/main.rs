@@ -663,6 +663,14 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
 
+    /* Initialize NetworkManager */
+    #[cfg(feature = "network")]
+    {
+        early_println!("[boot] Initializing NetworkManager...");
+        let _network_manager = crate::network::NetworkManager::init();
+        fence(Ordering::SeqCst); // Ensure NetworkManager is initialized before proceeding
+    }
+
     /* Make init task */
     early_println!("[boot] Creating initial user task...");
     let mut task = new_user_task("init".to_string(), 0);

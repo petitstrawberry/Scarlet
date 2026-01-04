@@ -11,7 +11,7 @@ use crate::fs::FileObject;
 use crate::ipc::StreamIpcOps;
 use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::pipe::PipeObject;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 
 #[cfg(feature = "network")]

@@ -37,8 +37,8 @@
 //! let [handle1, handle2] = sys_socketpair();
 //! ```
 
-use alloc::sync::Arc;
 use alloc::string::String;
+use alloc::sync::Arc;
 
 use crate::arch::Trapframe;
 use crate::network::{
@@ -335,13 +335,20 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
     let handle_id = tf.get_arg(0) as u32;
 
     // Get the listening socket from handle table
-    let socket = match task.handle_table.get(handle_id) {
+    let socket_obj = match task.handle_table.get(handle_id) {
         Some(KernelObject::Socket(socket)) => socket.clone(),
         _ => return usize::MAX,
     };
 
-    // Accept a connection
-    let accepted_socket = match socket.accept() {
+    // Try to downcast to LocalSocket to access accept_blocking
+    // Safety: In Scarlet Native, all sockets are LocalSockets
+    use crate::network::local::LocalSocket;
+
+    let socket_ptr = Arc::as_ptr(&socket_obj);
+    let local_socket = unsafe { &*(socket_ptr as *const LocalSocket) };
+
+    // Accept a connection with blocking
+    let accepted_socket = match local_socket.accept_blocking(task.get_id(), tf) {
         Ok(socket) => socket,
         Err(_) => return usize::MAX,
     };

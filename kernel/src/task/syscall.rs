@@ -27,7 +27,7 @@ use crate::library::std::string::{
 use crate::arch::{Trapframe, get_cpu};
 use crate::sched::scheduler::get_scheduler;
 use crate::task::{CloneFlags, WaitError, get_parent_waitpid_waker, get_waitpid_waker};
-use crate::timer::{get_tick, ms_to_ticks, ns_to_ticks};
+use crate::timer::ns_to_ticks;
 
 const MAX_ARG_COUNT: usize = 256; // Maximum number of arguments for execve
 

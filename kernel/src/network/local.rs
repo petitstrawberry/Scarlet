@@ -33,6 +33,7 @@ use super::{
 use crate::ipc::StreamIpcOps;
 use crate::object::KernelObject;
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
+use crate::sync::Waker;
 
 /// Maximum buffer size per socket (64 KB)
 const MAX_BUFFER_SIZE: usize = 65536;
@@ -71,6 +72,9 @@ pub struct LocalSocket {
 
     /// Maximum backlog size (set by listen())
     max_backlog: RwLock<usize>,
+
+    /// Waker for blocking accept() operations
+    accept_waker: Waker,
 }
 
 impl LocalSocket {
@@ -95,6 +99,48 @@ impl LocalSocket {
             peer_read_buffer: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
+            accept_waker: Waker::new_interruptible("socket_accept"),
+        }
+    }
+
+    /// Accept a connection with blocking behavior
+    ///
+    /// This method blocks the calling task until a connection is available in the backlog.
+    /// It uses the waker mechanism to properly suspend and wake the task.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - ID of the task calling accept
+    /// * `trapframe` - Trapframe for scheduler context switching
+    ///
+    /// # Returns
+    ///
+    /// Arc to the accepted socket connection
+    pub fn accept_blocking(
+        &self,
+        task_id: usize,
+        trapframe: &mut crate::arch::Trapframe,
+    ) -> Result<Arc<dyn SocketObject>, SocketError> {
+        let state = self.state.read();
+        if *state != SocketState::Listening {
+            return Err(SocketError::NotListening);
+        }
+        drop(state);
+
+        // Try to get a pending connection from backlog
+        loop {
+            {
+                let mut backlog = self.backlog.write();
+                if let Some(client_socket) = backlog.pop() {
+                    return Ok(client_socket);
+                }
+            } // Release backlog lock
+
+            // No connection available, block the task
+            self.accept_waker.wait(task_id, trapframe);
+
+            // When we reach here, task has been woken up
+            // Check again if there's a connection
         }
     }
 
@@ -127,6 +173,7 @@ impl LocalSocket {
             peer_read_buffer: RwLock::new(Some(peer_read_buffer.clone())),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
+            accept_waker: Waker::new_interruptible("socket_accept"),
         });
 
         // Create peer socket (client side)
@@ -141,6 +188,7 @@ impl LocalSocket {
             peer_read_buffer: RwLock::new(Some(local_read_buffer.clone())),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
+            accept_waker: Waker::new_interruptible("socket_accept"),
         });
 
         (local_socket, peer_socket)
@@ -235,6 +283,7 @@ impl SocketControl for LocalSocket {
             peer_read_buffer: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
+            accept_waker: Waker::new_interruptible("socket_accept"),
         });
         manager.register_named_socket(path, socket_obj)?;
 
@@ -262,6 +311,7 @@ impl SocketControl for LocalSocket {
         if *state != SocketState::Listening {
             return Err(SocketError::NotListening);
         }
+        drop(state);
 
         // Try to get a pending connection from backlog
         let mut backlog = self.backlog.write();
@@ -310,6 +360,10 @@ impl SocketControl for LocalSocket {
             return Err(SocketError::ConnectionRefused);
         }
         server_backlog.push(server_conn);
+        drop(server_backlog); // Release lock before waking
+
+        // Wake up any task waiting in accept()
+        server_local.accept_waker.wake_one();
 
         // Update self to become the client connection
         *state = SocketState::Connected;
@@ -391,6 +445,7 @@ impl CloneOps for LocalSocket {
             peer_read_buffer: RwLock::new(self.peer_read_buffer.read().clone()),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(*self.max_backlog.read()),
+            accept_waker: Waker::new_interruptible("socket_accept_cloned"),
         }))
     }
 }

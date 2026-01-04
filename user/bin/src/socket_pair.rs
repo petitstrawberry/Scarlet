@@ -8,8 +8,8 @@
 
 extern crate scarlet_std as std;
 
-use std::socket::{ShutdownHow, Socket};
 use std::println;
+use std::socket::{ShutdownHow, Socket};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
@@ -31,7 +31,10 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     // Test 1: Send from socket1 to socket2
     println!("\n--- Test 1: Socket 1 -> Socket 2 ---");
     let msg1 = b"Hello from Socket 1!";
-    println!("Socket 1 sending: {:?}", core::str::from_utf8(msg1).unwrap());
+    println!(
+        "Socket 1 sending: {:?}",
+        core::str::from_utf8(msg1).unwrap()
+    );
 
     let stream1 = match socket1.as_stream() {
         Ok(s) => s,
@@ -73,7 +76,10 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     // Test 2: Send from socket2 to socket1
     println!("\n--- Test 2: Socket 2 -> Socket 1 ---");
     let msg2 = b"Hello from Socket 2!";
-    println!("Socket 2 sending: {:?}", core::str::from_utf8(msg2).unwrap());
+    println!(
+        "Socket 2 sending: {:?}",
+        core::str::from_utf8(msg2).unwrap()
+    );
 
     match stream2.write(msg2) {
         Ok(n) => println!("Socket 2 sent {} bytes", n),
@@ -98,20 +104,29 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
 
     // Test 3: Bidirectional exchange
     println!("\n--- Test 3: Bidirectional Exchange ---");
-    
+
     // Socket 1 sends
     let msg3 = b"Ping";
-    println!("Socket 1 sending: {:?}", core::str::from_utf8(msg3).unwrap());
+    println!(
+        "Socket 1 sending: {:?}",
+        core::str::from_utf8(msg3).unwrap()
+    );
     let _ = stream1.write(msg3);
 
     // Socket 2 receives and responds
     let mut buffer3 = [0u8; 256];
     if let Ok(n) = stream2.read(&mut buffer3) {
         if n > 0 {
-            println!("Socket 2 received: {:?}", core::str::from_utf8(&buffer3[..n]).unwrap());
-            
+            println!(
+                "Socket 2 received: {:?}",
+                core::str::from_utf8(&buffer3[..n]).unwrap()
+            );
+
             let response = b"Pong";
-            println!("Socket 2 responding: {:?}", core::str::from_utf8(response).unwrap());
+            println!(
+                "Socket 2 responding: {:?}",
+                core::str::from_utf8(response).unwrap()
+            );
             let _ = stream2.write(response);
         }
     }
@@ -120,7 +135,10 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     let mut buffer4 = [0u8; 256];
     if let Ok(n) = stream1.read(&mut buffer4) {
         if n > 0 {
-            println!("Socket 1 received: {:?}", core::str::from_utf8(&buffer4[..n]).unwrap());
+            println!(
+                "Socket 1 received: {:?}",
+                core::str::from_utf8(&buffer4[..n]).unwrap()
+            );
         }
     }
 
