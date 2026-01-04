@@ -35,34 +35,29 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     // Get KernelObject from handle table
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
-        None => return usize::MAX, // Invalid handle
-    };
-
-    // Check if object supports StreamOps
-    let stream = match kernel_obj.as_stream() {
-        Some(stream) => stream,
-        None => return usize::MAX, // Object doesn't support stream operations
+        None => return usize::MAX,
     };
 
     // Check if this is a socket that supports blocking reads
     use crate::network::local::LocalSocket;
     use crate::object::KernelObject;
-    use core::any::Any;
 
-    let bytes_read = if let Some(KernelObject::Socket(socket_obj)) = task.handle_table.get(handle) {
-        // Try to downcast to LocalSocket for blocking read
-        let socket_ptr = alloc::sync::Arc::as_ptr(&socket_obj);
+    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+
+    let bytes_read = if let KernelObject::Socket(socket_obj) = kernel_obj {
+        let socket_ptr = alloc::sync::Arc::as_ptr(socket_obj);
         let local_socket = unsafe { &*(socket_ptr as *const LocalSocket) };
 
-        // Use blocking read for sockets
-        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
         match local_socket.read_blocking(buffer, task.get_id(), trapframe) {
             Ok(n) => n,
             Err(_) => usize::MAX,
         }
     } else {
-        // Non-socket objects use regular non-blocking read
-        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+        let stream = match kernel_obj.as_stream() {
+            Some(stream) => stream,
+            None => return usize::MAX,
+        };
+
         match stream.read(buffer) {
             Ok(n) => n,
             Err(_) => usize::MAX,
