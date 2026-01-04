@@ -21,7 +21,7 @@ use alloc::{
     collections::VecDeque,
     format,
     string::{String, ToString},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec::Vec,
 };
 use spin::RwLock;
@@ -66,6 +66,9 @@ pub struct LocalSocket {
     /// When we write, we push to peer's read_buffer
     peer_read_buffer: RwLock<Option<Arc<RwLock<VecDeque<u8>>>>>,
 
+    /// Peer socket reference (for waking read waiters)
+    peer_socket: RwLock<Option<Weak<LocalSocket>>>,
+
     /// Backlog queue for listening sockets
     /// Contains pending connections waiting to be accepted
     backlog: RwLock<Vec<Arc<LocalSocket>>>,
@@ -75,6 +78,9 @@ pub struct LocalSocket {
 
     /// Waker for blocking accept() operations
     accept_waker: Waker,
+
+    /// Waker for blocking read() operations
+    read_waker: Waker,
 }
 
 impl LocalSocket {
@@ -97,9 +103,11 @@ impl LocalSocket {
             peer_addr: RwLock::new(None),
             read_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE))),
             peer_read_buffer: RwLock::new(None),
+            peer_socket: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
+            read_waker: Waker::new_interruptible("socket_read"),
         }
     }
 
@@ -171,9 +179,11 @@ impl LocalSocket {
             peer_addr: RwLock::new(Some(peer_addr.clone())),
             read_buffer: local_read_buffer.clone(),
             peer_read_buffer: RwLock::new(Some(peer_read_buffer.clone())),
+            peer_socket: RwLock::new(None), // Set later
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
+            read_waker: Waker::new_interruptible("socket_read"),
         });
 
         // Create peer socket (client side)
@@ -186,12 +196,51 @@ impl LocalSocket {
             peer_addr: RwLock::new(Some(local_addr)),
             read_buffer: peer_read_buffer.clone(),
             peer_read_buffer: RwLock::new(Some(local_read_buffer.clone())),
+            peer_socket: RwLock::new(None), // Set later
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
+            read_waker: Waker::new_interruptible("socket_read"),
         });
 
+        // Set peer references
+        *local_socket.peer_socket.write() = Some(Arc::downgrade(&peer_socket));
+        *peer_socket.peer_socket.write() = Some(Arc::downgrade(&local_socket));
+
         (local_socket, peer_socket)
+    }
+
+    /// Blocking read operation
+    ///
+    /// This method blocks the calling task until data is available.
+    pub fn read_blocking(
+        &self,
+        buffer: &mut [u8],
+        task_id: usize,
+        trapframe: &mut crate::arch::Trapframe,
+    ) -> Result<usize, StreamError> {
+        loop {
+            {
+                let mut read_buf = self.read_buffer.write();
+
+                if !read_buf.is_empty() {
+                    let bytes_to_read = buffer.len().min(read_buf.len());
+                    for i in 0..bytes_to_read {
+                        buffer[i] = read_buf.pop_front().unwrap();
+                    }
+                    return Ok(bytes_to_read);
+                }
+
+                // Check if socket is still connected
+                if *self.state.read() != SocketState::Connected {
+                    return Err(StreamError::Closed);
+                }
+            } // Release lock
+
+            // No data available, block the task
+            self.read_waker.wait(task_id, trapframe);
+            // When woken, loop back to check for data
+        }
     }
 }
 
@@ -229,6 +278,16 @@ impl StreamOps for LocalSocket {
 
                 // Write data to peer's read buffer
                 peer_buf.extend(data.iter().copied());
+                drop(peer_buf); // Release lock
+                drop(peer_buffer); // Release peer_buffer lock
+
+                // Wake up any task waiting to read from peer socket
+                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        peer.read_waker.wake_one();
+                    }
+                }
+
                 Ok(data.len())
             }
             None => Err(StreamError::Closed),
@@ -281,9 +340,11 @@ impl SocketControl for LocalSocket {
             peer_addr: RwLock::new(None),
             read_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE))),
             peer_read_buffer: RwLock::new(None),
+            peer_socket: RwLock::new(None),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
+            read_waker: Waker::new_interruptible("socket_read"),
         });
         manager.register_named_socket(path, socket_obj)?;
 
@@ -370,6 +431,7 @@ impl SocketControl for LocalSocket {
         *self.local_addr.write() = client_conn.local_addr.read().clone();
         *self.peer_addr.write() = client_conn.peer_addr.read().clone();
         *self.peer_read_buffer.write() = client_conn.peer_read_buffer.read().clone();
+        *self.peer_socket.write() = client_conn.peer_socket.read().clone();
 
         Ok(())
     }
@@ -443,9 +505,11 @@ impl CloneOps for LocalSocket {
             peer_addr: RwLock::new(self.peer_addr.read().clone()),
             read_buffer: self.read_buffer.clone(),
             peer_read_buffer: RwLock::new(self.peer_read_buffer.read().clone()),
+            peer_socket: RwLock::new(self.peer_socket.read().clone()),
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(*self.max_backlog.read()),
             accept_waker: Waker::new_interruptible("socket_accept_cloned"),
+            read_waker: Waker::new_interruptible("socket_read_cloned"),
         }))
     }
 }

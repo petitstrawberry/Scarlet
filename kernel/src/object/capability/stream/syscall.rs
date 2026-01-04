@@ -44,12 +44,32 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    // Perform read operation
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-    match stream.read(buffer) {
-        Ok(bytes_read) => bytes_read,
-        Err(_) => usize::MAX, // Read error
-    }
+    // Check if this is a socket that supports blocking reads
+    use crate::object::KernelObject;
+    use crate::network::local::LocalSocket;
+    use core::any::Any;
+    
+    let bytes_read = if let Some(KernelObject::Socket(socket_obj)) = task.handle_table.get(handle) {
+        // Try to downcast to LocalSocket for blocking read
+        let socket_ptr = alloc::sync::Arc::as_ptr(&socket_obj);
+        let local_socket = unsafe { &*(socket_ptr as *const LocalSocket) };
+        
+        // Use blocking read for sockets
+        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+        match local_socket.read_blocking(buffer, task.get_id(), trapframe) {
+            Ok(n) => n,
+            Err(_) => usize::MAX,
+        }
+    } else {
+        // Non-socket objects use regular non-blocking read
+        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+        match stream.read(buffer) {
+            Ok(n) => n,
+            Err(_) => usize::MAX,
+        }
+    };
+
+    bytes_read
 }
 
 /// System call for writing to a KernelObject with StreamOps capability
