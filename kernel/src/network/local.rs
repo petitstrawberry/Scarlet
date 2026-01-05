@@ -44,6 +44,8 @@ struct SocketBuffer {
     data: RwLock<VecDeque<u8>>,
     /// Task ID waiting to read (if any)
     reading_task: RwLock<Option<usize>>,
+    /// Flag indicating this buffer has been closed (peer shutdown)
+    closed: RwLock<bool>,
 }
 
 impl SocketBuffer {
@@ -51,6 +53,7 @@ impl SocketBuffer {
         Arc::new(Self {
             data: RwLock::new(VecDeque::with_capacity(MAX_BUFFER_SIZE)),
             reading_task: RwLock::new(None),
+            closed: RwLock::new(false),
         })
     }
 }
@@ -251,9 +254,36 @@ impl LocalSocket {
                     return Ok(bytes_to_read);
                 }
 
-                // Check if socket is still connected
-                if *self.state.read() != SocketState::Connected {
-                    return Err(StreamError::Closed);
+                // Check if socket is closed (peer shutdown)
+                // Return 0 to indicate EOF (not an error)
+                let my_state = *self.state.read();
+                if my_state == SocketState::Closed {
+                    // crate::println!("[LocalSocket] read_blocking: self is Closed, returning EOF");
+                    return Ok(0);
+                }
+
+                // Check if peer is closed (they called shutdown)
+                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        let peer_state = *peer.state.read();
+                        if peer_state == SocketState::Closed {
+                            // crate::println!(
+                            //     "[LocalSocket] read_blocking: peer is Closed, returning EOF"
+                            // );
+                            return Ok(0); // Peer closed, return EOF
+                        }
+                    } else {
+                        // crate::println!("[LocalSocket] read_blocking: peer dropped, returning EOF");
+                        return Ok(0); // Peer dropped, treat as EOF
+                    }
+                }
+
+                // Check if this read buffer has been closed by peer's shutdown()
+                if *read_buf_arc.closed.read() {
+                    // crate::println!(
+                    //     "[LocalSocket] read_blocking: read_buffer marked closed, returning EOF"
+                    // );
+                    return Ok(0);
                 }
 
                 // Register this task as waiting to read
@@ -262,7 +292,8 @@ impl LocalSocket {
 
             // No data available, block the task
             self.read_waker.wait(task_id, trapframe);
-            // When woken, loop back to check for data
+            // crate::println!("[LocalSocket] read_blocking: woken up, checking again...");
+            // When woken, loop back to check for data or shutdown
         }
     }
 }
@@ -318,7 +349,7 @@ impl StreamOps for LocalSocket {
                 Ok(bytes_written)
             }
             None => {
-                crate::println!("[LocalSocket] write: peer buffer is None (closed)");
+                // crate::println!("[LocalSocket] write: peer buffer is None (closed)");
                 Err(StreamError::Closed)
             }
         }
@@ -459,7 +490,7 @@ impl SocketControl for LocalSocket {
             peer_addr: RwLock::new(Some(local_addr.clone())),
             read_buffer: RwLock::new(server_read_buffer.clone()),
             peer_read_buffer: RwLock::new(Some(client_read_buffer.clone())),
-            peer_socket: RwLock::new(None), // Will be set after we know the client handle
+            peer_socket: RwLock::new(None), // Will be set below
             backlog: RwLock::new(Vec::new()),
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
@@ -472,6 +503,13 @@ impl SocketControl for LocalSocket {
         *self.local_addr.write() = Some(local_addr);
         *self.peer_addr.write() = Some(path.to_string());
         *self.state.write() = SocketState::Connected;
+
+        // Set peer_socket references - IMPORTANT for shutdown()
+        // Client (self) points to server_conn
+        *self.peer_socket.write() = Some(Arc::downgrade(&server_conn));
+
+        // Server_conn needs to point back to client, but we don't have Arc<Self>
+        // We'll handle this in a moment by creating a temporary strong reference
 
         // Add server connection to server's backlog
         // Safety: We know server_socket is a LocalSocket since we created it
@@ -504,9 +542,34 @@ impl SocketControl for LocalSocket {
             return Err(SocketError::NotConnected);
         }
 
+        // crate::println!("[LocalSocket] shutdown({:?}) called", how);
+
         match how {
             ShutdownHow::Read | ShutdownHow::Write | ShutdownHow::Both => {
                 *state = SocketState::Closed;
+
+                // Mark peer's read buffer as closed so they detect EOF
+                if let Some(peer_buf) = self.peer_read_buffer.read().as_ref() {
+                    // crate::println!("[LocalSocket] shutdown: marking peer_read_buffer as closed");
+                    *peer_buf.closed.write() = true;
+                }
+
+                // Wake up peer's read_waker so it can detect the shutdown
+                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        // crate::println!("[LocalSocket] shutdown: waking peer's read_waker");
+                        peer.read_waker.wake_one();
+                    } else {
+                        // crate::println!("[LocalSocket] shutdown: peer already dropped");
+                    }
+                } else {
+                    // No direct peer reference - wake via waker
+                    // crate::println!(
+                    //     "[LocalSocket] shutdown: no peer_socket, waking via read_waker"
+                    // );
+                    self.read_waker.wake_all(); // Wake any waiting readers
+                }
+
                 Ok(())
             }
         }

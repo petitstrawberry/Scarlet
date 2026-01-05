@@ -21,7 +21,10 @@ fn reverse_bytes(data: &mut [u8]) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
-    println!("[Server] String Reverse Server starting...");
+    println!("========================================");
+    println!("[Server] String Reverse Server v2.0");
+    println!("[Server] Multiple client support enabled");
+    println!("========================================");
 
     // Create server socket
     let server = match Socket::new() {
@@ -51,72 +54,80 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
         }
     };
 
-    // Accept client connection (blocking)
-    let client = match server.accept() {
-        Ok(c) => {
-            println!("[Server] Client connected");
-            c
-        }
-        Err(e) => {
-            println!("[Server] Failed to accept connection: {:?}", e);
-            return 1;
-        }
-    };
-
-    let stream = match client.as_stream() {
-        Ok(s) => s,
-        Err(e) => {
-            println!("[Server] Failed to get stream: {:?}", e);
-            return 1;
-        }
-    };
-
-    let mut buffer = [0u8; 256];
-
-    // Service loop - reverse strings until client disconnects
+    // Main server loop - accept multiple clients sequentially
     loop {
-        match stream.read(&mut buffer) {
-            Ok(n) if n > 0 => {
-                let input = core::str::from_utf8(&buffer[..n]).unwrap_or("<invalid utf8>");
-                println!("[Server] Received: {}", input);
+        println!("[Server] Waiting for client connection...");
 
-                // Skip empty messages (shouldn't happen, but handle gracefully)
-                if n == 0 {
-                    continue;
-                }
-
-                // Reverse the string
-                reverse_bytes(&mut buffer[..n]);
-
-                let reversed = core::str::from_utf8(&buffer[..n]).unwrap_or("<invalid utf8>");
-                println!("[Server] Sending back: {}", reversed);
-
-                // Send reversed string back
-                match stream.write(&buffer[..n]) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        println!("[Server] Failed to write: {:?}", e);
-                        break;
-                    }
-                }
-            }
-            Ok(_) => {
-                println!("[Server] Client disconnected");
-                break;
+        // Accept client connection (blocking)
+        let client = match server.accept() {
+            Ok(c) => {
+                println!("[Server] Client connected");
+                c
             }
             Err(e) => {
-                println!("[Server] Read error: {:?}", e);
-                break;
+                println!("[Server] Failed to accept connection: {:?}", e);
+                continue; // Try to accept next client
+            }
+        };
+
+        let stream = match client.as_stream() {
+            Ok(s) => s,
+            Err(e) => {
+                println!("[Server] Failed to get stream: {:?}", e);
+                continue;
+            }
+        };
+
+        let mut buffer = [0u8; 256];
+
+        // Service loop - reverse strings until client disconnects
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(n) if n > 0 => {
+                    let input = core::str::from_utf8(&buffer[..n]).unwrap_or("<invalid utf8>");
+                    println!("[Server] Received: {}", input);
+
+                    // Skip empty messages (shouldn't happen, but handle gracefully)
+                    if n == 0 {
+                        continue;
+                    }
+
+                    // Reverse the string
+                    reverse_bytes(&mut buffer[..n]);
+
+                    let reversed = core::str::from_utf8(&buffer[..n]).unwrap_or("<invalid utf8>");
+                    println!("[Server] Sending back: {}", reversed);
+
+                    // Send reversed string back
+                    match stream.write(&buffer[..n]) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("[Server] Failed to write: {:?}", e);
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    println!("[Server] Client disconnected");
+                    break;
+                }
+                Err(e) => {
+                    println!("[Server] Read error: {:?}", e);
+                    break;
+                }
             }
         }
+
+        // Cleanup this client connection
+        match client.shutdown(ShutdownHow::Both) {
+            Ok(_) => {}
+            Err(e) => println!("[Server] Shutdown error: {:?}", e),
+        };
+
+        println!("[Server] Ready for next client");
     }
 
-    // Cleanup
-    match client.shutdown(ShutdownHow::Both) {
-        Ok(_) => {}
-        Err(e) => println!("[Server] Shutdown error: {:?}", e),
-    };
-
-    println!("[Server] Server shutting down");
-    0
+    // Unreachable in current implementation
+    // println!("[Server] Server shutting down");
+    // 0
 }
