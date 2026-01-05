@@ -149,7 +149,7 @@ The Linux ABI implementation is currently in active development:
 Scarlet supports multiple CPU architectures with a unified codebase:
 
 - **RISC-V 64-bit** - Primary development platform, fully supported
-- **AArch64 (ARM 64-bit)** - Fully supported with all core features
+- **AArch64 (ARM 64-bit)** - Experimental supported
 
 The kernel includes hardware abstraction layers for interrupt handling, memory management, graphics/framebuffer support, and device drivers that work across both architectures.
 
