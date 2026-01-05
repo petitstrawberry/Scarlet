@@ -1006,9 +1006,39 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 base_addr,
                 input_name
             );
-            // VirtioInputDevice internally creates and registers EventDevice
-            let _dev = Arc::new(VirtioInputDevice::new(base_addr, &input_name));
-            // Note: EventDevice is already registered inside VirtioInputDevice::new
+            // Create VirtIO Input device
+            let dev = Arc::new(VirtioInputDevice::new(base_addr, &input_name));
+            
+            // Register interrupt handler if IRQ resource is available
+            if let Some(irq_resource) = device
+                .get_resources()
+                .iter()
+                .find(|r| r.res_type == PlatformDeviceResourceType::IRQ)
+            {
+                let interrupt_id = irq_resource.start as u32;
+                crate::early_println!("[Virtio] Input device interrupt ID: {}", interrupt_id);
+                
+                // Enable interrupts
+                if let Err(e) = dev.enable_interrupts(interrupt_id) {
+                    crate::early_println!("[Virtio] Failed to enable input interrupts: {}", e);
+                } else {
+                    crate::early_println!("[Virtio] Input interrupts enabled (ID: {})", interrupt_id);
+                    
+                    // Register interrupt handler
+                    if let Err(e) = crate::interrupt::InterruptManager::with_manager(|mgr| {
+                        mgr.register_interrupt_device(interrupt_id, dev.clone())
+                    }) {
+                        crate::early_println!("[Virtio] Failed to register input interrupt device: {}", e);
+                    } else {
+                        crate::early_println!("[Virtio] Input interrupt device registered");
+                    }
+                }
+            } else {
+                crate::early_println!("[Virtio] No interrupt resource found for input device");
+            }
+            
+            // Keep device alive by registering with DeviceManager
+            DeviceManager::get_mut_manager().register_device(dev);
         }
         _ => {
             // Unsupported device type

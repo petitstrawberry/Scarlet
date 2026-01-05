@@ -145,33 +145,58 @@ impl CharDevice for EventDevice {
         None
     }
 
-    fn read_at(&self, _offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+    fn read(&self, buffer: &mut [u8]) -> usize {
         let event_size = InputEvent::size();
 
         // Buffer must be large enough to hold at least one event
         if buffer.len() < event_size {
-            return Ok(0);
+            return 0;
         }
 
         // Try to read one event
-        let mut q = self.queue.lock();
-        if let Some(event) = q.pop_front() {
-            // Convert event structure to bytes
-            let bytes =
-                unsafe { core::slice::from_raw_parts(&event as *const _ as *const u8, event_size) };
+        {
+            let mut q = self.queue.lock();
+            if let Some(event) = q.pop_front() {
+                // Convert event structure to bytes
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(&event as *const _ as *const u8, event_size)
+                };
 
-            buffer[..event_size].copy_from_slice(bytes);
-            Ok(event_size)
-        } else {
-            // No data available
-            if *self.nonblocking.lock() {
-                // In non-blocking mode, return immediately
-                Ok(0)
-            } else {
-                // In blocking mode, caller should use wait_until_ready
-                Ok(0)
+                buffer[..event_size].copy_from_slice(bytes);
+                return event_size;
             }
         }
+
+        // No data available - check nonblocking mode
+        if *self.nonblocking.lock() {
+            // In non-blocking mode, return immediately with 0 bytes
+            return 0;
+        }
+
+        // In blocking mode, wait for data using waker
+        use crate::task::mytask;
+        
+        if let Some(task) = mytask() {
+            self.waker.wait(task.get_id(), task.get_trapframe());
+            
+            // After waking up, try to read again
+            let mut q = self.queue.lock();
+            if let Some(event) = q.pop_front() {
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(&event as *const _ as *const u8, event_size)
+                };
+                buffer[..event_size].copy_from_slice(bytes);
+                return event_size;
+            }
+        }
+        
+        // No task context or spurious wakeup
+        0
+    }
+
+    fn read_at(&self, _offset: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        // Delegate to read() which implements blocking
+        Ok(self.read(buffer))
     }
 
     fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
