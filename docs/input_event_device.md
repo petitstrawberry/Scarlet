@@ -222,7 +222,7 @@ fn scarlet_to_linux(scarlet_event: &InputEvent) -> LinuxInputEvent {
 
 `InputEvent`は`#[repr(C)]`により、メモリレイアウトが保証されています。これにより:
 - ファイルから直接`read()`してキャスト可能
-- 構造体サイズは`24バイト`（パディング含む）
+- 構造体サイズは`16バイト`
 - エンディアンは実行環境に依存
 
 ## Testing
