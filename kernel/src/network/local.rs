@@ -24,6 +24,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::any::Any;
 use spin::RwLock;
 
 use super::{
@@ -104,6 +105,15 @@ pub struct LocalSocket {
 }
 
 impl LocalSocket {
+    /// Safely downcast a SocketObject to LocalSocket using Any trait
+    ///
+    /// Returns None if the socket is not a LocalSocket.
+    /// This is completely safe and does not use any unsafe code.
+    pub fn from_socket_object(socket: &Arc<dyn SocketObject>) -> Option<&Self> {
+        // Use SocketObject's as_any() to get &dyn Any
+        socket.as_any().downcast_ref::<LocalSocket>()
+    }
+
     /// Create a new local socket
     ///
     /// # Arguments
@@ -336,15 +346,20 @@ impl StreamOps for LocalSocket {
                 let bytes_written = data.len();
 
                 // Check if there's a task waiting to read
-                let reading_task = *peer_sock_buffer.reading_task.read();
-                drop(peer_data); // Release data lock
-                drop(peer_buffer); // Release peer_buffer lock
+                // Keep reading_task lock held while we wake to prevent race condition
+                let reading_task_guard = peer_sock_buffer.reading_task.read();
+                let reading_task = *reading_task_guard;
 
-                // Wake up the task if one is waiting
+                drop(peer_data); // Release data lock
+
+                // Wake up the task if one is waiting (still holding reading_task lock)
                 if let Some(task_id) = reading_task {
                     use crate::sched::scheduler::get_scheduler;
                     get_scheduler().wake_task(task_id);
                 }
+
+                drop(reading_task_guard); // Release reading_task lock
+                drop(peer_buffer); // Release peer_buffer lock
 
                 Ok(bytes_written)
             }
@@ -390,26 +405,9 @@ impl SocketControl for LocalSocket {
             _ => return Err(SocketError::InvalidAddress),
         };
 
-        // Register with NetworkManager
-        let manager = NetworkManager::get_manager();
-        // Create a socket object from self reference
-        let socket_obj: Arc<dyn SocketObject> = Arc::new(LocalSocket {
-            socket_type: self.socket_type,
-            protocol: self.protocol,
-            state: RwLock::new(*state),
-            local_addr: RwLock::new(Some(path.to_string())),
-            peer_addr: RwLock::new(None),
-            read_buffer: RwLock::new(SocketBuffer::new()),
-            peer_read_buffer: RwLock::new(None),
-            peer_socket: RwLock::new(None),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(0),
-            accept_waker: Waker::new_interruptible("socket_accept"),
-            read_waker: Waker::new_interruptible("socket_read"),
-        });
-        manager.register_named_socket(path, socket_obj)?;
-
         // Update state
+        // Note: NetworkManager registration is done by the syscall layer
+        // to ensure the same Arc<Self> is registered that's in the handle table
         *self.local_addr.write() = Some(path.to_string());
         *state = SocketState::Bound;
 
@@ -512,8 +510,10 @@ impl SocketControl for LocalSocket {
         // We'll handle this in a moment by creating a temporary strong reference
 
         // Add server connection to server's backlog
-        // Safety: We know server_socket is a LocalSocket since we created it
-        let server_local = unsafe { &*(Arc::as_ptr(&server_socket) as *const LocalSocket) };
+        let server_local = match Self::from_socket_object(&server_socket) {
+            Some(socket) => socket,
+            None => return Err(SocketError::InvalidOperation), // Not a LocalSocket
+        };
         let mut server_backlog = server_local.backlog.write();
         let max_backlog = *server_local.max_backlog.read();
 
@@ -618,24 +618,18 @@ impl SocketObject for LocalSocket {
     fn socket_protocol(&self) -> SocketProtocol {
         self.protocol
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl CloneOps for LocalSocket {
     fn custom_clone(&self) -> KernelObject {
-        KernelObject::Socket(Arc::new(LocalSocket {
-            socket_type: self.socket_type,
-            protocol: self.protocol,
-            state: RwLock::new(*self.state.read()),
-            local_addr: RwLock::new(self.local_addr.read().clone()),
-            peer_addr: RwLock::new(self.peer_addr.read().clone()),
-            read_buffer: RwLock::new(self.read_buffer.read().clone()),
-            peer_read_buffer: RwLock::new(self.peer_read_buffer.read().clone()),
-            peer_socket: RwLock::new(self.peer_socket.read().clone()),
-            backlog: RwLock::new(Vec::new()),
-            max_backlog: RwLock::new(*self.max_backlog.read()),
-            accept_waker: Waker::new_interruptible("socket_accept_cloned"),
-            read_waker: Waker::new_interruptible("socket_read_cloned"),
-        }))
+        // Socket cloning creates a new unconnected socket with the same type/protocol
+        // This is similar to dup() behavior for sockets in UNIX - creates a new independent socket
+        // rather than sharing the connection state
+        KernelObject::Socket(Arc::new(LocalSocket::new(self.socket_type, self.protocol)))
     }
 }
 

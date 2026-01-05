@@ -167,12 +167,19 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
         Err(_) => return usize::MAX,
     };
 
+    // Bind updates the socket's internal state
     if socket_arc.bind(&SocketAddress::Local(local_addr)).is_err() {
         return usize::MAX;
     }
 
-    // Register in NetworkManager's named socket namespace
-    NetworkManager::get_manager().register_named_socket(&path, socket_arc);
+    // Register the same Arc in NetworkManager's named socket namespace
+    // This ensures the registered socket and the one in handle_table are identical
+    if NetworkManager::get_manager()
+        .register_named_socket(&path, socket_arc)
+        .is_err()
+    {
+        return usize::MAX;
+    }
 
     0
 }
@@ -334,11 +341,12 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
     };
 
     // Try to downcast to LocalSocket to access accept_blocking
-    // Safety: In Scarlet Native, all sockets are LocalSockets
     use crate::network::local::LocalSocket;
 
-    let socket_ptr = Arc::as_ptr(&socket_obj);
-    let local_socket = unsafe { &*(socket_ptr as *const LocalSocket) };
+    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+        Some(socket) => socket,
+        None => return usize::MAX, // Not a LocalSocket
+    };
 
     // Accept a connection with blocking
     let accepted_socket = match local_socket.accept_blocking(task.get_id(), tf) {

@@ -340,7 +340,7 @@ pub trait SocketControl {
 /// must satisfy.
 ///
 /// Similar to how TtyDeviceEndpoint combines CharDevice + TtyControl.
-pub trait SocketObject: StreamIpcOps + SocketControl + CloneOps + Send + Sync {
+pub trait SocketObject: StreamIpcOps + SocketControl + CloneOps + Send + Sync + 'static {
     /// Get socket type (Stream, Datagram, etc.)
     fn socket_type(&self) -> SocketType;
 
@@ -349,6 +349,9 @@ pub trait SocketObject: StreamIpcOps + SocketControl + CloneOps + Send + Sync {
 
     /// Get socket protocol
     fn socket_protocol(&self) -> SocketProtocol;
+
+    /// Cast to Any for safe downcasting
+    fn as_any(&self) -> &dyn core::any::Any;
 
     /// Send data to a specific address (for datagram sockets)
     /// For stream sockets, address is ignored and data is sent to connected peer
