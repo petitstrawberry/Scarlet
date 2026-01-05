@@ -9,3 +9,4 @@ pub mod pic;
 pub mod special;
 pub mod uart;
 pub mod virtio;
+pub mod virtio_input;

@@ -20,7 +20,7 @@ use crate::{
     driver_initcall,
     drivers::{
         block::virtio_blk::VirtioBlockDevice, graphics::virtio_gpu::VirtioGpuDevice,
-        network::virtio_net::VirtioNetDevice,
+        network::virtio_net::VirtioNetDevice, virtio_input::VirtioInputDevice,
     },
     early_println,
 };
@@ -29,6 +29,7 @@ use crate::{
 static BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static NET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register enum for Virtio devices
 ///
@@ -855,6 +856,7 @@ pub enum VirtioDeviceType {
     Console = 3,
     Rng = 4,
     GPU = 16,
+    Input = 18,
 }
 
 impl VirtioDeviceType {
@@ -877,6 +879,7 @@ impl VirtioDeviceType {
             3 => VirtioDeviceType::Console,
             4 => VirtioDeviceType::Rng,
             16 => VirtioDeviceType::GPU,
+            18 => VirtioDeviceType::Input,
             _ => panic!("Not supported device type"),
         }
     }
@@ -994,6 +997,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             );
             let dev: Arc<dyn Device> = Arc::new(VirtioGpuDevice::new(base_addr));
             DeviceManager::get_mut_manager().register_device_with_name(name, dev);
+        }
+        VirtioDeviceType::Input => {
+            let id = INPUT_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let input_name = format!("input{}", id);
+            crate::early_println!(
+                "[Virtio] Detected Virtio Input Device at {:#x}, registering as {}",
+                base_addr,
+                input_name
+            );
+            // VirtioInputDevice internally creates and registers EventDevice
+            let _dev = Arc::new(VirtioInputDevice::new(base_addr, &input_name));
+            // Note: EventDevice is already registered inside VirtioInputDevice::new
         }
         _ => {
             // Unsupported device type
