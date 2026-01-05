@@ -767,7 +767,7 @@ fn interactive_shell() -> i32 {
                 if status != 0 {
                     // Command failed, but continue shell
                 }
-                println!("DEBUG: About to loop back to read next command...");
+                // println!("DEBUG: About to loop back to read next command...");
             }
             Err(err) => {
                 println!("sh: parse error: {:?}", err);
