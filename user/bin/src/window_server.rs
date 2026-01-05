@@ -155,6 +155,7 @@ struct WindowServer {
     screen_width: u32,
     screen_height: u32,
     bg_color: [u8; 4],
+    tablet_max: i32, // Maximum value for tablet absolute coordinates (typically 32767)
 }
 
 impl WindowServer {
@@ -204,6 +205,7 @@ impl WindowServer {
             screen_width,
             screen_height,
             bg_color,
+            tablet_max: 32767, // Standard virtio-tablet range
         })
     }
 
@@ -283,21 +285,25 @@ impl WindowServer {
             },
             event_types::EV_ABS => match event.code {
                 abs_codes::ABS_X => {
-                    println!("[WindowServer] ABS_X: {}", event.value);
-                    // Tablet X coordinate - set directly
+                    println!("[WindowServer] ABS_X: {} (raw)", event.value);
+                    // Scale tablet coordinates (0-32767) to screen width
+                    let screen_x = ((event.value as i64 * self.screen_width as i64) / self.tablet_max as i64) as i32;
+                    println!("[WindowServer] Scaled X: {}", screen_x);
                     self.cursor.set_position(
-                        event.value,
+                        screen_x,
                         self.cursor.y,
                         self.screen_width,
                         self.screen_height,
                     );
                 }
                 abs_codes::ABS_Y => {
-                    println!("[WindowServer] ABS_Y: {}", event.value);
-                    // Tablet Y coordinate - set directly
+                    println!("[WindowServer] ABS_Y: {} (raw)", event.value);
+                    // Scale tablet coordinates (0-32767) to screen height
+                    let screen_y = ((event.value as i64 * self.screen_height as i64) / self.tablet_max as i64) as i32;
+                    println!("[WindowServer] Scaled Y: {}", screen_y);
                     self.cursor.set_position(
                         self.cursor.x,
-                        event.value,
+                        screen_y,
                         self.screen_width,
                         self.screen_height,
                     );
