@@ -9,7 +9,14 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use core::any::Any;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
+
+/// Static counters for device naming
+static KEYBOARD_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static MOUSE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static TABLET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use crate::arch::Trapframe;
 use crate::device::char::CharDevice;
@@ -46,15 +53,32 @@ impl EventDevice {
     ///
     /// # Arguments
     ///
-    /// * `name` - Device name (e.g., "input0")
+    /// * `device_type` - Device type ("keyboard", "mouse", "tablet", or "input")
     ///
     /// # Examples
     ///
     /// ```
-    /// let event_dev = Arc::new(EventDevice::new("input0".to_string()));
+    /// let event_dev = Arc::new(EventDevice::new("keyboard"));
     /// DeviceManager::get_mut_manager().register_device(event_dev);
     /// ```
-    pub fn new(name: String) -> Self {
+    pub fn new(device_type: &str) -> Self {
+        // Get counter and increment based on device type
+        let (counter, id) = match device_type {
+            "keyboard" => (
+                &KEYBOARD_COUNTER,
+                KEYBOARD_COUNTER.fetch_add(1, Ordering::SeqCst),
+            ),
+            "mouse" => (&MOUSE_COUNTER, MOUSE_COUNTER.fetch_add(1, Ordering::SeqCst)),
+            "tablet" => (
+                &TABLET_COUNTER,
+                TABLET_COUNTER.fetch_add(1, Ordering::SeqCst),
+            ),
+            _ => (&INPUT_COUNTER, INPUT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        };
+
+        // Generate device name
+        let name = alloc::format!("{}{}", device_type, id);
+
         // Create a unique waker name based on the device name
         let waker_name = alloc::format!("event_{}", name).leak();
 
@@ -64,6 +88,15 @@ impl EventDevice {
             waker: Waker::new_interruptible(waker_name),
             nonblocking: Mutex::new(false),
         }
+    }
+
+    /// Get the device name
+    ///
+    /// # Returns
+    ///
+    /// The device name (e.g., "keyboard0", "mouse0")
+    pub fn get_name(&self) -> &str {
+        &self.name
     }
 
     /// Push an input event into the queue
@@ -175,10 +208,10 @@ impl CharDevice for EventDevice {
 
         // In blocking mode, wait for data using waker
         use crate::task::mytask;
-        
+
         if let Some(task) = mytask() {
             self.waker.wait(task.get_id(), task.get_trapframe());
-            
+
             // After waking up, try to read again
             let mut q = self.queue.lock();
             if let Some(event) = q.pop_front() {
@@ -189,7 +222,7 @@ impl CharDevice for EventDevice {
                 return event_size;
             }
         }
-        
+
         // No task context or spurious wakeup
         0
     }
