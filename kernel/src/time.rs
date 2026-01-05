@@ -25,6 +25,14 @@ pub fn current_time_s() -> u64 {
     current_time() / 1_000_000
 }
 
+/// Get the current time in nanoseconds
+///
+/// This function returns the current system time in nanoseconds since boot.
+/// Useful for high-resolution timestamps in input events and profiling.
+pub fn current_time_ns() -> u64 {
+    current_time() * 1000
+}
+
 /// Convert microseconds to a human-readable format (for debugging)
 pub fn format_time_us(time_us: u64) -> (u64, u64, u64) {
     let seconds = time_us / 1_000_000;
