@@ -62,18 +62,12 @@ impl EventDevice {
     /// DeviceManager::get_mut_manager().register_device(event_dev);
     /// ```
     pub fn new(device_type: &str) -> Self {
-        // Get counter and increment based on device type
-        let (counter, id) = match device_type {
-            "keyboard" => (
-                &KEYBOARD_COUNTER,
-                KEYBOARD_COUNTER.fetch_add(1, Ordering::SeqCst),
-            ),
-            "mouse" => (&MOUSE_COUNTER, MOUSE_COUNTER.fetch_add(1, Ordering::SeqCst)),
-            "tablet" => (
-                &TABLET_COUNTER,
-                TABLET_COUNTER.fetch_add(1, Ordering::SeqCst),
-            ),
-            _ => (&INPUT_COUNTER, INPUT_COUNTER.fetch_add(1, Ordering::SeqCst)),
+        // Get incremented ID based on device type
+        let id = match device_type {
+            "keyboard" => KEYBOARD_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "mouse" => MOUSE_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "tablet" => TABLET_COUNTER.fetch_add(1, Ordering::SeqCst),
+            _ => INPUT_COUNTER.fetch_add(1, Ordering::SeqCst),
         };
 
         // Generate device name
