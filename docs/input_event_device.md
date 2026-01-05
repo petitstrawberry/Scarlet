@@ -60,7 +60,7 @@ use crate::device::manager::DeviceManager;
 use alloc::sync::Arc;
 
 // In device driver initialization
-let event_dev = Arc::new(EventDevice::new("input0".into()));
+let event_dev = Arc::new(EventDevice::new("input0"));
 DeviceManager::get_mut_manager().register_device(event_dev.clone());
 ```
 
