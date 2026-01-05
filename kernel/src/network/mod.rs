@@ -582,6 +582,10 @@ mod tests {
             self.protocol
         }
 
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
         fn sendto(
             &self,
             data: &[u8],
