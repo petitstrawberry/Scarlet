@@ -90,7 +90,7 @@ qemu-system-riscv64 \
     -netdev user,id=net0 \
     -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.3 \
-    -device virtio-mouse-device,bus=virtio-mmio-bus.4 \
+    -device virtio-tablet-device,bus=virtio-mmio-bus.4 \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS \
     -initrd "$INITRAMFS_PATH" \
