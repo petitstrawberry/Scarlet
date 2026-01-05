@@ -328,14 +328,15 @@ mod tests {
 
     #[test_case]
     fn test_event_device_creation() {
-        let dev = EventDevice::new("input0".into());
-        assert_eq!(dev.name, "input0");
+        let dev = EventDevice::new("input");
+        // Device name should be "input" + counter (e.g., "input0", "input1", etc.)
+        assert!(dev.name.starts_with("input"));
         assert!(!dev.has_events());
     }
 
     #[test_case]
     fn test_push_and_read_event() {
-        let dev = EventDevice::new("input0".into());
+        let dev = EventDevice::new("input");
 
         // Push an event
         dev.push_event(EV_REL, REL_X, 10);
@@ -361,7 +362,7 @@ mod tests {
 
     #[test_case]
     fn test_queue_overflow() {
-        let dev = EventDevice::new("input0".into());
+        let dev = EventDevice::new("input");
 
         // Fill the queue beyond capacity
         for i in 0..(EVENT_QUEUE_CAPACITY + 10) {
