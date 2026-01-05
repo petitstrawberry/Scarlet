@@ -9,19 +9,14 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use spin::{Mutex, RwLock};
+use spin::Mutex;
 
-use crate::arch::mmio::{read32, write32};
-use crate::device::input::InputEvent as ScarletInputEvent;
 use crate::device::input::event_device::EventDevice;
-use crate::device::input::event_types::*;
-use crate::device::input::key_codes::*;
-use crate::device::input::rel_codes::*;
-use crate::device::input::syn_codes::*;
 use crate::device::manager::DeviceManager;
 use crate::drivers::virtio::device::{DeviceStatus, Register, VirtioDevice};
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
@@ -72,6 +67,7 @@ pub struct VirtioInputDevice {
     event_device: Arc<EventDevice>,
     initialized: Mutex<bool>,
     event_buffers: Mutex<Vec<Box<[u8]>>>,
+    interrupt_id: Mutex<Option<u32>>,
 }
 
 impl VirtioInputDevice {
@@ -98,6 +94,7 @@ impl VirtioInputDevice {
             event_device: event_device.clone(),
             initialized: Mutex::new(false),
             event_buffers: Mutex::new(Vec::new()),
+            interrupt_id: Mutex::new(None),
         };
 
         // Initialize the VirtIO device
@@ -105,8 +102,8 @@ impl VirtioInputDevice {
             panic!("[virtio-input] Failed to initialize: {}", e);
         }
 
-        // Register the EventDevice with DeviceManager
-        DeviceManager::get_mut_manager().register_device(event_device);
+        // Register the EventDevice with DeviceManager using name
+        DeviceManager::get_mut_manager().register_device_with_name(device_name.to_string(), event_device);
 
         early_println!("[virtio-input] Device initialized successfully");
 
@@ -115,8 +112,6 @@ impl VirtioInputDevice {
 
     /// Initialize the VirtIO input device
     fn init(&mut self) -> Result<(), &'static str> {
-        early_println!("[virtio-input] Starting initialization");
-
         // 1. Reset the device
         self.write32_register(Register::Status, 0);
 
@@ -267,7 +262,7 @@ impl VirtioInputDevice {
 
     /// Handle input events from the device
     ///
-    /// This should be called from the interrupt handler
+    /// This should be called from the interrupt handler or periodically polled
     pub fn handle_interrupt(&self) {
         // Read and acknowledge interrupt status
         let isr_status = self.read32_register(Register::InterruptStatus);
@@ -278,6 +273,14 @@ impl VirtioInputDevice {
         self.write32_register(Register::InterruptAck, isr_status);
 
         // Process events from the queue
+        self.process_events();
+    }
+
+    /// Poll for events (for testing without interrupt support)
+    ///
+    /// This can be called periodically to check for events when
+    /// interrupt handling is not yet implemented
+    pub fn poll_events(&self) {
         self.process_events();
     }
 
@@ -319,11 +322,69 @@ impl VirtioInputDevice {
         self.write32_register(Register::QueueNotify, 0);
     }
 
+    /// Enable interrupts for this device
+    pub fn enable_interrupts(&self, interrupt_id: u32) -> Result<(), &'static str> {
+        // Store the interrupt ID
+        *self.interrupt_id.lock() = Some(interrupt_id);
+        
+        // Check current ISR status and clear any pending interrupts
+        let isr = self.read32_register(Register::InterruptStatus);
+        if isr != 0 {
+            self.write32_register(Register::InterruptAck, isr);
+            // Process any pending events
+            self.process_events();
+        }
+        
+        // Enable interrupt in PLIC for CPU 0
+        crate::interrupt::InterruptManager::with_manager(|mgr| {
+            mgr.enable_external_interrupt(interrupt_id, 0)
+        })
+        .map_err(|_| "Failed to enable interrupt in PLIC")?;
+        
+        Ok(())
+    }
+
     /// Get the EventDevice for this input device
     pub fn get_event_device(&self) -> Arc<EventDevice> {
         self.event_device.clone()
     }
 }
+
+// Implement MemoryMappingOps for VirtioInputDevice
+impl crate::object::capability::memory_mapping::MemoryMappingOps for VirtioInputDevice {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<(usize, usize, bool), &'static str> {
+        Err("Memory mapping not supported")
+    }
+}
+
+// Implement Device for VirtioInputDevice
+impl crate::device::Device for VirtioInputDevice {
+    fn device_type(&self) -> crate::device::DeviceType {
+        crate::device::DeviceType::Char
+    }
+
+    fn name(&self) -> &'static str {
+        "virtio-input"
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
+// Implement Selectable for VirtioInputDevice
+impl crate::object::capability::selectable::Selectable for VirtioInputDevice {}
+
+// Implement ControlOps for VirtioInputDevice
+impl crate::object::capability::control::ControlOps for VirtioInputDevice {}
 
 impl VirtioDevice for VirtioInputDevice {
     fn get_base_addr(&self) -> usize {
@@ -375,6 +436,8 @@ impl VirtioDevice for VirtioInputDevice {
 
 #[cfg(test)]
 mod tests {
+    use crate::device::input::{event_types::*, key_codes::*};
+
     use super::*;
 
     #[test_case]
@@ -394,5 +457,28 @@ mod tests {
         assert_eq!(virtio_event.type_, EV_KEY);
         assert_eq!(virtio_event.code, KEY_A);
         assert_eq!(virtio_event.value, 1);
+    }
+}
+
+// Implement InterruptCapableDevice for VirtioInputDevice
+impl crate::device::events::InterruptCapableDevice for VirtioInputDevice {
+    fn handle_interrupt(&self) -> crate::interrupt::InterruptResult<()> {
+        // Read ISR status to acknowledge interrupt
+        let isr_status = self.read32_register(Register::InterruptStatus);
+        if isr_status == 0 {
+            return Ok(());
+        }
+        
+        // Acknowledge the interrupt
+        self.write32_register(Register::InterruptAck, isr_status);
+        
+        // Process pending events
+        self.process_events();
+        
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<crate::interrupt::InterruptId> {
+        None
     }
 }
