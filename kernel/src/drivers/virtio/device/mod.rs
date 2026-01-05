@@ -999,16 +999,10 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         VirtioDeviceType::Input => {
-            let id = INPUT_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let input_name = format!("input{}", id);
-            crate::early_println!(
-                "[Virtio] Detected Virtio Input Device at {:#x}, registering as {}",
-                base_addr,
-                input_name
-            );
+            crate::early_println!("[Virtio] Detected Virtio Input Device at {:#x}", base_addr);
             // Create VirtIO Input device
-            let dev = Arc::new(VirtioInputDevice::new(base_addr, &input_name));
-            
+            let dev = Arc::new(VirtioInputDevice::new(base_addr));
+
             // Register interrupt handler if IRQ resource is available
             if let Some(irq_resource) = device
                 .get_resources()
@@ -1017,18 +1011,24 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             {
                 let interrupt_id = irq_resource.start as u32;
                 crate::early_println!("[Virtio] Input device interrupt ID: {}", interrupt_id);
-                
+
                 // Enable interrupts
                 if let Err(e) = dev.enable_interrupts(interrupt_id) {
                     crate::early_println!("[Virtio] Failed to enable input interrupts: {}", e);
                 } else {
-                    crate::early_println!("[Virtio] Input interrupts enabled (ID: {})", interrupt_id);
-                    
+                    crate::early_println!(
+                        "[Virtio] Input interrupts enabled (ID: {})",
+                        interrupt_id
+                    );
+
                     // Register interrupt handler
                     if let Err(e) = crate::interrupt::InterruptManager::with_manager(|mgr| {
                         mgr.register_interrupt_device(interrupt_id, dev.clone())
                     }) {
-                        crate::early_println!("[Virtio] Failed to register input interrupt device: {}", e);
+                        crate::early_println!(
+                            "[Virtio] Failed to register input interrupt device: {}",
+                            e
+                        );
                     } else {
                         crate::early_println!("[Virtio] Input interrupt device registered");
                     }
@@ -1036,7 +1036,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
             } else {
                 crate::early_println!("[Virtio] No interrupt resource found for input device");
             }
-            
+
             // Keep device alive by registering with DeviceManager
             DeviceManager::get_mut_manager().register_device(dev);
         }

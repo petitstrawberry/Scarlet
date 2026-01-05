@@ -71,21 +71,103 @@ pub struct VirtioInputDevice {
 }
 
 impl VirtioInputDevice {
+    /// Read a u8 from configuration space
+    fn read8_config(&self, offset: usize) -> u8 {
+        unsafe {
+            let addr = self.base_addr + Register::DeviceConfig as usize + offset;
+            core::ptr::read_volatile(addr as *const u8)
+        }
+    }
+
+    /// Write a u8 to configuration space
+    fn write8_config(&self, offset: usize, value: u8) {
+        unsafe {
+            let addr = self.base_addr + Register::DeviceConfig as usize + offset;
+            core::ptr::write_volatile(addr as *mut u8, value);
+        }
+    }
+
+    /// Read device name from configuration
+    fn read_device_name(&self) -> Option<alloc::string::String> {
+        use config_select::*;
+
+        // Select name configuration
+        self.write8_config(0, VIRTIO_INPUT_CFG_ID_NAME);
+        self.write8_config(1, 0); // subsel
+
+        // Read size
+        let size = self.read8_config(2);
+        if size == 0 || size > 128 {
+            return None;
+        }
+
+        // Read name from data field (offset 8)
+        let mut name_bytes = alloc::vec::Vec::new();
+        for i in 0..size {
+            let byte = self.read8_config(8 + i as usize);
+            if byte == 0 {
+                break;
+            }
+            name_bytes.push(byte);
+        }
+
+        alloc::string::String::from_utf8(name_bytes).ok()
+    }
+
+    /// Determine device type from name
+    fn determine_device_type(name: &str) -> &'static str {
+        let name_lower = name.to_lowercase();
+        if name_lower.contains("keyboard") || name_lower.contains("kbd") {
+            "keyboard"
+        } else if name_lower.contains("mouse") {
+            "mouse"
+        } else if name_lower.contains("tablet") {
+            "tablet"
+        } else {
+            "input"
+        }
+    }
+
     /// Create a new VirtIO Input device
     ///
     /// # Arguments
     ///
     /// * `base_addr` - The base address of the device
-    /// * `device_name` - Name for the EventDevice (e.g., "input0")
     ///
     /// # Returns
     ///
     /// A new instance of `VirtioInputDevice`
-    pub fn new(base_addr: usize, device_name: &str) -> Self {
-        early_println!("[virtio-input] Initializing device at {:#x}", base_addr);
+    pub fn new(base_addr: usize) -> Self {
+        // Create a temporary device to read configuration
+        let temp_device = Self {
+            base_addr,
+            eventq: Mutex::new(VirtQueue::new(8)),
+            statusq: Mutex::new(VirtQueue::new(8)),
+            event_device: Arc::new(EventDevice::new("input")),
+            initialized: Mutex::new(false),
+            event_buffers: Mutex::new(Vec::new()),
+            interrupt_id: Mutex::new(None),
+        };
 
-        // Create the EventDevice for this input device
-        let event_device = Arc::new(EventDevice::new(device_name.into()));
+        // Read device name from VirtIO config
+        let virtio_name = temp_device
+            .read_device_name()
+            .unwrap_or_else(|| "Unknown Device".to_string());
+
+        // Determine device type
+        let device_type = Self::determine_device_type(&virtio_name);
+
+        early_println!(
+            "[virtio-input] Device at {:#x}: \"{}\"",
+            base_addr,
+            virtio_name
+        );
+
+        // Create the EventDevice with the device type (it will assign the name)
+        let event_device = Arc::new(EventDevice::new(device_type));
+        let device_name = event_device.get_name();
+
+        early_println!("[virtio-input] Registered as /dev/{}", device_name);
 
         let mut device = Self {
             base_addr,
@@ -102,8 +184,9 @@ impl VirtioInputDevice {
             panic!("[virtio-input] Failed to initialize: {}", e);
         }
 
-        // Register the EventDevice with DeviceManager using name
-        DeviceManager::get_mut_manager().register_device_with_name(device_name.to_string(), event_device);
+        // Register the EventDevice with DeviceManager
+        DeviceManager::get_mut_manager()
+            .register_device_with_name(device_name.to_string(), event_device);
 
         early_println!("[virtio-input] Device initialized successfully");
 
@@ -326,7 +409,7 @@ impl VirtioInputDevice {
     pub fn enable_interrupts(&self, interrupt_id: u32) -> Result<(), &'static str> {
         // Store the interrupt ID
         *self.interrupt_id.lock() = Some(interrupt_id);
-        
+
         // Check current ISR status and clear any pending interrupts
         let isr = self.read32_register(Register::InterruptStatus);
         if isr != 0 {
@@ -334,13 +417,13 @@ impl VirtioInputDevice {
             // Process any pending events
             self.process_events();
         }
-        
+
         // Enable interrupt in PLIC for CPU 0
         crate::interrupt::InterruptManager::with_manager(|mgr| {
             mgr.enable_external_interrupt(interrupt_id, 0)
         })
         .map_err(|_| "Failed to enable interrupt in PLIC")?;
-        
+
         Ok(())
     }
 
@@ -468,13 +551,13 @@ impl crate::device::events::InterruptCapableDevice for VirtioInputDevice {
         if isr_status == 0 {
             return Ok(());
         }
-        
+
         // Acknowledge the interrupt
         self.write32_register(Register::InterruptAck, isr_status);
-        
+
         // Process pending events
         self.process_events();
-        
+
         Ok(())
     }
 
