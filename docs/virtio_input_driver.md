@@ -59,8 +59,7 @@ struct VirtioInputEvent {
 
 ```rust
 VirtioDeviceType::Input => {
-    let input_name = format!("input{}", id);
-    let _dev = Arc::new(VirtioInputDevice::new(base_addr, &input_name));
+    let _dev = Arc::new(VirtioInputDevice::new(base_addr));
     // EventDevice is automatically registered as /dev/input0, /dev/input1, etc.
 }
 ```
