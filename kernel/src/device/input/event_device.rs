@@ -144,11 +144,7 @@ impl Device for EventDevice {
     }
 
     fn name(&self) -> &'static str {
-        // SAFETY: Device names are typically static strings or need to live
-        // for the lifetime of the device. For dynamically allocated names,
-        // we leak the string to get a 'static reference.
-        // This is acceptable because devices are rarely destroyed.
-        Box::leak(self.name.clone().into_boxed_str())
+        "event_device"
     }
 
     fn as_any(&self) -> &dyn Any {
