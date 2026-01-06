@@ -226,10 +226,10 @@ fn test_runtime_argument_construction() {
     let target_path = "/data/apps/program.wasm";
     let target_argv = &["program.wasm", "arg1", "arg2"];
     let runtime_path = "/system/scarlet/bin/wasm-runtime";
-    let runtime_args: Vec<&str> = alloc::vec!["--wasm"];
+    let runtime_args = alloc::vec!["--wasm"];
     
     // Construct runtime argv as TransparentExecutor::execute_via_runtime does
-    let mut runtime_argv: Vec<&str> = Vec::new();
+    let mut runtime_argv = Vec::new();
     runtime_argv.push(runtime_path);
     for arg in &runtime_args {
         runtime_argv.push(arg);

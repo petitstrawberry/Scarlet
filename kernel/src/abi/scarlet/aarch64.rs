@@ -122,13 +122,27 @@ impl AbiModule for ScarletAbi {
         // Check for Wasm magic bytes (0x00 0x61 0x73 0x6D) or .wasm extension
         let is_wasm = if let Some(file_obj) = file_object.as_file() {
             let mut magic_buffer = [0u8; 4];
-            file_obj.seek(SeekFrom::Start(0)).ok()?;
-            match file_obj.read(&mut magic_buffer) {
-                Ok(bytes_read) if bytes_read >= 4 => {
-                    magic_buffer == [0x00, 0x61, 0x73, 0x6D] // Wasm magic "\0asm"
+            // Save current position to restore later
+            let original_pos = file_obj.seek(SeekFrom::Current(0)).ok();
+            
+            // Check magic bytes
+            let has_wasm_magic = if file_obj.seek(SeekFrom::Start(0)).is_ok() {
+                match file_obj.read(&mut magic_buffer) {
+                    Ok(bytes_read) if bytes_read >= 4 => {
+                        magic_buffer == [0x00, 0x61, 0x73, 0x6D] // Wasm magic "\0asm"
+                    }
+                    _ => false,
                 }
-                _ => false,
+            } else {
+                false
+            };
+            
+            // Restore original file position
+            if let Some(pos) = original_pos {
+                let _ = file_obj.seek(SeekFrom::Start(pos));
             }
+            
+            has_wasm_magic
         } else {
             false
         } || file_path.ends_with(".wasm");
