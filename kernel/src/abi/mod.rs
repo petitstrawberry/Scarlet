@@ -39,11 +39,11 @@ pub const MAX_ABI_LENGTH: usize = 64;
 pub struct RuntimeConfig {
     /// Path to the runtime executable in the VFS
     pub runtime_path: String,
-    
+
     /// ABI that the runtime itself uses
     /// If None, runtime's ABI will be auto-detected
     pub runtime_abi: Option<String>,
-    
+
     /// Additional arguments to pass to the runtime before the target binary
     /// Example: ["--emulate", "dos"] for DOSBox
     pub runtime_args: Vec<String>,

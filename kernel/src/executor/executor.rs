@@ -351,18 +351,18 @@ impl TransparentExecutor {
     ) -> ExecutorResult<()> {
         // Build runtime arguments: [runtime_args..., target_path, target_argv...]
         let mut runtime_argv = Vec::new();
-        
+
         // Add runtime executable name as argv[0]
         runtime_argv.push(runtime_config.runtime_path.as_str());
-        
+
         // Add configured runtime arguments
         for arg in &runtime_config.runtime_args {
             runtime_argv.push(arg.as_str());
         }
-        
+
         // Add target binary path
         runtime_argv.push(target_path);
-        
+
         // Add target binary arguments (skip argv[0] which is the target binary name)
         for arg in target_argv.iter().skip(1) {
             runtime_argv.push(*arg);
