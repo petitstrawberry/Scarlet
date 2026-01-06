@@ -1044,19 +1044,19 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
         VirtioDeviceType::Rng => {
             let id = RNG_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let name = format!("random{}", id);
+            // Use "random" for the first device, "random1", "random2", etc. for subsequent ones
+            let name = if id == 0 {
+                format!("random")
+            } else {
+                format!("random{}", id)
+            };
             crate::early_println!(
                 "[Virtio] Detected Virtio RNG Device at {:#x}, registering as {}",
                 base_addr,
                 name
             );
             let dev: Arc<dyn Device> = Arc::new(VirtioRngDevice::new(base_addr));
-            // Register with a well-known name for the first RNG device
-            if id == 0 {
-                DeviceManager::get_mut_manager().register_device_with_name(format!("random"), dev);
-            } else {
-                DeviceManager::get_mut_manager().register_device_with_name(name, dev);
-            }
+            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
         }
         _ => {
             // Unsupported device type

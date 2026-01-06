@@ -19,7 +19,7 @@
 //! from the host. Random bytes are fetched in batches and buffered internally
 //! to minimize virtqueue operations when small amounts of random data are requested.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 use spin::{Mutex, RwLock};
 use core::any::Any;
 
@@ -44,7 +44,7 @@ pub struct VirtioRngDevice {
     /// VirtIO queue for random number requests
     virtqueues: Mutex<[VirtQueue<'static>; 1]>,
     /// Internal buffer for random data
-    buffer: Mutex<Vec<u8>>,
+    buffer: Mutex<VecDeque<u8>>,
     /// Negotiated features
     features: RwLock<u32>,
 }
@@ -63,7 +63,7 @@ impl VirtioRngDevice {
         let mut device = Self {
             base_addr,
             virtqueues: Mutex::new([VirtQueue::new(8)]), // Small queue is sufficient for RNG
-            buffer: Mutex::new(Vec::with_capacity(RNG_BUFFER_SIZE)),
+            buffer: Mutex::new(VecDeque::with_capacity(RNG_BUFFER_SIZE)),
             features: RwLock::new(0),
         };
 
@@ -145,10 +145,13 @@ impl VirtioRngDevice {
         }
 
         // Copy data to internal buffer
+        // Note: Using descriptor length as fallback. The VirtIO spec indicates
+        // the used ring's len field contains the actual bytes written, but the
+        // current VirtQueue API doesn't expose it from pop().
         let bytes_received = queue.desc[desc_idx].len as usize;
         let mut buffer = self.buffer.lock();
         for i in 0..bytes_received.min(RNG_BUFFER_SIZE) {
-            buffer.push(data_buffer[i]);
+            buffer.push_back(data_buffer[i]);
         }
 
         // Free the descriptor
@@ -177,7 +180,7 @@ impl VirtioRngDevice {
 
         // Pop a byte from the buffer
         if !buffer.is_empty() {
-            Some(buffer.remove(0))
+            buffer.pop_front()
         } else {
             None
         }
@@ -225,10 +228,10 @@ impl VirtioDevice for VirtioRngDevice {
         Some(virtqueues[queue_idx].used.flags as *const _ as u64)
     }
 
-    fn get_supported_features(&self, device_features: u32) -> u32 {
+    fn get_supported_features(&self, _device_features: u32) -> u32 {
         // VirtIO RNG doesn't have device-specific features in the base spec
-        // Just accept the common VirtIO features
-        device_features & 0
+        // Return 0 to indicate no additional features are requested
+        0
     }
 }
 
