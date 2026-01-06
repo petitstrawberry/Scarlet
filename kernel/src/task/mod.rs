@@ -484,6 +484,11 @@ impl Task {
     /// This allows changing a task's namespace, useful for ABI transitions
     /// or when moving tasks between namespace contexts.
     ///
+    /// **Warning**: This method allocates a new namespace-local ID each time
+    /// it's called. Changing a task's namespace multiple times may lead to
+    /// ID conflicts or unexpected behavior. This method should typically only
+    /// be called once during task initialization or ABI transition.
+    ///
     /// # Arguments
     /// * `ns` - New namespace for the task
     pub fn set_namespace(&mut self, ns: Arc<namespace::TaskNamespace>) {
