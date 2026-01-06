@@ -16,13 +16,13 @@ use alloc::vec::Vec;
 fn make_mount(fs: Arc<dyn FileSystemOperations>) -> Arc<MountPoint> {
     let root_node = fs.root_node();
     let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
-    MountPoint::new_regular("/".to_string(), root_entry)
+    MountPoint::new_regular("/".to_string(), root_entry, fs)
 }
 
 fn make_mount_and_entry(fs: Arc<dyn FileSystemOperations>) -> (Arc<MountPoint>, Arc<VfsEntry>) {
     let root_node = fs.root_node();
     let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
-    let mp = MountPoint::new_regular("/".to_string(), root_entry.clone());
+    let mp = MountPoint::new_regular("/".to_string(), root_entry.clone(), fs);
     (mp, root_entry)
 }
 

@@ -23,7 +23,7 @@ fn test_mount_tree_basic() {
     let root_entry = VfsEntry::new(None, "/".to_string(), root_node);
 
     // Create mount tree
-    let mount_tree = MountTree::new(root_entry.clone());
+    let mount_tree = MountTree::new(root_entry.clone(), root_tmpfs.clone());
 
     // Test basic functionality
     assert_eq!(mount_tree.root_mount.read().root.name(), "/");
@@ -39,7 +39,7 @@ fn test_mount_point_creation() {
     let entry = VfsEntry::new(None, "/".to_string(), root_node);
 
     // Create mount point
-    let mount_point = MountPoint::new_regular("/mnt".to_string(), entry.clone());
+    let mount_point = MountPoint::new_regular("/mnt".to_string(), entry.clone(), tmpfs.clone());
 
     // Test properties
     assert_eq!(mount_point.path, "/mnt");

@@ -563,7 +563,6 @@ const SYSCALL_ERROR: usize = usize::MAX;
 pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     use crate::fs::VfsManager;
     use crate::task::namespace::TaskNamespace;
-    use alloc::sync::Arc;
 
     let task = mytask().unwrap();
     let flags = trapframe.get_arg(0);
@@ -599,14 +598,28 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
 
     // Create VFS namespace if requested
     if flags & NS_CREATE_VFS != 0 {
-        // Create new isolated VFS manager
-        let new_vfs = Arc::new(VfsManager::new());
+        // Deep-clone the current mount topology so the initial view is the same,
+        // but future mount operations are isolated.
+        let source_vfs = match task.get_vfs() {
+            Some(vfs) => vfs,
+            None => return SYSCALL_ERROR,
+        };
 
-        // If task already has a VFS, copy its current working directory
-        if let Some(old_vfs) = &task.vfs {
-            let cwd_path = old_vfs.get_cwd_path();
-            let _ = new_vfs.set_cwd_by_path(&cwd_path);
-        }
+        let new_vfs = match VfsManager::clone_mount_namespace_deep(&source_vfs) {
+            Ok(vfs) => vfs,
+            Err(e) => {
+                crate::early_println!(
+                    "[syscall] Failed to clone VFS namespace '{}': {}",
+                    name,
+                    e.message
+                );
+                return SYSCALL_ERROR;
+            }
+        };
+
+        // Preserve current working directory when possible.
+        let cwd_path = source_vfs.get_cwd_path();
+        let _ = new_vfs.set_cwd_by_path(&cwd_path);
 
         task.set_vfs(new_vfs);
         crate::early_println!("[syscall] Created VFS namespace '{}'", name);
