@@ -140,7 +140,6 @@ qemu-system-aarch64 \
     -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
     -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
-    -device virtio-rng-device,bus=virtio-mmio-bus.8 \
     -initrd "$INITRAMFS_PATH" \
     -kernel "$KERNEL_BIN" \
     $QEMU_DEBUG_ARGS \
