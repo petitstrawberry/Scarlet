@@ -9,6 +9,7 @@
 extern crate scarlet_std as std;
 
 use std::{
+    fs::OpenOptions,
     println,
     syscall::{Syscall, syscall2},
 };
@@ -95,6 +96,26 @@ fn print_dir(path: &str, title: &str) {
     }
 }
 
+fn dir_contains_entry(path: &str, entry_name: &str) -> Option<bool> {
+    match std::fs::list_directory(path) {
+        Ok(entries) => Some(entries.iter().any(|e| e.name_str() == entry_name)),
+        Err(_) => None,
+    }
+}
+
+fn setup_tmpfs_newroot() -> Result<(), ()> {
+    let _ = std::fs::create_directory("/newroot");
+    std::fs::mount("tmpfs", "/newroot", "tmpfs", 0, Some("size=50M")).map_err(|_| ())?;
+    let _ = std::fs::create_directory("/newroot/old_root");
+    Ok(())
+}
+
+fn pivot_into_newroot() -> Result<(), ()> {
+    std::fs::pivot_root("/newroot", "/newroot/old_root").map_err(|_| ())?;
+    let _ = std::fs::change_directory("/");
+    Ok(())
+}
+
 fn demo_task_namespace() {
     println!("\n=== Task Namespace Demo ===");
     println!("Parent process PID: {}", getpid());
@@ -159,6 +180,69 @@ fn demo_vfs_namespace() {
 
     print_vfs_view("before VFS namespace");
 
+    // Isolation verification: create a file inside a VFS namespace and ensure
+    // it is NOT visible from this (parent) process.
+    println!("\n--- VFS isolation check: file visibility ---");
+    // NOTE: Don't touch parent FS (no create/remove on parent root).
+    let test_file = "/__scarlet_vfs_ns_isolation_test";
+    let test_file_name = "__scarlet_vfs_ns_isolation_test";
+
+    let child_pid = std::task::fork();
+    if child_pid == 0 {
+        // Child process: enter a new VFS namespace, pivot_root to tmpfs, then create a file.
+        match create_namespace(NS_CREATE_VFS, "vfs_isolation_child") {
+            Ok(()) => {
+                if setup_tmpfs_newroot().is_err() {
+                    println!("Child: mount tmpfs failed");
+                    std::task::exit(2);
+                }
+
+                if pivot_into_newroot().is_err() {
+                    println!("Child: pivot_root failed");
+                    std::task::exit(3);
+                }
+
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(test_file)
+                {
+                    Ok(mut file) => {
+                        let _ = file.write_all(b"hello from vfs namespace\n");
+                        println!("Child: created {} inside VFS namespace", test_file);
+                        std::task::exit(0);
+                    }
+                    Err(e) => {
+                        println!("Child: create {} failed: {}", test_file, e);
+                        std::task::exit(4);
+                    }
+                }
+            }
+            Err(()) => {
+                println!("Child: failed to create VFS namespace");
+                std::task::exit(1);
+            }
+        }
+    } else {
+        // Parent process: wait for the child, then ensure the file is not visible here.
+        let (_waited_pid, status) = std::task::waitpid(child_pid, 0);
+        if status != 0 {
+            println!("Parent: ERROR - child test failed (status={})", status);
+        } else {
+            match dir_contains_entry("/", test_file_name) {
+                Some(true) => println!(
+                    "Parent: ERROR - {} is visible (isolation broken)",
+                    test_file
+                ),
+                Some(false) => println!(
+                    "Parent: OK - {} is not visible (isolation verified)",
+                    test_file
+                ),
+                None => println!("Parent: WARN - cannot list '/', skipping visibility assertion"),
+            }
+        }
+    }
+
     // Create VFS namespace only
     match create_namespace(NS_CREATE_VFS, "vfs_container") {
         Ok(()) => {
@@ -172,26 +256,22 @@ fn demo_vfs_namespace() {
             // Minimal flow: mount tmpfs at /newroot, create /newroot/old_root, then pivot_root.
             println!("\n--- pivot_root demo (in VFS namespace) ---");
 
-            let _ = std::fs::create_directory("/newroot");
-            match std::fs::mount("tmpfs", "/newroot", "tmpfs", 0, Some("size=50M")) {
+            match setup_tmpfs_newroot() {
                 Ok(()) => println!("mount tmpfs: OK"),
-                Err(_) => println!("mount tmpfs: ERR"),
+                Err(()) => {
+                    println!("mount tmpfs: ERR");
+                    return;
+                }
             }
 
             // Inspect what newroot looks like before pivot.
-            let _ = std::fs::create_directory("/newroot/old_root");
             print_dir("/newroot", "before pivot_root");
 
-            match std::fs::pivot_root("/newroot", "/newroot/old_root") {
-                Ok(()) => {
-                    let _ = std::fs::change_directory("/");
-                    println!(
-                        "pivot_root successful: new_root='/newroot' old_root='/newroot/old_root'"
-                    );
-                }
-                Err(_) => {
-                    println!("pivot_root failed");
-                }
+            match pivot_into_newroot() {
+                Ok(()) => println!(
+                    "pivot_root successful: new_root='/newroot' old_root='/newroot/old_root'"
+                ),
+                Err(()) => println!("pivot_root failed"),
             }
 
             print_vfs_view("after pivot_root");
