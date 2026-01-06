@@ -3,6 +3,7 @@
 //! The task module defines the structure and behavior of tasks in the system.
 
 pub mod elf_loader;
+pub mod namespace;
 pub mod syscall;
 
 extern crate alloc;
@@ -217,6 +218,10 @@ pub struct AbiZone {
 
 pub struct Task {
     id: usize,
+    /// Task ID within the task's namespace (may differ from global ID)
+    namespace_id: usize,
+    /// Task namespace for ID management
+    namespace: Arc<namespace::TaskNamespace>,
     pub name: String,
     pub priority: u32,
     pub vcpu: Vcpu,
@@ -347,11 +352,46 @@ impl Default for CloneFlags {
 static TASK_ID: Mutex<usize> = Mutex::new(1);
 
 impl Task {
+    /// Create a new task with the root namespace.
+    ///
+    /// # Arguments
+    /// * `name` - Task name
+    /// * `priority` - Task priority
+    /// * `task_type` - Task type (Kernel or User)
+    ///
+    /// # Returns
+    /// A new task in the root namespace
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
+        Self::new_with_namespace(name, priority, task_type, namespace::get_root_namespace().clone())
+    }
+
+    /// Create a new task with a specific namespace.
+    ///
+    /// # Arguments
+    /// * `name` - Task name
+    /// * `priority` - Task priority
+    /// * `task_type` - Task type (Kernel or User)
+    /// * `ns` - Task namespace
+    ///
+    /// # Returns
+    /// A new task in the specified namespace
+    pub fn new_with_namespace(
+        name: String,
+        priority: u32,
+        task_type: TaskType,
+        ns: Arc<namespace::TaskNamespace>,
+    ) -> Self {
         let mut taskid = TASK_ID.lock();
+        let global_id = *taskid;
+        *taskid += 1;
+        drop(taskid);
+
+        let namespace_id = ns.allocate_task_id();
 
         let task = Task {
-            id: *taskid,
+            id: global_id,
+            namespace_id,
+            namespace: ns,
             name,
             priority,
             vcpu: Vcpu::new(match task_type {
@@ -387,7 +427,6 @@ impl Task {
             kernel_stack_window_base: None,
         };
 
-        *taskid += 1;
         task
     }
 
@@ -419,6 +458,38 @@ impl Task {
 
     pub fn get_id(&self) -> usize {
         self.id
+    }
+
+    /// Get the task ID within its namespace.
+    ///
+    /// This ID is local to the task's namespace and may differ from the global ID.
+    /// This is the ID that should be exposed to user space and ABI syscalls.
+    ///
+    /// # Returns
+    /// The namespace-local task ID
+    pub fn get_namespace_id(&self) -> usize {
+        self.namespace_id
+    }
+
+    /// Get the task's namespace.
+    ///
+    /// # Returns
+    /// Reference to the task's namespace
+    pub fn get_namespace(&self) -> &Arc<namespace::TaskNamespace> {
+        &self.namespace
+    }
+
+    /// Set the task's namespace.
+    ///
+    /// This allows changing a task's namespace, useful for ABI transitions
+    /// or when moving tasks between namespace contexts.
+    ///
+    /// # Arguments
+    /// * `ns` - New namespace for the task
+    pub fn set_namespace(&mut self, ns: Arc<namespace::TaskNamespace>) {
+        self.namespace = ns;
+        // Allocate a new namespace-local ID
+        self.namespace_id = self.namespace.allocate_task_id();
     }
 
     /// Set the task state
@@ -967,8 +1038,13 @@ impl Task {
     /// If the task cannot be cloned, an error is returned.
     ///
     pub fn clone_task(&mut self, flags: CloneFlags) -> Result<Task, &'static str> {
-        // Create a new task (but don't call init() yet)
-        let mut child = Task::new(self.name.clone(), self.priority, self.task_type);
+        // Create a new task in the same namespace as the parent
+        let mut child = Task::new_with_namespace(
+            self.name.clone(),
+            self.priority,
+            self.task_type,
+            self.namespace.clone(),
+        );
 
         // First, set up the virtual memory manager with the same ASID allocation
         match self.task_type {
