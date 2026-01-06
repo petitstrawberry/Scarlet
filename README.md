@@ -16,38 +16,6 @@
 
 Scarlet is an operating system kernel written in Rust that implements native ABI support for executing binaries across different operating systems and architectures. The kernel provides a universal container runtime environment with strong isolation capabilities, comprehensive filesystem support, dynamic linking, and modern graphics capabilities.
 
-## Key Features
-
-- **Multi-ABI Support**: Transparent execution of binaries from different operating systems
-- **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - **NEW!**
-- **Container Runtime**: Complete filesystem isolation with namespace support
-- **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
-- **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
-- **Graphics Support**: Framebuffer device support with graphics hardware abstraction
-- **System Integration**: TTY devices, interrupt handling, and comprehensive device management
-- **Task Management**: Full task lifecycle with environment variables and IPC pipes
-- **Event System**: Advanced IPC with event-driven communication and synchronization
-- **Memory Safety**: Built with Rust's safety guarantees for reliable system operation
-- **RISC-V Ready**: Native support for RISC-V 64-bit architecture
-
-## Runtime Delegation (NEW)
-
-Scarlet now supports delegating binary execution to userland runtimes, enabling:
-
-- **Cross-Architecture Emulation**: Run MS-DOS binaries via DOSBox, or x86 binaries via QEMU
-- **Alternative Runtimes**: Execute Wasm, Java bytecode, or other runtime-based formats
-- **Kernel Simplicity**: Keep complex emulation/runtime logic in userspace for better security
-
-See [Runtime Delegation Documentation](docs/runtime-delegation.md) for detailed information and examples.
-
-### Example: WebAssembly Support
-
-```bash
-# Scarlet can now execute .wasm files via a userland runtime
-$ /path/to/program.wasm arg1 arg2
-# Automatically delegates to: /system/scarlet/bin/wasm-runtime --wasm /path/to/program.wasm arg1 arg2
-```
-
 ## Quick Start
 
 ### Try Scarlet Now
@@ -129,6 +97,7 @@ This interoperability is possible because all ABIs share the same underlying ker
 ## Key Features
 
 - **Multi-ABI Support**: Transparent execution of binaries from different operating systems
+- **Runtime Delegation**: Execute binaries via userland runtimes (Wasm, emulators, etc.) - [Details](docs/runtime-delegation.md)
 - **Container Runtime**: Complete filesystem isolation with namespace support
 - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 - **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
