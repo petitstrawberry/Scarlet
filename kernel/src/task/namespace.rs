@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use spin::Mutex;
 
@@ -24,6 +25,13 @@ pub struct TaskNamespace {
     id: usize,
     /// Next task ID to allocate in this namespace
     next_task_id: Mutex<usize>,
+    /// Mapping from namespace-local task IDs to global task IDs.
+    ///
+    /// This enables syscall boundary translation (PID namespace semantics)
+    /// while keeping kernel internals globally-addressed.
+    local_to_global: Mutex<BTreeMap<usize, usize>>,
+    /// Reverse mapping from global task IDs to namespace-local task IDs.
+    global_to_local: Mutex<BTreeMap<usize, usize>>,
     /// Parent namespace (None for root namespace)
     parent: Option<Arc<TaskNamespace>>,
     /// Name/description of this namespace (for debugging)
@@ -42,6 +50,8 @@ impl TaskNamespace {
         Arc::new(TaskNamespace {
             id: 0,
             next_task_id: Mutex::new(1), // Start from 1 (0 is often reserved)
+            local_to_global: Mutex::new(BTreeMap::new()),
+            global_to_local: Mutex::new(BTreeMap::new()),
             parent: None,
             name,
         })
@@ -67,6 +77,8 @@ impl TaskNamespace {
         Arc::new(TaskNamespace {
             id: ns_id,
             next_task_id: Mutex::new(1),
+            local_to_global: Mutex::new(BTreeMap::new()),
+            global_to_local: Mutex::new(BTreeMap::new()),
             parent: Some(parent),
             name,
         })
@@ -81,6 +93,32 @@ impl TaskNamespace {
         let id = *next_id;
         *next_id += 1;
         id
+    }
+
+    /// Allocate a new namespace-local task ID and register it for a global task.
+    ///
+    /// This is the preferred allocator when a task is created or enters this namespace,
+    /// because syscalls need a stable local↔global mapping.
+    pub fn allocate_task_id_for(&self, global_task_id: usize) -> usize {
+        let local_id = self.allocate_task_id();
+        self.register_mapping(local_id, global_task_id);
+        local_id
+    }
+
+    /// Register an existing namespace-local ID mapping for a global task ID.
+    pub fn register_mapping(&self, local_id: usize, global_task_id: usize) {
+        self.local_to_global.lock().insert(local_id, global_task_id);
+        self.global_to_local.lock().insert(global_task_id, local_id);
+    }
+
+    /// Resolve a namespace-local task ID to a global task ID.
+    pub fn resolve_global_id(&self, local_id: usize) -> Option<usize> {
+        self.local_to_global.lock().get(&local_id).copied()
+    }
+
+    /// Resolve a global task ID to a namespace-local task ID.
+    pub fn resolve_local_id(&self, global_task_id: usize) -> Option<usize> {
+        self.global_to_local.lock().get(&global_task_id).copied()
     }
 
     /// Get the namespace ID.
@@ -133,7 +171,7 @@ mod tests {
     fn test_child_namespace_creation() {
         let root = TaskNamespace::new_root("root".to_string());
         let child = TaskNamespace::new_child(root.clone(), "child".to_string());
-        
+
         assert_ne!(child.get_id(), 0);
         assert_eq!(child.get_name(), "child");
         assert!(!child.is_root());
@@ -146,7 +184,7 @@ mod tests {
         let id1 = ns.allocate_task_id();
         let id2 = ns.allocate_task_id();
         let id3 = ns.allocate_task_id();
-        
+
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
@@ -156,12 +194,12 @@ mod tests {
     fn test_separate_namespace_ids() {
         let ns1 = TaskNamespace::new_root("ns1".to_string());
         let ns2 = TaskNamespace::new_root("ns2".to_string());
-        
+
         let id1_1 = ns1.allocate_task_id();
         let id2_1 = ns2.allocate_task_id();
         let id1_2 = ns1.allocate_task_id();
         let id2_2 = ns2.allocate_task_id();
-        
+
         // Both namespaces should allocate IDs independently
         assert_eq!(id1_1, 1);
         assert_eq!(id2_1, 1);
@@ -173,7 +211,7 @@ mod tests {
     fn test_root_namespace_singleton() {
         let root1 = get_root_namespace();
         let root2 = get_root_namespace();
-        
+
         // Should return the same instance
         assert_eq!(Arc::as_ptr(root1), Arc::as_ptr(root2));
     }

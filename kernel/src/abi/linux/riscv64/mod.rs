@@ -82,11 +82,11 @@ impl Default for LinuxRiscv64Abi {
         // Pop from the end so fd 0, 1, 2 are allocated first
         let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
-        
+
         // Use root namespace by default for cross-ABI task visibility
         // Separate namespaces can be created explicitly when needed (e.g., containers, cgroups)
         let namespace = crate::task::namespace::get_root_namespace().clone();
-        
+
         Self {
             namespace,
             fd_to_handle: vec![None; MAX_FDS],

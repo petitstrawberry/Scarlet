@@ -1308,3 +1308,37 @@ pub fn read_link(symlink_path: &str) -> Result<String> {
         }
     }
 }
+
+/// Get current working directory as a path string
+///
+/// # Returns
+/// * `Ok(String)` - Current working directory path
+/// * `Err(Error)` - If the path could not be retrieved
+pub fn get_cwd_path() -> Result<String> {
+    use crate::syscall::{Syscall, syscall2};
+
+    // Allocate buffer for path (PATH_MAX = 4096)
+    let mut buffer = [0u8; 4096];
+
+    let result = syscall2(
+        Syscall::VfsGetCwdPath,
+        buffer.as_mut_ptr() as usize,
+        buffer.len(),
+    );
+
+    if result == usize::MAX {
+        Err(Error::new(
+            ErrorKind::Other,
+            "Failed to get current working directory",
+        ))
+    } else {
+        let path_bytes = &buffer[..result];
+        match core::str::from_utf8(path_bytes) {
+            Ok(path_str) => Ok(String::from(path_str)),
+            Err(_) => Err(Error::new(
+                ErrorKind::Other,
+                "Invalid UTF-8 in current working directory",
+            )),
+        }
+    }
+}

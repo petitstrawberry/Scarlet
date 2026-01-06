@@ -22,7 +22,7 @@ pub enum Syscall {
     // ABI Zone Management
     RegisterAbiZone = 90,
     UnregisterAbiZone = 91,
-    
+
     // Namespace Management (Scarlet-style)
     CreateNamespace = 92,
 
@@ -52,6 +52,7 @@ pub enum Syscall {
     VfsTruncate = 405,        // Truncate files by path
     VfsCreateSymlink = 406,   // Create symbolic links through VFS
     VfsReadlink = 407,        // Read symbolic link target through VFS
+    VfsGetCwdPath = 408,      // Get current working directory path
 
     // === Filesystem Operations (mount management) ===
     FsMount = 500,
