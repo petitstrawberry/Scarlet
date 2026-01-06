@@ -26,6 +26,29 @@ pub mod xv6;
 
 pub const MAX_ABI_LENGTH: usize = 64;
 
+/// Runtime configuration for delegating binary execution to userland
+///
+/// This structure defines how a binary format should be executed via
+/// a userland runtime instead of being loaded directly by the kernel.
+///
+/// # Examples
+/// - MS-DOS binaries executed via DOSBox (Linux ABI)
+/// - Wasm binaries executed via a Scarlet-native Wasm runtime
+/// - Java bytecode executed via a JVM
+#[derive(Debug, Clone)]
+pub struct RuntimeConfig {
+    /// Path to the runtime executable in the VFS
+    pub runtime_path: String,
+    
+    /// ABI that the runtime itself uses
+    /// If None, runtime's ABI will be auto-detected
+    pub runtime_abi: Option<String>,
+    
+    /// Additional arguments to pass to the runtime before the target binary
+    /// Example: ["--emulate", "dos"] for DOSBox
+    pub runtime_args: Vec<String>,
+}
+
 /// ABI module trait.
 ///
 /// This trait defines the interface for ABI modules in the Scarlet kernel.
@@ -243,6 +266,33 @@ pub trait AbiModule: Send + Sync + 'static {
     /// The interpreter path to actually use (may be different from requested)
     fn get_interpreter_path(&self, requested_interpreter: &str) -> String {
         requested_interpreter.to_string() // Default: use requested interpreter as-is
+    }
+
+    /// Get userland runtime configuration for executing binaries
+    ///
+    /// This method allows ABI modules to delegate binary execution to userland runtimes.
+    /// When a runtime is configured, the binary will be executed via the runtime instead
+    /// of being loaded directly by the kernel.
+    ///
+    /// # Arguments
+    /// * `file_object` - Binary file to check
+    /// * `file_path` - File path for format detection
+    ///
+    /// # Returns
+    /// * `Some(RuntimeConfig)` - Runtime configuration if delegation is needed
+    /// * `None` - No runtime delegation, execute directly
+    ///
+    /// # Example Use Cases
+    /// - MS-DOS binaries via DOSBox (Linux ABI runtime)
+    /// - Wasm binaries via Scarlet-native Wasm runtime
+    /// - Java bytecode via JVM
+    /// - Cross-architecture binaries via QEMU user-mode
+    fn get_runtime_config(
+        &self,
+        _file_object: &crate::object::KernelObject,
+        _file_path: &str,
+    ) -> Option<RuntimeConfig> {
+        None // Default: no runtime delegation
     }
 
     /// Get default working directory for this ABI
