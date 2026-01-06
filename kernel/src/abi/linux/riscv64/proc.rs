@@ -68,8 +68,8 @@ pub fn sys_set_tid_address(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe)
 
     trapframe.increment_pc_next(task);
 
-    // Return current task ID (Linux exposes caller TID from set_tid_address)
-    task.get_id()
+    // Return current task namespace ID (Linux TID visible to user space)
+    task.get_namespace_id()
 }
 
 pub fn sys_exit(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {

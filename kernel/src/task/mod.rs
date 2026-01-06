@@ -2112,4 +2112,113 @@ mod tests {
         // when sharing VM (physical memory isn't privately managed by the child)
         assert!(child.managed_pages.len() <= parent.managed_pages.len());
     }
+
+    #[test_case]
+    fn test_task_namespace_creation() {
+        use super::namespace;
+        
+        // Create task in root namespace
+        let task = super::new_user_task("TestTask".to_string(), 0);
+        assert_eq!(task.get_namespace().get_name(), "root");
+        assert!(task.get_namespace().is_root());
+        
+        // Verify namespace-local ID was allocated
+        let ns_id = task.get_namespace_id();
+        assert!(ns_id >= 1); // Should start from 1
+    }
+
+    #[test_case]
+    fn test_task_namespace_inheritance() {
+        use super::namespace;
+        
+        let mut parent = super::new_user_task("Parent".to_string(), 0);
+        parent.init();
+        
+        // Clone should inherit parent's namespace
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        
+        // Both should be in same namespace
+        assert_eq!(
+            parent.get_namespace().get_id(),
+            child.get_namespace().get_id()
+        );
+        
+        // But should have different namespace-local IDs
+        assert_ne!(
+            parent.get_namespace_id(),
+            child.get_namespace_id()
+        );
+    }
+
+    #[test_case]
+    fn test_task_namespace_id_allocation() {
+        use super::namespace;
+        
+        // Create custom namespace
+        let custom_ns = namespace::TaskNamespace::new_child(
+            namespace::get_root_namespace().clone(),
+            "test_ns".to_string(),
+        );
+        
+        // Create multiple tasks in the same namespace
+        let task1 = super::Task::new_with_namespace(
+            "Task1".to_string(),
+            0,
+            super::TaskType::User,
+            custom_ns.clone(),
+        );
+        let task2 = super::Task::new_with_namespace(
+            "Task2".to_string(),
+            0,
+            super::TaskType::User,
+            custom_ns.clone(),
+        );
+        let task3 = super::Task::new_with_namespace(
+            "Task3".to_string(),
+            0,
+            super::TaskType::User,
+            custom_ns.clone(),
+        );
+        
+        // All should have sequential namespace-local IDs
+        assert_eq!(task1.get_namespace_id(), 1);
+        assert_eq!(task2.get_namespace_id(), 2);
+        assert_eq!(task3.get_namespace_id(), 3);
+        
+        // All should have different global IDs
+        assert_ne!(task1.get_id(), task2.get_id());
+        assert_ne!(task2.get_id(), task3.get_id());
+        assert_ne!(task1.get_id(), task3.get_id());
+    }
+
+    #[test_case]
+    fn test_namespace_hierarchy() {
+        use super::namespace;
+        
+        let root = namespace::get_root_namespace();
+        let child_ns = namespace::TaskNamespace::new_child(
+            root.clone(),
+            "child".to_string(),
+        );
+        let grandchild_ns = namespace::TaskNamespace::new_child(
+            child_ns.clone(),
+            "grandchild".to_string(),
+        );
+        
+        // Verify hierarchy
+        assert!(root.is_root());
+        assert!(!child_ns.is_root());
+        assert!(!grandchild_ns.is_root());
+        
+        // Verify parent relationships
+        assert!(child_ns.get_parent().is_some());
+        assert_eq!(
+            child_ns.get_parent().unwrap().get_id(),
+            root.get_id()
+        );
+        assert_eq!(
+            grandchild_ns.get_parent().unwrap().get_id(),
+            child_ns.get_id()
+        );
+    }
 }
