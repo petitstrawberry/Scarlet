@@ -374,7 +374,7 @@ pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
 
     let mut writer = StdoutWriter;
-    writer.write_fmt(args).unwrap();
+    let _ = writer.write_fmt(args);
 }
 
 /// A simple writer that outputs to stdout

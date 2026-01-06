@@ -302,26 +302,35 @@ impl VfsManager {
             }
         }
 
-        fn mount_namespace_path(mount: &Arc<MountPoint>) -> String {
+        fn mount_namespace_path(mount: &Arc<MountPoint>) -> Result<String, FileSystemError> {
             if mount.is_root_mount() {
-                return "/".to_string();
+                return Ok("/".to_string());
             }
 
-            let parent_mount = mount.get_parent().expect("non-root mount must have parent");
-            let parent_entry = mount
-                .parent_entry
-                .as_ref()
-                .expect("non-root mount must have parent_entry")
-                .clone();
+            let parent_mount = mount.get_parent().ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::InvalidPath,
+                    "deep-clone: orphan mount (missing parent)",
+                )
+            })?;
+            let parent_entry = mount.parent_entry.as_ref().ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::InvalidPath,
+                    "deep-clone: orphan mount (missing parent_entry)",
+                )
+            })?;
 
-            namespace_path_of_entry(&parent_mount, &parent_entry)
+            namespace_path_of_entry(&parent_mount, parent_entry)
         }
 
-        fn namespace_path_of_entry(mount: &Arc<MountPoint>, entry: &Arc<VfsEntry>) -> String {
-            let base = mount_namespace_path(mount);
+        fn namespace_path_of_entry(
+            mount: &Arc<MountPoint>,
+            entry: &Arc<VfsEntry>,
+        ) -> Result<String, FileSystemError> {
+            let base = mount_namespace_path(mount)?;
 
             if Arc::ptr_eq(entry, &mount.root) {
-                return base;
+                return Ok(base);
             }
 
             let mut components: Vec<String> = Vec::new();
@@ -336,11 +345,11 @@ impl VfsManager {
             components.reverse();
 
             if components.is_empty() {
-                base
+                Ok(base)
             } else if base == "/" {
-                alloc::format!("/{}", components.join("/"))
+                Ok(alloc::format!("/{}", components.join("/")))
             } else {
-                alloc::format!("{}/{}", base, components.join("/"))
+                Ok(alloc::format!("{}/{}", base, components.join("/")))
             }
         }
 
@@ -427,7 +436,7 @@ impl VfsManager {
                 continue;
             }
 
-            let target_path = mount_namespace_path(mount);
+            let target_path = mount_namespace_path(mount)?;
             let depth = target_path.matches('/').count();
             let fs = mount
                 .filesystem
@@ -467,7 +476,7 @@ impl VfsManager {
                 continue;
             }
 
-            let target_path = mount_namespace_path(mount);
+            let target_path = mount_namespace_path(mount)?;
             let depth = target_path.matches('/').count();
 
             let source_entry = mount.root.clone();
@@ -478,7 +487,7 @@ impl VfsManager {
                         "Bind source mount not found",
                     )
                 })?;
-            let source_path = namespace_path_of_entry(&containing_mount, &source_entry);
+            let source_path = namespace_path_of_entry(&containing_mount, &source_entry)?;
 
             bind_mounts.push((depth, source_path, target_path));
         }
@@ -536,8 +545,11 @@ impl VfsManager {
             (*mut_ptr).parent = Some(Arc::downgrade(&target_mount_point));
             (*mut_ptr).parent_entry = Some(target_entry.clone());
         }
-        // Connect the bind mount to the source mount point
-        *(bind_mount.children.write()) = source_mount_point.children.read().clone();
+        // NOTE: Do not clone mount-children from the source mount point.
+        // Cloning `MountPoint` children across VFS instances leaves their `parent` weak refs
+        // pointing at the source tree, which can later be dropped (e.g. during pivot_root),
+        // producing orphan mounts and panics in mount-tree traversal.
+        let _ = source_mount_point;
         // Add as child to target_mount_point
         target_mount_point
             .children

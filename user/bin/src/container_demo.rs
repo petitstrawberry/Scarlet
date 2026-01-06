@@ -17,9 +17,6 @@ use std::{
 const NS_CREATE_TASK: usize = 0x01; // Create separate task namespace  
 const NS_CREATE_VFS: usize = 0x02; // Create separate VFS namespace
 
-// Syscall error return value
-const SYSCALL_ERROR: usize = usize::MAX;
-
 fn create_namespace(flags: usize, name: &str) -> Result<(), ()> {
     let name_cstr = std::ffi::str_to_cstr_bytes(name).map_err(|_| ())?;
     let name_ptr = name_cstr.as_ptr() as usize;
@@ -67,6 +64,34 @@ fn print_vfs_view(title: &str) {
             }
         }
         Err(_) => println!("/ entries: <unavailable>"),
+    }
+}
+
+fn print_dir(path: &str, title: &str) {
+    println!("--- dir: {} ({}) ---", path, title);
+    match std::fs::list_directory(path) {
+        Ok(entries) => {
+            println!("{} entries: {}", path, entries.len());
+            let mut shown = 0usize;
+            for e in entries {
+                if shown >= 32 {
+                    println!("  ...");
+                    break;
+                }
+                let kind = if e.is_directory() {
+                    "dir"
+                } else if e.is_file() {
+                    "file"
+                } else if e.is_symlink() {
+                    "symlink"
+                } else {
+                    "other"
+                };
+                println!("  {}\t{}\t{} bytes", kind, e.name_str(), e.size);
+                shown += 1;
+            }
+        }
+        Err(_) => println!("{} entries: <unavailable>", path),
     }
 }
 
@@ -142,6 +167,36 @@ fn demo_vfs_namespace() {
             println!("Changes to mounts/filesystem won't affect other processes");
 
             print_vfs_view("after VFS namespace");
+
+            // Demonstrate pivot_root inside the isolated VFS namespace.
+            // Minimal flow: mount tmpfs at /newroot, create /newroot/old_root, then pivot_root.
+            println!("\n--- pivot_root demo (in VFS namespace) ---");
+
+            let _ = std::fs::create_directory("/newroot");
+            match std::fs::mount("tmpfs", "/newroot", "tmpfs", 0, Some("size=50M")) {
+                Ok(()) => println!("mount tmpfs: OK"),
+                Err(_) => println!("mount tmpfs: ERR"),
+            }
+
+            // Inspect what newroot looks like before pivot.
+            let _ = std::fs::create_directory("/newroot/old_root");
+            print_dir("/newroot", "before pivot_root");
+
+            match std::fs::pivot_root("/newroot", "/newroot/old_root") {
+                Ok(()) => {
+                    let _ = std::fs::change_directory("/");
+                    println!(
+                        "pivot_root successful: new_root='/newroot' old_root='/newroot/old_root'"
+                    );
+                }
+                Err(_) => {
+                    println!("pivot_root failed");
+                }
+            }
+
+            print_vfs_view("after pivot_root");
+            // Inspect old_root after pivot (init expects it at /old_root).
+            print_dir("/old_root", "after pivot_root");
         }
         Err(()) => {
             println!("Failed to create VFS namespace");
