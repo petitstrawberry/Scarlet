@@ -1,6 +1,7 @@
 //! Window management module
 
 use std::vec::Vec;
+use std::{print, println};
 
 /// Window ID type
 pub type WindowId = u32;
@@ -84,6 +85,7 @@ impl WindowManager {
         let id = self.next_id;
         self.next_id += 1;
 
+        println!("[WindowManager] Creating window #{} at ({}, {})", id, x, y);
         let window = Window::new(id, x, y, width, height);
         self.windows.push(window);
 
@@ -115,6 +117,7 @@ impl WindowManager {
 
     /// Focus a window
     pub fn focus_window(&mut self, id: WindowId) {
+        println!("[WindowManager] Focusing window #{}", id);
         // Unfocus all windows
         for window in &mut self.windows {
             window.focused = false;
@@ -124,11 +127,31 @@ impl WindowManager {
         if let Some(window) = self.get_window_mut(id) {
             window.focused = true;
             self.focused_window = Some(id);
+        }
+    }
 
-            // Move to top (bring to front)
-            let index = self.windows.iter().position(|w| w.id == id).unwrap();
+    /// Set focus to a window (alias for focus_window)
+    pub fn set_focus(&mut self, id: WindowId) {
+        self.focus_window(id);
+    }
+
+    /// Raise window to top (bring to front in Z-order)
+    pub fn raise_to_top(&mut self, id: WindowId) {
+        println!("[WindowManager] Raising window #{} to top", id);
+        if let Some(index) = self.windows.iter().position(|w| w.id == id) {
+            println!(
+                "[WindowManager] Window was at index {}, moving to end",
+                index
+            );
             let window = self.windows.remove(index);
             self.windows.push(window);
+
+            // Print current Z-order
+            print!("[WindowManager] Current Z-order (bottom to top): ");
+            for w in &self.windows {
+                print!("#{} ", w.id);
+            }
+            println!();
         }
     }
 

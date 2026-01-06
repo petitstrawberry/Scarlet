@@ -20,6 +20,7 @@ pub struct Compositor {
     bg_color: [u8; 4],
     bytes_per_pixel: u32,
     full_redraw_needed: bool,
+    event_counter: u64,
 }
 
 impl Compositor {
@@ -76,6 +77,7 @@ impl Compositor {
             bg_color,
             bytes_per_pixel,
             full_redraw_needed: true,
+            event_counter: 0,
         })
     }
 
@@ -83,11 +85,26 @@ impl Compositor {
     pub fn init_display(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Initializing display...");
 
-        // Create test window for demonstration
-        let win_id = self.window_manager.create_window(100, 100, 300, 200);
-        if let Some(window) = self.window_manager.get_window_mut(win_id) {
-            window.set_title("Test Window");
+        // Create multiple test windows for demonstration
+        let win1 = self.window_manager.create_window(50, 50, 400, 250);
+        if let Some(window) = self.window_manager.get_window_mut(win1) {
+            window.set_title("Window 1");
         }
+
+        let win2 = self.window_manager.create_window(150, 120, 350, 200);
+        if let Some(window) = self.window_manager.get_window_mut(win2) {
+            window.set_title("Window 2");
+        }
+
+        let win3 = self.window_manager.create_window(250, 180, 300, 180);
+        if let Some(window) = self.window_manager.get_window_mut(win3) {
+            window.set_title("Window 3");
+        }
+
+        // Focus the last created window
+        self.window_manager.set_focus(win3);
+
+        println!("[Compositor] Created 3 test windows");
 
         // Initial full composite
         self.full_redraw_needed = true;
@@ -137,12 +154,12 @@ impl Compositor {
                     }
                 }
 
-                // Layer 2: Draw all windows
+                // Layer 2: Draw all windows (no clipping for full redraw)
                 for window in self.window_manager.get_windows() {
                     if !window.visible {
                         continue;
                     }
-                    self.draw_window_to_buffer(window, vram, stride);
+                    self.draw_window_to_buffer_clipped(window, vram, stride, None);
                 }
 
                 // Layer 3: Draw cursor
@@ -151,17 +168,16 @@ impl Compositor {
         } else {
             // Incremental update: only cursor dirty region
             let (dx, dy, dw, dh) = self.cursor.get_dirty_region();
+            let clip_rect = Some((dx, dy, dw, dh));
 
             unsafe {
                 let vram = core::slice::from_raw_parts_mut(vram_addr as *mut u8, self.vram_size);
 
-                // Redraw dirty region
+                // Redraw dirty region background
                 for y in dy.max(0)..(dy + dh as i32).min(self.screen_height as i32) {
                     for x in dx.max(0)..(dx + dw as i32).min(self.screen_width as i32) {
                         let offset =
                             ((y as u32 * stride) + (x as u32 * self.bytes_per_pixel)) as usize;
-
-                        // Background
                         vram[offset] = self.bg_color[0];
                         vram[offset + 1] = self.bg_color[1];
                         vram[offset + 2] = self.bg_color[2];
@@ -169,19 +185,18 @@ impl Compositor {
                     }
                 }
 
-                // Redraw windows in dirty region
+                // Redraw ALL windows, but clipped to dirty region
                 for window in self.window_manager.get_windows() {
                     if !window.visible {
                         continue;
                     }
-
                     // Check if window intersects dirty region
                     if window.x + window.width as i32 >= dx
                         && window.x < dx + dw as i32
                         && window.y + window.height as i32 >= dy
                         && window.y < dy + dh as i32
                     {
-                        self.draw_window_to_buffer(window, vram, stride);
+                        self.draw_window_to_buffer_clipped(window, vram, stride, clip_rect);
                     }
                 }
 
@@ -194,12 +209,14 @@ impl Compositor {
         Ok(())
     }
 
-    /// Draw a window to buffer
-    fn draw_window_to_buffer(
+    /// Draw a window to buffer with optional clipping
+    /// clip_rect: (x, y, width, height) in screen coordinates
+    fn draw_window_to_buffer_clipped(
         &self,
         window: &super::window::Window,
         buffer: &mut [u8],
         stride: u32,
+        clip_rect: Option<(i32, i32, u32, u32)>,
     ) {
         let window_color = if window.focused {
             [150, 150, 200, 255]
@@ -217,12 +234,24 @@ impl Compositor {
                 let screen_x = window.x + x as i32;
                 let screen_y = window.y + y as i32;
 
+                // Screen bounds check
                 if screen_x < 0
                     || screen_x >= self.screen_width as i32
                     || screen_y < 0
                     || screen_y >= self.screen_height as i32
                 {
                     continue;
+                }
+
+                // Clip rect check
+                if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
+                    if screen_x < clip_x
+                        || screen_x >= clip_x + clip_w as i32
+                        || screen_y < clip_y
+                        || screen_y >= clip_y + clip_h as i32
+                    {
+                        continue;
+                    }
                 }
 
                 let offset = ((screen_y as u32 * stride) + (screen_x as u32 * self.bytes_per_pixel))
@@ -280,7 +309,7 @@ impl Compositor {
             if !window.visible {
                 continue;
             }
-            self.draw_window_to_buffer(window, &mut backbuffer, stride);
+            self.draw_window_to_buffer_clipped(window, &mut backbuffer, stride, None);
         }
 
         // Layer 3: Draw cursor
@@ -346,8 +375,31 @@ impl Compositor {
                         self.screen_height,
                     );
                 }
-                _ => {}
+                _ => {
+                    println!(
+                        "[Compositor] Unknown EV_ABS code: 0x{:x}, value: {}",
+                        event.code, event.value
+                    );
+                }
             },
+            event_types::EV_KEY => {
+                use super::input::key_codes;
+                println!(
+                    "[Compositor] EV_KEY: code=0x{:x}, value={}",
+                    event.code, event.value
+                );
+                match event.code {
+                    key_codes::BTN_LEFT => {
+                        if event.value == 1 {
+                            // Button pressed
+                            println!("[Compositor] BTN_LEFT pressed!");
+                            self.handle_mouse_click()?;
+                            return Ok(true); // Need full redraw for focus change
+                        }
+                    }
+                    _ => {}
+                }
+            }
             event_types::EV_SYN => {
                 if self.cursor.needs_redraw() {
                     return Ok(true); // Need to redraw
@@ -357,6 +409,26 @@ impl Compositor {
         }
 
         Ok(false)
+    }
+
+    /// Handle mouse click (for window focus)
+    fn handle_mouse_click(&mut self) -> Result<(), &'static str> {
+        let click_x = self.cursor.x;
+        let click_y = self.cursor.y;
+
+        // Find topmost window at click position
+        if let Some(win_id) = self.window_manager.window_at_point(click_x, click_y) {
+            println!("[Compositor] Clicked on window #{}", win_id);
+
+            // Change focus and bring to front
+            self.window_manager.set_focus(win_id);
+            self.window_manager.raise_to_top(win_id);
+
+            // Need full redraw when Z-order changes
+            self.full_redraw_needed = true;
+        }
+
+        Ok(())
     }
 
     /// Main event loop
@@ -370,6 +442,17 @@ impl Compositor {
             // Re-composite and present if needed
             if needs_redraw {
                 self.composite_and_present()?;
+            }
+
+            // Periodically print Z-order (every 100 events)
+            self.event_counter += 1;
+            if self.event_counter % 100 == 0 {
+                use std::print;
+                print!("[Compositor] Z-order check #{}: ", self.event_counter);
+                for window in self.window_manager.get_windows() {
+                    print!("#{}{} ", window.id, if window.focused { "(F)" } else { "" });
+                }
+                println!();
             }
         }
     }
