@@ -40,11 +40,12 @@ pub fn sys_fork(
     /* Clone the task */
     match parent_task.clone_task(CloneFlags::default()) {
         Ok(mut child_task) => {
-            let child_id = child_task.get_id();
+            // Return namespace-local ID to user space (this is the PID visible to xv6 programs)
+            let child_namespace_id = child_task.get_namespace_id();
             child_task.vcpu.iregs.reg[10] = 0; /* Set the return value (a0) to 0 in the child proc */
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
-            /* Return the child task ID as pid to the parent proc */
-            child_id
+            /* Return the child task namespace ID as pid to the parent proc */
+            child_namespace_id
         }
         Err(_) => {
             usize::MAX /* Return -1 on error */
@@ -196,7 +197,8 @@ pub fn sys_getpid(
 ) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(task);
-    task.get_id()
+    // Return namespace-local ID (this is the PID visible to xv6 programs)
+    task.get_namespace_id()
 }
 
 pub fn sys_sleep(

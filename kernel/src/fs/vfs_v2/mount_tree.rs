@@ -81,6 +81,8 @@ pub struct MountPoint {
     pub path: String,
     /// Root entry of the mounted filesystem
     pub root: VfsEntryRef,
+    /// Strong reference to the mounted filesystem (Regular mounts only)
+    pub filesystem: Option<Arc<dyn FileSystemOperations>>,
     /// Parent mount (weak reference to avoid cycles)
     pub parent: Option<Weak<MountPoint>>,
     /// Parent entry (strong reference to the VFS entry at the mount point to ensure it stays alive)
@@ -91,12 +93,17 @@ pub struct MountPoint {
 
 impl MountPoint {
     /// Create a new regular mount point
-    pub fn new_regular(path: String, root: VfsEntryRef) -> Arc<Self> {
+    pub fn new_regular(
+        path: String,
+        root: VfsEntryRef,
+        filesystem: Arc<dyn FileSystemOperations>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id: MountId::new(),
             mount_type: MountType::Regular,
             path,
             root,
+            filesystem: Some(filesystem),
             parent: None,
             parent_entry: None,
             children: Arc::new(RwLock::new(BTreeMap::new())),
@@ -110,6 +117,7 @@ impl MountPoint {
             mount_type: MountType::Bind,
             path,
             root: source,
+            filesystem: None,
             parent: None,
             parent_entry: None,
             children: Arc::new(RwLock::new(BTreeMap::new())),
@@ -135,6 +143,7 @@ impl MountPoint {
             },
             path,
             root,
+            filesystem: None,
             parent: None,
             parent_entry: None,
             children: Arc::new(RwLock::new(BTreeMap::new())),
@@ -217,8 +226,8 @@ pub struct MountTree {
 
 impl MountTree {
     /// Create a new mount tree with the given root
-    pub fn new(root_entry: VfsEntryRef) -> Self {
-        let root_mount = MountPoint::new_regular("/".to_string(), root_entry);
+    pub fn new(root_entry: VfsEntryRef, root_fs: Arc<dyn FileSystemOperations>) -> Self {
+        let root_mount = MountPoint::new_regular("/".to_string(), root_entry, root_fs);
         let root_id = root_mount.id;
 
         let mut mounts = BTreeMap::new();
@@ -265,7 +274,11 @@ impl MountTree {
         let new_fs_root_entry = VfsEntry::new(None, "/".to_string(), new_fs_root_node);
 
         // Create a new mount point for the filesystem.
-        let new_mount = MountPoint::new_regular(target_entry.name().clone(), new_fs_root_entry);
+        let new_mount = MountPoint::new_regular(
+            target_entry.name().clone(),
+            new_fs_root_entry,
+            filesystem.clone(),
+        );
         let mount_id = new_mount.id;
 
         // Add the new mount as a child to the target's mount point.

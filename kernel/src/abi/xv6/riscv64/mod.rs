@@ -40,6 +40,8 @@ const MAX_FDS: usize = 1024; // Maximum number of file descriptors
 
 #[derive(Clone)]
 pub struct Xv6Riscv64Abi {
+    /// Task namespace for xv6 process management
+    namespace: Arc<crate::task::namespace::TaskNamespace>,
     /// File descriptor to handle mapping (fd -> handle)
     fd_to_handle: HashMap<usize, u32>,
     /// Free file descriptor list for O(1) allocation/deallocation
@@ -52,7 +54,13 @@ impl Default for Xv6Riscv64Abi {
         // Pop from the end so fd 0, 1, 2 are allocated first
         let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
+
+        // Use root namespace by default for cross-ABI task visibility
+        // Separate namespaces can be created explicitly when needed (e.g., containers, cgroups)
+        let namespace = crate::task::namespace::get_root_namespace().clone();
+
         Self {
+            namespace,
             fd_to_handle: HashMap::new(), // Empty HashMap
             free_fds,
         }
@@ -418,6 +426,10 @@ impl AbiModule for Xv6Riscv64Abi {
         // This should never be called since xv6 binaries should not have PT_INTERP
         // But if it happens, we'll return an error path
         "/dev/null".to_string() // Invalid path to ensure failure
+    }
+
+    fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {
+        self.namespace.clone()
     }
 }
 

@@ -89,6 +89,17 @@ pub trait AbiModule: Send + Sync + 'static {
     /// clearing TLS/robust-list pointers, or delivering exit-related signals.
     fn on_task_exit(&mut self, _task: &mut crate::task::Task) {}
 
+    /// Get the task namespace for this ABI.
+    ///
+    /// This allows each ABI to have its own namespace for task IDs.
+    /// By default, returns the root namespace.
+    ///
+    /// # Returns
+    /// The task namespace for this ABI
+    fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {
+        crate::task::namespace::get_root_namespace().clone()
+    }
+
     /// Determine if a binary can be executed by this ABI and return confidence
     ///
     /// This method reads binary content directly from the file object and

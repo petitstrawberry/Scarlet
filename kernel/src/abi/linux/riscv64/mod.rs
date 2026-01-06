@@ -52,6 +52,8 @@ pub struct LinuxThreadState {
 
 #[derive(Clone)]
 pub struct LinuxRiscv64Abi {
+    /// Task namespace for Linux PID/TID management
+    namespace: Arc<crate::task::namespace::TaskNamespace>,
     /// File descriptor to handle mapping table (fd -> handle)
     /// None means the fd is not allocated
     /// Vec to avoid stack overflow during initialization
@@ -80,7 +82,13 @@ impl Default for LinuxRiscv64Abi {
         // Pop from the end so fd 0, 1, 2 are allocated first
         let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
+
+        // Use root namespace by default for cross-ABI task visibility
+        // Separate namespaces can be created explicitly when needed (e.g., containers, cgroups)
+        let namespace = crate::task::namespace::get_root_namespace().clone();
+
         Self {
+            namespace,
             fd_to_handle: vec![None; MAX_FDS],
             fd_flags: vec![0; MAX_FDS],
             file_status_flags: vec![0; MAX_FDS],
@@ -426,6 +434,10 @@ impl AbiModule for LinuxRiscv64Abi {
             }
         }
         // TODO: robust list-based wakeups for owned mutexes at thread exit.
+    }
+
+    fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {
+        self.namespace.clone()
     }
 
     fn can_execute_binary(
