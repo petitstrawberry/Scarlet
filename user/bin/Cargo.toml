@@ -64,6 +64,10 @@ name = "window_server"
 path = "src/window_server.rs"
 
 [[bin]]
+name = "sws"
+path = "src/sws/main.rs"
+
+[[bin]]
 name = "container_demo"
 path = "src/container_demo.rs"
 
