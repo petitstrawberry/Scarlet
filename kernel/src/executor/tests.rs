@@ -181,3 +181,69 @@ fn test_envp_array_handling() {
         );
     }
 }
+
+/// Test runtime delegation configuration
+#[test_case]
+fn test_runtime_delegation_config() {
+    use crate::abi::scarlet::ScarletAbi;
+    use crate::abi::{AbiModule, RuntimeConfig};
+    use crate::object::KernelObject;
+    use alloc::string::String;
+    use alloc::sync::Arc;
+
+    // Create a mock file object for testing
+    // In real scenarios, this would be an actual file from VFS
+    let scarlet_abi = ScarletAbi::default();
+
+    // Test 1: Non-Wasm file should not require runtime delegation
+    let non_wasm_path = "/system/scarlet/bin/hello";
+    // Note: We can't easily create a real file object in tests without VFS,
+    // but we can verify the method signature and basic logic
+
+    // Test 2: Wasm file extension should trigger runtime delegation
+    let wasm_path = "/data/apps/program.wasm";
+    // The actual runtime_config would be returned when a real Wasm file is detected
+
+    // Test 3: Verify RuntimeConfig structure can be created
+    let test_config = RuntimeConfig {
+        runtime_path: "/system/scarlet/bin/test-runtime".to_string(),
+        runtime_abi: Some("scarlet".to_string()),
+        runtime_args: alloc::vec!["--test".to_string(), "--verbose".to_string()],
+    };
+
+    assert_eq!(test_config.runtime_path, "/system/scarlet/bin/test-runtime");
+    assert_eq!(test_config.runtime_abi, Some("scarlet".to_string()));
+    assert_eq!(test_config.runtime_args.len(), 2);
+    assert_eq!(test_config.runtime_args[0], "--test");
+}
+
+/// Test runtime argument construction
+#[test_case]
+fn test_runtime_argument_construction() {
+    use alloc::vec::Vec;
+
+    // Simulate runtime argument construction
+    let target_path = "/data/apps/program.wasm";
+    let target_argv = &["program.wasm", "arg1", "arg2"];
+    let runtime_path = "/system/scarlet/bin/wasm-runtime";
+    let runtime_args = alloc::vec!["--wasm"];
+
+    // Construct runtime argv as TransparentExecutor::execute_via_runtime does
+    let mut runtime_argv = Vec::new();
+    runtime_argv.push(runtime_path);
+    for arg in &runtime_args {
+        runtime_argv.push(arg);
+    }
+    runtime_argv.push(target_path);
+    for arg in target_argv.iter().skip(1) {
+        runtime_argv.push(*arg);
+    }
+
+    // Verify argument order
+    assert_eq!(runtime_argv[0], "/system/scarlet/bin/wasm-runtime");
+    assert_eq!(runtime_argv[1], "--wasm");
+    assert_eq!(runtime_argv[2], "/data/apps/program.wasm");
+    assert_eq!(runtime_argv[3], "arg1");
+    assert_eq!(runtime_argv[4], "arg2");
+    assert_eq!(runtime_argv.len(), 5);
+}

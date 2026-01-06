@@ -874,6 +874,46 @@ pub fn sys_vfs_readlink(trapframe: &mut Trapframe) -> usize {
     bytes_to_copy
 }
 
+/// Get current working directory path (VfsGetCwdPath)
+///
+/// This system call writes the calling task's current working directory as a UTF-8 path
+/// into the provided user buffer.
+///
+/// # Arguments
+///
+/// * `trapframe.get_arg(0)` - Pointer to buffer to store path
+/// * `trapframe.get_arg(1)` - Buffer size
+///
+/// # Returns
+///
+/// * Number of bytes written to buffer on success
+/// * `usize::MAX` on error
+pub fn sys_vfs_get_cwd_path(trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let buffer_ptr = task
+        .vm_manager
+        .translate_vaddr(trapframe.get_arg(0))
+        .unwrap() as *mut u8;
+    let buffer_size = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    let vfs = match task.vfs.as_ref() {
+        Some(vfs) => vfs,
+        None => return usize::MAX,
+    };
+
+    let cwd = vfs.get_cwd_path();
+    let cwd_bytes = cwd.as_bytes();
+    let bytes_to_copy = core::cmp::min(cwd_bytes.len(), buffer_size);
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), buffer_ptr, bytes_to_copy);
+    }
+
+    bytes_to_copy
+}
+
 // Use VfsManager-based path normalization function
 fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, ()> {
     if path.starts_with('/') {

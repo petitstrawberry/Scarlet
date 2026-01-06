@@ -253,21 +253,35 @@ impl TransparentExecutor {
         let mut abi = crate::abi::AbiRegistry::instantiate(&abi_name)
             .ok_or(ExecutorError::UnsupportedAbi(abi_name.clone()))?;
 
-        // Step 3: Check if ABI switch or forced rebuild is required
+        // Step 3: Check if runtime delegation is needed
+        if let Some(runtime_config) = abi.get_runtime_config(&file_object, path) {
+            // Delegate execution to userland runtime
+            return Self::execute_via_runtime(
+                path,
+                argv,
+                envp,
+                &runtime_config,
+                task,
+                trapframe,
+                force_abi_rebuild,
+            );
+        }
+
+        // Step 4: Check if ABI switch or forced rebuild is required
         let current_abi_name = task.default_abi_ref().get_name();
         let abi_switch_required = abi_name != current_abi_name;
         let rebuild_required = abi_switch_required || force_abi_rebuild;
 
         if rebuild_required {
-            // Step 4: Setup complete task environment for new ABI (includes VFS, CWD)
+            // Step 5: Setup complete task environment for new ABI (includes VFS, CWD)
             Self::setup_task_environment(task, &mut abi)?;
         }
 
-        // Step 5: Execute binary through ABI module (pass envp directly)
+        // Step 6: Execute binary through ABI module (pass envp directly)
         abi.execute_binary(&file_object, argv, envp, task, trapframe)
             .map_err(|e| ExecutorError::ExecutionFailed(e.to_string()))?;
 
-        // Step 6: Update task's ABI if switch occurred
+        // Step 7: Update task's ABI if switch occurred
         if abi_switch_required {
             task.default_abi = Some(abi);
         }
@@ -299,6 +313,93 @@ impl TransparentExecutor {
         match crate::abi::AbiRegistry::detect_best_abi(file_object, path) {
             Some((abi_name, _confidence)) => Ok(abi_name),
             None => Err(ExecutorError::UnknownBinaryFormat),
+        }
+    }
+
+    /// Execute binary via userland runtime
+    ///
+    /// This method delegates binary execution to a userland runtime, enabling:
+    /// - Cross-architecture emulation (e.g., MS-DOS via DOSBox)
+    /// - Alternative runtime environments (e.g., Wasm, Java bytecode)
+    /// - Complex runtimes in userspace without kernel bloat
+    ///
+    /// # Arguments
+    /// * `target_path` - Path to the binary to execute
+    /// * `target_argv` - Command line arguments for the target binary
+    /// * `target_envp` - Environment variables for the target binary
+    /// * `runtime_config` - Runtime configuration (path, ABI, args)
+    /// * `task` - The task to execute in
+    /// * `trapframe` - The trapframe for execution context
+    /// * `force_abi_rebuild` - Flag to force ABI environment reconstruction
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful runtime execution setup
+    /// * `Err(ExecutorError)` if runtime execution fails
+    ///
+    /// # Execution Flow
+    /// 1. Construct runtime arguments: [runtime_args..., target_path, target_argv...]
+    /// 2. If runtime_abi is specified, use execute_with_abi
+    /// 3. Otherwise, auto-detect runtime's ABI and execute
+    fn execute_via_runtime(
+        target_path: &str,
+        target_argv: &[&str],
+        target_envp: &[&str],
+        runtime_config: &crate::abi::RuntimeConfig,
+        task: &mut Task,
+        trapframe: &mut Trapframe,
+        force_abi_rebuild: bool,
+    ) -> ExecutorResult<()> {
+        // Build runtime arguments: [runtime_args..., target_path, target_argv...]
+        let mut runtime_argv = Vec::new();
+
+        // Add runtime executable name as argv[0]
+        runtime_argv.push(runtime_config.runtime_path.as_str());
+
+        // Add configured runtime arguments
+        for arg in &runtime_config.runtime_args {
+            runtime_argv.push(arg.as_str());
+        }
+
+        // Add target binary path
+        runtime_argv.push(target_path);
+
+        // Add target binary arguments (skip argv[0] which is the target binary name)
+        for arg in target_argv.iter().skip(1) {
+            runtime_argv.push(*arg);
+        }
+
+        crate::println!(
+            "[Runtime Delegation] Executing '{}' via runtime '{}'",
+            target_path,
+            runtime_config.runtime_path
+        );
+
+        // Execute runtime with constructed arguments
+        match &runtime_config.runtime_abi {
+            Some(abi_name) => {
+                // Explicit ABI specified for runtime
+                Self::execute_with_optional_abi(
+                    &runtime_config.runtime_path,
+                    &runtime_argv,
+                    target_envp,
+                    Some(abi_name.as_str()),
+                    task,
+                    trapframe,
+                    force_abi_rebuild,
+                )
+            }
+            None => {
+                // Auto-detect runtime's ABI
+                Self::execute_with_optional_abi(
+                    &runtime_config.runtime_path,
+                    &runtime_argv,
+                    target_envp,
+                    None,
+                    task,
+                    trapframe,
+                    force_abi_rebuild,
+                )
+            }
         }
     }
 

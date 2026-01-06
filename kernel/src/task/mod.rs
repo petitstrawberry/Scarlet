@@ -3,6 +3,7 @@
 //! The task module defines the structure and behavior of tasks in the system.
 
 pub mod elf_loader;
+pub mod namespace;
 pub mod syscall;
 
 extern crate alloc;
@@ -217,6 +218,10 @@ pub struct AbiZone {
 
 pub struct Task {
     id: usize,
+    /// Task ID within the task's namespace (may differ from global ID)
+    namespace_id: usize,
+    /// Task namespace for ID management
+    namespace: Arc<namespace::TaskNamespace>,
     pub name: String,
     pub priority: u32,
     pub vcpu: Vcpu,
@@ -347,11 +352,51 @@ impl Default for CloneFlags {
 static TASK_ID: Mutex<usize> = Mutex::new(1);
 
 impl Task {
+    /// Create a new task with the root namespace.
+    ///
+    /// # Arguments
+    /// * `name` - Task name
+    /// * `priority` - Task priority
+    /// * `task_type` - Task type (Kernel or User)
+    ///
+    /// # Returns
+    /// A new task in the root namespace
     pub fn new(name: String, priority: u32, task_type: TaskType) -> Self {
+        Self::new_with_namespace(
+            name,
+            priority,
+            task_type,
+            namespace::get_root_namespace().clone(),
+        )
+    }
+
+    /// Create a new task with a specific namespace.
+    ///
+    /// # Arguments
+    /// * `name` - Task name
+    /// * `priority` - Task priority
+    /// * `task_type` - Task type (Kernel or User)
+    /// * `ns` - Task namespace
+    ///
+    /// # Returns
+    /// A new task in the specified namespace
+    pub fn new_with_namespace(
+        name: String,
+        priority: u32,
+        task_type: TaskType,
+        ns: Arc<namespace::TaskNamespace>,
+    ) -> Self {
         let mut taskid = TASK_ID.lock();
+        let global_id = *taskid;
+        *taskid += 1;
+        drop(taskid);
+
+        let namespace_id = ns.allocate_task_id_for(global_id);
 
         let task = Task {
-            id: *taskid,
+            id: global_id,
+            namespace_id,
+            namespace: ns,
             name,
             priority,
             vcpu: Vcpu::new(match task_type {
@@ -387,7 +432,6 @@ impl Task {
             kernel_stack_window_base: None,
         };
 
-        *taskid += 1;
         task
     }
 
@@ -419,6 +463,43 @@ impl Task {
 
     pub fn get_id(&self) -> usize {
         self.id
+    }
+
+    /// Get the task ID within its namespace.
+    ///
+    /// This ID is local to the task's namespace and may differ from the global ID.
+    /// This is the ID that should be exposed to user space and ABI syscalls.
+    ///
+    /// # Returns
+    /// The namespace-local task ID
+    pub fn get_namespace_id(&self) -> usize {
+        self.namespace_id
+    }
+
+    /// Get the task's namespace.
+    ///
+    /// # Returns
+    /// Reference to the task's namespace
+    pub fn get_namespace(&self) -> &Arc<namespace::TaskNamespace> {
+        &self.namespace
+    }
+
+    /// Set the task's namespace.
+    ///
+    /// This allows changing a task's namespace, useful for ABI transitions
+    /// or when moving tasks between namespace contexts.
+    ///
+    /// **Warning**: This method allocates a new namespace-local ID each time
+    /// it's called. Changing a task's namespace multiple times may lead to
+    /// ID conflicts or unexpected behavior. This method should typically only
+    /// be called once during task initialization or ABI transition.
+    ///
+    /// # Arguments
+    /// * `ns` - New namespace for the task
+    pub fn set_namespace(&mut self, ns: Arc<namespace::TaskNamespace>) {
+        self.namespace = ns;
+        // Allocate a new namespace-local ID (and register translation mapping)
+        self.namespace_id = self.namespace.allocate_task_id_for(self.id);
     }
 
     /// Set the task state
@@ -967,8 +1048,13 @@ impl Task {
     /// If the task cannot be cloned, an error is returned.
     ///
     pub fn clone_task(&mut self, flags: CloneFlags) -> Result<Task, &'static str> {
-        // Create a new task (but don't call init() yet)
-        let mut child = Task::new(self.name.clone(), self.priority, self.task_type);
+        // Create a new task in the same namespace as the parent
+        let mut child = Task::new_with_namespace(
+            self.name.clone(),
+            self.priority,
+            self.task_type,
+            self.namespace.clone(),
+        );
 
         // First, set up the virtual memory manager with the same ASID allocation
         match self.task_type {
@@ -2035,5 +2121,133 @@ mod tests {
         // Managed pages are per-task; child should not acquire new managed pages
         // when sharing VM (physical memory isn't privately managed by the child)
         assert!(child.managed_pages.len() <= parent.managed_pages.len());
+    }
+
+    #[test_case]
+    fn test_task_namespace_creation() {
+        use super::namespace;
+
+        // Create task in root namespace
+        let task = super::new_user_task("TestTask".to_string(), 0);
+        assert_eq!(task.get_namespace().get_name(), "root");
+        assert!(task.get_namespace().is_root());
+
+        // Verify namespace-local ID was allocated
+        let ns_id = task.get_namespace_id();
+        assert!(ns_id >= 1); // Should start from 1
+    }
+
+    #[test_case]
+    fn test_task_namespace_inheritance() {
+        use super::namespace;
+
+        let mut parent = super::new_user_task("Parent".to_string(), 0);
+        parent.init();
+
+        // Clone should inherit parent's namespace
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+
+        // Both should be in same namespace
+        assert_eq!(
+            parent.get_namespace().get_id(),
+            child.get_namespace().get_id()
+        );
+
+        // But should have different namespace-local IDs
+        assert_ne!(parent.get_namespace_id(), child.get_namespace_id());
+    }
+
+    #[test_case]
+    fn test_task_namespace_id_allocation() {
+        use super::namespace;
+
+        // Create custom namespace
+        let custom_ns = namespace::TaskNamespace::new_child(
+            namespace::get_root_namespace().clone(),
+            "test_ns".to_string(),
+        );
+
+        // Create multiple tasks in the same namespace
+        let task1 = super::Task::new_with_namespace(
+            "Task1".to_string(),
+            0,
+            super::TaskType::User,
+            custom_ns.clone(),
+        );
+        let task2 = super::Task::new_with_namespace(
+            "Task2".to_string(),
+            0,
+            super::TaskType::User,
+            custom_ns.clone(),
+        );
+        let task3 = super::Task::new_with_namespace(
+            "Task3".to_string(),
+            0,
+            super::TaskType::User,
+            custom_ns.clone(),
+        );
+
+        // All should have sequential namespace-local IDs
+        assert_eq!(task1.get_namespace_id(), 1);
+        assert_eq!(task2.get_namespace_id(), 2);
+        assert_eq!(task3.get_namespace_id(), 3);
+
+        // All should have different global IDs
+        assert_ne!(task1.get_id(), task2.get_id());
+        assert_ne!(task2.get_id(), task3.get_id());
+        assert_ne!(task1.get_id(), task3.get_id());
+    }
+
+    #[test_case]
+    fn test_namespace_hierarchy() {
+        use super::namespace;
+
+        let root = namespace::get_root_namespace();
+        let child_ns = namespace::TaskNamespace::new_child(root.clone(), "child".to_string());
+        let grandchild_ns =
+            namespace::TaskNamespace::new_child(child_ns.clone(), "grandchild".to_string());
+
+        // Verify hierarchy
+        assert!(root.is_root());
+        assert!(!child_ns.is_root());
+        assert!(!grandchild_ns.is_root());
+
+        // Verify parent relationships
+        assert!(child_ns.get_parent().is_some());
+        assert_eq!(child_ns.get_parent().unwrap().get_id(), root.get_id());
+        assert_eq!(
+            grandchild_ns.get_parent().unwrap().get_id(),
+            child_ns.get_id()
+        );
+    }
+
+    #[test_case]
+    fn test_all_abis_share_root_namespace_by_default() {
+        use super::namespace;
+
+        // Create tasks using default Task::new (which uses root namespace)
+        let task1 = super::new_user_task("Task1".to_string(), 0);
+        let task2 = super::new_user_task("Task2".to_string(), 0);
+        let task3 = super::new_user_task("Task3".to_string(), 0);
+
+        // All tasks should be in root namespace
+        assert_eq!(task1.get_namespace().get_name(), "root");
+        assert_eq!(task2.get_namespace().get_name(), "root");
+        assert_eq!(task3.get_namespace().get_name(), "root");
+
+        // All should share the same namespace instance
+        assert_eq!(
+            task1.get_namespace().get_id(),
+            task2.get_namespace().get_id()
+        );
+        assert_eq!(
+            task2.get_namespace().get_id(),
+            task3.get_namespace().get_id()
+        );
+
+        // Namespace-local IDs should be sequential in the shared namespace
+        // (though exact values depend on test execution order)
+        assert_ne!(task1.get_namespace_id(), task2.get_namespace_id());
+        assert_ne!(task2.get_namespace_id(), task3.get_namespace_id());
     }
 }
