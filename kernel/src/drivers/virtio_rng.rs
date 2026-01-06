@@ -1,35 +1,31 @@
 //! # VirtIO RNG (Random Number Generator) Device Driver
 //!
 //! This module provides a driver for VirtIO entropy source devices (virtio-rng),
-//! implementing the CharDevice trait for integration with the kernel's character
-//! device subsystem.
+//! acting as an entropy source for the kernel's random number generation subsystem.
 //!
-//! The driver exposes a character device (typically /dev/random) that provides
-//! cryptographically secure random numbers from the host's entropy source.
+//! The driver integrates with the kernel's RNG manager to provide cryptographically
+//! secure random numbers from the host's entropy source.
 //!
 //! ## Features
 //!
-//! - Random number generation from virtio-rng device
+//! - VirtIO RNG device driver with virtqueue management
+//! - Entropy source integration with kernel RNG subsystem
 //! - Internal buffering for efficient random number requests
-//! - Integration with CharDevice interface
 //!
 //! ## Implementation Details
 //!
 //! The driver uses a single virtqueue (requestq) for receiving random data
 //! from the host. Random bytes are fetched in batches and buffered internally
-//! to minimize virtqueue operations when small amounts of random data are requested.
+//! to minimize virtqueue operations when requests are made.
 
-use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec, vec::Vec};
 use spin::{Mutex, RwLock};
-use core::any::Any;
 
-use crate::device::{Device, DeviceType};
-use crate::device::char::CharDevice;
 use crate::drivers::virtio::{
     device::VirtioDevice,
     queue::{DescriptorFlag, VirtQueue},
 };
-use crate::object::capability::{ControlOps, MemoryMappingOps, Selectable};
+use crate::random::EntropySource;
 
 // Default buffer size for random data
 const RNG_BUFFER_SIZE: usize = 256;
@@ -187,6 +183,32 @@ impl VirtioRngDevice {
     }
 }
 
+impl EntropySource for VirtioRngDevice {
+    fn name(&self) -> &'static str {
+        "virtio-rng"
+    }
+
+    fn read_entropy(&self, buffer: &mut [u8]) -> usize {
+        let mut bytes_read = 0;
+        
+        for i in 0..buffer.len() {
+            if let Some(byte) = self.read_byte_internal() {
+                buffer[i] = byte;
+                bytes_read += 1;
+            } else {
+                break;
+            }
+        }
+        
+        bytes_read
+    }
+
+    fn is_available(&self) -> bool {
+        // VirtIO RNG device is always available once initialized
+        true
+    }
+}
+
 impl VirtioDevice for VirtioRngDevice {
     fn get_base_addr(&self) -> usize {
         self.base_addr
@@ -234,62 +256,3 @@ impl VirtioDevice for VirtioRngDevice {
         0
     }
 }
-
-impl Device for VirtioRngDevice {
-    fn device_type(&self) -> DeviceType {
-        DeviceType::Char
-    }
-
-    fn name(&self) -> &'static str {
-        "virtio-rng"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn as_char_device(&self) -> Option<&dyn CharDevice> {
-        Some(self)
-    }
-}
-
-impl CharDevice for VirtioRngDevice {
-    fn read_byte(&self) -> Option<u8> {
-        self.read_byte_internal()
-    }
-
-    fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
-        Err("Write not supported for RNG device")
-    }
-
-    fn can_read(&self) -> bool {
-        // Always ready to provide random data
-        true
-    }
-
-    fn can_write(&self) -> bool {
-        false
-    }
-}
-
-impl ControlOps for VirtioRngDevice {
-    fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
-        Err("Control operations not supported for RNG device")
-    }
-}
-
-impl MemoryMappingOps for VirtioRngDevice {
-    fn get_mapping_info(
-        &self,
-        _offset: usize,
-        _length: usize,
-    ) -> Result<(usize, usize, bool), &'static str> {
-        Err("Memory mapping not supported for RNG device")
-    }
-}
-
-impl Selectable for VirtioRngDevice {}

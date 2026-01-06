@@ -2,7 +2,7 @@
 
 ## Overview
 
-Scarlet用のVirtIO RNG (Random Number Generator) Deviceドライバを実装しました。このドライバは、VirtIOプロトコルを使用してホストのエントロピーソースから暗号学的に安全な乱数を提供します。
+Scarlet用のVirtIO RNG (Random Number Generator) Deviceドライバを実装しました。このドライバは、カーネルレベルの乱数生成サブシステムのエントロピーソースとして機能し、ホストのエントロピーソースから暗号学的に安全な乱数を提供します。
 
 ## Architecture
 
@@ -15,13 +15,21 @@ Scarlet用のVirtIO RNG (Random Number Generator) Deviceドライバを実装し
          │ VirtIO Protocol
          ▼
 ┌──────────────────┐
-│ VirtioRngDevice  │ (Kernel Driver)
+│ VirtioRngDevice  │ (Entropy Source)
 │   - requestq     │
 │   - Buffer (256B)│
+└────────┬─────────┘
+         │ EntropySource trait
+         ▼
+┌──────────────────┐
+│ RandomManager    │ (Kernel RNG Subsystem)
+│   - Pool (4096B) │
+│   - Sources[]    │
 └────────┬─────────┘
          │ CharDevice
          ▼
 ┌──────────────────┐
+│RandomCharDevice  │
 │   /dev/random    │ (DevFS)
 └────────┬─────────┘
          │ read()
@@ -34,26 +42,46 @@ Scarlet用のVirtIO RNG (Random Number Generator) Deviceドライバを実装し
 
 ## Implementation Components
 
-### 1. VirtioRngDevice
+### 1. Kernel RNG Subsystem (`kernel/src/random.rs`)
 
-VirtIO RNG仕様に基づいて実装された乱数生成デバイスドライバです。
+カーネル全体で使用できる乱数生成機能を提供する中央サブシステムです。
 
 **主な機能:**
-- ホストのエントロピーソースから乱数を取得
+- エントロピーソースの抽象化と管理
+- 4096バイトの内部プール
+- スレッドセーフなランダムバイト生成API
+- `/dev/random` CharDeviceの提供
+
+**API:**
+```rust
+// カーネル内から乱数を取得
+use crate::random::RandomManager;
+let mut buffer = [0u8; 32];
+RandomManager::get_random_bytes(&mut buffer);
+```
+
+### 2. VirtioRngDevice (`kernel/src/drivers/virtio_rng.rs`)
+
+VirtIO RNG仕様に基づいて実装されたエントロピーソースです。
+
+**主な機能:**
+- `EntropySource` traitの実装
 - 内部バッファリングによる効率的な読み取り
-- CharDeviceインターフェースの実装
+- VirtIO queueの管理
 
 **実装ファイル:** `kernel/src/drivers/virtio_rng.rs`
 
-### 2. Internal Buffer
+### 3. EntropySource Trait
 
-256バイトの内部バッファを使用して、VirtIO queueの操作回数を最小化します。バッファが空になると自動的にホストから新しい乱数データを要求します。
+複数のエントロピーソース（将来的にはハードウェアRNG、タイマージッタなど）をサポートするための抽象化レイヤーです。
 
-### 3. VirtQueue Management
-
-RNG deviceは単一のvirtqueue (requestq) を使用します:
-- Queue size: 8 descriptors (小規模で十分)
-- Device-writable descriptorを使用してホストから乱数を受信
+```rust
+pub trait EntropySource: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn read_entropy(&self, buffer: &mut [u8]) -> usize;
+    fn is_available(&self) -> bool;
+}
+```
 
 ## Usage
 
@@ -70,9 +98,9 @@ qemu-system-riscv64 \
 
 ### Device Registration
 
-デバイスは自動的に `/dev/random` として登録されます（最初のRNGデバイスの場合）。
+デバイスは自動的に検出され、カーネルのRandomManagerに登録されます。最初のRNGデバイスで `/dev/random` が作成されます。
 
-### Reading Random Data
+### Reading Random Data from Userspace
 
 ユーザースペースからは通常のCharDeviceとして読み取り可能です:
 
@@ -87,48 +115,55 @@ read(fd, buffer, sizeof(buffer));
 close(fd);
 ```
 
+### Reading Random Data from Kernel
+
+カーネル内部から直接乱数を取得できます:
+
+```rust
+use crate::random::RandomManager;
+
+let mut buffer = [0u8; 32];
+let bytes_read = RandomManager::get_random_bytes(&mut buffer);
+
+// Or get a single byte
+if let Some(byte) = RandomManager::get_random_byte() {
+    // Use the random byte
+}
+```
+
 ## Implementation Details
 
-### Feature Negotiation
+### Entropy Source Registration
 
-VirtIO RNG基本仕様にはデバイス固有の機能フラグがないため、標準VirtIO機能のみをサポートします。
+VirtIO RNGデバイスが検出されると、自動的にエントロピーソースとして登録されます:
 
-### Buffer Fill Process
+1. VirtIO デバイスプローブでRNGデバイスを検出
+2. `VirtioRngDevice`を作成・初期化
+3. `RandomManager::register_entropy_source()` で登録
+4. 最初のデバイスの場合、`/dev/random` CharDeviceも作成
 
-1. 内部バッファが空になったら `fill_buffer()` を呼び出し
-2. 256バイトのバッファをアロケート
-3. VirtQueue descriptorを設定（device-writable）
-4. デバイスに通知（`notify(0)`）
-5. ポーリングで完了を待機
-6. 受信したデータを内部バッファにコピー
+### Random Pool Management
+
+- 内部プールサイズ: 4096バイト
+- プールが空になると自動的にエントロピーソースから補充
+- 複数のエントロピーソースがある場合、利用可能な順に試行
 
 ### Thread Safety
 
-- `Mutex`を使用してvirtqueueと内部バッファへのアクセスを保護
-- `RwLock`で機能フラグを管理
-
-## Testing
-
-### Manual Testing
-
-1. QEMUでvirtio-rngデバイスを有効化
-2. カーネルを起動し、デバイスが検出されることを確認:
-   ```
-   [Virtio] Detected Virtio RNG Device at 0x... registering as random
-   [VirtIO RNG] Device initialized with features: 0x...
-   ```
-3. `/dev/random`が存在することを確認
-4. デバイスから読み取りテスト
+- `Mutex`を使用してエントロピーソースリストとプールへのアクセスを保護
+- スレッドセーフなAPI設計
 
 ## Future Enhancements
 
-- 非同期I/Oサポート
-- 統計情報の提供 (読み取りバイト数など)
-- エントロピープール管理の統合
-- `/dev/urandom`のサポート
+- 追加のエントロピーソース（ハードウェアRNG、タイマージッタ、割り込みタイミング）
+- エントロピープールの品質評価
+- 非ブロッキングモードのサポート
+- `/dev/urandom`の実装
+- エントロピー統計情報の提供
 
 ## References
 
 - [VirtIO Specification - Entropy Device](https://docs.oasis-open.org/virtio/virtio/v1.1/cs01/virtio-v1.1-cs01.html#x1-2920004)
 - Scarlet VirtIO Infrastructure: `kernel/src/drivers/virtio/`
+- Kernel RNG Subsystem: `kernel/src/random.rs`
 - Character Device Interface: `kernel/src/device/char/`

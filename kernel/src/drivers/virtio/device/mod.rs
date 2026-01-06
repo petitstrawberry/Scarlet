@@ -1044,19 +1044,23 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         }
         VirtioDeviceType::Rng => {
             let id = RNG_COUNTER.fetch_add(1, Ordering::SeqCst);
-            // Use "random" for the first device, "random1", "random2", etc. for subsequent ones
-            let name = if id == 0 {
-                format!("random")
-            } else {
-                format!("random{}", id)
-            };
             crate::early_println!(
-                "[Virtio] Detected Virtio RNG Device at {:#x}, registering as {}",
-                base_addr,
-                name
+                "[Virtio] Detected Virtio RNG Device at {:#x}",
+                base_addr
             );
-            let dev: Arc<dyn Device> = Arc::new(VirtioRngDevice::new(base_addr));
-            DeviceManager::get_mut_manager().register_device_with_name(name, dev);
+            
+            // Create and register the VirtIO RNG device as an entropy source
+            let rng_device = Arc::new(VirtioRngDevice::new(base_addr));
+            crate::random::RandomManager::register_entropy_source(rng_device);
+            
+            // Register the RandomCharDevice as /dev/random (only for the first RNG device)
+            if id == 0 {
+                let random_char_dev: Arc<dyn Device> = 
+                    Arc::new(crate::random::RandomCharDevice::new());
+                DeviceManager::get_mut_manager()
+                    .register_device_with_name(format!("random"), random_char_dev);
+                crate::early_println!("[Virtio] Registered /dev/random character device");
+            }
         }
         _ => {
             // Unsupported device type
