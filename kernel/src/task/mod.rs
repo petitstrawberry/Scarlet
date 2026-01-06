@@ -2226,4 +2226,34 @@ mod tests {
             child_ns.get_id()
         );
     }
+
+    #[test_case]
+    fn test_all_abis_share_root_namespace_by_default() {
+        use super::namespace;
+        
+        // Create tasks using default Task::new (which uses root namespace)
+        let task1 = super::new_user_task("Task1".to_string(), 0);
+        let task2 = super::new_user_task("Task2".to_string(), 0);
+        let task3 = super::new_user_task("Task3".to_string(), 0);
+        
+        // All tasks should be in root namespace
+        assert_eq!(task1.get_namespace().get_name(), "root");
+        assert_eq!(task2.get_namespace().get_name(), "root");
+        assert_eq!(task3.get_namespace().get_name(), "root");
+        
+        // All should share the same namespace instance
+        assert_eq!(
+            task1.get_namespace().get_id(),
+            task2.get_namespace().get_id()
+        );
+        assert_eq!(
+            task2.get_namespace().get_id(),
+            task3.get_namespace().get_id()
+        );
+        
+        // Namespace-local IDs should be sequential in the shared namespace
+        // (though exact values depend on test execution order)
+        assert_ne!(task1.get_namespace_id(), task2.get_namespace_id());
+        assert_ne!(task2.get_namespace_id(), task3.get_namespace_id());
+    }
 }

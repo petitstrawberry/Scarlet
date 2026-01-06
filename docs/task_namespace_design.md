@@ -2,23 +2,48 @@
 
 ## Overview
 
-The task ID namespace system allows different ABI modules (Linux, xv6, Scarlet, etc.) to maintain separate task ID numbering schemes while sharing the same kernel task management infrastructure. This enables proper support for ABI-specific process/thread models without conflicts.
+The task ID namespace system provides the infrastructure to optionally separate task ID numbering schemes for different contexts (e.g., containers, cgroups). By default, all tasks share the root namespace, enabling cross-ABI task visibility and collaboration - a key characteristic of Scarlet.
+
+## Default Behavior: Shared Namespace
+
+**By default, all ABI modules (Linux, xv6, Scarlet) use the root namespace.** This means:
+- Tasks from different ABIs can see and interact with each other
+- PIDs/TIDs are shared across the entire system
+- Task collaboration between different OS environments is seamless
+
+This design reflects Scarlet's philosophy: different task types should appear as "companions" rather than being isolated.
 
 ## Architecture
 
-### Namespace Hierarchy
+### Namespace Hierarchy (Default Configuration)
+
+```
+Root Namespace (id: 0) - Used by all ABIs by default
+├── Linux Task 1 (global_id: 1, namespace_id: 1)
+├── xv6 Task 2 (global_id: 2, namespace_id: 2)
+├── Scarlet Task 3 (global_id: 3, namespace_id: 3)
+├── Linux Task 4 (global_id: 4, namespace_id: 4)
+└── xv6 Task 5 (global_id: 5, namespace_id: 5)
+```
+
+### When to Use Separate Namespaces
+
+Separate namespaces should only be created explicitly when needed:
+- Container isolation
+- cgroups or similar resource management
+- Security boundaries requiring PID isolation
+- Testing different task hierarchies
+
+### Namespace Hierarchy (With Explicit Separation)
 
 ```
 Root Namespace (id: 0)
-├── Linux Namespace (created by LinuxRiscv64Abi)
+├── Container 1 Namespace (explicitly created)
 │   ├── Task 1 (global_id: 5, namespace_id: 1)
 │   └── Task 2 (global_id: 6, namespace_id: 2)
-├── xv6 Namespace (created by Xv6Riscv64Abi)
-│   ├── Task 3 (global_id: 7, namespace_id: 1)
-│   └── Task 4 (global_id: 8, namespace_id: 2)
-└── Direct tasks (ScarletAbi uses root namespace)
-    ├── Task 5 (global_id: 9, namespace_id: 3)
-    └── Task 6 (global_id: 10, namespace_id: 4)
+└── Container 2 Namespace (explicitly created)
+    ├── Task 3 (global_id: 7, namespace_id: 1)
+    └── Task 4 (global_id: 8, namespace_id: 2)
 ```
 
 ### Key Concepts
@@ -83,54 +108,84 @@ pub fn sys_fork(...) -> usize {
 
 ### Default Implementation
 
-The `AbiModule` trait provides a default implementation:
+All ABIs use the root namespace by default, enabling cross-ABI task visibility:
 
 ```rust
+// All ABIs share this default behavior
 fn get_task_namespace(&self) -> Arc<TaskNamespace> {
     get_root_namespace().clone()
 }
 ```
 
-### Custom Namespaces
-
-ABIs can create their own namespaces in their `Default` implementation:
+### Example: Default Shared Namespace
 
 ```rust
 impl Default for LinuxRiscv64Abi {
     fn default() -> Self {
-        let linux_namespace = TaskNamespace::new_child(
-            get_root_namespace().clone(),
-            "linux".to_string(),
-        );
+        // Use root namespace for cross-ABI task visibility
+        let namespace = get_root_namespace().clone();
         Self {
-            namespace: linux_namespace,
+            namespace,
             // ... other fields ...
         }
     }
 }
 ```
 
+### Creating Separate Namespaces (When Needed)
+
+For containers, cgroups, or explicit isolation:
+
+```rust
+// Create a separate namespace explicitly
+let container_namespace = TaskNamespace::new_child(
+    get_root_namespace().clone(),
+    "container_1".to_string(),
+);
+
+// Create task in isolated namespace
+let isolated_task = Task::new_with_namespace(
+    "isolated_task".to_string(),
+    0,
+    TaskType::User,
+    container_namespace,
+);
+```
+
 ## Benefits
 
-1. **ABI Isolation**: Each ABI can have its own PID space without conflicts
-2. **Compatibility**: Different ABIs can coexist with their own process models
-3. **Transparency**: User space applications see familiar PID/TID values
-4. **Flexibility**: New ABIs can easily define their own namespace strategy
+1. **Cross-ABI Collaboration**: Tasks from different ABIs can see and interact with each other by default - Scarlet's key characteristic
+2. **Unified PID Space**: All tasks share the same PID space, making inter-process communication natural
+3. **Optional Isolation**: Namespaces can be created explicitly when isolation is needed (containers, cgroups)
+4. **Flexibility**: Infrastructure supports both shared and isolated scenarios
 5. **Backward Compatibility**: Global IDs ensure kernel internals continue to work
 
 ## Design Decisions
+
+### Why Shared Namespace by Default?
+
+Scarlet's design philosophy is **collaboration between different OS environments**. By sharing the root namespace:
+1. Linux, xv6, and Scarlet tasks appear as "companions"
+2. Task visibility across ABIs is seamless
+3. Inter-ABI IPC and coordination is straightforward
+4. The system behaves more like a unified OS rather than isolated containers
+
+Separation is only applied when explicitly needed (e.g., containers, security boundaries).
 
 ### Why Two IDs?
 
 - **Global ID**: Required for scheduler, task lookup, and kernel-internal operations
 - **Namespace ID**: Required for ABI compatibility and user space expectations
 
-### Why Not Map Between Namespaces?
+### Why Not Always Separate Namespaces?
 
-The current design keeps namespaces independent. Cross-namespace task lookup is intentionally not provided because:
-1. Different ABIs have different process models
-2. Cross-ABI process management is undefined
-3. Simplifies implementation and reduces complexity
+With shared namespaces by default:
+1. Cross-ABI task visibility enables collaboration
+2. Task management is simpler (no namespace translation needed)
+3. IPC between different ABI tasks is straightforward
+4. Reflects Scarlet's design goal of unified multi-OS execution
+
+When isolation is needed (containers, security), explicit namespace creation provides that capability.
 
 ### Why Arc for Namespace?
 

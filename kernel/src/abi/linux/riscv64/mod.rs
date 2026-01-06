@@ -83,14 +83,12 @@ impl Default for LinuxRiscv64Abi {
         let mut free_fds: Vec<usize> = (0..MAX_FDS).collect();
         free_fds.reverse(); // Reverse so fd 0 is at the end and allocated first
         
-        // Create a Linux-specific namespace
-        let linux_namespace = crate::task::namespace::TaskNamespace::new_child(
-            crate::task::namespace::get_root_namespace().clone(),
-            "linux".to_string(),
-        );
+        // Use root namespace by default for cross-ABI task visibility
+        // Separate namespaces can be created explicitly when needed (e.g., containers, cgroups)
+        let namespace = crate::task::namespace::get_root_namespace().clone();
         
         Self {
-            namespace: linux_namespace,
+            namespace,
             fd_to_handle: vec![None; MAX_FDS],
             fd_flags: vec![0; MAX_FDS],
             file_status_flags: vec![0; MAX_FDS],
