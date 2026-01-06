@@ -46,6 +46,44 @@ mod abs_codes {
     pub const ABS_Y: u16 = 0x01;
 }
 
+/// Cursor bitmap - simple 0/1/2 format
+const CURSOR_WIDTH: usize = 16;
+const CURSOR_HEIGHT: usize = 24;
+
+/// Cursor color (white)
+const CURSOR_COLOR: [u8; 4] = [255, 255, 255, 255]; // BGRA
+/// Cursor border color (black)
+const CURSOR_BORDER: [u8; 4] = [0, 0, 0, 255]; // BGRA
+
+/// Arrow cursor bitmap (16x24 pixels)
+/// 0 = transparent (don't draw), 1 = white (CURSOR_COLOR), 2 = black border (CURSOR_BORDER)
+const CURSOR_BITMAP: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
+    [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 0, 0, 0, 0],
+    [2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 1, 2, 2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+    [2, 1, 2, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+    [2, 2, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0],
+];
+
 /// Simple cursor state
 struct Cursor {
     x: i32,
@@ -64,8 +102,8 @@ impl Cursor {
             y: 0,
             prev_x: 0,
             prev_y: 0,
-            width: 12,
-            height: 18,
+            width: CURSOR_WIDTH as u32,
+            height: CURSOR_HEIGHT as u32,
             needs_redraw: true,
         }
     }
@@ -98,30 +136,29 @@ impl Cursor {
         moved
     }
 
-    /// Draw an arrow cursor
+    /// Draw cursor from bitmap
     fn draw(&self, fb: &mut Framebuffer) {
-        let white = [255, 255, 255, 255];
-        let black = [0, 0, 0, 255];
         let cx = self.x as u32;
         let cy = self.y as u32;
-        
-        // Arrow pattern: width for each row
-        let pattern = [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,  // Expanding
-            9, 6, 6, 3, 3, 1,  // Contracting tail
-        ];
-        
-        for (y_offset, &width) in pattern.iter().enumerate() {
-            for dx in 0..width {
-                let px = cx.saturating_add(dx);
-                let py = cy.saturating_add(y_offset as u32);
-                
-                // Black border
-                if dx == 0 || dx == width - 1 {
-                    let _ = fb.write_pixel(px, py, black);
-                } else {
-                    let _ = fb.write_pixel(px, py, white);
+
+        for y in 0..CURSOR_HEIGHT {
+            for x in 0..CURSOR_WIDTH {
+                let pixel = CURSOR_BITMAP[y][x];
+                // Skip transparent pixels (0)
+                if pixel == 0 {
+                    continue;
                 }
+
+                let px = cx.saturating_add(x as u32);
+                let py = cy.saturating_add(y as u32);
+
+                let color = if pixel == 2 {
+                    CURSOR_BORDER
+                } else {
+                    CURSOR_COLOR
+                };
+
+                let _ = fb.write_pixel(px, py, color);
             }
         }
     }
@@ -130,17 +167,17 @@ impl Cursor {
     fn clear_prev(&self, fb: &mut Framebuffer, bg_color: [u8; 4]) {
         let cx = self.prev_x as u32;
         let cy = self.prev_y as u32;
-        
-        // Same pattern as draw
-        let pattern = [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-            9, 6, 6, 3, 3, 1,
-        ];
-        
-        for (y_offset, &width) in pattern.iter().enumerate() {
-            for dx in 0..width {
-                let px = cx.saturating_add(dx);
-                let py = cy.saturating_add(y_offset as u32);
+
+        for y in 0..CURSOR_HEIGHT {
+            for x in 0..CURSOR_WIDTH {
+                let pixel = CURSOR_BITMAP[y][x];
+                // Skip transparent pixels (0)
+                if pixel == 0 {
+                    continue;
+                }
+
+                let px = cx.saturating_add(x as u32);
+                let py = cy.saturating_add(y as u32);
                 let _ = fb.write_pixel(px, py, bg_color);
             }
         }
@@ -221,6 +258,10 @@ impl WindowServer {
         // Draw initial cursor
         self.cursor.draw(&mut self.framebuffer);
 
+        // Sync prev position with current position (important for first move)
+        self.cursor.prev_x = self.cursor.x;
+        self.cursor.prev_y = self.cursor.y;
+
         // Flush to display
         self.framebuffer
             .flush()
@@ -287,7 +328,8 @@ impl WindowServer {
                 abs_codes::ABS_X => {
                     println!("[WindowServer] ABS_X: {} (raw)", event.value);
                     // Scale tablet coordinates (0-32767) to screen width
-                    let screen_x = ((event.value as i64 * self.screen_width as i64) / self.tablet_max as i64) as i32;
+                    let screen_x = ((event.value as i64 * self.screen_width as i64)
+                        / self.tablet_max as i64) as i32;
                     println!("[WindowServer] Scaled X: {}", screen_x);
                     self.cursor.set_position(
                         screen_x,
@@ -299,7 +341,8 @@ impl WindowServer {
                 abs_codes::ABS_Y => {
                     println!("[WindowServer] ABS_Y: {} (raw)", event.value);
                     // Scale tablet coordinates (0-32767) to screen height
-                    let screen_y = ((event.value as i64 * self.screen_height as i64) / self.tablet_max as i64) as i32;
+                    let screen_y = ((event.value as i64 * self.screen_height as i64)
+                        / self.tablet_max as i64) as i32;
                     println!("[WindowServer] Scaled Y: {}", screen_y);
                     self.cursor.set_position(
                         self.cursor.x,
