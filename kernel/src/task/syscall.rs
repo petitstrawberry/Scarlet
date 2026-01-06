@@ -510,6 +510,9 @@ pub const NS_CREATE_VFS: usize = 0x02;   // Create separate VFS namespace
 pub const NS_CREATE_NET: usize = 0x04;   // Create separate network namespace (future)
 pub const NS_CREATE_IPC: usize = 0x08;   // Create separate IPC namespace (future)
 
+// Syscall error return value
+const SYSCALL_ERROR: usize = usize::MAX;
+
 /// Create a new namespace for the current task (Scarlet-style smart syscall)
 ///
 /// # Arguments
@@ -518,7 +521,7 @@ pub const NS_CREATE_IPC: usize = 0x08;   // Create separate IPC namespace (futur
 ///
 /// # Returns
 /// * `0` on success
-/// * `usize::MAX` (-1) on failure
+/// * `SYSCALL_ERROR` (-1) on failure
 ///
 /// # Example
 /// ```rust
@@ -544,7 +547,7 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
             Ok(s) => s,
             Err(_) => {
                 crate::early_println!("[syscall] Failed to parse namespace name");
-                return usize::MAX;
+                return SYSCALL_ERROR;
             }
         }
     };
