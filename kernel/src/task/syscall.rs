@@ -503,3 +503,88 @@ pub fn sys_unregister_abi_zone(trapframe: &mut Trapframe) -> usize {
         }
     }
 }
+
+// Namespace creation flags (bit flags for smart control)
+pub const NS_CREATE_TASK: usize = 0x01;  // Create separate task namespace
+pub const NS_CREATE_VFS: usize = 0x02;   // Create separate VFS namespace
+pub const NS_CREATE_NET: usize = 0x04;   // Create separate network namespace (future)
+pub const NS_CREATE_IPC: usize = 0x08;   // Create separate IPC namespace (future)
+
+/// Create a new namespace for the current task (Scarlet-style smart syscall)
+///
+/// # Arguments
+/// * `flags` - Bitfield specifying which namespaces to create (NS_CREATE_*)
+/// * `name_ptr` - Pointer to C string with namespace name (optional, can be null)
+///
+/// # Returns
+/// * `0` on success
+/// * `usize::MAX` (-1) on failure
+///
+/// # Example
+/// ```rust
+/// // Create separate task and VFS namespaces
+/// sys_create_namespace(NS_CREATE_TASK | NS_CREATE_VFS, "container1");
+/// ```
+pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
+    use crate::fs::VfsManager;
+    use crate::task::namespace::TaskNamespace;
+    use alloc::sync::Arc;
+    
+    let task = mytask().unwrap();
+    let flags = trapframe.get_arg(0);
+    let name_ptr = trapframe.get_arg(1);
+    
+    trapframe.increment_pc_next(task);
+    
+    // Parse namespace name (optional)
+    let name = if name_ptr == 0 {
+        alloc::format!("ns_{}", task.get_id())
+    } else {
+        match parse_c_string_from_userspace(task, name_ptr, 64) {
+            Ok(s) => s,
+            Err(_) => {
+                crate::early_println!("[syscall] Failed to parse namespace name");
+                return usize::MAX;
+            }
+        }
+    };
+    
+    crate::early_println!("[syscall] Creating namespace '{}' with flags={:#x}", name, flags);
+    
+    // Create task namespace if requested
+    if flags & NS_CREATE_TASK != 0 {
+        let new_task_ns = TaskNamespace::new_child(
+            task.get_namespace().clone(),
+            name.clone(),
+        );
+        task.set_namespace(new_task_ns);
+        crate::early_println!("[syscall] Created task namespace '{}'", name);
+    }
+    
+    // Create VFS namespace if requested
+    if flags & NS_CREATE_VFS != 0 {
+        // Create new isolated VFS manager
+        let new_vfs = Arc::new(VfsManager::new());
+        
+        // If task already has a VFS, copy its current working directory
+        if let Some(old_vfs) = &task.vfs {
+            let cwd_path = old_vfs.get_cwd_path();
+            let _ = new_vfs.set_cwd_by_path(&cwd_path);
+        }
+        
+        task.set_vfs(new_vfs);
+        crate::early_println!("[syscall] Created VFS namespace '{}'", name);
+    }
+    
+    // Future: Network namespace
+    if flags & NS_CREATE_NET != 0 {
+        crate::early_println!("[syscall] Network namespace not yet implemented");
+    }
+    
+    // Future: IPC namespace  
+    if flags & NS_CREATE_IPC != 0 {
+        crate::early_println!("[syscall] IPC namespace not yet implemented");
+    }
+    
+    0
+}

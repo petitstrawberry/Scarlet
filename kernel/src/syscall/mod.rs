@@ -27,6 +27,8 @@
 //! - Exit (1), Clone (2), Execve (3), ExecveABI (4), Waitpid (5)
 //! - Getpid (7), Getppid (8), Brk (12), Sbrk (13)
 //! - Basic I/O: Putchar (16), Getchar (17)
+//! - ABI Zone: RegisterAbiZone (90), UnregisterAbiZone (91)
+//! - Namespace: CreateNamespace (92) - Smart syscall for task/VFS isolation
 //!
 //! ### Handle Management (100-199)
 //! - HandleQuery (100), HandleSetRole (101), HandleClose (102), HandleDuplicate (103)
@@ -95,8 +97,9 @@ use crate::object::handle::syscall::{
     sys_handle_set_role,
 };
 use crate::task::syscall::{
-    sys_brk, sys_clone, sys_execve, sys_execve_abi, sys_exit, sys_getchar, sys_getpid, sys_getppid,
-    sys_putchar, sys_register_abi_zone, sys_sbrk, sys_sleep, sys_unregister_abi_zone, sys_waitpid,
+    sys_brk, sys_clone, sys_create_namespace, sys_execve, sys_execve_abi, sys_exit, sys_getchar,
+    sys_getpid, sys_getppid, sys_putchar, sys_register_abi_zone, sys_sbrk, sys_sleep,
+    sys_unregister_abi_zone, sys_waitpid,
 };
 
 #[macro_use]
@@ -146,6 +149,9 @@ syscall_table! {
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,
     UnregisterAbiZone = 91 => sys_unregister_abi_zone,
+    
+    // Namespace Management (Scarlet-style smart syscall)
+    CreateNamespace = 92 => sys_create_namespace,
 
     // === Handle Management ===
     HandleQuery = 100 => sys_handle_query,     // Query handle metadata/capabilities

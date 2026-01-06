@@ -19,6 +19,13 @@ pub enum Syscall {
 
     Sleep = 20,
 
+    // ABI Zone Management
+    RegisterAbiZone = 90,
+    UnregisterAbiZone = 91,
+    
+    // Namespace Management (Scarlet-style)
+    CreateNamespace = 92,
+
     // === Handle Management ===
     HandleQuery = 100,
     HandleSetRole = 101,
