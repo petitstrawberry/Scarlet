@@ -107,6 +107,7 @@ if [ "$DEBUG_MODE" = true ]; then
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
         -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
         -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
+        -device virtio-rng-device,bus=virtio-mmio-bus.8 \
         -netdev user,id=pci-net0 \
         -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF \
         -initrd "$INITRAMFS_PATH" \
@@ -137,6 +138,7 @@ else
         -device virtio-net-device,netdev=net2,mac=52:54:00:12:34:58,bus=virtio-mmio-bus.4 \
         -device virtio-keyboard-device,bus=virtio-mmio-bus.6 \
         -device virtio-mouse-device,bus=virtio-mmio-bus.7 \
+        -device virtio-rng-device,bus=virtio-mmio-bus.8 \
         -netdev user,id=pci-net0 \
         -device virtio-net-pci,netdev=pci-net0,mac=52:54:00:AB:CD:EF \
         -initrd "$INITRAMFS_PATH" \

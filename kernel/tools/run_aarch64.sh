@@ -129,6 +129,7 @@ qemu-system-aarch64 \
     -device virtio-net-device,netdev=net0 \
     -device virtio-keyboard-device \
     -device virtio-mouse-device \
+    -device virtio-rng-device \
     $QEMU_DEBUG_ARGS \
     $DEBUG_FLAGS | tee "$TEMP_OUTPUT"
 
