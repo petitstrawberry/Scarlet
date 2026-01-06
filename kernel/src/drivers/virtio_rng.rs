@@ -33,7 +33,7 @@ const RNG_BUFFER_SIZE: usize = 256;
 /// VirtIO RNG Device
 ///
 /// This device provides access to a hardware random number generator through
-/// the VirtIO interface.
+/// the VirtIO interface, acting as an entropy source for the kernel RNG.
 pub struct VirtioRngDevice {
     /// Base memory address for MMIO access
     base_addr: usize,
@@ -43,6 +43,8 @@ pub struct VirtioRngDevice {
     buffer: Mutex<VecDeque<u8>>,
     /// Negotiated features
     features: RwLock<u32>,
+    /// Device initialization status
+    initialized: RwLock<bool>,
 }
 
 impl VirtioRngDevice {
@@ -61,11 +63,15 @@ impl VirtioRngDevice {
             virtqueues: Mutex::new([VirtQueue::new(8)]), // Small queue is sufficient for RNG
             buffer: Mutex::new(VecDeque::with_capacity(RNG_BUFFER_SIZE)),
             features: RwLock::new(0),
+            initialized: RwLock::new(false),
         };
 
         // Initialize the device
         let negotiated_features = match device.init() {
-            Ok(features) => features,
+            Ok(features) => {
+                *device.initialized.write() = true;
+                features
+            }
             Err(e) => {
                 crate::early_println!("[VirtIO RNG] Failed to initialize: {}", e);
                 0
@@ -204,8 +210,8 @@ impl EntropySource for VirtioRngDevice {
     }
 
     fn is_available(&self) -> bool {
-        // VirtIO RNG device is always available once initialized
-        true
+        // Check if the device is properly initialized
+        *self.initialized.read()
     }
 }
 

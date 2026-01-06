@@ -6,7 +6,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use alloc::{boxed::Box, format, sync::Arc, vec};
+use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec};
 
 use crate::{
     arch::io_mb,
@@ -1058,7 +1058,7 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
                 let random_char_dev: Arc<dyn Device> = 
                     Arc::new(crate::random::RandomCharDevice::new());
                 DeviceManager::get_mut_manager()
-                    .register_device_with_name(format!("random"), random_char_dev);
+                    .register_device_with_name("random".to_string(), random_char_dev);
                 crate::early_println!("[Virtio] Registered /dev/random character device");
             }
         }

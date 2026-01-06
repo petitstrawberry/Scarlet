@@ -112,12 +112,20 @@ impl RandomManager {
             let bytes_read = source.read_entropy(&mut temp_buffer);
             if bytes_read > 0 {
                 let mut pool = self.pool.lock();
-                for i in 0..bytes_read {
-                    if pool.len() < RANDOM_POOL_SIZE {
-                        pool.push_back(temp_buffer[i]);
-                    }
+                let available_space = RANDOM_POOL_SIZE.saturating_sub(pool.len());
+                let bytes_to_add = bytes_read.min(available_space);
+                
+                if bytes_to_add < bytes_read {
+                    crate::early_println!(
+                        "[Random] Pool full, discarding {} entropy bytes",
+                        bytes_read - bytes_to_add
+                    );
                 }
-                total_bytes += bytes_read;
+                
+                for i in 0..bytes_to_add {
+                    pool.push_back(temp_buffer[i]);
+                }
+                total_bytes += bytes_to_add;
                 break; // Got data from one source, that's enough for now
             }
         }
@@ -140,28 +148,29 @@ impl RandomManager {
     /// Number of bytes actually written
     pub fn get_random_bytes(buffer: &mut [u8]) -> usize {
         let manager = Self::instance();
-        let mut pool = manager.pool.lock();
         let mut bytes_read = 0;
 
         for i in 0..buffer.len() {
+            // Try to get byte from pool
+            let mut pool = manager.pool.lock();
             if let Some(byte) = pool.pop_front() {
                 buffer[i] = byte;
                 bytes_read += 1;
             } else {
-                // Pool is empty, try to refill
+                // Pool is empty, try to refill while holding the lock
                 drop(pool);
                 if manager.fill_pool().is_err() {
                     // Can't get more entropy
                     return bytes_read;
                 }
+                // Try again after refill
                 pool = manager.pool.lock();
-                
-                // Try again with refilled pool
                 if let Some(byte) = pool.pop_front() {
                     buffer[i] = byte;
                     bytes_read += 1;
                 } else {
                     // Still empty, give up
+                    drop(pool);
                     return bytes_read;
                 }
             }
@@ -224,8 +233,10 @@ impl CharDevice for RandomCharDevice {
     }
 
     fn can_read(&self) -> bool {
-        // Always ready to provide random data
-        true
+        // Check if we have any entropy sources available
+        let manager = RandomManager::instance();
+        let sources = manager.sources.lock();
+        !sources.is_empty() && sources.iter().any(|s| s.is_available())
     }
 
     fn can_write(&self) -> bool {
