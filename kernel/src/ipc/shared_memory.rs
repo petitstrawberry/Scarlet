@@ -176,7 +176,12 @@ impl MemoryMappingOps for SharedMemory {
         }
 
         // Return physical address (base + offset), permissions, and shared flag
-        Ok((state.paddr + offset, state.permissions, true))
+        let paddr = state
+            .paddr
+            .checked_add(offset)
+            .ok_or("Physical address overflow in shared memory mapping")?;
+
+        Ok((paddr, state.permissions, true))
     }
 
     fn on_mapped(&self, _vaddr: usize, _paddr: usize, _length: usize, _offset: usize) {
