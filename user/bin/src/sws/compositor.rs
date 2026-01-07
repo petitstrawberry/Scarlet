@@ -20,6 +20,7 @@ pub struct Compositor {
     screen_height: u32,
     bg_color: [u8; 4],
     bytes_per_pixel: u32,
+    mmap_stride_bytes: u32,
     full_redraw_needed: bool,
     event_counter: u64,
 }
@@ -38,16 +39,52 @@ impl Compositor {
             .get_var_screen_info()
             .map_err(|_| "Failed to get screen info")?;
 
+        let fix_info = framebuffer
+            .get_fix_screen_info()
+            .map_err(|_| "Failed to get fixed screen info")?;
+
         let screen_width = var_info.xres;
         let screen_height = var_info.yres;
         let bytes_per_pixel = 4; // BGRA
 
-        println!("[Compositor] Screen: {}x{}", screen_width, screen_height);
+        // NOTE: Framebuffer scanlines may have padding. Use line_length for mmap stride.
+        let mmap_stride_bytes = fix_info.line_length;
 
-        // Try to get mmap info for direct VRAM access
-        let (vram_ptr, vram_size) = if let Some((addr, size)) = framebuffer.get_mapping_info() {
-            println!("[Compositor] Using mmap direct VRAM access at 0x{:x}", addr);
-            (Some(addr), size)
+        let expected_vram_size = (mmap_stride_bytes as usize).saturating_mul(screen_height as usize);
+
+        println!("[Compositor] Screen: {}x{}", screen_width, screen_height);
+        println!(
+            "[Compositor] Framebuffer: bpp={} line_length={} smem_len={}",
+            var_info.bits_per_pixel,
+            fix_info.line_length,
+            fix_info.smem_len
+        );
+
+        // Try to get mmap info for direct VRAM access.
+        // NOTE: If the mapping size is smaller than the expected screen size,
+        // direct writes may corrupt unrelated memory (e.g. window buffers).
+        let can_use_mmap = var_info.bits_per_pixel == 32
+            && mmap_stride_bytes >= screen_width.saturating_mul(bytes_per_pixel);
+
+        let (vram_ptr, vram_size) = if !can_use_mmap {
+            println!(
+                "[Compositor] Warning: unsupported framebuffer format for mmap fast-path (bpp={}, line_length={}, expected_line_bytes={}), using fallback I/O",
+                var_info.bits_per_pixel,
+                mmap_stride_bytes,
+                screen_width.saturating_mul(bytes_per_pixel)
+            );
+            (None, 0)
+        } else if let Some((addr, size)) = framebuffer.get_mapping_info() {
+            if size < expected_vram_size {
+                println!(
+                    "[Compositor] Warning: mmap VRAM size too small (got {} bytes, expected >= {}), using fallback I/O",
+                    size, expected_vram_size
+                );
+                (None, 0)
+            } else {
+                println!("[Compositor] Using mmap direct VRAM access at 0x{:x}", addr);
+                (Some(addr), expected_vram_size)
+            }
         } else {
             println!("[Compositor] Warning: mmap not available, using fallback I/O");
             (None, 0)
@@ -81,6 +118,7 @@ impl Compositor {
             screen_height,
             bg_color,
             bytes_per_pixel,
+            mmap_stride_bytes,
             full_redraw_needed: true,
             event_counter: 0,
         })
@@ -171,7 +209,7 @@ impl Compositor {
 
     /// Composite directly to VRAM (fastest method)
     fn composite_to_vram(&mut self, vram_addr: usize) -> Result<(), &'static str> {
-        let stride = self.screen_width * self.bytes_per_pixel;
+        let stride = self.mmap_stride_bytes;
 
         if self.full_redraw_needed {
             // Full screen redraw
