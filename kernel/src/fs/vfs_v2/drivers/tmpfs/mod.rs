@@ -760,13 +760,17 @@ impl TmpFileObject {
                 socket_ref: Some(socket),
             },
             None => {
-                // Socket not found in NetworkManager - this indicates a programming error
-                // where a socket file was created but the socket was not registered,
-                // or the socket was unregistered before the file was opened.
-                panic!(
-                    "Socket {} not found in NetworkManager. Socket must be registered before creating socket files.",
-                    info.socket_id
-                );
+                // Socket not found in NetworkManager. This can happen in legitimate
+                // scenarios (e.g. stale socket file after reboot or the socket being
+                // unregistered before the file is opened). We avoid panicking here and
+                // instead return a TmpFile without an associated socket so that later
+                // operations can fail gracefully with a FileSystemError.
+                Self {
+                    node,
+                    position: RwLock::new(0),
+                    device_guard: None,
+                    socket_ref: None,
+                }
             }
         }
     }
