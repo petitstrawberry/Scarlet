@@ -164,7 +164,14 @@ impl MemoryMappingOps for SharedMemory {
             return Err("Shared memory object is not valid");
         }
 
-        if offset + length > state.size {
+        let end = match offset.checked_add(length) {
+            Some(end) => end,
+            None => {
+                return Err("Mapping request exceeds shared memory size");
+            }
+        };
+
+        if end > state.size {
             return Err("Mapping request exceeds shared memory size");
         }
 
