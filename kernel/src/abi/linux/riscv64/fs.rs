@@ -142,7 +142,7 @@ impl LinuxStat {
             FileType::BlockDevice(_) => S_IFBLK,
             FileType::SymbolicLink(_) => S_IFLNK,
             FileType::Pipe => S_IFIFO,
-            FileType::Socket => S_IFSOCK,
+            FileType::Socket(_) => S_IFSOCK,
             FileType::Unknown => S_IFREG, // Default to regular file
         } | if metadata.permissions.read {
             S_IRUSR | S_IRGRP | S_IXGRP | S_IROTH

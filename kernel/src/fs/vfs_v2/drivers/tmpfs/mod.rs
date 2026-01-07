@@ -17,13 +17,14 @@ use core::{any::Any, fmt::Debug};
 use spin::{Mutex, rwlock::RwLock};
 
 use crate::device::manager::DeviceManager;
+use crate::network::NetworkManager;
 use crate::object::capability::{ControlOps, StreamError, StreamOps};
 use crate::{
     device::{Device, DeviceType},
     driver_initcall,
     fs::{
         DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemDriver,
-        FileSystemError, FileSystemErrorKind, FileType, get_fs_driver_manager,
+        FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo, get_fs_driver_manager,
     },
     object::capability::MemoryMappingOps,
 };
@@ -203,6 +204,9 @@ impl FileSystemOperations for TmpFS {
             FileType::CharDevice(info) | FileType::BlockDevice(info) => {
                 TmpFileObject::new_device(tmp_node, info)
             }
+            FileType::Socket(info) => {
+                TmpFileObject::new_socket(tmp_node, info)
+            }
             _ => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -261,11 +265,9 @@ impl FileSystemOperations for TmpFS {
                     file_id,
                 ))
             }
-            FileType::CharDevice(_) | FileType::BlockDevice(_) => Arc::new(TmpNode::new_device(
-                name.clone().to_string(),
-                file_type,
-                file_id,
-            )),
+            FileType::CharDevice(_) | FileType::BlockDevice(_) | FileType::Socket(_) => {
+                Arc::new(TmpNode::new_device(name.clone().to_string(), file_type, file_id))
+            }
             _ => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -696,6 +698,7 @@ impl VfsNode for TmpNode {
 /// TmpFileObject represents an open file or directory in TmpFS.
 ///
 /// It maintains the current file position and, for device files, an optional device guard.
+/// For socket files, it maintains a reference to the socket object.
 pub struct TmpFileObject {
     /// Reference to the TmpNode
     node: Arc<TmpNode>,
@@ -705,6 +708,9 @@ pub struct TmpFileObject {
 
     /// Optional device guard for device files
     device_guard: Option<Arc<dyn Device>>,
+
+    /// Optional socket reference for socket files
+    socket_ref: Option<Arc<dyn crate::network::SocketObject>>,
 }
 
 impl TmpFileObject {
@@ -714,6 +720,7 @@ impl TmpFileObject {
             node,
             position: RwLock::new(0),
             device_guard: None,
+            socket_ref: None,
         }
     }
 
@@ -723,6 +730,7 @@ impl TmpFileObject {
             node,
             position: RwLock::new(0),
             device_guard: None,
+            socket_ref: None,
         }
     }
 
@@ -734,10 +742,28 @@ impl TmpFileObject {
                 node,
                 position: RwLock::new(0),
                 device_guard: Some(device_guard),
+                socket_ref: None,
             },
             None => {
                 // If borrowing fails, return an error
                 panic!("Failed to borrow device {}", info.device_id);
+            }
+        }
+    }
+
+    /// Create a new file object for socket files
+    pub fn new_socket(node: Arc<TmpNode>, info: SocketFileInfo) -> Self {
+        // Try to get the socket from NetworkManager
+        match NetworkManager::get_manager().get_socket(info.socket_id) {
+            Some(socket) => Self {
+                node,
+                position: RwLock::new(0),
+                device_guard: None,
+                socket_ref: Some(socket),
+            },
+            None => {
+                // If socket not found, panic (similar to device behavior)
+                panic!("Failed to get socket {}", info.socket_id);
             }
         }
     }
@@ -932,6 +958,24 @@ impl TmpFileObject {
         *position += buffer.len() as u64;
         Ok(buffer.len())
     }
+
+    fn read_socket(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if let Some(ref socket) = self.socket_ref {
+            // Delegate read operation to the socket object
+            socket.read(buffer)
+        } else {
+            Err(StreamError::NotSupported)
+        }
+    }
+
+    fn write_socket(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        if let Some(ref socket) = self.socket_ref {
+            // Delegate write operation to the socket object
+            socket.write(buffer)
+        } else {
+            Err(StreamError::NotSupported)
+        }
+    }
 }
 
 impl StreamOps for TmpFileObject {
@@ -1021,6 +1065,9 @@ impl StreamOps for TmpFileObject {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 self.read_device(buffer).map_err(StreamError::from)
             }
+            FileType::Socket(_) => {
+                self.read_socket(buffer)
+            }
             _ => Err(StreamError::NotSupported),
         }
     }
@@ -1034,6 +1081,9 @@ impl StreamOps for TmpFileObject {
             ))),
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 self.write_device(buffer).map_err(StreamError::from)
+            }
+            FileType::Socket(_) => {
+                self.write_socket(buffer)
             }
             _ => Err(StreamError::NotSupported),
         }

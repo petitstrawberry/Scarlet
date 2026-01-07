@@ -425,6 +425,45 @@ impl NetworkManager {
         self.connections.read().get(&socket_id).cloned()
     }
 
+    /// Register a socket with a specific ID
+    ///
+    /// This method allows external systems (like VFS) to register socket objects
+    /// with specific IDs for filesystem integration.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket_id` - The unique socket identifier to use
+    /// * `socket` - The socket object to register
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Socket successfully registered
+    /// * `Err(SocketError::AddressInUse)` - Socket ID already in use
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // When creating a socket file in VFS
+    /// let socket = create_local_socket()?;
+    /// let socket_id = generate_unique_id();
+    /// NetworkManager::get_manager().register_socket_with_id(socket_id, socket)?;
+    /// ```
+    pub fn register_socket_with_id(
+        &self,
+        socket_id: SocketId,
+        socket: Arc<dyn SocketObject>,
+    ) -> Result<(), SocketError> {
+        let mut connections = self.connections.write();
+        
+        // Check if ID is already in use
+        if connections.contains_key(&socket_id) {
+            return Err(SocketError::AddressInUse);
+        }
+        
+        connections.insert(socket_id, socket);
+        Ok(())
+    }
+
     /// Remove a socket from the connections registry
     ///
     /// # Arguments

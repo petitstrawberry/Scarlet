@@ -12,7 +12,7 @@ use crate::{
     },
     drivers::block::virtio_blk::VirtioBlockDevice,
     early_println,
-    fs::{FileSystemError, FileSystemErrorKind, FileSystemType, FileType, get_fs_driver_manager},
+    fs::{FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SocketFileInfo, get_fs_driver_manager},
     object::capability::StreamOps,
 };
 use alloc::{format, string::ToString, sync::Arc, vec, vec::Vec};
@@ -1959,7 +1959,7 @@ fn test_ext2_device_file_creation() {
             let socket_node = match fs.create(
                 &root_node,
                 &"my_socket".to_string(),
-                FileType::Socket,
+                FileType::Socket(SocketFileInfo { socket_id: 0 }),
                 0o666,
             ) {
                 Ok(node) => node,
@@ -1970,7 +1970,7 @@ fn test_ext2_device_file_creation() {
 
             // Verify socket type
             match socket_node.file_type() {
-                Ok(FileType::Socket) => {
+                Ok(FileType::Socket(_)) => {
                     // Test passed successfully
                 }
                 Ok(other) => {
@@ -2008,7 +2008,7 @@ fn test_ext2_device_file_creation() {
                             }
                             "my_socket" => {
                                 socket_found = true;
-                                assert_eq!(entry.file_type, FileType::Socket);
+                                assert!(matches!(entry.file_type, FileType::Socket(_)));
                             }
                             _ => {}
                         }

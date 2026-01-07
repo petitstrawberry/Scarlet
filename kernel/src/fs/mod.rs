@@ -289,6 +289,33 @@ pub struct DeviceFileInfo {
     pub device_type: DeviceType,
 }
 
+/// Information about socket files in the filesystem
+///
+/// Scarlet uses socket IDs to uniquely identify socket objects in the NetworkManager.
+/// This allows socket files to be created in the filesystem and associated with
+/// actual socket objects for inter-process communication.
+///
+/// # Architecture
+///
+/// Similar to device files, socket files in Scarlet are identified by:
+/// - `socket_id`: A unique identifier within the NetworkManager's socket registry
+///
+/// This enables Unix domain socket-like functionality where sockets can be bound
+/// to filesystem paths for inter-process communication.
+///
+/// # Examples
+///
+/// ```rust
+/// // Socket file for IPC
+/// let socket_file = SocketFileInfo {
+///     socket_id: 42,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SocketFileInfo {
+    pub socket_id: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileType {
     RegularFile,
@@ -297,7 +324,7 @@ pub enum FileType {
     BlockDevice(DeviceFileInfo),
     Pipe,
     SymbolicLink(String),
-    Socket,
+    Socket(SocketFileInfo),
     Unknown,
 }
 
@@ -366,7 +393,7 @@ impl DirectoryEntry {
             FileType::CharDevice(_) => 3u8,
             FileType::BlockDevice(_) => 4u8,
             FileType::Pipe => 5u8,
-            FileType::Socket => 6u8,
+            FileType::Socket(_) => 6u8,
             FileType::Unknown => 7u8,
         };
 
