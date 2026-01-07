@@ -1,6 +1,6 @@
 //! SharedMemory KernelObject tests
 
-use crate::ipc::shared_memory::SharedMemory;
+use crate::ipc::shared_memory::{SharedMemory, SharedMemoryObject};
 use crate::object::KernelObject;
 use alloc::sync::Arc;
 
