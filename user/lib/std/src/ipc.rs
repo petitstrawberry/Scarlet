@@ -57,10 +57,13 @@ pub fn shared_memory_create(size: usize, permissions: usize) -> Option<SharedMem
 /// through a connected socket. This provides Unix-like SCM_RIGHTS functionality
 /// for passing file descriptors / handles between processes.
 ///
+/// Uses dup() semantics: the handle is duplicated, not moved. The original handle
+/// remains valid in the sender's task after the send operation completes.
+///
 /// # Arguments
 ///
 /// * `socket_handle` - Handle to the connected socket
-/// * `object_handle` - Handle to the kernel object to send (e.g., SharedMemoryHandle)
+/// * `object_handle` - Handle to the kernel object to send (remains valid after send)
 ///
 /// # Returns
 ///
@@ -74,10 +77,11 @@ pub fn shared_memory_create(size: usize, permissions: usize) -> Option<SharedMem
 /// // Create a shared memory object
 /// let shmem = shared_memory_create(4096, permissions::READ_WRITE).unwrap();
 ///
-/// // Send it through a connected socket
+/// // Send it through a connected socket (shmem remains valid after this)
 /// let socket = /* ... get connected socket handle ... */;
 /// if socket_send_handle(socket, shmem) {
 ///     println!("Successfully sent shared memory handle!");
+///     // shmem can still be used here
 /// }
 /// ```
 pub fn socket_send_handle(socket_handle: u32, object_handle: u32) -> bool {

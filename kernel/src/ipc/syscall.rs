@@ -423,10 +423,12 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
 ///
 /// Transfers a kernel object (like SharedMemoryObject) to another task
 /// through a connected socket, similar to Unix SCM_RIGHTS functionality.
+/// Uses dup() semantics - the handle is duplicated, not moved, so both
+/// sender and receiver will have independent references to the same object.
 ///
 /// Arguments:
 /// - socket_handle: Handle to the connected socket
-/// - object_handle: Handle to the kernel object to send
+/// - object_handle: Handle to the kernel object to send (remains valid after send)
 ///
 /// Returns:
 /// - 0 on success
@@ -455,8 +457,9 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Not a socket/stream IPC object
     };
 
-    // Get the kernel object to send
-    let object = match task.handle_table.get(object_handle) {
+    // Get the kernel object to send with dup semantics
+    // Use clone_for_dup() to properly increment reference counts for objects like Pipes
+    let object = match task.handle_table.clone_for_dup(object_handle) {
         Some(obj) => obj,
         None => return usize::MAX, // Invalid object handle
     };

@@ -63,9 +63,11 @@ pub trait StreamIpcOps: StreamOps {
     ///
     /// This enables passing kernel objects (like SharedMemoryObject) between tasks
     /// through a socket or pipe connection, similar to Unix SCM_RIGHTS functionality.
+    /// Uses dup() semantics - the object is duplicated with proper reference counting,
+    /// ensuring that objects like Pipes correctly track reader/writer counts.
     ///
     /// # Arguments
-    /// * `object` - The KernelObject to transfer to the peer
+    /// * `object` - The KernelObject to transfer to the peer (already duplicated)
     ///
     /// # Returns
     /// * `Ok(())` if the handle was queued successfully
