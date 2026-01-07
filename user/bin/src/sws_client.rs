@@ -45,7 +45,10 @@ fn main() -> i32 {
     // Read response
     println!("Waiting for WindowCreated response...");
     match protocol::read_window_created(&mut socket) {
-        Ok(protocol::WindowCreated { window_id, shm_size }) => {
+        Ok(protocol::WindowCreated {
+            window_id,
+            shm_size,
+        }) => {
             println!("Window created successfully!");
             println!("  Window ID: {}", window_id);
             println!("  Shared memory size: {} bytes", shm_size);

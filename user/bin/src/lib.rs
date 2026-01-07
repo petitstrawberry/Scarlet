@@ -6,4 +6,3 @@
 #![no_std]
 
 extern crate scarlet_std as std;
-

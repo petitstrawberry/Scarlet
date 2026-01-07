@@ -1,12 +1,12 @@
 //! IPC Server module - handles client connections and messages
 
-use sws_protocol as protocol;
-use sws_protocol::ClientMessageRef;
 use std::println;
 use std::socket::Socket;
 use std::sync::Mutex;
 use std::thread;
 use std::vec::Vec;
+use sws_protocol as protocol;
+use sws_protocol::ClientMessageRef;
 
 /// Global event queue for IPC events
 static EVENT_QUEUE: Mutex<Vec<IpcEvent>> = Mutex::new(Vec::new());
@@ -102,7 +102,10 @@ impl IpcServer {
     ) -> Result<(), &'static str> {
         // TODO: Implement client response mechanism
         // For now, just log
-        println!("[IpcServer] Would send message {:?} to client {}", message, _client_id);
+        println!(
+            "[IpcServer] Would send message {:?} to client {}",
+            message, _client_id
+        );
         Ok(())
     }
 }
@@ -207,7 +210,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] DestroyWindow request for window {}",
                     client_id, window_id
                 );
-                push_ipc_event(IpcEvent::DestroyWindow { client_id, window_id });
+                push_ipc_event(IpcEvent::DestroyWindow {
+                    client_id,
+                    window_id,
+                });
             }
             Ok(ClientMessageRef::UpdateBuffer {
                 window_id,

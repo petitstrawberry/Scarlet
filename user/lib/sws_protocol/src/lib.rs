@@ -130,7 +130,11 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<(u32, Vec<u8>), ProtocolErr
 }
 
 /// Write one framed message.
-pub fn write_frame<W: Write>(writer: &mut W, msg_type: u32, payload: &[u8]) -> Result<(), ProtocolError> {
+pub fn write_frame<W: Write>(
+    writer: &mut W,
+    msg_type: u32,
+    payload: &[u8],
+) -> Result<(), ProtocolError> {
     let header = MessageHeader {
         msg_type,
         payload_size: payload.len() as u32,
@@ -147,9 +151,17 @@ pub fn write_frame<W: Write>(writer: &mut W, msg_type: u32, payload: &[u8]) -> R
 /// Borrowed client->server messages (payload may be borrowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMessageRef<'a> {
-    CreateWindow { width: u32, height: u32 },
-    DestroyWindow { window_id: u32 },
-    SetWindowTitle { window_id: u32, title: &'a [u8] },
+    CreateWindow {
+        width: u32,
+        height: u32,
+    },
+    DestroyWindow {
+        window_id: u32,
+    },
+    SetWindowTitle {
+        window_id: u32,
+        title: &'a [u8],
+    },
     UpdateBuffer {
         window_id: u32,
         x: i32,
@@ -157,26 +169,42 @@ pub enum ClientMessageRef<'a> {
         width: u32,
         height: u32,
     },
-    RequestMoveWindow { window_id: u32 },
-    MoveWindow { window_id: u32, x: i32, y: i32 },
+    RequestMoveWindow {
+        window_id: u32,
+    },
+    MoveWindow {
+        window_id: u32,
+        x: i32,
+        y: i32,
+    },
 }
 
 /// Server->client messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerMessage {
-    WindowCreated { window_id: u32, shm_size: u64 },
-    WindowDestroyed { window_id: u32 },
+    WindowCreated {
+        window_id: u32,
+        shm_size: u64,
+    },
+    WindowDestroyed {
+        window_id: u32,
+    },
     InputEvent {
         time: u64,
         type_: u16,
         code: u16,
         value: i32,
     },
-    Error { code: u32 },
+    Error {
+        code: u32,
+    },
 }
 
 /// Parse a client->server message from `(msg_type, payload)`.
-pub fn parse_client_message<'a>(msg_type: u32, payload: &'a [u8]) -> Result<ClientMessageRef<'a>, ProtocolError> {
+pub fn parse_client_message<'a>(
+    msg_type: u32,
+    payload: &'a [u8],
+) -> Result<ClientMessageRef<'a>, ProtocolError> {
     match msg_type {
         client_msg::CREATE_WINDOW => {
             if payload.len() != 8 {
@@ -198,7 +226,8 @@ pub fn parse_client_message<'a>(msg_type: u32, payload: &'a [u8]) -> Result<Clie
                 return Err(ProtocolError::MalformedPayload);
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-            let title_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+            let title_len =
+                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
             if payload.len() != 8 + title_len {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -253,9 +282,19 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let shm_size = u64::from_le_bytes([
-                payload[4], payload[5], payload[6], payload[7], payload[8], payload[9], payload[10], payload[11],
+                payload[4],
+                payload[5],
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
             ]);
-            Ok(ServerMessage::WindowCreated { window_id, shm_size })
+            Ok(ServerMessage::WindowCreated {
+                window_id,
+                shm_size,
+            })
         }
         server_msg::WINDOW_DESTROYED => {
             if payload.len() != 4 {
@@ -269,7 +308,8 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 return Err(ProtocolError::MalformedPayload);
             }
             let time = u64::from_le_bytes([
-                payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6], payload[7],
+                payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+                payload[7],
             ]);
             let type_ = u16::from_le_bytes([payload[8], payload[9]]);
             let code = u16::from_le_bytes([payload[10], payload[11]]);
@@ -293,7 +333,11 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
 }
 
 /// Convenience: client->server CreateWindow.
-pub fn write_create_window<W: Write>(writer: &mut W, width: u32, height: u32) -> Result<(), ProtocolError> {
+pub fn write_create_window<W: Write>(
+    writer: &mut W,
+    width: u32,
+    height: u32,
+) -> Result<(), ProtocolError> {
     let mut payload = [0u8; 8];
     payload[0..4].copy_from_slice(&width.to_le_bytes());
     payload[4..8].copy_from_slice(&height.to_le_bytes());
@@ -313,7 +357,11 @@ pub struct WindowCreated {
 }
 
 /// Convenience: server->client WindowCreated.
-pub fn write_window_created<W: Write>(writer: &mut W, window_id: u32, shm_size: u64) -> Result<(), ProtocolError> {
+pub fn write_window_created<W: Write>(
+    writer: &mut W,
+    window_id: u32,
+    shm_size: u64,
+) -> Result<(), ProtocolError> {
     let mut payload = [0u8; 12];
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4..12].copy_from_slice(&shm_size.to_le_bytes());
@@ -324,7 +372,13 @@ pub fn write_window_created<W: Write>(writer: &mut W, window_id: u32, shm_size: 
 pub fn read_window_created<R: Read>(reader: &mut R) -> Result<WindowCreated, ProtocolError> {
     let (msg_type, payload) = read_frame(reader)?;
     match parse_server_message(msg_type, &payload)? {
-        ServerMessage::WindowCreated { window_id, shm_size } => Ok(WindowCreated { window_id, shm_size }),
+        ServerMessage::WindowCreated {
+            window_id,
+            shm_size,
+        } => Ok(WindowCreated {
+            window_id,
+            shm_size,
+        }),
         _ => Err(ProtocolError::UnknownMessageType),
     }
 }
