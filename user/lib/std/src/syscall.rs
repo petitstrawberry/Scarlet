@@ -61,6 +61,9 @@ pub enum Syscall {
 
     // === IPC Operations ===
     Pipe = 600, // Create pipe handles
+    
+    // Shared Memory
+    SharedMemoryCreate = 620, // Create shared memory region
 
     // === Memory Mapping Operations ===
     MemoryMap = 700,   // Memory map operation (mmap)

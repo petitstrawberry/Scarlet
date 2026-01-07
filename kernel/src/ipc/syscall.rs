@@ -9,12 +9,13 @@ use crate::{
         Event, EventContent, EventManager, EventPayload, EventPriority, ProcessControlType,
     },
     ipc::pipe::UnidirectionalPipe,
+    ipc::shared_memory::SharedMemory,
     library::std::string::parse_c_string_from_userspace,
     object::KernelObject,
     object::capability::EventSubscriber,
     task::mytask,
 };
-use alloc::string::ToString;
+use alloc::{string::ToString, sync::Arc};
 
 /// sys_pipe - Create a pipe pair
 ///
@@ -352,4 +353,68 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
+}
+
+/// sys_shared_memory_create - Create a shared memory object
+///
+/// Creates a shared memory region that can be mapped into multiple processes.
+///
+/// Arguments:
+/// - size: Size of the shared memory region in bytes
+/// - permissions: Access permissions (read/write/execute flags)
+///   - 0x1: Read permission
+///   - 0x2: Write permission
+///   - 0x4: Execute permission
+///
+/// Returns:
+/// - Handle to the shared memory object on success
+/// - usize::MAX on error
+pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let size = trapframe.get_arg(0);
+    let permissions = trapframe.get_arg(1);
+
+    // Increment PC to avoid infinite loop if creation fails
+    trapframe.increment_pc_next(task);
+
+    // Validate size (must be non-zero and reasonable)
+    if size == 0 || size > 1024 * 1024 * 1024 {
+        // Max 1GB
+        return usize::MAX;
+    }
+
+    // Create the shared memory object
+    let shmem = match SharedMemory::new(size, permissions) {
+        Ok(shmem) => shmem,
+        Err(_) => return usize::MAX,
+    };
+
+    // Wrap in KernelObject
+    let kernel_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
+
+    // Insert into handle table with IPC metadata
+    use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
+
+    let metadata = HandleMetadata {
+        handle_type: HandleType::IpcChannel,
+        access_mode: if permissions & 0x3 == 0x3 {
+            AccessMode::ReadWrite
+        } else if permissions & 0x2 != 0 {
+            AccessMode::WriteOnly
+        } else {
+            AccessMode::ReadOnly
+        },
+        special_semantics: None,
+    };
+
+    let handle = match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
+        Ok(handle) => handle,
+        Err(_) => return usize::MAX, // Too many open handles
+    };
+
+    handle as usize
 }

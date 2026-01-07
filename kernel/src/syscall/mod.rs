@@ -48,6 +48,7 @@
 //! ### IPC Operations (600-699)
 //! - Pipe (600)
 //! - Event Channels: Subscribe (610), Unsubscribe (611), Publish (612)
+//! - Shared Memory: Create (620)
 //! - Process Groups: Join (620), Leave (621), Send (622)
 //!
 //! ### Memory Mapping Operations (700-799)
@@ -83,7 +84,7 @@ use crate::fs::vfs_v2::syscall::{
 };
 use crate::ipc::syscall::{
     sys_event_channel_create, sys_event_handler_register, sys_event_publish, sys_event_send_direct,
-    sys_event_subscribe, sys_event_unsubscribe, sys_pipe,
+    sys_event_subscribe, sys_event_unsubscribe, sys_pipe, sys_shared_memory_create,
 };
 use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_connect, sys_socket_create, sys_socket_listen,
@@ -197,6 +198,9 @@ syscall_table! {
     EventPublish = 613 => sys_event_publish,                   // Publish event to channel (ABI use)
     EventHandlerRegister = 614 => sys_event_handler_register,  // Register event filter (ABI use)
     EventSendDirect = 615 => sys_event_send_direct,            // Send direct event to task (ABI use)
+
+    // Shared Memory
+    SharedMemoryCreate = 620 => sys_shared_memory_create,      // Create shared memory region
 
 
     // === Memory Mapping Operations ===
