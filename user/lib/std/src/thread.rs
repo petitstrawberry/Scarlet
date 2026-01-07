@@ -1,4 +1,4 @@
-use crate::syscall::{Syscall, syscall1};
+use crate::syscall::{Syscall, syscall1, syscall2};
 use crate::task::{CloneFlags, CloneFlagsDef};
 use core::time::Duration;
 
@@ -63,9 +63,20 @@ where
     F: FnOnce() + Send + 'static,
 {
     use crate::boxed::Box;
+    use crate::vec::Vec;
 
     // Allocate closure on heap
     let closure_ptr = Box::into_raw(Box::new(f)) as usize;
+
+    // Allocate thread stack (2MB)
+    const STACK_SIZE: usize = 2 * 1024 * 1024;
+    let mut stack = Vec::<u8>::with_capacity(STACK_SIZE);
+    unsafe { stack.set_len(STACK_SIZE); }
+    let stack_ptr = stack.as_mut_ptr();
+    let stack_top = unsafe { stack_ptr.add(STACK_SIZE) } as usize;
+    
+    // Leak stack (child thread will use it, freed on thread exit)
+    core::mem::forget(stack);
 
     // Set up clone flags for thread creation (share VM, FS, Files)
     let mut flags = CloneFlags::new();
@@ -73,12 +84,13 @@ where
     flags.set(CloneFlagsDef::Fs);
     flags.set(CloneFlagsDef::Files);
 
-    let result = syscall1(Syscall::Clone, flags.get_raw() as usize);
+    let result = syscall2(Syscall::Clone, flags.get_raw() as usize, stack_top);
 
     if result == usize::MAX {
         // Failed to create thread
         unsafe {
             let _ = Box::from_raw(closure_ptr as *mut F);
+            // TODO: free stack
         }
         return Err("Failed to create thread");
     }
