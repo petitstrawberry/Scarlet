@@ -111,7 +111,8 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     parent_task.vcpu.store(trapframe);
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
     let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
-    let child_arg = trapframe.get_arg(2);   // Third argument: argument to pass to child (for thread start function)
+    let child_fn = trapframe.get_arg(2);    // Third argument: function pointer (trampoline)
+    let child_arg = trapframe.get_arg(3);   // Fourth argument: argument to pass to function (closure pointer)
 
     // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
 
@@ -130,7 +131,12 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
                 child_task.vcpu.set_sp(child_stack);
             }
             
-            // If child_arg is provided, set it as first argument (a0/x0)
+            // If child_fn is provided, set it as PC (thread entry point)
+            if child_fn != 0 {
+                child_task.vcpu.set_pc(child_fn as u64);
+            }
+            
+            // If child_arg is provided, pass it as first argument (a0/x0)
             if child_arg != 0 {
                 child_task.vcpu.iregs.set_arg(0, child_arg);
             }
