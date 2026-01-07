@@ -180,7 +180,8 @@ fn test_task_handle_table_clone_behavior() {
 
     assert_eq!(parent_task.handle_table.open_count(), 2);
 
-    // Clone the task (this should deep_clone the handle table by default since CLONE_FILES is set)
+    // Clone the task with default flags (CLONE_FILES is set by default)
+    // Since CLONE_FILES is set, the handle table is shared (shallow clone)
     let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
     // With CLONE_FILES, child shares handle table with parent
