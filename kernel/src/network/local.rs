@@ -102,6 +102,10 @@ pub struct LocalSocket {
 
     /// Waker for blocking read() operations
     read_waker: Waker,
+
+    /// Queue of handles (KernelObjects) received from peer
+    /// This allows passing file descriptors / kernel objects between tasks
+    handle_queue: RwLock<VecDeque<KernelObject>>,
 }
 
 impl LocalSocket {
@@ -138,6 +142,7 @@ impl LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_queue: RwLock::new(VecDeque::new()),
         }
     }
 
@@ -214,6 +219,7 @@ impl LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_queue: RwLock::new(VecDeque::new()),
         });
 
         // Create peer socket (client side)
@@ -231,6 +237,7 @@ impl LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_queue: RwLock::new(VecDeque::new()),
         });
 
         // Set peer references
@@ -389,6 +396,38 @@ impl StreamIpcOps for LocalSocket {
         let peer = self.peer_addr.read();
         format!("LocalSocket[{:?} -> {:?}]", local.as_ref(), peer.as_ref())
     }
+
+    fn send_handle(&self, object: KernelObject) -> Result<(), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            return Err(IpcError::InvalidState);
+        }
+
+        // Get peer socket reference
+        let peer_weak = self.peer_socket.read();
+        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
+        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+
+        // Add handle to peer's receive queue
+        peer.handle_queue.write().push_back(object);
+
+        Ok(())
+    }
+
+    fn recv_handle(&self) -> Result<KernelObject, crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            return Err(IpcError::InvalidState);
+        }
+
+        // Try to get a handle from the queue
+        let mut queue = self.handle_queue.write();
+        queue.pop_front().ok_or(IpcError::ChannelEmpty)
+    }
 }
 
 impl SocketControl for LocalSocket {
@@ -493,6 +532,7 @@ impl SocketControl for LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_queue: RwLock::new(VecDeque::new()),
         });
 
         // Update self (client socket) to use the shared buffers

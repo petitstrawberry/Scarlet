@@ -418,3 +418,100 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
 
     handle as usize
 }
+
+/// sys_socket_send_handle - Send a kernel object handle through a socket
+///
+/// Transfers a kernel object (like SharedMemoryObject) to another task
+/// through a connected socket, similar to Unix SCM_RIGHTS functionality.
+///
+/// Arguments:
+/// - socket_handle: Handle to the connected socket
+/// - object_handle: Handle to the kernel object to send
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let socket_handle = trapframe.get_arg(0) as u32;
+    let object_handle = trapframe.get_arg(1) as u32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Get the socket object
+    let socket_obj = match task.handle_table.get(socket_handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid socket handle
+    };
+
+    // Get StreamIpcOps capability (sockets implement this)
+    let stream_ipc = match socket_obj.as_stream_ipc() {
+        Some(ipc) => ipc,
+        None => return usize::MAX, // Not a socket/stream IPC object
+    };
+
+    // Get the kernel object to send
+    let object = match task.handle_table.get(object_handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid object handle
+    };
+
+    // Send the handle through the socket
+    match stream_ipc.send_handle(object) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// sys_socket_recv_handle - Receive a kernel object handle from a socket
+///
+/// Receives a kernel object that was sent by a peer task through a
+/// connected socket.
+///
+/// Arguments:
+/// - socket_handle: Handle to the connected socket
+///
+/// Returns:
+/// - Handle to the received kernel object on success
+/// - usize::MAX on error (no handle available or other error)
+pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let socket_handle = trapframe.get_arg(0) as u32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Get the socket object
+    let socket_obj = match task.handle_table.get(socket_handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid socket handle
+    };
+
+    // Get StreamIpcOps capability
+    let stream_ipc = match socket_obj.as_stream_ipc() {
+        Some(ipc) => ipc,
+        None => return usize::MAX, // Not a socket/stream IPC object
+    };
+
+    // Receive a handle from the socket
+    let object = match stream_ipc.recv_handle() {
+        Ok(obj) => obj,
+        Err(_) => return usize::MAX, // No handle available or error
+    };
+
+    // Insert the received object into this task's handle table
+    match task.handle_table.insert(object) {
+        Ok(handle) => handle as usize,
+        Err(_) => usize::MAX, // Too many open handles
+    }
+}
+

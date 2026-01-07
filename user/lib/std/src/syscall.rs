@@ -65,6 +65,10 @@ pub enum Syscall {
     // Shared Memory
     SharedMemoryCreate = 620, // Create shared memory region
 
+    // Socket Handle Transfer (similar to SCM_RIGHTS)
+    SocketSendHandle = 630, // Send kernel object handle through socket
+    SocketRecvHandle = 631, // Receive kernel object handle from socket
+
     // === Memory Mapping Operations ===
     MemoryMap = 700,   // Memory map operation (mmap)
     MemoryUnmap = 701, // Memory unmap operation (munmap)
