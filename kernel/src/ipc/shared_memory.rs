@@ -212,8 +212,13 @@ impl MemoryMappingOps for SharedMemory {
         }
 
         let offset_in_mapping = page_vaddr - map.vmarea.start;
+        let paddr_page_base = map
+            .pmarea
+            .start
+            .checked_add(offset_in_mapping)
+            .ok_or(ResolveFaultError::Invalid)?;
         Ok(ResolveFaultResult {
-            paddr_page_base: map.pmarea.start + offset_in_mapping,
+            paddr_page_base,
             is_tail: false,
         })
     }
