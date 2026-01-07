@@ -172,11 +172,30 @@ impl HandleTable {
         inner.handles[handle as usize].as_ref().map(f)
     }
 
-    /// O(1) access - returns a clone of the KernelObject if it exists
+    /// O(1) access - returns an Arc-level clone of the KernelObject if it exists
     ///
-    /// This method returns a cloned copy of the KernelObject (which uses Arc internally,
-    /// so this is efficient). Use this when you need to hold onto the object.
+    /// This method returns an Arc-level clone of the KernelObject. Unlike the Clone
+    /// trait which may have side effects (e.g., incrementing Pipe reader/writer counts),
+    /// this performs a simple Arc reference count increment without modifying object state.
+    ///
+    /// For cases where you need dup() semantics (creating a new logical file descriptor
+    /// with proper reference counting), use `clone_for_dup()` instead.
     pub fn get(&self, handle: Handle) -> Option<KernelObject> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return None;
+        }
+        let inner = self.inner.read();
+        inner.handles[handle as usize]
+            .as_ref()
+            .map(|obj| obj.arc_clone())
+    }
+
+    /// O(1) access - returns a full clone with dup() semantics
+    ///
+    /// This method uses the KernelObject's Clone trait which may invoke custom_clone()
+    /// for objects like Pipes. This is appropriate when duplicating a file descriptor
+    /// (dup/dup2 syscalls) where the new descriptor should be tracked separately.
+    pub fn clone_for_dup(&self, handle: Handle) -> Option<KernelObject> {
         if handle as usize >= Self::MAX_HANDLES {
             return None;
         }
