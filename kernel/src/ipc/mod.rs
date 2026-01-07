@@ -8,7 +8,7 @@
 //!   - Subscription: Channel-based pub/sub
 //!   - Group: Broadcast delivery
 //! - Message Queues: Structured message passing (future)
-//! - Shared Memory: Memory-based communication (future)
+//! - Shared Memory: Memory-based communication
 //! - Sockets: Network and local communication endpoints (future)
 
 use crate::object::capability::{StreamError, StreamOps};
@@ -16,6 +16,7 @@ use alloc::string::String;
 
 pub mod event;
 pub mod pipe;
+pub mod shared_memory;
 pub mod syscall;
 
 /// Represents errors specific to IPC operations
@@ -81,11 +82,6 @@ pub trait MessageQueueObject: StreamIpcOps {
     // Message-based communication methods will be defined here
 }
 
-/// Shared memory operations (future implementation)
-pub trait SharedMemoryObject: StreamIpcOps {
-    // Shared memory methods will be defined here
-}
-
 /// Socket operations (future implementation)
 pub trait SocketObject: StreamIpcOps {
     // Socket-specific methods will be defined here
@@ -96,3 +92,4 @@ pub use event::{
     Event, EventContent, EventDelivery, EventError, EventManager, EventPayload, GroupTarget,
 };
 pub use pipe::{PipeEndpoint, PipeError, PipeObject, UnidirectionalPipe};
+pub use shared_memory::{SharedMemory, SharedMemoryObject};

@@ -11,6 +11,7 @@ use crate::fs::FileObject;
 use crate::ipc::StreamIpcOps;
 use crate::ipc::event::{EventChannelObject, EventSubscriptionObject};
 use crate::ipc::pipe::PipeObject;
+use crate::ipc::shared_memory::SharedMemoryObject;
 use alloc::sync::Arc;
 use capability::{CloneOps, ControlOps, MemoryMappingOps, Selectable, StreamOps};
 
@@ -28,9 +29,9 @@ pub enum KernelObject {
     EventSubscription(Arc<EventSubscriptionObject>),
     #[cfg(feature = "network")]
     Socket(Arc<dyn SocketObject>),
+    SharedMemory(Arc<dyn SharedMemoryObject>),
     // Future variants will be added here:
     // MessageQueue(Arc<dyn MessageQueueObject>),
-    // SharedMemory(Arc<dyn SharedMemoryObject>),
     // CharDevice(Arc<dyn CharDevice>),
 }
 
@@ -61,6 +62,11 @@ impl KernelObject {
         KernelObject::Socket(socket)
     }
 
+    /// Create a KernelObject from a SharedMemoryObject
+    pub fn from_shared_memory_object(shared_memory: Arc<dyn SharedMemoryObject>) -> Self {
+        KernelObject::SharedMemory(shared_memory)
+    }
+
     /// Try to get StreamOps capability
     pub fn as_stream(&self) -> Option<&dyn StreamOps> {
         match self {
@@ -86,6 +92,10 @@ impl KernelObject {
             }
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide stream operations
+                None
+            }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide stream operations
                 None
             }
         }
@@ -117,6 +127,10 @@ impl KernelObject {
                 // Event subscriptions don't provide stream IPC operations
                 None
             }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide stream IPC operations
+                None
+            }
         }
     }
 
@@ -143,6 +157,10 @@ impl KernelObject {
             }
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide file operations
+                None
+            }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide file operations
                 None
             }
         }
@@ -172,6 +190,10 @@ impl KernelObject {
                 // Event subscriptions don't provide pipe operations
                 None
             }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide pipe operations
+                None
+            }
         }
     }
 
@@ -182,6 +204,17 @@ impl KernelObject {
             KernelObject::Socket(socket) => {
                 let socket_ops: &dyn SocketObject = socket.as_ref();
                 Some(socket_ops)
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to get SharedMemoryObject that provides shared memory operations
+    pub fn as_shared_memory(&self) -> Option<&dyn SharedMemoryObject> {
+        match self {
+            KernelObject::SharedMemory(shared_memory) => {
+                let shmem_ops: &dyn SharedMemoryObject = shared_memory.as_ref();
+                Some(shmem_ops)
             }
             _ => None,
         }
@@ -214,6 +247,10 @@ impl KernelObject {
                 let cloneable: &dyn CloneOps = event_subscription.as_ref();
                 Some(cloneable)
             }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't implement CloneOps, use Arc::clone directly
+                None
+            }
         }
     }
 
@@ -240,6 +277,10 @@ impl KernelObject {
             }
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide control operations
+                None
+            }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory doesn't provide control operations
                 None
             }
         }
@@ -270,6 +311,11 @@ impl KernelObject {
                 // Event subscriptions don't provide memory mapping operations
                 None
             }
+            KernelObject::SharedMemory(shared_memory) => {
+                // SharedMemory implements MemoryMappingOps
+                let memory_mapping_ops: &dyn MemoryMappingOps = shared_memory.as_ref();
+                Some(memory_mapping_ops)
+            }
         }
     }
 
@@ -298,6 +344,12 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => {
                 // Event subscriptions don't provide memory mapping operations
                 None
+            }
+            KernelObject::SharedMemory(shared_memory) => {
+                // Create weak reference from the Arc<dyn SharedMemoryObject>
+                // SharedMemoryObject implements MemoryMappingOps
+                let weak_shmem = Arc::downgrade(shared_memory);
+                Some(weak_shmem)
             }
         }
     }
@@ -337,6 +389,7 @@ impl KernelObject {
             KernelObject::Socket(socket) => socket.as_selectable(),
             KernelObject::EventChannel(_) => None,
             KernelObject::EventSubscription(_) => None,
+            KernelObject::SharedMemory(_) => None,
         }
     }
 }
@@ -358,6 +411,9 @@ impl Clone for KernelObject {
                 }
                 KernelObject::EventSubscription(event_subscription) => {
                     KernelObject::EventSubscription(Arc::clone(event_subscription))
+                }
+                KernelObject::SharedMemory(shared_memory) => {
+                    KernelObject::SharedMemory(Arc::clone(shared_memory))
                 }
             }
         }
