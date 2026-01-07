@@ -1,7 +1,7 @@
 //! IPC Server module - handles client connections and messages
 
-use userprogram::sws_protocol as protocol;
-use userprogram::sws_protocol::ClientMessageRef;
+use sws_protocol as protocol;
+use sws_protocol::ClientMessageRef;
 use std::println;
 use std::socket::Socket;
 use std::sync::Mutex;

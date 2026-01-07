@@ -5,9 +5,7 @@
 
 extern crate scarlet_std as std;
 
-extern crate userprogram;
-
-use userprogram::sws_protocol as protocol;
+use sws_protocol as protocol;
 
 use std::println;
 use std::socket::Socket;

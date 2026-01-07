@@ -78,3 +78,4 @@ path = "src/container_demo.rs"
 [dependencies]
 scarlet_std = { path = "../lib/std" }
 framebuffer = { path = "../lib/framebuffer" }
+sws_protocol = { path = "../lib/sws_protocol" }

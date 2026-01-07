@@ -1,6 +1,6 @@
 //! Scarlet Window Server (SWS) IPC protocol.
 //!
-//! This module is the single source of truth for both the SWS server (`sws`)
+//! This crate is the single source of truth for both the SWS server (`sws`)
 //! and clients (`sws_client`) for message IDs, framing, and parsing.
 //!
 //! Wire format
@@ -12,6 +12,8 @@
 //! - Payload (`payload_size` bytes)
 //!
 //! See `docs/sws_ipc_protocol.md` for the detailed specification.
+
+#![no_std]
 
 extern crate scarlet_std as std;
 
