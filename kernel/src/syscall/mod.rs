@@ -49,7 +49,7 @@
 //! - Pipe (600)
 //! - Event Channels: Subscribe (610), Unsubscribe (611), Publish (612)
 //! - Shared Memory: Create (620)
-//! - Process Groups: Join (620), Leave (621), Send (622)
+//! - Process Groups: not yet implemented
 //!
 //! ### Memory Mapping Operations (700-799)
 //! - MemoryMap (700), MemoryUnmap (701)
