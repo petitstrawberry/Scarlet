@@ -111,6 +111,10 @@ pub struct NetworkManager {
     /// Active socket connections by ID
     connections: RwLock<BTreeMap<SocketId, Arc<dyn SocketObject>>>,
 
+    /// Reverse mapping: socket pointer address -> socket ID for O(1) lookups
+    /// This is maintained alongside connections for efficient get_socket_id()
+    socket_to_id: RwLock<BTreeMap<usize, SocketId>>,
+
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
 }
@@ -124,6 +128,7 @@ impl NetworkManager {
             protocol_layers: RwLock::new(BTreeMap::new()),
             named_sockets: RwLock::new(BTreeMap::new()),
             connections: RwLock::new(BTreeMap::new()),
+            socket_to_id: RwLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
         }
     }
@@ -460,7 +465,16 @@ impl NetworkManager {
             return Err(SocketError::AddressInUse);
         }
 
+        // Get the socket pointer address for reverse mapping
+        let socket_ptr = Arc::as_ptr(&socket) as *const () as usize;
+
+        // Insert into both mappings
         connections.insert(socket_id, socket);
+        drop(connections);
+
+        // Update reverse mapping
+        self.socket_to_id.write().insert(socket_ptr, socket_id);
+
         Ok(())
     }
 
@@ -470,7 +484,17 @@ impl NetworkManager {
     ///
     /// * `socket_id` - The unique socket identifier to remove
     pub fn remove_socket(&self, socket_id: SocketId) {
-        self.connections.write().remove(&socket_id);
+        let mut connections = self.connections.write();
+
+        // Get the socket to find its pointer address before removal
+        if let Some(socket) = connections.get(&socket_id) {
+            let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+            drop(connections);
+
+            // Remove from both mappings
+            self.connections.write().remove(&socket_id);
+            self.socket_to_id.write().remove(&socket_ptr);
+        }
     }
 
     /// Allocate a new socket ID and register the socket
@@ -552,7 +576,8 @@ impl NetworkManager {
 
     /// Get the socket ID for a given socket object
     ///
-    /// Searches through registered connections to find the ID for a socket object.
+    /// Searches the socket registry to find the ID for a socket object.
+    /// This is now an O(1) operation using a reverse mapping.
     ///
     /// # Arguments
     ///
@@ -562,13 +587,8 @@ impl NetworkManager {
     ///
     /// The socket ID if found, None otherwise
     pub fn get_socket_id(&self, socket: &Arc<dyn SocketObject>) -> Option<SocketId> {
-        let connections = self.connections.read();
-        for (id, registered_socket) in connections.iter() {
-            if Arc::ptr_eq(registered_socket, socket) {
-                return Some(*id);
-            }
-        }
-        None
+        let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+        self.socket_to_id.read().get(&socket_ptr).copied()
     }
 
     /// Get the count of active connections

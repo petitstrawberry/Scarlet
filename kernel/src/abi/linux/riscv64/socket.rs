@@ -207,7 +207,9 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
             None => return usize::MAX, // Socket not found in NetworkManager
         };
 
-        // Create socket file in VFS
+        // Create socket file in VFS on a best-effort basis
+        // The socket has already been successfully bound, so VFS file creation
+        // is optional - the socket remains functional even if this fails
         let vfs = match &task.vfs {
             Some(vfs) => vfs.clone(),
             None => {
@@ -218,10 +220,14 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
         let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
 
-        // Create the socket file in VFS on a best-effort basis.
-        // If this fails, we still report success, since the socket has
-        // already been successfully bound and registered with NetworkManager.
-        let _ = vfs.create_file(path, socket_file_type);
+        // Attempt to create the socket file - log on failure but don't fail the bind
+        if let Err(e) = vfs.create_file(path, socket_file_type) {
+            crate::early_println!(
+                "[sys_bind] Warning: Failed to create VFS socket file at '{}': {:?}",
+                path,
+                e
+            );
+        }
 
         0 // Success
     }

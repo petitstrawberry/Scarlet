@@ -1962,7 +1962,9 @@ fn test_ext2_device_file_creation() {
             let socket_node = match fs.create(
                 &root_node,
                 &"my_socket".to_string(),
-                FileType::Socket(SocketFileInfo { socket_id: 0 }),
+                FileType::Socket(SocketFileInfo {
+                    socket_id: crate::fs::UNBOUND_SOCKET_ID,
+                }),
                 0o666,
             ) {
                 Ok(node) => node,
