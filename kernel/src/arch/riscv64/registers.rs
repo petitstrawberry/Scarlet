@@ -24,4 +24,20 @@ impl IntRegisters {
         // RISC-V syscall return value: a0 (x10)
         self.reg[10] = value;
     }
+
+    pub fn set_arg(&mut self, index: usize, value: usize) {
+        // RISC-V syscall arguments: a0-a7 (x10-x17)
+        if index < 8 {
+            self.reg[index + 10] = value;
+        }
+    }
+
+    pub fn get_arg(&self, index: usize) -> usize {
+        // RISC-V syscall arguments: a0-a7 (x10-x17)
+        if index < 8 {
+            self.reg[index + 10]
+        } else {
+            0
+        }
+    }
 }
