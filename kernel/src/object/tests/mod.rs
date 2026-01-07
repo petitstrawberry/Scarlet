@@ -6,3 +6,4 @@
 
 mod kernel_object;
 mod mock;
+mod shared_memory;

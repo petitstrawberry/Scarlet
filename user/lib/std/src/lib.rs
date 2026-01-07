@@ -76,6 +76,7 @@ pub mod ffi;
 pub mod fs;
 pub mod handle;
 pub mod io;
+pub mod ipc;
 pub mod socket;
 pub mod syscall;
 pub mod task;

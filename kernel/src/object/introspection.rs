@@ -35,6 +35,8 @@ pub enum KernelObjectType {
     BlockDevice = 6,
     /// Socket (future)
     Socket = 7,
+    /// Shared memory for IPC
+    SharedMemory = 8,
     /// Unknown or unsupported type
     Unknown = 0,
 }
@@ -135,6 +137,23 @@ impl KernelObjectInfo {
             },
             handle_role,
             access_mode: Self::encode_access_mode(true, false), // Subscription is read-only
+        }
+    }
+
+    /// Create info for a SharedMemory KernelObject
+    pub fn for_shared_memory(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::SharedMemory,
+            capabilities: ObjectCapabilities {
+                stream_ops: false, // Shared memory doesn't support stream operations
+                file_ops: false,
+                pipe_ops: false,
+                event_ops: false,
+                clone_ops: false, // Uses Arc::clone directly
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
         }
     }
 
