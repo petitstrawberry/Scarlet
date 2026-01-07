@@ -80,9 +80,6 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         };
     }
 
-    // Create a LocalSocket for AF_UNIX
-    let socket = Arc::new(LocalSocket::new(scarlet_type, SocketProtocol::Default));
-
     // Create socket through NetworkManager (which assigns ID automatically)
     let socket_obj = match NetworkManager::get_manager().create_socket(
         scarlet_domain,
