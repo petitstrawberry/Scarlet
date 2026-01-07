@@ -39,16 +39,19 @@ struct SharedMemoryState {
     valid: bool,
     /// Number of active mappings
     mapping_count: usize,
+    /// Whether this object owns the physical memory (should free on drop)
+    owns_memory: bool,
 }
 
 impl SharedMemoryState {
-    fn new(paddr: usize, size: usize, permissions: usize) -> Self {
+    fn new(paddr: usize, size: usize, permissions: usize, owns_memory: bool) -> Self {
         Self {
             paddr,
             size,
             permissions,
             valid: true,
             mapping_count: 0,
+            owns_memory,
         }
     }
 }
@@ -86,9 +89,12 @@ impl SharedMemory {
 
         // Allocate physical memory for the shared region
         let pages = allocate_raw_pages(num_pages);
+        if pages.is_null() {
+            return Err("Failed to allocate physical memory for shared memory");
+        }
         let paddr = pages as usize;
 
-        let state = SharedMemoryState::new(paddr, aligned_size, permissions);
+        let state = SharedMemoryState::new(paddr, aligned_size, permissions, true);
         let id = format!("shmem_{:#x}", paddr);
 
         Ok(Self {
@@ -110,8 +116,10 @@ impl SharedMemory {
     /// # Safety
     /// The caller must ensure that the physical address is valid and the size is correct.
     /// The physical memory must remain valid for the lifetime of this object.
+    /// This object will NOT free the memory on drop - the caller is responsible for
+    /// managing the memory lifetime.
     pub unsafe fn from_paddr(paddr: usize, size: usize, permissions: usize) -> Self {
-        let state = SharedMemoryState::new(paddr, size, permissions);
+        let state = SharedMemoryState::new(paddr, size, permissions, false);
         let id = format!("shmem_{:#x}", paddr);
 
         Self {
@@ -223,10 +231,12 @@ impl Drop for SharedMemory {
             // Warning: SharedMemory dropped with active mappings
         }
 
-        // Free the physical pages
-        let num_pages = (state.size + PAGE_SIZE - 1) / PAGE_SIZE;
-        let pages_ptr = state.paddr as *mut crate::mem::page::Page;
-        free_raw_pages(pages_ptr, num_pages);
+        // Only free the physical pages if this object owns them
+        if state.owns_memory {
+            let num_pages = (state.size + PAGE_SIZE - 1) / PAGE_SIZE;
+            let pages_ptr = state.paddr as *mut crate::mem::page::Page;
+            free_raw_pages(pages_ptr, num_pages);
+        }
     }
 }
 
