@@ -219,9 +219,8 @@ impl Drop for SharedMemory {
         let state = self.state.read();
         if state.mapping_count > 0 {
             // Note: In a real implementation, we should ensure all mappings are
-            // unmapped before freeing the physical memory. For now, we just log
-            // a warning.
-            crate::debug!("Warning: SharedMemory dropped with active mappings");
+            // unmapped before freeing the physical memory.
+            // Warning: SharedMemory dropped with active mappings
         }
 
         // Free the physical pages

@@ -97,6 +97,10 @@ impl HandleTable {
                 // Event subscriptions are used for receiving events
                 HandleType::EventSubscription
             }
+            KernelObject::SharedMemory(_) => {
+                // Shared memory is used for IPC and data sharing
+                HandleType::IpcChannel
+            }
         };
 
         HandleMetadata {
@@ -233,6 +237,9 @@ impl HandleTable {
                 ),
                 KernelObject::EventSubscription(_) => Some(
                     introspection::KernelObjectInfo::for_event_subscription(handle_role),
+                ),
+                KernelObject::SharedMemory(_) => Some(
+                    introspection::KernelObjectInfo::for_pipe(handle_role, readable, writable),
                 ),
             }
         } else {
