@@ -95,7 +95,7 @@ impl RandomManager {
     /// Fill the internal pool with entropy from available sources
     fn fill_pool(&self) -> Result<usize, &'static str> {
         let sources = self.sources.lock();
-        
+
         if sources.is_empty() {
             return Err("No entropy sources available");
         }
@@ -114,14 +114,14 @@ impl RandomManager {
                 let mut pool = self.pool.lock();
                 let available_space = RANDOM_POOL_SIZE.saturating_sub(pool.len());
                 let bytes_to_add = bytes_read.min(available_space);
-                
+
                 if bytes_to_add < bytes_read {
                     crate::early_println!(
                         "[Random] Pool full, discarding {} entropy bytes",
                         bytes_read - bytes_to_add
                     );
                 }
-                
+
                 for i in 0..bytes_to_add {
                     pool.push_back(temp_buffer[i]);
                 }

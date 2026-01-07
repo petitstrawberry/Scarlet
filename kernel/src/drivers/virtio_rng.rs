@@ -81,7 +81,10 @@ impl VirtioRngDevice {
         // Store negotiated features
         *device.features.write() = negotiated_features;
 
-        crate::early_println!("[VirtIO RNG] Device initialized with features: 0x{:x}", negotiated_features);
+        crate::early_println!(
+            "[VirtIO RNG] Device initialized with features: 0x{:x}",
+            negotiated_features
+        );
 
         device
     }
@@ -108,9 +111,7 @@ impl VirtioRngDevice {
             .ok_or("Failed to translate data vaddr")?;
 
         // Allocate descriptor for the data buffer (device writable)
-        let desc_idx = queue
-            .alloc_desc()
-            .ok_or("No available descriptors")?;
+        let desc_idx = queue.alloc_desc().ok_or("No available descriptors")?;
 
         // Set up the descriptor
         queue.desc[desc_idx].addr = data_phys as u64;
@@ -196,7 +197,7 @@ impl EntropySource for VirtioRngDevice {
 
     fn read_entropy(&self, buffer: &mut [u8]) -> usize {
         let mut bytes_read = 0;
-        
+
         for i in 0..buffer.len() {
             if let Some(byte) = self.read_byte_internal() {
                 buffer[i] = byte;
@@ -205,7 +206,7 @@ impl EntropySource for VirtioRngDevice {
                 break;
             }
         }
-        
+
         bytes_read
     }
 
