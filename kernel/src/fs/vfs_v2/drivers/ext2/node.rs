@@ -14,7 +14,7 @@ use crate::{
     DeviceManager,
     fs::{
         DeviceFileInfo, FileMetadata, FileObject, FilePermission, FileSystemError,
-        FileSystemErrorKind, FileType, SocketFileInfo, SeekFrom,
+        FileSystemErrorKind, FileType, SeekFrom, SocketFileInfo,
     },
     object::capability::{ControlOps, MemoryMappingOps, StreamError, StreamOps},
 };
@@ -714,8 +714,10 @@ impl Ext2DirectoryObject {
                         device_type: crate::device::DeviceType::Block,
                     })
                 }
-                5 => FileType::Pipe,   // EXT2_FT_FIFO
-                6 => FileType::Socket(SocketFileInfo { socket_id: crate::fs::UNBOUND_SOCKET_ID }), // EXT2_FT_SOCK - Socket ID will be bound at runtime
+                5 => FileType::Pipe, // EXT2_FT_FIFO
+                6 => FileType::Socket(SocketFileInfo {
+                    socket_id: crate::fs::UNBOUND_SOCKET_ID,
+                }), // EXT2_FT_SOCK - Socket ID will be bound at runtime
                 7 => {
                     // EXT2_FT_SYMLINK - Symbolic link
                     // Read the actual symlink target from the inode using the new method

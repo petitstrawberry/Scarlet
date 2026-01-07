@@ -204,9 +204,7 @@ impl FileSystemOperations for TmpFS {
             FileType::CharDevice(info) | FileType::BlockDevice(info) => {
                 TmpFileObject::new_device(tmp_node, info)
             }
-            FileType::Socket(info) => {
-                TmpFileObject::new_socket(tmp_node, info)
-            }
+            FileType::Socket(info) => TmpFileObject::new_socket(tmp_node, info),
             _ => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -265,9 +263,9 @@ impl FileSystemOperations for TmpFS {
                     file_id,
                 ))
             }
-            FileType::CharDevice(_) | FileType::BlockDevice(_) | FileType::Socket(_) => {
-                Arc::new(TmpNode::new_device(name.clone().to_string(), file_type, file_id))
-            }
+            FileType::CharDevice(_) | FileType::BlockDevice(_) | FileType::Socket(_) => Arc::new(
+                TmpNode::new_device(name.clone().to_string(), file_type, file_id),
+            ),
             _ => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -765,7 +763,10 @@ impl TmpFileObject {
                 // Socket not found in NetworkManager - this indicates a programming error
                 // where a socket file was created but the socket was not registered,
                 // or the socket was unregistered before the file was opened.
-                panic!("Socket {} not found in NetworkManager. Socket must be registered before creating socket files.", info.socket_id);
+                panic!(
+                    "Socket {} not found in NetworkManager. Socket must be registered before creating socket files.",
+                    info.socket_id
+                );
             }
         }
     }
@@ -1067,9 +1068,7 @@ impl StreamOps for TmpFileObject {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 self.read_device(buffer).map_err(StreamError::from)
             }
-            FileType::Socket(_) => {
-                self.read_socket(buffer)
-            }
+            FileType::Socket(_) => self.read_socket(buffer),
             _ => Err(StreamError::NotSupported),
         }
     }
@@ -1084,9 +1083,7 @@ impl StreamOps for TmpFileObject {
             FileType::CharDevice(_) | FileType::BlockDevice(_) => {
                 self.write_device(buffer).map_err(StreamError::from)
             }
-            FileType::Socket(_) => {
-                self.write_socket(buffer)
-            }
+            FileType::Socket(_) => self.write_socket(buffer),
             _ => Err(StreamError::NotSupported),
         }
     }

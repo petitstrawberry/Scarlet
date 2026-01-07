@@ -81,9 +81,9 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
     ));
 
     // Register socket with NetworkManager to get a socket ID for VFS integration
-    let socket_id = match NetworkManager::get_manager().allocate_socket_id(
-        socket.clone() as Arc<dyn SocketObject>
-    ) {
+    let socket_id = match NetworkManager::get_manager()
+        .allocate_socket_id(socket.clone() as Arc<dyn SocketObject>)
+    {
         Ok(id) => id,
         Err(_) => return usize::MAX,
     };
@@ -210,7 +210,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     };
 
     let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
-    
+
     // Attempt to create the socket file in VFS
     // This may fail if:
     // - Parent directory doesn't exist

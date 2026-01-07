@@ -800,7 +800,7 @@ mod tests {
     #[test_case]
     fn test_socket_file_creation() {
         use crate::fs::SocketFileInfo;
-        use crate::network::{NetworkManager, local::LocalSocket, SocketType, SocketProtocol};
+        use crate::network::{NetworkManager, SocketProtocol, SocketType, local::LocalSocket};
         use alloc::sync::Arc;
 
         // Initialize network manager
@@ -819,7 +819,10 @@ mod tests {
         // Register socket with network manager
         let socket_id = 1001; // Use a specific socket ID
         network_manager
-            .register_socket_with_id(socket_id, socket.clone() as Arc<dyn crate::network::SocketObject>)
+            .register_socket_with_id(
+                socket_id,
+                socket.clone() as Arc<dyn crate::network::SocketObject>,
+            )
             .unwrap();
 
         // Create socket file in VFS
@@ -830,7 +833,7 @@ mod tests {
         // Verify socket file exists and has correct type
         let (socket_entry, _) = vfs.resolve_path("/my_socket.sock").unwrap();
         let socket_node = socket_entry.node();
-        
+
         match socket_node.file_type().unwrap() {
             FileType::Socket(info) => {
                 assert_eq!(info.socket_id, socket_id);
@@ -840,7 +843,7 @@ mod tests {
 
         // Open the socket file
         let socket_file = vfs.open("/my_socket.sock", 0x02).unwrap(); // Write mode
-        
+
         // Verify it's a file object
         assert!(matches!(socket_file, crate::object::KernelObject::File(_)));
 

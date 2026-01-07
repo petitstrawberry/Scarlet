@@ -39,8 +39,8 @@ use crate::{
     device::block::BlockDevice,
     driver_initcall,
     fs::{
-        FileObject, FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo, get_fs_driver_manager,
-        params::FileSystemParams,
+        FileObject, FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo,
+        get_fs_driver_manager, params::FileSystemParams,
     },
     profile_scope,
     task::mytask,
@@ -3006,7 +3006,9 @@ impl Ext2FileSystem {
                 }
             }
             EXT2_S_IFIFO => Ok(FileType::Pipe),
-            EXT2_S_IFSOCK => Ok(FileType::Socket(SocketFileInfo { socket_id: crate::fs::UNBOUND_SOCKET_ID })), // Socket ID will be bound at runtime
+            EXT2_S_IFSOCK => Ok(FileType::Socket(SocketFileInfo {
+                socket_id: crate::fs::UNBOUND_SOCKET_ID,
+            })), // Socket ID will be bound at runtime
             _ => Ok(FileType::Unknown),
         }
     }

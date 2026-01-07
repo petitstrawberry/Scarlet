@@ -12,7 +12,10 @@ use crate::{
     },
     drivers::block::virtio_blk::VirtioBlockDevice,
     early_println,
-    fs::{FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SocketFileInfo, get_fs_driver_manager},
+    fs::{
+        FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SocketFileInfo,
+        get_fs_driver_manager,
+    },
     object::capability::StreamOps,
 };
 use alloc::{format, string::ToString, sync::Arc, vec, vec::Vec};

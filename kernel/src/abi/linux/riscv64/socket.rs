@@ -1,12 +1,12 @@
-use alloc::sync::Arc;
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi, 
+    abi::linux::riscv64::LinuxRiscv64Abi,
     arch::Trapframe,
     ipc::pipe::UnidirectionalPipe,
     network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
     object::KernelObject,
     task::mytask,
 };
+use alloc::sync::Arc;
 
 /// Linux socket domains
 pub const AF_UNIX: i32 = 1; // Unix domain sockets
@@ -82,7 +82,7 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 
     // Create a LocalSocket for AF_UNIX
     let socket = Arc::new(LocalSocket::new(scarlet_type, SocketProtocol::Default));
-    
+
     // Create socket through NetworkManager (which assigns ID automatically)
     let socket_obj = match NetworkManager::get_manager().create_socket(
         scarlet_domain,
@@ -167,7 +167,7 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
     unsafe {
         let sa_family = *(addr_paddr as *const u16);
-        
+
         // Only support AF_UNIX for now
         if sa_family != AF_UNIX as u16 {
             return usize::MAX;
@@ -176,7 +176,7 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         // Read the socket path (starts at offset 2)
         let path_start = (addr_paddr + 2) as *const u8;
         let max_path_len = (addrlen - 2) as usize;
-        
+
         // Find the null terminator or max length
         let mut path_len = 0;
         while path_len < max_path_len && *path_start.add(path_len) != 0 {
@@ -220,7 +220,7 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
         };
 
         let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
-        
+
         // Create the socket file
         if let Err(_) = vfs.create_file(path, socket_file_type) {
             return usize::MAX;

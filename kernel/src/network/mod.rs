@@ -454,12 +454,12 @@ impl NetworkManager {
         socket: Arc<dyn SocketObject>,
     ) -> Result<(), SocketError> {
         let mut connections = self.connections.write();
-        
+
         // Check if ID is already in use
         if connections.contains_key(&socket_id) {
             return Err(SocketError::AddressInUse);
         }
-        
+
         connections.insert(socket_id, socket);
         Ok(())
     }
@@ -492,7 +492,10 @@ impl NetworkManager {
     /// let socket = Arc::new(LocalSocket::new(SocketType::Stream, SocketProtocol::Default));
     /// let socket_id = NetworkManager::get_manager().allocate_socket_id(socket)?;
     /// ```
-    pub fn allocate_socket_id(&self, socket: Arc<dyn SocketObject>) -> Result<SocketId, SocketError> {
+    pub fn allocate_socket_id(
+        &self,
+        socket: Arc<dyn SocketObject>,
+    ) -> Result<SocketId, SocketError> {
         let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
         self.register_socket_with_id(socket_id, socket)?;
         Ok(socket_id)
