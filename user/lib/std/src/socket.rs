@@ -318,9 +318,23 @@ pub enum SocketType {
     Stream = 1,
 }
 
+/// Helper macro to perform an operation on a raw socket handle without closing it
+macro_rules! with_socket {
+    ($handle:expr, $op:expr) => {{
+        let socket = unsafe { Socket::from_raw_handle($handle) };
+        let result = $op(&socket);
+        core::mem::forget(socket); // Prevent Drop from closing
+        result
+    }};
+}
+
 /// Create a new socket (C-style wrapper)
 pub fn socket_create(domain: SocketDomain, socket_type: SocketType, _protocol: u32) -> Option<u32> {
-    let _ = (domain, socket_type); // Currently only support Local/Stream
+    // Currently only Local/Stream is supported
+    if domain != SocketDomain::Local || socket_type != SocketType::Stream {
+        return None;
+    }
+    
     Socket::new().ok().map(|s| {
         let handle = s.as_raw_handle();
         core::mem::forget(s); // Prevent Drop from closing
@@ -330,33 +344,21 @@ pub fn socket_create(domain: SocketDomain, socket_type: SocketType, _protocol: u
 
 /// Bind socket to a path (C-style wrapper)
 pub fn socket_bind(handle: u32, path: &str) -> bool {
-    let socket = unsafe { Socket::from_raw_handle(handle) };
-    let result = socket.bind(path).is_ok();
-    core::mem::forget(socket); // Prevent Drop from closing
-    result
+    with_socket!(handle, |s: &Socket| s.bind(path).is_ok())
 }
 
 /// Start listening (C-style wrapper)
 pub fn socket_listen(handle: u32, backlog: usize) -> bool {
-    let socket = unsafe { Socket::from_raw_handle(handle) };
-    let result = socket.listen(backlog).is_ok();
-    core::mem::forget(socket); // Prevent Drop from closing
-    result
+    with_socket!(handle, |s: &Socket| s.listen(backlog).is_ok())
 }
 
 /// Connect to a socket (C-style wrapper)
 pub fn socket_connect(handle: u32, path: &str) -> bool {
-    let socket = unsafe { Socket::from_raw_handle(handle) };
-    let result = socket.connect(path).is_ok();
-    core::mem::forget(socket); // Prevent Drop from closing
-    result
+    with_socket!(handle, |s: &Socket| s.connect(path).is_ok())
 }
 
 /// Shutdown socket (C-style wrapper)
 pub fn socket_shutdown(handle: u32) -> bool {
-    let socket = unsafe { Socket::from_raw_handle(handle) };
-    let result = socket.shutdown(ShutdownHow::Both).is_ok();
-    core::mem::forget(socket); // Prevent Drop from closing
-    result
+    with_socket!(handle, |s: &Socket| s.shutdown(ShutdownHow::Both).is_ok())
 }
 

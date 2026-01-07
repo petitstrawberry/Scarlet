@@ -755,7 +755,7 @@ mod tests {
             LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
 
         // Create a shared memory object to transfer
-        let shmem = match SharedMemory::new(4096, 0x3) {
+        let shmem = match SharedMemory::new(4096, 0x3) { // READ | WRITE
             Ok(shmem) => shmem,
             Err(_) => {
                 crate::println!("SharedMemory::new failed, skipping test");
@@ -821,7 +821,7 @@ mod tests {
         let sock = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
 
         // Try to send handle on disconnected socket
-        if let Ok(shmem) = SharedMemory::new(4096, 0x3) {
+        if let Ok(shmem) = SharedMemory::new(4096, 0x3) { // READ | WRITE
             let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
             let result = sock.send_handle(shmem_obj);
             assert!(result.is_err(), "send_handle should fail on disconnected socket");

@@ -25,7 +25,9 @@ fn close_handle(handle: u32) {
 
 /// Simple sleep function (not available in API, so we busy-wait)
 fn simple_sleep(ms: usize) {
-    for _ in 0..(ms * 10000) {
+    // Approximate busy-wait: 10000 iterations ≈ 1ms on typical hardware
+    const ITERATIONS_PER_MS: usize = 10000;
+    for _ in 0..(ms * ITERATIONS_PER_MS) {
         core::hint::spin_loop();
     }
 }
@@ -34,6 +36,12 @@ fn simple_sleep(ms: usize) {
 pub fn _start() -> ! {
     println!("=== Socket Handle Transfer Demo ===");
     println!("Demonstrating SharedMemory transfer between processes\n");
+
+    // Shared memory layout constants
+    const MESSAGE_OFFSET: usize = 0;  // Parent's message starts at offset 0
+    const MESSAGE_MAX_LEN: usize = 50; // Maximum message length
+    const RESPONSE_OFFSET: usize = 60; // Child's response starts at offset 60
+    const RESPONSE_MAX_LEN: usize = 40; // Maximum response length
 
     // Create a local socket for IPC
     let server_path = "/tmp/handle_transfer_demo.sock";
@@ -84,7 +92,7 @@ pub fn _start() -> ! {
                         unsafe {
                             let ptr = addr as *const u8;
                             print!("[Child] Message from parent: \"");
-                            for i in 0..50 {
+                            for i in MESSAGE_OFFSET..MESSAGE_MAX_LEN {
                                 let c = *ptr.add(i) as char;
                                 if c == '\0' {
                                     break;
@@ -97,9 +105,9 @@ pub fn _start() -> ! {
                             let response = b"Hello from child!";
                             let ptr_mut = addr as *mut u8;
                             for (i, &byte) in response.iter().enumerate() {
-                                *ptr_mut.add(60 + i) = byte;
+                                *ptr_mut.add(RESPONSE_OFFSET + i) = byte;
                             }
-                            *ptr_mut.add(60 + response.len()) = 0; // Null terminator
+                            *ptr_mut.add(RESPONSE_OFFSET + response.len()) = 0; // Null terminator
                         }
 
                         println!("[Child] Wrote response to shared memory");
@@ -216,7 +224,7 @@ pub fn _start() -> ! {
                 unsafe {
                     let ptr = addr as *const u8;
                     print!("[Parent] Response from child: \"");
-                    for i in 60..100 {
+                    for i in RESPONSE_OFFSET..(RESPONSE_OFFSET + RESPONSE_MAX_LEN) {
                         let c = *ptr.add(i) as char;
                         if c == '\0' {
                             break;
