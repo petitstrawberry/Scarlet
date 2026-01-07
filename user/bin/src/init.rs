@@ -69,6 +69,18 @@ fn setup_new_root() -> bool {
         }
     }
 
+    // Create /tmp in the new root and mount tmpfs there for volatile storage
+    match create_directory("/mnt/newroot/tmp") {
+        Ok(_) => println!("init: Created /tmp in new root"),
+        Err(_) => println!("init: Warning: /tmp may already exist in new root"),
+    }
+
+    // Try mounting tmpfs on the new /tmp. Non-fatal if it fails.
+    match mount("tmpfs", "/mnt/newroot/tmp", "tmpfs", 0, Some("size=16M")) {
+        Ok(_) => println!("init: tmpfs mounted at /mnt/newroot/tmp"),
+        Err(_) => println!("init: Warning: Failed to mount tmpfs at /mnt/newroot/tmp"),
+    }
+
     true
 }
 

@@ -461,6 +461,22 @@ impl AbiModule for ScarletAbi {
             }
         }
 
+        // Bind moutt /tmp for temporary files
+        match create_dir_if_not_exists(target_vfs, "/tmp") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /tmp directory for Scarlet: {}", e.message);
+                return Err("Failed to create /tmp directory for Scarlet");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /tmp for Scarlet: {}", e.message);
+                return Err("Failed to bind mount /tmp for Scarlet");
+            }
+        }
+
         // Setup gateway to native Scarlet environment (read-only for security)
         match create_dir_if_not_exists(target_vfs, "/scarlet") {
             Ok(()) => {}
