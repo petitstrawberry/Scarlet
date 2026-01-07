@@ -1,7 +1,7 @@
 //! IPC Server module - handles client connections and messages
 
-use super::protocol::{MessageHeader, ServerMessage};
-use std::io::{Read, Write};
+use userprogram::sws_protocol as protocol;
+use userprogram::sws_protocol::ClientMessageRef;
 use std::println;
 use std::socket::Socket;
 use std::sync::Mutex;
@@ -98,15 +98,11 @@ impl IpcServer {
     pub fn send_to_client(
         &mut self,
         _client_id: usize,
-        message: ServerMessage,
+        message: protocol::ServerMessage,
     ) -> Result<(), &'static str> {
         // TODO: Implement client response mechanism
         // For now, just log
-        println!(
-            "[IpcServer] Would send message type {} to client {}",
-            message.type_id(),
-            _client_id
-        );
+        println!("[IpcServer] Would send message {:?} to client {}", message, _client_id);
         Ok(())
     }
 }
@@ -163,136 +159,80 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         socket.as_raw()
     );
 
-    loop {
-        // Read message header (blocking per client)
-        let mut header_buf = [0u8; 8];
+    // Per-client window id generator (avoid collision between clients)
+    let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
 
+    loop {
         println!(
             "[ClientThread {}] Waiting for message... (socket handle: {})",
             client_id,
             socket.as_raw()
         );
-        println!("[ClientThread {}] Calling read()...", client_id);
-        match socket.read(&mut header_buf) {
-            Ok(n) if n == 8 => {
-                println!("[ClientThread {}] Read {} byte header", client_id, n);
-                // Parse header
-                let msg_type = u32::from_le_bytes([
-                    header_buf[0],
-                    header_buf[1],
-                    header_buf[2],
-                    header_buf[3],
-                ]);
-                let payload_size = u32::from_le_bytes([
-                    header_buf[4],
-                    header_buf[5],
-                    header_buf[6],
-                    header_buf[7],
-                ]);
 
-                println!(
-                    "[ClientThread {}] msg_type={}, payload_size={}",
-                    client_id, msg_type, payload_size
-                );
-
-                // Read payload if needed
-                let mut payload = Vec::new();
-                if payload_size > 0 {
-                    payload.resize(payload_size as usize, 0);
-                    match socket.read(&mut payload) {
-                        Ok(n) if n == payload_size as usize => {
-                            println!("[ClientThread {}] Read {} byte payload", client_id, n);
-                        }
-                        Ok(n) => {
-                            println!(
-                                "[ClientThread {}] Incomplete payload read: {} of {}",
-                                client_id, n, payload_size
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            println!("[ClientThread {}] Payload read error: {:?}", client_id, e);
-                            continue;
-                        }
-                    }
-                }
-
-                // Parse message and push to global queue
-                if let Some(event) = parse_message(client_id, msg_type, &payload) {
-                    println!("[ClientThread {}] Pushing event to queue", client_id);
-                    push_ipc_event(event);
-
-                    // Send response immediately (simplified - just ACK for now)
-                    if msg_type == 1 {
-                        // CreateWindow
-                        if payload.len() >= 8 {
-                            let width = u32::from_le_bytes([
-                                payload[0], payload[1], payload[2], payload[3],
-                            ]);
-                            let height = u32::from_le_bytes([
-                                payload[4], payload[5], payload[6], payload[7],
-                            ]);
-
-                            // Calculate buffer size
-                            let buffer_size = (width * height * 4) as usize;
-
-                            // Send WindowCreated response
-                            let window_id = client_id as u32 + 100; // Temporary ID
-                            send_window_created(&mut socket, window_id, buffer_size);
-                            
-                            // Trigger compositor redraw
-                            push_ipc_event(IpcEvent::WindowCreated { window_id, width, height });
-                        }
-                    } else if msg_type == 2 {
-                        // DestroyWindow
-                        if payload.len() >= 4 {
-                            let window_id = u32::from_le_bytes([
-                                payload[0], payload[1], payload[2], payload[3],
-                            ]);
-                            println!("[ClientThread {}] DestroyWindow request for window {}", client_id, window_id);
-                            
-                            // Trigger compositor to destroy window
-                            push_ipc_event(IpcEvent::WindowDestroyed { window_id });
-                        }
-                    } else if msg_type == 3 {
-                        // BufferUpdated - includes full buffer data
-                        if payload.len() >= 4 {
-                            let window_id = u32::from_le_bytes([
-                                payload[0], payload[1], payload[2], payload[3],
-                            ]);
-                            let buffer_data = &payload[4..];
-                            println!(
-                                "[ClientThread {}] BufferUpdated for window {} ({} bytes)",
-                                client_id, window_id, buffer_data.len()
-                            );
-                            
-                            // Clone buffer data
-                            let mut buffer = Vec::new();
-                            buffer.extend_from_slice(buffer_data);
-                            
-                            // Trigger compositor to update window buffer with new data
-                            push_ipc_event(IpcEvent::ClientBufferUpdate { window_id, buffer });
-                        }
-                    }
-                }
-            }
-            Ok(0) => {
-                // Connection closed
+        let (msg_type, payload) = match protocol::read_frame(&mut socket) {
+            Ok(v) => v,
+            Err(protocol::ProtocolError::IoDisconnected) => {
                 println!("[ClientThread {}] Client disconnected", client_id);
                 break;
             }
-            Ok(n) => {
-                println!(
-                    "[ClientThread {}] Unexpected read size: {} (expected 8)",
-                    client_id, n
-                );
+            Err(e) => {
+                println!("[ClientThread {}] Failed to read frame: {:?}", client_id, e);
                 break;
             }
+        };
+
+        match protocol::parse_client_message(msg_type, &payload) {
+            Ok(ClientMessageRef::CreateWindow { width, height }) => {
+                // Calculate buffer size (used by client for now)
+                let buffer_size = (width as u64)
+                    .saturating_mul(height as u64)
+                    .saturating_mul(4);
+
+                let window_id = next_window_id;
+                next_window_id = next_window_id.saturating_add(1);
+
+                // Reply to client immediately
+                send_window_created(&mut socket, window_id, buffer_size);
+
+                // Create window in compositor with the same ID
+                push_ipc_event(IpcEvent::CreateWindow {
+                    client_id,
+                    window_id,
+                    width,
+                    height,
+                });
+            }
+            Ok(ClientMessageRef::DestroyWindow { window_id }) => {
+                println!(
+                    "[ClientThread {}] DestroyWindow request for window {}",
+                    client_id, window_id
+                );
+                push_ipc_event(IpcEvent::DestroyWindow { client_id, window_id });
+            }
+            Ok(ClientMessageRef::UpdateBuffer {
+                window_id,
+                x,
+                y,
+                width,
+                height,
+            }) => {
+                // UpdateBuffer (damage notification) - optional
+                push_ipc_event(IpcEvent::BufferUpdated {
+                    window_id,
+                    damage_x: x,
+                    damage_y: y,
+                    damage_width: width,
+                    damage_height: height,
+                });
+            }
+            Ok(_) => {
+                // Ignore other messages for now
+            }
             Err(e) => {
-                // Error or no data
-                // For blocking socket, this means error
-                println!("[ClientThread {}] Read error: {:?}", client_id, e);
-                break;
+                println!(
+                    "[ClientThread {}] Failed to parse message (type {}): {:?}",
+                    client_id, msg_type, e
+                );
             }
         }
     }
@@ -301,108 +241,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 }
 
 /// Send WindowCreated message
-fn send_window_created(socket: &mut Socket, window_id: u32, shm_size: usize) {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&window_id.to_le_bytes());
-    payload.extend_from_slice(&shm_size.to_le_bytes());
-
-    let header = MessageHeader {
-        msg_type: 10, // WindowCreated
-        payload_size: payload.len() as u32,
-    };
-
-    let mut header_buf = Vec::new();
-    header_buf.extend_from_slice(&header.msg_type.to_le_bytes());
-    header_buf.extend_from_slice(&header.payload_size.to_le_bytes());
-
-    let _ = socket.write(&header_buf);
-    let _ = socket.write(&payload);
+fn send_window_created(socket: &mut Socket, window_id: u32, shm_size: u64) {
+    if let Err(e) = protocol::write_window_created(socket, window_id, shm_size) {
+        println!(
+            "[IpcServer] Failed to send WindowCreated: {:?} (window_id={}, shm_size={})",
+            e, window_id, shm_size
+        );
+        return;
+    }
 
     println!(
         "[IpcServer] Sent WindowCreated: window_id={}, shm_size={}",
         window_id, shm_size
     );
-}
-
-/// Parse message and create IpcEvent
-fn parse_message(client_id: usize, msg_type: u32, payload: &[u8]) -> Option<IpcEvent> {
-    match msg_type {
-        1 => {
-            // CreateWindow
-            if payload.len() >= 8 {
-                let width = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                let height = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                Some(IpcEvent::CreateWindow {
-                    client_id,
-                    width,
-                    height,
-                })
-            } else {
-                None
-            }
-        }
-        2 => {
-            // DestroyWindow
-            if payload.len() >= 4 {
-                let window_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                Some(IpcEvent::DestroyWindow {
-                    client_id,
-                    window_id,
-                })
-            } else {
-                None
-            }
-        }
-        4 => {
-            // UpdateBuffer
-            if payload.len() >= 20 {
-                let window_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                let x = i32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                let y = i32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
-                let width =
-                    u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
-                let height =
-                    u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
-                Some(IpcEvent::BufferUpdated {
-                    window_id,
-                    damage_x: x,
-                    damage_y: y,
-                    damage_width: width,
-                    damage_height: height,
-                })
-            } else {
-                None
-            }
-        }
-        5 => {
-            // RequestMove
-            if payload.len() >= 4 {
-                let window_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                Some(IpcEvent::RequestMove { window_id })
-            } else {
-                None
-            }
-        }
-        6 => {
-            // MoveWindow
-            if payload.len() >= 12 {
-                let window_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                let x = i32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                let y = i32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
-                Some(IpcEvent::MoveWindow { window_id, x, y })
-            } else {
-                None
-            }
-        }
-        _ => {
-            println!("[IpcServer] Unknown message type: {}", msg_type);
-            None
-        }
-    }
 }
 
 /// IPC Events that can be sent from clients
@@ -411,19 +262,12 @@ pub enum IpcEvent {
     /// Client requested to create a window
     CreateWindow {
         client_id: usize,
-        width: u32,
-        height: u32,
-    },
-    /// Window was created via IPC (for compositor notification)
-    WindowCreated {
         window_id: u32,
         width: u32,
         height: u32,
     },
     /// Client requested to destroy a window
     DestroyWindow { client_id: usize, window_id: u32 },
-    /// Window was destroyed (for compositor notification)
-    WindowDestroyed { window_id: u32 },
     /// Client updated their window buffer (damage region only)
     BufferUpdated {
         window_id: u32,
@@ -431,11 +275,6 @@ pub enum IpcEvent {
         damage_y: i32,
         damage_width: u32,
         damage_height: u32,
-    },
-    /// Client sent new buffer data (full buffer update from IPC)
-    ClientBufferUpdate {
-        window_id: u32,
-        buffer: Vec<u8>,
     },
     /// Client requested window move
     RequestMove { window_id: u32 },

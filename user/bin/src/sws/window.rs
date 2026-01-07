@@ -17,7 +17,7 @@ pub struct Window {
     pub title: Option<Vec<u8>>,
     pub visible: bool,
     pub focused: bool,
-    /// Shared memory buffer for window contents (BGRA format, 4 bytes per pixel)
+    /// Window contents buffer (BGRA format, 4 bytes per pixel)
     pub buffer: Option<Vec<u8>>,
 }
 
@@ -37,9 +37,8 @@ impl Window {
         }
     }
 
-    /// Create window with buffer
+    /// Create window with internal buffer
     pub fn new_with_buffer(id: WindowId, x: i32, y: i32, width: u32, height: u32) -> Self {
-        // Allocate buffer (BGRA format, 4 bytes per pixel)
         let buffer_size = (width * height * 4) as usize;
         let mut buffer = Vec::new();
         buffer.resize(buffer_size, 0);
@@ -91,7 +90,7 @@ impl Window {
 /// Window manager - manages multiple windows with Z-order
 pub struct WindowManager {
     windows: Vec<Window>,
-    next_id: WindowId,
+    next_window_id: WindowId,
     focused_window: Option<WindowId>,
 }
 
@@ -100,15 +99,15 @@ impl WindowManager {
     pub fn new() -> Self {
         Self {
             windows: Vec::new(),
-            next_id: 1,
+            next_window_id: 1,
             focused_window: None,
         }
     }
 
-    /// Create a new window
+    /// Create a new window and add it to the manager
     pub fn create_window(&mut self, x: i32, y: i32, width: u32, height: u32) -> WindowId {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.next_window_id;
+        self.next_window_id += 1;
 
         println!(
             "[WindowManager] Creating window #{} at ({}, {}) with buffer",
@@ -123,10 +122,36 @@ impl WindowManager {
         id
     }
 
+    /// Create a new window with a specified ID (used for IPC ID consistency)
+    pub fn create_window_with_id(
+        &mut self,
+        id: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> WindowId {
+        if id >= self.next_window_id {
+            self.next_window_id = id + 1;
+        }
+
+        println!(
+            "[WindowManager] Creating window #{} at ({}, {}) with buffer (fixed id)",
+            id, x, y
+        );
+        let window = Window::new_with_buffer(id, x, y, width, height);
+        self.windows.push(window);
+
+        // Focus the new window
+        self.focus_window(id);
+
+        id
+    }
+
     /// Create window without buffer (for testing)
     pub fn create_window_no_buffer(&mut self, x: i32, y: i32, width: u32, height: u32) -> WindowId {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.next_window_id;
+        self.next_window_id += 1;
 
         println!(
             "[WindowManager] Creating window #{} at ({}, {}) without buffer",

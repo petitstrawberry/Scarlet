@@ -3,8 +3,7 @@
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer};
-use super::protocol::ServerMessage;
-use super::window::{WindowId, WindowManager};
+use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
 use std::vec::Vec;
@@ -254,7 +253,7 @@ impl Compositor {
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
     ) {
-        // If window has a buffer, use it; otherwise draw placeholder
+        // If window has a mapped buffer, use it; otherwise draw placeholder
         if let Some(ref window_buffer) = window.buffer {
             self.draw_window_from_buffer(window, window_buffer, buffer, stride, clip_rect);
         } else {
@@ -547,38 +546,18 @@ impl Compositor {
         match event {
             IpcEvent::CreateWindow {
                 client_id,
+                window_id,
                 width,
                 height,
             } => {
                 println!(
-                    "[Compositor] Client {} creating window {}x{}",
-                    client_id, width, height
+                    "[Compositor] Client {} creating window #{} ({}x{})",
+                    client_id, window_id, width, height
                 );
-                let window_id = self.window_manager.create_window(0, 0, width, height);
+                // Create window using the ID that IPC already returned to the client
+                self.window_manager
+                    .create_window_with_id(window_id, 0, 0, width, height);
 
-                // Get buffer size from window
-                let buffer_size = if let Some(window) = self.window_manager.get_window(window_id) {
-                    window.buffer_size()
-                } else {
-                    0
-                };
-
-                // Send WindowCreated message to client
-                let message = ServerMessage::WindowCreated {
-                    window_id,
-                    shm_size: buffer_size,
-                };
-                if let Err(e) = self.ipc_server.send_to_client(client_id, message) {
-                    println!("[Compositor] Failed to send WindowCreated: {}", e);
-                }
-
-                self.full_redraw_needed = true;
-            }
-            IpcEvent::WindowCreated { window_id, width, height } => {
-                println!(
-                    "[Compositor] Window #{} created via IPC ({}x{}), triggering redraw",
-                    window_id, width, height
-                );
                 self.full_redraw_needed = true;
             }
             IpcEvent::DestroyWindow {
@@ -588,14 +567,6 @@ impl Compositor {
                 println!(
                     "[Compositor] Client {} destroying window #{}",
                     client_id, window_id
-                );
-                self.window_manager.close_window(window_id);
-                self.full_redraw_needed = true;
-            }
-            IpcEvent::WindowDestroyed { window_id } => {
-                println!(
-                    "[Compositor] Window #{} destroyed via IPC, triggering redraw",
-                    window_id
                 );
                 self.window_manager.close_window(window_id);
                 self.full_redraw_needed = true;
@@ -612,19 +583,6 @@ impl Compositor {
                     window_id, damage_x, damage_y, damage_width, damage_height
                 );
                 // TODO: Optimize by only compositing the damaged region
-                self.full_redraw_needed = true;
-            }
-            IpcEvent::ClientBufferUpdate { window_id, buffer } => {
-                println!(
-                    "[Compositor] Window #{} received new buffer ({} bytes)",
-                    window_id,
-                    buffer.len()
-                );
-                // Update window buffer
-                if let Some(window) = self.window_manager.get_window_mut(window_id) {
-                    window.buffer = Some(buffer);
-                    println!("[Compositor] Buffer updated for window #{}", window_id);
-                }
                 self.full_redraw_needed = true;
             }
             IpcEvent::RequestMove { window_id } => {

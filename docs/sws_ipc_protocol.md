@@ -1,0 +1,129 @@
+# Scarlet Window Server (SWS) IPC Protocol
+
+This document describes the wire protocol used between the Scarlet Window Server (`sws`) and clients (e.g. `sws_client`).
+
+The canonical implementation is in `user/bin/src/sws/protocol.rs` and is shared by both server and clients via the `userprogram::sws_protocol` module.
+
+## Transport
+
+- Endpoint: Unix-domain socket (VFS socket)
+- Default path: `/tmp/sws.sock`
+- Byte order: little-endian for all integer fields
+
+## Framing
+
+All messages are framed.
+
+### Header
+
+The header is always **8 bytes**:
+
+| Offset | Size | Field         | Type | Notes |
+|--------|------|---------------|------|-------|
+| 0      | 4    | `msg_type`     | u32  | Message type ID |
+| 4      | 4    | `payload_size` | u32  | Payload length in bytes |
+
+### Payload
+
+Immediately following the header is `payload_size` bytes of payload.
+
+Implementations **must** reject frames with excessively large payloads to avoid unbounded allocations. The current implementation uses a fixed maximum of 1 MiB.
+
+## Message Types
+
+### Client → Server
+
+#### `CREATE_WINDOW` (type = 1)
+
+Payload (8 bytes):
+
+| Offset | Size | Field    | Type |
+|--------|------|----------|------|
+| 0      | 4    | `width`  | u32  |
+| 4      | 4    | `height` | u32  |
+
+#### `DESTROY_WINDOW` (type = 2)
+
+Payload (4 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+
+#### `SET_WINDOW_TITLE` (type = 3)
+
+Payload (variable):
+
+| Offset | Size | Field       | Type | Notes |
+|--------|------|-------------|------|-------|
+| 0      | 4    | `window_id` | u32  | |
+| 4      | 4    | `title_len` | u32  | Length of `title` in bytes |
+| 8      | N    | `title`     | bytes | UTF-8 recommended; not validated |
+
+The payload length must equal `8 + title_len`.
+
+#### `UPDATE_BUFFER` (type = 4)
+
+This is currently treated as a **damage notification only** (no pixel payload is transferred).
+
+Payload (20 bytes):
+
+| Offset | Size | Field    | Type |
+|--------|------|----------|------|
+| 0      | 4    | `window_id` | u32 |
+| 4      | 4    | `x`      | i32 |
+| 8      | 4    | `y`      | i32 |
+| 12     | 4    | `width`  | u32 |
+| 16     | 4    | `height` | u32 |
+
+#### `REQUEST_MOVE_WINDOW` (type = 5)
+
+Payload (4 bytes): `window_id: u32`
+
+#### `MOVE_WINDOW` (type = 6)
+
+Payload (12 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `x`         | i32  |
+| 8      | 4    | `y`         | i32  |
+
+### Server → Client
+
+#### `WINDOW_CREATED` (type = 10)
+
+Payload (12 bytes):
+
+| Offset | Size | Field       | Type | Notes |
+|--------|------|-------------|------|-------|
+| 0      | 4    | `window_id` | u32  | Window ID allocated by server |
+| 4      | 8    | `shm_size`  | u64  | Currently informational; shared memory is a future feature |
+
+`shm_size` is a fixed-width `u64` to keep the protocol stable across architectures.
+
+#### `WINDOW_DESTROYED` (type = 11)
+
+Payload (4 bytes): `window_id: u32`
+
+#### `INPUT_EVENT` (type = 12)
+
+Payload (16 bytes):
+
+| Offset | Size | Field   | Type |
+|--------|------|---------|------|
+| 0      | 8    | `time`  | u64 |
+| 8      | 2    | `type_` | u16 |
+| 10     | 2    | `code`  | u16 |
+| 12     | 4    | `value` | i32 |
+
+#### `ERROR` (type = 13)
+
+Payload (at least 4 bytes): `code: u32`
+
+## Compatibility and Versioning
+
+- The protocol currently has no explicit version field. Changes to message layouts should be made carefully.
+- Prefer adding new message types over changing existing payload formats.
+- When changing payload formats is unavoidable, introduce a new message type ID and keep the old one for compatibility.

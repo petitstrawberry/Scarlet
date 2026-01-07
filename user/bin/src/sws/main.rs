@@ -11,7 +11,6 @@ mod compositor;
 mod cursor;
 mod input;
 mod ipc;
-mod protocol;
 mod window;
 
 use compositor::Compositor;
