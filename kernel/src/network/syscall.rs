@@ -200,6 +200,7 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     };
 
     // Create socket file in VFS for filesystem visibility
+    // Note: This is optional - the socket is already functional via named_sockets
     let vfs = match &task.vfs {
         Some(vfs) => vfs.clone(),
         None => {
@@ -210,9 +211,22 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
 
     let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
     
-    // Create the socket file - ignore errors if file already exists or path is invalid
-    // This is non-critical for Scarlet Native sockets which primarily use named_sockets
-    let _ = vfs.create_file(&path, socket_file_type);
+    // Attempt to create the socket file in VFS
+    // This may fail if:
+    // - Parent directory doesn't exist
+    // - File already exists
+    // - Path is invalid
+    // - Filesystem doesn't support socket files
+    // Since the socket is already bound and registered in named_sockets,
+    // we treat VFS file creation as optional and don't fail the bind operation
+    if let Err(e) = vfs.create_file(&path, socket_file_type) {
+        // Log the error for debugging but continue - socket is still usable
+        crate::early_println!(
+            "[socket_bind] Warning: Failed to create VFS socket file at '{}': {:?}",
+            path,
+            e
+        );
+    }
 
     0
 }
