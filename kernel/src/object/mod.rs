@@ -392,6 +392,33 @@ impl KernelObject {
             KernelObject::SharedMemory(_) => None,
         }
     }
+
+    /// Clone the KernelObject at the Arc level only (no state changes).
+    ///
+    /// Unlike the `Clone` trait implementation which may use `custom_clone()` for
+    /// objects like Pipes (incrementing reader/writer counts), this method performs
+    /// a simple `Arc::clone()` that only increments the Arc reference count without
+    /// modifying the underlying object state.
+    ///
+    /// Use this when you need a copy of the KernelObject for temporary access
+    /// without intending to create a new logical file descriptor (dup semantics).
+    pub fn arc_clone(&self) -> Self {
+        match self {
+            KernelObject::File(file_object) => KernelObject::File(Arc::clone(file_object)),
+            KernelObject::Pipe(pipe_object) => KernelObject::Pipe(Arc::clone(pipe_object)),
+            #[cfg(feature = "network")]
+            KernelObject::Socket(socket) => KernelObject::Socket(Arc::clone(socket)),
+            KernelObject::EventChannel(event_channel) => {
+                KernelObject::EventChannel(Arc::clone(event_channel))
+            }
+            KernelObject::EventSubscription(event_subscription) => {
+                KernelObject::EventSubscription(Arc::clone(event_subscription))
+            }
+            KernelObject::SharedMemory(shared_memory) => {
+                KernelObject::SharedMemory(Arc::clone(shared_memory))
+            }
+        }
+    }
 }
 
 impl Clone for KernelObject {

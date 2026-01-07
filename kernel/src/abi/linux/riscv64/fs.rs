@@ -509,8 +509,8 @@ pub fn sys_dup(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
     // Get handle from Linux fd
     if let Some(old_handle) = abi.get_handle(fd) {
-        if let Some(old_kernel_obj) = task.handle_table.get(old_handle) {
-            let kernel_obj = old_kernel_obj.clone();
+        // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
+        if let Some(kernel_obj) = task.handle_table.clone_for_dup(old_handle) {
             let handle = task.handle_table.insert(kernel_obj);
             match handle {
                 Ok(new_handle) => {
@@ -548,8 +548,8 @@ pub fn sys_dup3(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
     // Get handle from old fd
     if let Some(old_handle) = abi.get_handle(oldfd) {
-        if let Some(old_kernel_obj) = task.handle_table.get(old_handle) {
-            let kernel_obj = old_kernel_obj.clone();
+        // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
+        if let Some(kernel_obj) = task.handle_table.clone_for_dup(old_handle) {
             let handle = task.handle_table.insert(kernel_obj);
             match handle {
                 Ok(new_handle) => {
@@ -1654,7 +1654,7 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     if let Some(caps) = caps {
         // TTY translation
         if caps.iter().any(|c| *c == DeviceCapability::Tty) {
-            match crate::abi::linux::device::tty::handle_ioctl(request, arg, kernel_object) {
+            match crate::abi::linux::device::tty::handle_ioctl(request, arg, &kernel_object) {
                 Ok(Some(ret)) => return ret,
                 Ok(None) => {
                     // Do NOT pass through unknown TTY ioctls to device-specific control.

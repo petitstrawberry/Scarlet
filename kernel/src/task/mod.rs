@@ -1203,8 +1203,12 @@ impl Task {
         child.entry = self.entry;
 
         if flags.is_set(CloneFlagsDef::Files) {
-            // Clone the file descriptor table
+            // Share the handle table (CLONE_FILES behavior)
+            // clone() creates a shallow copy that shares the same underlying data
             child.handle_table = self.handle_table.clone();
+        } else {
+            // Create an independent copy of the handle table (fork-like behavior)
+            child.handle_table = self.handle_table.deep_clone();
         }
 
         if flags.is_set(CloneFlagsDef::Fs) {

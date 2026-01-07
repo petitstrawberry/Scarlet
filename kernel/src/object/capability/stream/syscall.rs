@@ -44,7 +44,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
 
     let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
 
-    let bytes_read = if let KernelObject::Socket(socket_obj) = kernel_obj {
+    let bytes_read = if let KernelObject::Socket(socket_obj) = &kernel_obj {
         let socket_ptr = alloc::sync::Arc::as_ptr(socket_obj);
         let local_socket = unsafe { &*(socket_ptr as *const LocalSocket) };
 

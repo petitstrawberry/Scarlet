@@ -44,8 +44,10 @@ impl CloneFlags {
 }
 
 impl Default for CloneFlags {
+    /// Returns default CloneFlags with FS flag set
+    /// This mimics the behavior of fork(), where the filesystem context is shared.
     fn default() -> Self {
-        let raw = CloneFlagsDef::Fs as u64 | CloneFlagsDef::Files as u64;
+        let raw = CloneFlagsDef::Fs as u64;
         CloneFlags { raw }
     }
 }
