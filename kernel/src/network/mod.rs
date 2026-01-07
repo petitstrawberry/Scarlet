@@ -111,6 +111,10 @@ pub struct NetworkManager {
     /// Active socket connections by ID
     connections: RwLock<BTreeMap<SocketId, Arc<dyn SocketObject>>>,
 
+    /// Reverse mapping: socket pointer address -> socket ID for O(1) lookups
+    /// This is maintained alongside connections for efficient get_socket_id()
+    socket_to_id: RwLock<BTreeMap<usize, SocketId>>,
+
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
 }
@@ -124,6 +128,7 @@ impl NetworkManager {
             protocol_layers: RwLock::new(BTreeMap::new()),
             named_sockets: RwLock::new(BTreeMap::new()),
             connections: RwLock::new(BTreeMap::new()),
+            socket_to_id: RwLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1), // Start from 1, reserve 0 for invalid
         }
     }
@@ -425,13 +430,165 @@ impl NetworkManager {
         self.connections.read().get(&socket_id).cloned()
     }
 
+    /// Register a socket with a specific ID
+    ///
+    /// This method allows external systems (like VFS) to register socket objects
+    /// with specific IDs for filesystem integration.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket_id` - The unique socket identifier to use
+    /// * `socket` - The socket object to register
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Socket successfully registered
+    /// * `Err(SocketError::AddressInUse)` - Socket ID already in use
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // When creating a socket file in VFS
+    /// let socket = create_local_socket()?;
+    /// let socket_id = 1001; // Use a unique ID
+    /// NetworkManager::get_manager().register_socket_with_id(socket_id, socket)?;
+    /// ```
+    pub fn register_socket_with_id(
+        &self,
+        socket_id: SocketId,
+        socket: Arc<dyn SocketObject>,
+    ) -> Result<(), SocketError> {
+        let mut connections = self.connections.write();
+
+        // Check if ID is already in use
+        if connections.contains_key(&socket_id) {
+            return Err(SocketError::AddressInUse);
+        }
+
+        // Get the socket pointer address for reverse mapping
+        let socket_ptr = Arc::as_ptr(&socket) as *const () as usize;
+
+        // Insert into both mappings
+        connections.insert(socket_id, socket);
+        drop(connections);
+
+        // Update reverse mapping
+        self.socket_to_id.write().insert(socket_ptr, socket_id);
+
+        Ok(())
+    }
+
     /// Remove a socket from the connections registry
     ///
     /// # Arguments
     ///
     /// * `socket_id` - The unique socket identifier to remove
     pub fn remove_socket(&self, socket_id: SocketId) {
-        self.connections.write().remove(&socket_id);
+        let mut connections = self.connections.write();
+
+        // Get the socket to find its pointer address before removal
+        if let Some(socket) = connections.get(&socket_id) {
+            let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+            drop(connections);
+
+            // Remove from both mappings
+            self.connections.write().remove(&socket_id);
+            self.socket_to_id.write().remove(&socket_ptr);
+        }
+    }
+
+    /// Allocate a new socket ID and register the socket
+    ///
+    /// This is a convenience method that allocates a unique socket ID
+    /// and registers the socket in one operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - The socket object to register
+    ///
+    /// # Returns
+    ///
+    /// The allocated socket ID
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let socket = Arc::new(LocalSocket::new(SocketType::Stream, SocketProtocol::Default));
+    /// let socket_id = NetworkManager::get_manager().allocate_socket_id(socket)?;
+    /// ```
+    pub fn allocate_socket_id(
+        &self,
+        socket: Arc<dyn SocketObject>,
+    ) -> Result<SocketId, SocketError> {
+        // Keep ownership of the socket and clone the Arc on each registration attempt.
+        let socket = socket;
+
+        // Use the current value of `next_socket_id` as our starting point.
+        let start_id = self.next_socket_id.load(Ordering::SeqCst);
+        let mut current_id = start_id;
+
+        loop {
+            // Try to register the current candidate ID.
+            match self.register_socket_with_id(current_id, Arc::clone(&socket)) {
+                Ok(()) => {
+                    // On success, advance `next_socket_id` so that it is at least
+                    // one past the allocated ID. This uses a CAS loop to avoid
+                    // regressing the counter in the presence of concurrent allocators.
+                    let mut observed = self.next_socket_id.load(Ordering::SeqCst);
+                    loop {
+                        if observed > current_id {
+                            break;
+                        }
+
+                        match self.next_socket_id.compare_exchange(
+                            observed,
+                            current_id.wrapping_add(1),
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => break,
+                            Err(actual) => {
+                                if actual > current_id {
+                                    // Another allocator already moved the counter forward.
+                                    break;
+                                }
+                                observed = actual;
+                            }
+                        }
+                    }
+
+                    return Ok(current_id);
+                }
+                Err(e) => {
+                    // Move to the next candidate ID, wrapping on overflow.
+                    let next_id = current_id.wrapping_add(1);
+
+                    // If we've wrapped around and tried the entire ID space, give up.
+                    if next_id == start_id {
+                        return Err(e);
+                    }
+
+                    current_id = next_id;
+                }
+            }
+        }
+    }
+
+    /// Get the socket ID for a given socket object
+    ///
+    /// Searches the socket registry to find the ID for a socket object.
+    /// This is now an O(1) operation using a reverse mapping.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - The socket object to find
+    ///
+    /// # Returns
+    ///
+    /// The socket ID if found, None otherwise
+    pub fn get_socket_id(&self, socket: &Arc<dyn SocketObject>) -> Option<SocketId> {
+        let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
+        self.socket_to_id.read().get(&socket_ptr).copied()
     }
 
     /// Get the count of active connections

@@ -39,8 +39,8 @@ use crate::{
     device::block::BlockDevice,
     driver_initcall,
     fs::{
-        FileObject, FileSystemError, FileSystemErrorKind, FileType, get_fs_driver_manager,
-        params::FileSystemParams,
+        FileObject, FileSystemError, FileSystemErrorKind, FileType, SocketFileInfo,
+        get_fs_driver_manager, params::FileSystemParams,
     },
     profile_scope,
     task::mytask,
@@ -2371,7 +2371,7 @@ impl Ext2FileSystem {
             FileType::CharDevice(_) => 3,
             FileType::BlockDevice(_) => 4,
             FileType::Pipe => 5,
-            FileType::Socket => 6,
+            FileType::Socket(_) => 6,
             FileType::SymbolicLink(_) => 7,
             FileType::Unknown => 0,
         };
@@ -3006,7 +3006,9 @@ impl Ext2FileSystem {
                 }
             }
             EXT2_S_IFIFO => Ok(FileType::Pipe),
-            EXT2_S_IFSOCK => Ok(FileType::Socket),
+            EXT2_S_IFSOCK => Ok(FileType::Socket(SocketFileInfo {
+                socket_id: crate::fs::UNBOUND_SOCKET_ID,
+            })), // Socket ID will be bound at runtime
             _ => Ok(FileType::Unknown),
         }
     }
@@ -4524,7 +4526,7 @@ impl FileSystemOperations for Ext2FileSystem {
             FileType::CharDevice(_) => EXT2_S_IFCHR | 0o666,
             FileType::BlockDevice(_) => EXT2_S_IFBLK | 0o666,
             FileType::Pipe => EXT2_S_IFIFO | 0o666,
-            FileType::Socket => EXT2_S_IFSOCK | 0o666,
+            FileType::Socket(_) => EXT2_S_IFSOCK | 0o666,
             _ => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::NotSupported,
@@ -4706,8 +4708,8 @@ impl FileSystemOperations for Ext2FileSystem {
                 Arc::new(Ext2Node::new(new_inode_number, file_type.clone(), file_id))
             }
             FileType::Pipe => Arc::new(Ext2Node::new(new_inode_number, FileType::Pipe, file_id)),
-            FileType::Socket => {
-                Arc::new(Ext2Node::new(new_inode_number, FileType::Socket, file_id))
+            FileType::Socket(_) => {
+                Arc::new(Ext2Node::new(new_inode_number, file_type.clone(), file_id))
             }
             _ => {
                 return Err(FileSystemError::new(

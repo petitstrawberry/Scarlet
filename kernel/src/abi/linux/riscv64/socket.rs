@@ -1,7 +1,12 @@
 use crate::{
-    abi::linux::riscv64::LinuxRiscv64Abi, arch::Trapframe, ipc::pipe::UnidirectionalPipe,
+    abi::linux::riscv64::LinuxRiscv64Abi,
+    arch::Trapframe,
+    ipc::pipe::UnidirectionalPipe,
+    network::{NetworkManager, SocketDomain, SocketProtocol, SocketType, local::LocalSocket},
+    object::KernelObject,
     task::mytask,
 };
+use alloc::sync::Arc;
 
 /// Linux socket domains
 pub const AF_UNIX: i32 = 1; // Unix domain sockets
@@ -14,12 +19,10 @@ pub const SOCK_DGRAM: i32 = 2; // Datagram socket
 pub const SOCK_RAW: i32 = 3; // Raw socket
 pub const SOCK_SEQPACKET: i32 = 5; // Sequenced packet socket
 
-/// Linux sys_socket implementation (mock with pipe)
+/// Linux sys_socket implementation
 ///
-/// Creates a socket endpoint for communication. This is a mock implementation
-/// that creates a pipe and returns one end as a "socket" file descriptor.
-/// This allows applications to proceed without hanging, even though real
-/// network communication won't work.
+/// Creates a socket endpoint for communication. Now properly integrated with
+/// NetworkManager and VFS for Unix domain socket support.
 ///
 /// Arguments:
 /// - abi: LinuxRiscv64Abi context
@@ -29,7 +32,7 @@ pub const SOCK_SEQPACKET: i32 = 5; // Sequenced packet socket
 ///   - arg2: protocol (protocol to use, usually 0)
 ///
 /// Returns:
-/// - file descriptor on success (mock socket using pipe)
+/// - file descriptor on success
 /// - usize::MAX (Linux -1) on error
 pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
@@ -37,21 +40,63 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
         None => return usize::MAX,
     };
 
-    let _domain = trapframe.get_arg(0) as i32;
-    let _type = trapframe.get_arg(1) as i32;
+    let domain = trapframe.get_arg(0) as i32;
+    let socket_type = trapframe.get_arg(1) as i32;
     let _protocol = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Create a pipe to mock a socket
-    // This allows applications to get a valid fd and proceed
-    let (read_obj, _write_obj) = UnidirectionalPipe::create_pair(4096);
+    // Map Linux socket domain to Scarlet domain
+    let scarlet_domain = match domain {
+        AF_UNIX => SocketDomain::Local,
+        AF_INET => SocketDomain::Inet,
+        AF_INET6 => SocketDomain::Inet6,
+        _ => return usize::MAX, // Unsupported domain
+    };
 
-    // Insert only the read end as the "socket" - we don't need the write end
-    match task.handle_table.insert(read_obj) {
+    // Map Linux socket type to Scarlet type
+    let scarlet_type = match socket_type {
+        SOCK_STREAM => SocketType::Stream,
+        SOCK_DGRAM => SocketType::Datagram,
+        SOCK_RAW => SocketType::Raw,
+        SOCK_SEQPACKET => SocketType::SeqPacket,
+        _ => return usize::MAX, // Unsupported type
+    };
+
+    // For now, only support AF_UNIX (Local domain)
+    if scarlet_domain != SocketDomain::Local {
+        // Fall back to mock behavior for non-local sockets
+        let (read_obj, _write_obj) = UnidirectionalPipe::create_pair(4096);
+        return match task.handle_table.insert(read_obj) {
+            Ok(handle) => match abi.allocate_fd(handle) {
+                Ok(fd) => fd,
+                Err(_) => {
+                    let _ = task.handle_table.remove(handle);
+                    usize::MAX
+                }
+            },
+            Err(_) => usize::MAX,
+        };
+    }
+
+    // Create socket through NetworkManager (which assigns ID automatically)
+    let socket_obj = match NetworkManager::get_manager().create_socket(
+        scarlet_domain,
+        scarlet_type,
+        SocketProtocol::Default,
+    ) {
+        Ok(KernelObject::Socket(s)) => s,
+        _ => return usize::MAX,
+    };
+
+    // Wrap in KernelObject
+    let kernel_obj = KernelObject::Socket(socket_obj);
+
+    // Insert into handle table
+    match task.handle_table.insert(kernel_obj) {
         Ok(handle) => {
-            // Allocate a file descriptor for the "socket"
+            // Allocate a file descriptor for the socket
             match abi.allocate_fd(handle) {
                 Ok(fd) => fd,
                 Err(_) => {
@@ -61,14 +106,14 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
                 }
             }
         }
-        Err(_) => usize::MAX, // Failed to create pipe
+        Err(_) => usize::MAX,
     }
 }
 
-/// Linux sys_bind implementation (mock)
+/// Linux sys_bind implementation
 ///
-/// Binds a socket to an address. This is a mock implementation that
-/// always succeeds to allow applications to proceed.
+/// Binds a socket to an address. For AF_UNIX sockets, this creates a socket file
+/// in the VFS at the specified path.
 ///
 /// Arguments:
 /// - abi: LinuxRiscv64Abi context
@@ -80,21 +125,112 @@ pub fn sys_socket(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_bind(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
 
-    let _sockfd = trapframe.get_arg(0) as i32;
-    let _addr_ptr = trapframe.get_arg(1);
-    let _addrlen = trapframe.get_arg(2) as u32;
+    let sockfd = trapframe.get_arg(0) as i32;
+    let addr_ptr = trapframe.get_arg(1);
+    let addrlen = trapframe.get_arg(2) as u32;
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Mock implementation - always succeed
-    0
+    // Get the file descriptor handle
+    let handle_id = match abi.get_handle(sockfd as usize) {
+        Some(h) => h,
+        None => return usize::MAX,
+    };
+
+    // Get the socket object from handle table
+    let socket_arc = match task.handle_table.get(handle_id) {
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX,
+    };
+
+    // Translate address pointer to physical
+    let addr_paddr = match task.vm_manager.translate_vaddr(addr_ptr) {
+        Some(addr) => addr,
+        None => return usize::MAX,
+    };
+
+    // Read sockaddr structure from userspace
+    // sockaddr_un structure: { sa_family: u16, sun_path: [u8; 108] }
+    if addrlen < 2 {
+        return usize::MAX; // Too small
+    }
+
+    unsafe {
+        let sa_family = *(addr_paddr as *const u16);
+
+        // Only support AF_UNIX for now
+        if sa_family != AF_UNIX as u16 {
+            return usize::MAX;
+        }
+
+        // Read the socket path (starts at offset 2)
+        let path_start = (addr_paddr + 2) as *const u8;
+        let max_path_len = (addrlen - 2) as usize;
+
+        // Find the null terminator or max length
+        let mut path_len = 0;
+        while path_len < max_path_len && *path_start.add(path_len) != 0 {
+            path_len += 1;
+        }
+
+        if path_len == 0 || path_len > 108 {
+            return usize::MAX; // Invalid path
+        }
+
+        // Convert to string
+        let path_bytes = core::slice::from_raw_parts(path_start, path_len);
+        let path = match core::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => return usize::MAX,
+        };
+
+        // Bind the socket to the address
+        let socket_addr = match crate::network::LocalSocketAddress::from_path(path) {
+            Ok(addr) => crate::network::SocketAddress::Local(addr),
+            Err(_) => return usize::MAX,
+        };
+
+        if let Err(_) = socket_arc.bind(&socket_addr) {
+            return usize::MAX;
+        }
+
+        // Get the socket ID from NetworkManager
+        let socket_id = match NetworkManager::get_manager().get_socket_id(&socket_arc) {
+            Some(id) => id,
+            None => return usize::MAX, // Socket not found in NetworkManager
+        };
+
+        // Create socket file in VFS on a best-effort basis
+        // The socket has already been successfully bound, so VFS file creation
+        // is optional - the socket remains functional even if this fails
+        let vfs = match &task.vfs {
+            Some(vfs) => vfs.clone(),
+            None => {
+                // Use global VFS if task doesn't have its own
+                crate::fs::vfs_v2::manager::get_global_vfs_manager()
+            }
+        };
+
+        let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
+
+        // Attempt to create the socket file - log on failure but don't fail the bind
+        if let Err(e) = vfs.create_file(path, socket_file_type) {
+            crate::early_println!(
+                "[sys_bind] Warning: Failed to create VFS socket file at '{}': {:?}",
+                path,
+                e
+            );
+        }
+
+        0 // Success
+    }
 }
 
 /// Linux sys_listen implementation (mock)

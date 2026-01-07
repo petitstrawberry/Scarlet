@@ -80,6 +80,14 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
         SocketProtocol::Default,
     ));
 
+    // Register socket with NetworkManager to get a socket ID for VFS integration
+    let socket_id = match NetworkManager::get_manager()
+        .allocate_socket_id(socket.clone() as Arc<dyn SocketObject>)
+    {
+        Ok(id) => id,
+        Err(_) => return usize::MAX,
+    };
+
     // Wrap in KernelObject
     let kernel_obj = KernelObject::Socket(socket);
 
@@ -93,7 +101,11 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
     // Add to handle table with metadata
     let handle_id = match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
         Ok(id) => id as usize,
-        Err(_) => return usize::MAX,
+        Err(_) => {
+            // Clean up on error
+            NetworkManager::get_manager().remove_socket(socket_id);
+            return usize::MAX;
+        }
     };
 
     handle_id
@@ -175,10 +187,45 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     // Register the same Arc in NetworkManager's named socket namespace
     // This ensures the registered socket and the one in handle_table are identical
     if NetworkManager::get_manager()
-        .register_named_socket(&path, socket_arc)
+        .register_named_socket(&path, socket_arc.clone())
         .is_err()
     {
         return usize::MAX;
+    }
+
+    // Get the socket ID from NetworkManager for VFS integration
+    let socket_id = match NetworkManager::get_manager().get_socket_id(&socket_arc) {
+        Some(id) => id,
+        None => return usize::MAX, // Socket not found in NetworkManager
+    };
+
+    // Create socket file in VFS for filesystem visibility
+    // Note: This is optional - the socket is already functional via named_sockets
+    let vfs = match &task.vfs {
+        Some(vfs) => vfs.clone(),
+        None => {
+            // Use global VFS if task doesn't have its own
+            crate::fs::vfs_v2::manager::get_global_vfs_manager()
+        }
+    };
+
+    let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
+
+    // Attempt to create the socket file in VFS
+    // This may fail if:
+    // - Parent directory doesn't exist
+    // - File already exists
+    // - Path is invalid
+    // - Filesystem doesn't support socket files
+    // Since the socket is already bound and registered in named_sockets,
+    // we treat VFS file creation as optional and don't fail the bind operation
+    if let Err(e) = vfs.create_file(&path, socket_file_type) {
+        // Log the error for debugging but continue - socket is still usable
+        crate::early_println!(
+            "[socket_bind] Warning: Failed to create VFS socket file at '{}': {:?}",
+            path,
+            e
+        );
     }
 
     0
