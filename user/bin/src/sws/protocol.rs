@@ -1,20 +1,13 @@
 //! IPC Protocol definitions for Scarlet Window Server
 
-use std::vec::Vec;
-
 /// Client-to-Server messages
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub enum ClientMessage {
     /// Create a new window
-    CreateWindow {
-        width: u32,
-        height: u32,
-    },
+    CreateWindow { width: u32, height: u32 },
     /// Destroy a window
-    DestroyWindow {
-        window_id: u32,
-    },
+    DestroyWindow { window_id: u32 },
     /// Set window title
     SetWindowTitle {
         window_id: u32,
@@ -30,15 +23,9 @@ pub enum ClientMessage {
         height: u32,
     },
     /// Request window move (for drag operation)
-    RequestMoveWindow {
-        window_id: u32,
-    },
+    RequestMoveWindow { window_id: u32 },
     /// Move window to specific position
-    MoveWindow {
-        window_id: u32,
-        x: i32,
-        y: i32,
-    },
+    MoveWindow { window_id: u32, x: i32, y: i32 },
 }
 
 /// Server-to-Client messages
@@ -52,9 +39,7 @@ pub enum ServerMessage {
         // Shared memory key follows
     },
     /// Window destroyed
-    WindowDestroyed {
-        window_id: u32,
-    },
+    WindowDestroyed { window_id: u32 },
     /// Input event for focused window
     InputEvent {
         time: u64,
@@ -95,10 +80,10 @@ impl ServerMessage {
     /// Get message type ID
     pub fn type_id(&self) -> u32 {
         match self {
-            ServerMessage::WindowCreated { .. } => 1,
-            ServerMessage::WindowDestroyed { .. } => 2,
-            ServerMessage::InputEvent { .. } => 3,
-            ServerMessage::Error { .. } => 4,
+            ServerMessage::WindowCreated { .. } => 10,
+            ServerMessage::WindowDestroyed { .. } => 11,
+            ServerMessage::InputEvent { .. } => 12,
+            ServerMessage::Error { .. } => 13,
         }
     }
 }

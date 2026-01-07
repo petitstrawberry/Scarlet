@@ -2,6 +2,9 @@
 
 use std::fs::File;
 use std::println;
+use std::sync::Mutex;
+use std::thread;
+use std::vec::Vec;
 
 /// Input event structure (16 bytes, matches kernel InputEvent)
 #[repr(C)]
@@ -15,6 +18,31 @@ pub struct InputEvent {
 
 impl InputEvent {
     pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Processed input events for compositor
+#[derive(Debug, Clone)]
+pub enum CompositorInputEvent {
+    MouseMove { dx: i32, dy: i32 },
+    MouseButton { button: u16, pressed: bool },
+    MouseAbsolute { x: i32, y: i32 },
+}
+
+/// Global input event queue
+static INPUT_EVENT_QUEUE: Mutex<Vec<CompositorInputEvent>> = Mutex::new(Vec::new());
+
+/// Add an input event to the global queue
+pub fn push_input_event(event: CompositorInputEvent) {
+    let mut queue = INPUT_EVENT_QUEUE.lock();
+    queue.push(event);
+}
+
+/// Get all pending input events from the queue
+pub fn pop_all_input_events() -> Vec<CompositorInputEvent> {
+    let mut queue = INPUT_EVENT_QUEUE.lock();
+    let events = queue.clone();
+    queue.clear();
+    events
 }
 
 /// Event types
@@ -101,4 +129,96 @@ impl InputManager {
     pub fn scale_tablet_coord(&self, value: i32, screen_dimension: u32) -> i32 {
         ((value as i64 * screen_dimension as i64) / self.tablet_max as i64) as i32
     }
+
+    /// Start input processing thread
+    pub fn start_input_thread(screen_width: u32, screen_height: u32) -> Result<(), &'static str> {
+        println!("[InputManager] Starting input thread...");
+
+        thread::spawn(move || {
+            input_thread_main(screen_width, screen_height);
+        });
+
+        println!("[InputManager] Input thread started");
+        Ok(())
+    }
+}
+
+/// Input thread main function
+fn input_thread_main(screen_width: u32, screen_height: u32) {
+    println!("[InputThread] Started");
+
+    let mut input_manager = match InputManager::new() {
+        Ok(mgr) => mgr,
+        Err(e) => {
+            println!("[InputThread] Failed to create InputManager: {}", e);
+            return;
+        }
+    };
+
+    loop {
+        match input_manager.read_event() {
+            Ok(Some(event)) => {
+                // Convert raw event to compositor event
+                match event.type_ {
+                    event_types::EV_REL => match event.code {
+                        rel_codes::REL_X => {
+                            push_input_event(CompositorInputEvent::MouseMove {
+                                dx: event.value,
+                                dy: 0,
+                            });
+                        }
+                        rel_codes::REL_Y => {
+                            push_input_event(CompositorInputEvent::MouseMove {
+                                dx: 0,
+                                dy: event.value,
+                            });
+                        }
+                        _ => {}
+                    },
+                    event_types::EV_ABS => match event.code {
+                        abs_codes::ABS_X => {
+                            input_manager.abs_x = Some(event.value);
+                            if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
+                                let screen_x = input_manager.scale_tablet_coord(x, screen_width);
+                                let screen_y = input_manager.scale_tablet_coord(y, screen_height);
+                                push_input_event(CompositorInputEvent::MouseAbsolute {
+                                    x: screen_x,
+                                    y: screen_y,
+                                });
+                            }
+                        }
+                        abs_codes::ABS_Y => {
+                            input_manager.abs_y = Some(event.value);
+                            if let (Some(x), Some(y)) = (input_manager.abs_x, input_manager.abs_y) {
+                                let screen_x = input_manager.scale_tablet_coord(x, screen_width);
+                                let screen_y = input_manager.scale_tablet_coord(y, screen_height);
+                                push_input_event(CompositorInputEvent::MouseAbsolute {
+                                    x: screen_x,
+                                    y: screen_y,
+                                });
+                            }
+                        }
+                        _ => {}
+                    },
+                    event_types::EV_KEY => {
+                        let pressed = event.value == 1;
+                        push_input_event(CompositorInputEvent::MouseButton {
+                            button: event.code,
+                            pressed,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(None) => {
+                // No event, continue
+            }
+            Err(e) => {
+                println!("[InputThread] Error reading event: {}", e);
+                break;
+            }
+        }
+    }
+
+    println!("[InputThread] Exited");
 }

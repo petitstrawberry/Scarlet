@@ -312,6 +312,15 @@ impl Socket {
             handle: unsafe { Handle::from_raw(raw) },
         }
     }
+
+    /// Get the raw handle value for debugging
+    ///
+    /// # Returns
+    ///
+    /// The raw handle ID
+    pub fn as_raw(&self) -> i32 {
+        self.handle.as_raw()
+    }
 }
 
 impl crate::io::Read for Socket {

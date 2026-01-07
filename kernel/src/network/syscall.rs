@@ -264,15 +264,23 @@ pub fn sys_socket_listen(tf: &mut Trapframe) -> usize {
     // Get the socket from handle table
     let socket = match task.handle_table.get(handle_id) {
         Some(KernelObject::Socket(socket)) => socket.clone(),
-        _ => return usize::MAX,
+        _ => {
+            crate::println!("[sys_socket_listen] Invalid handle {}", handle_id);
+            return usize::MAX;
+        }
     };
 
     // Start listening
-    if socket.listen(backlog).is_err() {
-        return usize::MAX;
+    match socket.listen(backlog) {
+        Ok(()) => {
+            crate::println!("[sys_socket_listen] Socket {} now listening", handle_id);
+            0
+        }
+        Err(e) => {
+            crate::println!("[sys_socket_listen] listen() failed: {:?}", e);
+            usize::MAX
+        }
     }
-
-    0
 }
 
 /// System call: Connect to a named socket
@@ -392,13 +400,19 @@ pub fn sys_socket_accept(tf: &mut Trapframe) -> usize {
 
     let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
         Some(socket) => socket,
-        None => return usize::MAX, // Not a LocalSocket
+        None => {
+            crate::println!("[sys_socket_accept] Not a LocalSocket");
+            return usize::MAX;
+        }
     };
 
     // Accept a connection with blocking
     let accepted_socket = match local_socket.accept_blocking(task.get_id(), tf) {
         Ok(socket) => socket,
-        Err(_) => return usize::MAX,
+        Err(e) => {
+            crate::println!("[sys_socket_accept] accept_blocking failed: {:?}", e);
+            return usize::MAX;
+        }
     };
 
     // Add the accepted socket to handle table

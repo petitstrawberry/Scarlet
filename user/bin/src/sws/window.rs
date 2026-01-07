@@ -17,7 +17,7 @@ pub struct Window {
     pub title: Option<Vec<u8>>,
     pub visible: bool,
     pub focused: bool,
-    /// Shared memory buffer for window contents (placeholder for Phase 2)
+    /// Shared memory buffer for window contents (BGRA format, 4 bytes per pixel)
     pub buffer: Option<Vec<u8>>,
 }
 
@@ -35,6 +35,31 @@ impl Window {
             focused: false,
             buffer: None,
         }
+    }
+
+    /// Create window with buffer
+    pub fn new_with_buffer(id: WindowId, x: i32, y: i32, width: u32, height: u32) -> Self {
+        // Allocate buffer (BGRA format, 4 bytes per pixel)
+        let buffer_size = (width * height * 4) as usize;
+        let mut buffer = Vec::new();
+        buffer.resize(buffer_size, 0);
+
+        Self {
+            id,
+            x,
+            y,
+            width,
+            height,
+            title: None,
+            visible: true,
+            focused: false,
+            buffer: Some(buffer),
+        }
+    }
+
+    /// Get buffer size in bytes
+    pub fn buffer_size(&self) -> usize {
+        (self.width * self.height * 4) as usize
     }
 
     /// Set window title
@@ -85,7 +110,28 @@ impl WindowManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        println!("[WindowManager] Creating window #{} at ({}, {})", id, x, y);
+        println!(
+            "[WindowManager] Creating window #{} at ({}, {}) with buffer",
+            id, x, y
+        );
+        let window = Window::new_with_buffer(id, x, y, width, height);
+        self.windows.push(window);
+
+        // Focus the new window
+        self.focus_window(id);
+
+        id
+    }
+
+    /// Create window without buffer (for testing)
+    pub fn create_window_no_buffer(&mut self, x: i32, y: i32, width: u32, height: u32) -> WindowId {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        println!(
+            "[WindowManager] Creating window #{} at ({}, {}) without buffer",
+            id, x, y
+        );
         let window = Window::new(id, x, y, width, height);
         self.windows.push(window);
 

@@ -1,8 +1,9 @@
 //! Compositor module - manages window composition and rendering
 
 use super::cursor::Cursor;
-use super::input::{InputEvent, InputManager, abs_codes, event_types, rel_codes};
+use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer};
+use super::protocol::ServerMessage;
 use super::window::{WindowId, WindowManager};
 use framebuffer::Framebuffer;
 use std::println;
@@ -13,7 +14,6 @@ pub struct Compositor {
     framebuffer: Framebuffer,
     vram_ptr: Option<usize>,
     vram_size: usize,
-    input_manager: InputManager,
     window_manager: WindowManager,
     ipc_server: IpcServer,
     cursor: Cursor,
@@ -54,8 +54,8 @@ impl Compositor {
             (None, 0)
         };
 
-        // Initialize input manager
-        let input_manager = InputManager::new()?;
+        // Start input thread
+        InputManager::start_input_thread(screen_width, screen_height)?;
 
         // Initialize IPC server
         let mut ipc_server = IpcServer::new("/tmp/sws.sock")?;
@@ -75,7 +75,6 @@ impl Compositor {
             framebuffer,
             vram_ptr,
             vram_size,
-            input_manager,
             window_manager,
             ipc_server,
             cursor,
@@ -92,26 +91,38 @@ impl Compositor {
     pub fn init_display(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Initializing display...");
 
-        // Create multiple test windows for demonstration
+        // Create multiple test windows with buffers
         let win1 = self.window_manager.create_window(50, 50, 400, 250);
         if let Some(window) = self.window_manager.get_window_mut(win1) {
             window.set_title("Window 1");
+            // Fill with red gradient
+            if let Some(ref mut buffer) = window.buffer {
+                Self::fill_buffer_gradient(buffer, 400, 250, [200, 50, 50, 255]);
+            }
         }
 
         let win2 = self.window_manager.create_window(150, 120, 350, 200);
         if let Some(window) = self.window_manager.get_window_mut(win2) {
             window.set_title("Window 2");
+            // Fill with green gradient
+            if let Some(ref mut buffer) = window.buffer {
+                Self::fill_buffer_gradient(buffer, 350, 200, [50, 200, 50, 255]);
+            }
         }
 
         let win3 = self.window_manager.create_window(250, 180, 300, 180);
         if let Some(window) = self.window_manager.get_window_mut(win3) {
             window.set_title("Window 3");
+            // Fill with blue gradient
+            if let Some(ref mut buffer) = window.buffer {
+                Self::fill_buffer_gradient(buffer, 300, 180, [50, 50, 200, 255]);
+            }
         }
 
         // Focus the last created window
         self.window_manager.set_focus(win3);
 
-        println!("[Compositor] Created 3 test windows");
+        println!("[Compositor] Created 3 test windows with content");
 
         // Initial full composite
         self.full_redraw_needed = true;
@@ -120,6 +131,24 @@ impl Compositor {
         println!("[Compositor] Display initialized");
 
         Ok(())
+    }
+
+    /// Fill buffer with gradient (for testing, static method)
+    fn fill_buffer_gradient(buffer: &mut [u8], width: u32, height: u32, base_color: [u8; 4]) {
+        for y in 0..height {
+            for x in 0..width {
+                let offset = ((y * width + x) * 4) as usize;
+                if offset + 4 <= buffer.len() {
+                    // Create gradient effect
+                    let intensity =
+                        (x as f32 / width as f32 * 0.5 + y as f32 / height as f32 * 0.5) as u8;
+                    buffer[offset] = base_color[0].saturating_sub(intensity); // B
+                    buffer[offset + 1] = base_color[1].saturating_sub(intensity); // G
+                    buffer[offset + 2] = base_color[2].saturating_sub(intensity); // R
+                    buffer[offset + 3] = base_color[3]; // A
+                }
+            }
+        }
     }
 
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
@@ -219,6 +248,93 @@ impl Compositor {
     /// Draw a window to buffer with optional clipping
     /// clip_rect: (x, y, width, height) in screen coordinates
     fn draw_window_to_buffer_clipped(
+        &self,
+        window: &super::window::Window,
+        buffer: &mut [u8],
+        stride: u32,
+        clip_rect: Option<(i32, i32, u32, u32)>,
+    ) {
+        // If window has a buffer, use it; otherwise draw placeholder
+        if let Some(ref window_buffer) = window.buffer {
+            self.draw_window_from_buffer(window, window_buffer, buffer, stride, clip_rect);
+        } else {
+            self.draw_window_placeholder(window, buffer, stride, clip_rect);
+        }
+    }
+
+    /// Draw window from its shared memory buffer
+    fn draw_window_from_buffer(
+        &self,
+        window: &super::window::Window,
+        window_buffer: &[u8],
+        screen_buffer: &mut [u8],
+        stride: u32,
+        clip_rect: Option<(i32, i32, u32, u32)>,
+    ) {
+        let border_color = if window.focused {
+            [50, 50, 150, 255] // Blue border for focused
+        } else {
+            [100, 100, 100, 255] // Gray border for unfocused
+        };
+
+        for y in 0..window.height {
+            for x in 0..window.width {
+                let screen_x = window.x + x as i32;
+                let screen_y = window.y + y as i32;
+
+                // Screen bounds check
+                if screen_x < 0
+                    || screen_x >= self.screen_width as i32
+                    || screen_y < 0
+                    || screen_y >= self.screen_height as i32
+                {
+                    continue;
+                }
+
+                // Clip rect check
+                if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
+                    if screen_x < clip_x
+                        || screen_x >= clip_x + clip_w as i32
+                        || screen_y < clip_y
+                        || screen_y >= clip_y + clip_h as i32
+                    {
+                        continue;
+                    }
+                }
+
+                let screen_offset = ((screen_y as u32 * stride)
+                    + (screen_x as u32 * self.bytes_per_pixel))
+                    as usize;
+
+                // Draw border or content
+                let is_border = x == 0 || y == 0 || x == window.width - 1 || y == window.height - 1;
+
+                if is_border {
+                    // Draw border
+                    if screen_offset + 4 <= screen_buffer.len() {
+                        screen_buffer[screen_offset] = border_color[0];
+                        screen_buffer[screen_offset + 1] = border_color[1];
+                        screen_buffer[screen_offset + 2] = border_color[2];
+                        screen_buffer[screen_offset + 3] = border_color[3];
+                    }
+                } else {
+                    // Draw from window buffer (BGRA format)
+                    let window_offset = ((y * window.width + x) * 4) as usize;
+                    if window_offset + 4 <= window_buffer.len()
+                        && screen_offset + 4 <= screen_buffer.len()
+                    {
+                        screen_buffer[screen_offset] = window_buffer[window_offset];
+                        screen_buffer[screen_offset + 1] = window_buffer[window_offset + 1];
+                        screen_buffer[screen_offset + 2] = window_buffer[window_offset + 2];
+                        screen_buffer[screen_offset + 3] = window_buffer[window_offset + 3];
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw placeholder window (for windows without buffers yet)
+    fn draw_window_placeholder(
         &self,
         window: &super::window::Window,
         buffer: &mut [u8],
@@ -332,94 +448,8 @@ impl Compositor {
     }
 
     /// Process input events
-    fn process_input(&mut self) -> Result<bool, &'static str> {
-        let event = match self.input_manager.read_event()? {
-            Some(event) => event,
-            None => return Ok(false), // No event available
-        };
-
-        // Process event
-        match event.type_ {
-            event_types::EV_REL => match event.code {
-                rel_codes::REL_X => {
-                    self.cursor.update_position(
-                        event.value,
-                        0,
-                        self.screen_width,
-                        self.screen_height,
-                    );
-                }
-                rel_codes::REL_Y => {
-                    self.cursor.update_position(
-                        0,
-                        event.value,
-                        self.screen_width,
-                        self.screen_height,
-                    );
-                }
-                _ => {}
-            },
-            event_types::EV_ABS => match event.code {
-                abs_codes::ABS_X => {
-                    let screen_x = self
-                        .input_manager
-                        .scale_tablet_coord(event.value, self.screen_width);
-                    self.cursor.set_position(
-                        screen_x,
-                        self.cursor.y,
-                        self.screen_width,
-                        self.screen_height,
-                    );
-                }
-                abs_codes::ABS_Y => {
-                    let screen_y = self
-                        .input_manager
-                        .scale_tablet_coord(event.value, self.screen_height);
-                    self.cursor.set_position(
-                        self.cursor.x,
-                        screen_y,
-                        self.screen_width,
-                        self.screen_height,
-                    );
-                }
-                _ => {
-                    println!(
-                        "[Compositor] Unknown EV_ABS code: 0x{:x}, value: {}",
-                        event.code, event.value
-                    );
-                }
-            },
-            event_types::EV_KEY => {
-                use super::input::key_codes;
-                println!(
-                    "[Compositor] EV_KEY: code=0x{:x}, value={}",
-                    event.code, event.value
-                );
-                match event.code {
-                    key_codes::BTN_LEFT => {
-                        if event.value == 1 {
-                            // Button pressed
-                            println!("[Compositor] BTN_LEFT pressed!");
-                            self.handle_mouse_click()?;
-                            return Ok(true); // Need full redraw for focus change
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            event_types::EV_SYN => {
-                if self.cursor.needs_redraw() {
-                    return Ok(true); // Need to redraw
-                }
-            }
-            _ => {}
-        }
-
-        Ok(false)
-    }
-
     /// Handle mouse click (for window focus)
-    fn handle_mouse_click(&mut self) -> Result<(), &'static str> {
+    fn handle_click(&mut self) -> Result<(), &'static str> {
         let click_x = self.cursor.x;
         let click_y = self.cursor.y;
 
@@ -440,26 +470,46 @@ impl Compositor {
 
     /// Main event loop
     pub fn run(&mut self) -> Result<(), &'static str> {
-        println!("[Compositor] Starting main loop");
+        println!("[Compositor] Starting main loop (multithreaded)");
 
         loop {
-            // Process IPC messages from clients
+            let mut needs_redraw = false;
+
+            // Process IPC events from global queue (non-blocking)
             let ipc_events = self.ipc_server.process_messages()?;
+            if !ipc_events.is_empty() {
+                println!("[Compositor] Processing {} IPC events", ipc_events.len());
+                needs_redraw = true;
+            }
             for event in ipc_events {
                 self.handle_ipc_event(event)?;
             }
 
-            // Process one input event
-            let needs_redraw = self.process_input()?;
-
-            // Re-composite and present if needed
-            if needs_redraw {
-                self.composite_and_present()?;
+            // Process input events from global queue (non-blocking)
+            let input_events = super::input::pop_all_input_events();
+            if !input_events.is_empty() {
+                for event in input_events {
+                    if self.handle_input_event(event)? {
+                        needs_redraw = true;
+                    }
+                }
             }
 
-            // Periodically print Z-order (every 100 events)
-            self.event_counter += 1;
-            if self.event_counter % 100 == 0 {
+            // Re-composite and present if needed
+            if needs_redraw || self.full_redraw_needed {
+                if self.full_redraw_needed {
+                    println!("[Compositor] Full redraw triggered");
+                }
+                self.composite_and_present()?;
+                self.event_counter += 1;
+            }
+
+            // Sleep briefly to limit frame rate and reduce CPU usage
+            // 16ms = ~60fps, adjust as needed
+            std::thread::sleep(core::time::Duration::from_millis(16));
+
+            // Periodically print Z-order (every 100 redraws)
+            if self.event_counter % 100 == 0 && self.event_counter > 0 {
                 use std::print;
                 print!("[Compositor] Z-order check #{}: ", self.event_counter);
                 for window in self.window_manager.get_windows() {
@@ -470,24 +520,111 @@ impl Compositor {
         }
     }
 
+    /// Handle input event from input thread
+    fn handle_input_event(&mut self, event: CompositorInputEvent) -> Result<bool, &'static str> {
+        match event {
+            CompositorInputEvent::MouseMove { dx, dy } => {
+                self.cursor
+                    .update_position(dx, dy, self.screen_width, self.screen_height);
+                Ok(true)
+            }
+            CompositorInputEvent::MouseAbsolute { x, y } => {
+                self.cursor
+                    .set_position(x, y, self.screen_width, self.screen_height);
+                Ok(true)
+            }
+            CompositorInputEvent::MouseButton { button, pressed } => {
+                if button == key_codes::BTN_LEFT && pressed {
+                    self.handle_click()?;
+                }
+                Ok(true)
+            }
+        }
+    }
+
     /// Handle IPC events from clients
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<(), &'static str> {
         match event {
-            IpcEvent::CreateWindow { client_id, width, height } => {
-                println!("[Compositor] Client {} creating window {}x{}", client_id, width, height);
+            IpcEvent::CreateWindow {
+                client_id,
+                width,
+                height,
+            } => {
+                println!(
+                    "[Compositor] Client {} creating window {}x{}",
+                    client_id, width, height
+                );
                 let window_id = self.window_manager.create_window(0, 0, width, height);
-                // TODO: Send WindowCreated message to client with shared memory info
+
+                // Get buffer size from window
+                let buffer_size = if let Some(window) = self.window_manager.get_window(window_id) {
+                    window.buffer_size()
+                } else {
+                    0
+                };
+
+                // Send WindowCreated message to client
+                let message = ServerMessage::WindowCreated {
+                    window_id,
+                    shm_size: buffer_size,
+                };
+                if let Err(e) = self.ipc_server.send_to_client(client_id, message) {
+                    println!("[Compositor] Failed to send WindowCreated: {}", e);
+                }
+
                 self.full_redraw_needed = true;
             }
-            IpcEvent::DestroyWindow { client_id, window_id } => {
-                println!("[Compositor] Client {} destroying window #{}", client_id, window_id);
+            IpcEvent::WindowCreated { window_id, width, height } => {
+                println!(
+                    "[Compositor] Window #{} created via IPC ({}x{}), triggering redraw",
+                    window_id, width, height
+                );
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::DestroyWindow {
+                client_id,
+                window_id,
+            } => {
+                println!(
+                    "[Compositor] Client {} destroying window #{}",
+                    client_id, window_id
+                );
                 self.window_manager.close_window(window_id);
                 self.full_redraw_needed = true;
             }
-            IpcEvent::BufferUpdated { window_id, damage_x, damage_y, damage_width, damage_height } => {
-                println!("[Compositor] Window #{} buffer updated: ({},{}) {}x{}",
-                    window_id, damage_x, damage_y, damage_width, damage_height);
-                // TODO: Composite only the damaged region
+            IpcEvent::WindowDestroyed { window_id } => {
+                println!(
+                    "[Compositor] Window #{} destroyed via IPC, triggering redraw",
+                    window_id
+                );
+                self.window_manager.close_window(window_id);
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::BufferUpdated {
+                window_id,
+                damage_x,
+                damage_y,
+                damage_width,
+                damage_height,
+            } => {
+                println!(
+                    "[Compositor] Window #{} buffer updated: ({},{}) {}x{}",
+                    window_id, damage_x, damage_y, damage_width, damage_height
+                );
+                // TODO: Optimize by only compositing the damaged region
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::ClientBufferUpdate { window_id, buffer } => {
+                println!(
+                    "[Compositor] Window #{} received new buffer ({} bytes)",
+                    window_id,
+                    buffer.len()
+                );
+                // Update window buffer
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.buffer = Some(buffer);
+                    println!("[Compositor] Buffer updated for window #{}", window_id);
+                }
                 self.full_redraw_needed = true;
             }
             IpcEvent::RequestMove { window_id } => {
@@ -495,7 +632,10 @@ impl Compositor {
                 // TODO: Enter move mode for this window
             }
             IpcEvent::MoveWindow { window_id, x, y } => {
-                println!("[Compositor] Moving window #{} to ({}, {})", window_id, x, y);
+                println!(
+                    "[Compositor] Moving window #{} to ({}, {})",
+                    window_id, x, y
+                );
                 self.window_manager.set_window_position(window_id, x, y);
                 self.full_redraw_needed = true;
             }
