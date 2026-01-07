@@ -473,6 +473,27 @@ impl NetworkManager {
         self.connections.write().remove(&socket_id);
     }
 
+    /// Get the socket ID for a given socket object
+    ///
+    /// Searches through registered connections to find the ID for a socket object.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - The socket object to find
+    ///
+    /// # Returns
+    ///
+    /// The socket ID if found, None otherwise
+    pub fn get_socket_id(&self, socket: &Arc<dyn SocketObject>) -> Option<SocketId> {
+        let connections = self.connections.read();
+        for (id, registered_socket) in connections.iter() {
+            if Arc::ptr_eq(registered_socket, socket) {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
     /// Get the count of active connections
     pub fn connection_count(&self) -> usize {
         self.connections.read().len()
