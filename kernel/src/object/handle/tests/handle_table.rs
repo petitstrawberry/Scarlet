@@ -9,12 +9,12 @@ fn test_handle_table_creation() {
     let table = HandleTable::new();
     assert_eq!(table.open_count(), 0);
     assert_eq!(table.active_handles().len(), 0);
-    assert_eq!(table.free_handles.len(), HandleTable::MAX_HANDLES);
+    assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES);
 }
 
 #[test_case]
 fn test_handle_table_insert_and_get() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
     let mock_file = Arc::new(MockFileObject::new(b"test".to_vec()));
     let kernel_obj = KernelObject::File(mock_file);
 
@@ -34,7 +34,7 @@ fn test_handle_table_insert_and_get() {
 
 #[test_case]
 fn test_handle_table_remove() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
     let mock_file = Arc::new(MockFileObject::new(b"test".to_vec()));
     let kernel_obj = KernelObject::File(mock_file);
 
@@ -53,7 +53,7 @@ fn test_handle_table_remove() {
 
 #[test_case]
 fn test_handle_table_multiple_objects() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
     let mut handles = Vec::new();
 
     // Insert multiple objects
@@ -84,7 +84,7 @@ fn test_handle_table_multiple_objects() {
 
 #[test_case]
 fn test_handle_table_close_all() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
 
     // Insert multiple objects
     for i in 0..5 {
@@ -100,12 +100,12 @@ fn test_handle_table_close_all() {
 
     assert_eq!(table.open_count(), 0);
     assert_eq!(table.active_handles().len(), 0);
-    assert_eq!(table.free_handles.len(), HandleTable::MAX_HANDLES);
+    assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES);
 }
 
 #[test_case]
 fn test_handle_table_limits() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
     let mut handles = Vec::new();
 
     // Fill up the table
@@ -131,7 +131,7 @@ fn test_handle_table_limits() {
 
 #[test_case]
 fn test_handle_table_handle_reuse() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
 
     // Insert object
     let mock_file1 = Arc::new(MockFileObject::new(b"first".to_vec()));
@@ -151,7 +151,7 @@ fn test_handle_table_handle_reuse() {
 
 #[test_case]
 fn test_handle_table_invalid_operations() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
 
     // Try to get non-existent handle
     assert!(table.get(999).is_none());
@@ -167,7 +167,7 @@ fn test_handle_table_invalid_operations() {
 
 #[test_case]
 fn test_handle_table_stress_allocation() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
 
     // Test rapid allocation/deallocation to ensure no memory leaks
     for _ in 0..100 {
@@ -192,7 +192,7 @@ fn test_handle_table_stress_allocation() {
 
 #[test_case]
 fn test_handle_table_edge_cases() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
 
     // Test edge case: handle 0 should be valid
     let mock_file = Arc::new(MockFileObject::new(b"handle_zero".to_vec()));
@@ -229,12 +229,12 @@ fn test_handle_table_memory_efficiency() {
     let table = HandleTable::new();
 
     // Verify initial memory layout is efficient
-    assert_eq!(table.free_handles.len(), HandleTable::MAX_HANDLES);
+    assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES);
     assert_eq!(table.open_count(), 0);
 
     // Verify that handles are allocated in ascending order
     // (due to stack-based allocation with reverse initialization)
-    let mut temp_table = HandleTable::new();
+    let temp_table = HandleTable::new();
     let mut allocated_handles = Vec::new();
 
     for _ in 0..10 {
@@ -252,7 +252,7 @@ fn test_handle_table_memory_efficiency() {
 
 #[test_case]
 fn test_handle_table_active_handles_accuracy() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
     let mut expected_active = Vec::new();
 
     // Insert handles in non-sequential pattern
@@ -281,7 +281,7 @@ fn test_handle_table_active_handles_accuracy() {
 
 #[test_case]
 fn test_handle_table_concurrent_like_operations() {
-    let mut table = HandleTable::new();
+    let table = HandleTable::new();
 
     // Simulate concurrent-like operations by rapidly inserting and removing
     for iteration in 0..10 {
@@ -305,4 +305,56 @@ fn test_handle_table_concurrent_like_operations() {
         // Table should be empty after each iteration
         assert_eq!(table.open_count(), 0);
     }
+}
+
+#[test_case]
+fn test_handle_table_sharing() {
+    // Test that clone() creates a shared copy (Arc behavior)
+    let table1 = HandleTable::new();
+
+    let mock_file = Arc::new(MockFileObject::new(b"shared_test".to_vec()));
+    let kernel_obj = KernelObject::File(mock_file);
+    let handle = table1.insert(kernel_obj).unwrap();
+
+    // Clone creates a shared reference
+    let table2 = table1.clone();
+
+    // Both tables should see the same handle
+    assert!(table1.is_valid_handle(handle));
+    assert!(table2.is_valid_handle(handle));
+    assert_eq!(table1.open_count(), 1);
+    assert_eq!(table2.open_count(), 1);
+
+    // Removing from one should affect the other (shared)
+    table2.remove(handle);
+    assert!(!table1.is_valid_handle(handle));
+    assert!(!table2.is_valid_handle(handle));
+    assert_eq!(table1.open_count(), 0);
+    assert_eq!(table2.open_count(), 0);
+}
+
+#[test_case]
+fn test_handle_table_deep_clone() {
+    // Test that deep_clone() creates an independent copy
+    let table1 = HandleTable::new();
+
+    let mock_file = Arc::new(MockFileObject::new(b"deep_clone_test".to_vec()));
+    let kernel_obj = KernelObject::File(mock_file);
+    let handle = table1.insert(kernel_obj).unwrap();
+
+    // Deep clone creates an independent copy
+    let table2 = table1.deep_clone();
+
+    // Both tables should see the same handle initially
+    assert!(table1.is_valid_handle(handle));
+    assert!(table2.is_valid_handle(handle));
+    assert_eq!(table1.open_count(), 1);
+    assert_eq!(table2.open_count(), 1);
+
+    // Removing from one should NOT affect the other (independent)
+    table2.remove(handle);
+    assert!(table1.is_valid_handle(handle)); // table1 still has it
+    assert!(!table2.is_valid_handle(handle)); // table2 no longer has it
+    assert_eq!(table1.open_count(), 1);
+    assert_eq!(table2.open_count(), 0);
 }

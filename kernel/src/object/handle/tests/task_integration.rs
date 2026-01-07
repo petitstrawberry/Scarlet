@@ -122,7 +122,7 @@ fn test_task_handle_table_process_lifecycle() {
 
     // All handles should now be available for reuse
     assert_eq!(
-        task.handle_table.free_handles.len(),
+        task.handle_table.free_handles_len(),
         HandleTable::MAX_HANDLES
     );
 }
@@ -180,42 +180,34 @@ fn test_task_handle_table_clone_behavior() {
 
     assert_eq!(parent_task.handle_table.open_count(), 2);
 
-    // Clone the task (this should clone the handle table)
-    let mut child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
+    // Clone the task with default flags (CLONE_FILES is set by default)
+    // Since CLONE_FILES is set, the handle table is shared (shallow clone)
+    let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
 
-    // Child should inherit parent's handle table (Linux fork() behavior)
+    // With CLONE_FILES, child shares handle table with parent
+    // When we remove handle1 from child, it affects parent too
     assert_eq!(child_task.handle_table.open_count(), 2);
-
-    // Parent's handle table should be unaffected
     assert_eq!(parent_task.handle_table.open_count(), 2);
     assert!(parent_task.handle_table.is_valid_handle(handle1));
     assert!(parent_task.handle_table.is_valid_handle(handle2));
-
-    // Child should have inherited the same handles
     assert!(child_task.handle_table.is_valid_handle(handle1));
     assert!(child_task.handle_table.is_valid_handle(handle2));
 
-    // Verify that child and parent have independent handle tables (closing in one doesn't affect the other)
+    // With CLONE_FILES, removing from child DOES affect parent (shared table)
     child_task.handle_table.remove(handle1);
     assert_eq!(child_task.handle_table.open_count(), 1);
-    assert_eq!(parent_task.handle_table.open_count(), 2); // Parent still has both handles
-    assert!(parent_task.handle_table.is_valid_handle(handle1)); // Parent's handle1 still valid
+    assert_eq!(parent_task.handle_table.open_count(), 1); // Parent is also affected
+    assert!(!parent_task.handle_table.is_valid_handle(handle1)); // Parent's handle1 is now invalid
 
-    // Child and parent should have independent handle tables for new allocations
-    let mock_child_file = Arc::new(MockTaskFileObject::new(b"child_file".to_vec()));
-    let child_kernel_obj = KernelObject::File(mock_child_file);
-    let child_handle = child_task.handle_table.insert(child_kernel_obj).unwrap();
+    // Both still share access to handle2
+    let parent_obj = parent_task.handle_table.get(handle2);
+    let child_obj = child_task.handle_table.get(handle2);
+    assert!(parent_obj.is_some());
+    assert!(child_obj.is_some());
 
-    assert_eq!(child_task.handle_table.open_count(), 2); // handle2 + new child_handle
-    assert_eq!(parent_task.handle_table.open_count(), 2); // Still has both original handles
-
-    // New child handle should reuse the freed handle1 slot
-    assert_eq!(child_handle, handle1); // Should reuse handle1 (0)
-
-    // Verify that the file objects are still accessible from both tasks
-    // and contain the same data (Arc sharing), but positions are also shared
-    if let Some(parent_obj) = parent_task.handle_table.get(handle2) {
-        if let Some(child_obj) = child_task.handle_table.get(handle2) {
+    // Verify the file objects are the same (shared via Arc)
+    if let Some(parent_obj) = parent_obj {
+        if let Some(child_obj) = child_obj {
             if let (Some(parent_stream), Some(child_stream)) =
                 (parent_obj.as_stream(), child_obj.as_stream())
             {
@@ -276,7 +268,7 @@ fn test_task_handle_table_memory_efficiency() {
     // After all iterations, handle table should be in clean state
     assert_eq!(task.handle_table.open_count(), 0);
     assert_eq!(
-        task.handle_table.free_handles.len(),
+        task.handle_table.free_handles_len(),
         HandleTable::MAX_HANDLES
     );
 }
