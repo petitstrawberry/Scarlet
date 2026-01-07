@@ -23,6 +23,7 @@
 //! ```
 
 use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3};
+use crate::handle::Handle;
 
 /// Socket handle wrapper
 ///
@@ -30,7 +31,7 @@ use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3};
 /// Sockets are automatically closed when dropped.
 #[derive(Debug)]
 pub struct Socket {
-    handle: u32,
+    handle: Handle,
 }
 
 /// Socket shutdown direction
@@ -78,12 +79,12 @@ impl Socket {
     /// let socket = Socket::new().unwrap();
     /// ```
     pub fn new() -> Result<Self> {
-        let handle = syscall0(Syscall::SocketCreate);
-        if handle == usize::MAX {
+        let raw_handle = syscall0(Syscall::SocketCreate);
+        if raw_handle == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
         Ok(Socket {
-            handle: handle as u32,
+            handle: unsafe { Handle::from_raw(raw_handle as i32) },
         })
     }
 
@@ -106,7 +107,7 @@ impl Socket {
     pub fn bind(&self, path: &str) -> Result<()> {
         let result = syscall3(
             Syscall::SocketBind,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             path.as_ptr() as usize,
             path.len(),
         );
@@ -134,7 +135,7 @@ impl Socket {
     /// socket.listen(5).unwrap();
     /// ```
     pub fn listen(&self, backlog: usize) -> Result<()> {
-        let result = syscall2(Syscall::SocketListen, self.handle as usize, backlog);
+        let result = syscall2(Syscall::SocketListen, self.handle.as_raw() as usize, backlog);
         if result == usize::MAX {
             return Err(SocketError::NotListening);
         }
@@ -160,7 +161,7 @@ impl Socket {
     pub fn connect(&self, path: &str) -> Result<()> {
         let result = syscall3(
             Syscall::SocketConnect,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             path.as_ptr() as usize,
             path.len(),
         );
@@ -186,12 +187,12 @@ impl Socket {
     /// let client = server.accept().unwrap();
     /// ```
     pub fn accept(&self) -> Result<Socket> {
-        let handle = syscall1(Syscall::SocketAccept, self.handle as usize);
-        if handle == usize::MAX {
+        let raw_handle = syscall1(Syscall::SocketAccept, self.handle.as_raw() as usize);
+        if raw_handle == usize::MAX {
             return Err(SocketError::WouldBlock);
         }
         Ok(Socket {
-            handle: handle as u32,
+            handle: unsafe { Handle::from_raw(raw_handle as i32) },
         })
     }
 
@@ -215,10 +216,10 @@ impl Socket {
         }
         Ok((
             Socket {
-                handle: handles[0] as u32,
+                handle: unsafe { Handle::from_raw(handles[0] as i32) },
             },
             Socket {
-                handle: handles[1] as u32,
+                handle: unsafe { Handle::from_raw(handles[1] as i32) },
             },
         ))
     }
@@ -241,7 +242,7 @@ impl Socket {
     /// socket.shutdown(ShutdownHow::Both).unwrap();
     /// ```
     pub fn shutdown(&self, how: ShutdownHow) -> Result<()> {
-        let result = syscall2(Syscall::SocketShutdown, self.handle as usize, how as usize);
+        let result = syscall2(Syscall::SocketShutdown, self.handle.as_raw() as usize, how as usize);
         if result == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -253,8 +254,17 @@ impl Socket {
     /// # Returns
     ///
     /// The underlying handle ID for this socket.
-    pub fn as_raw_handle(&self) -> u32 {
-        self.handle
+    pub fn as_raw_handle(&self) -> i32 {
+        self.handle.as_raw()
+    }
+
+    /// Get the underlying Handle
+    ///
+    /// # Returns
+    ///
+    /// Reference to the underlying Handle.
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
     }
 
     /// Get StreamOps capability for this socket
@@ -271,9 +281,7 @@ impl Socket {
     /// stream.write(b"Hello").unwrap();
     /// ```
     pub fn as_stream(&self) -> Result<crate::handle::capability::StreamOps> {
-        Ok(crate::handle::capability::StreamOps::from_handle(
-            self.handle as i32,
-        ))
+        self.handle.as_stream().map_err(|_| SocketError::SyscallFailed)
     }
 
     /// Create a socket from a raw handle
@@ -289,15 +297,33 @@ impl Socket {
     /// # Returns
     ///
     /// A Socket wrapping the given handle.
-    pub unsafe fn from_raw_handle(handle: u32) -> Self {
-        Socket { handle }
+    pub unsafe fn from_raw_handle(raw: i32) -> Self {
+        Socket { 
+            handle: unsafe { Handle::from_raw(raw) }
+        }
     }
 }
 
-impl Drop for Socket {
-    fn drop(&mut self) {
-        // Close the socket handle
-        // HandleClose = 102
-        let _ = syscall1(Syscall::HandleClose, self.handle as usize);
+impl crate::io::Read for Socket {
+    fn read(&mut self, buf: &mut [u8]) -> crate::io::Result<usize> {
+        let stream = self.handle.as_stream()
+            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream"))?;
+        stream.read(buf)
+            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to read"))
     }
 }
+
+impl crate::io::Write for Socket {
+    fn write(&mut self, buf: &[u8]) -> crate::io::Result<usize> {
+        let stream = self.handle.as_stream()
+            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream"))?;
+        stream.write(buf)
+            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to write"))
+    }
+
+    fn flush(&mut self) -> crate::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Handle's Drop implementation will automatically close the socket

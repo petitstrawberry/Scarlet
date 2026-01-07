@@ -78,6 +78,7 @@ pub mod handle;
 pub mod io;
 pub mod ipc;
 pub mod socket;
+pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod thread;
