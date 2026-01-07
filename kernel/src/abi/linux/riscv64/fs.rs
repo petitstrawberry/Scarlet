@@ -1654,7 +1654,7 @@ pub fn sys_ioctl(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize 
     if let Some(caps) = caps {
         // TTY translation
         if caps.iter().any(|c| *c == DeviceCapability::Tty) {
-            match crate::abi::linux::device::tty::handle_ioctl(request, arg, kernel_object) {
+            match crate::abi::linux::device::tty::handle_ioctl(request, arg, &kernel_object) {
                 Ok(Some(ret)) => return ret,
                 Ok(None) => {
                     // Do NOT pass through unknown TTY ioctls to device-specific control.

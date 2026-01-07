@@ -244,7 +244,7 @@ fn test_metadata_with_iterator() {
     let mut found_stdin = false;
     let mut found_ipc = false;
 
-    for (_handle, _obj, metadata) in table.iter_with_metadata() {
+    table.for_each_with_metadata(|_handle, _obj, metadata| {
         count += 1;
         match metadata.handle_type {
             HandleType::Regular => found_regular = true,
@@ -252,7 +252,7 @@ fn test_metadata_with_iterator() {
             HandleType::IpcChannel => found_ipc = true,
             _ => {}
         }
-    }
+    });
 
     assert_eq!(count, 3);
     assert!(found_regular);
