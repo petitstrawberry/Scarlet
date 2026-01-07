@@ -218,10 +218,10 @@ pub fn sys_bind(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
 
         let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
 
-        // Create the socket file
-        if let Err(_) = vfs.create_file(path, socket_file_type) {
-            return usize::MAX;
-        }
+        // Create the socket file in VFS on a best-effort basis.
+        // If this fails, we still report success, since the socket has
+        // already been successfully bound and registered with NetworkManager.
+        let _ = vfs.create_file(path, socket_file_type);
 
         0 // Success
     }
