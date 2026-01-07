@@ -744,4 +744,107 @@ mod tests {
         sock1.read(&mut buf).unwrap();
         assert_eq!(&buf, b"pong");
     }
+
+    #[test_case]
+    fn test_handle_transfer_send_recv() {
+        use crate::ipc::{SharedMemory, StreamIpcOps};
+        use alloc::sync::Arc;
+
+        // Create a connected socket pair
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        // Create a shared memory object to transfer
+        let shmem = match SharedMemory::new(4096, 0x3) {
+            Ok(shmem) => shmem,
+            Err(_) => {
+                crate::println!("SharedMemory::new failed, skipping test");
+                return;
+            }
+        };
+        let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
+
+        // Send handle from sock1 to sock2
+        let result = sock1.send_handle(shmem_obj);
+        assert!(result.is_ok(), "send_handle should succeed");
+
+        // Receive handle at sock2
+        let received = sock2.recv_handle();
+        assert!(received.is_ok(), "recv_handle should succeed");
+
+        // Verify it's a SharedMemory object
+        let received_obj = received.unwrap();
+        assert!(
+            received_obj.as_shared_memory().is_some(),
+            "Received object should be SharedMemory"
+        );
+    }
+
+    #[test_case]
+    fn test_handle_transfer_multiple_handles() {
+        use crate::ipc::{SharedMemory, StreamIpcOps};
+        use alloc::sync::Arc;
+
+        // Create a connected socket pair
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        // Send multiple handles
+        for i in 0..3 {
+            if let Ok(shmem) = SharedMemory::new(4096 * (i + 1), 0x3) {
+                let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
+                assert!(sock1.send_handle(shmem_obj).is_ok());
+            }
+        }
+
+        // Receive all handles
+        for _ in 0..3 {
+            let received = sock2.recv_handle();
+            assert!(received.is_ok(), "recv_handle should succeed");
+            assert!(
+                received.unwrap().as_shared_memory().is_some(),
+                "Received object should be SharedMemory"
+            );
+        }
+
+        // Queue should be empty now
+        let result = sock2.recv_handle();
+        assert!(result.is_err(), "recv_handle should fail when queue is empty");
+    }
+
+    #[test_case]
+    fn test_handle_transfer_on_disconnected_socket() {
+        use crate::ipc::{SharedMemory, StreamIpcOps};
+        use alloc::sync::Arc;
+
+        // Create an unconnected socket
+        let sock = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+
+        // Try to send handle on disconnected socket
+        if let Ok(shmem) = SharedMemory::new(4096, 0x3) {
+            let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
+            let result = sock.send_handle(shmem_obj);
+            assert!(result.is_err(), "send_handle should fail on disconnected socket");
+        }
+
+        // Try to receive handle on disconnected socket
+        let result = sock.recv_handle();
+        assert!(
+            result.is_err(),
+            "recv_handle should fail on disconnected socket"
+        );
+    }
+
+    #[test_case]
+    fn test_handle_transfer_empty_queue() {
+        use crate::ipc::StreamIpcOps;
+
+        // Create a connected socket pair
+        let (_, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        // Try to receive from empty queue
+        let result = sock2.recv_handle();
+        assert!(result.is_err(), "recv_handle should fail when queue is empty");
+    }
 }

@@ -301,3 +301,62 @@ impl Drop for Socket {
         let _ = syscall1(Syscall::HandleClose, self.handle as usize);
     }
 }
+
+// Convenience C-style functions
+
+/// Socket domain for socket_create
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketDomain {
+    /// Local (Unix-like) socket
+    Local = 1,
+}
+
+/// Socket type for socket_create
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketType {
+    /// Stream socket (connection-oriented)
+    Stream = 1,
+}
+
+/// Create a new socket (C-style wrapper)
+pub fn socket_create(domain: SocketDomain, socket_type: SocketType, _protocol: u32) -> Option<u32> {
+    let _ = (domain, socket_type); // Currently only support Local/Stream
+    Socket::new().ok().map(|s| {
+        let handle = s.as_raw_handle();
+        core::mem::forget(s); // Prevent Drop from closing
+        handle
+    })
+}
+
+/// Bind socket to a path (C-style wrapper)
+pub fn socket_bind(handle: u32, path: &str) -> bool {
+    let socket = unsafe { Socket::from_raw_handle(handle) };
+    let result = socket.bind(path).is_ok();
+    core::mem::forget(socket); // Prevent Drop from closing
+    result
+}
+
+/// Start listening (C-style wrapper)
+pub fn socket_listen(handle: u32, backlog: usize) -> bool {
+    let socket = unsafe { Socket::from_raw_handle(handle) };
+    let result = socket.listen(backlog).is_ok();
+    core::mem::forget(socket); // Prevent Drop from closing
+    result
+}
+
+/// Connect to a socket (C-style wrapper)
+pub fn socket_connect(handle: u32, path: &str) -> bool {
+    let socket = unsafe { Socket::from_raw_handle(handle) };
+    let result = socket.connect(path).is_ok();
+    core::mem::forget(socket); // Prevent Drop from closing
+    result
+}
+
+/// Shutdown socket (C-style wrapper)
+pub fn socket_shutdown(handle: u32) -> bool {
+    let socket = unsafe { Socket::from_raw_handle(handle) };
+    let result = socket.shutdown(ShutdownHow::Both).is_ok();
+    core::mem::forget(socket); // Prevent Drop from closing
+    result
+}
+
