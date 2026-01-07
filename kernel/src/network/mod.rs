@@ -496,9 +496,58 @@ impl NetworkManager {
         &self,
         socket: Arc<dyn SocketObject>,
     ) -> Result<SocketId, SocketError> {
-        let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
-        self.register_socket_with_id(socket_id, socket)?;
-        Ok(socket_id)
+        // Keep ownership of the socket and clone the Arc on each registration attempt.
+        let socket = socket;
+
+        // Use the current value of `next_socket_id` as our starting point.
+        let start_id = self.next_socket_id.load(Ordering::SeqCst);
+        let mut current_id = start_id;
+
+        loop {
+            // Try to register the current candidate ID.
+            match self.register_socket_with_id(current_id, Arc::clone(&socket)) {
+                Ok(()) => {
+                    // On success, advance `next_socket_id` so that it is at least
+                    // one past the allocated ID. This uses a CAS loop to avoid
+                    // regressing the counter in the presence of concurrent allocators.
+                    let mut observed = self.next_socket_id.load(Ordering::SeqCst);
+                    loop {
+                        if observed > current_id {
+                            break;
+                        }
+
+                        match self.next_socket_id.compare_exchange(
+                            observed,
+                            current_id.wrapping_add(1),
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => break,
+                            Err(actual) => {
+                                if actual > current_id {
+                                    // Another allocator already moved the counter forward.
+                                    break;
+                                }
+                                observed = actual;
+                            }
+                        }
+                    }
+
+                    return Ok(current_id);
+                }
+                Err(e) => {
+                    // Move to the next candidate ID, wrapping on overflow.
+                    let next_id = current_id.wrapping_add(1);
+
+                    // If we've wrapped around and tried the entire ID space, give up.
+                    if next_id == start_id {
+                        return Err(e);
+                    }
+
+                    current_id = next_id;
+                }
+            }
+        }
     }
 
     /// Get the socket ID for a given socket object
