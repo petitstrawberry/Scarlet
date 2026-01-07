@@ -2,6 +2,7 @@
 
 use super::cursor::Cursor;
 use super::input::{InputEvent, InputManager, abs_codes, event_types, rel_codes};
+use super::ipc::{IpcEvent, IpcServer};
 use super::window::{WindowId, WindowManager};
 use framebuffer::Framebuffer;
 use std::println;
@@ -14,6 +15,7 @@ pub struct Compositor {
     vram_size: usize,
     input_manager: InputManager,
     window_manager: WindowManager,
+    ipc_server: IpcServer,
     cursor: Cursor,
     screen_width: u32,
     screen_height: u32,
@@ -55,6 +57,10 @@ impl Compositor {
         // Initialize input manager
         let input_manager = InputManager::new()?;
 
+        // Initialize IPC server
+        let mut ipc_server = IpcServer::new("/tmp/sws.sock")?;
+        ipc_server.listen()?;
+
         // Initialize window manager
         let window_manager = WindowManager::new();
 
@@ -71,6 +77,7 @@ impl Compositor {
             vram_size,
             input_manager,
             window_manager,
+            ipc_server,
             cursor,
             screen_width,
             screen_height,
@@ -436,6 +443,12 @@ impl Compositor {
         println!("[Compositor] Starting main loop");
 
         loop {
+            // Process IPC messages from clients
+            let ipc_events = self.ipc_server.process_messages()?;
+            for event in ipc_events {
+                self.handle_ipc_event(event)?;
+            }
+
             // Process one input event
             let needs_redraw = self.process_input()?;
 
@@ -455,5 +468,38 @@ impl Compositor {
                 println!();
             }
         }
+    }
+
+    /// Handle IPC events from clients
+    fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<(), &'static str> {
+        match event {
+            IpcEvent::CreateWindow { client_id, width, height } => {
+                println!("[Compositor] Client {} creating window {}x{}", client_id, width, height);
+                let window_id = self.window_manager.create_window(0, 0, width, height);
+                // TODO: Send WindowCreated message to client with shared memory info
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::DestroyWindow { client_id, window_id } => {
+                println!("[Compositor] Client {} destroying window #{}", client_id, window_id);
+                self.window_manager.close_window(window_id);
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::BufferUpdated { window_id, damage_x, damage_y, damage_width, damage_height } => {
+                println!("[Compositor] Window #{} buffer updated: ({},{}) {}x{}",
+                    window_id, damage_x, damage_y, damage_width, damage_height);
+                // TODO: Composite only the damaged region
+                self.full_redraw_needed = true;
+            }
+            IpcEvent::RequestMove { window_id } => {
+                println!("[Compositor] Window #{} requested move", window_id);
+                // TODO: Enter move mode for this window
+            }
+            IpcEvent::MoveWindow { window_id, x, y } => {
+                println!("[Compositor] Moving window #{} to ({}, {})", window_id, x, y);
+                self.window_manager.set_window_position(window_id, x, y);
+                self.full_redraw_needed = true;
+            }
+        }
+        Ok(())
     }
 }

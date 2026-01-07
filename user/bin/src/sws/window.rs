@@ -189,4 +189,12 @@ impl WindowManager {
             window.y += dy;
         }
     }
+
+    /// Set window position (absolute)
+    pub fn set_window_position(&mut self, id: WindowId, x: i32, y: i32) {
+        if let Some(window) = self.get_window_mut(id) {
+            window.x = x;
+            window.y = y;
+        }
+    }
 }
