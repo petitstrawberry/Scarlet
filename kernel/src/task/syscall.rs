@@ -111,6 +111,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     parent_task.vcpu.store(trapframe);
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
     let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
+    let child_arg = trapframe.get_arg(2);   // Third argument: argument to pass to child (for thread start function)
 
     // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
 
@@ -127,6 +128,11 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {
                 child_task.vcpu.set_sp(child_stack);
+            }
+            
+            // If child_arg is provided, set it as first argument (a0/x0)
+            if child_arg != 0 {
+                child_task.vcpu.iregs.set_arg(0, child_arg);
             }
             
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());

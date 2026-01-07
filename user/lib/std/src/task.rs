@@ -62,7 +62,7 @@ impl Default for CloneFlags {
 /// - In the child process: 0
 /// - On error: -1
 pub fn clone(flags: CloneFlags) -> i32 {
-    syscall2(Syscall::Clone, flags.get_raw() as usize, 0) as i32 // 0 = use parent's stack
+    syscall3(Syscall::Clone, flags.get_raw() as usize, 0, 0) as i32 // 0 = use parent's stack, no child_arg
 }
 
 /// Fork the current process.

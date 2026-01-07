@@ -1,4 +1,4 @@
-use crate::syscall::{Syscall, syscall1, syscall2};
+use crate::syscall::{Syscall, syscall1, syscall3};
 use crate::task::{CloneFlags, CloneFlagsDef};
 use core::time::Duration;
 
@@ -84,7 +84,9 @@ where
     flags.set(CloneFlagsDef::Fs);
     flags.set(CloneFlagsDef::Files);
 
-    let result = syscall2(Syscall::Clone, flags.get_raw() as usize, stack_top);
+    // Clone with stack and closure pointer as argument
+    // Child thread will start at same PC with new stack and closure_ptr in a0 register
+    let result = syscall3(Syscall::Clone, flags.get_raw() as usize, stack_top, closure_ptr);
 
     if result == usize::MAX {
         // Failed to create thread
@@ -98,9 +100,26 @@ where
     let tid = result as i32;
 
     if tid == 0 {
-        // Child thread: execute closure and exit
+        // Child thread: closure_ptr is in register a0 (first argument)
+        // We need to get it via assembly since compiler doesn't know about it
+        let closure_arg: usize;
+        #[cfg(target_arch = "riscv64")]
         unsafe {
-            let closure = Box::from_raw(closure_ptr as *mut F);
+            core::arch::asm!(
+                "mv {0}, a0",
+                out(reg) closure_arg,
+            );
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!(
+                "mov {0}, x0",
+                out(reg) closure_arg,
+            );
+        }
+        
+        unsafe {
+            let closure = Box::from_raw(closure_arg as *mut F);
             (*closure)();
         }
         crate::task::exit(0);
