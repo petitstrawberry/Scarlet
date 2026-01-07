@@ -63,18 +63,18 @@ where
     F: FnOnce() + Send + 'static,
 {
     use crate::boxed::Box;
-    
+
     // Allocate closure on heap
     let closure_ptr = Box::into_raw(Box::new(f)) as usize;
-    
+
     // Set up clone flags for thread creation (share VM, FS, Files)
     let mut flags = CloneFlags::new();
     flags.set(CloneFlagsDef::Vm);
     flags.set(CloneFlagsDef::Fs);
     flags.set(CloneFlagsDef::Files);
-    
+
     let result = syscall1(Syscall::Clone, flags.get_raw() as usize);
-    
+
     if result == usize::MAX {
         // Failed to create thread
         unsafe {
@@ -82,9 +82,9 @@ where
         }
         return Err("Failed to create thread");
     }
-    
+
     let tid = result as i32;
-    
+
     if tid == 0 {
         // Child thread: execute closure and exit
         unsafe {

@@ -22,8 +22,8 @@
 //! let (sock1, sock2) = Socket::pair().unwrap();
 //! ```
 
-use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3};
 use crate::handle::Handle;
+use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3};
 
 /// Socket handle wrapper
 ///
@@ -135,7 +135,11 @@ impl Socket {
     /// socket.listen(5).unwrap();
     /// ```
     pub fn listen(&self, backlog: usize) -> Result<()> {
-        let result = syscall2(Syscall::SocketListen, self.handle.as_raw() as usize, backlog);
+        let result = syscall2(
+            Syscall::SocketListen,
+            self.handle.as_raw() as usize,
+            backlog,
+        );
         if result == usize::MAX {
             return Err(SocketError::NotListening);
         }
@@ -242,7 +246,11 @@ impl Socket {
     /// socket.shutdown(ShutdownHow::Both).unwrap();
     /// ```
     pub fn shutdown(&self, how: ShutdownHow) -> Result<()> {
-        let result = syscall2(Syscall::SocketShutdown, self.handle.as_raw() as usize, how as usize);
+        let result = syscall2(
+            Syscall::SocketShutdown,
+            self.handle.as_raw() as usize,
+            how as usize,
+        );
         if result == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
@@ -281,7 +289,9 @@ impl Socket {
     /// stream.write(b"Hello").unwrap();
     /// ```
     pub fn as_stream(&self) -> Result<crate::handle::capability::StreamOps> {
-        self.handle.as_stream().map_err(|_| SocketError::SyscallFailed)
+        self.handle
+            .as_stream()
+            .map_err(|_| SocketError::SyscallFailed)
     }
 
     /// Create a socket from a raw handle
@@ -298,26 +308,30 @@ impl Socket {
     ///
     /// A Socket wrapping the given handle.
     pub unsafe fn from_raw_handle(raw: i32) -> Self {
-        Socket { 
-            handle: unsafe { Handle::from_raw(raw) }
+        Socket {
+            handle: unsafe { Handle::from_raw(raw) },
         }
     }
 }
 
 impl crate::io::Read for Socket {
     fn read(&mut self, buf: &mut [u8]) -> crate::io::Result<usize> {
-        let stream = self.handle.as_stream()
-            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream"))?;
-        stream.read(buf)
+        let stream = self.handle.as_stream().map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream")
+        })?;
+        stream
+            .read(buf)
             .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to read"))
     }
 }
 
 impl crate::io::Write for Socket {
     fn write(&mut self, buf: &[u8]) -> crate::io::Result<usize> {
-        let stream = self.handle.as_stream()
-            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream"))?;
-        stream.write(buf)
+        let stream = self.handle.as_stream().map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream")
+        })?;
+        stream
+            .write(buf)
             .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to write"))
     }
 
