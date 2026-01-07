@@ -205,7 +205,7 @@ impl MemoryMappingOps for SharedMemory {
 
         // Calculate the page-aligned virtual address
         let page_vaddr = access.vaddr & !(crate::environment::PAGE_SIZE - 1);
-        
+
         // Check if the access is within the mapped range
         if page_vaddr < map.vmarea.start || page_vaddr >= map.vmarea.end {
             return Err(ResolveFaultError::Unmapped);

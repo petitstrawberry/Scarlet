@@ -3,7 +3,7 @@
 //! This module provides user-space interfaces for IPC mechanisms including
 //! pipes, shared memory, and event channels.
 
-use crate::syscall::{syscall2, Syscall};
+use crate::syscall::{Syscall, syscall2};
 
 /// Handle to a shared memory object
 pub type SharedMemoryHandle = u32;

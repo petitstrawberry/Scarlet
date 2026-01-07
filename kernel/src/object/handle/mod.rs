@@ -238,13 +238,13 @@ impl HandleTable {
                 KernelObject::EventSubscription(_) => Some(
                     introspection::KernelObjectInfo::for_event_subscription(handle_role),
                 ),
-                KernelObject::SharedMemory(_) => Some(
-                    introspection::KernelObjectInfo::for_shared_memory(
+                KernelObject::SharedMemory(_) => {
+                    Some(introspection::KernelObjectInfo::for_shared_memory(
                         handle_role,
                         readable,
                         writable,
-                    ),
-                ),
+                    ))
+                }
             }
         } else {
             None

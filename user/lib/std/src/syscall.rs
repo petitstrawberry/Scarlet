@@ -61,7 +61,7 @@ pub enum Syscall {
 
     // === IPC Operations ===
     Pipe = 600, // Create pipe handles
-    
+
     // Shared Memory
     SharedMemoryCreate = 620, // Create shared memory region
 
