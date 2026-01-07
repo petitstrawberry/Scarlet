@@ -473,6 +473,31 @@ impl NetworkManager {
         self.connections.write().remove(&socket_id);
     }
 
+    /// Allocate a new socket ID and register the socket
+    ///
+    /// This is a convenience method that allocates a unique socket ID
+    /// and registers the socket in one operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - The socket object to register
+    ///
+    /// # Returns
+    ///
+    /// The allocated socket ID
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let socket = Arc::new(LocalSocket::new(SocketType::Stream, SocketProtocol::Default));
+    /// let socket_id = NetworkManager::get_manager().allocate_socket_id(socket)?;
+    /// ```
+    pub fn allocate_socket_id(&self, socket: Arc<dyn SocketObject>) -> Result<SocketId, SocketError> {
+        let socket_id = self.next_socket_id.fetch_add(1, Ordering::SeqCst);
+        self.register_socket_with_id(socket_id, socket)?;
+        Ok(socket_id)
+    }
+
     /// Get the socket ID for a given socket object
     ///
     /// Searches through registered connections to find the ID for a socket object.

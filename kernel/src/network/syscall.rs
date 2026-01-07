@@ -80,6 +80,14 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
         SocketProtocol::Default,
     ));
 
+    // Register socket with NetworkManager to get a socket ID for VFS integration
+    let socket_id = match NetworkManager::get_manager().allocate_socket_id(
+        socket.clone() as Arc<dyn SocketObject>
+    ) {
+        Ok(id) => id,
+        Err(_) => return usize::MAX,
+    };
+
     // Wrap in KernelObject
     let kernel_obj = KernelObject::Socket(socket);
 
@@ -93,7 +101,11 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
     // Add to handle table with metadata
     let handle_id = match task.handle_table.insert_with_metadata(kernel_obj, metadata) {
         Ok(id) => id as usize,
-        Err(_) => return usize::MAX,
+        Err(_) => {
+            // Clean up on error
+            NetworkManager::get_manager().remove_socket(socket_id);
+            return usize::MAX;
+        }
     };
 
     handle_id
@@ -175,11 +187,32 @@ pub fn sys_socket_bind(tf: &mut Trapframe) -> usize {
     // Register the same Arc in NetworkManager's named socket namespace
     // This ensures the registered socket and the one in handle_table are identical
     if NetworkManager::get_manager()
-        .register_named_socket(&path, socket_arc)
+        .register_named_socket(&path, socket_arc.clone())
         .is_err()
     {
         return usize::MAX;
     }
+
+    // Get the socket ID from NetworkManager for VFS integration
+    let socket_id = match NetworkManager::get_manager().get_socket_id(&socket_arc) {
+        Some(id) => id,
+        None => return usize::MAX, // Socket not found in NetworkManager
+    };
+
+    // Create socket file in VFS for filesystem visibility
+    let vfs = match &task.vfs {
+        Some(vfs) => vfs.clone(),
+        None => {
+            // Use global VFS if task doesn't have its own
+            crate::fs::vfs_v2::manager::get_global_vfs_manager()
+        }
+    };
+
+    let socket_file_type = crate::fs::FileType::Socket(crate::fs::SocketFileInfo { socket_id });
+    
+    // Create the socket file - ignore errors if file already exists or path is invalid
+    // This is non-critical for Scarlet Native sockets which primarily use named_sockets
+    let _ = vfs.create_file(&path, socket_file_type);
 
     0
 }
