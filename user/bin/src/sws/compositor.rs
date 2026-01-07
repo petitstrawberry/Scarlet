@@ -8,6 +8,11 @@ use framebuffer::Framebuffer;
 use std::println;
 use std::vec::Vec;
 
+// Temporary safety switch: disable mmap fast-path.
+// If this fixes visual corruption, the root cause is likely VM overlap/aliasing
+// between the framebuffer mapping and heap allocations.
+const DISABLE_MMAP_FAST_PATH: bool = true;
+
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     framebuffer: Framebuffer,
@@ -63,10 +68,14 @@ impl Compositor {
         // Try to get mmap info for direct VRAM access.
         // NOTE: If the mapping size is smaller than the expected screen size,
         // direct writes may corrupt unrelated memory (e.g. window buffers).
-        let can_use_mmap = var_info.bits_per_pixel == 32
+        let can_use_mmap = !DISABLE_MMAP_FAST_PATH
+            && var_info.bits_per_pixel == 32
             && mmap_stride_bytes >= screen_width.saturating_mul(bytes_per_pixel);
 
-        let (vram_ptr, vram_size) = if !can_use_mmap {
+        let (vram_ptr, vram_size) = if DISABLE_MMAP_FAST_PATH {
+            println!("[Compositor] mmap fast-path disabled, using fallback I/O");
+            (None, 0)
+        } else if !can_use_mmap {
             println!(
                 "[Compositor] Warning: unsupported framebuffer format for mmap fast-path (bpp={}, line_length={}, expected_line_bytes={}), using fallback I/O",
                 var_info.bits_per_pixel,
