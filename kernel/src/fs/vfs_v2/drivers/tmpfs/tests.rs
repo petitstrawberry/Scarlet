@@ -795,4 +795,55 @@ mod tests {
             .unwrap();
         assert_eq!(new_file.node().file_type().unwrap(), FileType::RegularFile);
     }
+
+    /// Test socket file creation and integration with VFS
+    #[test_case]
+    fn test_socket_file_creation() {
+        use crate::fs::SocketFileInfo;
+        use crate::network::{NetworkManager, local::LocalSocket, SocketType, SocketProtocol};
+        use alloc::sync::Arc;
+
+        // Initialize network manager
+        let network_manager = NetworkManager::init();
+
+        // Create TmpFS and VFS manager
+        let tmpfs = TmpFS::new(0); // Unlimited memory
+        let vfs = VfsManager::new_with_root(tmpfs);
+
+        // Create a local socket
+        let socket = Arc::new(LocalSocket::new(
+            SocketType::Stream,
+            SocketProtocol::Default,
+        ));
+
+        // Register socket with network manager
+        let socket_id = 1001; // Use a specific socket ID
+        network_manager
+            .register_socket_with_id(socket_id, socket.clone() as Arc<dyn crate::network::SocketObject>)
+            .unwrap();
+
+        // Create socket file in VFS
+        let socket_file_type = FileType::Socket(SocketFileInfo { socket_id });
+        vfs.create_file("/my_socket.sock", socket_file_type)
+            .unwrap();
+
+        // Verify socket file exists and has correct type
+        let (socket_entry, _) = vfs.resolve_path("/my_socket.sock").unwrap();
+        let socket_node = socket_entry.node();
+        
+        match socket_node.file_type().unwrap() {
+            FileType::Socket(info) => {
+                assert_eq!(info.socket_id, socket_id);
+            }
+            other => panic!("Expected Socket file type, got {:?}", other),
+        }
+
+        // Open the socket file
+        let socket_file = vfs.open("/my_socket.sock", 0x02).unwrap(); // Write mode
+        
+        // Verify it's a file object
+        assert!(matches!(socket_file, crate::object::KernelObject::File(_)));
+
+        crate::early_println!("[Test] Socket VFS integration test passed!");
+    }
 }
