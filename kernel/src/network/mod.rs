@@ -445,7 +445,7 @@ impl NetworkManager {
     /// ```rust,ignore
     /// // When creating a socket file in VFS
     /// let socket = create_local_socket()?;
-    /// let socket_id = generate_unique_id();
+    /// let socket_id = 1001; // Use a unique ID
     /// NetworkManager::get_manager().register_socket_with_id(socket_id, socket)?;
     /// ```
     pub fn register_socket_with_id(

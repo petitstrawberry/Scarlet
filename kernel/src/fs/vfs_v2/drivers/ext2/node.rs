@@ -715,7 +715,7 @@ impl Ext2DirectoryObject {
                     })
                 }
                 5 => FileType::Pipe,   // EXT2_FT_FIFO
-                6 => FileType::Socket(SocketFileInfo { socket_id: 0 }), // EXT2_FT_SOCK - Socket ID will be set later
+                6 => FileType::Socket(SocketFileInfo { socket_id: crate::fs::UNBOUND_SOCKET_ID }), // EXT2_FT_SOCK - Socket ID will be bound at runtime
                 7 => {
                     // EXT2_FT_SYMLINK - Symbolic link
                     // Read the actual symlink target from the inode using the new method

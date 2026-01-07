@@ -3006,7 +3006,7 @@ impl Ext2FileSystem {
                 }
             }
             EXT2_S_IFIFO => Ok(FileType::Pipe),
-            EXT2_S_IFSOCK => Ok(FileType::Socket(SocketFileInfo { socket_id: 0 })), // Socket ID will be set later
+            EXT2_S_IFSOCK => Ok(FileType::Socket(SocketFileInfo { socket_id: crate::fs::UNBOUND_SOCKET_ID })), // Socket ID will be bound at runtime
             _ => Ok(FileType::Unknown),
         }
     }

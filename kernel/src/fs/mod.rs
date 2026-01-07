@@ -289,6 +289,11 @@ pub struct DeviceFileInfo {
     pub device_type: DeviceType,
 }
 
+/// Placeholder socket ID value for socket files that are not yet bound to a socket object.
+/// This is used when reading socket files from persistent storage (e.g., ext2 filesystem)
+/// before the actual socket binding occurs at runtime.
+pub const UNBOUND_SOCKET_ID: usize = 0;
+
 /// Information about socket files in the filesystem
 ///
 /// Scarlet uses socket IDs to uniquely identify socket objects in the NetworkManager.

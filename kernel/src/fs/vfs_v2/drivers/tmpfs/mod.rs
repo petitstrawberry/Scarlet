@@ -762,8 +762,10 @@ impl TmpFileObject {
                 socket_ref: Some(socket),
             },
             None => {
-                // If socket not found, panic (similar to device behavior)
-                panic!("Failed to get socket {}", info.socket_id);
+                // Socket not found in NetworkManager - this indicates a programming error
+                // where a socket file was created but the socket was not registered,
+                // or the socket was unregistered before the file was opened.
+                panic!("Socket {} not found in NetworkManager. Socket must be registered before creating socket files.", info.socket_id);
             }
         }
     }
