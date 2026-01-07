@@ -110,6 +110,7 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
     /* Save the trapframe to the task before cloning */
     parent_task.vcpu.store(trapframe);
     let clone_flags = CloneFlags::from_raw(trapframe.get_arg(0) as u64);
+    let child_stack = trapframe.get_arg(1); // Second argument: child stack pointer
 
     // crate::println!("[CLONE] Parent task {} cloning with flags: 0x{:x}", parent_task.get_id(), clone_flags.get_raw());
 
@@ -122,6 +123,12 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
             // crate::println!("[CLONE] Successfully created child task {}, state: {:?}, PC: 0x{:x}",
             //     child_id, child_task.get_state(), child_task.vcpu.get_pc());
             child_task.vcpu.iregs.set_return_value(0); /* Set the return value to 0 in the child task */
+            
+            // If child_stack is provided, set child's user SP
+            if child_stack != 0 {
+                child_task.vcpu.set_sp(child_stack);
+            }
+            
             get_scheduler().add_task(child_task, get_cpu().get_cpuid());
             // crate::println!("[CLONE] Child task {} added to scheduler", child_id);
             /* Return the child task PID (namespace-local) to the parent task */
