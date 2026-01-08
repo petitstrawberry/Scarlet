@@ -39,6 +39,10 @@ use crate::sync::Waker;
 /// Maximum buffer size per socket (64 KB)
 const MAX_BUFFER_SIZE: usize = 65536;
 
+/// Maximum number of handles that can be queued for transfer
+/// This prevents unbounded memory growth from DoS attacks
+const MAX_HANDLE_QUEUE_SIZE: usize = 64;
+
 /// Shared buffer structure that tracks reading task
 struct SocketBuffer {
     /// Data buffer
@@ -67,6 +71,12 @@ impl SocketBuffer {
 pub struct LocalSocket {
     /// Socket type (Stream, Datagram, etc.)
     socket_type: SocketType,
+
+    /// Weak self reference (initialized when wrapped in Arc)
+    ///
+    /// This is used to establish peer relationships in methods that only
+    /// have `&self` (e.g., connect()), where we still need an `Arc<Self>`.
+    self_weak: RwLock<Weak<LocalSocket>>,
 
     /// Socket protocol
     protocol: SocketProtocol,
@@ -102,9 +112,20 @@ pub struct LocalSocket {
 
     /// Waker for blocking read() operations
     read_waker: Waker,
+
+    /// Waker for blocking recv_handle() operations
+    handle_waker: Waker,
+
+    /// Queue of handles (KernelObjects) received from peer
+    /// This allows passing file descriptors / kernel objects between tasks
+    handle_queue: RwLock<VecDeque<KernelObject>>,
 }
 
 impl LocalSocket {
+    pub(crate) fn init_self_weak(this: &Arc<Self>) {
+        *this.self_weak.write() = Arc::downgrade(this);
+    }
+
     /// Safely downcast a SocketObject to LocalSocket using Any trait
     ///
     /// Returns None if the socket is not a LocalSocket.
@@ -138,7 +159,56 @@ impl LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_waker: Waker::new_interruptible("socket_handle"),
+            handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         }
+    }
+
+    /// Send a KernelObject handle through this socket
+    ///
+    /// This is LocalSocket-only (SCM_RIGHTS equivalent) and uses dup() semantics.
+    pub fn send_handle(&self, object: KernelObject) -> Result<(), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            return Err(IpcError::InvalidState);
+        }
+
+        // Get peer socket reference
+        let peer_weak = self.peer_socket.read();
+        let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
+        let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
+
+        // Check if peer's handle queue is full to prevent DoS attacks
+        let mut peer_queue = peer.handle_queue.write();
+        if peer_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
+            return Err(IpcError::ChannelFull);
+        }
+
+        // Add handle to peer's receive queue
+        peer_queue.push_back(object);
+        drop(peer_queue);
+
+        // Wake one task potentially blocked on recv_handle
+        peer.handle_waker.wake_one();
+
+        Ok(())
+    }
+
+    /// Receive a KernelObject handle from this socket (non-blocking)
+    pub fn recv_handle(&self) -> Result<KernelObject, crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        // Verify socket is connected
+        if *self.state.read() != SocketState::Connected {
+            return Err(IpcError::InvalidState);
+        }
+
+        // Try to get a handle from the queue
+        let mut queue = self.handle_queue.write();
+        queue.pop_front().ok_or(IpcError::ChannelEmpty)
     }
 
     /// Accept a connection with blocking behavior
@@ -214,6 +284,9 @@ impl LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_waker: Waker::new_interruptible("socket_handle"),
+            handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         });
 
         // Create peer socket (client side)
@@ -231,7 +304,13 @@ impl LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_waker: Waker::new_interruptible("socket_handle"),
+            handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         });
+
+        Self::init_self_weak(&local_socket);
+        Self::init_self_weak(&peer_socket);
 
         // Set peer references
         *local_socket.peer_socket.write() = Some(Arc::downgrade(&peer_socket));
@@ -304,6 +383,50 @@ impl LocalSocket {
             self.read_waker.wait(task_id, trapframe);
             // crate::println!("[LocalSocket] read_blocking: woken up, checking again...");
             // When woken, loop back to check for data or shutdown
+        }
+    }
+
+    /// Blocking handle receive operation
+    ///
+    /// This method blocks the calling task until a handle is available in the
+    /// handle queue, or the peer is closed.
+    pub fn recv_handle_blocking(
+        &self,
+        task_id: usize,
+        trapframe: &mut crate::arch::Trapframe,
+    ) -> Result<KernelObject, crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        loop {
+            // Verify socket is connected
+            if *self.state.read() != SocketState::Connected {
+                return Err(IpcError::InvalidState);
+            }
+
+            // Fast path: handle already queued
+            if let Some(obj) = self.handle_queue.write().pop_front() {
+                return Ok(obj);
+            }
+
+            // If peer has shut down (or been dropped), don't block forever.
+            // We reuse the same conditions as read_blocking() uses for EOF.
+            if let Some(peer_weak) = self.peer_socket.read().as_ref() {
+                if let Some(peer) = peer_weak.upgrade() {
+                    if *peer.state.read() == SocketState::Closed {
+                        return Err(IpcError::PeerClosed);
+                    }
+                } else {
+                    return Err(IpcError::PeerClosed);
+                }
+            }
+
+            // If peer performed shutdown(), our read buffer is marked closed.
+            if *self.read_buffer.read().closed.read() {
+                return Err(IpcError::PeerClosed);
+            }
+
+            // No handle available, block the task
+            self.handle_waker.wait(task_id, trapframe);
         }
     }
 }
@@ -444,7 +567,7 @@ impl SocketControl for LocalSocket {
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
         // Validate current state
-        let mut state = self.state.write();
+        let state = self.state.read();
         if *state != SocketState::Unconnected {
             return Err(SocketError::AlreadyConnected);
         }
@@ -493,7 +616,12 @@ impl SocketControl for LocalSocket {
             max_backlog: RwLock::new(0),
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
+            handle_waker: Waker::new_interruptible("socket_handle"),
+            handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         });
+
+        Self::init_self_weak(&server_conn);
 
         // Update self (client socket) to use the shared buffers
         *self.read_buffer.write() = client_read_buffer.clone();
@@ -506,8 +634,14 @@ impl SocketControl for LocalSocket {
         // Client (self) points to server_conn
         *self.peer_socket.write() = Some(Arc::downgrade(&server_conn));
 
-        // Server_conn needs to point back to client, but we don't have Arc<Self>
-        // We'll handle this in a moment by creating a temporary strong reference
+        // Server_conn needs to point back to client for handle transfer.
+        // We keep a Weak<Self> initialized at creation time, so upgrade it here.
+        let client_arc = self
+            .self_weak
+            .read()
+            .upgrade()
+            .ok_or(SocketError::InvalidOperation)?;
+        *server_conn.peer_socket.write() = Some(Arc::downgrade(&client_arc));
 
         // Add server connection to server's backlog
         let server_local = match Self::from_socket_object(&server_socket) {
@@ -559,6 +693,8 @@ impl SocketControl for LocalSocket {
                     if let Some(peer) = peer_weak.upgrade() {
                         // crate::println!("[LocalSocket] shutdown: waking peer's read_waker");
                         peer.read_waker.wake_one();
+                        // Also wake any tasks waiting for handle transfer
+                        peer.handle_waker.wake_all();
                     } else {
                         // crate::println!("[LocalSocket] shutdown: peer already dropped");
                     }
@@ -568,6 +704,7 @@ impl SocketControl for LocalSocket {
                     //     "[LocalSocket] shutdown: no peer_socket, waking via read_waker"
                     // );
                     self.read_waker.wake_all(); // Wake any waiting readers
+                    self.handle_waker.wake_all(); // Wake any waiting handle receivers
                 }
 
                 Ok(())
@@ -703,5 +840,117 @@ mod tests {
         let mut buf = [0u8; 4];
         sock1.read(&mut buf).unwrap();
         assert_eq!(&buf, b"pong");
+    }
+
+    #[test_case]
+    fn test_handle_transfer_send_recv() {
+        use crate::ipc::SharedMemory;
+        use alloc::sync::Arc;
+
+        // Create a connected socket pair
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        // Create a shared memory object to transfer
+        let shmem = match SharedMemory::new(4096, 0x3) {
+            // READ | WRITE
+            Ok(shmem) => shmem,
+            Err(_) => {
+                crate::println!("SharedMemory::new failed, skipping test");
+                return;
+            }
+        };
+        let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
+
+        // Send handle from sock1 to sock2
+        let result = sock1.send_handle(shmem_obj);
+        assert!(result.is_ok(), "send_handle should succeed");
+
+        // Receive handle at sock2
+        let received = sock2.recv_handle();
+        assert!(received.is_ok(), "recv_handle should succeed");
+
+        // Verify it's a SharedMemory object
+        let received_obj = received.unwrap();
+        assert!(
+            received_obj.as_shared_memory().is_some(),
+            "Received object should be SharedMemory"
+        );
+    }
+
+    #[test_case]
+    fn test_handle_transfer_multiple_handles() {
+        use crate::ipc::SharedMemory;
+        use alloc::sync::Arc;
+
+        // Create a connected socket pair
+        let (sock1, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        // Send multiple handles
+        for i in 0..3 {
+            if let Ok(shmem) = SharedMemory::new(4096 * (i + 1), 0x3) {
+                let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
+                assert!(sock1.send_handle(shmem_obj).is_ok());
+            }
+        }
+
+        // Receive all handles
+        for _ in 0..3 {
+            let received = sock2.recv_handle();
+            assert!(received.is_ok(), "recv_handle should succeed");
+            assert!(
+                received.unwrap().as_shared_memory().is_some(),
+                "Received object should be SharedMemory"
+            );
+        }
+
+        // Queue should be empty now
+        let result = sock2.recv_handle();
+        assert!(
+            result.is_err(),
+            "recv_handle should fail when queue is empty"
+        );
+    }
+
+    #[test_case]
+    fn test_handle_transfer_on_disconnected_socket() {
+        use crate::ipc::SharedMemory;
+        use alloc::sync::Arc;
+
+        // Create an unconnected socket
+        let sock = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+
+        // Try to send handle on disconnected socket
+        if let Ok(shmem) = SharedMemory::new(4096, 0x3) {
+            // READ | WRITE
+            let shmem_obj = KernelObject::from_shared_memory_object(Arc::new(shmem));
+            let result = sock.send_handle(shmem_obj);
+            assert!(
+                result.is_err(),
+                "send_handle should fail on disconnected socket"
+            );
+        }
+
+        // Try to receive handle on disconnected socket
+        let result = sock.recv_handle();
+        assert!(
+            result.is_err(),
+            "recv_handle should fail on disconnected socket"
+        );
+    }
+
+    #[test_case]
+    fn test_handle_transfer_empty_queue() {
+        // Create a connected socket pair
+        let (_, sock2) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+
+        // Try to receive from empty queue
+        let result = sock2.recv_handle();
+        assert!(
+            result.is_err(),
+            "recv_handle should fail when queue is empty"
+        );
     }
 }

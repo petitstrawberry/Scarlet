@@ -42,8 +42,8 @@ use alloc::sync::Arc;
 
 use crate::arch::Trapframe;
 use crate::network::{
-    LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress, SocketControl, SocketObject,
-    SocketProtocol, SocketType, local::LocalSocket,
+    LocalSocketAddress, NetworkManager, ShutdownHow, SocketAddress, SocketObject, SocketProtocol,
+    SocketType, local::LocalSocket,
 };
 use crate::object::KernelObject;
 use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
@@ -79,6 +79,7 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
         SocketType::Stream,
         SocketProtocol::Default,
     ));
+    LocalSocket::init_self_weak(&socket);
 
     // Register socket with NetworkManager to get a socket ID for VFS integration
     let socket_id = match NetworkManager::get_manager()
