@@ -1,7 +1,7 @@
-use crate::syscall;
-use crate::sync::Mutex;
 #[cfg(any(debug_assertions, feature = "alloc_debug"))]
 use crate::println;
+use crate::sync::Mutex;
+use crate::syscall;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -551,9 +551,7 @@ unsafe impl GlobalAlloc for LockedFreeListAllocator {
                 {
                     println!(
                         "[ALLOC] ERROR: bad header magic for ptr=0x{:x} header_addr=0x{:x} magic=0x{:x}",
-                        ptr as usize,
-                        header_addr,
-                        hdr.magic
+                        ptr as usize, header_addr, hdr.magic
                     );
                     panic!("allocator header magic mismatch");
                 }

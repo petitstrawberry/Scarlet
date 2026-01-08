@@ -185,15 +185,11 @@ impl Compositor {
 
             let bb_overlap = bb_start < vram_end && vram_start < bb_end;
             if bb_overlap {
-                println!(
-                    "[Compositor] WARNING: backbuffer overlaps framebuffer mapping!"
-                );
+                println!("[Compositor] WARNING: backbuffer overlaps framebuffer mapping!");
             }
 
             if sp_hint >= vram_start && sp_hint < vram_end {
-                println!(
-                    "[Compositor] WARNING: stack marker is inside framebuffer mapping!"
-                );
+                println!("[Compositor] WARNING: stack marker is inside framebuffer mapping!");
             }
         } else {
             println!("[Compositor] VRAM mmap (framebuffer lib): (unavailable)");

@@ -171,7 +171,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     // Evidence-only: log a stack address hint for this thread.
     let stack_marker: u8 = 0;
     let sp_hint = (&stack_marker as *const u8) as usize;
-    println!("[ClientThread {}] stack marker addr: 0x{:x}", client_id, sp_hint);
+    println!(
+        "[ClientThread {}] stack marker addr: 0x{:x}",
+        client_id, sp_hint
+    );
 
     // Per-client window id generator (avoid collision between clients)
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
