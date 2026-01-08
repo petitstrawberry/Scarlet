@@ -127,4 +127,3 @@ pub fn socket_recv_handle(socket_handle: u32) -> Option<u32> {
         Some(result as u32)
     }
 }
-

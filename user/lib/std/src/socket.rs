@@ -334,7 +334,7 @@ pub fn socket_create(domain: SocketDomain, socket_type: SocketType, _protocol: u
     if domain != SocketDomain::Local || socket_type != SocketType::Stream {
         return None;
     }
-    
+
     Socket::new().ok().map(|s| {
         let handle = s.as_raw_handle();
         core::mem::forget(s); // Prevent Drop from closing
@@ -361,4 +361,3 @@ pub fn socket_connect(handle: u32, path: &str) -> bool {
 pub fn socket_shutdown(handle: u32) -> bool {
     with_socket!(handle, |s: &Socket| s.shutdown(ShutdownHow::Both).is_ok())
 }
-

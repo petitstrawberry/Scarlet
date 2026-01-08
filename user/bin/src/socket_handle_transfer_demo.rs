@@ -10,13 +10,13 @@ extern crate scarlet_std;
 
 use scarlet_std::handle::capability::memory_mapping::mmap;
 use scarlet_std::ipc::{permissions, shared_memory_create, socket_recv_handle, socket_send_handle};
-use scarlet_std::{print, println};
 use scarlet_std::socket::{
-    socket_bind, socket_connect, socket_create, socket_listen, socket_shutdown, SocketDomain,
-    SocketType,
+    SocketDomain, SocketType, socket_bind, socket_connect, socket_create, socket_listen,
+    socket_shutdown,
 };
-use scarlet_std::syscall::{syscall1, Syscall};
+use scarlet_std::syscall::{Syscall, syscall1};
 use scarlet_std::task::{exit, fork, getpid, waitpid};
+use scarlet_std::{print, println};
 
 /// Close a handle
 fn close_handle(handle: u32) {
@@ -38,7 +38,7 @@ pub fn _start() -> ! {
     println!("Demonstrating SharedMemory transfer between processes\n");
 
     // Shared memory layout constants
-    const MESSAGE_OFFSET: usize = 0;  // Parent's message starts at offset 0
+    const MESSAGE_OFFSET: usize = 0; // Parent's message starts at offset 0
     const MESSAGE_MAX_LEN: usize = 50; // Maximum message length
     const RESPONSE_OFFSET: usize = 60; // Child's response starts at offset 60
     const RESPONSE_MAX_LEN: usize = 40; // Maximum response length
@@ -78,10 +78,7 @@ pub fn _start() -> ! {
         // Receive the shared memory handle
         match socket_recv_handle(client_sock) {
             Some(shmem_handle) => {
-                println!(
-                    "[Child] Received shared memory handle: {}",
-                    shmem_handle
-                );
+                println!("[Child] Received shared memory handle: {}", shmem_handle);
 
                 // Map the shared memory
                 match mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
@@ -220,20 +217,18 @@ pub fn _start() -> ! {
 
         // Read the response from shared memory
         match mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
-            Ok(addr) => {
-                unsafe {
-                    let ptr = addr as *const u8;
-                    print!("[Parent] Response from child: \"");
-                    for i in RESPONSE_OFFSET..(RESPONSE_OFFSET + RESPONSE_MAX_LEN) {
-                        let c = *ptr.add(i) as char;
-                        if c == '\0' {
-                            break;
-                        }
-                        print!("{}", c);
+            Ok(addr) => unsafe {
+                let ptr = addr as *const u8;
+                print!("[Parent] Response from child: \"");
+                for i in RESPONSE_OFFSET..(RESPONSE_OFFSET + RESPONSE_MAX_LEN) {
+                    let c = *ptr.add(i) as char;
+                    if c == '\0' {
+                        break;
                     }
-                    println!("\"");
+                    print!("{}", c);
                 }
-            }
+                println!("\"");
+            },
             Err(_) => {}
         }
 
@@ -256,4 +251,3 @@ pub fn _start() -> ! {
 
     exit(0);
 }
-

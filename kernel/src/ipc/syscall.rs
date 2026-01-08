@@ -517,4 +517,3 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
         Err(_) => usize::MAX, // Too many open handles
     }
 }
-
