@@ -36,3 +36,76 @@ pub fn sys_getppid(_abi: &mut FreeBsdRiscv64Abi, _trapframe: &mut Trapframe) -> 
         FreeBsdErrno::ESRCH.as_error()
     }
 }
+
+/// sys_getuid - get user ID
+pub fn sys_getuid(_abi: &mut FreeBsdRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return FreeBsdErrno::ESRCH.as_error(),
+    };
+
+    trapframe.increment_pc_next(task);
+
+    // Stub: return 0 (root)
+    0
+}
+
+/// sys_geteuid - get effective user ID
+pub fn sys_geteuid(_abi: &mut FreeBsdRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return FreeBsdErrno::ESRCH.as_error(),
+    };
+
+    trapframe.increment_pc_next(task);
+
+    // Stub: return 0 (root)
+    0
+}
+
+/// sys_getgid - get group ID
+pub fn sys_getgid(_abi: &mut FreeBsdRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return FreeBsdErrno::ESRCH.as_error(),
+    };
+
+    trapframe.increment_pc_next(task);
+
+    // Stub: return 0 (root)
+    0
+}
+
+/// sys_getegid - get effective group ID
+pub fn sys_getegid(_abi: &mut FreeBsdRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return FreeBsdErrno::ESRCH.as_error(),
+    };
+
+    trapframe.increment_pc_next(task);
+
+    // Stub: return 0 (root)
+    0
+}
+
+/// sys_brk - change data segment size
+pub fn sys_brk(_abi: &mut FreeBsdRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return FreeBsdErrno::ESRCH.as_error(),
+    };
+
+    let addr = trapframe.get_arg(0);
+
+    trapframe.increment_pc_next(task);
+
+    // If addr is 0, return current brk
+    if addr == 0 {
+        return task.brk.unwrap_or(0x60000000);
+    }
+
+    // Set new brk
+    task.brk = Some(addr);
+    addr
+}

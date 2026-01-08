@@ -2,6 +2,8 @@
 mod macros;
 mod errno;
 mod fs;
+mod mm;
+mod pipe;
 mod proc;
 
 use alloc::{boxed::Box, string::ToString, sync::Arc, vec, vec::Vec};
@@ -372,8 +374,20 @@ syscall_table! {
     Write = 4 => fs::sys_write,
     Open = 5 => fs::sys_open,
     Close = 6 => fs::sys_close,
+    Brk = 17 => proc::sys_brk,
     GetPid = 20 => proc::sys_getpid,
+    GetUid = 24 => proc::sys_getuid,
+    GetEuid = 25 => proc::sys_geteuid,
     GetPpid = 39 => proc::sys_getppid,
+    GetEgid = 43 => proc::sys_getegid,
+    GetGid = 47 => proc::sys_getgid,
+    IoCtl = 54 => fs::sys_ioctl,
+    Lseek = 62 => fs::sys_lseek,
+    Munmap = 73 => mm::sys_munmap,
+    Mprotect = 74 => mm::sys_mprotect,
+    Fcntl = 92 => fs::sys_fcntl,
+    Mmap = 197 => mm::sys_mmap,
+    Pipe = 42 => pipe::sys_pipe,
 }
 
 fn register_freebsd_abi() {
