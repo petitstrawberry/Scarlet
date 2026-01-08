@@ -10,6 +10,30 @@
 //! - Architecture-specific functionality
 //! - Custom memory allocator implementation
 //!
+//! ## Handle Model (RawHandle / Handle / Capabilities)
+//!
+//! Scarlet user space interacts with the kernel primarily through *handles*.
+//!
+//! - [`handle::RawHandle`] is the raw integer handle value returned by syscalls.
+//!   By itself it does **not** provide ownership or type information.
+//! - [`handle::Handle`] is the owning RAII wrapper. Dropping it closes the underlying
+//!   kernel object handle.
+//! - When a `Handle` is created (e.g. [`handle::Handle::open`] or
+//!   [`handle::Handle::from_raw`]), user space queries the kernel for
+//!   [`handle::introspection::KernelObjectInfo`] and caches it inside the `Handle`.
+//!   This cached info is then used to validate conversions such as
+//!   [`handle::Handle::as_socket`] without additional syscalls.
+//!
+//! ## High-level Wrappers (File / Socket / SharedMemory)
+//!
+//! Higher-level types in this crate (e.g. [`fs::File`], [`socket::Socket`],
+//! [`ipc::SharedMemory`]) own a [`handle::Handle`] internally.
+//!
+//! - Wrapper constructors from an existing handle are *fallible* and perform a type
+//!   check using the cached object info.
+//! - Capability views (e.g. `StreamOps`, `FileObject`) borrow `&Handle` and are
+//!   obtained via `Handle::as_*` methods.
+//!
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]

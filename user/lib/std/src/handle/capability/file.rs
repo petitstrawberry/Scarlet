@@ -3,6 +3,7 @@
 //! This module provides type-safe file operations (seek, truncate, metadata) for
 //! KernelObjects that support the FileObject capability.
 
+use crate::handle::Handle;
 use crate::syscall::{Syscall, syscall2, syscall3};
 
 /// Result type for file operations
@@ -108,16 +109,15 @@ impl FileMetadata {
 }
 
 /// File object capability for file-specific operations
-pub struct FileObject {
-    handle: i32,
+pub struct FileObject<'a> {
+    handle: &'a Handle,
 }
 
-impl FileObject {
-    /// Create a FileObject capability from a raw handle
+impl<'a> FileObject<'a> {
+    /// Construct a `FileObject` capability from a [`Handle`] reference.
     ///
-    /// # Safety
-    /// The caller must ensure that the handle is valid and supports FileObject
-    pub fn from_handle(handle: i32) -> Self {
+    /// This is crate-internal to prevent bypassing `Handle::as_file` validation.
+    pub(crate) fn from_handle(handle: &'a Handle) -> Self {
         Self { handle }
     }
 
@@ -133,7 +133,7 @@ impl FileObject {
 
         let result = syscall3(
             Syscall::FileSeek,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             offset as usize,
             whence as usize,
         );
@@ -149,7 +149,11 @@ impl FileObject {
     /// # Returns
     /// Success or FileError on failure
     pub fn truncate(&self, size: u64) -> FileResult<()> {
-        let result = syscall2(Syscall::FileTruncate, self.handle as usize, size as usize);
+        let result = syscall2(
+            Syscall::FileTruncate,
+            self.handle.as_raw() as usize,
+            size as usize,
+        );
 
         FileError::from_syscall_result(result).map(|_| ())
     }
@@ -167,7 +171,7 @@ impl FileObject {
 
     //     let result = syscall2(
     //         Syscall::FileMetadata,
-    //         self.handle as usize,
+    //         self.handle.as_raw() as usize,
     //         metadata_raw.as_mut_ptr() as usize,
     //     );
 

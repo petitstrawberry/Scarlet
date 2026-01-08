@@ -9,18 +9,11 @@
 extern crate scarlet_std;
 
 use core::time::Duration;
-use scarlet_std::handle::capability::memory_mapping::mmap;
-use scarlet_std::ipc::{permissions, shared_memory_create, socket_recv_handle, socket_send_handle};
+use scarlet_std::ipc::{SharedMemory, permissions};
 use scarlet_std::socket::{ShutdownHow, Socket};
-use scarlet_std::syscall::{Syscall, syscall1};
 use scarlet_std::task::{exit, fork, getpid, waitpid};
 use scarlet_std::thread::sleep;
 use scarlet_std::{print, println};
-
-/// Close a handle
-fn close_handle(handle: u32) {
-    let _ = syscall1(Syscall::HandleClose, handle as usize);
-}
 
 fn sleep_ms(ms: u64) {
     let _ = sleep(Duration::from_millis(ms));
@@ -49,7 +42,7 @@ fn main() -> i32 {
         // Create client socket
         let client_sock = match Socket::new() {
             Ok(sock) => {
-                println!("[Child] Created client socket: {}", sock.as_raw_handle());
+                println!("[Child] Created client socket: {}", sock.as_raw());
                 sock
             }
             Err(_) => {
@@ -69,18 +62,33 @@ fn main() -> i32 {
         }
         if !connected {
             println!("[Child] Failed to connect to server");
-            close_handle(client_sock.as_raw_handle());
             exit(1);
         }
         println!("[Child] Connected to server");
 
         // Receive the shared memory handle (blocking syscall)
-        match socket_recv_handle(client_sock.as_raw_handle()) {
-            Some(shmem_handle) => {
-                println!("[Child] Received shared memory handle: {}", shmem_handle);
+        match client_sock.recv_handle() {
+            Ok(shmem_handle) => {
+                let shmem = match SharedMemory::from_handle(shmem_handle) {
+                    Ok(shmem) => shmem,
+                    Err(_) => {
+                        println!("[Child] Received non-shared-memory handle");
+                        exit(1);
+                    }
+                };
+                println!("[Child] Received shared memory handle: {}", shmem.as_raw());
 
                 // Map the shared memory
-                match mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
+                let mapper = match shmem.as_handle().as_memory_mapping() {
+                    Ok(mapper) => mapper,
+                    Err(_) => {
+                        println!("[Child] SharedMemory does not support memory mapping");
+                        let _ = client_sock.shutdown(ShutdownHow::Both);
+                        println!("[Child] Exiting...");
+                        exit(1);
+                    }
+                };
+                match mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
                     Ok(addr) => {
                         println!("[Child] Mapped shared memory at: {:#x}", addr);
 
@@ -112,13 +120,10 @@ fn main() -> i32 {
                         println!("[Child] Failed to map shared memory: {:?}", e);
                     }
                 }
-
-                close_handle(shmem_handle);
             }
-            None => {
+            Err(_) => {
                 println!("[Child] Failed to receive handle");
                 let _ = client_sock.shutdown(ShutdownHow::Both);
-                close_handle(client_sock.as_raw_handle());
                 println!("[Child] Exiting...");
                 exit(1);
             }
@@ -126,7 +131,6 @@ fn main() -> i32 {
 
         // Cleanup
         let _ = client_sock.shutdown(ShutdownHow::Both);
-        close_handle(client_sock.as_raw_handle());
         println!("[Child] Exiting...");
         exit(0);
     } else if pid > 0 {
@@ -137,7 +141,7 @@ fn main() -> i32 {
         // Create server socket
         let server_sock = match Socket::new() {
             Ok(sock) => {
-                println!("[Parent] Created server socket: {}", sock.as_raw_handle());
+                println!("[Parent] Created server socket: {}", sock.as_raw());
                 sock
             }
             Err(_) => {
@@ -149,7 +153,6 @@ fn main() -> i32 {
         // Bind to path
         if server_sock.bind(server_path).is_err() {
             println!("[Parent] Failed to bind socket");
-            close_handle(server_sock.as_raw_handle());
             exit(1);
         }
         println!("[Parent] Bound to {}", server_path);
@@ -157,7 +160,6 @@ fn main() -> i32 {
         // Listen for connections
         if server_sock.listen(1).is_err() {
             println!("[Parent] Failed to listen");
-            close_handle(server_sock.as_raw_handle());
             exit(1);
         }
         println!("[Parent] Listening for connections...");
@@ -170,27 +172,29 @@ fn main() -> i32 {
                 exit(1);
             }
         };
-        println!(
-            "[Parent] Accepted connection: {}",
-            client_conn.as_raw_handle()
-        );
+        println!("[Parent] Accepted connection: {}", client_conn.as_raw());
 
         // Create shared memory
-        let shmem_handle = match shared_memory_create(4096, permissions::READ_WRITE) {
-            Some(handle) => {
-                println!("[Parent] Created shared memory: {}", handle);
-                handle
+        let shmem = match SharedMemory::create(4096, permissions::READ_WRITE) {
+            Ok(shm) => {
+                println!("[Parent] Created shared memory: {}", shm.as_raw());
+                shm
             }
-            None => {
+            Err(_) => {
                 println!("[Parent] Failed to create shared memory");
-                close_handle(client_conn.as_raw_handle());
-                close_handle(server_sock.as_raw_handle());
                 exit(1);
             }
         };
 
         // Map shared memory and write a message
-        match mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
+        let mapper = match shmem.as_handle().as_memory_mapping() {
+            Ok(mapper) => mapper,
+            Err(_) => {
+                println!("[Parent] SharedMemory does not support memory mapping");
+                exit(1);
+            }
+        };
+        match mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
             Ok(addr) => {
                 println!("[Parent] Mapped shared memory at: {:#x}", addr);
 
@@ -211,7 +215,7 @@ fn main() -> i32 {
         }
 
         // Send the shared memory handle through the socket
-        let sent_ok = socket_send_handle(client_conn.as_raw_handle(), shmem_handle);
+        let sent_ok = client_conn.send_handle(shmem.as_handle()).is_ok();
         if sent_ok {
             println!("[Parent] Successfully sent shared memory handle!");
         } else {
@@ -225,7 +229,18 @@ fn main() -> i32 {
 
         // Read the response from shared memory
         let mut response_non_empty = false;
-        if let Ok(addr) = mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
+        let mapper = match shmem.as_handle().as_memory_mapping() {
+            Ok(mapper) => mapper,
+            Err(_) => {
+                println!("[Parent] SharedMemory does not support memory mapping");
+                println!("[Parent] Response from child: \"\"");
+                let _ = client_conn.shutdown(ShutdownHow::Both);
+                let _ = server_sock.shutdown(ShutdownHow::Both);
+                println!("\nHandle transfer test failed");
+                return 1;
+            }
+        };
+        if let Ok(addr) = mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
             unsafe {
                 let ptr = addr as *const u8;
                 response_non_empty = *ptr.add(RESPONSE_OFFSET) != 0;
@@ -244,7 +259,6 @@ fn main() -> i32 {
         }
 
         // Cleanup
-        close_handle(shmem_handle);
         let _ = client_conn.shutdown(ShutdownHow::Both);
         let _ = server_sock.shutdown(ShutdownHow::Both);
 

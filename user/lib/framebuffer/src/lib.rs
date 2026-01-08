@@ -12,7 +12,7 @@ use alloc::vec;
 use std::{
     fs::File,
     handle::{
-        capability::memory_mapping::{flags, mmap, munmap, prot},
+        capability::memory_mapping::{flags, munmap, prot},
         HandleError, HandleResult,
     },
     io::SeekFrom,
@@ -242,9 +242,9 @@ impl Framebuffer {
         }
 
         // Try to map the framebuffer memory
-        let handle = self.file.as_handle().as_raw() as u32;
-        match mmap(
-            handle,
+        let handle = self.file.as_handle();
+        let mapper = handle.as_memory_mapping()?;
+        match mapper.mmap(
             0,                          // Let kernel choose address
             fix_info.smem_len as usize, // Map entire framebuffer
             prot::READ | prot::WRITE,   // Read/write permissions
@@ -259,7 +259,7 @@ impl Framebuffer {
                 // Debug output to understand why mmap failed
                 std::println!(
                     "mmap failed: handle={}, size={}, error={:?}",
-                    handle,
+                    handle.as_raw(),
                     fix_info.smem_len,
                     e
                 );

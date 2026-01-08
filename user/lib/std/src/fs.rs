@@ -288,7 +288,7 @@ impl OpenOptions {
         let handle = Handle::open(path.as_ref(), flags)
             .map_err(|_| Error::new(ErrorKind::Other, "Failed to open file"))?;
 
-        Ok(File::from_handle(handle))
+        File::from_handle(handle)
     }
 }
 
@@ -323,9 +323,19 @@ impl File {
     /// * `handle` - The handle to wrap
     ///
     /// # Returns
-    /// File instance
-    pub fn from_handle(handle: Handle) -> Self {
-        File { handle }
+    /// A `File` on success.
+    ///
+    /// This performs a type check using the handle's cached kernel object info.
+    /// If the handle does not represent a file-like object, this returns
+    /// `ErrorKind::Unsupported`.
+    pub fn from_handle(handle: Handle) -> Result<Self> {
+        handle.as_file().map_err(|_| {
+            Error::new(
+                ErrorKind::Unsupported,
+                "Object does not support file operations",
+            )
+        })?;
+        Ok(File { handle })
     }
 
     /// Open a file with automatic resource management
@@ -342,7 +352,7 @@ impl File {
         // Open for read-only
         let handle = Handle::open(path.as_ref(), 0x0) // O_RDONLY
             .map_err(|_| Error::new(ErrorKind::Other, "Failed to open file"))?;
-        Ok(File { handle })
+        File::from_handle(handle)
     }
 
     /// Create a new file (equivalent to open with create, write, truncate)
@@ -377,7 +387,7 @@ impl File {
         // Open the created file for writing
         let handle = Handle::open(path.as_ref(), 0x1) // O_WRONLY
             .map_err(|_| Error::new(ErrorKind::Other, "Failed to open created file"))?;
-        Ok(File { handle })
+        File::from_handle(handle)
     }
 
     /// Open a file with specific flags (low-level interface)
@@ -395,7 +405,7 @@ impl File {
     pub fn open_with_flags<P: AsRef<str>>(path: P, flags: usize) -> Result<Self> {
         let handle = Handle::open(path.as_ref(), flags)
             .map_err(|_| Error::new(ErrorKind::Other, "Failed to open file"))?;
-        Ok(File { handle })
+        File::from_handle(handle)
     }
 
     /// Get the underlying handle (for advanced usage)
@@ -413,13 +423,7 @@ impl File {
     /// # Returns
     /// Handle instance
     pub fn into_handle(self) -> Handle {
-        // Prevent the File's Drop from running
-
-        unsafe {
-            let handle_ptr = &self.handle as *const Handle;
-            core::mem::forget(self);
-            core::ptr::read(handle_ptr)
-        }
+        self.handle
     }
 
     /// Clone the underlying handle via duplication
@@ -614,14 +618,6 @@ impl File {
     /// Current position or error
     pub fn stream_position(&mut self) -> Result<u64> {
         self.seek(SeekFrom::Current(0))
-    }
-}
-
-// Automatic resource cleanup
-impl Drop for File {
-    fn drop(&mut self) {
-        // Handle already implements Drop, so the file will be automatically
-        // closed when the File goes out of scope
     }
 }
 

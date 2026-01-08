@@ -496,7 +496,21 @@ pub fn pipe() -> Result<(crate::handle::Handle, crate::handle::Handle), i32> {
         return Err(-1);
     }
 
-    let read_handle = unsafe { crate::handle::Handle::from_raw(pipefd[0] as i32) };
-    let write_handle = unsafe { crate::handle::Handle::from_raw(pipefd[1] as i32) };
+    let read_handle = match unsafe { crate::handle::Handle::from_raw(pipefd[0] as i32) } {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = syscall1(Syscall::HandleClose, pipefd[0] as usize);
+            let _ = syscall1(Syscall::HandleClose, pipefd[1] as usize);
+            return Err(-1);
+        }
+    };
+    let write_handle = match unsafe { crate::handle::Handle::from_raw(pipefd[1] as i32) } {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = syscall1(Syscall::HandleClose, pipefd[0] as usize);
+            let _ = syscall1(Syscall::HandleClose, pipefd[1] as usize);
+            return Err(-1);
+        }
+    };
     Ok((read_handle, write_handle))
 }

@@ -25,8 +25,8 @@ pub extern "C" fn main(_argc: isize, _argv: *const *const u8) -> isize {
     };
 
     println!("Created connected socket pair");
-    println!("Socket 1 handle: {}", socket1.as_raw_handle());
-    println!("Socket 2 handle: {}", socket2.as_raw_handle());
+    println!("Socket 1 handle: {}", socket1.as_raw());
+    println!("Socket 2 handle: {}", socket2.as_raw());
 
     // Test 1: Send from socket1 to socket2
     println!("\n--- Test 1: Socket 1 -> Socket 2 ---");

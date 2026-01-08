@@ -7,7 +7,7 @@ use std::fs::OpenOptions;
 use std::handle::Handle;
 use std::io::Read;
 use std::{
-    format, mem, print, println,
+    format, print, println,
     string::String,
     task::{execve, exit, fork, pipe, waitpid},
     vec::Vec,
@@ -392,21 +392,23 @@ const KB_XLATE: usize = 0;
 
 /// Restore TTY to canonical mode before executing external commands
 fn restore_canonical_mode() {
-    let stdin_handle = unsafe { Handle::from_raw(0) };
-    let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 1); // canonical mode
-    let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 1); // echo enabled
-    core::mem::forget(stdin_handle); // Don't close stdin
+    if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
+        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 1); // canonical mode
+        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 1); // echo enabled
+        core::mem::forget(stdin_handle); // Don't close stdin
+    }
 }
 
 /// Restore TTY to raw mode after external command finishes
 fn restore_raw_mode() {
-    let stdin_handle = unsafe { Handle::from_raw(0) };
-    let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0); // raw mode (non-canonical)
-    let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0); // echo disabled
-    let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE); // keyboard mode
-    let read_policy = (0 << 16) | 1; // min=1, timeout=0
-    let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, read_policy);
-    core::mem::forget(stdin_handle); // Don't close stdin
+    if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
+        let _ = stdin_handle.control(SCTL_TTY_SET_CANONICAL, 0); // raw mode (non-canonical)
+        let _ = stdin_handle.control(SCTL_TTY_SET_ECHO, 0); // echo disabled
+        let _ = stdin_handle.control(SCTL_TTY_SET_KBMODE, KB_XLATE); // keyboard mode
+        let read_policy = (0 << 16) | 1; // min=1, timeout=0
+        let _ = stdin_handle.control(SCTL_TTY_SET_READ_POLICY, read_policy);
+        core::mem::forget(stdin_handle); // Don't close stdin
+    }
 }
 
 /// Execute a single command from the new Command struct
@@ -496,7 +498,9 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
             // For stdin: close handle 0, then dup to get handle 0
             if let Some(h) = stdin_handle {
                 // Close stdin (handle 0)
-                let _ = unsafe { Handle::from_raw(0) }.close();
+                if let Ok(h) = unsafe { Handle::from_raw(0) } {
+                    let _ = h.close();
+                }
                 // Duplicate the input file handle - should get assigned to handle 0
                 if let Ok(new_h) = h.duplicate() {
                     // If not handle 0, we have a problem, but continue anyway
@@ -509,7 +513,9 @@ fn execute_single_command(cmd: &Command, is_background: bool) -> i32 {
             if let Some(h) = stdout_handle {
                 println!("DEBUG: Closing stdout and duplicating file");
                 // Close stdout (handle 1)
-                let _ = unsafe { Handle::from_raw(1) }.close();
+                if let Ok(h) = unsafe { Handle::from_raw(1) } {
+                    let _ = h.close();
+                }
                 // Duplicate the output file handle - should get assigned to handle 1
                 match h.duplicate() {
                     Ok(new_h) => {
