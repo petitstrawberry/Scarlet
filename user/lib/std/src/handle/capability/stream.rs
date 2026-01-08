@@ -3,6 +3,7 @@
 //! This module provides type-safe stream operations (read/write) for KernelObjects
 //! that support the StreamOps capability.
 
+use crate::handle::Handle;
 use crate::syscall::{Syscall, syscall3};
 
 /// Result type for stream operations
@@ -38,16 +39,15 @@ impl StreamError {
 }
 
 /// Stream operations capability for reading and writing data
-pub struct StreamOps {
-    handle: i32,
+pub struct StreamOps<'a> {
+    handle: &'a Handle,
 }
 
-impl StreamOps {
-    /// Create a StreamOps capability from a raw handle
+impl<'a> StreamOps<'a> {
+    /// Create a StreamOps capability from a Handle reference.
     ///
-    /// # Safety
-    /// The caller must ensure that the handle is valid and supports StreamOps
-    pub fn from_handle(handle: i32) -> Self {
+    /// This capability does not own the handle; dropping it will not close anything.
+    pub fn from_handle(handle: &'a Handle) -> Self {
         Self { handle }
     }
 
@@ -61,7 +61,7 @@ impl StreamOps {
     pub fn read(&self, buffer: &mut [u8]) -> StreamResult<usize> {
         let result = syscall3(
             Syscall::StreamRead,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             buffer.as_mut_ptr() as usize,
             buffer.len(),
         );
@@ -79,7 +79,7 @@ impl StreamOps {
     pub fn write(&self, buffer: &[u8]) -> StreamResult<usize> {
         let result = syscall3(
             Syscall::StreamWrite,
-            self.handle as usize,
+            self.handle.as_raw() as usize,
             buffer.as_ptr() as usize,
             buffer.len(),
         );

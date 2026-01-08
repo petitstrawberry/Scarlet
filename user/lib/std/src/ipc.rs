@@ -3,10 +3,70 @@
 //! This module provides user-space interfaces for IPC mechanisms including
 //! pipes, shared memory, and event channels.
 
-use crate::syscall::{Syscall, syscall1, syscall2};
+use crate::handle::Handle;
+use crate::handle::RawHandle;
+use crate::syscall::{Syscall, syscall2};
 
-/// Handle to a shared memory object
-pub type SharedMemoryHandle = u32;
+/// Shared memory error type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedMemoryError {
+    /// System call failed
+    SyscallFailed,
+}
+
+pub type SharedMemoryResult<T> = core::result::Result<T, SharedMemoryError>;
+
+/// High-level SharedMemory wrapper with automatic resource management
+///
+/// Owns a kernel shared memory object handle. The handle is automatically
+/// closed when the SharedMemory instance is dropped.
+#[derive(Debug)]
+pub struct SharedMemory {
+    handle: Handle,
+}
+
+impl SharedMemory {
+    /// Create a shared memory region
+    pub fn create(size: usize, permissions: usize) -> SharedMemoryResult<Self> {
+        let result = syscall2(Syscall::SharedMemoryCreate, size, permissions);
+        if result == usize::MAX {
+            return Err(SharedMemoryError::SyscallFailed);
+        }
+        Ok(Self {
+            handle: unsafe { Handle::from_raw(result as i32) },
+        })
+    }
+
+    /// Create a SharedMemory from an existing Handle
+    pub fn from_handle(handle: Handle) -> Self {
+        Self { handle }
+    }
+
+    /// Get the underlying handle (for advanced usage)
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Get the raw handle value
+    pub fn as_raw(&self) -> RawHandle {
+        self.handle.as_raw()
+    }
+
+    /// Get a SharedMemoryObject capability for this shared memory
+    pub fn as_object(&self) -> crate::handle::capability::SharedMemoryObject<'_> {
+        // as_shared_memory currently cannot fail
+        self.handle.as_shared_memory().unwrap()
+    }
+
+    /// Convert the SharedMemory into a Handle
+    pub fn into_handle(self) -> Handle {
+        unsafe {
+            let handle_ptr = &self.handle as *const Handle;
+            core::mem::forget(self);
+            core::ptr::read(handle_ptr)
+        }
+    }
+}
 
 /// Permissions for shared memory
 pub mod permissions {
@@ -18,112 +78,4 @@ pub mod permissions {
     pub const EXECUTE: usize = 0x4;
     /// Read and write permissions
     pub const READ_WRITE: usize = READ | WRITE;
-}
-
-/// Create a shared memory region
-///
-/// Creates a new shared memory object that can be mapped into the address space
-/// of multiple processes for efficient zero-copy data sharing.
-///
-/// # Arguments
-///
-/// * `size` - Size of the shared memory region in bytes
-/// * `permissions` - Access permissions using constants from `permissions` module
-///
-/// # Returns
-///
-/// Returns a handle to the shared memory object on success, or `None` on failure.
-///
-/// # Examples
-///
-/// ```no_run
-/// use scarlet_std::ipc::{shared_memory_create, permissions};
-///
-/// // Create a 4KB shared memory region with read-write permissions
-/// let handle = shared_memory_create(4096, permissions::READ_WRITE).unwrap();
-/// ```
-pub fn shared_memory_create(size: usize, permissions: usize) -> Option<SharedMemoryHandle> {
-    let result = syscall2(Syscall::SharedMemoryCreate, size, permissions);
-    if result == usize::MAX {
-        None
-    } else {
-        Some(result as u32)
-    }
-}
-
-/// Send a kernel object handle through a socket
-///
-/// Transfers a kernel object (such as a SharedMemoryObject) to another task
-/// through a connected socket. This provides Unix-like SCM_RIGHTS functionality
-/// for passing file descriptors / handles between processes.
-///
-/// Uses dup() semantics: the handle is duplicated, not moved. The original handle
-/// remains valid in the sender's task after the send operation completes.
-///
-/// # Arguments
-///
-/// * `socket_handle` - Handle to the connected socket
-/// * `object_handle` - Handle to the kernel object to send (remains valid after send)
-///
-/// # Returns
-///
-/// Returns `true` on success, `false` on failure.
-///
-/// # Examples
-///
-/// ```no_run
-/// use scarlet_std::ipc::{socket_send_handle, shared_memory_create, permissions};
-///
-/// // Create a shared memory object
-/// let shmem = shared_memory_create(4096, permissions::READ_WRITE).unwrap();
-///
-/// // Send it through a connected socket (shmem remains valid after this)
-/// let socket = /* ... get connected socket handle ... */;
-/// if socket_send_handle(socket, shmem) {
-///     println!("Successfully sent shared memory handle!");
-///     // shmem can still be used here
-/// }
-/// ```
-pub fn socket_send_handle(socket_handle: u32, object_handle: u32) -> bool {
-    let result = syscall2(
-        Syscall::SocketSendHandle,
-        socket_handle as usize,
-        object_handle as usize,
-    );
-    result == 0
-}
-
-/// Receive a kernel object handle from a socket
-///
-/// Receives a kernel object that was sent by a peer task through a connected socket.
-/// This provides Unix-like SCM_RIGHTS functionality for receiving file descriptors
-/// / handles from other processes.
-///
-/// # Arguments
-///
-/// * `socket_handle` - Handle to the connected socket
-///
-/// # Returns
-///
-/// Returns a handle to the received kernel object on success, or `None` if no
-/// handle is available or on error.
-///
-/// # Examples
-///
-/// ```no_run
-/// use scarlet_std::ipc::socket_recv_handle;
-///
-/// let socket = /* ... get connected socket handle ... */;
-/// if let Some(received_handle) = socket_recv_handle(socket) {
-///     println!("Received handle: {}", received_handle);
-///     // Can now use the received handle (e.g., map shared memory)
-/// }
-/// ```
-pub fn socket_recv_handle(socket_handle: u32) -> Option<u32> {
-    let result = syscall1(Syscall::SocketRecvHandle, socket_handle as usize);
-    if result == usize::MAX {
-        None
-    } else {
-        Some(result as u32)
-    }
 }

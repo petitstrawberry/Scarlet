@@ -7,10 +7,17 @@ pub mod capability;
 
 use crate::ffi::str_to_cstr_bytes;
 use crate::syscall::{Syscall, syscall1, syscall2, syscall3};
-use capability::{FileObject, StreamOps};
+use capability::{FileObject, MemoryMappingOps, SharedMemoryObject, SocketObject, StreamOps};
 
 /// Result type for handle operations
 pub type HandleResult<T> = Result<T, HandleError>;
+
+/// Raw kernel handle type used throughout userlib.
+///
+/// This is the canonical representation of a kernel object handle at the
+/// userlib boundary. Public APIs may expose other integer widths for
+/// compatibility (e.g., `u32`), but internally we normalize to `RawHandle`.
+pub type RawHandle = i32;
 
 /// Errors that can occur during handle operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +55,7 @@ impl HandleError {
 /// ensure clear ownership semantics.
 #[derive(Debug)]
 pub struct Handle {
-    raw: i32,
+    raw: RawHandle,
 }
 
 impl Handle {
@@ -80,12 +87,12 @@ impl Handle {
     ///
     /// # Safety
     /// The caller must ensure that the raw handle is valid
-    pub unsafe fn from_raw(raw: i32) -> Self {
+    pub unsafe fn from_raw(raw: RawHandle) -> Self {
         Self { raw }
     }
 
     /// Get the raw handle value
-    pub fn as_raw(&self) -> i32 {
+    pub fn as_raw(&self) -> RawHandle {
         self.raw
     }
 
@@ -130,20 +137,50 @@ impl Handle {
     ///
     /// # Returns
     /// StreamOps capability if the handle supports stream operations
-    pub fn as_stream(&self) -> HandleResult<StreamOps> {
+    pub fn as_stream(&self) -> HandleResult<StreamOps<'_>> {
         // For now, assume all handles support stream operations
         // In the future, we might want to check capabilities
-        Ok(StreamOps::from_handle(self.raw))
+        Ok(StreamOps::from_handle(self))
     }
 
     /// Get a FileObject capability for this handle
     ///
     /// # Returns
     /// FileObject capability if the handle supports file operations
-    pub fn as_file(&self) -> HandleResult<FileObject> {
+    pub fn as_file(&self) -> HandleResult<FileObject<'_>> {
         // For now, assume all handles support file operations
         // In the future, we might want to check capabilities
-        Ok(FileObject::from_handle(self.raw))
+        Ok(FileObject::from_handle(self))
+    }
+
+    /// Get a SocketObject capability for this handle
+    ///
+    /// # Returns
+    /// SocketObject capability if the handle supports socket operations
+    pub fn as_socket(&self) -> HandleResult<SocketObject<'_>> {
+        // For now, assume all handles support socket operations
+        // In the future, we might want to check capabilities
+        Ok(SocketObject::from_handle(self))
+    }
+
+    /// Get a SharedMemoryObject capability for this handle
+    ///
+    /// # Returns
+    /// SharedMemoryObject capability if the handle supports shared memory operations
+    pub fn as_shared_memory(&self) -> HandleResult<SharedMemoryObject<'_>> {
+        // For now, assume all handles support shared memory operations
+        // In the future, we might want to check capabilities
+        Ok(SharedMemoryObject::from_handle(self))
+    }
+
+    /// Get a MemoryMappingOps capability for this handle
+    ///
+    /// # Returns
+    /// MemoryMappingOps capability if the handle supports memory mapping operations
+    pub fn as_memory_mapping(&self) -> HandleResult<MemoryMappingOps<'_>> {
+        // For now, assume all handles support memory mapping operations
+        // In the future, we might want to check capabilities
+        Ok(MemoryMappingOps::from_handle(self))
     }
 
     /// Perform a control operation on this handle (ioctl-equivalent)

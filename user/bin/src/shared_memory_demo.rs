@@ -8,8 +8,7 @@
 extern crate scarlet_std;
 
 use scarlet_std::arch::*;
-use scarlet_std::handle::capability::memory_mapping::mmap;
-use scarlet_std::ipc::{permissions, shared_memory_create};
+use scarlet_std::ipc::{permissions, SharedMemory};
 use scarlet_std::println;
 
 #[no_mangle]
@@ -20,14 +19,15 @@ pub fn _start() -> ! {
     let size = 4096;
     println!("Creating shared memory region of {} bytes...", size);
 
-    match shared_memory_create(size, permissions::READ_WRITE) {
-        Some(handle) => {
+    match SharedMemory::create(size, permissions::READ_WRITE) {
+        Ok(shm) => {
             println!("✓ Shared memory created successfully!");
-            println!("  Handle: {}", handle);
+            println!("  Handle: {}", shm.as_raw());
 
             // Map the shared memory into our address space
             println!("\nMapping shared memory into address space...");
-            match mmap(0, size, permissions::READ_WRITE, handle, 0) {
+            let mapper = shm.as_handle().as_memory_mapping().unwrap();
+            match mapper.mmap(0, size, permissions::READ_WRITE, 0, 0) {
                 Ok(addr) => {
                     println!("✓ Memory mapped at address: {:#x}", addr);
 
@@ -58,7 +58,7 @@ pub fn _start() -> ! {
                 }
             }
         }
-        None => {
+        Err(_) => {
             println!("✗ Failed to create shared memory");
         }
     }
