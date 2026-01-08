@@ -1003,9 +1003,15 @@ fn load_elf_into_task_static(
             // Update brk to track the end of the loaded program
             // brk should be set to the maximum end address of all loaded segments
             let segment_end = mapping_addr + aligned_size;
-            let current_brk = task.brk.unwrap_or(0);
+            let current_brk_raw = task.brk.load(core::sync::atomic::Ordering::SeqCst);
+            let current_brk = if current_brk_raw == usize::MAX {
+                0
+            } else {
+                current_brk_raw
+            };
             if segment_end > current_brk {
-                task.brk = Some(segment_end);
+                task.brk
+                    .store(segment_end, core::sync::atomic::Ordering::SeqCst);
                 // crate::println!("[ELF loader] Updated brk to {:#x} (segment end at {:#x})", segment_end, mapping_addr);
             }
 

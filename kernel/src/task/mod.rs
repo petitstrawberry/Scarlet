@@ -41,6 +41,7 @@ use crate::{
 };
 use alloc::collections::BTreeMap;
 use core::ops::Range;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Once;
 
 /// Global registry of task-specific wakers for waitpid
@@ -230,7 +231,7 @@ pub struct Task {
     pub state: TaskState,
     pub task_type: TaskType,
     pub entry: usize,
-    pub brk: Option<usize>,    /* Program break (NOT work in Kernel task) */
+    pub brk: Arc<AtomicUsize>, /* Program break (NOT work in Kernel task) */
     pub stack_size: usize,     /* Size of the stack in bytes */
     pub data_size: usize, /* Size of the data segment in bytes (page unit) (NOT work in Kernel task) */
     pub text_size: usize, /* Size of the text segment in bytes (NOT work in Kernel task) */
@@ -407,7 +408,7 @@ impl Task {
             state: TaskState::NotInitialized,
             task_type,
             entry: 0,
-            brk: None,
+            brk: Arc::new(AtomicUsize::new(usize::MAX)),
             stack_size: 0,
             data_size: 0,
             text_size: 0,
@@ -535,7 +536,12 @@ impl Task {
     pub fn get_brk(&self) -> usize {
         // Return brk if set (represents program end address)
         // Otherwise fallback to legacy size-based calculation for compatibility
-        self.brk.unwrap_or(self.text_size + self.data_size)
+        let brk = self.brk.load(Ordering::SeqCst);
+        if brk == usize::MAX {
+            self.text_size + self.data_size
+        } else {
+            brk
+        }
     }
 
     /// Set the program break (NOT work in Kernel task)
@@ -587,7 +593,7 @@ impl Task {
                 }
             }
         }
-        self.brk = Some(brk);
+        self.brk.store(brk, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1192,7 +1198,14 @@ impl Task {
         child.max_stack_size = self.max_stack_size;
         child.max_data_size = self.max_data_size;
         child.max_text_size = self.max_text_size;
-        child.brk = self.brk; // Copy brk (program break / heap top)
+        // Program break must be shared when CLONE_VM is set, because the heap lives in the shared
+        // address space. If not shared, the child gets an independent copy of the current brk.
+        if flags.is_set(CloneFlagsDef::Vm) {
+            child.brk = self.brk.clone();
+        } else {
+            let parent_brk = self.brk.load(Ordering::SeqCst);
+            child.brk = Arc::new(AtomicUsize::new(parent_brk));
+        }
 
         // Copy scheduling and event handling state
         child.time_slice = self.time_slice;
@@ -1686,6 +1699,7 @@ pub fn task_initial_kernel_entrypoint() -> ! {
 #[cfg(test)]
 mod tests {
     use alloc::string::ToString;
+    use alloc::sync::Arc;
 
     use crate::task::CloneFlags;
 
@@ -1764,6 +1778,12 @@ mod tests {
 
         // Clone the parent task
         let child_task = parent_task.clone_task(CloneFlags::default()).unwrap();
+
+        // For fork-like clones (no CLONE_VM), brk must NOT be shared.
+        assert!(
+            !Arc::ptr_eq(&child_task.brk, &parent_task.brk),
+            "Child should not share brk with parent unless CLONE_VM is set"
+        );
 
         // Get child memory map count after cloning
         let child_memmap_count = child_task.vm_manager.memmap_len();
@@ -2108,6 +2128,12 @@ mod tests {
         let mut flags = super::CloneFlags::new();
         flags.set(super::CloneFlagsDef::Vm);
         let child = parent.clone_task(flags).unwrap();
+
+        // CLONE_VM: brk must be shared because heap lives in the shared address space.
+        assert!(
+            Arc::ptr_eq(&child.brk, &parent.brk),
+            "CLONE_VM tasks must share brk"
+        );
 
         // Indirectly verify that both share the same ASID/address space
         assert_eq!(child.vm_manager.get_asid(), parent.vm_manager.get_asid());

@@ -174,7 +174,8 @@ impl AbiModule for ScarletAbi {
                 task.text_size = 0;
                 task.data_size = 0;
                 task.stack_size = 0;
-                task.brk = None;
+                task.brk
+                    .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
                 // Create Scarlet-specific loading strategy
                 let strategy = LoadStrategy {
