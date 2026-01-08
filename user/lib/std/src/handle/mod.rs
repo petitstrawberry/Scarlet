@@ -4,10 +4,12 @@
 //! KernelObject handles in a type-safe manner.
 
 pub mod capability;
+pub mod introspection;
 
 use crate::ffi::str_to_cstr_bytes;
 use crate::syscall::{Syscall, syscall1, syscall2, syscall3};
 use capability::{FileObject, MemoryMappingOps, SharedMemoryObject, SocketObject, StreamOps};
+use introspection::{KernelObjectInfo, KernelObjectType};
 
 /// Result type for handle operations
 pub type HandleResult<T> = Result<T, HandleError>;
@@ -56,9 +58,38 @@ impl HandleError {
 #[derive(Debug)]
 pub struct Handle {
     raw: RawHandle,
+    info: KernelObjectInfo,
 }
 
 impl Handle {
+    fn query_info(raw: RawHandle) -> HandleResult<KernelObjectInfo> {
+        let mut info = KernelObjectInfo::unknown();
+        let result = syscall2(
+            Syscall::HandleQuery,
+            raw as usize,
+            (&mut info as *mut KernelObjectInfo) as usize,
+        );
+
+        if result == usize::MAX {
+            Err(HandleError::InvalidHandle)
+        } else {
+            Ok(info)
+        }
+    }
+
+    fn from_kernel_raw(raw: RawHandle) -> HandleResult<Self> {
+        let info = match Self::query_info(raw) {
+            Ok(info) => info,
+            Err(e) => {
+                // Best-effort cleanup to avoid leaking a handle when introspection fails.
+                let _ = syscall1(Syscall::HandleClose, raw as usize);
+                return Err(e);
+            }
+        };
+
+        Ok(Self { raw, info })
+    }
+
     /// Open a file or resource and return a Handle
     ///
     /// # Arguments
@@ -80,20 +111,27 @@ impl Handle {
             0, // mode (unused for now)
         );
 
-        HandleError::from_syscall_result(result).map(|raw| Handle { raw })
+        HandleError::from_syscall_result(result).and_then(|raw| Handle::from_kernel_raw(raw))
     }
 
     /// Create a Handle from a raw handle value
     ///
     /// # Safety
     /// The caller must ensure that the raw handle is valid
-    pub unsafe fn from_raw(raw: RawHandle) -> Self {
-        Self { raw }
+    pub unsafe fn from_raw(raw: RawHandle) -> HandleResult<Self> {
+        // Caller guarantees ownership/validity; we still query the kernel so that
+        // later capability conversions can be validated without extra syscalls.
+        Self::from_kernel_raw(raw)
     }
 
     /// Get the raw handle value
     pub fn as_raw(&self) -> RawHandle {
         self.raw
+    }
+
+    /// Get cached kernel object information for this handle.
+    pub fn object_info(&self) -> KernelObjectInfo {
+        self.info
     }
 
     /// Close the handle and release the underlying KernelObject
@@ -109,16 +147,10 @@ impl Handle {
     /// Creates a new Handle pointing to the same KernelObject
     pub fn duplicate(&self) -> HandleResult<Handle> {
         let result = syscall1(Syscall::HandleDuplicate, self.raw as usize);
-        HandleError::from_syscall_result(result).map(|raw| Handle { raw })
-    }
-
-    /// Query the capabilities supported by this handle
-    ///
-    /// # Returns
-    /// A bitmask of supported capabilities
-    pub fn query_capabilities(&self) -> HandleResult<u64> {
-        let result = syscall1(Syscall::HandleQuery, self.raw as usize);
-        HandleError::from_syscall_result(result).map(|caps| caps as u64)
+        HandleError::from_syscall_result(result).map(|raw| Handle {
+            raw,
+            info: self.info,
+        })
     }
 
     /// Set role metadata for this handle
@@ -138,8 +170,9 @@ impl Handle {
     /// # Returns
     /// StreamOps capability if the handle supports stream operations
     pub fn as_stream(&self) -> HandleResult<StreamOps<'_>> {
-        // For now, assume all handles support stream operations
-        // In the future, we might want to check capabilities
+        if !self.info.capabilities.stream_ops {
+            return Err(HandleError::Unsupported);
+        }
         Ok(StreamOps::from_handle(self))
     }
 
@@ -148,8 +181,9 @@ impl Handle {
     /// # Returns
     /// FileObject capability if the handle supports file operations
     pub fn as_file(&self) -> HandleResult<FileObject<'_>> {
-        // For now, assume all handles support file operations
-        // In the future, we might want to check capabilities
+        if !self.info.capabilities.file_ops {
+            return Err(HandleError::Unsupported);
+        }
         Ok(FileObject::from_handle(self))
     }
 
@@ -158,8 +192,9 @@ impl Handle {
     /// # Returns
     /// SocketObject capability if the handle supports socket operations
     pub fn as_socket(&self) -> HandleResult<SocketObject<'_>> {
-        // For now, assume all handles support socket operations
-        // In the future, we might want to check capabilities
+        if self.info.object_type != KernelObjectType::Socket {
+            return Err(HandleError::Unsupported);
+        }
         Ok(SocketObject::from_handle(self))
     }
 
@@ -168,8 +203,9 @@ impl Handle {
     /// # Returns
     /// SharedMemoryObject capability if the handle supports shared memory operations
     pub fn as_shared_memory(&self) -> HandleResult<SharedMemoryObject<'_>> {
-        // For now, assume all handles support shared memory operations
-        // In the future, we might want to check capabilities
+        if self.info.object_type != KernelObjectType::SharedMemory {
+            return Err(HandleError::Unsupported);
+        }
         Ok(SharedMemoryObject::from_handle(self))
     }
 
@@ -178,9 +214,14 @@ impl Handle {
     /// # Returns
     /// MemoryMappingOps capability if the handle supports memory mapping operations
     pub fn as_memory_mapping(&self) -> HandleResult<MemoryMappingOps<'_>> {
-        // For now, assume all handles support memory mapping operations
-        // In the future, we might want to check capabilities
-        Ok(MemoryMappingOps::from_handle(self))
+        // Kernel introspection currently does not expose a dedicated
+        // MemoryMappingOps flag. We conservatively allow it for file-like objects.
+        match self.info.object_type {
+            KernelObjectType::File
+            | KernelObjectType::CharDevice
+            | KernelObjectType::BlockDevice => Ok(MemoryMappingOps::from_handle(self)),
+            _ => Err(HandleError::Unsupported),
+        }
     }
 
     /// Perform a control operation on this handle (ioctl-equivalent)

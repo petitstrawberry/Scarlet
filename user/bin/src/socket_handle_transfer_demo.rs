@@ -69,7 +69,13 @@ fn main() -> i32 {
         // Receive the shared memory handle (blocking syscall)
         match client_sock.recv_handle() {
             Ok(shmem_handle) => {
-                let shmem = SharedMemory::from_handle(shmem_handle);
+                let shmem = match SharedMemory::from_handle(shmem_handle) {
+                    Ok(shmem) => shmem,
+                    Err(_) => {
+                        println!("[Child] Received non-shared-memory handle");
+                        exit(1);
+                    }
+                };
                 println!("[Child] Received shared memory handle: {}", shmem.as_raw());
 
                 // Map the shared memory

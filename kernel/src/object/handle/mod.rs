@@ -343,7 +343,7 @@ impl HandleTable {
                 writable,
             )),
             #[cfg(feature = "network")]
-            KernelObject::Socket(_) => Some(introspection::KernelObjectInfo::for_pipe(
+            KernelObject::Socket(_) => Some(introspection::KernelObjectInfo::for_socket(
                 handle_role,
                 readable,
                 writable,

@@ -12,6 +12,8 @@ use crate::syscall::{Syscall, syscall2};
 pub enum SharedMemoryError {
     /// System call failed
     SyscallFailed,
+    /// Invalid handle type
+    InvalidHandle,
 }
 
 pub type SharedMemoryResult<T> = core::result::Result<T, SharedMemoryError>;
@@ -32,14 +34,17 @@ impl SharedMemory {
         if result == usize::MAX {
             return Err(SharedMemoryError::SyscallFailed);
         }
-        Ok(Self {
-            handle: unsafe { Handle::from_raw(result as i32) },
-        })
+        let handle = unsafe { Handle::from_raw(result as i32) }
+            .map_err(|_| SharedMemoryError::SyscallFailed)?;
+        Ok(Self { handle })
     }
 
     /// Create a SharedMemory from an existing Handle
-    pub fn from_handle(handle: Handle) -> Self {
-        Self { handle }
+    pub fn from_handle(handle: Handle) -> SharedMemoryResult<Self> {
+        handle
+            .as_shared_memory()
+            .map_err(|_| SharedMemoryError::InvalidHandle)?;
+        Ok(Self { handle })
     }
 
     /// Get the underlying handle (for advanced usage)
@@ -53,18 +58,18 @@ impl SharedMemory {
     }
 
     /// Get a SharedMemoryObject capability for this shared memory
-    pub fn as_object(&self) -> crate::handle::capability::SharedMemoryObject<'_> {
-        // as_shared_memory currently cannot fail
-        self.handle.as_shared_memory().unwrap()
+    pub fn as_object(
+        &self,
+    ) -> core::result::Result<crate::handle::capability::SharedMemoryObject<'_>, SharedMemoryError>
+    {
+        self.handle
+            .as_shared_memory()
+            .map_err(|_| SharedMemoryError::InvalidHandle)
     }
 
     /// Convert the SharedMemory into a Handle
     pub fn into_handle(self) -> Handle {
-        unsafe {
-            let handle_ptr = &self.handle as *const Handle;
-            core::mem::forget(self);
-            core::ptr::read(handle_ptr)
-        }
+        self.handle
     }
 }
 

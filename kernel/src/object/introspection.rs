@@ -106,6 +106,25 @@ impl KernelObjectInfo {
         }
     }
 
+    /// Create info for a Socket KernelObject
+    pub fn for_socket(handle_role: HandleRole, readable: bool, writable: bool) -> Self {
+        Self {
+            object_type: KernelObjectType::Socket,
+            // Sockets are stream-like and support handle transfer; we conservatively
+            // model them as supporting StreamOps + PipeOps + CloneOps.
+            capabilities: ObjectCapabilities {
+                stream_ops: true,
+                file_ops: false,
+                pipe_ops: true,
+                event_ops: false,
+                clone_ops: true,
+                reserved: [false; 3],
+            },
+            handle_role,
+            access_mode: Self::encode_access_mode(readable, writable),
+        }
+    }
+
     /// Create info for an EventChannel KernelObject
     pub fn for_event_channel(handle_role: HandleRole) -> Self {
         Self {
