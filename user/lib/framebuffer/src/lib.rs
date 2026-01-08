@@ -12,7 +12,7 @@ use alloc::vec;
 use std::{
     fs::File,
     handle::{
-        capability::memory_mapping::{flags, mmap, munmap, prot},
+        capability::memory_mapping::{flags, munmap, prot},
         HandleError, HandleResult,
     },
     io::SeekFrom,
@@ -241,28 +241,28 @@ impl Framebuffer {
             return Err(HandleError::InvalidParameter);
         }
 
-        // Try to map the framebuffer memory.
-        // NOTE: Do not pass a non-zero address hint here.
-        // In Scarlet's current userland layout, providing a preferred address can
-        // increase the chance of collisions with the heap growth region (sbrk),
-        // which can lead to silent aliasing/corruption.
-        let handle = self.file.as_handle().as_raw() as u32;
-        let size = fix_info.smem_len as usize;
-
-        match mmap(
-            handle,
-            0,
-            size,                     // Map entire framebuffer
-            prot::READ | prot::WRITE, // Read/write permissions
-            flags::SHARED,            // Shared mapping
-            0,                        // Offset 0
+        // Try to map the framebuffer memory
+        let handle = self.file.as_handle();
+        let mapper = handle.as_memory_mapping()?;
+        match mapper.mmap(
+            0,                          // Let kernel choose address
+            fix_info.smem_len as usize, // Map entire framebuffer
+            prot::READ | prot::WRITE,   // Read/write permissions
+            flags::SHARED,              // Shared mapping
+            0,                          // Offset 0
         ) {
             Ok(mapped_addr) => {
-                self.mapped_buffer = Some((mapped_addr, size));
+                self.mapped_buffer = Some((mapped_addr, fix_info.smem_len as usize));
                 Ok(())
             }
-            Err(_e) => {
-                std::println!("mmap failed: handle={}, size={}", handle, fix_info.smem_len);
+            Err(e) => {
+                // Debug output to understand why mmap failed
+                std::println!(
+                    "mmap failed: handle={}, size={}, error={:?}",
+                    handle.as_raw(),
+                    fix_info.smem_len,
+                    e
+                );
                 Err(HandleError::SystemError(-1))
             }
         }

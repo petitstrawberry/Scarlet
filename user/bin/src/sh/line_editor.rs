@@ -73,7 +73,7 @@ impl LineEditor {
         // Use stdin handle (fd 0) for TTY control
         if self.stdin_handle.is_none() {
             // Create handle from stdin (file descriptor 0)
-            self.stdin_handle = Some(unsafe { Handle::from_raw(0) });
+            self.stdin_handle = unsafe { Handle::from_raw(0) }.ok();
         }
 
         if let Some(ref handle) = self.stdin_handle {

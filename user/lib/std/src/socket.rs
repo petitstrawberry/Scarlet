@@ -23,7 +23,10 @@
 //! ```
 
 use crate::handle::Handle;
-use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3};
+use crate::handle::RawHandle;
+use crate::syscall::{Syscall, syscall0, syscall1};
+
+pub use crate::handle::capability::ShutdownHow;
 
 /// Socket handle wrapper
 ///
@@ -32,17 +35,6 @@ use crate::syscall::{Syscall, syscall0, syscall1, syscall2, syscall3};
 #[derive(Debug)]
 pub struct Socket {
     handle: Handle,
-}
-
-/// Socket shutdown direction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShutdownHow {
-    /// Shutdown read operations
-    Read = 0,
-    /// Shutdown write operations
-    Write = 1,
-    /// Shutdown both read and write operations
-    Both = 2,
 }
 
 /// Socket error type
@@ -83,9 +75,64 @@ impl Socket {
         if raw_handle == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
-        Ok(Socket {
-            handle: unsafe { Handle::from_raw(raw_handle as i32) },
-        })
+
+        let handle =
+            unsafe { Handle::from_raw(raw_handle as i32) }.map_err(|_| SocketError::SyscallFailed)?;
+        Ok(Socket { handle })
+    }
+
+    /// Create a `Socket` from an existing [`Handle`].
+    ///
+    /// This performs a type check using the handle's cached kernel object info.
+    /// If the handle does not represent a socket, this returns [`SocketError::InvalidHandle`]
+    /// and does **not** consume the handle.
+    pub fn from_handle(handle: Handle) -> Result<Self> {
+        handle.as_socket().map_err(|_| SocketError::InvalidHandle)?;
+        Ok(Self { handle })
+    }
+
+    /// Create a socket from a raw handle
+    ///
+    /// # Safety
+    /// The caller must ensure the handle is valid and represents a socket.
+    pub unsafe fn from_raw(raw: RawHandle) -> Self {
+        let handle = unsafe { Handle::from_raw(raw) }.expect("invalid raw handle");
+        Self { handle }
+    }
+
+    /// Get the underlying handle (for advanced usage)
+    pub fn as_handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Get the raw handle value
+    pub fn as_raw(&self) -> RawHandle {
+        self.handle.as_raw()
+    }
+
+    /// Convert the Socket into a Handle
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
+
+    /// Send a kernel object handle through this connected socket.
+    pub fn send_handle(&self, object: &Handle) -> Result<()> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.send_handle(object.as_raw())
+            .map_err(|_| SocketError::SyscallFailed)
+    }
+
+    /// Receive a kernel object handle from this connected socket.
+    pub fn recv_handle(&self) -> Result<Handle> {
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        let raw = sock.recv_handle().map_err(|_| SocketError::WouldBlock)?;
+        unsafe { Handle::from_raw(raw) }.map_err(|_| SocketError::SyscallFailed)
     }
 
     /// Bind socket to a path
@@ -105,16 +152,11 @@ impl Socket {
     /// socket.bind("/tmp/server.sock").unwrap();
     /// ```
     pub fn bind(&self, path: &str) -> Result<()> {
-        let result = syscall3(
-            Syscall::SocketBind,
-            self.handle.as_raw() as usize,
-            path.as_ptr() as usize,
-            path.len(),
-        );
-        if result == usize::MAX {
-            return Err(SocketError::AlreadyBound);
-        }
-        Ok(())
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.bind(path).map_err(|_| SocketError::AlreadyBound)
     }
 
     /// Start listening for connections
@@ -135,15 +177,11 @@ impl Socket {
     /// socket.listen(5).unwrap();
     /// ```
     pub fn listen(&self, backlog: usize) -> Result<()> {
-        let result = syscall2(
-            Syscall::SocketListen,
-            self.handle.as_raw() as usize,
-            backlog,
-        );
-        if result == usize::MAX {
-            return Err(SocketError::NotListening);
-        }
-        Ok(())
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.listen(backlog).map_err(|_| SocketError::NotListening)
     }
 
     /// Connect to a named socket
@@ -163,16 +201,12 @@ impl Socket {
     /// socket.connect("/tmp/server.sock").unwrap();
     /// ```
     pub fn connect(&self, path: &str) -> Result<()> {
-        let result = syscall3(
-            Syscall::SocketConnect,
-            self.handle.as_raw() as usize,
-            path.as_ptr() as usize,
-            path.len(),
-        );
-        if result == usize::MAX {
-            return Err(SocketError::ConnectionRefused);
-        }
-        Ok(())
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.connect(path)
+            .map_err(|_| SocketError::ConnectionRefused)
     }
 
     /// Accept an incoming connection
@@ -191,13 +225,13 @@ impl Socket {
     /// let client = server.accept().unwrap();
     /// ```
     pub fn accept(&self) -> Result<Socket> {
-        let raw_handle = syscall1(Syscall::SocketAccept, self.handle.as_raw() as usize);
-        if raw_handle == usize::MAX {
-            return Err(SocketError::WouldBlock);
-        }
-        Ok(Socket {
-            handle: unsafe { Handle::from_raw(raw_handle as i32) },
-        })
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        let raw = sock.accept().map_err(|_| SocketError::WouldBlock)?;
+        let handle = unsafe { Handle::from_raw(raw) }.map_err(|_| SocketError::SyscallFailed)?;
+        Ok(Socket { handle })
     }
 
     /// Create a connected socket pair
@@ -218,14 +252,11 @@ impl Socket {
         if result == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
-        Ok((
-            Socket {
-                handle: unsafe { Handle::from_raw(handles[0] as i32) },
-            },
-            Socket {
-                handle: unsafe { Handle::from_raw(handles[1] as i32) },
-            },
-        ))
+        let handle0 = unsafe { Handle::from_raw(handles[0] as i32) }
+            .map_err(|_| SocketError::SyscallFailed)?;
+        let handle1 = unsafe { Handle::from_raw(handles[1] as i32) }
+            .map_err(|_| SocketError::SyscallFailed)?;
+        Ok((Socket { handle: handle0 }, Socket { handle: handle1 }))
     }
 
     /// Shutdown socket
@@ -246,33 +277,11 @@ impl Socket {
     /// socket.shutdown(ShutdownHow::Both).unwrap();
     /// ```
     pub fn shutdown(&self, how: ShutdownHow) -> Result<()> {
-        let result = syscall2(
-            Syscall::SocketShutdown,
-            self.handle.as_raw() as usize,
-            how as usize,
-        );
-        if result == usize::MAX {
-            return Err(SocketError::SyscallFailed);
-        }
-        Ok(())
-    }
-
-    /// Get the raw handle ID
-    ///
-    /// # Returns
-    ///
-    /// The underlying handle ID for this socket.
-    pub fn as_raw_handle(&self) -> i32 {
-        self.handle.as_raw()
-    }
-
-    /// Get the underlying Handle
-    ///
-    /// # Returns
-    ///
-    /// Reference to the underlying Handle.
-    pub fn as_handle(&self) -> &Handle {
-        &self.handle
+        let sock = self
+            .handle
+            .as_socket()
+            .map_err(|_| SocketError::InvalidHandle)?;
+        sock.shutdown(how).map_err(|_| SocketError::SyscallFailed)
     }
 
     /// Get StreamOps capability for this socket
@@ -288,49 +297,10 @@ impl Socket {
     /// let stream = socket.as_stream().unwrap();
     /// stream.write(b"Hello").unwrap();
     /// ```
-    pub fn as_stream(&self) -> Result<crate::handle::capability::StreamOps> {
+    pub fn as_stream(&self) -> Result<crate::handle::capability::StreamOps<'_>> {
         self.handle
             .as_stream()
-            .map_err(|_| SocketError::SyscallFailed)
-    }
-
-    /// Create a socket from a raw handle
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure the handle is valid and represents a socket.
-    ///
-    /// # Arguments
-    ///
-    /// * `handle` - Raw handle ID
-    ///
-    /// # Returns
-    ///
-    /// A Socket wrapping the given handle.
-    pub unsafe fn from_raw_handle(raw: i32) -> Self {
-        Socket {
-            handle: unsafe { Handle::from_raw(raw) },
-        }
-    }
-
-    /// Get the raw handle value for debugging
-    ///
-    /// # Returns
-    ///
-    /// The raw handle ID
-    pub fn as_raw(&self) -> i32 {
-        self.handle.as_raw()
-    }
-}
-
-impl crate::io::Read for Socket {
-    fn read(&mut self, buf: &mut [u8]) -> crate::io::Result<usize> {
-        let stream = self.handle.as_stream().map_err(|_| {
-            crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream")
-        })?;
-        stream
-            .read(buf)
-            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to read"))
+            .map_err(|_| SocketError::InvalidHandle)
     }
 }
 

@@ -129,8 +129,7 @@ pub enum SeekFrom {
     Current(i64),
 }
 
-use crate::handle::Handle;
-use core::mem;
+use crate::syscall::{Syscall, syscall3};
 
 /// A handle to the standard input stream of a process
 ///
@@ -195,21 +194,18 @@ impl Stdin {
     /// # Returns
     /// Number of bytes read or error
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize> {
-        let handle = unsafe { Handle::from_raw(0) };
-        let result = if let Ok(stream) = handle.as_stream() {
-            stream
-                .read(buffer)
-                .map_err(|_| Error::new(ErrorKind::Other, "Read from stdin failed"))
-        } else {
-            Err(Error::new(
-                ErrorKind::Unsupported,
-                "Stdin does not support read operations",
-            ))
-        };
+        let result = syscall3(
+            Syscall::StreamRead,
+            0,
+            buffer.as_mut_ptr() as usize,
+            buffer.len(),
+        );
 
-        // Prevent handle from being dropped and closing stdin
-        mem::forget(handle);
-        result
+        if result == usize::MAX {
+            Err(Error::new(ErrorKind::Other, "Read from stdin failed"))
+        } else {
+            Ok(result)
+        }
     }
 }
 
@@ -222,21 +218,13 @@ impl Stdout {
     /// # Returns
     /// Number of bytes written or error
     pub fn write(&self, data: &[u8]) -> Result<usize> {
-        let handle = unsafe { Handle::from_raw(1) };
-        let result = if let Ok(stream) = handle.as_stream() {
-            stream
-                .write(data)
-                .map_err(|_| Error::new(ErrorKind::Other, "Write to stdout failed"))
-        } else {
-            Err(Error::new(
-                ErrorKind::Unsupported,
-                "Stdout does not support write operations",
-            ))
-        };
+        let result = syscall3(Syscall::StreamWrite, 1, data.as_ptr() as usize, data.len());
 
-        // Prevent handle from being dropped and closing stdout
-        mem::forget(handle);
-        result
+        if result == usize::MAX {
+            Err(Error::new(ErrorKind::Other, "Write to stdout failed"))
+        } else {
+            Ok(result)
+        }
     }
 
     /// Write all data to stdout
@@ -275,21 +263,13 @@ impl Stderr {
     /// # Returns
     /// Number of bytes written or error
     pub fn write(&self, data: &[u8]) -> Result<usize> {
-        let handle = unsafe { Handle::from_raw(2) };
-        let result = if let Ok(stream) = handle.as_stream() {
-            stream
-                .write(data)
-                .map_err(|_| Error::new(ErrorKind::Other, "Write to stderr failed"))
-        } else {
-            Err(Error::new(
-                ErrorKind::Unsupported,
-                "Stderr does not support write operations",
-            ))
-        };
+        let result = syscall3(Syscall::StreamWrite, 2, data.as_ptr() as usize, data.len());
 
-        // Prevent handle from being dropped and closing stderr
-        mem::forget(handle);
-        result
+        if result == usize::MAX {
+            Err(Error::new(ErrorKind::Other, "Write to stderr failed"))
+        } else {
+            Ok(result)
+        }
     }
 
     /// Write all data to stderr
