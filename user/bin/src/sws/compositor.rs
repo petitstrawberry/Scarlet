@@ -17,7 +17,7 @@ const LOG_MEMORY_LAYOUT: bool = true;
 
 // Debug: validate that compositor output in VRAM matches what we expect
 // from window buffers (helps catch stride/offset/blit bugs).
-const LOG_RENDER_VALIDATION: bool = true;
+const LOG_RENDER_VALIDATION: bool = false;
 
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
@@ -29,6 +29,8 @@ pub struct Compositor {
     screen_height: u32,
     bg_color: [u8; 4],
     bytes_per_pixel: u32,
+    backbuffer: Vec<u8>,
+    backbuffer_stride: u32,
     full_redraw_needed: bool,
     event_counter: u64,
 }
@@ -75,8 +77,15 @@ impl Compositor {
         let mut cursor = Cursor::new();
         cursor.x = (screen_width / 2) as i32;
         cursor.y = (screen_height / 2) as i32;
+        // Keep prev position consistent to avoid an oversized first dirty region.
+        cursor.mark_drawn();
 
         let bg_color = [100, 100, 100, 255]; // Gray background
+
+        let backbuffer_stride = screen_width * bytes_per_pixel;
+        let buffer_size = (screen_width * screen_height * bytes_per_pixel) as usize;
+        let mut backbuffer = Vec::with_capacity(buffer_size);
+        backbuffer.resize(buffer_size, 0);
 
         Ok(Self {
             framebuffer,
@@ -87,6 +96,8 @@ impl Compositor {
             screen_height,
             bg_color,
             bytes_per_pixel,
+            backbuffer,
+            backbuffer_stride,
             full_redraw_needed: true,
             event_counter: 0,
         })
@@ -147,6 +158,23 @@ impl Compositor {
 
         println!("[Compositor] === Memory layout dump: {} ===", reason);
 
+        // Backbuffer lives on the heap; log its virtual range and fingerprint.
+        // This helps detect accidental aliasing/corruption and confirms it doesn't overlap VRAM.
+        let bb_start = self.backbuffer.as_ptr() as usize;
+        let bb_len = self.backbuffer.len();
+        let bb_end = bb_start.saturating_add(bb_len);
+        let bb_fp = Self::buffer_fingerprint(&self.backbuffer);
+        println!(
+            "[Compositor] backbuffer: 0x{:x}..0x{:x} ({} bytes) stride={} fp=0x{:08x}",
+            bb_start, bb_end, bb_len, self.backbuffer_stride, bb_fp
+        );
+
+        // Best-effort stack location hint: address of a local variable.
+        // We don't know the full stack range here, but if this falls inside VRAM it is a red flag.
+        let stack_marker: u8 = 0;
+        let sp_hint = (&stack_marker as *const u8) as usize;
+        println!("[Compositor] stack marker addr: 0x{:x}", sp_hint);
+
         if let Some((addr, size)) = self.framebuffer.get_mapping_info() {
             let vram_start = addr;
             let vram_end = addr.saturating_add(size);
@@ -154,6 +182,19 @@ impl Compositor {
                 "[Compositor] VRAM mmap (framebuffer lib): 0x{:x}..0x{:x} ({} bytes)",
                 vram_start, vram_end, size
             );
+
+            let bb_overlap = bb_start < vram_end && vram_start < bb_end;
+            if bb_overlap {
+                println!(
+                    "[Compositor] WARNING: backbuffer overlaps framebuffer mapping!"
+                );
+            }
+
+            if sp_hint >= vram_start && sp_hint < vram_end {
+                println!(
+                    "[Compositor] WARNING: stack marker is inside framebuffer mapping!"
+                );
+            }
         } else {
             println!("[Compositor] VRAM mmap (framebuffer lib): (unavailable)");
         }
@@ -181,6 +222,14 @@ impl Compositor {
                             w.id
                         );
                     }
+                }
+
+                let overlap_bb = start < bb_end && bb_start < end;
+                if overlap_bb {
+                    println!(
+                        "[Compositor] WARNING: window #{} buffer overlaps backbuffer!",
+                        w.id
+                    );
                 }
             } else {
                 println!("[Compositor] window #{} buffer: (none)", w.id);
@@ -258,9 +307,18 @@ impl Compositor {
 
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
+        let dirty = if self.full_redraw_needed {
+            None
+        } else if self.cursor.needs_redraw() {
+            Some(self.cursor.get_dirty_region())
+        } else {
+            // For now, window/IPC-driven changes trigger full redraw.
+            None
+        };
+
         // Always use framebuffer API for presentation.
         // This avoids compositor-managed mmap and keeps correctness centralized.
-        self.composite_via_framebuffer()?;
+        self.composite_via_framebuffer(dirty)?;
 
         // Flush to display
         self.framebuffer
@@ -318,9 +376,20 @@ impl Compositor {
                 continue;
             }
 
+            // Cursor is an overlay; expected_pixel_at_with_source does not account for it.
+            // Skip samples that fall within the cursor bounding box to avoid false mismatches.
+            let cx0 = self.cursor.x;
+            let cy0 = self.cursor.y;
+            let cx1 = cx0.saturating_add(self.cursor.width as i32);
+            let cy1 = cy0.saturating_add(self.cursor.height as i32);
+            let xi = x as i32;
+            let yi = y as i32;
+            if xi >= cx0 && xi < cx1 && yi >= cy0 && yi < cy1 {
+                println!("[Compositor] skip {} ({},{}) under cursor", label, x, y);
+                continue;
+            }
+
             if let Some((dx, dy, dw, dh)) = dirty {
-                let xi = x as i32;
-                let yi = y as i32;
                 let inside = xi >= dx && xi < dx + dw as i32 && yi >= dy && yi < dy + dh as i32;
                 if !inside {
                     println!(
@@ -431,7 +500,9 @@ impl Compositor {
 
     /// clip_rect: (x, y, width, height) in screen coordinates
     fn draw_window_to_buffer_clipped(
-        &self,
+        screen_width: u32,
+        screen_height: u32,
+        bytes_per_pixel: u32,
         window: &super::window::Window,
         buffer: &mut [u8],
         stride: u32,
@@ -439,15 +510,34 @@ impl Compositor {
     ) {
         // If window has a mapped buffer, use it; otherwise draw placeholder
         if let Some(ref window_buffer) = window.buffer {
-            self.draw_window_from_buffer(window, window_buffer, buffer, stride, clip_rect);
+            Self::draw_window_from_buffer(
+                screen_width,
+                screen_height,
+                bytes_per_pixel,
+                window,
+                window_buffer,
+                buffer,
+                stride,
+                clip_rect,
+            );
         } else {
-            self.draw_window_placeholder(window, buffer, stride, clip_rect);
+            Self::draw_window_placeholder(
+                screen_width,
+                screen_height,
+                bytes_per_pixel,
+                window,
+                buffer,
+                stride,
+                clip_rect,
+            );
         }
     }
 
     /// Draw window from its shared memory buffer
     fn draw_window_from_buffer(
-        &self,
+        screen_width: u32,
+        screen_height: u32,
+        bytes_per_pixel: u32,
         window: &super::window::Window,
         window_buffer: &[u8],
         screen_buffer: &mut [u8],
@@ -467,9 +557,9 @@ impl Compositor {
 
                 // Screen bounds check
                 if screen_x < 0
-                    || screen_x >= self.screen_width as i32
+                    || screen_x >= screen_width as i32
                     || screen_y < 0
-                    || screen_y >= self.screen_height as i32
+                    || screen_y >= screen_height as i32
                 {
                     continue;
                 }
@@ -485,9 +575,8 @@ impl Compositor {
                     }
                 }
 
-                let screen_offset = ((screen_y as u32 * stride)
-                    + (screen_x as u32 * self.bytes_per_pixel))
-                    as usize;
+                let screen_offset =
+                    ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
 
                 // Draw border or content
                 let is_border = x == 0 || y == 0 || x == window.width - 1 || y == window.height - 1;
@@ -518,7 +607,9 @@ impl Compositor {
 
     /// Draw placeholder window (for windows without buffers yet)
     fn draw_window_placeholder(
-        &self,
+        screen_width: u32,
+        screen_height: u32,
+        bytes_per_pixel: u32,
         window: &super::window::Window,
         buffer: &mut [u8],
         stride: u32,
@@ -542,9 +633,9 @@ impl Compositor {
 
                 // Screen bounds check
                 if screen_x < 0
-                    || screen_x >= self.screen_width as i32
+                    || screen_x >= screen_width as i32
                     || screen_y < 0
-                    || screen_y >= self.screen_height as i32
+                    || screen_y >= screen_height as i32
                 {
                     continue;
                 }
@@ -560,8 +651,8 @@ impl Compositor {
                     }
                 }
 
-                let offset = ((screen_y as u32 * stride) + (screen_x as u32 * self.bytes_per_pixel))
-                    as usize;
+                let offset =
+                    ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
                 let is_border = x == 0 || y == 0 || x == window.width - 1 || y == window.height - 1;
                 let color = if is_border {
                     border_color
@@ -579,54 +670,113 @@ impl Compositor {
         }
     }
 
-    /// Draw cursor to buffer
-    fn draw_cursor_to_buffer(&self, buffer: &mut [u8], stride: u32) {
-        self.cursor.draw_to_buffer_direct(
-            buffer,
-            self.screen_width,
-            self.screen_height,
-            self.bytes_per_pixel,
-            stride,
-        );
-    }
+    /// Composite into the persistent backbuffer, then present the affected region.
+    fn composite_via_framebuffer(
+        &mut self,
+        dirty: Option<(i32, i32, u32, u32)>,
+    ) -> Result<(), &'static str> {
+        let backbuffer_len = self.backbuffer.len();
+        let stride = self.backbuffer_stride;
 
-    /// Composite via framebuffer API (fallback when mmap unavailable)
-    fn composite_via_framebuffer(&mut self) -> Result<(), &'static str> {
-        // Allocate temporary backbuffer
-        let buffer_size = (self.screen_width * self.screen_height * self.bytes_per_pixel) as usize;
-        let mut backbuffer = Vec::with_capacity(buffer_size);
-        backbuffer.resize(buffer_size, 0);
-
-        let stride = self.screen_width * self.bytes_per_pixel;
-
-        // Layer 1: Fill with background
-        for y in 0..self.screen_height {
-            for x in 0..self.screen_width {
-                let offset = ((y * stride) + (x * self.bytes_per_pixel)) as usize;
-                backbuffer[offset] = self.bg_color[0];
-                backbuffer[offset + 1] = self.bg_color[1];
-                backbuffer[offset + 2] = self.bg_color[2];
-                backbuffer[offset + 3] = self.bg_color[3];
+        // Clip dirty region to screen bounds.
+        let (x0, y0, w, h) = match dirty {
+            None => (0i32, 0i32, self.screen_width, self.screen_height),
+            Some((dx, dy, dw, dh)) => {
+                let sx0 = dx.max(0).min(self.screen_width as i32);
+                let sy0 = dy.max(0).min(self.screen_height as i32);
+                let sx1 = (dx.saturating_add(dw as i32))
+                    .max(0)
+                    .min(self.screen_width as i32);
+                let sy1 = (dy.saturating_add(dh as i32))
+                    .max(0)
+                    .min(self.screen_height as i32);
+                let cw = (sx1 - sx0).max(0) as u32;
+                let ch = (sy1 - sy0).max(0) as u32;
+                (sx0, sy0, cw, ch)
             }
+        };
+
+        if w == 0 || h == 0 {
+            // Nothing to redraw.
+            self.cursor.mark_drawn();
+            return Ok(());
         }
 
-        // Layer 2: Draw windows
-        for window in self.window_manager.get_windows() {
-            if !window.visible {
-                continue;
-            }
-            self.draw_window_to_buffer_clipped(window, &mut backbuffer, stride, None);
-        }
+        // Mutate backbuffer within a limited scope so we can immutably borrow `self`
+        // afterwards for validation/present.
+        {
+            let backbuffer = &mut self.backbuffer;
 
-        // Layer 3: Draw cursor
-        self.draw_cursor_to_buffer(&mut backbuffer, stride);
+            // Layer 1: Fill background (only within dirty region).
+            for yy in 0..h {
+                let sy = (y0 as u32).saturating_add(yy);
+                let row_off = (sy as usize)
+                    .saturating_mul(stride as usize)
+                    .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
+                let row_len = (w as usize).saturating_mul(self.bytes_per_pixel as usize);
+                if row_off.saturating_add(row_len) > backbuffer_len {
+                    continue;
+                }
+                let row = &mut backbuffer[row_off..row_off + row_len];
+                for px in row.chunks_exact_mut(4) {
+                    px.copy_from_slice(&self.bg_color);
+                }
+            }
+
+            // Layer 2: Draw windows (clipped to dirty region).
+            let clip = if dirty.is_some() {
+                Some((x0, y0, w, h))
+            } else {
+                None
+            };
+            let screen_width = self.screen_width;
+            let screen_height = self.screen_height;
+            let bytes_per_pixel = self.bytes_per_pixel;
+            for window in self.window_manager.get_windows() {
+                if !window.visible {
+                    continue;
+                }
+                Self::draw_window_to_buffer_clipped(
+                    screen_width,
+                    screen_height,
+                    bytes_per_pixel,
+                    window,
+                    backbuffer,
+                    stride,
+                    clip,
+                );
+            }
+
+            // Layer 3: Draw cursor
+            let cursor = &self.cursor;
+            cursor.draw_to_buffer_direct(
+                backbuffer,
+                screen_width,
+                screen_height,
+                bytes_per_pixel,
+                stride,
+            );
+        }
 
         // Validate composition against expected pixels before presenting.
-        self.validate_vram_samples(&backbuffer, stride, None, "after framebuffer composite");
+        self.validate_vram_samples(
+            &self.backbuffer,
+            stride,
+            dirty,
+            "after framebuffer composite",
+        );
 
-        // Present
+        // Present only the dirty region when available.
+        let src_off = (y0 as usize)
+            .saturating_mul(stride as usize)
+            .saturating_add((x0 as usize).saturating_mul(self.bytes_per_pixel as usize));
+        if src_off >= backbuffer_len {
+            return Err("Backbuffer offset out of range");
+        }
+        let src = &self.backbuffer[src_off..];
+
         self.framebuffer
-            .write_block(0, 0, self.screen_width, self.screen_height, &backbuffer)
+            .write_block_strided(x0 as u32, y0 as u32, w, h, src, stride as usize)
             .map_err(|_| "Failed to write backbuffer")?;
 
         self.cursor.mark_drawn();

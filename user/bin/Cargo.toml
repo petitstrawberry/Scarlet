@@ -76,6 +76,6 @@ name = "container_demo"
 path = "src/container_demo.rs"
 
 [dependencies]
-scarlet_std = { path = "../lib/std" }
+scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
 sws_protocol = { path = "../lib/sws_protocol" }

@@ -242,25 +242,21 @@ impl Framebuffer {
         }
 
         // Try to map the framebuffer memory.
-        // Prefer a high virtual address hint to avoid collisions with
-        // interpreter/heap regions in simple address-space layouts.
+        // NOTE: Do not pass a non-zero address hint here.
+        // In Scarlet's current userland layout, providing a preferred address can
+        // increase the chance of collisions with the heap growth region (sbrk),
+        // which can lead to silent aliasing/corruption.
         let handle = self.file.as_handle().as_raw() as u32;
         let size = fix_info.smem_len as usize;
-        const PREFERRED_FB_MAP_ADDR: usize = 0x6000_0000;
 
-        let try_mmap = |addr| {
-            mmap(
-                handle,
-                addr,
-                size,                     // Map entire framebuffer
-                prot::READ | prot::WRITE, // Read/write permissions
-                flags::SHARED,            // Shared mapping
-                0,                        // Offset 0
-            )
-        };
-
-        let mapped = try_mmap(PREFERRED_FB_MAP_ADDR).or_else(|_| try_mmap(0));
-        match mapped {
+        match mmap(
+            handle,
+            0,
+            size,                     // Map entire framebuffer
+            prot::READ | prot::WRITE, // Read/write permissions
+            flags::SHARED,            // Shared mapping
+            0,                        // Offset 0
+        ) {
             Ok(mapped_addr) => {
                 self.mapped_buffer = Some((mapped_addr, size));
                 Ok(())
@@ -506,6 +502,97 @@ impl Framebuffer {
         Ok(())
     }
 
+    /// Write a rectangular block of pixels to the framebuffer from a strided source.
+    ///
+    /// This is useful when the source is a sub-rectangle of a larger packed buffer
+    /// (e.g., copying a window interior while the source stride is the full window width).
+    ///
+    /// The copy is a simple overwrite (no alpha blending).
+    ///
+    /// # Arguments
+    /// * `x` - Destination X coordinate in pixels
+    /// * `y` - Destination Y coordinate in pixels
+    /// * `width` - Width of the block in pixels
+    /// * `height` - Height of the block in pixels
+    /// * `data` - Source pixel data starting at the top-left of the block
+    /// * `src_stride_bytes` - Source stride in bytes (bytes between consecutive rows)
+    ///
+    /// # Returns
+    /// Success or HandleError on failure
+    pub fn write_block_strided(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        data: &[u8],
+        src_stride_bytes: usize,
+    ) -> HandleResult<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let var_info = self.get_var_screen_info()?;
+        let fix_info = self.get_fix_screen_info()?;
+
+        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let line_length = fix_info.line_length as usize;
+        let block_line_bytes = width as usize * bytes_per_pixel;
+
+        if src_stride_bytes < block_line_bytes {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        let required = (height as usize - 1)
+            .saturating_mul(src_stride_bytes)
+            .saturating_add(block_line_bytes);
+        if required > data.len() {
+            return Err(HandleError::InvalidParameter);
+        }
+
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+            for row in 0..height {
+                let dst_y = y + row;
+                let dst_off = (dst_y as usize)
+                    .saturating_mul(line_length)
+                    .saturating_add((x as usize).saturating_mul(bytes_per_pixel));
+                if dst_off.saturating_add(block_line_bytes) > mapped_size {
+                    return Err(HandleError::InvalidParameter);
+                }
+
+                let src_off = (row as usize).saturating_mul(src_stride_bytes);
+                let src_end = src_off.saturating_add(block_line_bytes);
+
+                unsafe {
+                    let dst_ptr = (mapped_addr + dst_off) as *mut u8;
+                    core::ptr::copy_nonoverlapping(
+                        data[src_off..src_end].as_ptr(),
+                        dst_ptr,
+                        block_line_bytes,
+                    );
+                }
+            }
+        } else {
+            for row in 0..height {
+                let dst_y = y + row;
+                let dst_off = (dst_y as usize)
+                    .saturating_mul(line_length)
+                    .saturating_add((x as usize).saturating_mul(bytes_per_pixel));
+                self.file
+                    .seek(SeekFrom::Start(dst_off as u64))
+                    .map_err(|_| HandleError::SystemError(-1))?;
+
+                let src_off = (row as usize).saturating_mul(src_stride_bytes);
+                let src_end = src_off.saturating_add(block_line_bytes);
+                self.file
+                    .write(&data[src_off..src_end])
+                    .map_err(|_| HandleError::SystemError(-1))?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Fill the entire screen with a solid color
     ///
     /// # Arguments
@@ -561,10 +648,17 @@ impl Framebuffer {
         height: u32,
         color: [u8; 4],
     ) -> HandleResult<()> {
-        let var_info = self.get_var_screen_info()?;
-        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
 
-        // Create a line buffer for the rectangle width
+        let var_info = self.get_var_screen_info()?;
+        let fix_info = self.get_fix_screen_info()?;
+
+        let bytes_per_pixel = (var_info.bits_per_pixel / 8) as usize;
+        let line_length = fix_info.line_length as usize;
+
+        // Create a single-line buffer for the rectangle width.
         let line_bytes = width as usize * bytes_per_pixel;
         let mut line_buffer = vec![0u8; line_bytes];
 
@@ -577,8 +671,36 @@ impl Framebuffer {
             }
         }
 
-        // Use write_block for efficiency
-        self.write_block(x, y, width, height, &line_buffer)
+        if let Some((mapped_addr, mapped_size)) = self.mapped_buffer {
+            for row in 0..height {
+                let dst_y = y + row;
+                let dst_off = (dst_y as usize)
+                    .saturating_mul(line_length)
+                    .saturating_add((x as usize).saturating_mul(bytes_per_pixel));
+                if dst_off.saturating_add(line_bytes) > mapped_size {
+                    return Err(HandleError::InvalidParameter);
+                }
+                unsafe {
+                    let dst_ptr = (mapped_addr + dst_off) as *mut u8;
+                    core::ptr::copy_nonoverlapping(line_buffer.as_ptr(), dst_ptr, line_bytes);
+                }
+            }
+        } else {
+            for row in 0..height {
+                let dst_y = y + row;
+                let dst_off = (dst_y as usize)
+                    .saturating_mul(line_length)
+                    .saturating_add((x as usize).saturating_mul(bytes_per_pixel));
+                self.file
+                    .seek(SeekFrom::Start(dst_off as u64))
+                    .map_err(|_| HandleError::SystemError(-1))?;
+                self.file
+                    .write(&line_buffer)
+                    .map_err(|_| HandleError::SystemError(-1))?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Create a horizontal gradient with specified colors

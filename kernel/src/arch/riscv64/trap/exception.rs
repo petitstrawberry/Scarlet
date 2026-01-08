@@ -8,6 +8,36 @@ use crate::println;
 use crate::sched::scheduler::get_scheduler;
 use crate::task::mytask;
 
+fn log_fatal_page_fault_context(
+    trapframe: &Trapframe,
+    cause: usize,
+    vaddr: usize,
+    task_id: usize,
+    task_name: &str,
+    asid: u16,
+) {
+    use crate::arch::vm::{get_root_pagetable_ptr, is_asid_used};
+
+    let cpu_id = get_cpu().get_cpuid();
+    let epc = trapframe.epc as usize;
+    // RISC-V integer registers: x1=ra, x2=sp, x8=s0/fp
+    let ra = trapframe.regs.reg[1] as usize;
+    let sp = trapframe.regs.reg[2] as usize;
+    let fp = trapframe.regs.reg[8] as usize;
+
+    let asid_used = is_asid_used(asid);
+    let root_pt = get_root_pagetable_ptr(asid).unwrap_or(core::ptr::null_mut());
+
+    println!(
+        "[Trap] fatal page fault map failed: cpu={} cause={} task_id={} name={} asid={} asid_used={} root_pt={:p}",
+        cpu_id, cause, task_id, task_name, asid, asid_used, root_pt
+    );
+    println!(
+        "[Trap] epc={:#x} vaddr={:#x} ra={:#x} sp={:#x} fp={:#x}",
+        epc, vaddr, ra, sp, fp
+    );
+}
+
 pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
     match cause {
         /* Environment call from U-mode */
@@ -31,7 +61,6 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             let task = get_scheduler()
                 .get_current_task(get_cpu().get_cpuid())
                 .unwrap();
-            let manager = &mut task.vm_manager;
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let access = AccessKind {
@@ -39,10 +68,18 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     vaddr,
                     size: None,
                 };
-                match manager.lazy_map_page_with(access) {
+                match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
+                        log_fatal_page_fault_context(
+                            trapframe,
+                            cause,
+                            vaddr,
+                            task.get_id(),
+                            &task.name,
+                            task.vm_manager.get_asid(),
+                        );
                         panic!(
                             "Failed to map page for instruction page fault at vaddr: {:#x}",
                             vaddr
@@ -66,7 +103,6 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
             let task = get_scheduler()
                 .get_current_task(get_cpu().get_cpuid())
                 .unwrap();
-            let manager = &mut task.vm_manager;
             use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
             loop {
                 let op = if cause == 13 {
@@ -79,10 +115,18 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, cause: usize) {
                     vaddr,
                     size: None,
                 };
-                match manager.lazy_map_page_with(access) {
+                match task.vm_manager.lazy_map_page_with(access) {
                     Ok(_) => (),
                     Err(_) => {
                         print_traplog(trapframe);
+                        log_fatal_page_fault_context(
+                            trapframe,
+                            cause,
+                            vaddr,
+                            task.get_id(),
+                            &task.name,
+                            task.vm_manager.get_asid(),
+                        );
                         panic!(
                             "Failed to map page for load/store page fault at vaddr: {:#x}",
                             vaddr
