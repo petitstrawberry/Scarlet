@@ -72,8 +72,17 @@ fn main() -> i32 {
         }
         println!("[Child] Connected to server");
 
-        // Receive the shared memory handle
-        match socket_recv_handle(client_sock.as_raw_handle()) {
+        // Receive the shared memory handle (non-blocking syscall; retry briefly)
+        let mut received_handle: Option<u32> = None;
+        for _ in 0..50 {
+            if let Some(h) = socket_recv_handle(client_sock.as_raw_handle()) {
+                received_handle = Some(h);
+                break;
+            }
+            simple_sleep(10);
+        }
+
+        match received_handle {
             Some(shmem_handle) => {
                 println!("[Child] Received shared memory handle: {}", shmem_handle);
 
@@ -217,23 +226,34 @@ fn main() -> i32 {
         // Wait for child to process
         simple_sleep(200);
 
-        // Read the response from shared memory
+        // Read the response from shared memory (poll briefly to avoid racing)
         let mut response_non_empty = false;
-        match mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
-            Ok(addr) => unsafe {
-                let ptr = addr as *const u8;
-                response_non_empty = *ptr.add(RESPONSE_OFFSET) != 0;
-                print!("[Parent] Response from child: \"");
-                for i in RESPONSE_OFFSET..(RESPONSE_OFFSET + RESPONSE_MAX_LEN) {
-                    let c = *ptr.add(i) as char;
-                    if c == '\0' {
+        let mut last_response_printed = false;
+        for _ in 0..50 {
+            if let Ok(addr) = mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
+                unsafe {
+                    let ptr = addr as *const u8;
+                    response_non_empty = *ptr.add(RESPONSE_OFFSET) != 0;
+                    if response_non_empty {
+                        print!("[Parent] Response from child: \"");
+                        for i in RESPONSE_OFFSET..(RESPONSE_OFFSET + RESPONSE_MAX_LEN) {
+                            let c = *ptr.add(i) as char;
+                            if c == '\0' {
+                                break;
+                            }
+                            print!("{}", c);
+                        }
+                        println!("\"");
+                        last_response_printed = true;
                         break;
                     }
-                    print!("{}", c);
                 }
-                println!("\"");
-            },
-            Err(_) => {}
+            }
+            simple_sleep(10);
+        }
+
+        if !last_response_printed {
+            println!("[Parent] Response from child: \"\"");
         }
 
         // Cleanup
