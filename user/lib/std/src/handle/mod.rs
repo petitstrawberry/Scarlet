@@ -219,7 +219,8 @@ impl Handle {
         match self.info.object_type {
             KernelObjectType::File
             | KernelObjectType::CharDevice
-            | KernelObjectType::BlockDevice => Ok(MemoryMappingOps::from_handle(self)),
+            | KernelObjectType::BlockDevice
+            | KernelObjectType::SharedMemory => Ok(MemoryMappingOps::from_handle(self)),
             _ => Err(HandleError::Unsupported),
         }
     }

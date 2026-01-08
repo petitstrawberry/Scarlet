@@ -79,7 +79,15 @@ fn main() -> i32 {
                 println!("[Child] Received shared memory handle: {}", shmem.as_raw());
 
                 // Map the shared memory
-                let mapper = shmem.as_handle().as_memory_mapping().unwrap();
+                let mapper = match shmem.as_handle().as_memory_mapping() {
+                    Ok(mapper) => mapper,
+                    Err(_) => {
+                        println!("[Child] SharedMemory does not support memory mapping");
+                        let _ = client_sock.shutdown(ShutdownHow::Both);
+                        println!("[Child] Exiting...");
+                        exit(1);
+                    }
+                };
                 match mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
                     Ok(addr) => {
                         println!("[Child] Mapped shared memory at: {:#x}", addr);
@@ -179,7 +187,13 @@ fn main() -> i32 {
         };
 
         // Map shared memory and write a message
-        let mapper = shmem.as_handle().as_memory_mapping().unwrap();
+        let mapper = match shmem.as_handle().as_memory_mapping() {
+            Ok(mapper) => mapper,
+            Err(_) => {
+                println!("[Parent] SharedMemory does not support memory mapping");
+                exit(1);
+            }
+        };
         match mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
             Ok(addr) => {
                 println!("[Parent] Mapped shared memory at: {:#x}", addr);
@@ -215,7 +229,17 @@ fn main() -> i32 {
 
         // Read the response from shared memory
         let mut response_non_empty = false;
-        let mapper = shmem.as_handle().as_memory_mapping().unwrap();
+        let mapper = match shmem.as_handle().as_memory_mapping() {
+            Ok(mapper) => mapper,
+            Err(_) => {
+                println!("[Parent] SharedMemory does not support memory mapping");
+                println!("[Parent] Response from child: \"\"");
+                let _ = client_conn.shutdown(ShutdownHow::Both);
+                let _ = server_sock.shutdown(ShutdownHow::Both);
+                println!("\nHandle transfer test failed");
+                return 1;
+            }
+        };
         if let Ok(addr) = mapper.mmap(0, 4096, permissions::READ_WRITE, 0, 0) {
             unsafe {
                 let ptr = addr as *const u8;
