@@ -63,6 +63,11 @@ path = "src/socket_pair.rs"
 name = "container_demo"
 path = "src/container_demo.rs"
 
+[[bin]]
+name = "socket_handle_transfer_demo"
+path = "src/socket_handle_transfer_demo.rs"
+test = false
+
 [dependencies]
 scarlet_std = { path = "../lib/std" }
 framebuffer = { path = "../lib/framebuffer" }

@@ -418,3 +418,103 @@ pub fn sys_shared_memory_create(trapframe: &mut Trapframe) -> usize {
 
     handle as usize
 }
+
+/// sys_socket_send_handle - Send a kernel object handle through a socket
+///
+/// Transfers a kernel object (like SharedMemoryObject) to another task
+/// through a connected socket, similar to Unix SCM_RIGHTS functionality.
+/// Uses dup() semantics - the handle is duplicated, not moved, so both
+/// sender and receiver will have independent references to the same object.
+///
+/// Arguments:
+/// - socket_handle: Handle to the connected socket
+/// - object_handle: Handle to the kernel object to send (remains valid after send)
+///
+/// Returns:
+/// - 0 on success
+/// - usize::MAX on error
+pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let socket_handle = trapframe.get_arg(0) as u32;
+    let object_handle = trapframe.get_arg(1) as u32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Get the socket object (LocalSocket-only)
+    let socket_obj = match task.handle_table.get(socket_handle) {
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX, // Invalid socket handle
+    };
+
+    use crate::network::local::LocalSocket;
+    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+        Some(s) => s,
+        None => return usize::MAX, // Not a LocalSocket
+    };
+
+    // Get the kernel object to send with dup semantics
+    // Use clone_for_dup() to properly increment reference counts for objects like Pipes
+    let object = match task.handle_table.clone_for_dup(object_handle) {
+        Some(obj) => obj,
+        None => return usize::MAX, // Invalid object handle
+    };
+
+    // Send the handle through the socket
+    match local_socket.send_handle(object) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// sys_socket_recv_handle - Receive a kernel object handle from a socket
+///
+/// Receives a kernel object that was sent by a peer task through a
+/// connected socket.
+///
+/// Arguments:
+/// - socket_handle: Handle to the connected socket
+///
+/// Returns:
+/// - Handle to the received kernel object on success
+/// - usize::MAX on error (no handle available or other error)
+pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+
+    let socket_handle = trapframe.get_arg(0) as u32;
+
+    // Increment PC to avoid infinite loop
+    trapframe.increment_pc_next(task);
+
+    // Get the socket object (LocalSocket-only)
+    let socket_obj = match task.handle_table.get(socket_handle) {
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX, // Invalid socket handle
+    };
+
+    // For LocalSocket, we provide blocking semantics: if the handle queue is empty,
+    // block the task until a handle arrives or the peer is closed.
+    use crate::network::local::LocalSocket;
+    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+        Some(s) => s,
+        None => return usize::MAX, // Not a LocalSocket
+    };
+
+    let object = match local_socket.recv_handle_blocking(task.get_id(), trapframe) {
+        Ok(obj) => obj,
+        Err(_) => return usize::MAX,
+    };
+
+    // Insert the received object into this task's handle table
+    match task.handle_table.insert(object) {
+        Ok(handle) => handle as usize,
+        Err(_) => usize::MAX, // Too many open handles
+    }
+}
