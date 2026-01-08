@@ -220,6 +220,7 @@ impl Default for FbBitfield {
 }
 
 /// Mock mapping for testing purposes
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct MockMapping {
     vaddr: usize,
@@ -456,6 +457,14 @@ impl MemoryMappingOps for FramebufferCharDevice {
     ) -> Result<(usize, usize, bool), &'static str> {
         let fb_resource = &self.fb_resource;
 
+        // VMM requires page-aligned physical mappings.
+        if offset % crate::environment::PAGE_SIZE != 0 {
+            return Err("Framebuffer mmap offset must be page-aligned");
+        }
+        if length % crate::environment::PAGE_SIZE != 0 {
+            return Err("Framebuffer mmap length must be page-aligned");
+        }
+
         // Check if framebuffer supports memory mapping
         if fb_resource.physical_addr == 0 || fb_resource.size == 0 {
             return Err("Invalid framebuffer configuration");
@@ -471,8 +480,12 @@ impl MemoryMappingOps for FramebufferCharDevice {
             return Err("Requested length exceeds available framebuffer size");
         }
 
-        // Return physical address, permissions (read/write), and shared flag
-        let paddr = fb_resource.physical_addr + offset;
+        // FramebufferResource currently stores a kernel virtual address for CPU access.
+        // Convert it to a physical address for user mmap.
+        let kva = fb_resource.physical_addr + offset;
+        let paddr = crate::vm::get_kernel_vm_manager()
+            .translate_vaddr(kva)
+            .ok_or("Failed to translate framebuffer address")?;
         let permissions = 0x3; // Read and Write
         let is_shared = true; // Framebuffer mappings are shared
 

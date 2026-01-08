@@ -8,16 +8,20 @@ use framebuffer::Framebuffer;
 use std::println;
 use std::vec::Vec;
 
-// Temporary safety switch: disable mmap fast-path.
-// If this fixes visual corruption, the root cause is likely VM overlap/aliasing
-// between the framebuffer mapping and heap allocations.
-const DISABLE_MMAP_FAST_PATH: bool = true;
+// NOTE: The compositor intentionally does NOT manage a manual VRAM mmap mapping.
+// Rendering goes through the framebuffer library (which may internally use mmap).
+
+// Debug: dump VRAM mmap range and window buffer ranges.
+// This helps confirm whether corruption is caused by virtual-address overlap.
+const LOG_MEMORY_LAYOUT: bool = true;
+
+// Debug: validate that compositor output in VRAM matches what we expect
+// from window buffers (helps catch stride/offset/blit bugs).
+const LOG_RENDER_VALIDATION: bool = true;
 
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     framebuffer: Framebuffer,
-    vram_ptr: Option<usize>,
-    vram_size: usize,
     window_manager: WindowManager,
     ipc_server: IpcServer,
     cursor: Cursor,
@@ -25,7 +29,6 @@ pub struct Compositor {
     screen_height: u32,
     bg_color: [u8; 4],
     bytes_per_pixel: u32,
-    mmap_stride_bytes: u32,
     full_redraw_needed: bool,
     event_counter: u64,
 }
@@ -52,52 +55,11 @@ impl Compositor {
         let screen_height = var_info.yres;
         let bytes_per_pixel = 4; // BGRA
 
-        // NOTE: Framebuffer scanlines may have padding. Use line_length for mmap stride.
-        let mmap_stride_bytes = fix_info.line_length;
-
-        let expected_vram_size = (mmap_stride_bytes as usize).saturating_mul(screen_height as usize);
-
         println!("[Compositor] Screen: {}x{}", screen_width, screen_height);
         println!(
             "[Compositor] Framebuffer: bpp={} line_length={} smem_len={}",
-            var_info.bits_per_pixel,
-            fix_info.line_length,
-            fix_info.smem_len
+            var_info.bits_per_pixel, fix_info.line_length, fix_info.smem_len
         );
-
-        // Try to get mmap info for direct VRAM access.
-        // NOTE: If the mapping size is smaller than the expected screen size,
-        // direct writes may corrupt unrelated memory (e.g. window buffers).
-        let can_use_mmap = !DISABLE_MMAP_FAST_PATH
-            && var_info.bits_per_pixel == 32
-            && mmap_stride_bytes >= screen_width.saturating_mul(bytes_per_pixel);
-
-        let (vram_ptr, vram_size) = if DISABLE_MMAP_FAST_PATH {
-            println!("[Compositor] mmap fast-path disabled, using fallback I/O");
-            (None, 0)
-        } else if !can_use_mmap {
-            println!(
-                "[Compositor] Warning: unsupported framebuffer format for mmap fast-path (bpp={}, line_length={}, expected_line_bytes={}), using fallback I/O",
-                var_info.bits_per_pixel,
-                mmap_stride_bytes,
-                screen_width.saturating_mul(bytes_per_pixel)
-            );
-            (None, 0)
-        } else if let Some((addr, size)) = framebuffer.get_mapping_info() {
-            if size < expected_vram_size {
-                println!(
-                    "[Compositor] Warning: mmap VRAM size too small (got {} bytes, expected >= {}), using fallback I/O",
-                    size, expected_vram_size
-                );
-                (None, 0)
-            } else {
-                println!("[Compositor] Using mmap direct VRAM access at 0x{:x}", addr);
-                (Some(addr), expected_vram_size)
-            }
-        } else {
-            println!("[Compositor] Warning: mmap not available, using fallback I/O");
-            (None, 0)
-        };
 
         // Start input thread
         InputManager::start_input_thread(screen_width, screen_height)?;
@@ -118,8 +80,6 @@ impl Compositor {
 
         Ok(Self {
             framebuffer,
-            vram_ptr,
-            vram_size,
             window_manager,
             ipc_server,
             cursor,
@@ -127,7 +87,6 @@ impl Compositor {
             screen_height,
             bg_color,
             bytes_per_pixel,
-            mmap_stride_bytes,
             full_redraw_needed: true,
             event_counter: 0,
         })
@@ -170,6 +129,8 @@ impl Compositor {
 
         println!("[Compositor] Created 3 test windows with content");
 
+        self.dump_memory_layout("after init_display windows");
+
         // Initial full composite
         self.full_redraw_needed = true;
         self.composite_and_present()?;
@@ -177,6 +138,104 @@ impl Compositor {
         println!("[Compositor] Display initialized");
 
         Ok(())
+    }
+
+    fn dump_memory_layout(&self, reason: &str) {
+        if !LOG_MEMORY_LAYOUT {
+            return;
+        }
+
+        println!("[Compositor] === Memory layout dump: {} ===", reason);
+
+        if let Some((addr, size)) = self.framebuffer.get_mapping_info() {
+            let vram_start = addr;
+            let vram_end = addr.saturating_add(size);
+            println!(
+                "[Compositor] VRAM mmap (framebuffer lib): 0x{:x}..0x{:x} ({} bytes)",
+                vram_start, vram_end, size
+            );
+        } else {
+            println!("[Compositor] VRAM mmap (framebuffer lib): (unavailable)");
+        }
+
+        let mut ranges: Vec<(u32, usize, usize, usize)> = Vec::new();
+        for w in self.window_manager.get_windows() {
+            if let Some(ref buf) = w.buffer {
+                let start = buf.as_ptr() as usize;
+                let len = buf.len();
+                let end = start.saturating_add(len);
+                ranges.push((w.id, start, end, len));
+
+                let fp = Self::buffer_fingerprint(buf);
+                println!(
+                    "[Compositor] window #{} buffer: 0x{:x}..0x{:x} ({} bytes) fp=0x{:08x}",
+                    w.id, start, end, len, fp
+                );
+
+                if let Some((vram_start, vram_size)) = self.framebuffer.get_mapping_info() {
+                    let vram_end = vram_start.saturating_add(vram_size);
+                    let overlap = start < vram_end && vram_start < end;
+                    if overlap {
+                        println!(
+                            "[Compositor] WARNING: window #{} buffer overlaps framebuffer mapping!",
+                            w.id
+                        );
+                    }
+                }
+            } else {
+                println!("[Compositor] window #{} buffer: (none)", w.id);
+            }
+        }
+
+        // Check overlap between window buffers themselves (should never happen).
+        if ranges.len() >= 2 {
+            ranges.sort_by_key(|(_id, start, _end, _len)| *start);
+            for i in 1..ranges.len() {
+                let (prev_id, prev_start, prev_end, _prev_len) = ranges[i - 1];
+                let (id, start, _end, _len) = ranges[i];
+                if start < prev_end {
+                    println!(
+                        "[Compositor] WARNING: window buffers overlap: #{} (0x{:x}..0x{:x}) and #{} (starts 0x{:x})",
+                        prev_id, prev_start, prev_end, id, start
+                    );
+                }
+            }
+        }
+
+        // Best-effort: print current program break (sbrk(0)).
+        // This is useful to see if heap grows towards the VRAM mapping.
+        {
+            use std::syscall::{Syscall, syscall1};
+            let brk_now = syscall1(Syscall::Sbrk, 0);
+            println!("[Compositor] sbrk(0) -> 0x{:x}", brk_now);
+        }
+    }
+
+    fn buffer_fingerprint(buf: &[u8]) -> u32 {
+        // Cheap fingerprint to detect unexpected buffer mutations.
+        // Mix a small prefix + suffix and a stride sample to reduce overhead.
+        let mut x: u32 = 0x811c_9dc5;
+
+        let take = core::cmp::min(256, buf.len());
+        for &b in &buf[..take] {
+            x = x.rotate_left(5) ^ (b as u32);
+        }
+
+        if buf.len() > 256 {
+            let tail_take = core::cmp::min(256, buf.len());
+            for &b in &buf[buf.len() - tail_take..] {
+                x = x.rotate_left(5) ^ (b as u32);
+            }
+        }
+
+        // Sample every ~4KB to catch larger-scale corruption.
+        let mut i = 0usize;
+        while i < buf.len() {
+            x = x.rotate_left(5) ^ (buf[i] as u32);
+            i = i.saturating_add(4096);
+        }
+
+        x
     }
 
     /// Fill buffer with gradient (for testing, static method)
@@ -199,13 +258,9 @@ impl Compositor {
 
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
-        if let Some(vram_addr) = self.vram_ptr {
-            // Fast path: Direct VRAM access
-            self.composite_to_vram(vram_addr)?;
-        } else {
-            // Fallback: Use framebuffer API
-            self.composite_via_framebuffer()?;
-        }
+        // Always use framebuffer API for presentation.
+        // This avoids compositor-managed mmap and keeps correctness centralized.
+        self.composite_via_framebuffer()?;
 
         // Flush to display
         self.framebuffer
@@ -216,82 +271,164 @@ impl Compositor {
         Ok(())
     }
 
-    /// Composite directly to VRAM (fastest method)
-    fn composite_to_vram(&mut self, vram_addr: usize) -> Result<(), &'static str> {
-        let stride = self.mmap_stride_bytes;
+    fn validate_vram_samples(
+        &self,
+        vram: &[u8],
+        stride: u32,
+        dirty: Option<(i32, i32, u32, u32)>,
+        reason: &str,
+    ) {
+        if !LOG_RENDER_VALIDATION {
+            return;
+        }
 
-        if self.full_redraw_needed {
-            // Full screen redraw
-            unsafe {
-                let vram = core::slice::from_raw_parts_mut(vram_addr as *mut u8, self.vram_size);
+        // Pick coordinates that avoid the default cursor position (center) AND
+        // avoid being fully covered by a client window at (0,0) size 400x300.
+        let mut samples: Vec<(u32, u32, &'static str)> = Vec::new();
+        samples.push((0, 0, "bg top-left"));
+        samples.push((10, 10, "bg near top-left"));
+        samples.push((420, 60, "inside win1 (outside client 0,0-400x300)"));
+        samples.push((460, 130, "inside win2 (outside client 0,0-400x300)"));
+        samples.push((420, 190, "overlap win2/win3 (expect top-most)"));
+        samples.push((900, 700, "bg bottom-right"));
 
-                // Layer 1: Fill with background color
-                for y in 0..self.screen_height {
-                    for x in 0..self.screen_width {
-                        let offset = ((y * stride) + (x * self.bytes_per_pixel)) as usize;
-                        vram[offset] = self.bg_color[0]; // B
-                        vram[offset + 1] = self.bg_color[1]; // G
-                        vram[offset + 2] = self.bg_color[2]; // R
-                        vram[offset + 3] = self.bg_color[3]; // A
-                    }
-                }
-
-                // Layer 2: Draw all windows (no clipping for full redraw)
-                for window in self.window_manager.get_windows() {
-                    if !window.visible {
-                        continue;
-                    }
-                    self.draw_window_to_buffer_clipped(window, vram, stride, None);
-                }
-
-                // Layer 3: Draw cursor
-                self.draw_cursor_to_buffer(vram, stride);
-            }
-        } else {
-            // Incremental update: only cursor dirty region
-            let (dx, dy, dw, dh) = self.cursor.get_dirty_region();
-            let clip_rect = Some((dx, dy, dw, dh));
-
-            unsafe {
-                let vram = core::slice::from_raw_parts_mut(vram_addr as *mut u8, self.vram_size);
-
-                // Redraw dirty region background
-                for y in dy.max(0)..(dy + dh as i32).min(self.screen_height as i32) {
-                    for x in dx.max(0)..(dx + dw as i32).min(self.screen_width as i32) {
-                        let offset =
-                            ((y as u32 * stride) + (x as u32 * self.bytes_per_pixel)) as usize;
-                        vram[offset] = self.bg_color[0];
-                        vram[offset + 1] = self.bg_color[1];
-                        vram[offset + 2] = self.bg_color[2];
-                        vram[offset + 3] = self.bg_color[3];
-                    }
-                }
-
-                // Redraw ALL windows, but clipped to dirty region
-                for window in self.window_manager.get_windows() {
-                    if !window.visible {
-                        continue;
-                    }
-                    // Check if window intersects dirty region
-                    if window.x + window.width as i32 >= dx
-                        && window.x < dx + dw as i32
-                        && window.y + window.height as i32 >= dy
-                        && window.y < dy + dh as i32
-                    {
-                        self.draw_window_to_buffer_clipped(window, vram, stride, clip_rect);
-                    }
-                }
-
-                // Draw cursor
-                self.draw_cursor_to_buffer(vram, stride);
+        // For incremental redraw, also validate a point inside the dirty region.
+        if let Some((dx, dy, dw, dh)) = dirty {
+            if dw > 0 && dh > 0 {
+                let cx = (dx + (dw as i32 / 2)).max(0) as u32;
+                let cy = (dy + (dh as i32 / 2)).max(0) as u32;
+                samples.push((cx, cy, "inside dirty region center"));
             }
         }
 
-        self.cursor.mark_drawn();
-        Ok(())
+        match dirty {
+            Some((dx, dy, dw, dh)) => {
+                println!(
+                    "[Compositor] === VRAM sample validation: {} (dirty=({}, {}) {}x{}) ===",
+                    reason, dx, dy, dw, dh
+                );
+            }
+            None => {
+                println!("[Compositor] === VRAM sample validation: {} ===", reason);
+            }
+        }
+
+        for (x, y, label) in samples {
+            if x >= self.screen_width || y >= self.screen_height {
+                continue;
+            }
+
+            if let Some((dx, dy, dw, dh)) = dirty {
+                let xi = x as i32;
+                let yi = y as i32;
+                let inside = xi >= dx && xi < dx + dw as i32 && yi >= dy && yi < dy + dh as i32;
+                if !inside {
+                    println!(
+                        "[Compositor] skip {} ({},{}) outside dirty region",
+                        label, x, y
+                    );
+                    continue;
+                }
+            }
+
+            let off = (y as usize)
+                .saturating_mul(stride as usize)
+                .saturating_add((x as usize).saturating_mul(self.bytes_per_pixel as usize));
+            if off + 4 > vram.len() {
+                println!(
+                    "[Compositor] skip {} ({},{}) out of VRAM range off=0x{:x}",
+                    label, x, y, off
+                );
+                continue;
+            }
+
+            let actual = [vram[off], vram[off + 1], vram[off + 2], vram[off + 3]];
+            let (expected, src) = self.expected_pixel_at_with_source(x, y);
+
+            if actual != expected {
+                println!(
+                    "[Compositor] MISMATCH {} ({},{}) actual={:?} expected={:?} src={}",
+                    label, x, y, actual, expected, src
+                );
+            } else {
+                println!(
+                    "[Compositor] ok {} ({},{}) value={:?} src={}",
+                    label, x, y, actual, src
+                );
+            }
+        }
     }
 
-    /// Draw a window to buffer with optional clipping
+    fn expected_pixel_at_with_source(&self, x: u32, y: u32) -> ([u8; 4], std::string::String) {
+        let sx = x as i32;
+        let sy = y as i32;
+
+        // Top-most window wins.
+        if let Some(window) = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .rev()
+            .find(|w| w.visible && w.contains_point(sx, sy))
+        {
+            let local_x = (sx - window.x) as u32;
+            let local_y = (sy - window.y) as u32;
+            let is_border = local_x == 0
+                || local_y == 0
+                || local_x + 1 == window.width
+                || local_y + 1 == window.height;
+
+            if is_border {
+                if window.focused {
+                    (
+                        [50, 50, 150, 255],
+                        std::format!("window#{} border(focused)", window.id),
+                    )
+                } else {
+                    (
+                        [100, 100, 100, 255],
+                        std::format!("window#{} border", window.id),
+                    )
+                }
+            } else if let Some(ref buf) = window.buffer {
+                let wo = ((local_y as usize)
+                    .saturating_mul(window.width as usize)
+                    .saturating_add(local_x as usize))
+                .saturating_mul(4);
+
+                if wo + 4 <= buf.len() {
+                    (
+                        [buf[wo], buf[wo + 1], buf[wo + 2], buf[wo + 3]],
+                        std::format!(
+                            "window#{} buffer local=({}, {}) off=0x{:x}",
+                            window.id,
+                            local_x,
+                            local_y,
+                            wo
+                        ),
+                    )
+                } else {
+                    (
+                        self.bg_color,
+                        std::format!("window#{} buffer OOB", window.id),
+                    )
+                }
+            } else if window.focused {
+                (
+                    [150, 150, 200, 255],
+                    std::format!("window#{} placeholder(focused)", window.id),
+                )
+            } else {
+                (
+                    [180, 180, 180, 255],
+                    std::format!("window#{} placeholder", window.id),
+                )
+            }
+        } else {
+            (self.bg_color, std::string::String::from("bg"))
+        }
+    }
+
     /// clip_rect: (x, y, width, height) in screen coordinates
     fn draw_window_to_buffer_clipped(
         &self,
@@ -318,9 +455,9 @@ impl Compositor {
         clip_rect: Option<(i32, i32, u32, u32)>,
     ) {
         let border_color = if window.focused {
-            [50, 50, 150, 255] // Blue border for focused
+            [50, 50, 150, 255]
         } else {
-            [100, 100, 100, 255] // Gray border for unfocused
+            [100, 100, 100, 255]
         };
 
         for y in 0..window.height {
@@ -484,6 +621,9 @@ impl Compositor {
         // Layer 3: Draw cursor
         self.draw_cursor_to_buffer(&mut backbuffer, stride);
 
+        // Validate composition against expected pixels before presenting.
+        self.validate_vram_samples(&backbuffer, stride, None, "after framebuffer composite");
+
         // Present
         self.framebuffer
             .write_block(0, 0, self.screen_width, self.screen_height, &backbuffer)
@@ -606,6 +746,8 @@ impl Compositor {
                     .create_window_with_id(window_id, 0, 0, width, height);
 
                 self.full_redraw_needed = true;
+
+                self.dump_memory_layout("after IPC CreateWindow");
             }
             IpcEvent::DestroyWindow {
                 client_id,
@@ -617,6 +759,8 @@ impl Compositor {
                 );
                 self.window_manager.close_window(window_id);
                 self.full_redraw_needed = true;
+
+                self.dump_memory_layout("after IPC DestroyWindow");
             }
             IpcEvent::BufferUpdated {
                 window_id,

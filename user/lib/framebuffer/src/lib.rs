@@ -241,28 +241,32 @@ impl Framebuffer {
             return Err(HandleError::InvalidParameter);
         }
 
-        // Try to map the framebuffer memory
+        // Try to map the framebuffer memory.
+        // Prefer a high virtual address hint to avoid collisions with
+        // interpreter/heap regions in simple address-space layouts.
         let handle = self.file.as_handle().as_raw() as u32;
-        match mmap(
-            handle,
-            0,                          // Let kernel choose address
-            fix_info.smem_len as usize, // Map entire framebuffer
-            prot::READ | prot::WRITE,   // Read/write permissions
-            flags::SHARED,              // Shared mapping
-            0,                          // Offset 0
-        ) {
+        let size = fix_info.smem_len as usize;
+        const PREFERRED_FB_MAP_ADDR: usize = 0x6000_0000;
+
+        let try_mmap = |addr| {
+            mmap(
+                handle,
+                addr,
+                size,                     // Map entire framebuffer
+                prot::READ | prot::WRITE, // Read/write permissions
+                flags::SHARED,            // Shared mapping
+                0,                        // Offset 0
+            )
+        };
+
+        let mapped = try_mmap(PREFERRED_FB_MAP_ADDR).or_else(|_| try_mmap(0));
+        match mapped {
             Ok(mapped_addr) => {
-                self.mapped_buffer = Some((mapped_addr, fix_info.smem_len as usize));
+                self.mapped_buffer = Some((mapped_addr, size));
                 Ok(())
             }
-            Err(e) => {
-                // Debug output to understand why mmap failed
-                std::println!(
-                    "mmap failed: handle={}, size={}, error={:?}",
-                    handle,
-                    fix_info.smem_len,
-                    e
-                );
+            Err(_e) => {
+                std::println!("mmap failed: handle={}, size={}", handle, fix_info.smem_len);
                 Err(HandleError::SystemError(-1))
             }
         }
