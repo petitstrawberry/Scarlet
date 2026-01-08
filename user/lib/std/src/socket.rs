@@ -329,6 +329,27 @@ macro_rules! with_socket {
 }
 
 /// Create a new socket (C-style wrapper)
+///
+/// Creates a new unconnected socket with the specified domain and type.
+///
+/// # Arguments
+///
+/// * `domain` - Socket domain (currently only `SocketDomain::Local` is supported)
+/// * `socket_type` - Socket type (currently only `SocketType::Stream` is supported)
+/// * `_protocol` - Protocol (reserved for future use, currently ignored)
+///
+/// # Returns
+///
+/// Returns `Some(handle)` on success, or `None` if the socket creation fails
+/// or if an unsupported domain/type combination is requested.
+///
+/// # Examples
+///
+/// ```no_run
+/// use scarlet_std::socket::{socket_create, SocketDomain, SocketType};
+///
+/// let socket = socket_create(SocketDomain::Local, SocketType::Stream, 0).unwrap();
+/// ```
 pub fn socket_create(domain: SocketDomain, socket_type: SocketType, _protocol: u32) -> Option<u32> {
     // Currently only Local/Stream is supported
     if domain != SocketDomain::Local || socket_type != SocketType::Stream {
@@ -343,21 +364,109 @@ pub fn socket_create(domain: SocketDomain, socket_type: SocketType, _protocol: u
 }
 
 /// Bind socket to a path (C-style wrapper)
+///
+/// Binds a socket to a local filesystem path for listening or connection.
+///
+/// # Arguments
+///
+/// * `handle` - Handle to the socket to bind
+/// * `path` - Filesystem path to bind to (e.g., "/tmp/server.sock")
+///
+/// # Returns
+///
+/// Returns `true` on success, `false` on failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// use scarlet_std::socket::{socket_create, socket_bind, SocketDomain, SocketType};
+///
+/// let socket = socket_create(SocketDomain::Local, SocketType::Stream, 0).unwrap();
+/// if socket_bind(socket, "/tmp/server.sock") {
+///     println!("Socket bound successfully");
+/// }
+/// ```
 pub fn socket_bind(handle: u32, path: &str) -> bool {
     with_socket!(handle, |s: &Socket| s.bind(path).is_ok())
 }
 
-/// Start listening (C-style wrapper)
+/// Start listening for connections (C-style wrapper)
+///
+/// Marks the socket as passive, ready to accept incoming connections.
+///
+/// # Arguments
+///
+/// * `handle` - Handle to the bound socket
+/// * `backlog` - Maximum number of pending connections in the queue
+///
+/// # Returns
+///
+/// Returns `true` on success, `false` on failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// use scarlet_std::socket::{socket_create, socket_bind, socket_listen, SocketDomain, SocketType};
+///
+/// let socket = socket_create(SocketDomain::Local, SocketType::Stream, 0).unwrap();
+/// socket_bind(socket, "/tmp/server.sock");
+/// if socket_listen(socket, 5) {
+///     println!("Socket listening");
+/// }
+/// ```
 pub fn socket_listen(handle: u32, backlog: usize) -> bool {
     with_socket!(handle, |s: &Socket| s.listen(backlog).is_ok())
 }
 
-/// Connect to a socket (C-style wrapper)
+/// Connect to a remote socket (C-style wrapper)
+///
+/// Initiates a connection to a listening socket at the specified path.
+///
+/// # Arguments
+///
+/// * `handle` - Handle to the unconnected socket
+/// * `path` - Filesystem path of the listening socket to connect to
+///
+/// # Returns
+///
+/// Returns `true` on success, `false` on failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// use scarlet_std::socket::{socket_create, socket_connect, SocketDomain, SocketType};
+///
+/// let socket = socket_create(SocketDomain::Local, SocketType::Stream, 0).unwrap();
+/// if socket_connect(socket, "/tmp/server.sock") {
+///     println!("Connected to server");
+/// }
+/// ```
 pub fn socket_connect(handle: u32, path: &str) -> bool {
     with_socket!(handle, |s: &Socket| s.connect(path).is_ok())
 }
 
-/// Shutdown socket (C-style wrapper)
+/// Shutdown a socket connection (C-style wrapper)
+///
+/// Shuts down both reading and writing on the socket connection.
+///
+/// # Arguments
+///
+/// * `handle` - Handle to the connected socket
+///
+/// # Returns
+///
+/// Returns `true` on success, `false` on failure.
+///
+/// # Examples
+///
+/// ```no_run
+/// use scarlet_std::socket::{socket_create, socket_connect, socket_shutdown, SocketDomain, SocketType};
+///
+/// let socket = socket_create(SocketDomain::Local, SocketType::Stream, 0).unwrap();
+/// socket_connect(socket, "/tmp/server.sock");
+/// // ... use socket ...
+/// socket_shutdown(socket);
+/// ```
 pub fn socket_shutdown(handle: u32) -> bool {
     with_socket!(handle, |s: &Socket| s.shutdown(ShutdownHow::Both).is_ok())
 }

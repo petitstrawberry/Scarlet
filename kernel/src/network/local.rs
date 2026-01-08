@@ -39,6 +39,10 @@ use crate::sync::Waker;
 /// Maximum buffer size per socket (64 KB)
 const MAX_BUFFER_SIZE: usize = 65536;
 
+/// Maximum number of handles that can be queued for transfer
+/// This prevents unbounded memory growth from DoS attacks
+const MAX_HANDLE_QUEUE_SIZE: usize = 64;
+
 /// Shared buffer structure that tracks reading task
 struct SocketBuffer {
     /// Data buffer
@@ -410,8 +414,14 @@ impl StreamIpcOps for LocalSocket {
         let peer_weak_ref = peer_weak.as_ref().ok_or(IpcError::PeerClosed)?;
         let peer = peer_weak_ref.upgrade().ok_or(IpcError::PeerClosed)?;
 
+        // Check if peer's handle queue is full to prevent DoS attacks
+        let mut peer_queue = peer.handle_queue.write();
+        if peer_queue.len() >= MAX_HANDLE_QUEUE_SIZE {
+            return Err(IpcError::ChannelFull);
+        }
+
         // Add handle to peer's receive queue
-        peer.handle_queue.write().push_back(object);
+        peer_queue.push_back(object);
 
         Ok(())
     }
