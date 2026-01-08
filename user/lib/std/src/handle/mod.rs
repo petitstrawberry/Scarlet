@@ -1,7 +1,28 @@
 //! Handle Management for Scarlet Native API
 //!
-//! This module provides the core Handle type and operations for managing
-//! KernelObject handles in a type-safe manner.
+//! This module defines the core [`Handle`] type and the rules around ownership and
+//! type validation.
+//!
+//! ## Ownership
+//!
+//! - [`RawHandle`] is the raw integer handle value.
+//! - [`Handle`] is the *only* owning wrapper in user space.
+//!   Dropping a `Handle` closes the underlying kernel handle.
+//!
+//! ## Introspection and Validation
+//!
+//! When a `Handle` is constructed (e.g. [`Handle::open`] or [`Handle::from_raw`]),
+//! user space queries the kernel for [`KernelObjectInfo`] via `Syscall::HandleQuery`.
+//! The result is cached inside the `Handle` and used to validate conversions:
+//!
+//! - `Handle::as_stream` checks `info.capabilities.stream_ops`
+//! - `Handle::as_file` checks `info.capabilities.file_ops`
+//! - `Handle::as_socket` checks `info.object_type == Socket`
+//! - `Handle::as_shared_memory` checks `info.object_type == SharedMemory`
+//!
+//! Capability types are borrowed views (e.g. `StreamOps<'_>`) and do not own handles.
+//! To avoid bypassing validation, capability constructors are crate-internal; prefer
+//! using `Handle::as_*`.
 
 pub mod capability;
 pub mod introspection;
@@ -215,7 +236,8 @@ impl Handle {
     /// MemoryMappingOps capability if the handle supports memory mapping operations
     pub fn as_memory_mapping(&self) -> HandleResult<MemoryMappingOps<'_>> {
         // Kernel introspection currently does not expose a dedicated
-        // MemoryMappingOps flag. We conservatively allow it for file-like objects.
+        // MemoryMappingOps capability flag. We conservatively allow it for
+        // file-like objects and shared memory based on the kernel object type.
         match self.info.object_type {
             KernelObjectType::File
             | KernelObjectType::CharDevice

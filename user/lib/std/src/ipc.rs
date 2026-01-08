@@ -39,7 +39,11 @@ impl SharedMemory {
         Ok(Self { handle })
     }
 
-    /// Create a SharedMemory from an existing Handle
+    /// Create a `SharedMemory` from an existing [`Handle`].
+    ///
+    /// This performs a type check using the handle's cached kernel object info.
+    /// If the handle does not represent a shared memory object, this returns
+    /// [`SharedMemoryError::InvalidHandle`] and does **not** consume the handle.
     pub fn from_handle(handle: Handle) -> SharedMemoryResult<Self> {
         handle
             .as_shared_memory()
@@ -57,7 +61,10 @@ impl SharedMemory {
         self.handle.as_raw()
     }
 
-    /// Get a SharedMemoryObject capability for this shared memory
+    /// Get a `SharedMemoryObject` capability for this shared memory.
+    ///
+    /// This is fallible to avoid panicking when a `SharedMemory` wrapper was
+    /// constructed from an unexpected handle type.
     pub fn as_object(
         &self,
     ) -> core::result::Result<crate::handle::capability::SharedMemoryObject<'_>, SharedMemoryError>

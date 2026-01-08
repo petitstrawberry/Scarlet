@@ -323,7 +323,11 @@ impl File {
     /// * `handle` - The handle to wrap
     ///
     /// # Returns
-    /// File instance or error if the handle is not file-like
+    /// A `File` on success.
+    ///
+    /// This performs a type check using the handle's cached kernel object info.
+    /// If the handle does not represent a file-like object, this returns
+    /// `ErrorKind::Unsupported`.
     pub fn from_handle(handle: Handle) -> Result<Self> {
         handle.as_file().map_err(|_| {
             Error::new(

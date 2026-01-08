@@ -45,8 +45,8 @@ pub struct SocketObject<'a> {
 impl<'a> SocketObject<'a> {
     /// Create a SocketObject capability from a Handle reference.
     ///
-    /// This capability does not own the handle; dropping it will not close anything.
-    pub fn from_handle(handle: &'a Handle) -> Self {
+    /// This is crate-internal to prevent bypassing `Handle::as_socket` validation.
+    pub(crate) fn from_handle(handle: &'a Handle) -> Self {
         Self { handle }
     }
 

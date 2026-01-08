@@ -81,9 +81,11 @@ impl Socket {
         Ok(Socket { handle })
     }
 
-    /// Create a Socket from an existing Handle.
+    /// Create a `Socket` from an existing [`Handle`].
     ///
-    /// This validates that the handle is a socket using the cached kernel object info.
+    /// This performs a type check using the handle's cached kernel object info.
+    /// If the handle does not represent a socket, this returns [`SocketError::InvalidHandle`]
+    /// and does **not** consume the handle.
     pub fn from_handle(handle: Handle) -> Result<Self> {
         handle.as_socket().map_err(|_| SocketError::InvalidHandle)?;
         Ok(Self { handle })

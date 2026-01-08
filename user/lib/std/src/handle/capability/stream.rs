@@ -44,10 +44,10 @@ pub struct StreamOps<'a> {
 }
 
 impl<'a> StreamOps<'a> {
-    /// Create a StreamOps capability from a Handle reference.
+    /// Construct a `StreamOps` capability from a [`Handle`] reference.
     ///
-    /// This capability does not own the handle; dropping it will not close anything.
-    pub fn from_handle(handle: &'a Handle) -> Self {
+    /// This is crate-internal to prevent bypassing `Handle::as_stream` validation.
+    pub(crate) fn from_handle(handle: &'a Handle) -> Self {
         Self { handle }
     }
 

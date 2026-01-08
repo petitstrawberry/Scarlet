@@ -114,10 +114,10 @@ pub struct FileObject<'a> {
 }
 
 impl<'a> FileObject<'a> {
-    /// Create a FileObject capability from a Handle reference.
+    /// Construct a `FileObject` capability from a [`Handle`] reference.
     ///
-    /// This capability does not own the handle; dropping it will not close anything.
-    pub fn from_handle(handle: &'a Handle) -> Self {
+    /// This is crate-internal to prevent bypassing `Handle::as_file` validation.
+    pub(crate) fn from_handle(handle: &'a Handle) -> Self {
         Self { handle }
     }
 
