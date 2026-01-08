@@ -10,10 +10,7 @@ extern crate scarlet_std;
 
 use scarlet_std::handle::capability::memory_mapping::mmap;
 use scarlet_std::ipc::{permissions, shared_memory_create, socket_recv_handle, socket_send_handle};
-use scarlet_std::socket::{
-    SocketDomain, SocketType, socket_bind, socket_connect, socket_create, socket_listen,
-    socket_shutdown,
-};
+use scarlet_std::socket::{ShutdownHow, Socket};
 use scarlet_std::syscall::{Syscall, syscall1};
 use scarlet_std::task::{exit, fork, getpid, waitpid};
 use scarlet_std::{print, println};
@@ -56,27 +53,27 @@ fn main() -> i32 {
         simple_sleep(100);
 
         // Create client socket
-        let client_sock = match socket_create(SocketDomain::Local, SocketType::Stream, 0) {
-            Some(sock) => {
-                println!("[Child] Created client socket: {}", sock);
+        let client_sock = match Socket::new() {
+            Ok(sock) => {
+                println!("[Child] Created client socket: {}", sock.as_raw_handle());
                 sock
             }
-            None => {
+            Err(_) => {
                 println!("[Child] Failed to create socket");
                 exit(1);
             }
         };
 
         // Connect to server
-        if !socket_connect(client_sock, server_path) {
+        if client_sock.connect(server_path).is_err() {
             println!("[Child] Failed to connect to server");
-            close_handle(client_sock);
+            close_handle(client_sock.as_raw_handle());
             exit(1);
         }
         println!("[Child] Connected to server");
 
         // Receive the shared memory handle
-        match socket_recv_handle(client_sock) {
+        match socket_recv_handle(client_sock.as_raw_handle()) {
             Some(shmem_handle) => {
                 println!("[Child] Received shared memory handle: {}", shmem_handle);
 
@@ -118,12 +115,16 @@ fn main() -> i32 {
             }
             None => {
                 println!("[Child] Failed to receive handle");
+                let _ = client_sock.shutdown(ShutdownHow::Both);
+                close_handle(client_sock.as_raw_handle());
+                println!("[Child] Exiting...");
+                exit(1);
             }
         }
 
         // Cleanup
-        socket_shutdown(client_sock);
-        close_handle(client_sock);
+        let _ = client_sock.shutdown(ShutdownHow::Both);
+        close_handle(client_sock.as_raw_handle());
         println!("[Child] Exiting...");
         exit(0);
     } else if pid > 0 {
@@ -132,39 +133,39 @@ fn main() -> i32 {
         println!("[Parent] Child PID: {}", pid);
 
         // Create server socket
-        let server_sock = match socket_create(SocketDomain::Local, SocketType::Stream, 0) {
-            Some(sock) => {
-                println!("[Parent] Created server socket: {}", sock);
+        let server_sock = match Socket::new() {
+            Ok(sock) => {
+                println!("[Parent] Created server socket: {}", sock.as_raw_handle());
                 sock
             }
-            None => {
+            Err(_) => {
                 println!("[Parent] Failed to create socket");
                 exit(1);
             }
         };
 
         // Bind to path
-        if !socket_bind(server_sock, server_path) {
+        if server_sock.bind(server_path).is_err() {
             println!("[Parent] Failed to bind socket");
-            close_handle(server_sock);
+            close_handle(server_sock.as_raw_handle());
             exit(1);
         }
         println!("[Parent] Bound to {}", server_path);
 
         // Listen for connections
-        if !socket_listen(server_sock, 1) {
+        if server_sock.listen(1).is_err() {
             println!("[Parent] Failed to listen");
-            close_handle(server_sock);
+            close_handle(server_sock.as_raw_handle());
             exit(1);
         }
         println!("[Parent] Listening for connections...");
 
         // Accept connection (blocking)
         // Note: We use a simple syscall here since socket_accept doesn't exist in the API yet
-        let client_conn = syscall1(Syscall::SocketAccept, server_sock as usize);
+        let client_conn = syscall1(Syscall::SocketAccept, server_sock.as_raw_handle() as usize);
         if client_conn == usize::MAX {
             println!("[Parent] Failed to accept connection");
-            close_handle(server_sock);
+            close_handle(server_sock.as_raw_handle());
             exit(1);
         }
         let client_conn = client_conn as u32;
@@ -179,7 +180,7 @@ fn main() -> i32 {
             None => {
                 println!("[Parent] Failed to create shared memory");
                 close_handle(client_conn);
-                close_handle(server_sock);
+                close_handle(server_sock.as_raw_handle());
                 exit(1);
             }
         };
@@ -206,7 +207,8 @@ fn main() -> i32 {
         }
 
         // Send the shared memory handle through the socket
-        if socket_send_handle(client_conn, shmem_handle) {
+        let sent_ok = socket_send_handle(client_conn, shmem_handle);
+        if sent_ok {
             println!("[Parent] Successfully sent shared memory handle!");
         } else {
             println!("[Parent] Failed to send handle");
@@ -216,9 +218,11 @@ fn main() -> i32 {
         simple_sleep(200);
 
         // Read the response from shared memory
+        let mut response_non_empty = false;
         match mmap(shmem_handle, 0, 4096, permissions::READ_WRITE, 0, 0) {
             Ok(addr) => unsafe {
                 let ptr = addr as *const u8;
+                response_non_empty = *ptr.add(RESPONSE_OFFSET) != 0;
                 print!("[Parent] Response from child: \"");
                 for i in RESPONSE_OFFSET..(RESPONSE_OFFSET + RESPONSE_MAX_LEN) {
                     let c = *ptr.add(i) as char;
@@ -234,20 +238,26 @@ fn main() -> i32 {
 
         // Cleanup
         close_handle(shmem_handle);
-        socket_shutdown(client_conn);
+        // Accepted connection handle is a raw handle; shutdown via syscall wrapper.
+        // We intentionally avoid adding new socket_* helper APIs in userlib.
+        let _ = unsafe { Socket::from_raw_handle(client_conn) }.shutdown(ShutdownHow::Both);
         close_handle(client_conn);
-        close_handle(server_sock);
+        close_handle(server_sock.as_raw_handle());
 
         // Wait for child to exit
         println!("[Parent] Waiting for child to exit...");
         let _ = waitpid(pid, 0);
         println!("[Parent] Child exited");
 
-        println!("\n✓ Handle transfer test completed successfully!");
+        if sent_ok && response_non_empty {
+            println!("\n✓ Handle transfer test completed successfully!");
+            return 0;
+        } else {
+            println!("\nHandle transfer test failed");
+            return 1;
+        }
     } else {
         println!("Fork failed!");
         return 1;
     }
-
-    0
 }

@@ -72,6 +72,12 @@ pub struct LocalSocket {
     /// Socket type (Stream, Datagram, etc.)
     socket_type: SocketType,
 
+    /// Weak self reference (initialized when wrapped in Arc)
+    ///
+    /// This is used to establish peer relationships in methods that only
+    /// have `&self` (e.g., connect()), where we still need an `Arc<Self>`.
+    self_weak: RwLock<Weak<LocalSocket>>,
+
     /// Socket protocol
     protocol: SocketProtocol,
 
@@ -113,6 +119,10 @@ pub struct LocalSocket {
 }
 
 impl LocalSocket {
+    pub(crate) fn init_self_weak(this: &Arc<Self>) {
+        *this.self_weak.write() = Arc::downgrade(this);
+    }
+
     /// Safely downcast a SocketObject to LocalSocket using Any trait
     ///
     /// Returns None if the socket is not a LocalSocket.
@@ -147,6 +157,7 @@ impl LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         }
     }
 
@@ -224,6 +235,7 @@ impl LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         });
 
         // Create peer socket (client side)
@@ -242,7 +254,11 @@ impl LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         });
+
+        Self::init_self_weak(&local_socket);
+        Self::init_self_weak(&peer_socket);
 
         // Set peer references
         *local_socket.peer_socket.write() = Some(Arc::downgrade(&peer_socket));
@@ -493,7 +509,7 @@ impl SocketControl for LocalSocket {
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
         // Validate current state
-        let mut state = self.state.write();
+        let state = self.state.read();
         if *state != SocketState::Unconnected {
             return Err(SocketError::AlreadyConnected);
         }
@@ -543,7 +559,10 @@ impl SocketControl for LocalSocket {
             accept_waker: Waker::new_interruptible("socket_accept"),
             read_waker: Waker::new_interruptible("socket_read"),
             handle_queue: RwLock::new(VecDeque::new()),
+            self_weak: RwLock::new(Weak::new()),
         });
+
+        Self::init_self_weak(&server_conn);
 
         // Update self (client socket) to use the shared buffers
         *self.read_buffer.write() = client_read_buffer.clone();
@@ -556,8 +575,14 @@ impl SocketControl for LocalSocket {
         // Client (self) points to server_conn
         *self.peer_socket.write() = Some(Arc::downgrade(&server_conn));
 
-        // Server_conn needs to point back to client, but we don't have Arc<Self>
-        // We'll handle this in a moment by creating a temporary strong reference
+        // Server_conn needs to point back to client for handle transfer.
+        // We keep a Weak<Self> initialized at creation time, so upgrade it here.
+        let client_arc = self
+            .self_weak
+            .read()
+            .upgrade()
+            .ok_or(SocketError::InvalidOperation)?;
+        *server_conn.peer_socket.write() = Some(Arc::downgrade(&client_arc));
 
         // Add server connection to server's backlog
         let server_local = match Self::from_socket_object(&server_socket) {
