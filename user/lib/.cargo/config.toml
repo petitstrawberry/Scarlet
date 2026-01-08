@@ -1,0 +1,8 @@
+# Shared Cargo configuration for user libraries.
+#
+# User libraries are built for custom targets (e.g. aarch64-unknown-scarlet-elf),
+# so `core`/`alloc` must be built from source.
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

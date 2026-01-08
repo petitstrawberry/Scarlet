@@ -76,8 +76,8 @@ impl Socket {
             return Err(SocketError::SyscallFailed);
         }
 
-        let handle =
-            unsafe { Handle::from_raw(raw_handle as i32) }.map_err(|_| SocketError::SyscallFailed)?;
+        let handle = unsafe { Handle::from_raw(raw_handle as i32) }
+            .map_err(|_| SocketError::SyscallFailed)?;
         Ok(Socket { handle })
     }
 
@@ -316,6 +316,17 @@ impl crate::io::Write for Socket {
 
     fn flush(&mut self) -> crate::io::Result<()> {
         Ok(())
+    }
+}
+
+impl crate::io::Read for Socket {
+    fn read(&mut self, buf: &mut [u8]) -> crate::io::Result<usize> {
+        let stream = self.handle.as_stream().map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream")
+        })?;
+        stream
+            .read(buf)
+            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to read"))
     }
 }
 
