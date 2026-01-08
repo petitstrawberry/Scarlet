@@ -445,16 +445,16 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Get the socket object
+    // Get the socket object (LocalSocket-only)
     let socket_obj = match task.handle_table.get(socket_handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid socket handle
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX, // Invalid socket handle
     };
 
-    // Get StreamIpcOps capability (sockets implement this)
-    let stream_ipc = match socket_obj.as_stream_ipc() {
-        Some(ipc) => ipc,
-        None => return usize::MAX, // Not a socket/stream IPC object
+    use crate::network::local::LocalSocket;
+    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+        Some(s) => s,
+        None => return usize::MAX, // Not a LocalSocket
     };
 
     // Get the kernel object to send with dup semantics
@@ -465,7 +465,7 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
     };
 
     // Send the handle through the socket
-    match stream_ipc.send_handle(object) {
+    match local_socket.send_handle(object) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
     }
@@ -493,22 +493,23 @@ pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(task);
 
-    // Get the socket object
+    // Get the socket object (LocalSocket-only)
     let socket_obj = match task.handle_table.get(socket_handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid socket handle
+        Some(KernelObject::Socket(socket)) => socket.clone(),
+        _ => return usize::MAX, // Invalid socket handle
     };
 
-    // Get StreamIpcOps capability
-    let stream_ipc = match socket_obj.as_stream_ipc() {
-        Some(ipc) => ipc,
-        None => return usize::MAX, // Not a socket/stream IPC object
+    // For LocalSocket, we provide blocking semantics: if the handle queue is empty,
+    // block the task until a handle arrives or the peer is closed.
+    use crate::network::local::LocalSocket;
+    let local_socket = match LocalSocket::from_socket_object(&socket_obj) {
+        Some(s) => s,
+        None => return usize::MAX, // Not a LocalSocket
     };
 
-    // Receive a handle from the socket
-    let object = match stream_ipc.recv_handle() {
+    let object = match local_socket.recv_handle_blocking(task.get_id(), trapframe) {
         Ok(obj) => obj,
-        Err(_) => return usize::MAX, // No handle available or error
+        Err(_) => return usize::MAX,
     };
 
     // Insert the received object into this task's handle table
