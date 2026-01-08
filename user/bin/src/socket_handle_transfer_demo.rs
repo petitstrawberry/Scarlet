@@ -33,7 +33,7 @@ fn simple_sleep(ms: usize) {
 }
 
 #[unsafe(no_mangle)]
-pub fn _start() -> ! {
+fn main() -> i32 {
     println!("=== Socket Handle Transfer Demo ===");
     println!("Demonstrating SharedMemory transfer between processes\n");
 
@@ -246,8 +246,8 @@ pub fn _start() -> ! {
         println!("\n✓ Handle transfer test completed successfully!");
     } else {
         println!("Fork failed!");
-        exit(1);
+        return 1;
     }
 
-    exit(0);
+    0
 }
