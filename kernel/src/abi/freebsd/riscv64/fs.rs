@@ -87,6 +87,7 @@ pub fn sys_read(abi: &mut FreeBsdRiscv64Abi, trapframe: &mut Trapframe) -> usize
 }
 
 /// sys_open - open a file (simplified stub implementation)
+/// TODO: Implement full open syscall with proper path resolution and VFS integration
 pub fn sys_open(abi: &mut FreeBsdRiscv64Abi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,

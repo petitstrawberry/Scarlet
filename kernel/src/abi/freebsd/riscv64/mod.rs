@@ -136,6 +136,10 @@ impl AbiModule for FreeBsdRiscv64Abi {
         file_path: &str,
         current_abi: Option<&(dyn AbiModule + Send + Sync)>,
     ) -> Option<u8> {
+        // ELF constants
+        const EM_RISCV: u16 = 243; // RISC-V machine type
+        const ELFOSABI_FREEBSD: u8 = 9; // FreeBSD OS/ABI identifier
+        
         // Check if this is an ELF file
         let file = file_object.as_file()?;
         
@@ -155,14 +159,13 @@ impl AbiModule for FreeBsdRiscv64Abi {
             return None;
         }
         
-        // Check if it's RISC-V (EM_RISCV = 243 = 0xF3)
+        // Check if it's RISC-V
         let e_machine = u16::from_le_bytes([elf_header[18], elf_header[19]]);
-        if e_machine != 243 {
+        if e_machine != EM_RISCV {
             return None;
         }
         
         // Check OS/ABI field (e_ident[EI_OSABI])
-        // FreeBSD uses ELFOSABI_FREEBSD = 9
         let osabi = elf_header[7];
         
         let mut confidence = 0u8;
@@ -171,7 +174,7 @@ impl AbiModule for FreeBsdRiscv64Abi {
         confidence += 30;
         
         // Check for FreeBSD OS/ABI marker
-        if osabi == 9 {
+        if osabi == ELFOSABI_FREEBSD {
             confidence += 40; // Strong indicator for FreeBSD
         }
         
