@@ -1418,7 +1418,6 @@ mod tests {
 
         // Test get_mapping_info with valid parameters
         let result = char_device.get_mapping_info(0, fb_pages * 4096);
-        crate::early_println!("Mapping info result: {:?}", result);
         assert!(result.is_ok());
         let (paddr, permissions, is_shared) = result.unwrap();
         assert_eq!(paddr, fb_addr);
