@@ -241,6 +241,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         socket.as_raw()
     );
 
+    // Enable non-blocking mode for event-driven I/O
+    if let Err(e) = socket.set_nonblocking(true) {
+        println!(
+            "[ClientThread {}] Failed to set non-blocking mode: {:?}",
+            client_id, e
+        );
+        return;
+    }
+    println!("[ClientThread {}] Enabled non-blocking mode", client_id);
+
     // Evidence-only: log a stack address hint for this thread.
     let stack_marker: u8 = 0;
     let sp_hint = (&stack_marker as *const u8) as usize;
@@ -253,34 +263,98 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
     let mut managed_windows: Vec<u32> = Vec::new();
 
+    // Debug: loop counter for periodic logging
+    let mut loop_count: u64 = 0;
+
+    println!("[ClientThread {}] Entering main loop", client_id);
+
     loop {
+        loop_count += 1;
+        let should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
+
         // Send any pending input events for this client's windows
+        let mut has_events = false;
+        let mut total_events = 0;
         for &window_id in &managed_windows {
             let events = pop_pending_input_events(window_id);
-            for event in events {
-                if let Err(e) = protocol::write_input_event(
-                    &mut socket,
-                    event.time,
-                    event.type_,
-                    event.code,
-                    event.value,
-                ) {
-                    println!(
-                        "[ClientThread {}] Failed to send input event to window {}: {:?}",
-                        client_id, window_id, e
-                    );
+            if !events.is_empty() {
+                has_events = true;
+                total_events += events.len();
+                // println!(
+                //     "[ClientThread {}] Loop #{}: Found {} events for window {}",
+                //     client_id,
+                //     loop_count,
+                //     events.len(),
+                //     window_id
+                // );
+                for event in events {
+                    if let Err(e) = protocol::write_input_event(
+                        &mut socket,
+                        event.time,
+                        event.type_,
+                        event.code,
+                        event.value,
+                    ) {
+                        println!(
+                            "[ClientThread {}] Failed to send input event to window {}: {:?}",
+                            client_id, window_id, e
+                        );
+                    } else {
+                        println!(
+                            "[ClientThread {}] Sent event: type={} code={} value={}",
+                            client_id, event.type_, event.code, event.value
+                        );
+                    }
                 }
             }
         }
 
-        println!(
-            "[ClientThread {}] Waiting for message... (socket handle: {})",
-            client_id,
-            socket.as_raw()
-        );
+        // // Debug: log event queue status periodically
+        // if should_log && !managed_windows.is_empty() {
+        //     println!(
+        //         "[ClientThread {}] Loop #{}: checked {} windows, found {} events",
+        //         client_id,
+        //         loop_count,
+        //         managed_windows.len(),
+        //         total_events
+        //     );
+        // }
+
+        // If we sent events, loop back immediately to check for more
+        // This ensures rapid delivery during input bursts
+        if has_events {
+            continue;
+        }
+
+        // // Always log before first read attempt or periodically
+        // if loop_count <= 5 || loop_count % 100 == 0 {
+        //     println!(
+        //         "[ClientThread {}] Loop #{}: about to call read_frame (socket handle: {}, windows: {})",
+        //         client_id,
+        //         loop_count,
+        //         socket.as_raw(),
+        //         managed_windows.len()
+        //     );
+        // }
 
         let (msg_type, payload) = match protocol::read_frame(&mut socket) {
-            Ok(v) => v,
+            Ok(v) => {
+                println!(
+                    "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
+                    client_id, loop_count, v.0
+                );
+                v
+            }
+            Err(protocol::ProtocolError::IoWouldBlock) => {
+                // Non-blocking read returned no data, loop back to check events
+                // if loop_count <= 5 || should_log {
+                //     println!(
+                //         "[ClientThread {}] Loop #{}: read_frame returned WouldBlock",
+                //         client_id, loop_count
+                //     );
+                // }
+                continue;
+            }
             Err(protocol::ProtocolError::IoDisconnected) => {
                 println!("[ClientThread {}] Client disconnected", client_id);
                 break;

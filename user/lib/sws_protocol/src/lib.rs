@@ -19,6 +19,7 @@ extern crate scarlet_std as std;
 
 use std::handle::Handle;
 use std::io::{Read, Write};
+use std::println;
 use std::socket::Socket;
 use std::vec::Vec;
 
@@ -77,6 +78,8 @@ impl MessageHeader {
 pub enum ProtocolError {
     /// The remote side closed the connection.
     IoDisconnected,
+    /// I/O operation would block (non-blocking socket).
+    IoWouldBlock,
     /// Any other I/O failure.
     IoError,
     /// Frame payload is too large.
@@ -93,7 +96,13 @@ fn read_exact<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), ProtocolErr
         match reader.read(&mut buf[filled..]) {
             Ok(0) => return Err(ProtocolError::IoDisconnected),
             Ok(n) => filled += n,
-            Err(_) => return Err(ProtocolError::IoError),
+            Err(e) => {
+                // Check if error is WouldBlock
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    return Err(ProtocolError::IoWouldBlock);
+                }
+                return Err(ProtocolError::IoError);
+            }
         }
     }
     Ok(())

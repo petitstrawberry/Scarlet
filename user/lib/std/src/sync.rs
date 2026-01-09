@@ -7,6 +7,9 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+extern crate alloc;
+pub use alloc::sync::Arc;
+
 /// Simple spin-lock based Mutex
 pub struct Mutex<T> {
     locked: AtomicBool,

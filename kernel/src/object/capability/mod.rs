@@ -31,7 +31,7 @@ pub use memory_mapping::MemoryMappingOps;
 pub use ipc::{EventReceiver, EventSender, EventSubscriber};
 
 // Re-export selectable capability types
-pub use selectable::Selectable;
+pub use selectable::{ReadyInterest, ReadySet, SelectWaitOutcome, Selectable};
 
 /// Clone operations capability
 ///
