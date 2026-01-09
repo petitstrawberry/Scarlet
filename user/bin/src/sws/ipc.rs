@@ -9,8 +9,27 @@ use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
 
+/// Input event to be sent to a client
+#[derive(Debug, Clone)]
+pub struct PendingInputEvent {
+    pub window_id: u32,
+    pub time: u64,
+    pub type_: u16,
+    pub code: u16,
+    pub value: i32,
+}
+
+/// Window to input events mapping
+struct WindowInputQueue {
+    window_id: u32,
+    events: Vec<PendingInputEvent>,
+}
+
 /// Global event queue for IPC events
 static EVENT_QUEUE: Mutex<Vec<IpcEvent>> = Mutex::new(Vec::new());
+
+/// Global pending input events: per-window queues
+static PENDING_INPUT_EVENTS: Mutex<Vec<WindowInputQueue>> = Mutex::new(Vec::new());
 
 /// Add an event to the global queue
 pub fn push_ipc_event(event: IpcEvent) {
@@ -29,6 +48,54 @@ pub fn pop_all_ipc_events() -> Vec<IpcEvent> {
     // Reverse to restore original order (pop removes from end)
     events.reverse();
     events
+}
+
+/// Register a window for input event routing
+fn register_window(window_id: u32, _client_id: usize) {
+    let mut pending = PENDING_INPUT_EVENTS.lock();
+    pending.push(WindowInputQueue {
+        window_id,
+        events: Vec::new(),
+    });
+}
+
+/// Unregister a window
+fn unregister_window(window_id: u32) {
+    let mut pending = PENDING_INPUT_EVENTS.lock();
+    pending.retain(|q| q.window_id != window_id);
+}
+
+/// Queue an input event for a specific window
+pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, value: i32) {
+    let mut pending = PENDING_INPUT_EVENTS.lock();
+
+    for queue in pending.iter_mut() {
+        if queue.window_id == window_id {
+            queue.events.push(PendingInputEvent {
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+            });
+            break;
+        }
+    }
+}
+
+/// Get pending input events for a window (called by client thread)
+fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
+    let mut pending = PENDING_INPUT_EVENTS.lock();
+
+    for queue in pending.iter_mut() {
+        if queue.window_id == window_id {
+            let events = queue.events.clone();
+            queue.events.clear();
+            return events;
+        }
+    }
+
+    Vec::new()
 }
 
 /// IPC Server - manages Socket VFS connections
@@ -184,8 +251,28 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
     // Per-client window id generator (avoid collision between clients)
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
+    let mut managed_windows: Vec<u32> = Vec::new();
 
     loop {
+        // Send any pending input events for this client's windows
+        for &window_id in &managed_windows {
+            let events = pop_pending_input_events(window_id);
+            for event in events {
+                if let Err(e) = protocol::write_input_event(
+                    &mut socket,
+                    event.time,
+                    event.type_,
+                    event.code,
+                    event.value,
+                ) {
+                    println!(
+                        "[ClientThread {}] Failed to send input event to window {}: {:?}",
+                        client_id, window_id, e
+                    );
+                }
+            }
+        }
+
         println!(
             "[ClientThread {}] Waiting for message... (socket handle: {})",
             client_id,
@@ -309,6 +396,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                         }
                         println!("[ClientThread {}] SHM handle sent successfully", client_id);
 
+                        // Register window for input event routing
+                        register_window(window_id, client_id);
+
+                        // Track this window for input event polling
+                        managed_windows.push(window_id);
+
                         // Notify compositor to create window entry with SHM ownership
                         push_ipc_event(IpcEvent::CreateWindow {
                             client_id,
@@ -331,6 +424,13 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     "[ClientThread {}] DestroyWindow request for window {}",
                     client_id, window_id
                 );
+
+                // Unregister window from input routing
+                unregister_window(window_id);
+
+                // Remove from managed windows
+                managed_windows.retain(|&id| id != window_id);
+
                 push_ipc_event(IpcEvent::DestroyWindow {
                     client_id,
                     window_id,

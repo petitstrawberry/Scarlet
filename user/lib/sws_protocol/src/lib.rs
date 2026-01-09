@@ -403,6 +403,22 @@ pub fn read_window_created<R: Read>(reader: &mut R) -> Result<WindowCreated, Pro
     }
 }
 
+/// Convenience: server->client InputEvent.
+pub fn write_input_event<W: Write>(
+    writer: &mut W,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) -> Result<(), ProtocolError> {
+    let mut payload = [0u8; 16];
+    payload[0..8].copy_from_slice(&time.to_le_bytes());
+    payload[8..10].copy_from_slice(&type_.to_le_bytes());
+    payload[10..12].copy_from_slice(&code.to_le_bytes());
+    payload[12..16].copy_from_slice(&value.to_le_bytes());
+    write_frame(writer, server_msg::INPUT_EVENT, &payload)
+}
+
 /// Send a shared memory handle over the socket (out-of-band, after WINDOW_CREATED).
 ///
 /// This uses Socket::send_handle() for SCM_RIGHTS-style handle transfer.

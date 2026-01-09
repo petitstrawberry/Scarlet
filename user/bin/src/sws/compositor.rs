@@ -635,30 +635,30 @@ impl Compositor {
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
     ) {
-        // Debug: Log first few pixels of window buffer to detect uninitialized content
-        // Only log for client windows (id >= 100) to reduce noise
-        if window.id >= 100 && window_buffer.len() >= 16 {
-            println!(
-                "[Compositor] Drawing window #{}, buffer first 16 bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                window.id,
-                window_buffer[0],
-                window_buffer[1],
-                window_buffer[2],
-                window_buffer[3],
-                window_buffer[4],
-                window_buffer[5],
-                window_buffer[6],
-                window_buffer[7],
-                window_buffer[8],
-                window_buffer[9],
-                window_buffer[10],
-                window_buffer[11],
-                window_buffer[12],
-                window_buffer[13],
-                window_buffer[14],
-                window_buffer[15]
-            );
-        }
+        // // Debug: Log first few pixels of window buffer to detect uninitialized content
+        // // Only log for client windows (id >= 100) to reduce noise
+        // if window.id >= 100 && window_buffer.len() >= 16 {
+        //     println!(
+        //         "[Compositor] Drawing window #{}, buffer first 16 bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+        //         window.id,
+        //         window_buffer[0],
+        //         window_buffer[1],
+        //         window_buffer[2],
+        //         window_buffer[3],
+        //         window_buffer[4],
+        //         window_buffer[5],
+        //         window_buffer[6],
+        //         window_buffer[7],
+        //         window_buffer[8],
+        //         window_buffer[9],
+        //         window_buffer[10],
+        //         window_buffer[11],
+        //         window_buffer[12],
+        //         window_buffer[13],
+        //         window_buffer[14],
+        //         window_buffer[15]
+        //     );
+        // }
 
         // Compositor only blits buffer content - no decorations
         for y in 0..window.height {
@@ -950,17 +950,101 @@ impl Compositor {
             CompositorInputEvent::MouseMove { dx, dy } => {
                 self.cursor
                     .update_position(dx, dy, self.screen_width, self.screen_height);
+
+                // Route mouse move to focused window (converted to absolute coordinates)
+                if let Some(focused_id) = self.window_manager.get_focused_window() {
+                    if let Some(window) = self.window_manager.get_window(focused_id) {
+                        // Convert screen coordinates to window-local coordinates
+                        let window_x = self.cursor.x - window.x;
+                        let window_y = self.cursor.y - window.y;
+
+                        // Send as absolute mouse event to client
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0, // time (TODO: get actual timestamp)
+                            super::input::event_types::EV_ABS,
+                            super::input::abs_codes::ABS_X,
+                            window_x,
+                        );
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0,
+                            super::input::event_types::EV_ABS,
+                            super::input::abs_codes::ABS_Y,
+                            window_y,
+                        );
+                        // Send SYN event to indicate frame boundary
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0,
+                            super::input::event_types::EV_SYN,
+                            0,
+                            0,
+                        );
+                    }
+                }
+
                 Ok(true)
             }
             CompositorInputEvent::MouseAbsolute { x, y } => {
                 self.cursor
                     .set_position(x, y, self.screen_width, self.screen_height);
+
+                // Route mouse position to focused window
+                if let Some(focused_id) = self.window_manager.get_focused_window() {
+                    if let Some(window) = self.window_manager.get_window(focused_id) {
+                        let window_x = x - window.x;
+                        let window_y = y - window.y;
+
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0,
+                            super::input::event_types::EV_ABS,
+                            super::input::abs_codes::ABS_X,
+                            window_x,
+                        );
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0,
+                            super::input::event_types::EV_ABS,
+                            super::input::abs_codes::ABS_Y,
+                            window_y,
+                        );
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0,
+                            super::input::event_types::EV_SYN,
+                            0,
+                            0,
+                        );
+                    }
+                }
+
                 Ok(true)
             }
             CompositorInputEvent::MouseButton { button, pressed } => {
                 if button == key_codes::BTN_LEFT && pressed {
                     self.handle_click()?;
                 }
+
+                // Route button event to focused window
+                if let Some(focused_id) = self.window_manager.get_focused_window() {
+                    super::ipc::send_input_to_window(
+                        focused_id,
+                        0,
+                        super::input::event_types::EV_KEY,
+                        button,
+                        if pressed { 1 } else { 0 },
+                    );
+                    super::ipc::send_input_to_window(
+                        focused_id,
+                        0,
+                        super::input::event_types::EV_SYN,
+                        0,
+                        0,
+                    );
+                }
+
                 Ok(true)
             }
         }
