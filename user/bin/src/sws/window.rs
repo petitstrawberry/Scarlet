@@ -346,8 +346,17 @@ impl WindowManager {
     }
 
     /// Get focused window ID
-    pub fn get_focused_window(&self) -> Option<WindowId> {
+    pub fn get_focused_window_id(&self) -> Option<WindowId> {
         self.focused_window
+    }
+
+    /// Get focused window reference
+    pub fn get_focused_window(&self) -> Option<&Window> {
+        if let Some(focused_id) = self.focused_window {
+            self.get_window(focused_id)
+        } else {
+            None
+        }
     }
 
     /// Get all windows in Z-order (bottom to top)

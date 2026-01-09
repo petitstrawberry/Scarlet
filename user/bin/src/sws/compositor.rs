@@ -1,5 +1,7 @@
 //! Compositor module - manages window composition and rendering
 
+use crate::window;
+
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer};
@@ -892,6 +894,49 @@ impl Compositor {
         Ok(())
     }
 
+    /// Check if cursor is within the bounds of a window
+    /// Returns window-local coordinates if inside, None if outside
+    fn cursor_position_in_window(&self, window: &super::window::Window) -> Option<(i32, i32)> {
+        let window_x = self.cursor.x - window.x;
+        let window_y = self.cursor.y - window.y;
+
+        // println!("[Boundary Check] Window #{}: cursor=({}, {}), window pos=({}, {}), size={}x{}, window_local=({}, {})",
+        //     window_id, self.cursor.x, self.cursor.y, window.x, window.y, window.width, window.height, window_x, window_y);
+
+        if window_x >= 0
+            && window_x < window.width as i32
+            && window_y >= 0
+            && window_y < window.height as i32
+        {
+            // println!("[Boundary Check] -> INSIDE");
+            Some((window_x, window_y))
+        } else {
+            // println!("[Boundary Check] -> OUTSIDE");
+            None
+        }
+    }
+
+    /// Send mouse position event to a window
+    fn send_mouse_position_to_window(&self, window_id: u32, window: &super::window::Window) {
+        if let Some((window_x, window_y)) = self.cursor_position_in_window(window) {
+            super::ipc::send_input_to_window(
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_X,
+                window_x,
+            );
+            super::ipc::send_input_to_window(
+                window_id,
+                0,
+                super::input::event_types::EV_ABS,
+                super::input::abs_codes::ABS_Y,
+                window_y,
+            );
+            super::ipc::send_input_to_window(window_id, 0, super::input::event_types::EV_SYN, 0, 0);
+        }
+    }
+
     /// Main event loop
     pub fn run(&mut self) -> Result<(), &'static str> {
         println!("[Compositor] Starting main loop (multithreaded)");
@@ -952,35 +997,9 @@ impl Compositor {
                     .update_position(dx, dy, self.screen_width, self.screen_height);
 
                 // Route mouse move to focused window (converted to absolute coordinates)
-                if let Some(focused_id) = self.window_manager.get_focused_window() {
+                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
-                        // Convert screen coordinates to window-local coordinates
-                        let window_x = self.cursor.x - window.x;
-                        let window_y = self.cursor.y - window.y;
-
-                        // Send as absolute mouse event to client
-                        super::ipc::send_input_to_window(
-                            focused_id,
-                            0, // time (TODO: get actual timestamp)
-                            super::input::event_types::EV_ABS,
-                            super::input::abs_codes::ABS_X,
-                            window_x,
-                        );
-                        super::ipc::send_input_to_window(
-                            focused_id,
-                            0,
-                            super::input::event_types::EV_ABS,
-                            super::input::abs_codes::ABS_Y,
-                            window_y,
-                        );
-                        // Send SYN event to indicate frame boundary
-                        super::ipc::send_input_to_window(
-                            focused_id,
-                            0,
-                            super::input::event_types::EV_SYN,
-                            0,
-                            0,
-                        );
+                        self.send_mouse_position_to_window(focused_id, window);
                     }
                 }
 
@@ -991,32 +1010,9 @@ impl Compositor {
                     .set_position(x, y, self.screen_width, self.screen_height);
 
                 // Route mouse position to focused window
-                if let Some(focused_id) = self.window_manager.get_focused_window() {
+                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
-                        let window_x = x - window.x;
-                        let window_y = y - window.y;
-
-                        super::ipc::send_input_to_window(
-                            focused_id,
-                            0,
-                            super::input::event_types::EV_ABS,
-                            super::input::abs_codes::ABS_X,
-                            window_x,
-                        );
-                        super::ipc::send_input_to_window(
-                            focused_id,
-                            0,
-                            super::input::event_types::EV_ABS,
-                            super::input::abs_codes::ABS_Y,
-                            window_y,
-                        );
-                        super::ipc::send_input_to_window(
-                            focused_id,
-                            0,
-                            super::input::event_types::EV_SYN,
-                            0,
-                            0,
-                        );
+                        self.send_mouse_position_to_window(focused_id, window);
                     }
                 }
 
@@ -1027,22 +1023,28 @@ impl Compositor {
                     self.handle_click()?;
                 }
 
-                // Route button event to focused window
-                if let Some(focused_id) = self.window_manager.get_focused_window() {
-                    super::ipc::send_input_to_window(
-                        focused_id,
-                        0,
-                        super::input::event_types::EV_KEY,
-                        button,
-                        if pressed { 1 } else { 0 },
-                    );
-                    super::ipc::send_input_to_window(
-                        focused_id,
-                        0,
-                        super::input::event_types::EV_SYN,
-                        0,
-                        0,
-                    );
+                // Route button event to focused window only if cursor is within window bounds
+                if let Some(focused_id) = self.window_manager.get_focused_window_id() {
+                    let window = self
+                        .window_manager
+                        .get_window(focused_id)
+                        .ok_or("Focused window not found")?;
+                    if self.cursor_position_in_window(window).is_some() {
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0,
+                            super::input::event_types::EV_KEY,
+                            button,
+                            if pressed { 1 } else { 0 },
+                        );
+                        super::ipc::send_input_to_window(
+                            focused_id,
+                            0,
+                            super::input::event_types::EV_SYN,
+                            0,
+                            0,
+                        );
+                    }
                 }
 
                 Ok(true)
