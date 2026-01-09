@@ -1,5 +1,6 @@
 //! IPC Server module - handles client connections and messages
 
+use std::collections::BTreeMap;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
@@ -19,17 +20,12 @@ pub struct PendingInputEvent {
     pub value: i32,
 }
 
-/// Window to input events mapping
-struct WindowInputQueue {
-    window_id: u32,
-    events: Vec<PendingInputEvent>,
-}
-
 /// Global event queue for IPC events
 static EVENT_QUEUE: Mutex<Vec<IpcEvent>> = Mutex::new(Vec::new());
 
-/// Global pending input events: per-window queues
-static PENDING_INPUT_EVENTS: Mutex<Vec<WindowInputQueue>> = Mutex::new(Vec::new());
+/// Global pending input events: BTreeMap for O(log n) lookup
+static PENDING_INPUT_EVENTS: Mutex<BTreeMap<u32, Vec<PendingInputEvent>>> =
+    Mutex::new(BTreeMap::new());
 
 /// Add an event to the global queue
 pub fn push_ipc_event(event: IpcEvent) {
@@ -53,49 +49,41 @@ pub fn pop_all_ipc_events() -> Vec<IpcEvent> {
 /// Register a window for input event routing
 fn register_window(window_id: u32, _client_id: usize) {
     let mut pending = PENDING_INPUT_EVENTS.lock();
-    pending.push(WindowInputQueue {
-        window_id,
-        events: Vec::new(),
-    });
+    pending.insert(window_id, Vec::new());
 }
 
 /// Unregister a window
 fn unregister_window(window_id: u32) {
     let mut pending = PENDING_INPUT_EVENTS.lock();
-    pending.retain(|q| q.window_id != window_id);
+    pending.remove(&window_id);
 }
 
-/// Queue an input event for a specific window
+/// Queue an input event for a specific window (O(log n) lookup)
 pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, value: i32) {
     let mut pending = PENDING_INPUT_EVENTS.lock();
 
-    for queue in pending.iter_mut() {
-        if queue.window_id == window_id {
-            queue.events.push(PendingInputEvent {
-                window_id,
-                time,
-                type_,
-                code,
-                value,
-            });
-            break;
-        }
+    if let Some(events) = pending.get_mut(&window_id) {
+        events.push(PendingInputEvent {
+            window_id,
+            time,
+            type_,
+            code,
+            value,
+        });
     }
 }
 
-/// Get pending input events for a window (called by client thread)
+/// Get pending input events for a window (called by client thread, O(log n) lookup)
 fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
     let mut pending = PENDING_INPUT_EVENTS.lock();
 
-    for queue in pending.iter_mut() {
-        if queue.window_id == window_id {
-            let events = queue.events.clone();
-            queue.events.clear();
-            return events;
-        }
+    if let Some(events) = pending.get_mut(&window_id) {
+        let result = events.clone();
+        events.clear();
+        result
+    } else {
+        Vec::new()
     }
-
-    Vec::new()
 }
 
 /// IPC Server - manages Socket VFS connections
