@@ -12,4 +12,4 @@ path = "src/lib.rs"
 alloc_debug = []
 
 [build]
-target = "../../../targets/riscv64-unknown-scarlet.json" 
+target = "../../../targets/riscv64gc-unknown-scarlet-elf.json" 

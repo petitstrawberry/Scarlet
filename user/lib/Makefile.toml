@@ -56,17 +56,17 @@ dependencies = ["build-userlib-debug"]
 [tasks.build-userlib-debug]
 description = "Build all user libraries in debug mode"
 script = [
-    "cd std && cargo build",
-    "cd ../framebuffer && cargo build",
-    "cd ../sws_protocol && cargo build"
+    "cd std && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-release]
 description = "Build all user libraries in release mode"
 script = [
-    "cd std && cargo build --release",
-    "cd ../framebuffer && cargo build --release",
-    "cd ../sws_protocol && cargo build --release"
+    "cd std && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-debug-aarch64]
