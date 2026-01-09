@@ -31,7 +31,7 @@ use crate::object::capability::{ControlOps, MemoryMappingOps};
 pub mod framebuffer_commands {
     /// Get variable screen information
     pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
-    /// Set variable screen information  
+    /// Set variable screen information
     pub const FBIOPUT_VSCREENINFO: u32 = 0x4601;
     /// Get fixed screen information
     pub const FBIOGET_FSCREENINFO: u32 = 0x4602;
@@ -45,7 +45,7 @@ pub mod framebuffer_commands {
 pub struct FbVarScreenInfo {
     /// Visible resolution width
     pub xres: u32,
-    /// Visible resolution height  
+    /// Visible resolution height
     pub yres: u32,
     /// Virtual resolution width
     pub xres_virtual: u32,
@@ -238,7 +238,7 @@ struct MockMapping {
 pub struct FramebufferCharDevice {
     /// The framebuffer resource this device represents
     fb_resource: Arc<FramebufferResource>,
-    /// Track mappings for testing purposes  
+    /// Track mappings for testing purposes
     mappings: RwLock<BTreeMap<usize, MockMapping>>, // virtual_start -> MockMapping
 }
 
@@ -752,7 +752,7 @@ impl FramebufferCharDevice {
         Ok(())
     }
 
-    /// Handle FBIOPUT_VSCREENINFO control command  
+    /// Handle FBIOPUT_VSCREENINFO control command
     fn handle_put_vscreeninfo(&self, arg: usize) -> Result<i32, &'static str> {
         // Basic validation of user pointer
         if arg == 0 {
@@ -1292,13 +1292,13 @@ mod tests {
         // Test memory mapping operations validation without requiring actual translation
         // Note: get_mapping_info requires proper virtual-to-physical address translation
         // which isn't available in tests, so we test the validation logic and callbacks only.
-        
+
         let config = FramebufferConfig::new(1024, 768, PixelFormat::RGBA8888);
         let fb_size = config.size();
-        
+
         // Use a mock physical address (not a real allocation)
         let fb_addr = 0x80000000;
-        
+
         let fb_resource = Arc::new(FramebufferResource::new(
             0,
             "fb0".to_string(),
@@ -1320,11 +1320,11 @@ mod tests {
         // Test invalid length (exceeds available size)
         let result = fb_device.get_mapping_info(0, fb_size + 4096);
         assert!(result.is_err());
-        
+
         // Test unaligned offset
         let result = fb_device.get_mapping_info(1, 4096);
         assert!(result.is_err());
-        
+
         // Test unaligned length
         let result = fb_device.get_mapping_info(0, 32);
         assert!(result.is_err());
@@ -1352,13 +1352,13 @@ mod tests {
         // Note: This test doesn't test get_mapping_info since that requires proper
         // virtual-to-physical address translation which isn't available in tests.
         // The translation functionality is tested in integration tests with real hardware.
-        
+
         let config = FramebufferConfig::new(1024, 768, PixelFormat::RGBA8888);
         let fb_size = config.size();
-        
+
         // Use a mock physical address (not a real allocation)
         let fb_addr = 0x80000000;
-        
+
         let fb_resource = Arc::new(FramebufferResource::new(
             0,
             "fb0".to_string(),
@@ -1377,7 +1377,7 @@ mod tests {
 
         // Test supports_mmap returns true for valid framebuffer
         assert!(char_device.supports_mmap());
-        
+
         // Test that mmap support is disabled for invalid framebuffer
         let invalid_resource = Arc::new(FramebufferResource::new(
             0,
