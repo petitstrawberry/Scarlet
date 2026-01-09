@@ -358,12 +358,14 @@ impl CharDevice for FramebufferCharDevice {
             return Err("Invalid framebuffer address");
         }
 
+        // Use logical framebuffer size for boundary checks
+        let logical_size = fb_resource.config.size();
         let start_pos = position as usize;
-        if start_pos >= fb_resource.size {
+        if start_pos >= logical_size {
             return Ok(0); // EOF
         }
 
-        let available = fb_resource.size - start_pos;
+        let available = logical_size - start_pos;
         let to_read = buffer.len().min(available);
 
         // Read data from framebuffer memory.
@@ -402,12 +404,14 @@ impl CharDevice for FramebufferCharDevice {
             return Err("Invalid framebuffer address");
         }
 
+        // Use logical framebuffer size for boundary checks
+        let logical_size = fb_resource.config.size();
         let start_pos = position as usize;
-        if start_pos >= fb_resource.size {
+        if start_pos >= logical_size {
             return Err("Position beyond framebuffer size");
         }
 
-        let available = fb_resource.size - start_pos;
+        let available = logical_size - start_pos;
         let to_write = buffer.len().min(available);
 
         // Write data to framebuffer memory.
@@ -471,6 +475,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
         }
 
         // Basic validation
+        // fb_resource.size is the page-aligned physical size, safe for mmap
         if offset >= fb_resource.size {
             return Err("Offset exceeds framebuffer size");
         }
@@ -480,7 +485,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
             return Err("Requested length exceeds available framebuffer size");
         }
 
-        // FramebufferResource currently stores a kernel virtual address for CPU access.
+        // FramebufferResource stores a kernel virtual address for CPU access.
         // Convert it to a physical address for user mmap.
         let kva = fb_resource.physical_addr + offset;
         let paddr = crate::vm::get_kernel_vm_manager()
@@ -1330,7 +1335,7 @@ mod tests {
         assert!(fb_device.supports_mmap());
 
         // Test get_mapping_info
-        let result = fb_device.get_mapping_info(0, 32);
+        let result = fb_device.get_mapping_info(0, fb_pages * 4096);
         assert!(result.is_ok());
         let (paddr, permissions, is_shared) = result.unwrap();
         assert_eq!(paddr, fb_addr);
@@ -1346,7 +1351,7 @@ mod tests {
         assert!(result.is_err());
 
         // Test on_mapped callback
-        fb_device.on_mapped(0x1000, paddr, 32, 0);
+        fb_device.on_mapped(0x1000, paddr, fb_pages * 4096, 0);
         {
             let mappings = fb_device.mappings.read();
             assert_eq!(mappings.len(), 1);
@@ -1354,7 +1359,7 @@ mod tests {
         }
 
         // Test on_unmapped callback
-        fb_device.on_unmapped(0x1000, 32);
+        fb_device.on_unmapped(0x1000, fb_pages * 4096);
         {
             let mappings = fb_device.mappings.read();
             assert_eq!(mappings.len(), 0);
@@ -1412,7 +1417,8 @@ mod tests {
         assert!(char_device.supports_mmap());
 
         // Test get_mapping_info with valid parameters
-        let result = char_device.get_mapping_info(0, fb_size);
+        let result = char_device.get_mapping_info(0, fb_pages * 4096);
+        crate::early_println!("Mapping info result: {:?}", result);
         assert!(result.is_ok());
         let (paddr, permissions, is_shared) = result.unwrap();
         assert_eq!(paddr, fb_addr);

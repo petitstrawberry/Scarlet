@@ -999,10 +999,14 @@ mod tests {
         // Test memory statistics
         let (total_maps, total_size, gaps) = manager.get_memory_stats();
         assert_eq!(total_maps, 2);
-        assert_eq!(total_size, PAGE_SIZE * 2);
-        assert_eq!(gaps, 0); // No gaps with adjacent ordering in this setup
+        // map1: 1 page (0x50000000-0x50000fff)
+        // overlapping_base_map: 32 pages (0x5fff0000-0x6000ffff)
+        // Total: 33 pages
+        assert_eq!(total_size, PAGE_SIZE * 33);
+        // These two maps are not adjacent, so there is 1 gap between them
+        assert_eq!(gaps, 1);
 
-        // Add another non-adjacent map to create a gap
+        // Add another non-adjacent map to create another gap
         let map2 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea {
                 start: 0x80002000,
@@ -1020,8 +1024,10 @@ mod tests {
 
         let (total_maps, total_size, gaps) = manager.get_memory_stats();
         assert_eq!(total_maps, 3);
-        assert_eq!(total_size, PAGE_SIZE * 3);
-        assert_eq!(gaps, 1); // One gap between memory maps
+        // map1: 1 page, map2: 1 page, overlapping_base_map: 32 pages = 34 pages total
+        assert_eq!(total_size, PAGE_SIZE * 34);
+        // Gaps: between map1 and map2 (1), between map2 and overlapping_base_map (2)
+        assert_eq!(gaps, 2);
 
         // Test memory map coalescing (should fail due to non-adjacent physical addresses)
         let coalesced = manager.coalesce_memory_maps();
