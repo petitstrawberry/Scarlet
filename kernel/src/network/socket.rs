@@ -340,7 +340,7 @@ pub trait SocketControl {
 /// must satisfy.
 ///
 /// Similar to how TtyDeviceEndpoint combines CharDevice + TtyControl.
-pub trait SocketObject: StreamIpcOps + SocketControl + CloneOps + Send + Sync {
+pub trait SocketObject: StreamIpcOps + SocketControl + Send + Sync {
     /// Get socket type (Stream, Datagram, etc.)
     fn socket_type(&self) -> SocketType;
 
@@ -383,6 +383,11 @@ pub trait SocketObject: StreamIpcOps + SocketControl + CloneOps + Send + Sync {
 
     /// Optional capability: expose select/pselect readiness/wait interface
     fn as_selectable(&self) -> Option<&dyn Selectable> {
+        None
+    }
+
+    /// Optional capability: expose control operations interface
+    fn as_control_ops(&self) -> Option<&dyn crate::object::capability::ControlOps> {
         None
     }
 }
