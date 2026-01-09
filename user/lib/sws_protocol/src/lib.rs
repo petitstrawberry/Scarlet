@@ -17,7 +17,9 @@
 
 extern crate scarlet_std as std;
 
+use std::handle::Handle;
 use std::io::{Read, Write};
+use std::socket::Socket;
 use std::vec::Vec;
 
 /// Maximum payload we accept from the socket.
@@ -350,6 +352,24 @@ pub fn write_destroy_window<W: Write>(writer: &mut W, window_id: u32) -> Result<
     write_frame(writer, client_msg::DESTROY_WINDOW, &payload)
 }
 
+/// Convenience: client->server UpdateBuffer (damage notification).
+pub fn write_update_buffer<W: Write>(
+    writer: &mut W,
+    window_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), ProtocolError> {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&x.to_le_bytes());
+    payload[8..12].copy_from_slice(&y.to_le_bytes());
+    payload[12..16].copy_from_slice(&width.to_le_bytes());
+    payload[16..20].copy_from_slice(&height.to_le_bytes());
+    write_frame(writer, client_msg::UPDATE_BUFFER, &payload)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowCreated {
     pub window_id: u32,
@@ -381,4 +401,20 @@ pub fn read_window_created<R: Read>(reader: &mut R) -> Result<WindowCreated, Pro
         }),
         _ => Err(ProtocolError::UnknownMessageType),
     }
+}
+
+/// Send a shared memory handle over the socket (out-of-band, after WINDOW_CREATED).
+///
+/// This uses Socket::send_handle() for SCM_RIGHTS-style handle transfer.
+pub fn send_shm_handle(socket: &Socket, handle: &Handle) -> Result<(), ProtocolError> {
+    socket
+        .send_handle(handle)
+        .map_err(|_| ProtocolError::IoError)
+}
+
+/// Receive a shared memory handle over the socket (out-of-band, after WINDOW_CREATED).
+///
+/// This uses Socket::recv_handle() for SCM_RIGHTS-style handle transfer.
+pub fn recv_shm_handle(socket: &Socket) -> Result<Handle, ProtocolError> {
+    socket.recv_handle().map_err(|_| ProtocolError::IoError)
 }

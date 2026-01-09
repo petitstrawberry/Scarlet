@@ -1,5 +1,6 @@
 //! IPC Server module - handles client connections and messages
 
+use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
 use std::sync::Mutex;
@@ -20,8 +21,13 @@ pub fn push_ipc_event(event: IpcEvent) {
 /// Get all pending events from the queue
 pub fn pop_all_ipc_events() -> Vec<IpcEvent> {
     let mut queue = EVENT_QUEUE.lock();
-    let events = queue.clone();
-    queue.clear();
+    let mut events = Vec::new();
+    // Drain all events from queue (moves ownership)
+    while let Some(event) = queue.pop() {
+        events.push(event);
+    }
+    // Reverse to restore original order (pop removes from end)
+    events.reverse();
     events
 }
 
@@ -200,7 +206,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
         match protocol::parse_client_message(msg_type, &payload) {
             Ok(ClientMessageRef::CreateWindow { width, height }) => {
-                // Calculate buffer size (used by client for now)
+                // Calculate buffer size
                 let buffer_size = (width as u64)
                     .saturating_mul(height as u64)
                     .saturating_mul(4);
@@ -208,16 +214,117 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 let window_id = next_window_id;
                 next_window_id = next_window_id.saturating_add(1);
 
-                // Reply to client immediately
-                send_window_created(&mut socket, window_id, buffer_size);
+                // Create shared memory region for this window
+                println!(
+                    "[ClientThread {}] Creating SHM for window {} ({}x{} = {} bytes)",
+                    client_id, window_id, width, height, buffer_size
+                );
 
-                // Create window in compositor with the same ID
-                push_ipc_event(IpcEvent::CreateWindow {
-                    client_id,
-                    window_id,
-                    width,
-                    height,
-                });
+                match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {
+                    Ok(shm) => {
+                        // Map SHM into server's address space for compositor access
+                        let shm_mapped_addr = match shm.as_handle().as_memory_mapping() {
+                            Ok(mapper) => {
+                                match mapper.mmap(
+                                    0,
+                                    buffer_size as usize,
+                                    permissions::READ_WRITE,
+                                    0,
+                                    0,
+                                ) {
+                                    Ok(addr) => {
+                                        println!(
+                                            "[ClientThread {}] SHM mapped at 0x{:x}",
+                                            client_id, addr
+                                        );
+
+                                        // Zero-initialize the SHM for deterministic behavior
+                                        unsafe {
+                                            let ptr = addr as *mut u8;
+                                            for i in 0..buffer_size as usize {
+                                                *ptr.add(i) = 0;
+                                            }
+                                        }
+                                        println!(
+                                            "[ClientThread {}] SHM zero-initialized",
+                                            client_id
+                                        );
+
+                                        // Sample first few bytes to verify
+                                        unsafe {
+                                            let ptr = addr as *const u8;
+                                            println!(
+                                                "[ClientThread {}] SHM first 16 bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                                                client_id,
+                                                *ptr.add(0),
+                                                *ptr.add(1),
+                                                *ptr.add(2),
+                                                *ptr.add(3),
+                                                *ptr.add(4),
+                                                *ptr.add(5),
+                                                *ptr.add(6),
+                                                *ptr.add(7),
+                                                *ptr.add(8),
+                                                *ptr.add(9),
+                                                *ptr.add(10),
+                                                *ptr.add(11),
+                                                *ptr.add(12),
+                                                *ptr.add(13),
+                                                *ptr.add(14),
+                                                *ptr.add(15)
+                                            );
+                                        }
+
+                                        Some(addr)
+                                    }
+                                    Err(_) => {
+                                        println!("[ClientThread {}] Failed to mmap SHM", client_id);
+                                        None
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                println!(
+                                    "[ClientThread {}] SHM does not support mapping",
+                                    client_id
+                                );
+                                None
+                            }
+                        };
+
+                        // Reply to client with window created message
+                        send_window_created(&mut socket, window_id, buffer_size);
+
+                        // Send SHM handle out-of-band
+                        println!(
+                            "[ClientThread {}] Sending SHM handle for window {}",
+                            client_id, window_id
+                        );
+                        if let Err(e) = protocol::send_shm_handle(&socket, shm.as_handle()) {
+                            println!(
+                                "[ClientThread {}] Failed to send SHM handle: {:?}",
+                                client_id, e
+                            );
+                            continue;
+                        }
+                        println!("[ClientThread {}] SHM handle sent successfully", client_id);
+
+                        // Notify compositor to create window entry with SHM ownership
+                        push_ipc_event(IpcEvent::CreateWindow {
+                            client_id,
+                            window_id,
+                            width,
+                            height,
+                            shm: Some(shm),
+                            shm_mapped_addr,
+                        });
+                    }
+                    Err(e) => {
+                        println!("[ClientThread {}] Failed to create SHM: {:?}", client_id, e);
+                        // Send error response (optional)
+                        continue;
+                    }
+                }
             }
             Ok(ClientMessageRef::DestroyWindow { window_id }) => {
                 println!(
@@ -277,7 +384,7 @@ fn send_window_created(socket: &mut Socket, window_id: u32, shm_size: u64) {
 }
 
 /// IPC Events that can be sent from clients
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum IpcEvent {
     /// Client requested to create a window
     CreateWindow {
@@ -285,6 +392,9 @@ pub enum IpcEvent {
         window_id: u32,
         width: u32,
         height: u32,
+        /// Shared memory for the window buffer (server-allocated)
+        shm: Option<SharedMemory>,
+        shm_mapped_addr: Option<usize>,
     },
     /// Client requested to destroy a window
     DestroyWindow { client_id: usize, window_id: u32 },

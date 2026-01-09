@@ -1,5 +1,6 @@
 //! Window management module
 
+use std::ipc::{SharedMemory, permissions};
 use std::vec::Vec;
 use std::{print, println};
 
@@ -7,7 +8,7 @@ use std::{print, println};
 pub type WindowId = u32;
 
 /// Window properties
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Window {
     pub id: WindowId,
     pub x: i32,
@@ -18,7 +19,12 @@ pub struct Window {
     pub visible: bool,
     pub focused: bool,
     /// Window contents buffer (BGRA format, 4 bytes per pixel)
+    /// This is used for test/legacy windows.
     pub buffer: Option<Vec<u8>>,
+    /// Shared memory object for buffer sharing with clients
+    pub shm: Option<SharedMemory>,
+    /// Mapped address of the shared memory (for server-side access)
+    pub shm_mapped_addr: Option<usize>,
 }
 
 impl Window {
@@ -34,6 +40,8 @@ impl Window {
             visible: true,
             focused: false,
             buffer: None,
+            shm: None,
+            shm_mapped_addr: None,
         }
     }
 
@@ -53,7 +61,50 @@ impl Window {
             visible: true,
             focused: false,
             buffer: Some(buffer),
+            shm: None,
+            shm_mapped_addr: None,
         }
+    }
+
+    /// Create window with shared memory buffer (server allocates SHM)
+    pub fn new_with_shm(
+        id: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, &'static str> {
+        let buffer_size = (width * height * 4) as usize;
+        let shm = SharedMemory::create(buffer_size, permissions::READ_WRITE)
+            .map_err(|_| "Failed to create shared memory")?;
+
+        // Map SHM into server's address space so compositor can read it
+        let mapper = shm
+            .as_handle()
+            .as_memory_mapping()
+            .map_err(|_| "SharedMemory does not support mapping")?;
+        let mapped_addr = mapper
+            .mmap(0, buffer_size, permissions::READ_WRITE, 0, 0)
+            .map_err(|_| "Failed to mmap shared memory")?;
+
+        println!(
+            "[Window] Window #{} SHM created: size={} mapped_addr=0x{:x}",
+            id, buffer_size, mapped_addr
+        );
+
+        Ok(Self {
+            id,
+            x,
+            y,
+            width,
+            height,
+            title: None,
+            visible: true,
+            focused: false,
+            buffer: None,
+            shm: Some(shm),
+            shm_mapped_addr: Some(mapped_addr),
+        })
     }
 
     /// Get buffer size in bytes
@@ -146,6 +197,74 @@ impl WindowManager {
         self.focus_window(id);
 
         id
+    }
+
+    /// Create a new window with shared memory buffer (server allocates, client maps)
+    pub fn create_window_with_shm(
+        &mut self,
+        id: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<WindowId, &'static str> {
+        if id >= self.next_window_id {
+            self.next_window_id = id + 1;
+        }
+
+        println!(
+            "[WindowManager] Creating SHM-backed window #{} at ({}, {}) {}x{}",
+            id, x, y, width, height
+        );
+        let window = Window::new_with_shm(id, x, y, width, height)?;
+        self.windows.push(window);
+
+        // Focus the new window
+        self.focus_window(id);
+
+        Ok(id)
+    }
+
+    /// Create window from IPC event with pre-mapped SHM
+    /// This takes ownership of the SharedMemory object passed from the IPC thread
+    pub fn create_window_with_shm_from_event(
+        &mut self,
+        id: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        shm: SharedMemory,
+        shm_mapped_addr: Option<usize>,
+    ) -> Result<WindowId, &'static str> {
+        if id >= self.next_window_id {
+            self.next_window_id = id + 1;
+        }
+
+        println!(
+            "[WindowManager] Creating window #{} from IPC event with SHM at 0x{:x?}",
+            id, shm_mapped_addr
+        );
+
+        let window = Window {
+            id,
+            x,
+            y,
+            width,
+            height,
+            title: None, // No title from IPC yet
+            visible: true,
+            focused: false, // Will be focused via focus_window below
+            buffer: None,   // No Vec buffer
+            shm: Some(shm),
+            shm_mapped_addr,
+        };
+        self.windows.push(window);
+
+        // Focus the new window
+        self.focus_window(id);
+
+        Ok(id)
     }
 
     /// Create window without buffer (for testing)

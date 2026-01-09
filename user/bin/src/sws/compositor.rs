@@ -19,6 +19,10 @@ const LOG_MEMORY_LAYOUT: bool = true;
 // from window buffers (helps catch stride/offset/blit bugs).
 const LOG_RENDER_VALIDATION: bool = false;
 
+// Feature flag: Enable dirty rect optimization (false = always full redraw)
+// Disable this if you suspect partial redraw is causing rendering artifacts
+const ENABLE_DIRTY_RECT: bool = false;
+
 /// Compositor - the main window server with proper layer compositing
 pub struct Compositor {
     framebuffer: Framebuffer,
@@ -197,7 +201,39 @@ impl Compositor {
 
         let mut ranges: Vec<(u32, usize, usize, usize)> = Vec::new();
         for w in self.window_manager.get_windows() {
-            if let Some(ref buf) = w.buffer {
+            // Check for SHM-backed window
+            if let Some(shm_addr) = w.shm_mapped_addr {
+                let buffer_size = (w.width as usize)
+                    .saturating_mul(w.height as usize)
+                    .saturating_mul(4);
+                let end = shm_addr.saturating_add(buffer_size);
+                ranges.push((w.id, shm_addr, end, buffer_size));
+
+                println!(
+                    "[Compositor] window #{} SHM: 0x{:x}..0x{:x} ({} bytes) [SHM-backed]",
+                    w.id, shm_addr, end, buffer_size
+                );
+
+                if let Some((vram_start, vram_size)) = self.framebuffer.get_mapping_info() {
+                    let vram_end = vram_start.saturating_add(vram_size);
+                    let overlap = shm_addr < vram_end && vram_start < end;
+                    if overlap {
+                        println!(
+                            "[Compositor] WARNING: window #{} SHM overlaps framebuffer mapping!",
+                            w.id
+                        );
+                    }
+                }
+
+                let overlap_bb = shm_addr < bb_end && bb_start < end;
+                if overlap_bb {
+                    println!(
+                        "[Compositor] WARNING: window #{} SHM overlaps backbuffer!",
+                        w.id
+                    );
+                }
+            } else if let Some(ref buf) = w.buffer {
+                // Legacy Vec-backed window
                 let start = buf.as_ptr() as usize;
                 let len = buf.len();
                 let end = start.saturating_add(len);
@@ -303,7 +339,10 @@ impl Compositor {
 
     /// Composite all layers directly to VRAM (or framebuffer as fallback)
     fn composite_and_present(&mut self) -> Result<(), &'static str> {
-        let dirty = if self.full_redraw_needed {
+        let dirty = if !ENABLE_DIRTY_RECT {
+            // Force full redraw when dirty rect optimization is disabled
+            None
+        } else if self.full_redraw_needed {
             None
         } else if self.cursor.needs_redraw() {
             Some(self.cursor.get_dirty_region())
@@ -455,7 +494,41 @@ impl Compositor {
                         std::format!("window#{} border", window.id),
                     )
                 }
+            } else if let Some(shm_addr) = window.shm_mapped_addr {
+                // SHM-backed window
+                let wo = ((local_y as usize)
+                    .saturating_mul(window.width as usize)
+                    .saturating_add(local_x as usize))
+                .saturating_mul(4);
+
+                let buffer_size = (window.width as usize)
+                    .saturating_mul(window.height as usize)
+                    .saturating_mul(4);
+
+                if wo + 4 <= buffer_size {
+                    unsafe {
+                        let ptr = shm_addr as *const u8;
+                        (
+                            [
+                                *ptr.add(wo),
+                                *ptr.add(wo + 1),
+                                *ptr.add(wo + 2),
+                                *ptr.add(wo + 3),
+                            ],
+                            std::format!(
+                                "window#{} SHM local=({}, {}) off=0x{:x}",
+                                window.id,
+                                local_x,
+                                local_y,
+                                wo
+                            ),
+                        )
+                    }
+                } else {
+                    (self.bg_color, std::format!("window#{} SHM OOB", window.id))
+                }
             } else if let Some(ref buf) = window.buffer {
+                // Legacy Vec-backed window
                 let wo = ((local_y as usize)
                     .saturating_mul(window.width as usize)
                     .saturating_add(local_x as usize))
@@ -504,8 +577,29 @@ impl Compositor {
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
     ) {
-        // If window has a mapped buffer, use it; otherwise draw placeholder
-        if let Some(ref window_buffer) = window.buffer {
+        // Check if window uses SHM or Vec buffer
+        if let Some(shm_addr) = window.shm_mapped_addr {
+            // SHM-backed window: read from mapped memory
+            let buffer_size = (window.width as usize)
+                .saturating_mul(window.height as usize)
+                .saturating_mul(4);
+
+            // Create slice from mapped address
+            let window_buffer =
+                unsafe { core::slice::from_raw_parts(shm_addr as *const u8, buffer_size) };
+
+            Self::draw_window_from_buffer(
+                screen_width,
+                screen_height,
+                bytes_per_pixel,
+                window,
+                window_buffer,
+                buffer,
+                stride,
+                clip_rect,
+            );
+        } else if let Some(ref window_buffer) = window.buffer {
+            // Legacy Vec-backed window
             Self::draw_window_from_buffer(
                 screen_width,
                 screen_height,
@@ -517,6 +611,7 @@ impl Compositor {
                 clip_rect,
             );
         } else {
+            // No buffer: draw placeholder
             Self::draw_window_placeholder(
                 screen_width,
                 screen_height,
@@ -540,12 +635,32 @@ impl Compositor {
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
     ) {
-        let border_color = if window.focused {
-            [50, 50, 150, 255]
-        } else {
-            [100, 100, 100, 255]
-        };
+        // Debug: Log first few pixels of window buffer to detect uninitialized content
+        // Only log for client windows (id >= 100) to reduce noise
+        if window.id >= 100 && window_buffer.len() >= 16 {
+            println!(
+                "[Compositor] Drawing window #{}, buffer first 16 bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                window.id,
+                window_buffer[0],
+                window_buffer[1],
+                window_buffer[2],
+                window_buffer[3],
+                window_buffer[4],
+                window_buffer[5],
+                window_buffer[6],
+                window_buffer[7],
+                window_buffer[8],
+                window_buffer[9],
+                window_buffer[10],
+                window_buffer[11],
+                window_buffer[12],
+                window_buffer[13],
+                window_buffer[14],
+                window_buffer[15]
+            );
+        }
 
+        // Compositor only blits buffer content - no decorations
         for y in 0..window.height {
             for x in 0..window.width {
                 let screen_x = window.x + x as i32;
@@ -574,28 +689,15 @@ impl Compositor {
                 let screen_offset =
                     ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
 
-                // Draw border or content
-                let is_border = x == 0 || y == 0 || x == window.width - 1 || y == window.height - 1;
-
-                if is_border {
-                    // Draw border
-                    if screen_offset + 4 <= screen_buffer.len() {
-                        screen_buffer[screen_offset] = border_color[0];
-                        screen_buffer[screen_offset + 1] = border_color[1];
-                        screen_buffer[screen_offset + 2] = border_color[2];
-                        screen_buffer[screen_offset + 3] = border_color[3];
-                    }
-                } else {
-                    // Draw from window buffer (BGRA format)
-                    let window_offset = ((y * window.width + x) * 4) as usize;
-                    if window_offset + 4 <= window_buffer.len()
-                        && screen_offset + 4 <= screen_buffer.len()
-                    {
-                        screen_buffer[screen_offset] = window_buffer[window_offset];
-                        screen_buffer[screen_offset + 1] = window_buffer[window_offset + 1];
-                        screen_buffer[screen_offset + 2] = window_buffer[window_offset + 2];
-                        screen_buffer[screen_offset + 3] = window_buffer[window_offset + 3];
-                    }
+                // Draw from window buffer (BGRA format)
+                let window_offset = ((y * window.width + x) * 4) as usize;
+                if window_offset + 4 <= window_buffer.len()
+                    && screen_offset + 4 <= screen_buffer.len()
+                {
+                    screen_buffer[screen_offset] = window_buffer[window_offset];
+                    screen_buffer[screen_offset + 1] = window_buffer[window_offset + 1];
+                    screen_buffer[screen_offset + 2] = window_buffer[window_offset + 2];
+                    screen_buffer[screen_offset + 3] = window_buffer[window_offset + 3];
                 }
             }
         }
@@ -615,11 +717,6 @@ impl Compositor {
             [150, 150, 200, 255]
         } else {
             [180, 180, 180, 255]
-        };
-        let border_color = if window.focused {
-            [50, 50, 150, 255]
-        } else {
-            [100, 100, 100, 255]
         };
 
         for y in 0..window.height {
@@ -649,18 +746,13 @@ impl Compositor {
 
                 let offset =
                     ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
-                let is_border = x == 0 || y == 0 || x == window.width - 1 || y == window.height - 1;
-                let color = if is_border {
-                    border_color
-                } else {
-                    window_color
-                };
 
+                // Fill with window color (no borders)
                 if offset + 4 <= buffer.len() {
-                    buffer[offset] = color[0];
-                    buffer[offset + 1] = color[1];
-                    buffer[offset + 2] = color[2];
-                    buffer[offset + 3] = color[3];
+                    buffer[offset] = window_color[0];
+                    buffer[offset + 1] = window_color[1];
+                    buffer[offset + 2] = window_color[2];
+                    buffer[offset + 3] = window_color[3];
                 }
             }
         }
@@ -882,16 +974,47 @@ impl Compositor {
                 window_id,
                 width,
                 height,
+                shm,
+                shm_mapped_addr,
             } => {
                 println!(
                     "[Compositor] Client {} creating window #{} ({}x{})",
                     client_id, window_id, width, height
                 );
-                // Create window using the ID that IPC already returned to the client
-                self.window_manager
-                    .create_window_with_id(window_id, 0, 0, width, height);
 
-                self.full_redraw_needed = true;
+                // Check if SHM was provided (modern path)
+                if let Some(shm_obj) = shm {
+                    println!(
+                        "[Compositor] Window #{} uses SHM at 0x{:x?}",
+                        window_id, shm_mapped_addr
+                    );
+
+                    // Create window with SHM ownership
+                    match self.window_manager.create_window_with_shm_from_event(
+                        window_id,
+                        0,
+                        0,
+                        width,
+                        height,
+                        shm_obj,
+                        shm_mapped_addr,
+                    ) {
+                        Ok(_) => {
+                            println!("[Compositor] Window #{} with SHM created", window_id);
+                        }
+                        Err(e) => {
+                            println!("[Compositor] Failed to create SHM window: {}", e);
+                        }
+                    }
+                } else {
+                    // Fallback: legacy Vec-backed window (for test windows)
+                    println!("[Compositor] Window #{} uses legacy Vec buffer", window_id);
+                    self.window_manager
+                        .create_window_with_id(window_id, 0, 0, width, height);
+                }
+
+                // Don't trigger redraw yet - wait for client to draw and send UPDATE_BUFFER
+                // self.full_redraw_needed = true;
 
                 self.dump_memory_layout("after IPC CreateWindow");
             }
@@ -916,10 +1039,10 @@ impl Compositor {
                 damage_height,
             } => {
                 println!(
-                    "[Compositor] Window #{} buffer updated: ({},{}) {}x{}",
+                    "[Compositor] Window #{} buffer updated: ({},{}) {}x{} - triggering redraw",
                     window_id, damage_x, damage_y, damage_width, damage_height
                 );
-                // TODO: Optimize by only compositing the damaged region
+                // Force redraw to display client's updated content
                 self.full_redraw_needed = true;
             }
             IpcEvent::RequestMove { window_id } => {
