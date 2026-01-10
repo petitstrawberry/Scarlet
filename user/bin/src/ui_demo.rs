@@ -15,7 +15,7 @@ extern crate scarlet_std as std;
 use core::time::Duration;
 use scarlet_ui::{
     Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar, RectView,
-    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
+    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, ViewModifier, Window, label,
 };
 use std::{format, println, string::String};
 
@@ -151,26 +151,38 @@ pub extern "C" fn main() -> i32 {
                                     })),
                             ),
                     )
-                    // TextField - State passed directly
                     .child(
-                        VStack::new()
-                            .spacing(8)
+                        // TextField - State passed directly
+                        HStack::new()
+                            .spacing(16)
                             .child(Label::new("TextField:").color(Color::TEXT).font_size(14))
                             .child(
                                 TextField::new("Type here...", text_input.clone()).corner_radius(6),
-                            ),
-                    )
-                    // CheckBox - State passed directly
-                    .child(
-                        VStack::new()
-                            .spacing(8)
-                            .child(Label::new("CheckBox:").color(Color::TEXT).font_size(14))
+                            )
                             .child(
-                                HStack::new()
-                                    .spacing(16)
-                                    .child(CheckBox::new("Feature A", feature_a.clone()))
-                                    .child(CheckBox::new("Feature B", feature_b.clone())),
-                            ),
+                            // CheckBox - State passed directly
+                            VStack::new()
+                                .spacing(8)
+                                .child(Label::new("CheckBox:").color(Color::TEXT).font_size(14))
+                                .child(
+                                    HStack::new()
+                                        .spacing(16)
+                                        .child(CheckBox::new("Feature A", feature_a.clone()))
+                                        .child(CheckBox::new("Feature B", feature_b.clone())),
+                                ),
+                            )
+                            // Toggle - State passed directly
+                            .child(
+                                VStack::new()
+                                    .spacing(8)
+                                    .child(Label::new("Toggle:").color(Color::TEXT).font_size(14))
+                                    .child(
+                                        HStack::new()
+                                            .spacing(16)
+                                            .child(Toggle::new(toggle1.clone()))
+                                            .child(Toggle::new(toggle2.clone())),
+                                    ),
+                            )
                     )
                     // Slider - State passed directly
                     .child(
@@ -186,18 +198,6 @@ pub extern "C" fn main() -> i32 {
                                 .watch(slider_value.clone())
                                 .color(Color::GRAY)
                                 .font_size(12),
-                            ),
-                    )
-                    // Toggle - State passed directly
-                    .child(
-                        VStack::new()
-                            .spacing(8)
-                            .child(Label::new("Toggle:").color(Color::TEXT).font_size(14))
-                            .child(
-                                HStack::new()
-                                    .spacing(16)
-                                    .child(Toggle::new(toggle1.clone()))
-                                    .child(Toggle::new(toggle2.clone())),
                             ),
                     )
                     // RectViews with corner_radius

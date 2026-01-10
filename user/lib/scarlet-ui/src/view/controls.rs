@@ -717,9 +717,17 @@ impl View for TextField {
         if self.refresh_handle.take_dirty() {
             self.sync_from_binding();
         }
-        let width = available.width.max(150);
-        let height = 32;
-        Size::new(width, height)
+
+        // If the parent provides a width constraint, respect it.
+        // When `available.width == 0`, treat it as "unconstrained" and use a
+        // reasonable intrinsic width.
+        let width = if available.width == 0 { 150 } else { available.width };
+        Size::new(width, 32)
+    }
+
+    fn flex_factor(&self) -> u32 {
+        // Make TextField consume remaining space in HStack/VStack.
+        1
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
