@@ -15,7 +15,8 @@
 extern crate scarlet_std as std;
 
 use scarlet_ui::{
-    Application, Button, Center, Color, HStack, Label, Padding, RectView, Spacer, VStack, Window,
+    Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar, RectView,
+    Slider, Spacer, TextField, Toggle, VStack, ViewModifier, Window,
 };
 use std::println;
 
@@ -45,48 +46,136 @@ pub extern "C" fn main() -> i32 {
     let popup_handle = handle.clone();
     let follow_handle = handle.clone();
     let resize_handle = handle.clone();
-    let window = Window::new("UI Demo", 500, 300)
-        .min_size(500, 300)
+    let window = Window::new("ScarletUI Widget Demo", 600, 500)
+        .min_size(600, 500)
         .max_size(1024, 768)
-        .background(Color::WHITE)
+        .background(Color::rgb(245, 245, 250))
         .content(
             Padding::new(
                 VStack::new()
+                    .spacing(16)
                     // Title
                     .child(
-                        Label::new("ScarletUIの世界からこんにちは！")
-                            .color(Color::TEXT)
-                            .font_size(40),
+                        Label::new("🎨 ScarletUI Widget Gallery")
+                            .color(Color::rgb(40, 40, 50))
+                            .font_size(32),
                     )
-                    .child(Label::new("View-based Architecture Demo").color(Color::GRAY))
-                    // Spacing
-                    .child(Spacer::new())
-                    // Colored boxes in a row
                     .child(
-                        HStack::new()
-                            .child(Spacer::new())
-                            .child(
-                                RectView::new(Color::rgb(255, 100, 100))
-                                    .width(80)
-                                    .height(50),
-                            )
-                            .child(
-                                RectView::new(Color::rgb(100, 255, 100))
-                                    .width(80)
-                                    .height(50),
-                            )
-                            .child(
-                                RectView::new(Color::rgb(100, 100, 255))
-                                    .width(80)
-                                    .height(50),
-                            )
-                            .child(Spacer::new()),
+                        Label::new("Modern UI Components & Modifiers")
+                            .color(Color::GRAY)
+                            .font_size(14),
                     )
-                    // Spacing
+                    // Spacer
+                    .child(Spacer::new().min_length(10))
+                    // TextField demo
+                    .child(
+                        VStack::new()
+                            .spacing(8)
+                            .child(Label::new("TextField:").color(Color::TEXT).font_size(16))
+                            .child(
+                                TextField::new("Enter your name...")
+                                    .text_color(Color::BLACK)
+                                    .background(Color::WHITE),
+                            ),
+                    )
+                    // CheckBox demo
+                    .child(
+                        VStack::new()
+                            .spacing(8)
+                            .child(Label::new("CheckBox:").color(Color::TEXT).font_size(16))
+                            .child(
+                                HStack::new()
+                                    .spacing(16)
+                                    .child(CheckBox::new("Enable feature A", true).on_toggle(
+                                        |checked| {
+                                            println!("[ui_demo] CheckBox A: {}", checked);
+                                        },
+                                    ))
+                                    .child(CheckBox::new("Enable feature B", false).on_toggle(
+                                        |checked| {
+                                            println!("[ui_demo] CheckBox B: {}", checked);
+                                        },
+                                    )),
+                            ),
+                    )
+                    // Slider demo
+                    .child(
+                        VStack::new()
+                            .spacing(8)
+                            .child(Label::new("Slider:").color(Color::TEXT).font_size(16))
+                            .child(Slider::new(0.5, 0.0, 1.0).on_change(|value| {
+                                println!("[ui_demo] Slider value: {:.2}", value);
+                            })),
+                    )
+                    // ProgressBar demo
+                    .child(
+                        VStack::new()
+                            .spacing(8)
+                            .child(Label::new("ProgressBar:").color(Color::TEXT).font_size(16))
+                            .child(
+                                ProgressBar::new(0.7)
+                                    .fill_color(Color::rgb(50, 200, 100))
+                                    .height(20),
+                            ),
+                    )
+                    // Toggle demo
+                    .child(
+                        VStack::new()
+                            .spacing(8)
+                            .child(Label::new("Toggle:").color(Color::TEXT).font_size(16))
+                            .child(
+                                HStack::new()
+                                    .spacing(16)
+                                    .child(Toggle::new(true).on_toggle(|enabled| {
+                                        println!("[ui_demo] Toggle 1: {}", enabled);
+                                    }))
+                                    .child(Toggle::new(false).on_toggle(|enabled| {
+                                        println!("[ui_demo] Toggle 2: {}", enabled);
+                                    })),
+                            ),
+                    )
+                    // Spacer
+                    .child(Spacer::new())
+                    // Colored boxes with modifiers
+                    .child(
+                        VStack::new()
+                            .spacing(8)
+                            .child(
+                                Label::new("View Modifiers:")
+                                    .color(Color::TEXT)
+                                    .font_size(16),
+                            )
+                            .child(
+                                HStack::new()
+                                    .spacing(12)
+                                    .child(Spacer::new())
+                                    .child(
+                                        RectView::new(Color::rgb(255, 100, 100))
+                                            .width(60)
+                                            .height(60)
+                                            .border(2, Color::rgb(200, 50, 50)),
+                                    )
+                                    .child(
+                                        RectView::new(Color::rgb(100, 255, 100))
+                                            .width(60)
+                                            .height(60)
+                                            .border(2, Color::rgb(50, 200, 50)),
+                                    )
+                                    .child(
+                                        RectView::new(Color::rgb(100, 100, 255))
+                                            .width(60)
+                                            .height(60)
+                                            .border(2, Color::rgb(50, 50, 200)),
+                                    )
+                                    .child(Spacer::new()),
+                            ),
+                    )
+                    // Spacer
                     .child(Spacer::new())
                     // Interactive buttons
                     .child(Center::new(
                         HStack::new()
+                            .spacing(12)
                             .child(Button::new("Popup", move || {
                                 println!("[ui_demo] Popup button clicked!");
                                 popup_handle.request_popup();
@@ -99,8 +188,8 @@ pub extern "C" fn main() -> i32 {
                                 println!("[ui_demo] Resize clicked!");
                                 resize_handle.toggle_main_resize();
                             }))
-                            .child(Button::new("Click Me", || {
-                                println!("[ui_demo] Button 1 clicked!");
+                            .child(Button::new("Info", || {
+                                println!("[ui_demo] Info button clicked!");
                             }))
                             .child(Button::new("Exit", || {
                                 println!("[ui_demo] Exit button clicked!");

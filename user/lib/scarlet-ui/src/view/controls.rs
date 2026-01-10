@@ -4,6 +4,7 @@ use super::traits::{View, Size};
 use crate::graphics::{measure_text_sized, Canvas, Rect};
 use crate::Color;
 use crate::event::{Event, EventKind, MouseButton};
+use scarlet_std::boxed::Box;
 use scarlet_std::string::String;
 
 /// Text label view
