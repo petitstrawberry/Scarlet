@@ -6,6 +6,7 @@ use crate::event::{Event, EventKind, MouseButton};
 use crate::Color;
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
+use sws_client::WindowSizeLimits;
 
 /// Title bar height in pixels
 const TITLEBAR_HEIGHT: u32 = 28;
@@ -42,6 +43,8 @@ pub struct Window {
     background: Color,
     content: Option<ViewBox>,
     content_size: Size,
+
+    size_limits: WindowSizeLimits,
     
     // State
     close_button_hovered: bool,
@@ -67,12 +70,38 @@ impl Window {
             background: Color::rgb(40, 40, 40),
             content: None,
             content_size: Size::ZERO,
+            size_limits: WindowSizeLimits::NONE,
             close_button_hovered: false,
             close_button_pressed: false,
             close_requested: false,
             move_requested: false,
             needs_redraw: true,
         }
+    }
+
+    /// Set minimum window size in pixels.
+    pub fn min_size(mut self, width: u32, height: u32) -> Self {
+        self.size_limits.min_width = width;
+        self.size_limits.min_height = height;
+        self
+    }
+
+    /// Set maximum window size in pixels.
+    pub fn max_size(mut self, width: u32, height: u32) -> Self {
+        self.size_limits.max_width = width;
+        self.size_limits.max_height = height;
+        self
+    }
+
+    /// Set size limits in pixels.
+    pub fn size_limits(mut self, limits: WindowSizeLimits) -> Self {
+        self.size_limits = limits;
+        self
+    }
+
+    /// Get configured size limits.
+    pub fn get_size_limits(&self) -> WindowSizeLimits {
+        self.size_limits
     }
 
     /// Set background color (builder pattern)
@@ -101,6 +130,16 @@ impl Window {
     /// Get window height
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// Update window size.
+    ///
+    /// This does not perform any protocol-level resize; it only updates the UI's
+    /// layout and drawing dimensions.
+    pub fn set_size(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.needs_redraw = true;
     }
 
     /// Get content area (excluding title bar)
@@ -179,7 +218,7 @@ impl Window {
 }
 
 impl View for Window {
-    fn layout(&mut self, available: Size) -> Size {
+    fn layout(&mut self, _available: Size) -> Size {
         // Window takes the size it was created with
         let size = Size::new(self.width, self.height);
         
@@ -215,7 +254,7 @@ impl View for Window {
         self.draw_border(canvas);
     }
 
-    fn on_event_capture(&mut self, event: &mut Event, frame: Rect) -> bool {
+    fn on_event_capture(&mut self, event: &mut Event, _frame: Rect) -> bool {
         // Window can intercept events in title bar
         let titlebar = self.titlebar_rect();
         

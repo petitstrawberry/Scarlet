@@ -1,6 +1,7 @@
 //! IPC Server module - handles client connections and messages
 
 use std::collections::BTreeMap;
+use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::println;
 use std::socket::Socket;
@@ -9,6 +10,52 @@ use std::thread;
 use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WindowSizeLimits {
+    min_width: u32,
+    min_height: u32,
+    max_width: u32,
+    max_height: u32,
+}
+
+impl WindowSizeLimits {
+    fn clamp(&self, width: u32, height: u32) -> (u32, u32) {
+        let mut w = width.max(1);
+        let mut h = height.max(1);
+
+        if self.min_width != 0 {
+            w = w.max(self.min_width.max(1));
+        }
+        if self.min_height != 0 {
+            h = h.max(self.min_height.max(1));
+        }
+
+        let effective_max_width = if self.max_width == 0 {
+            0
+        } else if self.min_width != 0 {
+            self.max_width.max(self.min_width.max(1))
+        } else {
+            self.max_width.max(1)
+        };
+        let effective_max_height = if self.max_height == 0 {
+            0
+        } else if self.min_height != 0 {
+            self.max_height.max(self.min_height.max(1))
+        } else {
+            self.max_height.max(1)
+        };
+
+        if effective_max_width != 0 {
+            w = w.min(effective_max_width);
+        }
+        if effective_max_height != 0 {
+            h = h.min(effective_max_height);
+        }
+
+        (w, h)
+    }
+}
 
 #[derive(Debug)]
 enum FrameIoError {
@@ -82,7 +129,6 @@ fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(),
 /// Input event to be sent to a client
 #[derive(Debug, Clone)]
 pub struct PendingInputEvent {
-    pub window_id: u32,
     pub time: u64,
     pub type_: u16,
     pub code: u16,
@@ -94,6 +140,16 @@ static EVENT_QUEUE: Mutex<Vec<IpcEvent>> = Mutex::new(Vec::new());
 
 /// Global pending input events: BTreeMap for O(log n) lookup
 static PENDING_INPUT_EVENTS: Mutex<BTreeMap<u32, Vec<PendingInputEvent>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Pending server->client frames to be delivered to a specific window.
+#[derive(Debug, Clone)]
+pub struct PendingServerFrame {
+    pub msg_type: u32,
+    pub payload: Vec<u8>,
+}
+
+static PENDING_SERVER_FRAMES: Mutex<BTreeMap<u32, Vec<PendingServerFrame>>> =
     Mutex::new(BTreeMap::new());
 
 /// Add an event to the global queue
@@ -117,14 +173,28 @@ pub fn pop_all_ipc_events() -> Vec<IpcEvent> {
 
 /// Register a window for input event routing
 fn register_window(window_id: u32, _client_id: usize) {
-    let mut pending = PENDING_INPUT_EVENTS.lock();
-    pending.insert(window_id, Vec::new());
+    {
+        let mut pending = PENDING_INPUT_EVENTS.lock();
+        pending.entry(window_id).or_insert_with(Vec::new);
+    }
+
+    {
+        let mut pending = PENDING_SERVER_FRAMES.lock();
+        pending.entry(window_id).or_insert_with(Vec::new);
+    }
 }
 
 /// Unregister a window
 fn unregister_window(window_id: u32) {
-    let mut pending = PENDING_INPUT_EVENTS.lock();
-    pending.remove(&window_id);
+    {
+        let mut pending = PENDING_INPUT_EVENTS.lock();
+        pending.remove(&window_id);
+    }
+
+    {
+        let mut pending = PENDING_SERVER_FRAMES.lock();
+        pending.remove(&window_id);
+    }
 }
 
 /// Queue an input event for a specific window (O(log n) lookup)
@@ -133,12 +203,39 @@ pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, va
 
     if let Some(events) = pending.get_mut(&window_id) {
         events.push(PendingInputEvent {
-            window_id,
             time,
             type_,
             code,
             value,
         });
+    }
+}
+
+/// Queue a server->client protocol message for a specific window.
+pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
+    let mut pending = PENDING_SERVER_FRAMES.lock();
+    match pending.get_mut(&window_id) {
+        Some(frames) => frames.push(PendingServerFrame { msg_type, payload }),
+        None => {
+            println!(
+                "[IpcServer] Warning: server message queued for unregistered window {} (msg_type={}); creating queue",
+                window_id, msg_type
+            );
+            let mut frames = Vec::new();
+            frames.push(PendingServerFrame { msg_type, payload });
+            pending.insert(window_id, frames);
+        }
+    }
+}
+
+fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
+    let mut pending = PENDING_SERVER_FRAMES.lock();
+    if let Some(frames) = pending.get_mut(&window_id) {
+        let result = frames.clone();
+        frames.clear();
+        result
+    } else {
+        Vec::new()
     }
 }
 
@@ -157,7 +254,6 @@ fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
 
 /// IPC Server - manages Socket VFS connections
 pub struct IpcServer {
-    socket: Option<Socket>,
     socket_path: &'static str,
     accept_thread_started: bool,
 }
@@ -168,7 +264,6 @@ impl IpcServer {
         println!("[IpcServer] Initializing at {}", socket_path);
 
         Ok(Self {
-            socket: None,
             socket_path,
             accept_thread_started: false,
         })
@@ -225,6 +320,7 @@ impl IpcServer {
     }
 
     /// Send a message to a specific client (not yet implemented for multi-threaded)
+    #[allow(dead_code)]
     pub fn send_to_client(
         &mut self,
         _client_id: usize,
@@ -319,6 +415,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     // Per-client window id generator (avoid collision between clients)
     let mut next_window_id: u32 = 100 + (client_id as u32 * 1000);
     let mut managed_windows: Vec<u32> = Vec::new();
+    let mut window_size_limits: BTreeMap<u32, WindowSizeLimits> = BTreeMap::new();
 
     // Debug: loop counter for periodic logging
     let mut loop_count: u64 = 0;
@@ -327,16 +424,29 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
     loop {
         loop_count += 1;
-        let should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
+        let _should_log = loop_count % 100 == 0; // Log every 100 iterations (more frequent)
 
         // Send any pending input events for this client's windows
         let mut has_events = false;
-        let mut total_events = 0;
+        let mut _total_events = 0;
         for &window_id in &managed_windows {
+            // Send queued server->client control messages for this window.
+            let frames = pop_pending_server_frames(window_id);
+            for frame in frames {
+                if let Err(e) = write_frame(&mut socket, frame.msg_type, &frame.payload) {
+                    println!(
+                        "[ClientThread {}] Failed to send server message to window {}: {:?}",
+                        client_id, window_id, e
+                    );
+                } else {
+                    has_events = true;
+                }
+            }
+
             let events = pop_pending_input_events(window_id);
             if !events.is_empty() {
                 has_events = true;
-                total_events += events.len();
+                _total_events += events.len();
                 // println!(
                 //     "[ClientThread {}] Loop #{}: Found {} events for window {}",
                 //     client_id,
@@ -346,6 +456,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 // );
                 for event in events {
                     let payload = protocol::payload_input_event(
+                        window_id,
                         event.time,
                         event.type_,
                         event.code,
@@ -449,7 +560,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                                     0,
                                     buffer_size as usize,
                                     permissions::READ_WRITE,
-                                    0,
+                                    mmap_flags::SHARED,
                                     0,
                                 ) {
                                     Ok(addr) => {
@@ -561,6 +672,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 // Unregister window from input routing
                 unregister_window(window_id);
 
+                window_size_limits.remove(&window_id);
+
                 // Remove from managed windows
                 managed_windows.retain(|&id| id != window_id);
 
@@ -590,6 +703,141 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
             }
             Ok(ClientMessageRef::MoveWindow { window_id, x, y }) => {
                 push_ipc_event(IpcEvent::MoveWindow { window_id, x, y });
+            }
+            Ok(ClientMessageRef::SetWindowParent {
+                window_id,
+                parent_id,
+            }) => {
+                push_ipc_event(IpcEvent::SetWindowParent {
+                    window_id,
+                    parent_id,
+                });
+            }
+            Ok(ClientMessageRef::SetWindowTransientFlags { window_id, flags }) => {
+                push_ipc_event(IpcEvent::SetWindowTransientFlags { window_id, flags });
+            }
+            Ok(ClientMessageRef::SetWindowSizeLimits {
+                window_id,
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            }) => {
+                println!(
+                    "[ClientThread {}] SetWindowSizeLimits: window_id={} min={}x{} max={}x{}",
+                    client_id, window_id, min_width, min_height, max_width, max_height
+                );
+
+                window_size_limits.insert(
+                    window_id,
+                    WindowSizeLimits {
+                        min_width,
+                        min_height,
+                        max_width,
+                        max_height,
+                    },
+                );
+
+                push_ipc_event(IpcEvent::SetWindowSizeLimits {
+                    window_id,
+                    min_width,
+                    min_height,
+                    max_width,
+                    max_height,
+                });
+            }
+            Ok(ClientMessageRef::ResizeWindow {
+                window_id,
+                width,
+                height,
+            }) => {
+                let (width, height) = match window_size_limits.get(&window_id) {
+                    Some(limits) => {
+                        let (w, h) = limits.clamp(width, height);
+                        if w != width || h != height {
+                            println!(
+                                "[ClientThread {}] ResizeWindow clamped: window_id={} {}x{} -> {}x{}",
+                                client_id, window_id, width, height, w, h
+                            );
+                        }
+                        (w, h)
+                    }
+                    None => (width.max(1), height.max(1)),
+                };
+
+                let buffer_size = (width as u64)
+                    .saturating_mul(height as u64)
+                    .saturating_mul(4);
+
+                println!(
+                    "[ClientThread {}] ResizeWindow: window_id={} {}x{} ({} bytes)",
+                    client_id, window_id, width, height, buffer_size
+                );
+
+                match SharedMemory::create(buffer_size as usize, permissions::READ_WRITE) {
+                    Ok(shm) => {
+                        // Map for compositor
+                        let mapper = match shm.as_handle().as_memory_mapping() {
+                            Ok(m) => m,
+                            Err(_) => {
+                                println!(
+                                    "[ClientThread {}] ResizeWindow: SHM mapping unsupported",
+                                    client_id
+                                );
+                                continue;
+                            }
+                        };
+
+                        let mapped_addr = match mapper.mmap(
+                            0,
+                            buffer_size as usize,
+                            permissions::READ_WRITE,
+                            mmap_flags::SHARED,
+                            0,
+                        ) {
+                            Ok(a) => a,
+                            Err(_) => {
+                                println!("[ClientThread {}] ResizeWindow: mmap failed", client_id);
+                                continue;
+                            }
+                        };
+
+                        // Reply to client with WINDOW_RESIZED + SHM handle.
+                        let payload =
+                            protocol::payload_window_resized(window_id, buffer_size, width, height);
+                        if let Err(e) =
+                            write_frame(&mut socket, protocol::server_msg::WINDOW_RESIZED, &payload)
+                        {
+                            println!(
+                                "[ClientThread {}] ResizeWindow: failed to send WINDOW_RESIZED: {:?}",
+                                client_id, e
+                            );
+                            continue;
+                        }
+
+                        if let Err(e) = socket.send_handle(shm.as_handle()) {
+                            println!(
+                                "[ClientThread {}] ResizeWindow: failed to send SHM handle: {:?}",
+                                client_id, e
+                            );
+                            continue;
+                        }
+
+                        push_ipc_event(IpcEvent::ResizeWindow {
+                            window_id,
+                            width,
+                            height,
+                            shm: Some(shm),
+                            shm_mapped_addr: Some(mapped_addr),
+                        });
+                    }
+                    Err(_) => {
+                        println!(
+                            "[ClientThread {}] ResizeWindow: failed to create SHM",
+                            client_id
+                        );
+                    }
+                }
             }
             Ok(_) => {
                 // Ignore other messages for now
@@ -650,4 +898,30 @@ pub enum IpcEvent {
     RequestMove { window_id: u32 },
     /// Client moved window
     MoveWindow { window_id: u32, x: i32, y: i32 },
+
+    /// Set (or clear) parent window relationship
+    ///
+    /// `parent_id == 0` means "no parent".
+    SetWindowParent { window_id: u32, parent_id: u32 },
+
+    /// Set transient behavior flags for a window (bitset).
+    SetWindowTransientFlags { window_id: u32, flags: u32 },
+
+    /// Set min/max size constraints for a window.
+    SetWindowSizeLimits {
+        window_id: u32,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
+    },
+
+    /// Resize a window and replace its SHM buffer.
+    ResizeWindow {
+        window_id: u32,
+        width: u32,
+        height: u32,
+        shm: Option<SharedMemory>,
+        shm_mapped_addr: Option<usize>,
+    },
 }

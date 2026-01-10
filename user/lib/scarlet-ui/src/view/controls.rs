@@ -1,7 +1,7 @@
 //! Control views (basic UI widgets)
 
 use super::traits::{View, Size};
-use crate::graphics::{Canvas, Rect};
+use crate::graphics::{measure_text_sized, Canvas, Rect};
 use crate::Color;
 use crate::event::{Event, EventKind, MouseButton};
 use scarlet_std::string::String;
@@ -42,11 +42,8 @@ impl Label {
 
 impl View for Label {
     fn layout(&mut self, _available: Size) -> Size {
-        // Approximate size based on text length and font size
-        let char_width = self.font_size * 6 / 10; // ~60% of font size
-        let width = self.text.len() as u32 * char_width;
-        let height = self.font_size;
-        Size::new(width, height)
+        let (w, h) = measure_text_sized(&self.text, self.font_size as f32);
+        Size::new(w, h)
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
@@ -118,9 +115,7 @@ impl<F: FnMut() + 'static> Button<F> {
 impl<F: FnMut() + 'static> View for Button<F> {
     fn layout(&mut self, _available: Size) -> Size {
         // Text size + padding
-        let char_width = 10u32; // ~10px per char at default size
-        let text_width = self.label.len() as u32 * char_width;
-        let text_height = 16u32;
+        let (text_width, text_height) = measure_text_sized(&self.label, 16.0);
         Size::new(
             text_width + self.padding * 2,
             text_height + self.padding * 2,
@@ -205,11 +200,21 @@ impl View for Spacer {
     }
 
     fn layout(&mut self, available: Size) -> Size {
-        // Spacer takes all available space (flex behavior)
-        Size::new(
-            available.width.max(self.min_length),
-            available.height.max(self.min_length),
-        )
+        // Spacer should only expand along the parent's main axis.
+        // Stacks pass `0` for the cross-axis when laying out flex children.
+        if available.width == 0 {
+            // Vertical spacer (in VStack)
+            Size::new(0, available.height.max(self.min_length))
+        } else if available.height == 0 {
+            // Horizontal spacer (in HStack)
+            Size::new(available.width.max(self.min_length), 0)
+        } else {
+            // Fallback: if used outside stacks, behave conservatively.
+            Size::new(
+                available.width.max(self.min_length),
+                available.height.max(self.min_length),
+            )
+        }
     }
 
     fn draw(&self, _canvas: &mut Canvas, _frame: Rect) {

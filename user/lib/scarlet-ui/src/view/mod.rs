@@ -14,6 +14,6 @@ mod controls;
 mod window;
 
 pub use traits::{View, ViewBox, Size, IntoViewBox};
-pub use containers::{VStack, HStack, ZStack, Padding, Center};
+pub use containers::{HStack, StackAlignment, VStack, ZStack, Padding, Center};
 pub use controls::{Label, Button, Spacer, RectView};
 pub use window::Window;

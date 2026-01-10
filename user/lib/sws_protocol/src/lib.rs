@@ -32,6 +32,10 @@ pub mod client_msg {
     pub const UPDATE_BUFFER: u32 = 4;
     pub const REQUEST_MOVE_WINDOW: u32 = 5;
     pub const MOVE_WINDOW: u32 = 6;
+    pub const SET_WINDOW_PARENT: u32 = 7;
+    pub const SET_WINDOW_TRANSIENT_FLAGS: u32 = 8;
+    pub const RESIZE_WINDOW: u32 = 9;
+    pub const SET_WINDOW_SIZE_LIMITS: u32 = 16;
 }
 
 /// Message type IDs (server -> client).
@@ -40,6 +44,18 @@ pub mod server_msg {
     pub const WINDOW_DESTROYED: u32 = 11;
     pub const INPUT_EVENT: u32 = 12;
     pub const ERROR: u32 = 13;
+    pub const WINDOW_RESIZED: u32 = 14;
+    pub const WINDOW_CONFIGURE: u32 = 15;
+}
+
+/// Flags for transient (parent/child) window behavior.
+///
+/// These flags are interpreted by the compositor as *policy hints*.
+pub mod transient_flags {
+    /// If set, the child moves together when its parent is moved.
+    pub const FOLLOW_PARENT_MOVE: u32 = 1 << 0;
+    /// If set, raising the parent raises the child group.
+    pub const RAISE_WITH_PARENT: u32 = 1 << 1;
 }
 
 /// Message header.
@@ -123,6 +139,44 @@ pub enum ClientMessageRef<'a> {
         x: i32,
         y: i32,
     },
+    /// Set (or clear) the logical parent of a window.
+    ///
+    /// `parent_id == 0` means "no parent".
+    SetWindowParent {
+        window_id: u32,
+        parent_id: u32,
+    },
+
+    /// Configure transient behavior flags for a window.
+    ///
+    /// Flags are a bitset from `transient_flags::*`.
+    SetWindowTransientFlags {
+        window_id: u32,
+        flags: u32,
+    },
+
+    /// Resize a window buffer.
+    ///
+    /// This triggers the server to allocate a new shared-memory buffer and
+    /// respond with `WINDOW_RESIZED` + a new SHM handle.
+    ResizeWindow {
+        window_id: u32,
+        width: u32,
+        height: u32,
+    },
+
+    /// Set min/max size constraints for a window.
+    ///
+    /// Values are in pixels.
+    /// - `min_* == 0` means "no minimum".
+    /// - `max_* == 0` means "no maximum".
+    SetWindowSizeLimits {
+        window_id: u32,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
+    },
 }
 
 /// Server->client messages.
@@ -135,7 +189,26 @@ pub enum ServerMessage {
     WindowDestroyed {
         window_id: u32,
     },
+    /// Server acknowledged a resize and provides the new SHM size.
+    ///
+    /// The server will send the new SHM handle out-of-band immediately after.
+    WindowResized {
+        window_id: u32,
+        shm_size: u64,
+        width: u32,
+        height: u32,
+    },
+    /// Compositor requests the client to resize to the given dimensions.
+    ///
+    /// This does not include a new SHM handle; clients should respond by
+    /// issuing a `RESIZE_WINDOW` request.
+    WindowConfigure {
+        window_id: u32,
+        width: u32,
+        height: u32,
+    },
     InputEvent {
+        window_id: u32,
         time: u64,
         type_: u16,
         code: u16,
@@ -215,6 +288,57 @@ pub fn parse_client_message<'a>(
             let y = i32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
             Ok(ClientMessageRef::MoveWindow { window_id, x, y })
         }
+        client_msg::SET_WINDOW_PARENT => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let parent_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            Ok(ClientMessageRef::SetWindowParent {
+                window_id,
+                parent_id,
+            })
+        }
+        client_msg::SET_WINDOW_TRANSIENT_FLAGS => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let flags = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            Ok(ClientMessageRef::SetWindowTransientFlags { window_id, flags })
+        }
+        client_msg::RESIZE_WINDOW => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let width = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let height = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            Ok(ClientMessageRef::ResizeWindow {
+                window_id,
+                width,
+                height,
+            })
+        }
+        client_msg::SET_WINDOW_SIZE_LIMITS => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let min_width = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let min_height = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            let max_width =
+                u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let max_height =
+                u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+            Ok(ClientMessageRef::SetWindowSizeLimits {
+                window_id,
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            })
+        }
         _ => Err(ProtocolError::UnknownMessageType),
     }
 }
@@ -249,18 +373,63 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ServerMessage::WindowDestroyed { window_id })
         }
-        server_msg::INPUT_EVENT => {
-            if payload.len() != 16 {
+        server_msg::WINDOW_RESIZED => {
+            if payload.len() != 20 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            let time = u64::from_le_bytes([
-                payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let shm_size = u64::from_le_bytes([
+                payload[4],
+                payload[5],
+                payload[6],
                 payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
             ]);
-            let type_ = u16::from_le_bytes([payload[8], payload[9]]);
-            let code = u16::from_le_bytes([payload[10], payload[11]]);
-            let value = i32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let width = u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+            let height = u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+            Ok(ServerMessage::WindowResized {
+                window_id,
+                shm_size,
+                width,
+                height,
+            })
+        }
+        server_msg::WINDOW_CONFIGURE => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let width = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            let height = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            Ok(ServerMessage::WindowConfigure {
+                window_id,
+                width,
+                height,
+            })
+        }
+        server_msg::INPUT_EVENT => {
+            if payload.len() != 20 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let time = u64::from_le_bytes([
+                payload[4],
+                payload[5],
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
+            ]);
+            let type_ = u16::from_le_bytes([payload[12], payload[13]]);
+            let code = u16::from_le_bytes([payload[14], payload[15]]);
+            let value = i32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
             Ok(ServerMessage::InputEvent {
+                window_id,
                 time,
                 type_,
                 code,
@@ -325,11 +494,74 @@ pub fn payload_move_window(window_id: u32, x: i32, y: i32) -> [u8; 12] {
     payload
 }
 
+/// Build payload for client->server `SET_WINDOW_PARENT`.
+///
+/// `parent_id == 0` means "no parent".
+pub fn payload_set_window_parent(window_id: u32, parent_id: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&parent_id.to_le_bytes());
+    payload
+}
+
+/// Build payload for client->server `SET_WINDOW_TRANSIENT_FLAGS`.
+pub fn payload_set_window_transient_flags(window_id: u32, flags: u32) -> [u8; 8] {
+    let mut payload = [0u8; 8];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&flags.to_le_bytes());
+    payload
+}
+
+/// Build payload for client->server `RESIZE_WINDOW`.
+pub fn payload_resize_window(window_id: u32, width: u32, height: u32) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&width.to_le_bytes());
+    payload[8..12].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+/// Build payload for client->server `SET_WINDOW_SIZE_LIMITS`.
+pub fn payload_set_window_size_limits(
+    window_id: u32,
+    min_width: u32,
+    min_height: u32,
+    max_width: u32,
+    max_height: u32,
+) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&min_width.to_le_bytes());
+    payload[8..12].copy_from_slice(&min_height.to_le_bytes());
+    payload[12..16].copy_from_slice(&max_width.to_le_bytes());
+    payload[16..20].copy_from_slice(&max_height.to_le_bytes());
+    payload
+}
+
 /// Build payload for server->client `WINDOW_CREATED`.
 pub fn payload_window_created(window_id: u32, shm_size: u64) -> [u8; 12] {
     let mut payload = [0u8; 12];
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4..12].copy_from_slice(&shm_size.to_le_bytes());
+    payload
+}
+
+/// Build payload for server->client `WINDOW_RESIZED`.
+pub fn payload_window_resized(window_id: u32, shm_size: u64, width: u32, height: u32) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..12].copy_from_slice(&shm_size.to_le_bytes());
+    payload[12..16].copy_from_slice(&width.to_le_bytes());
+    payload[16..20].copy_from_slice(&height.to_le_bytes());
+    payload
+}
+
+/// Build payload for server->client `WINDOW_CONFIGURE`.
+pub fn payload_window_configure(window_id: u32, width: u32, height: u32) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&width.to_le_bytes());
+    payload[8..12].copy_from_slice(&height.to_le_bytes());
     payload
 }
 
@@ -339,12 +571,19 @@ pub fn payload_window_destroyed(window_id: u32) -> [u8; 4] {
 }
 
 /// Build payload for server->client `INPUT_EVENT`.
-pub fn payload_input_event(time: u64, type_: u16, code: u16, value: i32) -> [u8; 16] {
-    let mut payload = [0u8; 16];
-    payload[0..8].copy_from_slice(&time.to_le_bytes());
-    payload[8..10].copy_from_slice(&type_.to_le_bytes());
-    payload[10..12].copy_from_slice(&code.to_le_bytes());
-    payload[12..16].copy_from_slice(&value.to_le_bytes());
+pub fn payload_input_event(
+    window_id: u32,
+    time: u64,
+    type_: u16,
+    code: u16,
+    value: i32,
+) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..12].copy_from_slice(&time.to_le_bytes());
+    payload[12..14].copy_from_slice(&type_.to_le_bytes());
+    payload[14..16].copy_from_slice(&code.to_le_bytes());
+    payload[16..20].copy_from_slice(&value.to_le_bytes());
     payload
 }
 

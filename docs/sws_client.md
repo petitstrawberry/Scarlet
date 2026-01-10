@@ -59,6 +59,8 @@ loop {
     }
 }
 
+```
+
 ## Window movement
 
 The protocol provides two window movement messages with different intent:
@@ -72,7 +74,13 @@ The protocol provides two window movement messages with different intent:
 - Programmatic movement: `move_window(surface_id, x, y)` sends `MOVE_WINDOW`.
     - Recommended usage: one-shot reposition (e.g. centering a window).
     - Not recommended to stream continuously for interactive dragging.
-```
+
+Related:
+
+- Parent/child relationship: `set_window_parent(surface_id, parent_surface_id)` sends
+    `SET_WINDOW_PARENT`.
+    - Recommended usage: mark dialogs/popups as transient so the compositor can keep them
+        stacked above their parent and move them together during interactive drags.
 
 ## Notes / current limitations
 

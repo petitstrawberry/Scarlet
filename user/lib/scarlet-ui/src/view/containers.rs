@@ -6,10 +6,24 @@ use crate::event::Event;
 use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
 
+/// Cross-axis alignment for stacks.
+///
+/// - `Start`: leading/top
+/// - `Center`: centered (SwiftUI default)
+/// - `End`: trailing/bottom
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StackAlignment {
+    Start,
+    Center,
+    End,
+}
+
 /// Vertical stack - arranges children top to bottom
 pub struct VStack {
     children: Vec<(ViewBox, Size)>,
     spacing: u32,
+    alignment: StackAlignment,
+    cached_size: Size,
 }
 
 impl VStack {
@@ -17,6 +31,8 @@ impl VStack {
         Self {
             children: Vec::new(),
             spacing: 8,
+            alignment: StackAlignment::Center,
+            cached_size: Size::ZERO,
         }
     }
 
@@ -31,15 +47,11 @@ impl VStack {
         self.spacing = spacing;
         self
     }
-    
-    /// Calculate child frame at index
-    fn child_frame(&self, index: usize, base: Rect) -> Rect {
-        let mut y = base.y;
-        for i in 0..index {
-            y += self.children[i].1.height as i32 + self.spacing as i32;
-        }
-        let size = self.children[index].1;
-        Rect::new(base.x, y, size.width, size.height)
+
+    /// Set cross-axis alignment (horizontal).
+    pub fn alignment(mut self, alignment: StackAlignment) -> Self {
+        self.alignment = alignment;
+        self
     }
 }
 
@@ -97,7 +109,8 @@ impl View for VStack {
                 }
 
                 // Give the child its allocated share along the main axis.
-                let child_size = child.layout(Size::new(available.width, share));
+                // Pass 0 for cross-axis so Spacer doesn't expand width.
+                let child_size = child.layout(Size::new(0, share));
                 *cached_size = child_size;
                 max_width = max_width.max(child_size.width);
             }
@@ -108,14 +121,22 @@ impl View for VStack {
             total_height = total_height.saturating_add(cached_size.height);
         }
 
-        Size::new(max_width.min(available.width), total_height.min(available.height))
+        let out = Size::new(max_width.min(available.width), total_height.min(available.height));
+        self.cached_size = out;
+        out
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
         let mut y = frame.y;
 
         for (child, cached_size) in &self.children {
-            let child_frame = Rect::new(frame.x, y, cached_size.width, cached_size.height);
+            let extra = frame.width.saturating_sub(cached_size.width) as i32;
+            let dx = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(frame.x + dx, y, cached_size.width, cached_size.height);
             child.draw(canvas, child_frame);
             y += cached_size.height as i32 + self.spacing as i32;
         }
@@ -125,7 +146,13 @@ impl View for VStack {
         let mut y = frame.y;
 
         for (child, cached_size) in &mut self.children {
-            let child_frame = Rect::new(frame.x, y, cached_size.width, cached_size.height);
+            let extra = frame.width.saturating_sub(cached_size.width) as i32;
+            let dx = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(frame.x + dx, y, cached_size.width, cached_size.height);
             if child_frame.contains(event.x(), event.y()) {
                 if child.on_event(event, child_frame) {
                     return true;
@@ -140,8 +167,15 @@ impl View for VStack {
     fn children(&self) -> Vec<(&dyn View, Rect)> {
         let mut result = Vec::new();
         let mut y = 0i32;
+        let base_w = self.cached_size.width;
         for (child, cached_size) in &self.children {
-            let child_frame = Rect::new(0, y, cached_size.width, cached_size.height);
+            let extra = base_w.saturating_sub(cached_size.width) as i32;
+            let dx = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(dx, y, cached_size.width, cached_size.height);
             result.push((child.as_ref() as &dyn View, child_frame));
             y += cached_size.height as i32 + self.spacing as i32;
         }
@@ -152,8 +186,15 @@ impl View for VStack {
         let mut result = Vec::new();
         let mut y = 0i32;
         let spacing = self.spacing;
+        let base_w = self.cached_size.width;
         for (child, cached_size) in &mut self.children {
-            let child_frame = Rect::new(0, y, cached_size.width, cached_size.height);
+            let extra = base_w.saturating_sub(cached_size.width) as i32;
+            let dx = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(dx, y, cached_size.width, cached_size.height);
             result.push((child.as_mut() as &mut dyn View, child_frame));
             y += cached_size.height as i32 + spacing as i32;
         }
@@ -162,8 +203,15 @@ impl View for VStack {
 
     fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
         let mut y = 0i32;
+        let base_w = self.cached_size.width;
         for (child, cached_size) in &self.children {
-            let child_frame = Rect::new(0, y, cached_size.width, cached_size.height);
+            let extra = base_w.saturating_sub(cached_size.width) as i32;
+            let dx = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(dx, y, cached_size.width, cached_size.height);
             if visitor(child.as_ref() as &dyn View, child_frame) {
                 break;
             }
@@ -174,8 +222,15 @@ impl View for VStack {
     fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
         let mut y = 0i32;
         let spacing = self.spacing;
+        let base_w = self.cached_size.width;
         for (child, cached_size) in &mut self.children {
-            let child_frame = Rect::new(0, y, cached_size.width, cached_size.height);
+            let extra = base_w.saturating_sub(cached_size.width) as i32;
+            let dx = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(dx, y, cached_size.width, cached_size.height);
             if visitor(child.as_mut() as &mut dyn View, child_frame) {
                 break;
             }
@@ -188,6 +243,8 @@ impl View for VStack {
 pub struct HStack {
     children: Vec<(ViewBox, Size)>,
     spacing: u32,
+    alignment: StackAlignment,
+    cached_size: Size,
 }
 
 impl HStack {
@@ -195,6 +252,8 @@ impl HStack {
         Self {
             children: Vec::new(),
             spacing: 8,
+            alignment: StackAlignment::Center,
+            cached_size: Size::ZERO,
         }
     }
 
@@ -207,6 +266,12 @@ impl HStack {
     /// Set spacing between children
     pub fn spacing(mut self, spacing: u32) -> Self {
         self.spacing = spacing;
+        self
+    }
+
+    /// Set cross-axis alignment (vertical).
+    pub fn alignment(mut self, alignment: StackAlignment) -> Self {
+        self.alignment = alignment;
         self
     }
 }
@@ -264,7 +329,8 @@ impl View for HStack {
                     remainder = remainder.saturating_sub(1);
                 }
 
-                let child_size = child.layout(Size::new(share, available.height));
+                // Pass 0 for cross-axis so Spacer doesn't expand height.
+                let child_size = child.layout(Size::new(share, 0));
                 *cached_size = child_size;
                 max_height = max_height.max(child_size.height);
             }
@@ -275,14 +341,22 @@ impl View for HStack {
             total_width = total_width.saturating_add(cached_size.width);
         }
 
-        Size::new(total_width.min(available.width), max_height.min(available.height))
+        let out = Size::new(total_width.min(available.width), max_height.min(available.height));
+        self.cached_size = out;
+        out
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
         let mut x = frame.x;
 
         for (child, cached_size) in &self.children {
-            let child_frame = Rect::new(x, frame.y, cached_size.width, cached_size.height);
+            let extra = frame.height.saturating_sub(cached_size.height) as i32;
+            let dy = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(x, frame.y + dy, cached_size.width, cached_size.height);
             child.draw(canvas, child_frame);
             x += cached_size.width as i32 + self.spacing as i32;
         }
@@ -292,7 +366,13 @@ impl View for HStack {
         let mut x = frame.x;
 
         for (child, cached_size) in &mut self.children {
-            let child_frame = Rect::new(x, frame.y, cached_size.width, cached_size.height);
+            let extra = frame.height.saturating_sub(cached_size.height) as i32;
+            let dy = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(x, frame.y + dy, cached_size.width, cached_size.height);
             if child_frame.contains(event.x(), event.y()) {
                 if child.on_event(event, child_frame) {
                     return true;
@@ -307,8 +387,15 @@ impl View for HStack {
     fn children(&self) -> Vec<(&dyn View, Rect)> {
         let mut result = Vec::new();
         let mut x = 0i32;
+        let base_h = self.cached_size.height;
         for (child, cached_size) in &self.children {
-            let child_frame = Rect::new(x, 0, cached_size.width, cached_size.height);
+            let extra = base_h.saturating_sub(cached_size.height) as i32;
+            let dy = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(x, dy, cached_size.width, cached_size.height);
             result.push((child.as_ref() as &dyn View, child_frame));
             x += cached_size.width as i32 + self.spacing as i32;
         }
@@ -319,8 +406,15 @@ impl View for HStack {
         let mut result = Vec::new();
         let mut x = 0i32;
         let spacing = self.spacing;
+        let base_h = self.cached_size.height;
         for (child, cached_size) in &mut self.children {
-            let child_frame = Rect::new(x, 0, cached_size.width, cached_size.height);
+            let extra = base_h.saturating_sub(cached_size.height) as i32;
+            let dy = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(x, dy, cached_size.width, cached_size.height);
             result.push((child.as_mut() as &mut dyn View, child_frame));
             x += cached_size.width as i32 + spacing as i32;
         }
@@ -329,8 +423,15 @@ impl View for HStack {
 
     fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
         let mut x = 0i32;
+        let base_h = self.cached_size.height;
         for (child, cached_size) in &self.children {
-            let child_frame = Rect::new(x, 0, cached_size.width, cached_size.height);
+            let extra = base_h.saturating_sub(cached_size.height) as i32;
+            let dy = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(x, dy, cached_size.width, cached_size.height);
             if visitor(child.as_ref() as &dyn View, child_frame) {
                 break;
             }
@@ -341,8 +442,15 @@ impl View for HStack {
     fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
         let mut x = 0i32;
         let spacing = self.spacing;
+        let base_h = self.cached_size.height;
         for (child, cached_size) in &mut self.children {
-            let child_frame = Rect::new(x, 0, cached_size.width, cached_size.height);
+            let extra = base_h.saturating_sub(cached_size.height) as i32;
+            let dy = match self.alignment {
+                StackAlignment::Start => 0,
+                StackAlignment::Center => extra / 2,
+                StackAlignment::End => extra,
+            };
+            let child_frame = Rect::new(x, dy, cached_size.width, cached_size.height);
             if visitor(child.as_mut() as &mut dyn View, child_frame) {
                 break;
             }

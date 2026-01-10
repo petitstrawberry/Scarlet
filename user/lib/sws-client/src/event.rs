@@ -3,6 +3,8 @@
 /// Input event from the server
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputEvent {
+    /// Target surface/window id
+    pub surface_id: u32,
     /// Timestamp in microseconds
     pub time: u64,
     /// Event type (EV_KEY, EV_REL, EV_ABS, etc.)
@@ -18,6 +20,15 @@ pub struct InputEvent {
 pub enum Event {
     /// Input event (keyboard, mouse, etc.)
     Input(InputEvent),
+    /// Compositor requests the surface to resize.
+    ///
+    /// Clients should respond by resizing the surface buffer (e.g. via
+    /// `Connection::resize_window`).
+    SurfaceConfigure {
+        surface_id: u32,
+        width: u32,
+        height: u32,
+    },
     /// Window was destroyed by server
     SurfaceDestroyed { surface_id: u32 },
     /// Error from server

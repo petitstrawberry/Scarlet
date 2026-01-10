@@ -3,6 +3,8 @@
 use crate::error::Error;
 use crate::event::{Event, InputEvent};
 use crate::surface::Surface;
+use crate::TransientFlags;
+use crate::WindowSizeLimits;
 use scarlet_std::collections::BTreeMap;
 use scarlet_std::ipc::SharedMemory;
 use scarlet_std::socket::Socket;
@@ -36,7 +38,14 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
         match socket.write(&buf[written..]) {
             Ok(0) => return Err(Error::Disconnected),
             Ok(n) => written += n,
-            Err(_) => return Err(Error::IoError),
+            Err(e) => {
+                if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
+                    // Socket is non-blocking; retry a bit later.
+                    let _ = scarlet_std::thread::sleep(core::time::Duration::from_millis(1));
+                    continue;
+                }
+                return Err(Error::IoError);
+            }
         }
     }
     Ok(())
@@ -178,6 +187,53 @@ impl Connection {
         Ok(())
     }
 
+    /// Set per-window size constraints.
+    ///
+    /// All values are in pixels. `0` means "unset".
+    pub fn set_window_size_limits(
+        &mut self,
+        surface_id: u32,
+        limits: WindowSizeLimits,
+    ) -> Result<(), Error> {
+        self.set_window_size_limits_raw(
+            surface_id,
+            limits.min_width,
+            limits.min_height,
+            limits.max_width,
+            limits.max_height,
+        )
+    }
+
+    /// Set per-window size constraints (raw values).
+    ///
+    /// Prefer [`set_window_size_limits`] with [`WindowSizeLimits`].
+    pub fn set_window_size_limits_raw(
+        &mut self,
+        surface_id: u32,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
+    ) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+
+        let payload = protocol::payload_set_window_size_limits(
+            surface_id,
+            min_width,
+            min_height,
+            max_width,
+            max_height,
+        );
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_SIZE_LIMITS,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
     /// Get a reference to a surface
     pub fn surface(&self, surface_id: u32) -> Option<&Surface> {
         self.surfaces.get(&surface_id)
@@ -242,6 +298,115 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Set (or clear) the logical parent of a window.
+    ///
+    /// Use this for transient dialogs/popups so the compositor can keep the child
+    /// stacked above its parent and move it together during interactive drags.
+    ///
+    /// `parent_surface_id == None` clears the parent.
+    pub fn set_window_parent(
+        &mut self,
+        surface_id: u32,
+        parent_surface_id: Option<u32>,
+    ) -> Result<(), Error> {
+        let parent_id = parent_surface_id.unwrap_or(0);
+        let payload = protocol::payload_set_window_parent(surface_id, parent_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_PARENT,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Configure transient behavior flags for a window.
+    pub fn set_window_transient_flags(
+        &mut self,
+        surface_id: u32,
+        flags: TransientFlags,
+    ) -> Result<(), Error> {
+        self.set_window_transient_flags_raw(surface_id, flags.bits())
+    }
+
+    /// Configure transient behavior flags for a window (raw bits).
+    ///
+    /// Prefer [`set_window_transient_flags`] with [`TransientFlags`].
+    pub fn set_window_transient_flags_raw(
+        &mut self,
+        surface_id: u32,
+        flags: u32,
+    ) -> Result<(), Error> {
+        let payload = protocol::payload_set_window_transient_flags(surface_id, flags);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::SET_WINDOW_TRANSIENT_FLAGS,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Resize a surface.
+    ///
+    /// This is a synchronous request: it waits for `WINDOW_RESIZED` and a new SHM handle,
+    /// then updates the local surface mapping.
+    pub fn resize_window(&mut self, surface_id: u32, width: u32, height: u32) -> Result<(), Error> {
+        if self.surfaces.get(&surface_id).is_none() {
+            return Err(Error::SurfaceNotFound);
+        }
+
+        let payload = protocol::payload_resize_window(surface_id, width, height);
+        write_frame(&mut self.socket, protocol::client_msg::RESIZE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)?;
+
+        // Block until we receive WINDOW_RESIZED + SHM handle.
+        self.socket
+            .set_nonblocking(false)
+            .map_err(|_| Error::SocketConfig)?;
+
+        let (msg_type, payload) = read_frame(&mut self.socket).map_err(|_| Error::ReceiveFailed)?;
+        let response =
+            protocol::parse_server_message(msg_type, &payload).map_err(|_| Error::InvalidResponse)?;
+
+        let (window_id, _shm_size, new_w, new_h) = match response {
+            ServerMessage::WindowResized {
+                window_id,
+                shm_size,
+                width,
+                height,
+            } => (window_id, shm_size, width, height),
+            _ => {
+                self.socket
+                    .set_nonblocking(true)
+                    .map_err(|_| Error::SocketConfig)?;
+                return Err(Error::InvalidResponse);
+            }
+        };
+
+        if window_id != surface_id {
+            self.socket
+                .set_nonblocking(true)
+                .map_err(|_| Error::SocketConfig)?;
+            return Err(Error::InvalidResponse);
+        }
+
+        let shm_handle = self
+            .socket
+            .recv_handle()
+            .map_err(|_| Error::ShmHandleFailed)?;
+        let shm = SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
+
+        self.socket
+            .set_nonblocking(true)
+            .map_err(|_| Error::SocketConfig)?;
+
+        if let Some(surface) = self.surfaces.get_mut(&surface_id) {
+            surface.remap(new_w, new_h, shm)?;
+            Ok(())
+        } else {
+            Err(Error::SurfaceNotFound)
+        }
+    }
+
     /// Dispatch pending events (non-blocking)
     ///
     /// Reads all available events from the socket and stores them.
@@ -262,12 +427,14 @@ impl Connection {
                     if let Ok(msg) = protocol::parse_server_message(msg_type, &payload) {
                         match msg {
                             ServerMessage::InputEvent {
+                                window_id,
                                 time,
                                 type_,
                                 code,
                                 value,
                             } => {
                                 self.pending_events.push(Event::Input(InputEvent {
+                                    surface_id: window_id,
                                     time,
                                     type_,
                                     code,
@@ -279,6 +446,23 @@ impl Connection {
                                 self.surfaces.remove(&window_id);
                                 self.pending_events
                                     .push(Event::SurfaceDestroyed { surface_id: window_id });
+                                count += 1;
+                            }
+                            ServerMessage::WindowResized { window_id, .. } => {
+                                // Resizes are handled synchronously by `resize_window()`.
+                                // Ignore here to keep `dispatch()` non-blocking.
+                                let _ = window_id;
+                            }
+                            ServerMessage::WindowConfigure {
+                                window_id,
+                                width,
+                                height,
+                            } => {
+                                self.pending_events.push(Event::SurfaceConfigure {
+                                    surface_id: window_id,
+                                    width,
+                                    height,
+                                });
                                 count += 1;
                             }
                             ServerMessage::Error { code } => {

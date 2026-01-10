@@ -2,6 +2,7 @@
 
 use crate::Error;
 use scarlet_std::ipc::SharedMemory;
+use scarlet_std::handle::capability::memory_mapping::flags as mmap_flags;
 
 /// A surface represents a drawable window buffer
 ///
@@ -30,23 +31,7 @@ impl Surface {
         height: u32,
         shm: SharedMemory,
     ) -> Result<Self, Error> {
-        let buffer_size = (width * height * 4) as usize;
-        
-        // Map the shared memory into our address space
-        let addr = shm
-            .as_handle()
-            .as_memory_mapping()
-            .map_err(|_| Error::ShmMapFailed)?
-            .mmap(
-                0,
-                buffer_size,
-                scarlet_std::ipc::permissions::READ_WRITE,
-                0,
-                0,
-            )
-            .map_err(|_| Error::ShmMapFailed)?;
-
-        let buffer = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, buffer_size) };
+        let (buffer, _addr) = Self::map_shm(&shm, width, height)?;
 
         Ok(Self {
             id,
@@ -56,6 +41,36 @@ impl Surface {
             buffer,
             dirty: false,
         })
+    }
+
+    fn map_shm(shm: &SharedMemory, width: u32, height: u32) -> Result<(&'static mut [u8], usize), Error> {
+        let buffer_size = (width * height * 4) as usize;
+
+        let addr = shm
+            .as_handle()
+            .as_memory_mapping()
+            .map_err(|_| Error::ShmMapFailed)?
+            .mmap(
+                0,
+                buffer_size,
+                scarlet_std::ipc::permissions::READ_WRITE,
+                mmap_flags::SHARED,
+                0,
+            )
+            .map_err(|_| Error::ShmMapFailed)?;
+
+        let buffer = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, buffer_size) };
+        Ok((buffer, addr))
+    }
+
+    pub(crate) fn remap(&mut self, width: u32, height: u32, shm: SharedMemory) -> Result<(), Error> {
+        let (buffer, _addr) = Self::map_shm(&shm, width, height)?;
+        self.width = width;
+        self.height = height;
+        self.shm = shm;
+        self.buffer = buffer;
+        self.dirty = true;
+        Ok(())
     }
 
     /// Get the surface ID

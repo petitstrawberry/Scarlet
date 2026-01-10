@@ -117,6 +117,24 @@ Semantics:
 - Interactive drag moves should prefer `REQUEST_MOVE_WINDOW` so the compositor can
 	own the pointer-grab and state machine.
 
+#### `SET_WINDOW_PARENT` (type = 7)
+
+Payload (8 bytes):
+
+| Offset | Size | Field       | Type |
+|--------|------|-------------|------|
+| 0      | 4    | `window_id` | u32  |
+| 4      | 4    | `parent_id` | u32  |
+
+Semantics:
+
+- Set (or clear) the logical parent relationship for a window.
+- `parent_id == 0` means "no parent".
+- Intended for transient windows (dialogs/popups) so the compositor can:
+	- Keep the child stacked above the parent when raising.
+	- Move the child together when the parent is interactively moved.
+- Parent relationships are a compositor policy; clients must not assume focus changes.
+
 ### Server → Client
 
 #### `WINDOW_CREATED` (type = 10)

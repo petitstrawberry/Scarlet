@@ -47,7 +47,7 @@ pub mod graphics;
 pub mod view;
 
 // Re-exports
-pub use application::Application;
+pub use application::{Application, ApplicationHandle};
 pub use color::Color;
 pub use event::{Event, EventKind, EventType, MouseButton};
 pub use graphics::{set_default_font, Canvas, Point, Rect};

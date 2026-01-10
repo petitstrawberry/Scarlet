@@ -216,6 +216,55 @@ fn default_font() -> Option<FontRef<'static>> {
     DEFAULT_FONT.lock().font.clone()
 }
 
+/// Measure text using the global default vector font.
+///
+/// Returns `(width, height)` in pixels for a single-line text layout.
+/// If the default font is not available, falls back to a rough estimate.
+pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
+    if let Some(font) = default_font() {
+        let scale = PxScale::from(font_size_px);
+        let scaled = font.as_scaled(scale);
+
+        let mut max_line_w: f32 = 0.0;
+        let mut line_w: f32 = 0.0;
+        let mut lines: u32 = 1;
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                if line_w > max_line_w {
+                    max_line_w = line_w;
+                }
+                line_w = 0.0;
+                lines = lines.saturating_add(1);
+                continue;
+            }
+            let glyph_id = scaled.glyph_id(ch);
+            line_w += scaled.h_advance(glyph_id);
+        }
+
+        if line_w > max_line_w {
+            max_line_w = line_w;
+        }
+
+        let line_h = scaled.height() + scaled.line_gap();
+        let total_h = if lines <= 1 {
+            scaled.height()
+        } else {
+            scaled.height() + (lines.saturating_sub(1) as f32) * line_h
+        };
+
+        let w = ceil_i32(max_line_w).max(0) as u32;
+        let h = ceil_i32(total_h).max(0) as u32;
+        (w, h)
+    } else {
+        let fs = font_size_px.max(1.0);
+        let char_w = ceil_i32(fs * 0.60).max(1) as u32;
+        let w = (text.chars().count() as u32).saturating_mul(char_w);
+        let h = ceil_i32(fs).max(1) as u32;
+        (w, h)
+    }
+}
+
 /// 2D point
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {

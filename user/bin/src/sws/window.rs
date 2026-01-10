@@ -3,18 +3,77 @@
 use std::ipc::{SharedMemory, permissions};
 use std::vec::Vec;
 use std::{print, println};
+use sws_protocol;
 
 /// Window ID type
 pub type WindowId = u32;
+
+/// Per-window size constraints.
+///
+/// All values are in pixels.
+/// - `0` means "unset".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowSizeLimits {
+    pub min_width: u32,
+    pub min_height: u32,
+    pub max_width: u32,
+    pub max_height: u32,
+}
+
+impl WindowSizeLimits {
+    pub fn clamp(&self, width: u32, height: u32) -> (u32, u32) {
+        let mut w = width.max(1);
+        let mut h = height.max(1);
+
+        if self.min_width != 0 {
+            w = w.max(self.min_width.max(1));
+        }
+        if self.min_height != 0 {
+            h = h.max(self.min_height.max(1));
+        }
+
+        let effective_max_width = if self.max_width == 0 {
+            0
+        } else if self.min_width != 0 {
+            self.max_width.max(self.min_width.max(1))
+        } else {
+            self.max_width.max(1)
+        };
+        let effective_max_height = if self.max_height == 0 {
+            0
+        } else if self.min_height != 0 {
+            self.max_height.max(self.min_height.max(1))
+        } else {
+            self.max_height.max(1)
+        };
+
+        if effective_max_width != 0 {
+            w = w.min(effective_max_width);
+        }
+        if effective_max_height != 0 {
+            h = h.min(effective_max_height);
+        }
+
+        (w, h)
+    }
+}
 
 /// Window properties
 #[derive(Debug)]
 pub struct Window {
     pub id: WindowId,
+    /// Optional logical parent window (transient relationship).
+    ///
+    /// When set, the compositor may keep this window stacked above its parent and
+    /// move it together during interactive operations.
+    pub parent: Option<WindowId>,
+    /// Transient behavior flags (bitset).
+    pub transient_flags: u32,
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    pub size_limits: WindowSizeLimits,
     pub title: Option<Vec<u8>>,
     pub visible: bool,
     pub focused: bool,
@@ -27,15 +86,19 @@ pub struct Window {
     pub shm_mapped_addr: Option<usize>,
 }
 
+#[allow(dead_code)]
 impl Window {
     /// Create a new window
     pub fn new(id: WindowId, x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
             id,
+            parent: None,
+            transient_flags: 0,
             x,
             y,
             width,
             height,
+            size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
             focused: false,
@@ -53,10 +116,13 @@ impl Window {
 
         Self {
             id,
+            parent: None,
+            transient_flags: 0,
             x,
             y,
             width,
             height,
+            size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
             focused: false,
@@ -94,10 +160,13 @@ impl Window {
 
         Ok(Self {
             id,
+            parent: None,
+            transient_flags: 0,
             x,
             y,
             width,
             height,
+            size_limits: WindowSizeLimits::default(),
             title: None,
             visible: true,
             focused: false,
@@ -133,8 +202,9 @@ impl Window {
 
     /// Resize window
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
+        let (w, h) = self.size_limits.clamp(width, height);
+        self.width = w;
+        self.height = h;
     }
 }
 
@@ -200,6 +270,7 @@ impl WindowManager {
     }
 
     /// Create a new window with shared memory buffer (server allocates, client maps)
+    #[allow(dead_code)]
     pub fn create_window_with_shm(
         &mut self,
         id: WindowId,
@@ -248,10 +319,13 @@ impl WindowManager {
 
         let window = Window {
             id,
+            parent: None,
+            transient_flags: 0,
             x,
             y,
             width,
             height,
+            size_limits: WindowSizeLimits::default(),
             title: None, // No title from IPC yet
             visible: true,
             focused: false, // Will be focused via focus_window below
@@ -268,6 +342,7 @@ impl WindowManager {
     }
 
     /// Create window without buffer (for testing)
+    #[allow(dead_code)]
     pub fn create_window_no_buffer(&mut self, x: i32, y: i32, width: u32, height: u32) -> WindowId {
         let id = self.next_window_id;
         self.next_window_id += 1;
@@ -327,21 +402,165 @@ impl WindowManager {
 
     /// Raise window to top (bring to front in Z-order)
     pub fn raise_to_top(&mut self, id: WindowId) {
-        println!("[WindowManager] Raising window #{} to top", id);
-        if let Some(index) = self.windows.iter().position(|w| w.id == id) {
-            println!(
-                "[WindowManager] Window was at index {}, moving to end",
-                index
-            );
-            let window = self.windows.remove(index);
-            self.windows.push(window);
+        let root = self.top_level_ancestor(id);
+        println!(
+            "[WindowManager] Raising window #{} (root #{}) to top",
+            id, root
+        );
 
-            // Print current Z-order
-            print!("[WindowManager] Current Z-order (bottom to top): ");
-            for w in &self.windows {
-                print!("#{} ", w.id);
+        // Raise the entire transient group (root + all descendants) together.
+        let mut group_ids: Vec<WindowId> = Vec::new();
+        self.collect_descendants_for_raise(root, &mut group_ids);
+        group_ids.insert(0, root);
+
+        // Snapshot and rebuild Z-order.
+        let old = core::mem::take(&mut self.windows);
+        let mut remaining: Vec<Window> = Vec::new();
+        let mut group: Vec<Window> = Vec::new();
+
+        for w in old {
+            if group_ids.iter().any(|gid| *gid == w.id) {
+                group.push(w);
+            } else {
+                remaining.push(w);
             }
-            println!();
+        }
+
+        // Ensure root is below its descendants within the group.
+        if let Some(pos) = group.iter().position(|w| w.id == root) {
+            let root_w = group.remove(pos);
+            group.insert(0, root_w);
+        }
+
+        self.windows = remaining;
+        self.windows.extend(group);
+
+        // Print current Z-order
+        print!("[WindowManager] Current Z-order (bottom to top): ");
+        for w in &self.windows {
+            print!("#{} ", w.id);
+        }
+        println!();
+    }
+
+    /// Internal helper: return the top-level ancestor for a window (follows parent links).
+    fn top_level_ancestor(&self, mut id: WindowId) -> WindowId {
+        // Follow parents until none or broken link.
+        // This intentionally tolerates inconsistent states.
+        for _ in 0..32 {
+            let parent = self.get_window(id).and_then(|w| w.parent);
+            match parent {
+                Some(p) if p != id => id = p,
+                _ => break,
+            }
+        }
+        id
+    }
+
+    /// Internal helper: collect all descendants of `id` into `out`.
+    fn collect_descendants_follow_move(&self, id: WindowId, out: &mut Vec<WindowId>) {
+        for w in &self.windows {
+            if w.parent == Some(id) {
+                if (w.transient_flags & sws_protocol::transient_flags::FOLLOW_PARENT_MOVE) != 0 {
+                    out.push(w.id);
+                    self.collect_descendants_follow_move(w.id, out);
+                }
+            }
+        }
+    }
+
+    fn collect_descendants_for_raise(&self, id: WindowId, out: &mut Vec<WindowId>) {
+        for w in &self.windows {
+            if w.parent == Some(id) {
+                if (w.transient_flags & sws_protocol::transient_flags::RAISE_WITH_PARENT) != 0 {
+                    out.push(w.id);
+                    self.collect_descendants_for_raise(w.id, out);
+                }
+            }
+        }
+    }
+
+    /// Set (or clear) a window parent.
+    ///
+    /// Returns `false` if the relationship would create a cycle or references missing windows.
+    pub fn set_window_parent(&mut self, window_id: WindowId, parent_id: Option<WindowId>) -> bool {
+        if self.get_window(window_id).is_none() {
+            return false;
+        }
+
+        if let Some(pid) = parent_id {
+            if pid == 0 || pid == window_id {
+                return false;
+            }
+            if self.get_window(pid).is_none() {
+                return false;
+            }
+
+            // Cycle check: ensure `pid` is not a descendant of `window_id`.
+            let mut cur = Some(pid);
+            for _ in 0..32 {
+                match cur {
+                    Some(x) if x == window_id => return false,
+                    Some(x) => cur = self.get_window(x).and_then(|w| w.parent),
+                    None => break,
+                }
+            }
+        }
+
+        if let Some(w) = self.get_window_mut(window_id) {
+            w.parent = parent_id;
+            // Default transient policy when a parent is set (Apple-like):
+            // keep stacking with parent, but do not automatically follow moves.
+            if w.parent.is_some() {
+                w.transient_flags = sws_protocol::transient_flags::RAISE_WITH_PARENT;
+            } else {
+                w.transient_flags = 0;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_window_transient_flags(&mut self, window_id: WindowId, flags: u32) -> bool {
+        if let Some(w) = self.get_window_mut(window_id) {
+            w.transient_flags = flags;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_window_size_limits(
+        &mut self,
+        window_id: WindowId,
+        min_width: u32,
+        min_height: u32,
+        max_width: u32,
+        max_height: u32,
+    ) -> bool {
+        if let Some(w) = self.get_window_mut(window_id) {
+            w.size_limits = WindowSizeLimits {
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clamp_size_for_window(
+        &self,
+        window_id: WindowId,
+        width: u32,
+        height: u32,
+    ) -> (u32, u32) {
+        match self.get_window(window_id) {
+            Some(w) => w.size_limits.clamp(width, height),
+            None => (width.max(1), height.max(1)),
         }
     }
 
@@ -351,6 +570,7 @@ impl WindowManager {
     }
 
     /// Get focused window reference
+    #[allow(dead_code)]
     pub fn get_focused_window(&self) -> Option<&Window> {
         if let Some(focused_id) = self.focused_window {
             self.get_window(focused_id)
@@ -382,18 +602,68 @@ impl WindowManager {
     }
 
     /// Move window by delta
+    #[allow(dead_code)]
     pub fn move_window(&mut self, id: WindowId, dx: i32, dy: i32) {
         if let Some(window) = self.get_window_mut(id) {
             window.x += dx;
             window.y += dy;
         }
+
+        if dx != 0 || dy != 0 {
+            let mut descendants: Vec<WindowId> = Vec::new();
+            self.collect_descendants_follow_move(id, &mut descendants);
+            for cid in descendants {
+                if let Some(w) = self.get_window_mut(cid) {
+                    w.x += dx;
+                    w.y += dy;
+                }
+            }
+        }
     }
 
     /// Set window position (absolute)
     pub fn set_window_position(&mut self, id: WindowId, x: i32, y: i32) {
+        // Compute delta from current position, then apply to descendants as well.
+        let (dx, dy) = match self.get_window(id) {
+            Some(w) => (x - w.x, y - w.y),
+            None => return,
+        };
+
         if let Some(window) = self.get_window_mut(id) {
             window.x = x;
             window.y = y;
+        }
+
+        if dx != 0 || dy != 0 {
+            let mut descendants: Vec<WindowId> = Vec::new();
+            self.collect_descendants_follow_move(id, &mut descendants);
+            for cid in descendants {
+                if let Some(w) = self.get_window_mut(cid) {
+                    w.x += dx;
+                    w.y += dy;
+                }
+            }
+        }
+    }
+
+    pub fn resize_window_with_shm(
+        &mut self,
+        id: WindowId,
+        width: u32,
+        height: u32,
+        shm: SharedMemory,
+        shm_mapped_addr: Option<usize>,
+    ) -> bool {
+        if let Some(w) = self.get_window_mut(id) {
+            let (width, height) = w.size_limits.clamp(width, height);
+            w.width = width;
+            w.height = height;
+            w.buffer = None;
+            w.shm = Some(shm);
+            w.shm_mapped_addr = shm_mapped_addr;
+            true
+        } else {
+            false
         }
     }
 }

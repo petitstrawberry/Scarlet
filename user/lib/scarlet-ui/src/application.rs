@@ -6,6 +6,7 @@ use crate::graphics::{Canvas, Rect, Point};
 use crate::Color;
 use scarlet_std::vec::Vec;
 use sws_client::{Connection, Event as SwsEvent, InputEvent};
+use std::sync::{Arc, Mutex};
 use core::time::Duration;
 
 /// Managed window with surface binding
@@ -47,6 +48,39 @@ pub struct Application {
     windows: Vec<ManagedWindow>,
     last_mouse: Point,
     layout_debug: bool,
+
+    command_queue: Arc<Mutex<Vec<AppCommand>>>,
+    popup_surface_id: Option<u32>,
+    popup_follow_parent_move: bool,
+    main_resized_large: bool,
+}
+
+#[derive(Clone)]
+pub struct ApplicationHandle {
+    command_queue: Arc<Mutex<Vec<AppCommand>>>,
+}
+
+impl ApplicationHandle {
+    pub fn request_popup(&self) {
+        self.command_queue.lock().push(AppCommand::CreatePopup);
+    }
+
+    pub fn toggle_popup_follow_parent_move(&self) {
+        self.command_queue
+            .lock()
+            .push(AppCommand::TogglePopupFollowParentMove);
+    }
+
+    pub fn toggle_main_resize(&self) {
+        self.command_queue.lock().push(AppCommand::ToggleMainResize);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AppCommand {
+    CreatePopup,
+    TogglePopupFollowParentMove,
+    ToggleMainResize,
 }
 
 impl Drop for Application {
@@ -74,7 +108,18 @@ impl Application {
             windows: Vec::new(),
             last_mouse: Point::ZERO,
             layout_debug: false,
+
+            command_queue: Arc::new(Mutex::new(Vec::new())),
+            popup_surface_id: None,
+            popup_follow_parent_move: false,
+            main_resized_large: false,
         })
+    }
+
+    pub fn handle(&self) -> ApplicationHandle {
+        ApplicationHandle {
+            command_queue: self.command_queue.clone(),
+        }
     }
 
     /// Enable or disable layout bounds visualization.
@@ -113,14 +158,27 @@ impl Application {
     ///
     /// The window will be displayed and managed by the application.
     pub fn add_window(&mut self, window: Window) -> Result<(), &'static str> {
+        let _ = self.add_window_inner(window)?;
+        Ok(())
+    }
+
+    fn add_window_inner(&mut self, window: Window) -> Result<u32, &'static str> {
         let width = window.width();
         let height = window.height();
+
+        let size_limits = window.get_size_limits();
         
         // Create surface
         let surface_id = self
             .connection
             .create_surface(width, height)
             .map_err(|_| "Failed to create surface")?;
+
+        if size_limits != sws_client::WindowSizeLimits::NONE {
+            self.connection
+                .set_window_size_limits(surface_id, size_limits)
+                .map_err(|_| "Failed to set window size limits")?;
+        }
         
         // Create managed window
         let mut managed = ManagedWindow::new(window, surface_id);
@@ -145,7 +203,7 @@ impl Application {
         self.connection.commit(surface_id).map_err(|_| "Failed to commit")?;
         
         self.windows.push(managed);
-        Ok(())
+        Ok(surface_id)
     }
 
     /// Run the application event loop
@@ -163,6 +221,15 @@ impl Application {
             // 3. Process drained events
             for sws_event in events.iter().copied() {
                 self.handle_sws_event(sws_event);
+            }
+
+            // 3b. Process application commands requested by UI callbacks.
+            let commands = {
+                let mut queue = self.command_queue.lock();
+                core::mem::take(&mut *queue)
+            };
+            for cmd in commands {
+                self.handle_command(cmd);
             }
 
             // 4. Handle close requests (send DESTROY_WINDOW to SWS)
@@ -190,7 +257,19 @@ impl Application {
                 let _ = self.connection.request_move_window(surface_id);
             }
 
-            // 5. Drop closed windows
+            // 5. Drop closed windows (and destroy their surfaces)
+            let mut closed_surface_ids: Vec<u32> = Vec::new();
+            for w in &self.windows {
+                if w.window.is_close_requested() {
+                    closed_surface_ids.push(w.surface_id);
+                }
+            }
+            for surface_id in closed_surface_ids {
+                let _ = self.connection.destroy_surface(surface_id);
+                if self.popup_surface_id == Some(surface_id) {
+                    self.popup_surface_id = None;
+                }
+            }
             self.windows.retain(|w| !w.window.is_close_requested());
             
             // 6. Layout and draw windows
@@ -226,23 +305,125 @@ impl Application {
         }
     }
 
+    fn handle_command(&mut self, cmd: AppCommand) {
+        match cmd {
+            AppCommand::CreatePopup => {
+                if self.popup_surface_id.is_some() {
+                    return;
+                }
+                if self.windows.is_empty() {
+                    return;
+                }
+
+                let main_surface_id = self.windows[0].surface_id;
+
+                // Create a small popup window.
+                let popup_window = Window::new("Popup", 240, 140)
+                    .background(Color::WHITE)
+                    .content(
+                        crate::view::Padding::new(crate::view::Label::new("Popup")
+                            .color(Color::TEXT))
+                            .all(10),
+                    );
+
+                let popup_surface_id = match self.add_window_inner(popup_window) {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+
+                let _ = self
+                    .connection
+                    .set_window_parent(popup_surface_id, Some(main_surface_id));
+
+                let flags = (if self.popup_follow_parent_move {
+                    sws_client::TransientFlags::FOLLOW_PARENT_MOVE
+                } else {
+                    sws_client::TransientFlags::NONE
+                }) | sws_client::TransientFlags::RAISE_WITH_PARENT;
+                let _ = self
+                    .connection
+                    .set_window_transient_flags(popup_surface_id, flags);
+
+                self.popup_surface_id = Some(popup_surface_id);
+            }
+            AppCommand::TogglePopupFollowParentMove => {
+                self.popup_follow_parent_move = !self.popup_follow_parent_move;
+                if let Some(popup_surface_id) = self.popup_surface_id {
+                    let flags = (if self.popup_follow_parent_move {
+                        sws_client::TransientFlags::FOLLOW_PARENT_MOVE
+                    } else {
+                        sws_client::TransientFlags::NONE
+                    }) | sws_client::TransientFlags::RAISE_WITH_PARENT;
+                    let _ = self
+                        .connection
+                        .set_window_transient_flags(popup_surface_id, flags);
+                }
+            }
+            AppCommand::ToggleMainResize => {
+                if self.windows.is_empty() {
+                    return;
+                }
+
+                self.main_resized_large = !self.main_resized_large;
+                let (w, h) = if self.main_resized_large { (640, 480) } else { (400, 300) };
+
+                let surface_id = self.windows[0].surface_id;
+                if self.connection.resize_window(surface_id, w, h).is_ok() {
+                    self.windows[0].window.set_size(w, h);
+                    self.windows[0].window.set_needs_draw();
+                }
+            }
+        }
+    }
+
     /// Handle a SWS event
     fn handle_sws_event(&mut self, sws_event: SwsEvent) {
         match sws_event {
             SwsEvent::Input(input) => {
                 if let Some(event) = self.convert_input(&input) {
-                    // Dispatch to first window (TODO: proper window targeting)
-                    if !self.windows.is_empty() {
-                        let width = self.windows[0].window.width();
-                        let height = self.windows[0].window.height();
+                    if let Some(index) = self
+                        .windows
+                        .iter()
+                        .position(|w| w.surface_id == input.surface_id)
+                    {
+                        let (width, height) = {
+                            let window = &self.windows[index].window;
+                            (window.width(), window.height())
+                        };
                         let frame = Rect::new(0, 0, width, height);
-                        Self::dispatch_event_to_view(&mut self.windows[0].window, event, frame);
+                        Self::dispatch_event_to_view(&mut self.windows[index].window, event, frame);
                     }
                 }
             }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 // Server destroyed the surface; drop the corresponding window.
                 self.windows.retain(|w| w.surface_id != surface_id);
+                if self.popup_surface_id == Some(surface_id) {
+                    self.popup_surface_id = None;
+                }
+            }
+            SwsEvent::SurfaceConfigure {
+                surface_id,
+                width,
+                height,
+            } => {
+                if let Some(index) = self
+                    .windows
+                    .iter()
+                    .position(|w| w.surface_id == surface_id)
+                {
+                    if self.connection.resize_window(surface_id, width, height).is_ok() {
+                        // The server may clamp the requested size; use the post-resize surface size.
+                        if let Some(surface) = self.connection.surface(surface_id) {
+                            self.windows[index]
+                                .window
+                                .set_size(surface.width(), surface.height());
+                        } else {
+                            self.windows[index].window.set_size(width, height);
+                        }
+                        self.windows[index].window.set_needs_draw();
+                    }
+                }
             }
             SwsEvent::Error { code: _ } => {
                 // Handle error

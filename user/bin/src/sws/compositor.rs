@@ -1,7 +1,5 @@
 //! Compositor module - manages window composition and rendering
 
-use crate::window;
-
 use super::cursor::Cursor;
 use super::input::{CompositorInputEvent, InputManager, key_codes};
 use super::ipc::{IpcEvent, IpcServer};
@@ -9,6 +7,7 @@ use super::window::WindowManager;
 use framebuffer::Framebuffer;
 use std::println;
 use std::vec::Vec;
+use sws_protocol;
 
 // NOTE: The compositor intentionally does NOT manage a manual VRAM mmap mapping.
 // Rendering goes through the framebuffer library (which may internally use mmap).
@@ -41,6 +40,8 @@ pub struct Compositor {
     event_counter: u64,
     left_button_down: bool,
     move_drag: Option<MoveDragState>,
+    resize_drag: Option<ResizeDragState>,
+    resize_outline: Option<(i32, i32, u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +52,21 @@ struct MoveDragState {
     start_window_x: i32,
     start_window_y: i32,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeDragState {
+    window_id: u32,
+    grab_cursor_x: i32,
+    grab_cursor_y: i32,
+    start_width: u32,
+    start_height: u32,
+    last_width: u32,
+    last_height: u32,
+}
+
+const RESIZE_GRIP_PX: i32 = 8;
+const MIN_WINDOW_WIDTH: u32 = 64;
+const MIN_WINDOW_HEIGHT: u32 = 64;
 
 impl Compositor {
     /// Create a new compositor
@@ -119,7 +135,98 @@ impl Compositor {
             event_counter: 0,
             left_button_down: false,
             move_drag: None,
+            resize_drag: None,
+            resize_outline: None,
         })
+    }
+
+    fn draw_outline_rect_to_buffer(
+        screen_width: u32,
+        screen_height: u32,
+        bytes_per_pixel: u32,
+        buffer: &mut [u8],
+        stride: u32,
+        rect: (i32, i32, u32, u32),
+        clip_rect: Option<(i32, i32, u32, u32)>,
+    ) {
+        let (x, y, w, h) = rect;
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        // High-contrast outline (outer black, inner white).
+        // This stays visible regardless of the window background.
+        let outer = [0u8, 0u8, 0u8, 255u8];
+        let inner = [255u8, 255u8, 255u8, 255u8];
+
+        let x0 = x;
+        let y0 = y;
+        let x1 = x.saturating_add(w as i32).saturating_sub(1);
+        let y1 = y.saturating_add(h as i32).saturating_sub(1);
+
+        let mut draw_outline = |rx0: i32, ry0: i32, rx1: i32, ry1: i32, color: [u8; 4]| {
+            if rx1 < rx0 || ry1 < ry0 {
+                return;
+            }
+
+            // Top/bottom
+            for sx in rx0..=rx1 {
+                for sy in [ry0, ry1] {
+                    if sx < 0 || sx >= screen_width as i32 || sy < 0 || sy >= screen_height as i32 {
+                        continue;
+                    }
+                    if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
+                        if sx < clip_x
+                            || sx >= clip_x + clip_w as i32
+                            || sy < clip_y
+                            || sy >= clip_y + clip_h as i32
+                        {
+                            continue;
+                        }
+                    }
+                    let off = ((sy as u32 * stride) + (sx as u32 * bytes_per_pixel)) as usize;
+                    if off + 4 <= buffer.len() {
+                        buffer[off] = color[0];
+                        buffer[off + 1] = color[1];
+                        buffer[off + 2] = color[2];
+                        buffer[off + 3] = color[3];
+                    }
+                }
+            }
+
+            // Left/right
+            for sy in ry0..=ry1 {
+                for sx in [rx0, rx1] {
+                    if sx < 0 || sx >= screen_width as i32 || sy < 0 || sy >= screen_height as i32 {
+                        continue;
+                    }
+                    if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
+                        if sx < clip_x
+                            || sx >= clip_x + clip_w as i32
+                            || sy < clip_y
+                            || sy >= clip_y + clip_h as i32
+                        {
+                            continue;
+                        }
+                    }
+                    let off = ((sy as u32 * stride) + (sx as u32 * bytes_per_pixel)) as usize;
+                    if off + 4 <= buffer.len() {
+                        buffer[off] = color[0];
+                        buffer[off + 1] = color[1];
+                        buffer[off + 2] = color[2];
+                        buffer[off + 3] = color[3];
+                    }
+                }
+            }
+        };
+
+        // Outer black outline.
+        draw_outline(x0, y0, x1, y1, outer);
+
+        // Inner white outline (1px inset) when possible.
+        if w > 2 && h > 2 {
+            draw_outline(x0 + 1, y0 + 1, x1 - 1, y1 - 1, inner);
+        }
     }
 
     /// Initialize display (clear screen and draw cursor)
@@ -650,69 +757,44 @@ impl Compositor {
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
     ) {
-        // // Debug: Log first few pixels of window buffer to detect uninitialized content
-        // // Only log for client windows (id >= 100) to reduce noise
-        // if window.id >= 100 && window_buffer.len() >= 16 {
-        //     println!(
-        //         "[Compositor] Drawing window #{}, buffer first 16 bytes: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-        //         window.id,
-        //         window_buffer[0],
-        //         window_buffer[1],
-        //         window_buffer[2],
-        //         window_buffer[3],
-        //         window_buffer[4],
-        //         window_buffer[5],
-        //         window_buffer[6],
-        //         window_buffer[7],
-        //         window_buffer[8],
-        //         window_buffer[9],
-        //         window_buffer[10],
-        //         window_buffer[11],
-        //         window_buffer[12],
-        //         window_buffer[13],
-        //         window_buffer[14],
-        //         window_buffer[15]
-        //     );
-        // }
+        let win_x0 = window.x;
+        let win_y0 = window.y;
+        let win_x1 = win_x0.saturating_add(window.width as i32);
+        let win_y1 = win_y0.saturating_add(window.height as i32);
 
-        // Compositor only blits buffer content - no decorations
-        for y in 0..window.height {
-            for x in 0..window.width {
-                let screen_x = window.x + x as i32;
-                let screen_y = window.y + y as i32;
+        let mut x0 = win_x0.max(0);
+        let mut y0 = win_y0.max(0);
+        let mut x1 = win_x1.min(screen_width as i32);
+        let mut y1 = win_y1.min(screen_height as i32);
 
-                // Screen bounds check
-                if screen_x < 0
-                    || screen_x >= screen_width as i32
-                    || screen_y < 0
-                    || screen_y >= screen_height as i32
-                {
-                    continue;
-                }
+        if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
+            let clip_x1 = clip_x.saturating_add(clip_w as i32);
+            let clip_y1 = clip_y.saturating_add(clip_h as i32);
+            x0 = x0.max(clip_x);
+            y0 = y0.max(clip_y);
+            x1 = x1.min(clip_x1);
+            y1 = y1.min(clip_y1);
+        }
 
-                // Clip rect check
-                if let Some((clip_x, clip_y, clip_w, clip_h)) = clip_rect {
-                    if screen_x < clip_x
-                        || screen_x >= clip_x + clip_w as i32
-                        || screen_y < clip_y
-                        || screen_y >= clip_y + clip_h as i32
-                    {
-                        continue;
-                    }
-                }
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
 
+        // Copy BGRA pixels from the window buffer into the screen buffer.
+        for sy in y0..y1 {
+            let wy = (sy - win_y0) as u32;
+            let screen_row_off = (sy as u32).saturating_mul(stride as u32) as usize;
+            for sx in x0..x1 {
+                let wx = (sx - win_x0) as u32;
+                let window_offset = ((wy * window.width + wx) * 4) as usize;
                 let screen_offset =
-                    ((screen_y as u32 * stride) + (screen_x as u32 * bytes_per_pixel)) as usize;
+                    screen_row_off + (sx as u32).saturating_mul(bytes_per_pixel) as usize;
 
-                // Draw from window buffer (BGRA format)
-                let window_offset = ((y * window.width + x) * 4) as usize;
                 if window_offset + 4 <= window_buffer.len()
                     && screen_offset + 4 <= screen_buffer.len()
                 {
-                    screen_buffer[screen_offset] = window_buffer[window_offset];
-                    screen_buffer[screen_offset + 1] = window_buffer[window_offset + 1];
-                    screen_buffer[screen_offset + 2] = window_buffer[window_offset + 2];
-                    screen_buffer[screen_offset + 3] = window_buffer[window_offset + 3];
+                    screen_buffer[screen_offset..screen_offset + 4]
+                        .copy_from_slice(&window_buffer[window_offset..window_offset + 4]);
                 }
             }
         }
@@ -846,6 +928,19 @@ impl Compositor {
                     window,
                     backbuffer,
                     stride,
+                    clip,
+                );
+            }
+
+            // Layer 2.5: Draw interactive resize outline (if any)
+            if let Some(rect) = self.resize_outline {
+                Self::draw_outline_rect_to_buffer(
+                    screen_width,
+                    screen_height,
+                    bytes_per_pixel,
+                    backbuffer,
+                    stride,
+                    rect,
                     clip,
                 );
             }
@@ -1009,6 +1104,36 @@ impl Compositor {
                 self.cursor
                     .update_position(dx, dy, self.screen_width, self.screen_height);
 
+                if self.left_button_down {
+                    if let Some(mut state) = self.resize_drag {
+                        let delta_x = self.cursor.x - state.grab_cursor_x;
+                        let delta_y = self.cursor.y - state.grab_cursor_y;
+
+                        let new_w = (state.start_width as i32 + delta_x)
+                            .max(MIN_WINDOW_WIDTH as i32)
+                            as u32;
+                        let new_h = (state.start_height as i32 + delta_y)
+                            .max(MIN_WINDOW_HEIGHT as i32)
+                            as u32;
+                        let (new_w, new_h) = self.window_manager.clamp_size_for_window(
+                            state.window_id,
+                            new_w,
+                            new_h,
+                        );
+                        state.last_width = new_w;
+                        state.last_height = new_h;
+                        self.resize_drag = Some(state);
+
+                        if let Some(window) = self.window_manager.get_window(state.window_id) {
+                            self.resize_outline = Some((window.x, window.y, new_w, new_h));
+                        }
+
+                        self.full_redraw_needed = true;
+                        // While resizing, compositor grabs the pointer.
+                        return Ok(true);
+                    }
+                }
+
                 // If a window move is in progress, update the window position before
                 // converting cursor coordinates into window-local space.
                 if self.left_button_down {
@@ -1036,6 +1161,35 @@ impl Compositor {
             CompositorInputEvent::MouseAbsolute { x, y } => {
                 self.cursor
                     .set_position(x, y, self.screen_width, self.screen_height);
+
+                if self.left_button_down {
+                    if let Some(mut state) = self.resize_drag {
+                        let delta_x = self.cursor.x - state.grab_cursor_x;
+                        let delta_y = self.cursor.y - state.grab_cursor_y;
+
+                        let new_w = (state.start_width as i32 + delta_x)
+                            .max(MIN_WINDOW_WIDTH as i32)
+                            as u32;
+                        let new_h = (state.start_height as i32 + delta_y)
+                            .max(MIN_WINDOW_HEIGHT as i32)
+                            as u32;
+                        let (new_w, new_h) = self.window_manager.clamp_size_for_window(
+                            state.window_id,
+                            new_w,
+                            new_h,
+                        );
+                        state.last_width = new_w;
+                        state.last_height = new_h;
+                        self.resize_drag = Some(state);
+
+                        if let Some(window) = self.window_manager.get_window(state.window_id) {
+                            self.resize_outline = Some((window.x, window.y, new_w, new_h));
+                        }
+
+                        self.full_redraw_needed = true;
+                        return Ok(true);
+                    }
+                }
 
                 if self.left_button_down {
                     if let Some(state) = self.move_drag {
@@ -1068,10 +1222,67 @@ impl Compositor {
                             self.move_drag = None;
                             self.full_redraw_needed = true;
                         }
+
+                        // Finalize resize on left button release.
+                        if let Some(state) = self.resize_drag.take() {
+                            self.resize_outline = None;
+                            self.full_redraw_needed = true;
+
+                            // Ask client to resize once (outline-only during drag).
+                            let (width, height) = self.window_manager.clamp_size_for_window(
+                                state.window_id,
+                                state.last_width,
+                                state.last_height,
+                            );
+                            let payload = sws_protocol::payload_window_configure(
+                                state.window_id,
+                                width,
+                                height,
+                            );
+                            super::ipc::send_message_to_window(
+                                state.window_id,
+                                sws_protocol::server_msg::WINDOW_CONFIGURE,
+                                payload.to_vec(),
+                            );
+                        }
                     }
                 }
 
                 if button == key_codes::BTN_LEFT && pressed {
+                    // Determine target window under cursor.
+                    if let Some(win_id) = self
+                        .window_manager
+                        .window_at_point(self.cursor.x, self.cursor.y)
+                    {
+                        self.window_manager.set_focus(win_id);
+                        self.window_manager.raise_to_top(win_id);
+                        self.full_redraw_needed = true;
+
+                        // Start interactive resize if we're near the bottom/right edge.
+                        if let Some(window) = self.window_manager.get_window(win_id) {
+                            if let Some((wx, wy)) = self.cursor_position_in_window(window) {
+                                let near_right = wx >= window.width as i32 - RESIZE_GRIP_PX;
+                                let near_bottom = wy >= window.height as i32 - RESIZE_GRIP_PX;
+                                if near_right || near_bottom {
+                                    self.move_drag = None;
+                                    self.resize_drag = Some(ResizeDragState {
+                                        window_id: win_id,
+                                        grab_cursor_x: self.cursor.x,
+                                        grab_cursor_y: self.cursor.y,
+                                        start_width: window.width,
+                                        start_height: window.height,
+                                        last_width: window.width,
+                                        last_height: window.height,
+                                    });
+                                    self.resize_outline =
+                                        Some((window.x, window.y, window.width, window.height));
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
+
+                    // Normal click behavior (focus/raise).
                     self.handle_click()?;
                 }
 
@@ -1210,6 +1421,84 @@ impl Compositor {
                 );
                 self.window_manager.set_window_position(window_id, x, y);
                 self.full_redraw_needed = true;
+            }
+            IpcEvent::SetWindowParent {
+                window_id,
+                parent_id,
+            } => {
+                let parent = if parent_id == 0 {
+                    None
+                } else {
+                    Some(parent_id)
+                };
+                println!(
+                    "[Compositor] Setting parent of window #{} to {:?}",
+                    window_id, parent
+                );
+
+                if self.window_manager.set_window_parent(window_id, parent) {
+                    // Keep transient children above their parent by raising the group.
+                    self.window_manager.raise_to_top(window_id);
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::SetWindowTransientFlags { window_id, flags } => {
+                println!(
+                    "[Compositor] Setting transient flags of window #{} to 0x{:x}",
+                    window_id, flags
+                );
+                if self
+                    .window_manager
+                    .set_window_transient_flags(window_id, flags)
+                {
+                    // If raise policy is enabled, re-raise the group.
+                    if (flags & sws_protocol::transient_flags::RAISE_WITH_PARENT) != 0 {
+                        self.window_manager.raise_to_top(window_id);
+                    }
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::SetWindowSizeLimits {
+                window_id,
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            } => {
+                println!(
+                    "[Compositor] Setting size limits of window #{} to min={}x{} max={}x{}",
+                    window_id, min_width, min_height, max_width, max_height
+                );
+                if self
+                    .window_manager
+                    .set_window_size_limits(window_id, min_width, min_height, max_width, max_height)
+                {
+                    // Size limits affect interactive resize behavior.
+                    self.full_redraw_needed = true;
+                }
+            }
+            IpcEvent::ResizeWindow {
+                window_id,
+                width,
+                height,
+                shm,
+                shm_mapped_addr,
+            } => {
+                println!(
+                    "[Compositor] Resizing window #{} to {}x{} (shm_mapped=0x{:x?})",
+                    window_id, width, height, shm_mapped_addr
+                );
+                if let Some(shm) = shm {
+                    if self.window_manager.resize_window_with_shm(
+                        window_id,
+                        width,
+                        height,
+                        shm,
+                        shm_mapped_addr,
+                    ) {
+                        self.full_redraw_needed = true;
+                    }
+                }
             }
         }
         Ok(())

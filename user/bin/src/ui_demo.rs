@@ -33,11 +33,18 @@ pub extern "C" fn main() -> i32 {
     };
     println!("[ui_demo] Connected to SWS");
 
+    let handle = app.handle();
+
     // Debug: visualize view layout bounds
     app.set_layout_debug(true);
 
     // Build the UI using View composition
-    let window = Window::new("UI Demo", 400, 300)
+    let popup_handle = handle.clone();
+    let follow_handle = handle.clone();
+    let resize_handle = handle.clone();
+    let window = Window::new("UI Demo", 420, 300)
+        .min_size(420, 300)
+        .max_size(1024, 768)
         .background(Color::WHITE)
         .content(
             Padding::new(
@@ -50,6 +57,7 @@ pub extern "C" fn main() -> i32 {
                     // Colored boxes in a row
                     .child(
                         HStack::new()
+                            .child(Spacer::new())
                             .child(
                                 RectView::new(Color::rgb(255, 100, 100))
                                     .width(80)
@@ -64,13 +72,26 @@ pub extern "C" fn main() -> i32 {
                                 RectView::new(Color::rgb(100, 100, 255))
                                     .width(80)
                                     .height(50),
-                            ),
+                            )
+                            .child(Spacer::new()),
                     )
                     // Spacing
                     .child(Spacer::new())
                     // Interactive buttons
                     .child(Center::new(
                         HStack::new()
+                            .child(Button::new("Popup", move || {
+                                println!("[ui_demo] Popup button clicked!");
+                                popup_handle.request_popup();
+                            }))
+                            .child(Button::new("Toggle Follow", move || {
+                                println!("[ui_demo] Toggle Follow clicked!");
+                                follow_handle.toggle_popup_follow_parent_move();
+                            }))
+                            .child(Button::new("Resize", move || {
+                                println!("[ui_demo] Resize clicked!");
+                                resize_handle.toggle_main_resize();
+                            }))
                             .child(Button::new("Click Me", || {
                                 println!("[ui_demo] Button 1 clicked!");
                             }))
