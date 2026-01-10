@@ -6,6 +6,7 @@ use crate::graphics::{Canvas, Rect, Point};
 use crate::Color;
 use scarlet_std::vec::Vec;
 use sws_client::{Connection, Event as SwsEvent, InputEvent};
+use core::time::Duration;
 
 /// Managed window with surface binding
 struct ManagedWindow {
@@ -101,10 +102,11 @@ impl Application {
             canvas.stroke(frame, Self::debug_color(depth));
         }
 
-        for (child, rel) in view.children() {
+        view.visit_children(&mut |child, rel| {
             let child_frame = Rect::new(frame.x + rel.x, frame.y + rel.y, rel.width, rel.height);
             Self::draw_layout_debug(child, canvas, child_frame, depth + 1);
-        }
+            false
+        });
     }
 
     /// Add a window to the application
@@ -154,15 +156,12 @@ impl Application {
         loop {
             // 1. Dispatch socket I/O
             let _ = self.connection.dispatch();
-            
-            // 2. Collect pending events first to avoid borrow issues
-            let mut events: Vec<SwsEvent> = Vec::new();
-            while let Some(sws_event) = self.connection.poll_event() {
-                events.push(sws_event);
-            }
-            
-            // 3. Process collected events
-            for sws_event in events {
+
+            // 2. Drain all pending events without O(n^2) shifting
+            let events: Vec<SwsEvent> = self.connection.drain_events();
+
+            // 3. Process drained events
+            for sws_event in events.iter().copied() {
                 self.handle_sws_event(sws_event);
             }
 
@@ -184,6 +183,7 @@ impl Application {
             self.windows.retain(|w| !w.window.is_close_requested());
             
             // 6. Layout and draw windows
+            let mut did_draw = false;
             for i in 0..self.windows.len() {
                 let managed = &mut self.windows[i];
                 let size = Size::new(managed.window.width(), managed.window.height());
@@ -203,8 +203,14 @@ impl Application {
                         }
                         managed.window.clear_needs_draw();
                         let _ = self.connection.commit(managed.surface_id);
+                        did_draw = true;
                     }
                 }
+            }
+
+            // 7. Avoid a busy loop when idle.
+            if events.is_empty() && !did_draw {
+                let _ = scarlet_std::thread::sleep(Duration::from_millis(1));
             }
         }
     }
@@ -301,7 +307,12 @@ impl Application {
     /// Dispatch event in bubble phase recursively
     fn dispatch_bubble(view: &mut dyn View, event: &mut Event, frame: Rect) -> bool {
         // First dispatch to children
-        for (child, child_frame) in view.children_mut() {
+        let mut consumed = false;
+        view.visit_children_mut(&mut |child, child_frame| {
+            if consumed {
+                return true;
+            }
+
             let abs = Rect::new(
                 frame.x + child_frame.x,
                 frame.y + child_frame.y,
@@ -311,12 +322,20 @@ impl Application {
 
             if abs.contains(event.x(), event.y()) {
                 if Self::dispatch_bubble(child, event, abs) {
+                    consumed = true;
                     return true;
                 }
                 if event.is_stopped() {
+                    consumed = true;
                     return true;
                 }
             }
+
+            false
+        });
+
+        if consumed {
+            return true;
         }
         
         // Then handle on this view

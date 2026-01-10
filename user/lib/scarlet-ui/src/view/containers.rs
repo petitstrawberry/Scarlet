@@ -159,6 +159,29 @@ impl View for VStack {
         }
         result
     }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        let mut y = 0i32;
+        for (child, cached_size) in &self.children {
+            let child_frame = Rect::new(0, y, cached_size.width, cached_size.height);
+            if visitor(child.as_ref() as &dyn View, child_frame) {
+                break;
+            }
+            y += cached_size.height as i32 + self.spacing as i32;
+        }
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        let mut y = 0i32;
+        let spacing = self.spacing;
+        for (child, cached_size) in &mut self.children {
+            let child_frame = Rect::new(0, y, cached_size.width, cached_size.height);
+            if visitor(child.as_mut() as &mut dyn View, child_frame) {
+                break;
+            }
+            y += cached_size.height as i32 + spacing as i32;
+        }
+    }
 }
 
 /// Horizontal stack - arranges children left to right
@@ -302,6 +325,29 @@ impl View for HStack {
             x += cached_size.width as i32 + spacing as i32;
         }
         result
+    }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        let mut x = 0i32;
+        for (child, cached_size) in &self.children {
+            let child_frame = Rect::new(x, 0, cached_size.width, cached_size.height);
+            if visitor(child.as_ref() as &dyn View, child_frame) {
+                break;
+            }
+            x += cached_size.width as i32 + self.spacing as i32;
+        }
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        let mut x = 0i32;
+        let spacing = self.spacing;
+        for (child, cached_size) in &mut self.children {
+            let child_frame = Rect::new(x, 0, cached_size.width, cached_size.height);
+            if visitor(child.as_mut() as &mut dyn View, child_frame) {
+                break;
+            }
+            x += cached_size.width as i32 + spacing as i32;
+        }
     }
 }
 
@@ -479,6 +525,26 @@ impl View for Padding {
         v.push((self.child.as_mut() as &mut dyn View, child_frame));
         v
     }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        let child_frame = Rect::new(
+            self.left as i32,
+            self.top as i32,
+            self.cached_size.width,
+            self.cached_size.height,
+        );
+        let _ = visitor(self.child.as_ref() as &dyn View, child_frame);
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        let child_frame = Rect::new(
+            self.left as i32,
+            self.top as i32,
+            self.cached_size.width,
+            self.cached_size.height,
+        );
+        let _ = visitor(self.child.as_mut() as &mut dyn View, child_frame);
+    }
 }
 
 /// Center wrapper - centers child in available space
@@ -532,5 +598,15 @@ impl View for Center {
         let mut v = Vec::new();
         v.push((self.child.as_mut() as &mut dyn View, child_frame));
         v
+    }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        let child_frame = Rect::new(0, 0, self.cached_size.width, self.cached_size.height);
+        let _ = visitor(self.child.as_ref() as &dyn View, child_frame);
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        let child_frame = Rect::new(0, 0, self.cached_size.width, self.cached_size.height);
+        let _ = visitor(self.child.as_mut() as &mut dyn View, child_frame);
     }
 }

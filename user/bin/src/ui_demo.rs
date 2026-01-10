@@ -34,7 +34,7 @@ pub extern "C" fn main() -> i32 {
     println!("[ui_demo] Connected to SWS");
 
     // Debug: visualize view layout bounds
-    app.set_layout_debug(true);
+    // app.set_layout_debug(true);
 
     // Build the UI using View composition
     let window = Window::new("UI Demo", 400, 300)

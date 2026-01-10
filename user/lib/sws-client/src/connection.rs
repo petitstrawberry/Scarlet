@@ -78,6 +78,7 @@ pub struct Connection {
     socket: Socket,
     surfaces: BTreeMap<u32, Surface>,
     pending_events: Vec<Event>,
+    pending_head: usize,
 }
 
 impl Connection {
@@ -102,6 +103,7 @@ impl Connection {
             socket,
             surfaces: BTreeMap::new(),
             pending_events: Vec::new(),
+            pending_head: 0,
         })
     }
 
@@ -226,6 +228,13 @@ impl Connection {
     pub fn dispatch(&mut self) -> Result<usize, Error> {
         let mut count = 0;
 
+        // Opportunistically compact the queue if we've consumed a lot.
+        // This avoids unbounded growth when clients mix `poll_event()` and `dispatch()`.
+        if self.pending_head > 0 && self.pending_head * 2 >= self.pending_events.len() {
+            self.pending_events.drain(..self.pending_head);
+            self.pending_head = 0;
+        }
+
         loop {
             match read_frame(&mut self.socket) {
                 Ok((msg_type, payload)) => {
@@ -270,20 +279,37 @@ impl Connection {
 
     /// Pop the next pending event
     pub fn poll_event(&mut self) -> Option<Event> {
-        if self.pending_events.is_empty() {
-            None
-        } else {
-            Some(self.pending_events.remove(0))
+        if self.pending_head >= self.pending_events.len() {
+            self.pending_events.clear();
+            self.pending_head = 0;
+            return None;
         }
+
+        let ev = self.pending_events[self.pending_head];
+        self.pending_head += 1;
+
+        if self.pending_head >= self.pending_events.len() {
+            self.pending_events.clear();
+            self.pending_head = 0;
+        }
+
+        Some(ev)
     }
 
     /// Drain all pending events
     pub fn drain_events(&mut self) -> Vec<Event> {
-        core::mem::take(&mut self.pending_events)
+        if self.pending_head == 0 {
+            core::mem::take(&mut self.pending_events)
+        } else {
+            let v = self.pending_events[self.pending_head..].to_vec();
+            self.pending_events.clear();
+            self.pending_head = 0;
+            v
+        }
     }
 
     /// Check if there are pending events
     pub fn has_events(&self) -> bool {
-        !self.pending_events.is_empty()
+        self.pending_head < self.pending_events.len()
     }
 }

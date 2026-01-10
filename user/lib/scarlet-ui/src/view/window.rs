@@ -295,6 +295,30 @@ impl View for Window {
         }
     }
 
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        if let Some(ref content) = self.content {
+            let content_frame = Rect::new(
+                0,
+                TITLEBAR_HEIGHT as i32,
+                self.content_size.width,
+                self.content_size.height,
+            );
+            let _ = visitor(content.as_ref() as &dyn View, content_frame);
+        }
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        if let Some(ref mut content) = self.content {
+            let content_frame = Rect::new(
+                0,
+                TITLEBAR_HEIGHT as i32,
+                self.content_size.width,
+                self.content_size.height,
+            );
+            let _ = visitor(content.as_mut() as &mut dyn View, content_frame);
+        }
+    }
+
     fn needs_draw(&self) -> bool {
         self.needs_redraw
     }

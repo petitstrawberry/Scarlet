@@ -97,6 +97,32 @@ pub trait View {
         Vec::new()
     }
 
+    /// Visit children without allocating.
+    ///
+    /// The visitor returns `true` to stop iteration early.
+    ///
+    /// Containers should override this to avoid per-call allocations.
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        for (child, frame) in self.children() {
+            if visitor(child, frame) {
+                break;
+            }
+        }
+    }
+
+    /// Visit mutable children without allocating.
+    ///
+    /// The visitor returns `true` to stop iteration early.
+    ///
+    /// Containers should override this to avoid per-call allocations.
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        for (child, frame) in self.children_mut() {
+            if visitor(child, frame) {
+                break;
+            }
+        }
+    }
+
     /// Flex factor for main-axis space distribution in stacks.
     ///
     /// - `0` (default): the view is laid out at its natural size.
