@@ -15,7 +15,7 @@ const CLOSE_BUTTON_SIZE: u32 = 18;
 /// Close button margin from edge
 const CLOSE_BUTTON_MARGIN: u32 = 8;
 /// Window corner radius
-const WINDOW_CORNER_RADIUS: u32 = 8;
+const WINDOW_CORNER_RADIUS: u32 = 0;
 
 /// Window - a root view with decorations (title bar, border)
 ///
@@ -259,12 +259,24 @@ impl Window {
 
     /// Draw the border
     fn draw_border(&self, canvas: &mut Canvas) {
-        // Modern border with subtle shadow effect and rounded corners
+        // Modern border with subtle shadow effect (no rounded corners)
         let border_color = Color::rgb(100, 100, 105);
-        canvas.draw_rounded_rect(0, 0, self.width, self.height, WINDOW_CORNER_RADIUS, border_color);
-        
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        canvas.draw_rect(0, 0, self.width, self.height, border_color);
+
         // Inner highlight for depth
-        canvas.draw_rounded_rect(1, 1, self.width - 2, self.height - 2, WINDOW_CORNER_RADIUS.saturating_sub(1), Color::rgb(90, 90, 95));
+        if self.width > 2 && self.height > 2 {
+            canvas.draw_rect(
+                1,
+                1,
+                self.width.saturating_sub(2),
+                self.height.saturating_sub(2),
+                Color::rgb(90, 90, 95),
+            );
+        }
     }
 }
 
@@ -286,8 +298,8 @@ impl View for Window {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        // Fill background with rounded corners
-        canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, WINDOW_CORNER_RADIUS, self.background);
+        // Fill background (no rounded corners)
+        canvas.fill_rect(frame.x, frame.y, frame.width, frame.height, self.background);
         
         // Draw content
         if let Some(ref content) = self.content {
