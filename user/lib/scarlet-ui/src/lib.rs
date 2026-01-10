@@ -116,6 +116,8 @@ pub mod color;
 pub mod event;
 pub mod graphics;
 pub mod modifiers;
+pub mod state;
+pub mod timer;
 pub mod view;
 
 // Re-exports
@@ -123,6 +125,11 @@ pub use application::{Application, ApplicationDelegate, ApplicationHandle};
 pub use color::Color;
 pub use event::{Event, EventKind, EventType, MouseButton};
 pub use graphics::{set_default_font, Canvas, Point, Rect};
+pub use state::{State, Binding, Observable};
+pub use timer::{Timer, schedule_on_main_thread};
+
+// Proc macro re-exports
+pub use scarlet_ui_macros::{View as DeriveView, state, binding, view_builder};
 
 // Vector font support (always enabled)
 pub use ab_glyph::{FontRef, InvalidFont};

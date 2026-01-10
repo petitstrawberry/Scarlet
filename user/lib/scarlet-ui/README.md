@@ -1,6 +1,6 @@
 # Scarlet UI
 
-A modern UI toolkit for Scarlet OS with SwiftUI-inspired APIs.
+A modern UI toolkit for Scarlet OS with SwiftUI-inspired APIs and reactive state management.
 
 ## Features
 
@@ -10,6 +10,100 @@ A modern UI toolkit for Scarlet OS with SwiftUI-inspired APIs.
 - **Automatic layout**: Views handle their own layout within constraints
 - **Event handling**: Two-phase event system (capture and bubble)
 - **Window management**: Built-in window decorations with modern design
+
+### Reactive State Management
+
+Scarlet UI provides SwiftUI-style reactive state management for automatic view updates:
+
+```rust
+use scarlet_ui::{State, Label, Button, VStack};
+
+let counter = State::new(0);
+let counter_clone = counter.clone();
+
+VStack::new()
+    .child(Label::new(format!("Count: {}", counter.get())))
+    .child(Button::new("Increment", move || {
+        counter_clone.set(counter_clone.get() + 1);
+    }))
+```
+
+#### State<T>
+
+Reactive state that triggers view updates when modified:
+
+```rust
+let state = State::new(42);
+state.set(100);  // Updates all observers
+println!("{}", state.get());  // Prints: 100
+```
+
+#### Binding<T>
+
+Two-way binding for connecting state to UI controls:
+
+```rust
+let text = State::new(String::from(""));
+let binding = text.binding();
+
+TextField::new("Enter text...")
+    .bind(binding)  // TextField can read and write
+```
+
+### Timer Support
+
+Schedule periodic or one-shot updates:
+
+```rust
+use scarlet_ui::Timer;
+use core::time::Duration;
+
+// Periodic timer
+let timer = Timer::periodic(Duration::from_secs(1), || {
+    println!("Tick!");
+});
+
+// One-shot timer
+Timer::once(Duration::from_millis(500), || {
+    println!("Delayed action");
+});
+
+// Cancel timer
+timer.cancel();
+```
+
+### Thread-Safe UI Updates
+
+Update UI from background threads:
+
+```rust
+use scarlet_ui::{schedule_on_main_thread, State};
+
+let counter = State::new(0);
+
+// From a background thread:
+std::thread::spawn(move || {
+    // Do background work...
+    schedule_on_main_thread(move || {
+        // This runs on the main UI thread
+        counter.set(counter.get() + 1);
+    });
+});
+```
+
+### Declarative Macros
+
+Use proc macros for cleaner UI code:
+
+```rust
+use scarlet_ui::{DeriveView, state, binding};
+
+#[derive(DeriveView)]
+struct CounterView {
+    #[state]
+    count: i32,
+}
+```
 
 ### Layout Containers
 
@@ -122,7 +216,7 @@ Window::new("My App", 600, 400)
     .content(/* your views */)
 ```
 
-## Example Application
+## Example Application with Reactive State
 
 ```rust
 #![no_std]
@@ -133,24 +227,44 @@ extern crate scarlet_std as std;
 use scarlet_ui::{
     Application, Window, VStack, HStack, Label, Button, 
     CheckBox, Slider, Padding, Color, ViewModifier,
+    State, Timer,
 };
+use core::time::Duration;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
     let mut app = Application::new().expect("Failed to connect");
     
-    let window = Window::new("Demo", 600, 400)
+    // Reactive state
+    let counter = State::new(0);
+    let enabled = State::new(true);
+    
+    // Timer to auto-increment
+    let counter_clone = counter.clone();
+    Timer::periodic(Duration::from_secs(1), move || {
+        counter_clone.set(counter_clone.get() + 1);
+    });
+    
+    let window = Window::new("Reactive Demo", 600, 400)
         .background(Color::rgb(245, 245, 250))
         .content(
             Padding::new(
                 VStack::new()
                     .spacing(16)
-                    .child(Label::new("Welcome!").font_size(32))
-                    .child(CheckBox::new("Enable feature", true))
+                    .child(Label::new(format!("Counter: {}", counter.get())).font_size(32))
+                    .child(CheckBox::new("Auto-increment", enabled.get())
+                        .on_toggle(move |checked| {
+                            enabled.set(checked);
+                        })
+                    )
                     .child(Slider::new(0.5, 0.0, 1.0))
                     .child(HStack::new()
-                        .child(Button::new("OK", || println!("OK")))
-                        .child(Button::new("Cancel", || println!("Cancel")))
+                        .child(Button::new("Reset", move || {
+                            counter.set(0);
+                        }))
+                        .child(Button::new("Increment", move || {
+                            counter.set(counter.get() + 1);
+                        }))
                     )
             ).all(20)
         );
@@ -166,8 +280,9 @@ Scarlet UI is inspired by SwiftUI and follows these principles:
 
 1. **Declarative**: Describe what you want, not how to build it
 2. **Composable**: Build complex UIs from simple components
-3. **Type-safe**: Leverage Rust's type system for correctness
-4. **Efficient**: Minimal allocations, `no_std` compatible
+3. **Reactive**: State changes automatically update views
+4. **Type-safe**: Leverage Rust's type system for correctness
+5. **Efficient**: Minimal allocations, `no_std` compatible
 
 ## Building
 

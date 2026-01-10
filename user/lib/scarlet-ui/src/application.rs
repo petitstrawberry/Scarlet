@@ -263,7 +263,19 @@ impl Application {
     /// This method never returns. It handles all events, layout,
     /// and drawing automatically.
     pub fn run(&mut self) -> ! {
+        let mut last_time_ms = 0u64;
+        
         loop {
+            // Get current time in milliseconds (approximate)
+            let current_time_ms = last_time_ms + 16; // Approximate 60 FPS
+            last_time_ms = current_time_ms;
+            
+            // Process timers
+            crate::timer::process_timers(current_time_ms);
+            
+            // Process main thread queue
+            crate::timer::process_main_thread_queue();
+            
             // 1. Dispatch socket I/O
             let _ = self.connection.dispatch();
 
