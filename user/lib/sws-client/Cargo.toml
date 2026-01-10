@@ -1,0 +1,12 @@
+[package]
+name = "sws-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet_std = { path = "../std" }
+sws_protocol = { path = "../sws_protocol" }
+
+[lib]
+name = "sws_client"
+path = "src/lib.rs"

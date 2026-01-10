@@ -80,7 +80,13 @@ name = "socket_handle_transfer_demo"
 path = "src/socket_handle_transfer_demo.rs"
 test = false
 
+[[bin]]
+name = "ui_demo"
+path = "src/ui_demo.rs"
+
 [dependencies]
 scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
 sws_protocol = { path = "../lib/sws_protocol" }
+sws-client = { path = "../lib/sws-client" }
+scarlet-ui = { path = "../lib/scarlet-ui" }

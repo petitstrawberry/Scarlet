@@ -288,10 +288,10 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             client_id, window_id, e
                         );
                     } else {
-                        println!(
-                            "[ClientThread {}] Sent event: type={} code={} value={}",
-                            client_id, event.type_, event.code, event.value
-                        );
+                        // println!(
+                        //     "[ClientThread {}] Sent event: type={} code={} value={}",
+                        //     client_id, event.type_, event.code, event.value
+                        // );
                     }
                 }
             }
