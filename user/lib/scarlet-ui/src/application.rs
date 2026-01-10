@@ -179,6 +179,17 @@ impl Application {
                 let _ = self.connection.destroy_surface(surface_id);
             }
 
+            // 4b. Handle move requests (send REQUEST_MOVE_WINDOW to SWS)
+            let mut move_surface_ids: Vec<u32> = Vec::new();
+            for i in 0..self.windows.len() {
+                if self.windows[i].window.take_move_requested() {
+                    move_surface_ids.push(self.windows[i].surface_id);
+                }
+            }
+            for surface_id in move_surface_ids {
+                let _ = self.connection.request_move_window(surface_id);
+            }
+
             // 5. Drop closed windows
             self.windows.retain(|w| !w.window.is_close_requested());
             

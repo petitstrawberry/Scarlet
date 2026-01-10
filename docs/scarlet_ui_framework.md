@@ -491,37 +491,42 @@ impl Application {
     pub fn run(&mut self) -> ! {
         loop {
             // 1. Dispatch socket I/O
-            self.connection.dispatch();
+            let _ = self.connection.dispatch();
             
-            // 2. Process all pending events
-            while let Some(sws_event) = self.connection.poll_event() {
-                let event = self.convert_event(sws_event);
-                
-                // Route event through window (root view)
-                for window in &mut self.windows {
-                    let frame = window.frame();
-                    if window.handle_event(&event, frame) {
-                        break; // Event consumed
-                    }
+            // 2. Drain all pending events in one shot
+            let events = self.connection.drain_events();
+
+            // 3. Convert + dispatch events through the Window(root view)
+            for sws_event in events {
+                if let Some(event) = self.convert_event(sws_event) {
+                    // NOTE: window targeting is still evolving; the important part is
+                    // that propagation happens inside the view tree.
+                    self.dispatch_to_root_windows(event);
                 }
             }
-            
-            // 3. Layout all windows that need it
+
+            // 4. Handle lifecycle requests originating from UI (e.g. close/move)
+            self.flush_close_requests_to_sws();
+            self.flush_move_requests_to_sws();
+
+            // 5. Layout + draw (draw only when needed)
+            let mut did_draw = false;
             for window in &mut self.windows {
-                if window.needs_layout() {
-                    let size = Size::new(window.width(), window.height());
-                    window.layout(size);
-                }
-            }
-            
-            // 4. Draw all windows that need it
-            for window in &mut self.windows {
+                let size = Size::new(window.width(), window.height());
+                window.layout(size);
+
                 if window.needs_draw() {
                     let mut canvas = window.canvas();
                     let frame = window.frame();
                     window.draw(&mut canvas, frame);
                     window.commit();
+                    did_draw = true;
                 }
+            }
+
+            // 6. Avoid a busy loop when idle
+            if !did_draw {
+                sleep_ms(1);
             }
         }
     }

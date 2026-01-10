@@ -47,6 +47,7 @@ pub struct Window {
     close_button_hovered: bool,
     close_button_pressed: bool,
     close_requested: bool,
+    move_requested: bool,
     needs_redraw: bool,
 }
 
@@ -69,6 +70,7 @@ impl Window {
             close_button_hovered: false,
             close_button_pressed: false,
             close_requested: false,
+            move_requested: false,
             needs_redraw: true,
         }
     }
@@ -114,6 +116,12 @@ impl Window {
     /// Check if close was requested
     pub fn is_close_requested(&self) -> bool {
         self.close_requested
+    }
+
+    pub fn take_move_requested(&mut self) -> bool {
+        let v = self.move_requested;
+        self.move_requested = false;
+        v
     }
 
     /// Clear redraw flag after a successful draw/commit.
@@ -230,7 +238,9 @@ impl View for Window {
                         self.needs_redraw = true;
                         true // Consume
                     } else {
-                        false
+                        // Titlebar drag: request compositor-level move.
+                        self.move_requested = true;
+                        true
                     }
                 }
                 EventKind::MouseUp { button: MouseButton::Left } => {

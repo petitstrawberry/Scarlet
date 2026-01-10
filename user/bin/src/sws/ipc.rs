@@ -585,6 +585,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                     damage_height: height,
                 });
             }
+            Ok(ClientMessageRef::RequestMoveWindow { window_id }) => {
+                push_ipc_event(IpcEvent::RequestMove { window_id });
+            }
+            Ok(ClientMessageRef::MoveWindow { window_id, x, y }) => {
+                push_ipc_event(IpcEvent::MoveWindow { window_id, x, y });
+            }
             Ok(_) => {
                 // Ignore other messages for now
             }

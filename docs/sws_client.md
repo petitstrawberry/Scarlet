@@ -21,6 +21,11 @@ This library is intentionally **not** a widget toolkit. It is the "Wayland clien
 
 ## Typical control flow
 
+`sws-client` is a low-level building block. Most native applications should prefer
+`scarlet-ui`, which owns the event loop and dispatches input into a view tree.
+
+For low-level/advanced usage (or when implementing a toolkit), the typical flow is:
+
 1. Connect once per process.
 2. Create a surface (window).
 3. Draw by writing to the surface buffer.
@@ -53,6 +58,20 @@ loop {
         let _ = ev;
     }
 }
+
+## Window movement
+
+The protocol provides two window movement messages with different intent:
+
+- Interactive user-driven movement: `request_move_window(surface_id)` sends
+    `REQUEST_MOVE_WINDOW`.
+    - Recommended usage: send once when the user starts dragging a title bar.
+    - The compositor should own the drag state and update the window position based
+        on global pointer motion.
+
+- Programmatic movement: `move_window(surface_id, x, y)` sends `MOVE_WINDOW`.
+    - Recommended usage: one-shot reposition (e.g. centering a window).
+    - Not recommended to stream continuously for interactive dragging.
 ```
 
 ## Notes / current limitations

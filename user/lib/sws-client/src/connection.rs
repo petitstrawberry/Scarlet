@@ -221,6 +221,27 @@ impl Connection {
         self.socket.flush().map_err(|_| Error::IoError)
     }
 
+    /// Request that the window manager begins an interactive move for this surface.
+    ///
+    /// The server is expected to track pointer movement and update the window position
+    /// until the primary button is released.
+    pub fn request_move_window(&mut self, surface_id: u32) -> Result<(), Error> {
+        let payload = protocol::payload_request_move_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::REQUEST_MOVE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)
+    }
+
+    /// Set the window position (absolute) for this surface.
+    pub fn move_window(&mut self, surface_id: u32, x: i32, y: i32) -> Result<(), Error> {
+        let payload = protocol::payload_move_window(surface_id, x, y);
+        write_frame(&mut self.socket, protocol::client_msg::MOVE_WINDOW, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Dispatch pending events (non-blocking)
     ///
     /// Reads all available events from the socket and stores them.

@@ -85,6 +85,20 @@ Payload (20 bytes):
 
 Payload (4 bytes): `window_id: u32`
 
+Semantics:
+
+- This is a **user-initiated interactive move request** (e.g. title-bar drag).
+- Clients should send this once when the user starts a drag gesture.
+- After receiving this request, the compositor is expected to enter a temporary
+	**move-drag mode** for `window_id` where it uses global pointer motion to update
+	the window position until the initiating button is released.
+- During move-drag mode, the compositor should treat the pointer as **grabbed** by
+	the compositor (i.e. avoid routing pointer motion to other clients) to keep the
+	gesture robust.
+- The compositor may raise the window to the front. Whether the window becomes
+	focused is a compositor policy (typically handled by click-to-focus), and is
+	not required for moving.
+
 #### `MOVE_WINDOW` (type = 6)
 
 Payload (12 bytes):
@@ -94,6 +108,14 @@ Payload (12 bytes):
 | 0      | 4    | `window_id` | u32  |
 | 4      | 4    | `x`         | i32  |
 | 8      | 4    | `y`         | i32  |
+
+Semantics:
+
+- This is a **programmatic reposition** request to set an absolute window origin.
+- Intended for non-interactive use cases (e.g. centering a dialog, restoring a
+	saved layout).
+- Interactive drag moves should prefer `REQUEST_MOVE_WINDOW` so the compositor can
+	own the pointer-grab and state machine.
 
 ### Server → Client
 

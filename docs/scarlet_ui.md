@@ -20,25 +20,19 @@ This crate is responsible for:
 ## Minimal example
 
 ```rust
-use scarlet_ui::{Application, Color, Rect};
+use scarlet_ui::{Application, Window, VStack, Label, Button};
 
-let mut app = Application::new()?;
-let mut window = app.create_window("UI Demo", 400, 300)?;
-let surface_id = window.surface_id();
+let mut app = Application::new().expect("Failed to connect to SWS");
 
-{
-    let mut canvas = window.canvas();
-    canvas.fill_rect(Rect::new(0, 0, 400, 300), Color::WHITE);
-}
+let window = Window::new("UI Demo", 400, 300)
+    .content(
+        VStack::new()
+            .child(Label::new("Hello"))
+            .child(Button::new("Click", || {})),
+    );
 
-app.commit(surface_id)?;
-
-loop {
-    while let Some((win_id, event)) = app.poll_event() {
-        let _ = (win_id, event);
-    }
-    let _ = app.commit(surface_id);
-}
+app.add_window(window).expect("Failed to create window");
+app.run();
 ```
 
 ## Demo
@@ -51,6 +45,10 @@ See `ui_demo` at `user/bin/src/ui_demo.rs` for a working end-to-end example usin
 
 ## Event model (current)
 
-- `Application::poll_event()` returns `(surface_id, Event)`.
-- Mouse absolute coordinates are delivered as separate X/Y updates (matching evdev semantics).
-- Window targeting is currently conservative and may be refined as multi-window routing matures.
+- Application code does not manually poll events. `Application` owns the event loop and dispatches
+    input through the root `Window` view.
+- Input is delivered as a `scarlet-ui` `Event` and propagated through the view tree using a
+    capture + bubble model.
+- Redraw is demand-driven: views mark themselves dirty (via `needs_draw`) and the application
+    commits only when a window needs drawing.
+- Current limitation: window targeting is conservative (input is not yet fully routed per-window).

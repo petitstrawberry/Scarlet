@@ -39,6 +39,17 @@ pub struct Compositor {
     backbuffer_stride: u32,
     full_redraw_needed: bool,
     event_counter: u64,
+    left_button_down: bool,
+    move_drag: Option<MoveDragState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MoveDragState {
+    window_id: u32,
+    grab_cursor_x: i32,
+    grab_cursor_y: i32,
+    start_window_x: i32,
+    start_window_y: i32,
 }
 
 impl Compositor {
@@ -106,6 +117,8 @@ impl Compositor {
             backbuffer_stride,
             full_redraw_needed: true,
             event_counter: 0,
+            left_button_down: false,
+            move_drag: None,
         })
     }
 
@@ -996,6 +1009,21 @@ impl Compositor {
                 self.cursor
                     .update_position(dx, dy, self.screen_width, self.screen_height);
 
+                // If a window move is in progress, update the window position before
+                // converting cursor coordinates into window-local space.
+                if self.left_button_down {
+                    if let Some(state) = self.move_drag {
+                        let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
+                        let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
+                        self.window_manager
+                            .set_window_position(state.window_id, new_x, new_y);
+
+                        // While moving a window, the compositor "grabs" the pointer.
+                        // Avoid routing mouse moves to the currently focused client.
+                        return Ok(true);
+                    }
+                }
+
                 // Route mouse move to focused window (converted to absolute coordinates)
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
@@ -1009,6 +1037,19 @@ impl Compositor {
                 self.cursor
                     .set_position(x, y, self.screen_width, self.screen_height);
 
+                if self.left_button_down {
+                    if let Some(state) = self.move_drag {
+                        let new_x = state.start_window_x + (self.cursor.x - state.grab_cursor_x);
+                        let new_y = state.start_window_y + (self.cursor.y - state.grab_cursor_y);
+                        self.window_manager
+                            .set_window_position(state.window_id, new_x, new_y);
+
+                        // While moving a window, the compositor "grabs" the pointer.
+                        // Avoid routing mouse moves to the currently focused client.
+                        return Ok(true);
+                    }
+                }
+
                 // Route mouse position to focused window
                 if let Some(focused_id) = self.window_manager.get_focused_window_id() {
                     if let Some(window) = self.window_manager.get_window(focused_id) {
@@ -1019,6 +1060,17 @@ impl Compositor {
                 Ok(true)
             }
             CompositorInputEvent::MouseButton { button, pressed } => {
+                if button == key_codes::BTN_LEFT {
+                    self.left_button_down = pressed;
+                    if !pressed {
+                        // Always exit move mode on left button release.
+                        if self.move_drag.is_some() {
+                            self.move_drag = None;
+                            self.full_redraw_needed = true;
+                        }
+                    }
+                }
+
                 if button == key_codes::BTN_LEFT && pressed {
                     self.handle_click()?;
                 }
@@ -1133,7 +1185,23 @@ impl Compositor {
             }
             IpcEvent::RequestMove { window_id } => {
                 println!("[Compositor] Window #{} requested move", window_id);
-                // TODO: Enter move mode for this window
+
+                let (start_window_x, start_window_y) =
+                    match self.window_manager.get_window(window_id) {
+                        Some(w) => (w.x, w.y),
+                        None => return Ok(()),
+                    };
+
+                // Bring the window to front for the drag (focus is handled by click routing).
+                self.window_manager.raise_to_top(window_id);
+
+                self.move_drag = Some(MoveDragState {
+                    window_id,
+                    grab_cursor_x: self.cursor.x,
+                    grab_cursor_y: self.cursor.y,
+                    start_window_x,
+                    start_window_y,
+                });
             }
             IpcEvent::MoveWindow { window_id, x, y } => {
                 println!(
