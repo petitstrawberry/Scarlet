@@ -200,6 +200,10 @@ impl Default for Spacer {
 }
 
 impl View for Spacer {
+    fn flex_factor(&self) -> u32 {
+        1
+    }
+
     fn layout(&mut self, available: Size) -> Size {
         // Spacer takes all available space (flex behavior)
         Size::new(

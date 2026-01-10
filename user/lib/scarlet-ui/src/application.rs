@@ -3,6 +3,7 @@
 use crate::view::{Window, View, Size};
 use crate::event::{Event, MouseButton};
 use crate::graphics::{Canvas, Rect, Point};
+use crate::Color;
 use scarlet_std::vec::Vec;
 use sws_client::{Connection, Event as SwsEvent, InputEvent};
 
@@ -44,6 +45,7 @@ pub struct Application {
     connection: Connection,
     windows: Vec<ManagedWindow>,
     last_mouse: Point,
+    layout_debug: bool,
 }
 
 impl Drop for Application {
@@ -70,7 +72,39 @@ impl Application {
             connection,
             windows: Vec::new(),
             last_mouse: Point::ZERO,
+            layout_debug: false,
         })
+    }
+
+    /// Enable or disable layout bounds visualization.
+    ///
+    /// When enabled, the framework draws rectangle outlines for the allocated
+    /// frames of each view after the normal draw pass.
+    pub fn set_layout_debug(&mut self, enabled: bool) {
+        self.layout_debug = enabled;
+        for w in &mut self.windows {
+            w.window.set_needs_draw();
+        }
+    }
+
+    fn debug_color(depth: u32) -> Color {
+        match depth % 4 {
+            0 => Color::RED,
+            1 => Color::GREEN,
+            2 => Color::BLUE,
+            _ => Color::GRAY,
+        }
+    }
+
+    fn draw_layout_debug(view: &dyn View, canvas: &mut Canvas, frame: Rect, depth: u32) {
+        if frame.width > 0 && frame.height > 0 {
+            canvas.stroke(frame, Self::debug_color(depth));
+        }
+
+        for (child, rel) in view.children() {
+            let child_frame = Rect::new(frame.x + rel.x, frame.y + rel.y, rel.width, rel.height);
+            Self::draw_layout_debug(child, canvas, child_frame, depth + 1);
+        }
     }
 
     /// Add a window to the application
@@ -98,6 +132,9 @@ impl Application {
             if let Some(surface) = self.connection.surface_mut(surface_id) {
                 let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
                 managed.window.draw(&mut canvas, frame);
+                if self.layout_debug {
+                    Self::draw_layout_debug(&managed.window, &mut canvas, frame, 0);
+                }
                 managed.window.clear_needs_draw();
             }
         }
@@ -161,6 +198,9 @@ impl Application {
                     if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
                         let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
                         managed.window.draw(&mut canvas, frame);
+                        if self.layout_debug {
+                            Self::draw_layout_debug(&managed.window, &mut canvas, frame, 0);
+                        }
                         managed.window.clear_needs_draw();
                         let _ = self.connection.commit(managed.surface_id);
                     }
@@ -262,8 +302,15 @@ impl Application {
     fn dispatch_bubble(view: &mut dyn View, event: &mut Event, frame: Rect) -> bool {
         // First dispatch to children
         for (child, child_frame) in view.children_mut() {
-            if child_frame.contains(event.x(), event.y()) {
-                if Self::dispatch_bubble(child, event, child_frame) {
+            let abs = Rect::new(
+                frame.x + child_frame.x,
+                frame.y + child_frame.y,
+                child_frame.width,
+                child_frame.height,
+            );
+
+            if abs.contains(event.x(), event.y()) {
+                if Self::dispatch_bubble(child, event, abs) {
                     return true;
                 }
                 if event.is_stopped() {

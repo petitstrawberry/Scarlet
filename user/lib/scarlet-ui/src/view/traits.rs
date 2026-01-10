@@ -97,6 +97,14 @@ pub trait View {
         Vec::new()
     }
 
+    /// Flex factor for main-axis space distribution in stacks.
+    ///
+    /// - `0` (default): the view is laid out at its natural size.
+    /// - `>0`: the view participates in distributing remaining space in `VStack`/`HStack`.
+    fn flex_factor(&self) -> u32 {
+        0
+    }
+
     /// Check if this view needs to be redrawn
     fn needs_draw(&self) -> bool {
         true // Default: always redraw (can be optimized later)
