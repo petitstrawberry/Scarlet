@@ -33,6 +33,9 @@ pub extern "C" fn main() -> i32 {
     };
     println!("[ui_demo] Connected to SWS");
 
+    // AppKit-like: opt into terminating after the last window is closed.
+    app.set_terminate_after_last_window_closed(true);
+
     let handle = app.handle();
 
     // Debug: visualize view layout bounds

@@ -4,10 +4,28 @@ use crate::view::{Window, View, Size};
 use crate::event::{Event, MouseButton};
 use crate::graphics::{Canvas, Rect, Point};
 use crate::Color;
+use scarlet_std::boxed::Box;
 use scarlet_std::vec::Vec;
 use sws_client::{Connection, Event as SwsEvent, InputEvent};
 use std::sync::{Arc, Mutex};
 use core::time::Duration;
+
+/// Application-level delegate for lifecycle decisions.
+///
+/// This is inspired by AppKit's `NSApplicationDelegate`.
+pub trait ApplicationDelegate {
+    /// Called after the last window is closed.
+    ///
+    /// Return `true` to terminate the process, `false` to keep running.
+    ///
+    /// AppKit equivalent: `applicationShouldTerminateAfterLastWindowClosed`.
+    fn application_should_terminate_after_last_window_closed(&mut self) -> bool {
+        false
+    }
+
+    /// Called immediately before terminating the process.
+    fn application_will_terminate(&mut self) {}
+}
 
 /// Managed window with surface binding
 struct ManagedWindow {
@@ -48,6 +66,9 @@ pub struct Application {
     windows: Vec<ManagedWindow>,
     last_mouse: Point,
     layout_debug: bool,
+
+    terminate_after_last_window_closed: bool,
+    delegate: Option<Box<dyn ApplicationDelegate>>,
 
     command_queue: Arc<Mutex<Vec<AppCommand>>>,
     popup_surface_id: Option<u32>,
@@ -109,11 +130,42 @@ impl Application {
             last_mouse: Point::ZERO,
             layout_debug: false,
 
+            // AppKit default is to keep the app running with no windows.
+            terminate_after_last_window_closed: false,
+            delegate: None,
+
             command_queue: Arc::new(Mutex::new(Vec::new())),
             popup_surface_id: None,
             popup_follow_parent_move: false,
             main_resized_large: false,
         })
+    }
+
+    /// Configure whether the application terminates when the last window is closed.
+    ///
+    /// Default: `false` (AppKit-like behavior).
+    pub fn set_terminate_after_last_window_closed(&mut self, enabled: bool) {
+        self.terminate_after_last_window_closed = enabled;
+    }
+
+    /// Install an application delegate for lifecycle decisions.
+    pub fn set_delegate<D: ApplicationDelegate + 'static>(&mut self, delegate: D) {
+        self.delegate = Some(Box::new(delegate));
+    }
+
+    fn should_terminate_after_last_window_closed(&mut self) -> bool {
+        if let Some(d) = self.delegate.as_mut() {
+            d.application_should_terminate_after_last_window_closed()
+        } else {
+            self.terminate_after_last_window_closed
+        }
+    }
+
+    fn terminate(&mut self) -> ! {
+        if let Some(d) = self.delegate.as_mut() {
+            d.application_will_terminate();
+        }
+        std::task::exit(0)
     }
 
     pub fn handle(&self) -> ApplicationHandle {
@@ -271,6 +323,10 @@ impl Application {
                 }
             }
             self.windows.retain(|w| !w.window.is_close_requested());
+
+            if self.windows.is_empty() && self.should_terminate_after_last_window_closed() {
+                self.terminate();
+            }
             
             // 6. Layout and draw windows
             let mut did_draw = false;
@@ -400,6 +456,10 @@ impl Application {
                 self.windows.retain(|w| w.surface_id != surface_id);
                 if self.popup_surface_id == Some(surface_id) {
                     self.popup_surface_id = None;
+                }
+
+                if self.windows.is_empty() && self.should_terminate_after_last_window_closed() {
+                    self.terminate();
                 }
             }
             SwsEvent::SurfaceConfigure {
