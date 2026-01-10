@@ -1148,10 +1148,11 @@ impl Compositor {
             let ipc_events = self.ipc_server.process_messages()?;
             if !ipc_events.is_empty() {
                 println!("[Compositor] Processing {} IPC events", ipc_events.len());
-                needs_redraw = true;
             }
             for event in ipc_events {
-                self.handle_ipc_event(event)?;
+                if self.handle_ipc_event(event)? {
+                    needs_redraw = true;
+                }
             }
 
             // Process input events from global queue (non-blocking)
@@ -1448,7 +1449,10 @@ impl Compositor {
     }
 
     /// Handle IPC events from clients
-    fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<(), &'static str> {
+    ///
+    /// Returns `Ok(true)` if an immediate redraw is required (e.g., window created/destroyed).
+    /// Returns `Ok(false)` if only damage was accumulated (redraw via `pending_damage`).
+    fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         match event {
             IpcEvent::CreateWindow {
                 client_id,
@@ -1527,7 +1531,7 @@ impl Compositor {
                         "[Compositor] Window #{} buffer updated with empty damage: ({},{}) {}x{} (ignored)",
                         window_id, damage_x, damage_y, damage_width, damage_height
                     );
-                    return Ok(());
+                    return Ok(false);
                 }
 
                 let (win_x, win_y) = match self.window_manager.get_window(window_id) {
@@ -1537,7 +1541,7 @@ impl Compositor {
                             "[Compositor] Window #{} buffer updated but window not found (ignored)",
                             window_id
                         );
-                        return Ok(());
+                        return Ok(false);
                     }
                 };
 
@@ -1558,7 +1562,7 @@ impl Compositor {
                         "[Compositor] Window #{} buffer updated but damage out of bounds: ({},{}) {}x{} (ignored)",
                         window_id, damage_x, damage_y, damage_width, damage_height
                     );
-                    return Ok(());
+                    return Ok(false);
                 }
 
                 println!(
@@ -1574,7 +1578,7 @@ impl Compositor {
                 let (start_window_x, start_window_y) =
                     match self.window_manager.get_window(window_id) {
                         Some(w) => (w.x, w.y),
-                        None => return Ok(()),
+                        None => return Ok(false),
                     };
 
                 // Bring the window to front for the drag (focus is handled by click routing).
@@ -1695,6 +1699,6 @@ impl Compositor {
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 }

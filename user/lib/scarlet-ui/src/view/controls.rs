@@ -1036,17 +1036,23 @@ impl Slider {
             let new_value = self.min + ratio * (self.max - self.min);
             let clamped = new_value.clamp(self.min, self.max);
             
-            // Store pending value instead of immediately committing
-            self.pending_value = Some(clamped);
+            // Check if value actually changed (with small threshold to avoid noise)
+            let old_value = self.pending_value.unwrap_or_else(|| self.binding.get());
+            let value_changed = (clamped - old_value).abs() > 0.001;
             
-            // Throttle: only commit every 3 frames during drag to reduce flicker
-            self.frame_counter = self.frame_counter.wrapping_add(1);
-            if self.frame_counter.wrapping_sub(self.last_commit_frame) >= 3 {
-                self.commit_pending_value();
+            if value_changed {
+                // Store pending value instead of immediately committing
+                self.pending_value = Some(clamped);
+                
+                // Throttle: only commit every 5 frames during drag to reduce flicker
+                self.frame_counter = self.frame_counter.wrapping_add(1);
+                if self.frame_counter.wrapping_sub(self.last_commit_frame) >= 5 {
+                    self.commit_pending_value();
+                }
+                
+                // Mark dirty only when value actually changed
+                self.refresh_handle.mark_dirty();
             }
-            
-            // Always mark self as dirty for immediate visual feedback
-            self.refresh_handle.mark_dirty();
         }
     }
     
@@ -1138,7 +1144,7 @@ impl View for Slider {
     }
 
     fn needs_draw(&self) -> bool {
-        self.refresh_handle.is_dirty() || self.pending_value.is_some()
+        self.refresh_handle.is_dirty()
     }
 
     fn set_needs_draw(&mut self) {
@@ -1190,8 +1196,15 @@ impl ProgressBar {
             height: 16,
             refresh_handle,
             display_value: initial,
-            animate: true,
+            // Disable animation by default to prevent flicker
+            animate: false,
         }
+    }
+    
+    /// Enable smooth animation (may cause flicker in some scenarios)
+    pub fn animated(mut self) -> Self {
+        self.animate = true;
+        self
     }
 
     /// Set track color
@@ -1219,6 +1232,8 @@ impl ProgressBar {
     }
     
     /// Disable animation (instant updates)
+    /// Note: Animation is disabled by default, so this is typically not needed.
+    #[deprecated(note = "Animation is now disabled by default. Use .animated() to enable.")]
     pub fn no_animation(mut self) -> Self {
         self.animate = false;
         self
@@ -1232,13 +1247,13 @@ impl View for ProgressBar {
         
         if self.animate {
             // Lerp towards target (smooth animation)
-            // Use a fast lerp factor for responsive feel
             let diff = target - self.display_value;
-            if diff.abs() < 0.001 {
+            // Use a larger threshold to reduce flicker from tiny updates
+            if diff.abs() < 0.01 {
                 self.display_value = target;
             } else {
-                // Move 30% of the way each frame
-                self.display_value += diff * 0.3;
+                // Move 50% of the way each frame (faster convergence)
+                self.display_value += diff * 0.5;
                 // Keep refreshing until we reach target
                 self.refresh_handle.mark_dirty();
             }

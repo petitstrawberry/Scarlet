@@ -20,7 +20,9 @@ pub struct SbrkOomHandler {
 impl SbrkOomHandler {
     /// Create a new uninitialized handler.
     pub const fn new() -> Self {
-        Self { heap: Span::empty() }
+        Self {
+            heap: Span::empty(),
+        }
     }
 }
 

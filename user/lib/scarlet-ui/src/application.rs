@@ -451,8 +451,16 @@ impl Application {
                 }
             }
 
-            // 7. Avoid a busy loop when idle.
-            if !self.connection.has_events() && !did_draw {
+            // 7. Frame rate limiting: cap at ~60fps to reduce flicker and CPU usage.
+            // Always sleep at least 1ms to yield CPU, and ensure minimum 16ms between frames.
+            if did_draw {
+                // We drew this frame, sleep briefly to cap frame rate
+                let _ = scarlet_std::thread::sleep(Duration::from_millis(8));
+            } else if !self.connection.has_events() {
+                // No events and no draw, sleep longer
+                let _ = scarlet_std::thread::sleep(Duration::from_millis(16));
+            } else {
+                // Events pending, yield briefly
                 let _ = scarlet_std::thread::sleep(Duration::from_millis(1));
             }
         }
