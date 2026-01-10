@@ -50,7 +50,7 @@ pub extern "C" fn main() -> i32 {
     // Timer - auto-increment progress (100ms intervals)
     let progress_t = progress.clone();
     let counter_t = counter.clone();
-    Timer::periodic(Duration::from_millis(100), move || {
+    Timer::periodic(Duration::from_millis(1000), move || {
         let p = progress_t.get() + 0.01;
         if p >= 1.0 {
             progress_t.set(0.0);

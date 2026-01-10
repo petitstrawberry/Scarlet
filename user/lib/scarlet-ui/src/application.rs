@@ -67,6 +67,10 @@ pub struct Application {
     last_mouse: Point,
     layout_debug: bool,
 
+    // Mouse capture: while the left button is down, keep routing pointer
+    // move/up events to the surface where the press started.
+    mouse_capture_surface_id: Option<u32>,
+
     terminate_after_last_window_closed: bool,
     delegate: Option<Box<dyn ApplicationDelegate>>,
 
@@ -129,6 +133,8 @@ impl Application {
             windows: Vec::new(),
             last_mouse: Point::ZERO,
             layout_debug: false,
+
+            mouse_capture_surface_id: None,
 
             // AppKit default is to keep the app running with no windows.
             terminate_after_last_window_closed: false,
@@ -528,17 +534,58 @@ impl Application {
         match sws_event {
             SwsEvent::Input(input) => {
                 if let Some(event) = self.convert_input(&input) {
+                    // Determine which surface should receive this event.
+                    // While captured, keep routing move/up to the capture surface.
+                    let is_left_move_or_up_under_capture = matches!(
+                        event.kind,
+                        crate::event::EventKind::MouseMove
+                            | crate::event::EventKind::MouseUp {
+                                button: MouseButton::Left
+                            }
+                    );
+
+                    let target_surface_id = if is_left_move_or_up_under_capture {
+                        self.mouse_capture_surface_id.unwrap_or(input.surface_id)
+                    } else {
+                        input.surface_id
+                    };
+
+                    // Start capture on left mouse down.
+                    if matches!(
+                        event.kind,
+                        crate::event::EventKind::MouseDown {
+                            button: MouseButton::Left
+                        }
+                    ) {
+                        self.mouse_capture_surface_id = Some(input.surface_id);
+                    }
+
                     if let Some(index) = self
                         .windows
                         .iter()
-                        .position(|w| w.surface_id == input.surface_id)
+                        .position(|w| w.surface_id == target_surface_id)
                     {
                         let (width, height) = {
                             let window = &self.windows[index].window;
                             (window.width(), window.height())
                         };
                         let frame = Rect::new(0, 0, width, height);
-                        Self::dispatch_event_to_view(&mut self.windows[index].window, event, frame);
+
+                        // While captured, ignore hit-test containment so dragging controls
+                        // still receive move/up events even when the cursor leaves bounds.
+                        let route_all = self.mouse_capture_surface_id == Some(target_surface_id)
+                            && is_left_move_or_up_under_capture;
+                        Self::dispatch_event_to_view(&mut self.windows[index].window, event, frame, route_all);
+                    }
+
+                    // End capture on left mouse up.
+                    if matches!(
+                        event.kind,
+                        crate::event::EventKind::MouseUp {
+                            button: MouseButton::Left
+                        }
+                    ) {
+                        self.mouse_capture_surface_id = None;
                     }
                 }
             }
@@ -630,7 +677,7 @@ impl Application {
     }
 
     /// Dispatch event to a view using capture/bubble phases
-    fn dispatch_event_to_view(view: &mut dyn View, mut event: Event, frame: Rect) {
+    fn dispatch_event_to_view(view: &mut dyn View, mut event: Event, frame: Rect, route_all: bool) {
         // Phase 1: CAPTURE (root → target)
         if view.on_event_capture(&mut event, frame) {
             view.set_needs_draw();
@@ -642,13 +689,13 @@ impl Application {
         }
         
         // Phase 2: BUBBLE (target → root)
-        if Self::dispatch_bubble(view, &mut event, frame) || event.is_stopped() {
+        if Self::dispatch_bubble(view, &mut event, frame, route_all) || event.is_stopped() {
             view.set_needs_draw();
         }
     }
 
     /// Dispatch event in bubble phase recursively
-    fn dispatch_bubble(view: &mut dyn View, event: &mut Event, frame: Rect) -> bool {
+    fn dispatch_bubble(view: &mut dyn View, event: &mut Event, frame: Rect, route_all: bool) -> bool {
         // First dispatch to children
         let mut consumed = false;
         view.visit_children_mut(&mut |child, child_frame| {
@@ -663,8 +710,8 @@ impl Application {
                 child_frame.height,
             );
 
-            if abs.contains(event.x(), event.y()) {
-                if Self::dispatch_bubble(child, event, abs) {
+            if route_all || abs.contains(event.x(), event.y()) {
+                if Self::dispatch_bubble(child, event, abs, route_all) {
                     consumed = true;
                     return true;
                 }
