@@ -955,6 +955,7 @@ syscall_table! {
     SetSockopt = 208 => socket::sys_setsockopt,
     GetSockopt = 209 => socket::sys_getsockopt,
     Unshare = 97 => unshare::sys_unshare,
+    Setns = 268 => unshare::sys_setns,
     RenameAt2 = 276 => fs::sys_renameat2,
     Membarrier = 283 => proc::sys_membarrier,
 }

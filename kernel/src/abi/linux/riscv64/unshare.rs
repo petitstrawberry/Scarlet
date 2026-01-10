@@ -1,8 +1,9 @@
-//! Unshare system call implementation for Linux ABI
+//! Unshare and setns system call implementations for Linux ABI
 //!
 //! The unshare system call allows a process to disassociate parts of its
 //! execution context that are currently being shared with other processes.
-//! This is commonly used for namespace isolation in containers.
+//! The setns system call allows a process to join an existing namespace.
+//! These are commonly used for namespace isolation in containers.
 //!
 //! Current implementation supports:
 //! - CLONE_NEWNS: Mount namespace isolation (using VFS separation)
@@ -127,6 +128,45 @@ pub fn sys_unshare(abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usiz
 
     // Success
     0
+}
+
+/// sys_setns - Join an existing namespace
+///
+/// Arguments:
+/// - fd: File descriptor referring to a namespace (e.g., /proc/[pid]/ns/[type])
+/// - nstype: Namespace type to join (CLONE_NEW* flags) or 0 for any type
+///
+/// Returns:
+/// - 0 on success
+/// - Negative error code on failure
+///
+/// # Implementation Details
+///
+/// This is currently a stub implementation that returns ENOSYS.
+/// Full implementation would require:
+/// - /proc/[pid]/ns/* filesystem support
+/// - Namespace file descriptor handling
+/// - Ability to switch namespaces at runtime
+///
+/// For now, applications that attempt to use setns will receive
+/// a "function not implemented" error.
+pub fn sys_setns(_abi: &mut LinuxRiscv64Abi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(t) => t,
+        None => return errno::to_result(errno::EPERM),
+    };
+
+    let _fd = trapframe.get_arg(0);
+    let _nstype = trapframe.get_arg(1);
+
+    trapframe.increment_pc_next(task);
+
+    // Stub: Not implemented yet
+    // Full implementation would:
+    // 1. Validate fd refers to a namespace file
+    // 2. Check nstype matches the namespace type (if non-zero)
+    // 3. Join the target namespace
+    errno::to_result(errno::ENOSYS)
 }
 
 #[cfg(test)]
