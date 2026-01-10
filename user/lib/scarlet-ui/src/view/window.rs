@@ -9,11 +9,13 @@ use scarlet_std::vec::Vec;
 use sws_client::WindowSizeLimits;
 
 /// Title bar height in pixels
-const TITLEBAR_HEIGHT: u32 = 28;
+const TITLEBAR_HEIGHT: u32 = 32;
 /// Close button size
-const CLOSE_BUTTON_SIZE: u32 = 16;
+const CLOSE_BUTTON_SIZE: u32 = 18;
 /// Close button margin from edge
-const CLOSE_BUTTON_MARGIN: u32 = 6;
+const CLOSE_BUTTON_MARGIN: u32 = 7;
+/// Window corner radius
+const WINDOW_CORNER_RADIUS: u32 = 8;
 
 /// Window - a root view with decorations (title bar, border)
 ///
@@ -182,38 +184,77 @@ impl Window {
 
     /// Draw the title bar
     fn draw_titlebar(&self, canvas: &mut Canvas) {
-        // Title bar background
-        canvas.fill_rect(0, 0, self.width, TITLEBAR_HEIGHT, Color::rgb(60, 60, 60));
+        // Title bar background with gradient effect
+        let base_color = Color::rgb(70, 70, 75);
+        let highlight = Color::rgb(80, 80, 85);
+        
+        for y in 0..TITLEBAR_HEIGHT {
+            let ratio = y as f32 / TITLEBAR_HEIGHT as f32;
+            let r = (base_color.r as f32 + (highlight.r as f32 - base_color.r as f32) * ratio) as u8;
+            let g = (base_color.g as f32 + (highlight.g as f32 - base_color.g as f32) * ratio) as u8;
+            let b = (base_color.b as f32 + (highlight.b as f32 - base_color.b as f32) * ratio) as u8;
+            canvas.fill_rect(0, y as i32, self.width, 1, Color::rgb(r, g, b));
+        }
 
-        // Title text
+        // Title text with shadow effect
         let title_str = core::str::from_utf8(&self.title[..self.title_len]).unwrap_or("");
+        // Shadow
+        canvas.draw_text(11, 9, title_str, Color::rgba(0, 0, 0, 128));
+        // Text
         canvas.draw_text(10, 8, title_str, Color::WHITE);
 
-        // Close button
+        // Close button with rounded corners
         let close_rect = self.close_button_rect();
         let close_color = if self.close_button_pressed {
-            Color::rgb(200, 60, 60)
+            Color::rgb(220, 70, 70)
         } else if self.close_button_hovered {
-            Color::rgb(230, 80, 80)
+            Color::rgb(255, 100, 100)
         } else {
-            Color::rgb(180, 180, 180)
+            Color::rgb(200, 90, 90)
         };
-        canvas.fill_rect(close_rect.x, close_rect.y, close_rect.width, close_rect.height, close_color);
+        
+        // Draw rounded close button
+        let radius = 3;
+        for dy in 0..close_rect.height {
+            for dx in 0..close_rect.width {
+                let px = close_rect.x + dx as i32;
+                let py = close_rect.y + dy as i32;
+                
+                // Simple corner rounding check
+                let is_corner = (dx < radius && dy < radius)
+                    || (dx >= close_rect.width - radius && dy < radius)
+                    || (dx < radius && dy >= close_rect.height - radius)
+                    || (dx >= close_rect.width - radius && dy >= close_rect.height - radius);
+                
+                if !is_corner || (dx >= 1 && dx < close_rect.width - 1 && dy >= 1 && dy < close_rect.height - 1) {
+                    canvas.put_pixel(px, py, close_color);
+                }
+            }
+        }
 
-        // X mark on close button
-        for i in 0..CLOSE_BUTTON_SIZE {
-            canvas.put_pixel(close_rect.x + i as i32, close_rect.y + i as i32, Color::BLACK);
-            canvas.put_pixel(
-                close_rect.x + i as i32,
-                close_rect.y + (CLOSE_BUTTON_SIZE - 1 - i) as i32,
-                Color::BLACK,
-            );
+        // X mark on close button (with anti-aliasing effect)
+        let cx = close_rect.x + close_rect.width as i32 / 2;
+        let cy = close_rect.y + close_rect.height as i32 / 2;
+        let size = 6;
+        
+        for i in 0..size {
+            // Main X lines
+            canvas.put_pixel(cx - size/2 + i, cy - size/2 + i, Color::WHITE);
+            canvas.put_pixel(cx + size/2 - i, cy - size/2 + i, Color::WHITE);
+            // Thicker lines
+            canvas.put_pixel(cx - size/2 + i, cy - size/2 + i + 1, Color::WHITE);
+            canvas.put_pixel(cx + size/2 - i, cy - size/2 + i + 1, Color::WHITE);
         }
     }
 
     /// Draw the border
     fn draw_border(&self, canvas: &mut Canvas) {
-        canvas.draw_rect(0, 0, self.width, self.height, Color::rgb(80, 80, 80));
+        // Modern border with subtle shadow effect
+        let border_color = Color::rgb(100, 100, 105);
+        canvas.draw_rect(0, 0, self.width, self.height, border_color);
+        
+        // Inner highlight for depth
+        canvas.draw_rect(1, 1, self.width - 2, self.height - 2, Color::rgb(90, 90, 95));
     }
 }
 

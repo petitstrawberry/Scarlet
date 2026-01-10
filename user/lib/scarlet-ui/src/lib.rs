@@ -44,6 +44,7 @@ mod application;
 pub mod color;
 pub mod event;
 pub mod graphics;
+pub mod modifiers;
 pub mod view;
 
 // Re-exports
@@ -61,4 +62,8 @@ pub use view::{
     Window,
     VStack, HStack, ZStack, Padding, Center,
     Label, Button, Spacer, RectView,
+    TextField, CheckBox, Slider, ProgressBar, Toggle,
 };
+
+// Modifier re-exports
+pub use modifiers::{ViewModifier, CornerRadius, Border, Background};

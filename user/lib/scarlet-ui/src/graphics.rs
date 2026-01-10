@@ -472,4 +472,75 @@ impl<'a> Canvas<'a> {
             caret_x += scaled.h_advance(glyph_id);
         }
     }
+
+    /// Draw a rounded rectangle
+    pub fn fill_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, color: Color) {
+        let radius = radius.min(width / 2).min(height / 2);
+        
+        // Fill center rectangle
+        if width > radius * 2 {
+            self.fill_rect(x + radius as i32, y, width - radius * 2, height, color);
+        }
+        
+        // Fill left and right vertical strips
+        if height > radius * 2 {
+            self.fill_rect(x, y + radius as i32, radius, height - radius * 2, color);
+            self.fill_rect(x + (width - radius) as i32, y + radius as i32, radius, height - radius * 2, color);
+        }
+        
+        // Draw rounded corners
+        let r_sq = (radius * radius) as i32;
+        for dy in 0..radius {
+            for dx in 0..radius {
+                let dist_sq = (dx * dx + dy * dy) as i32;
+                if dist_sq <= r_sq {
+                    // Top-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (radius - dy - 1) as i32, color);
+                    // Top-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (radius - dy - 1) as i32, color);
+                    // Bottom-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (height - radius + dy) as i32, color);
+                    // Bottom-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (height - radius + dy) as i32, color);
+                }
+            }
+        }
+    }
+
+    /// Draw a rounded rectangle outline
+    pub fn draw_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, color: Color) {
+        let radius = radius.min(width / 2).min(height / 2);
+        
+        // Draw straight edges
+        // Top
+        for dx in radius..(width - radius) {
+            self.put_pixel(x + dx as i32, y, color);
+            self.put_pixel(x + dx as i32, y + height as i32 - 1, color);
+        }
+        // Sides
+        for dy in radius..(height - radius) {
+            self.put_pixel(x, y + dy as i32, color);
+            self.put_pixel(x + width as i32 - 1, y + dy as i32, color);
+        }
+        
+        // Draw rounded corners (circle approximation)
+        let r_sq = (radius * radius) as i32;
+        let inner_r_sq = ((radius - 1) * (radius - 1)) as i32;
+        
+        for dy in 0..radius {
+            for dx in 0..radius {
+                let dist_sq = (dx * dx + dy * dy) as i32;
+                if dist_sq <= r_sq && dist_sq >= inner_r_sq {
+                    // Top-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (radius - dy - 1) as i32, color);
+                    // Top-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (radius - dy - 1) as i32, color);
+                    // Bottom-left
+                    self.put_pixel(x + (radius - dx - 1) as i32, y + (height - radius + dy) as i32, color);
+                    // Bottom-right
+                    self.put_pixel(x + (width - radius + dx) as i32, y + (height - radius + dy) as i32, color);
+                }
+            }
+        }
+    }
 }

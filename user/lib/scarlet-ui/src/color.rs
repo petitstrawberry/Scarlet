@@ -18,6 +18,10 @@ impl Color {
         Self { r, g, b, a: 255 }
     }
 
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
     /// Convert to BGRA format (native framebuffer format)
     pub fn to_bgra(&self) -> [u8; 4] {
         [self.b, self.g, self.r, self.a]
