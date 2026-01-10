@@ -413,6 +413,112 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draw a horizontal 1px line.
+    pub fn draw_hline(&mut self, x: i32, y: i32, width: u32, color: Color) {
+        self.fill_rect(x, y, width, 1, color);
+    }
+
+    /// Draw a vertical 1px line.
+    pub fn draw_vline(&mut self, x: i32, y: i32, height: u32, color: Color) {
+        self.fill_rect(x, y, 1, height, color);
+    }
+
+    /// Draw a 1px line segment from `(x0, y0)` to `(x1, y1)` (inclusive).
+    ///
+    /// Uses an integer Bresenham rasterization.
+    pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+
+        let mut err = dx + dy;
+        loop {
+            self.put_pixel(x0, y0, color);
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = err * 2;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    /// Draw a 1px circle outline centered at `(cx, cy)`.
+    ///
+    /// Uses the midpoint circle algorithm.
+    pub fn draw_circle(&mut self, cx: i32, cy: i32, radius: u32, color: Color) {
+        let r = radius as i32;
+        if r <= 0 {
+            self.put_pixel(cx, cy, color);
+            return;
+        }
+
+        let mut x = 0;
+        let mut y = r;
+        let mut d = 1 - r;
+
+        while x <= y {
+            self.put_pixel(cx + x, cy + y, color);
+            self.put_pixel(cx - x, cy + y, color);
+            self.put_pixel(cx + x, cy - y, color);
+            self.put_pixel(cx - x, cy - y, color);
+
+            self.put_pixel(cx + y, cy + x, color);
+            self.put_pixel(cx - y, cy + x, color);
+            self.put_pixel(cx + y, cy - x, color);
+            self.put_pixel(cx - y, cy - x, color);
+
+            x += 1;
+            if d < 0 {
+                d += 2 * x + 1;
+            } else {
+                y -= 1;
+                d += 2 * (x - y) + 1;
+            }
+        }
+    }
+
+    /// Fill a circle centered at `(cx, cy)`.
+    ///
+    /// Uses the midpoint circle algorithm and draws horizontal spans.
+    pub fn fill_circle(&mut self, cx: i32, cy: i32, radius: u32, color: Color) {
+        let r = radius as i32;
+        if r <= 0 {
+            self.put_pixel(cx, cy, color);
+            return;
+        }
+
+        let mut x = 0;
+        let mut y = r;
+        let mut d = 1 - r;
+
+        while x <= y {
+            // Spans across symmetric scanlines.
+            let w1 = (2 * x + 1).max(0) as u32;
+            let w2 = (2 * y + 1).max(0) as u32;
+
+            self.draw_hline(cx - x, cy + y, w1, color);
+            self.draw_hline(cx - x, cy - y, w1, color);
+            self.draw_hline(cx - y, cy + x, w2, color);
+            self.draw_hline(cx - y, cy - x, w2, color);
+
+            x += 1;
+            if d < 0 {
+                d += 2 * x + 1;
+            } else {
+                y -= 1;
+                d += 2 * (x - y) + 1;
+            }
+        }
+    }
+
     /// Draw a Rect outline
     pub fn stroke(&mut self, rect: Rect, color: Color) {
         self.draw_rect(rect.x, rect.y, rect.width, rect.height, color);

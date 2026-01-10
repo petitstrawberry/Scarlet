@@ -13,7 +13,7 @@ const TITLEBAR_HEIGHT: u32 = 32;
 /// Close button size
 const CLOSE_BUTTON_SIZE: u32 = 18;
 /// Close button margin from edge
-const CLOSE_BUTTON_MARGIN: u32 = 7;
+const CLOSE_BUTTON_MARGIN: u32 = 8;
 /// Window corner radius
 const WINDOW_CORNER_RADIUS: u32 = 8;
 
@@ -172,9 +172,9 @@ impl Window {
 
     /// Get close button rect
     fn close_button_rect(&self) -> Rect {
-        let x = (self.width - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN) as i32;
-        let y = CLOSE_BUTTON_MARGIN as i32;
-        Rect::new(x, y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE)
+        let seg_w = (CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2).min(self.width);
+        let x = (self.width - seg_w) as i32;
+        Rect::new(x, 0, seg_w, TITLEBAR_HEIGHT)
     }
 
     /// Get title bar rect
@@ -185,16 +185,24 @@ impl Window {
     /// Draw the title bar
     fn draw_titlebar(&self, canvas: &mut Canvas) {
         // Title bar with gradient effect and rounded top corners
-        let base_color = Color::rgb(70, 70, 75);
-        let highlight = Color::rgb(80, 80, 85);
+        // Light (white-based) titlebar (no gradient)
+        let base_color = Color::rgb(235, 235, 238);
+        
         let r = WINDOW_CORNER_RADIUS;
+
+        let close_rect = self.close_button_rect();
+        let close_x0 = close_rect.x.max(0) as u32;
+        let close_color = if self.close_button_pressed {
+            Color::rgb(190, 190, 194)
+        } else if self.close_button_hovered {
+            Color::rgb(210, 210, 214)
+        } else {
+            base_color
+        };
         
         for y in 0..TITLEBAR_HEIGHT {
-            let ratio = y as f32 / TITLEBAR_HEIGHT as f32;
-            let cr = (base_color.r as f32 + (highlight.r as f32 - base_color.r as f32) * ratio) as u8;
-            let cg = (base_color.g as f32 + (highlight.g as f32 - base_color.g as f32) * ratio) as u8;
-            let cb = (base_color.b as f32 + (highlight.b as f32 - base_color.b as f32) * ratio) as u8;
-            let color = Color::rgb(cr, cg, cb);
+            let color = base_color;
+            let color_close = close_color;
             
             // For top rows, apply corner rounding
             if y < r {
@@ -219,63 +227,34 @@ impl Window {
                     }
                     
                     if !skip {
-                        canvas.put_pixel(x as i32, y as i32, color);
+                        let c = if x >= close_x0 { color_close } else { color };
+                        canvas.put_pixel(x as i32, y as i32, c);
                     }
                 }
             } else {
-                canvas.fill_rect(0, y as i32, self.width, 1, color);
+                canvas.fill_rect(0, y as i32, close_x0, 1, color);
+                canvas.fill_rect(close_rect.x, y as i32, self.width.saturating_sub(close_x0), 1, color_close);
             }
         }
 
-        // Title text with shadow effect
+        // Title text
         let title_str = core::str::from_utf8(&self.title[..self.title_len]).unwrap_or("");
-        // Shadow
-        canvas.draw_text(11, 9, title_str, Color::rgba(0, 0, 0, 128));
-        // Text
-        canvas.draw_text(10, 8, title_str, Color::WHITE);
+        canvas.draw_text(10, 9, title_str, Color::rgb(20, 20, 24));
 
-        // Close button with rounded corners
-        let close_rect = self.close_button_rect();
-        let close_color = if self.close_button_pressed {
-            Color::rgb(220, 70, 70)
-        } else if self.close_button_hovered {
-            Color::rgb(255, 100, 100)
-        } else {
-            Color::rgb(200, 90, 90)
-        };
-        
-        // Draw rounded close button
-        let radius = 3;
-        for dy in 0..close_rect.height {
-            for dx in 0..close_rect.width {
-                let px = close_rect.x + dx as i32;
-                let py = close_rect.y + dy as i32;
-                
-                // Simple corner rounding check
-                let is_corner = (dx < radius && dy < radius)
-                    || (dx >= close_rect.width - radius && dy < radius)
-                    || (dx < radius && dy >= close_rect.height - radius)
-                    || (dx >= close_rect.width - radius && dy >= close_rect.height - radius);
-                
-                if !is_corner || (dx >= 1 && dx < close_rect.width - 1 && dy >= 1 && dy < close_rect.height - 1) {
-                    canvas.put_pixel(px, py, close_color);
-                }
-            }
-        }
-
-        // X mark on close button (with anti-aliasing effect)
+        // X mark on close segment
         let cx = close_rect.x + close_rect.width as i32 / 2;
         let cy = close_rect.y + close_rect.height as i32 / 2;
-        let size = 6;
-        
-        for i in 0..size {
-            // Main X lines
-            canvas.put_pixel(cx - size/2 + i, cy - size/2 + i, Color::WHITE);
-            canvas.put_pixel(cx + size/2 - i, cy - size/2 + i, Color::WHITE);
-            // Thicker lines
-            canvas.put_pixel(cx - size/2 + i, cy - size/2 + i + 1, Color::WHITE);
-            canvas.put_pixel(cx + size/2 - i, cy - size/2 + i + 1, Color::WHITE);
-        }
+        let size: i32 = 10;
+        let half = size / 2;
+        let x0 = cx - half;
+        let x1 = cx + half - 1;
+        let y0 = cy - half;
+        let y1 = cy + half - 1;
+
+        // Double-stroke for better visibility (2px)
+        let x_color = Color::rgb(30, 30, 34);
+        canvas.draw_line(x0, y0, x1, y1, x_color);
+        canvas.draw_line(x1, y0, x0, y1, x_color);
     }
 
     /// Draw the border

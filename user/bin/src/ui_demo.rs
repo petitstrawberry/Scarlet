@@ -50,7 +50,7 @@ pub extern "C" fn main() -> i32 {
     // Timer - auto-increment progress (100ms intervals)
     let progress_t = progress.clone();
     let counter_t = counter.clone();
-    Timer::periodic(Duration::from_millis(1000), move || {
+    Timer::periodic(Duration::from_millis(100), move || {
         let p = progress_t.get() + 0.01;
         if p >= 1.0 {
             progress_t.set(0.0);
@@ -79,12 +79,12 @@ pub extern "C" fn main() -> i32 {
                     .spacing(16)
                     // Header
                     .child(
-                        Label::new("🎨 ScarletUI Reactive Gallery")
+                        Label::new("ScarletUI Reactive Gallery")
                             .color(Color::rgb(40, 40, 50))
                             .font_size(28),
                     )
                     .child(
-                        Label::new("State<T> auto-binds to controls")
+                        Label::new("ScarletUIの世界からこんにちは！ This demo showcases reactive State<T> usage.")
                             .color(Color::GRAY)
                             .font_size(14),
                     )
@@ -94,25 +94,29 @@ pub extern "C" fn main() -> i32 {
                         VStack::new()
                             .spacing(8)
                             .child(
-                                Label::new("Reactive Counter:")
-                                    .color(Color::TEXT)
-                                    .font_size(14),
-                            )
-                            .child(
-                                label!("Count: {}", counter.clone())
-                                    .color(Color::rgb(50, 150, 255))
-                                    .font_size(24),
-                            )
-                            .child(
                                 HStack::new()
                                     .spacing(8)
+                                    .child(
+                                        VStack::new()
+                                            .spacing(8)
+                                            .child(
+                                                Label::new("Reactive Counter:")
+                                                    .color(Color::TEXT)
+                                                    .font_size(14),
+                                            )
+                                            .child(
+                                                label!("Count: {}", counter.clone())
+                                                    .color(Color::rgb(50, 150, 255))
+                                                    .font_size(24),
+                                            )
+                                    )
                                     .child(Button::new("Reset", move || {
                                         counter_reset.set(0);
                                     }))
                                     .child(Button::new("+1", move || {
                                         counter_inc.update(|c| *c += 1);
                                     })),
-                            ),
+                            )
                     )
                     // Progress - auto-updates via timer
                     .child(
