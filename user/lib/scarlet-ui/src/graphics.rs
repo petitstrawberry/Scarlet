@@ -543,4 +543,18 @@ impl<'a> Canvas<'a> {
             }
         }
     }
+
+    /// Draw a rounded rectangle outline with specified stroke width
+    pub fn stroke_rounded_rect(&mut self, x: i32, y: i32, width: u32, height: u32, radius: u32, stroke_width: u32, color: Color) {
+        // Draw multiple outlines for stroke width
+        for i in 0..stroke_width {
+            let inset = i as i32;
+            let w = width.saturating_sub(i * 2);
+            let h = height.saturating_sub(i * 2);
+            let r = radius.saturating_sub(i);
+            if w > 0 && h > 0 {
+                self.draw_rounded_rect(x + inset, y + inset, w, h, r, color);
+            }
+        }
+    }
 }

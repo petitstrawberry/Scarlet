@@ -125,7 +125,7 @@ pub use application::{Application, ApplicationDelegate, ApplicationHandle};
 pub use color::Color;
 pub use event::{Event, EventKind, EventType, MouseButton};
 pub use graphics::{set_default_font, Canvas, Point, Rect};
-pub use state::{State, Binding, Observable};
+pub use state::{State, Binding, Observable, Computed, ViewRefreshHandle, SubscriptionId};
 pub use timer::{Timer, schedule_on_main_thread};
 
 // Proc macro re-exports
@@ -139,9 +139,11 @@ pub use view::{
     View, Size, ViewBox, IntoViewBox,
     Window,
     VStack, HStack, ZStack, Padding, Center,
+    // Basic views
     Label, Button, Spacer, RectView,
-    TextField, CheckBox, Slider, ProgressBar, Toggle,
+    // Reactive controls (all use Binding<T> or State<T>)
+    ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
 };
 
 // Modifier re-exports
-pub use modifiers::{ViewModifier, CornerRadius, Border, Background};
+pub use modifiers::{ViewModifier, CornerRadius, Border, Background, RoundedBorder};

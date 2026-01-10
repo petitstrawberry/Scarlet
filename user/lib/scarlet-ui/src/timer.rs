@@ -18,7 +18,7 @@
 //! ```
 
 use scarlet_std::boxed::Box;
-use scarlet_std::sync::{Arc, Mutex};
+use scarlet_std::sync::Mutex;
 use scarlet_std::vec::Vec;
 use core::time::Duration;
 

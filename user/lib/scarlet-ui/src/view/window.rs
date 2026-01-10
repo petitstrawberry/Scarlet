@@ -249,12 +249,12 @@ impl Window {
 
     /// Draw the border
     fn draw_border(&self, canvas: &mut Canvas) {
-        // Modern border with subtle shadow effect
+        // Modern border with subtle shadow effect and rounded corners
         let border_color = Color::rgb(100, 100, 105);
-        canvas.draw_rect(0, 0, self.width, self.height, border_color);
+        canvas.draw_rounded_rect(0, 0, self.width, self.height, WINDOW_CORNER_RADIUS, border_color);
         
         // Inner highlight for depth
-        canvas.draw_rect(1, 1, self.width - 2, self.height - 2, Color::rgb(90, 90, 95));
+        canvas.draw_rounded_rect(1, 1, self.width - 2, self.height - 2, WINDOW_CORNER_RADIUS.saturating_sub(1), Color::rgb(90, 90, 95));
     }
 }
 
@@ -276,8 +276,8 @@ impl View for Window {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        // Fill background
-        canvas.fill_rect(frame.x, frame.y, frame.width, frame.height, self.background);
+        // Fill background with rounded corners
+        canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, WINDOW_CORNER_RADIUS, self.background);
         
         // Draw content
         if let Some(ref content) = self.content {
