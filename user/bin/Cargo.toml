@@ -68,10 +68,6 @@ name = "sws"
 path = "src/sws/main.rs"
 
 [[bin]]
-name = "sws_client"
-path = "src/sws_client.rs"
-
-[[bin]]
 name = "container_demo"
 path = "src/container_demo.rs"
 
