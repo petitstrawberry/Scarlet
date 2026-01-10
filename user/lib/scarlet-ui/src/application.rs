@@ -10,18 +10,11 @@ use sws_client::{Connection, Event as SwsEvent, InputEvent};
 struct ManagedWindow {
     window: Window,
     surface_id: u32,
-    buffer: Vec<u8>,
 }
 
 impl ManagedWindow {
-    fn new(window: Window, surface_id: u32, buffer_size: usize) -> Self {
-        let mut buffer = Vec::new();
-        buffer.resize(buffer_size, 0);
-        Self {
-            window,
-            surface_id,
-            buffer,
-        }
+    fn new(window: Window, surface_id: u32) -> Self {
+        Self { window, surface_id }
     }
 }
 
@@ -93,29 +86,24 @@ impl Application {
             .create_surface(width, height)
             .map_err(|_| "Failed to create surface")?;
         
-        // Calculate buffer size
-        let buffer_size = (width * height * 4) as usize;
-        
         // Create managed window
-        let mut managed = ManagedWindow::new(window, surface_id, buffer_size);
+        let mut managed = ManagedWindow::new(window, surface_id);
         
         // Initial layout
         managed.window.layout(Size::new(width, height));
         
-        // Initial draw
+        // Initial draw directly into the surface SHM buffer
         {
             let frame = Rect::new(0, 0, width, height);
-            let mut canvas = Canvas::new(&mut managed.buffer, width, height);
-            managed.window.draw(&mut canvas, frame);
+            if let Some(surface) = self.connection.surface_mut(surface_id) {
+                let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
+                managed.window.draw(&mut canvas, frame);
+                managed.window.clear_needs_draw();
+            }
         }
-        
+
         // Commit to display
-        if let Some(surface) = self.connection.surface_mut(surface_id) {
-            surface.buffer_mut().copy_from_slice(&managed.buffer);
-        }
-        self.connection
-            .commit(surface_id)
-            .map_err(|_| "Failed to commit")?;
+        self.connection.commit(surface_id).map_err(|_| "Failed to commit")?;
         
         self.windows.push(managed);
         Ok(())
@@ -165,28 +153,17 @@ impl Application {
                 managed.window.layout(size);
                 
                 if managed.window.needs_draw() {
-                    // Draw to buffer
+                    // Draw directly into surface SHM buffer
                     let width = managed.window.width();
                     let height = managed.window.height();
                     let frame = Rect::new(0, 0, width, height);
-                    
-                    // Use split borrow: we need &mut buffer and &window (for draw)
-                    // But draw takes &self, so this should work if we're careful
-                    let buffer_ptr = managed.buffer.as_mut_ptr();
-                    let buffer_len = managed.buffer.len();
-                    let buffer_slice = unsafe {
-                        core::slice::from_raw_parts_mut(buffer_ptr, buffer_len)
-                    };
-                    
-                    let mut canvas = Canvas::new(buffer_slice, width, height);
-                    managed.window.draw(&mut canvas, frame);
-                    
-                    // Commit
-                    let surface_id = managed.surface_id;
-                    if let Some(surface) = self.connection.surface_mut(surface_id) {
-                        surface.buffer_mut().copy_from_slice(&self.windows[i].buffer);
+
+                    if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
+                        let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
+                        managed.window.draw(&mut canvas, frame);
+                        managed.window.clear_needs_draw();
+                        let _ = self.connection.commit(managed.surface_id);
                     }
-                    let _ = self.connection.commit(surface_id);
                 }
             }
         }
@@ -267,14 +244,18 @@ impl Application {
     fn dispatch_event_to_view(view: &mut dyn View, mut event: Event, frame: Rect) {
         // Phase 1: CAPTURE (root → target)
         if view.on_event_capture(&mut event, frame) {
+            view.set_needs_draw();
             return;
         }
         if event.is_stopped() {
+            view.set_needs_draw();
             return;
         }
         
         // Phase 2: BUBBLE (target → root)
-        Self::dispatch_bubble(view, &mut event, frame);
+        if Self::dispatch_bubble(view, &mut event, frame) || event.is_stopped() {
+            view.set_needs_draw();
+        }
     }
 
     /// Dispatch event in bubble phase recursively

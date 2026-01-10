@@ -1,6 +1,88 @@
 //! Graphics primitives and drawing utilities
 
+use std::println;
+
+use ab_glyph::{point, Font, FontRef, Glyph, InvalidFont, PxScale, ScaleFont};
 use crate::Color;
+
+extern crate scarlet_std as std;
+extern crate alloc;
+
+use alloc::{boxed::Box, vec::Vec};
+
+// Rootfs-provided default font (MPLUS_FONTS, OFL-1.1).
+const DEFAULT_FONT_PATH: &str = "/fonts/Mplus1-Regular.ttf";
+
+#[derive(Clone)]
+struct DefaultFontState {
+    font: Option<FontRef<'static>>,
+    load_attempted: bool,
+}
+
+static DEFAULT_FONT: std::sync::Mutex<DefaultFontState> =
+    std::sync::Mutex::new(DefaultFontState {
+        font: None,
+        load_attempted: false,
+    });
+
+/// Set the default UI font used by [`Canvas::draw_text`] and widgets like `Label`.
+///
+/// Scarlet UI keeps the font bytes alive for the rest of the process.
+pub fn set_default_font(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
+    let font = FontRef::try_from_slice(font_bytes)?;
+    let mut state = DEFAULT_FONT.lock();
+    state.font = Some(font);
+    Ok(())
+}
+
+fn set_default_font_owned(font_bytes: Vec<u8>) -> Result<(), InvalidFont> {
+    let leaked: &'static [u8] = Box::leak(font_bytes.into_boxed_slice());
+    set_default_font(leaked)
+}
+
+fn load_default_font_from_rootfs_once() {
+    let should_try = {
+        let mut state = DEFAULT_FONT.lock();
+        if state.font.is_some() || state.load_attempted {
+            false
+        } else {
+            state.load_attempted = true;
+            true
+        }
+    };
+
+    if !should_try {
+        return;
+    }
+
+    let mut file = match std::fs::File::open(DEFAULT_FONT_PATH) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("scarlet-ui: Failed to open default font '{}': {:?}", DEFAULT_FONT_PATH, e);
+            return;
+        }
+    };
+
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+
+    let _ = set_default_font_owned(bytes);
+}
+
+fn default_font() -> Option<FontRef<'static>> {
+    load_default_font_from_rootfs_once();
+    DEFAULT_FONT.lock().font.clone()
+}
 
 /// 2D point
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +161,36 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    fn get_pixel(&self, x: i32, y: i32) -> Color {
+        if x < 0 || x >= self.width as i32 || y < 0 || y >= self.height as i32 {
+            return Color::BLACK;
+        }
+        let offset = ((y as u32 * self.width + x as u32) * 4) as usize;
+        if offset + 4 > self.buffer.len() {
+            return Color::BLACK;
+        }
+        let b = self.buffer[offset];
+        let g = self.buffer[offset + 1];
+        let r = self.buffer[offset + 2];
+        Color::rgb(r, g, b)
+    }
+
+    fn put_pixel_alpha(&mut self, x: i32, y: i32, color: Color, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
+        if alpha >= 1.0 {
+            self.put_pixel(x, y, color);
+            return;
+        }
+        let dst = self.get_pixel(x, y);
+        let inv = 1.0 - alpha;
+        let r = (dst.r as f32 * inv + color.r as f32 * alpha) as u8;
+        let g = (dst.g as f32 * inv + color.g as f32 * alpha) as u8;
+        let b = (dst.b as f32 * inv + color.b as f32 * alpha) as u8;
+        self.put_pixel(x, y, Color::rgb(r, g, b));
+    }
+
     /// Fill a rectangle with a solid color
     pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
         let bgra = color.to_bgra();
@@ -125,50 +237,52 @@ impl<'a> Canvas<'a> {
         self.draw_rect(rect.x, rect.y, rect.width, rect.height, color);
     }
 
-    /// Draw a simple 8x8 character (ASCII only, very basic)
-    pub fn draw_char(&mut self, x: i32, y: i32, ch: char, color: Color) {
-        // Very basic 8x8 bitmap font for ASCII 32-126
-        let bitmap = get_char_bitmap(ch);
-
-        for row in 0..8 {
-            for col in 0..8 {
-                if (bitmap[row] >> (7 - col)) & 1 != 0 {
-                    self.put_pixel(x + col as i32, y + row as i32, color);
-                }
-            }
-        }
-    }
-
-    /// Draw text string
+    /// Draw text using the global default vector font.
+    ///
+    /// `x,y` is the **top-left** of the text line.
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, color: Color) {
-        let mut offset_x = 0;
-        for ch in text.chars() {
-            self.draw_char(x + offset_x, y, ch, color);
-            offset_x += 8;
-        }
+        self.draw_text_sized(x, y, text, color, 16.0);
     }
-}
 
-/// Get 8x8 bitmap for a character (very basic ASCII font)
-fn get_char_bitmap(ch: char) -> [u8; 8] {
-    match ch {
-        ' ' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        'A' => [0x18, 0x24, 0x42, 0x42, 0x7E, 0x42, 0x42, 0x00],
-        'B' => [0x7C, 0x42, 0x42, 0x7C, 0x42, 0x42, 0x7C, 0x00],
-        'C' => [0x3C, 0x42, 0x40, 0x40, 0x40, 0x42, 0x3C, 0x00],
-        'H' => [0x42, 0x42, 0x42, 0x7E, 0x42, 0x42, 0x42, 0x00],
-        'e' => [0x00, 0x00, 0x3C, 0x42, 0x7E, 0x40, 0x3C, 0x00],
-        'l' => [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x0C, 0x00],
-        'o' => [0x00, 0x00, 0x3C, 0x42, 0x42, 0x42, 0x3C, 0x00],
-        'W' => [0x42, 0x42, 0x42, 0x5A, 0x66, 0x42, 0x42, 0x00],
-        'r' => [0x00, 0x00, 0x5C, 0x62, 0x40, 0x40, 0x40, 0x00],
-        'd' => [0x02, 0x02, 0x3E, 0x42, 0x42, 0x42, 0x3E, 0x00],
-        '!' => [0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00],
-        'C' => [0x3C, 0x42, 0x40, 0x40, 0x40, 0x42, 0x3C, 0x00],
-        'i' => [0x00, 0x18, 0x00, 0x18, 0x18, 0x18, 0x0C, 0x00],
-        'c' => [0x00, 0x00, 0x3C, 0x40, 0x40, 0x40, 0x3C, 0x00],
-        'k' => [0x40, 0x40, 0x44, 0x48, 0x70, 0x48, 0x44, 0x00],
-        'm' => [0x00, 0x00, 0x7C, 0x52, 0x52, 0x52, 0x52, 0x00],
-        _ => [0x7E, 0x42, 0x42, 0x42, 0x42, 0x42, 0x7E, 0x00], // Box for unknown chars
+    /// Draw text using the global default vector font with an explicit pixel size.
+    ///
+    /// `x,y` is the **top-left** of the text line.
+    pub fn draw_text_sized(&mut self, x: i32, y: i32, text: &str, color: Color, font_size_px: f32) {
+        let Some(font) = default_font() else {
+            // No font configured; nothing to draw.
+            return;
+        };
+
+        let scale = PxScale::from(font_size_px);
+        let scaled = font.as_scaled(scale);
+
+        let mut caret_x = x as f32;
+        // Convert top-left y to baseline y.
+        let mut caret_y = y as f32 + scaled.ascent();
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                caret_x = x as f32;
+                caret_y += scaled.height() + scaled.line_gap();
+                continue;
+            }
+
+            let glyph_id = scaled.glyph_id(ch);
+            let glyph: Glyph = glyph_id.with_scale_and_position(scale, point(caret_x, caret_y));
+
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                // Avoid f32::{floor,ceil} in no_std; truncation is acceptable for now.
+                let origin_x = bounds.min.x as i32;
+                let origin_y = bounds.min.y as i32;
+                outlined.draw(|gx, gy, coverage| {
+                    let px = origin_x + gx as i32;
+                    let py = origin_y + gy as i32;
+                    self.put_pixel_alpha(px, py, color, coverage);
+                });
+            }
+
+            caret_x += scaled.h_advance(glyph_id);
+        }
     }
 }

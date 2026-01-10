@@ -116,6 +116,11 @@ impl Window {
         self.close_requested
     }
 
+    /// Clear redraw flag after a successful draw/commit.
+    pub fn clear_needs_draw(&mut self) {
+        self.needs_redraw = false;
+    }
+
     /// Get close button rect
     fn close_button_rect(&self) -> Rect {
         let x = (self.width - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN) as i32;

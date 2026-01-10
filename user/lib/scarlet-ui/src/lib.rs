@@ -15,6 +15,9 @@
 //!
 //! fn main() {
 //!     let mut app = Application::new().expect("Failed to connect");
+//!
+//!     // Scarlet UI loads its default vector font from rootfs.
+//!     // Make sure `/system/scarlet/fonts/Mplus1-Regular.ttf` exists in the image.
 //!     
 //!     let window = Window::new("Demo", 400, 300)
 //!         .background(Color::DARK_GRAY)
@@ -43,15 +46,14 @@ pub mod event;
 pub mod graphics;
 pub mod view;
 
-// Legacy modules (for compatibility)
-pub mod widgets;
-pub mod window;
-
 // Re-exports
 pub use application::Application;
 pub use color::Color;
 pub use event::{Event, EventKind, EventType, MouseButton};
-pub use graphics::{Canvas, Point, Rect};
+pub use graphics::{set_default_font, Canvas, Point, Rect};
+
+// Vector font support (always enabled)
+pub use ab_glyph::{FontRef, InvalidFont};
 
 // View system re-exports
 pub use view::{
@@ -60,7 +62,3 @@ pub use view::{
     VStack, HStack, ZStack, Padding, Center,
     Label, Button, Spacer, RectView,
 };
-
-// Legacy widget re-export
-pub use widgets::Widget;
-

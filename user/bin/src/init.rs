@@ -58,6 +58,9 @@ fn setup_new_root() -> bool {
     copy_dir("/system/scarlet", "/mnt/newroot/system/scarlet");
     // copy_dir("/data", "/mnt/newroot/data");
 
+    // // 3. Merge essential binaries into new root (overwrite existing files)
+    // merge_dir("/system/scarlet", "/mnt/newroot/system/scarlet");
+
     // Create old_root directory in the new root (where the old root will be moved)
     match create_directory("/mnt/newroot/old_root") {
         Ok(_) => {
@@ -171,6 +174,7 @@ fn perform_pivot_root() -> bool {
 }
 
 // Copy a directory from src to dest recursively
+// Recursively copy src directory to dest, completely replacing dest (dest is deleted first)
 fn copy_dir(src: &str, dest: &str) -> bool {
     println!("init: Copying directory from {} to {}", src, dest);
 
@@ -246,6 +250,54 @@ fn copy_dir(src: &str, dest: &str) -> bool {
                     copy_file(&src_path, &dest_path);
                 } else if entry.is_symlink() {
                     // Copy symbolic link
+                    copy_symlink(&src_path, &dest_path);
+                } else {
+                    println!("init: Skipping special file: {}", src_path);
+                }
+            }
+            true
+        }
+        Err(_) => {
+            println!("init: Failed to read directory entries from {}", src);
+            false
+        }
+    }
+}
+
+// Recursively merge src directory into dest, overwriting/adding files from src but keeping existing dest contents
+fn merge_dir(src: &str, dest: &str) -> bool {
+    println!("init: Merging directory from {} to {}", src, dest);
+
+    // Create dest directory if it does not exist
+    match create_directory(dest) {
+        Ok(_) => (),
+        Err(_) => {
+            println!("init: Failed to create directory: {}", dest);
+            return false;
+        }
+    }
+
+    // Iterate over entries in src
+    match list_directory(src) {
+        Ok(entries) => {
+            println!("init: Successfully read directory entries from {}", src);
+            for entry in entries {
+                let src_path = format!("{}/{}", src, entry.name);
+                let dest_path = format!("{}/{}", dest, entry.name);
+
+                // Skip . and .. entries
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+
+                if entry.is_directory() {
+                    // Recursively merge subdirectory
+                    merge_dir(&src_path, &dest_path);
+                } else if entry.is_file() {
+                    // Overwrite file in dest
+                    copy_file(&src_path, &dest_path);
+                } else if entry.is_symlink() {
+                    // Overwrite symlink in dest
                     copy_symlink(&src_path, &dest_path);
                 } else {
                     println!("init: Skipping special file: {}", src_path);

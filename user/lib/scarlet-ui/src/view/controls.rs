@@ -50,7 +50,7 @@ impl View for Label {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        canvas.draw_text(frame.x, frame.y, &self.text, self.color);
+        canvas.draw_text_sized(frame.x, frame.y, &self.text, self.color, self.font_size as f32);
     }
 }
 
