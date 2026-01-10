@@ -271,6 +271,36 @@ impl Connection {
         Ok(())
     }
 
+    /// Commit a specific region of the surface to the server
+    ///
+    /// This is more efficient than `commit()` when only a small region changed.
+    pub fn commit_region(&mut self, surface_id: u32, x: u32, y: u32, width: u32, height: u32) -> Result<(), Error> {
+        let surface = self.surfaces.get_mut(&surface_id).ok_or(Error::SurfaceNotFound)?;
+
+        // Clamp region to surface bounds
+        let sw = surface.width();
+        let sh = surface.height();
+        let x = x.min(sw);
+        let y = y.min(sh);
+        let width = width.min(sw.saturating_sub(x));
+        let height = height.min(sh.saturating_sub(y));
+
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        let payload = protocol::payload_update_buffer(surface_id, x as i32, y as i32, width, height);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::UPDATE_BUFFER,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
+
+        surface.clear_dirty();
+        Ok(())
+    }
+
     /// Flush pending writes to the socket
     pub fn flush(&mut self) -> Result<(), Error> {
         use scarlet_std::io::Write;

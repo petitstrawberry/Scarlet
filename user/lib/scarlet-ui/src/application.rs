@@ -174,6 +174,54 @@ impl Application {
         }
     }
 
+    /// Collect dirty rects from subviews that need redraw
+    fn collect_dirty_rects(view: &dyn View, parent_frame: Rect, rects: &mut Vec<Rect>) {
+        view.visit_children(&mut |child, rel| {
+            let child_frame = Rect::new(
+                parent_frame.x + rel.x,
+                parent_frame.y + rel.y,
+                rel.width,
+                rel.height,
+            );
+            if child.needs_draw() {
+                rects.push(child_frame);
+            }
+            // Always recurse to find all dirty children
+            Self::collect_dirty_rects(child, child_frame, rects);
+            false
+        });
+    }
+
+    /// Union multiple rects into a bounding box
+    fn union_rects(rects: &[Rect]) -> Option<Rect> {
+        if rects.is_empty() {
+            return None;
+        }
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        for r in rects {
+            min_x = min_x.min(r.x);
+            min_y = min_y.min(r.y);
+            max_x = max_x.max(r.x + r.width as i32);
+            max_y = max_y.max(r.y + r.height as i32);
+        }
+        if max_x <= min_x || max_y <= min_y {
+            return None;
+        }
+        Some(Rect::new(min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
+    }
+
+    /// Recursively clear needs_draw flags on all views
+    fn clear_all_needs_draw(view: &mut dyn View, _frame: Rect) {
+        view.clear_needs_draw();
+        view.visit_children_mut(&mut |child, _rel| {
+            Self::clear_all_needs_draw(child, _rel);
+            false
+        });
+    }
+
     /// Enable or disable layout bounds visualization.
     ///
     /// When enabled, the framework draws rectangle outlines for the allocated
@@ -347,20 +395,51 @@ impl Application {
                 let size = Size::new(managed.window.width(), managed.window.height());
                 managed.window.layout(size);
                 
+                let width = managed.window.width();
+                let height = managed.window.height();
+                let full_frame = Rect::new(0, 0, width, height);
+                
+                // Check if window itself needs full redraw
                 if managed.window.needs_draw() {
-                    // Draw directly into surface SHM buffer
-                    let width = managed.window.width();
-                    let height = managed.window.height();
-                    let frame = Rect::new(0, 0, width, height);
-
+                    // Full redraw
                     if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
                         let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
-                        managed.window.draw(&mut canvas, frame);
+                        managed.window.draw(&mut canvas, full_frame);
                         if self.layout_debug {
-                            Self::draw_layout_debug(&managed.window, &mut canvas, frame, 0);
+                            Self::draw_layout_debug(&managed.window, &mut canvas, full_frame, 0);
                         }
-                        managed.window.clear_needs_draw();
-                        let _ = self.connection.commit(managed.surface_id);
+                    }
+                    Self::clear_all_needs_draw(&mut managed.window, full_frame);
+                    let _ = self.connection.commit(managed.surface_id);
+                    did_draw = true;
+                } else {
+                    // Collect dirty rects from subviews
+                    let mut dirty_rects = Vec::new();
+                    Self::collect_dirty_rects(&managed.window, full_frame, &mut dirty_rects);
+                    
+                    if !dirty_rects.is_empty() {
+                        // Redraw the whole window (since we can't easily do partial view draws)
+                        // but only commit the dirty region
+                        if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
+                            let mut canvas = Canvas::new(surface.buffer_mut(), width, height);
+                            managed.window.draw(&mut canvas, full_frame);
+                            if self.layout_debug {
+                                Self::draw_layout_debug(&managed.window, &mut canvas, full_frame, 0);
+                            }
+                        }
+                        Self::clear_all_needs_draw(&mut managed.window, full_frame);
+                        
+                        // Commit only the dirty region
+                        if let Some(dirty_rect) = Self::union_rects(&dirty_rects) {
+                            let x = dirty_rect.x.max(0) as u32;
+                            let y = dirty_rect.y.max(0) as u32;
+                            let _ = self.connection.commit_region(
+                                managed.surface_id,
+                                x, y,
+                                dirty_rect.width,
+                                dirty_rect.height,
+                            );
+                        }
                         did_draw = true;
                     }
                 }

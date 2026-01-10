@@ -184,16 +184,47 @@ impl Window {
 
     /// Draw the title bar
     fn draw_titlebar(&self, canvas: &mut Canvas) {
-        // Title bar background with gradient effect
+        // Title bar with gradient effect and rounded top corners
         let base_color = Color::rgb(70, 70, 75);
         let highlight = Color::rgb(80, 80, 85);
+        let r = WINDOW_CORNER_RADIUS;
         
         for y in 0..TITLEBAR_HEIGHT {
             let ratio = y as f32 / TITLEBAR_HEIGHT as f32;
-            let r = (base_color.r as f32 + (highlight.r as f32 - base_color.r as f32) * ratio) as u8;
-            let g = (base_color.g as f32 + (highlight.g as f32 - base_color.g as f32) * ratio) as u8;
-            let b = (base_color.b as f32 + (highlight.b as f32 - base_color.b as f32) * ratio) as u8;
-            canvas.fill_rect(0, y as i32, self.width, 1, Color::rgb(r, g, b));
+            let cr = (base_color.r as f32 + (highlight.r as f32 - base_color.r as f32) * ratio) as u8;
+            let cg = (base_color.g as f32 + (highlight.g as f32 - base_color.g as f32) * ratio) as u8;
+            let cb = (base_color.b as f32 + (highlight.b as f32 - base_color.b as f32) * ratio) as u8;
+            let color = Color::rgb(cr, cg, cb);
+            
+            // For top rows, apply corner rounding
+            if y < r {
+                let dy = (r - y) as i32;
+                for x in 0..self.width {
+                    // Check if inside rounded corners
+                    let in_left = x < r;
+                    let in_right = x >= self.width - r;
+                    
+                    let mut skip = false;
+                    if in_left {
+                        let dx = (r - x) as i32;
+                        if dx * dx + dy * dy > (r * r) as i32 {
+                            skip = true;
+                        }
+                    }
+                    if in_right {
+                        let dx = (x - (self.width - r)) as i32;
+                        if dx * dx + dy * dy > (r * r) as i32 {
+                            skip = true;
+                        }
+                    }
+                    
+                    if !skip {
+                        canvas.put_pixel(x as i32, y as i32, color);
+                    }
+                }
+            } else {
+                canvas.fill_rect(0, y as i32, self.width, 1, color);
+            }
         }
 
         // Title text with shadow effect
@@ -415,5 +446,9 @@ impl View for Window {
 
     fn set_needs_draw(&mut self) {
         self.needs_redraw = true;
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.needs_redraw = false;
     }
 }

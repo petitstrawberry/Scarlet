@@ -459,6 +459,20 @@ impl<T> Clone for Binding<T> {
     }
 }
 
+// Automatic conversion from State to Binding
+impl<T: Clone + Send + Sync + 'static> From<State<T>> for Binding<T> {
+    fn from(state: State<T>) -> Self {
+        Binding::from_state(state)
+    }
+}
+
+// Automatic conversion from &State to Binding
+impl<T: Clone + Send + Sync + 'static> From<&State<T>> for Binding<T> {
+    fn from(state: &State<T>) -> Self {
+        Binding::from_state(state.clone())
+    }
+}
+
 impl<T: fmt::Debug + 'static> fmt::Debug for Binding<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Binding")

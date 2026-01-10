@@ -133,12 +133,17 @@ pub trait View {
 
     /// Check if this view needs to be redrawn
     fn needs_draw(&self) -> bool {
-        true // Default: always redraw (can be optimized later)
+        false
     }
 
     /// Mark this view as needing redraw
     fn set_needs_draw(&mut self) {
         // Default: no-op (views can track their own dirty state)
+    }
+
+    /// Clear the needs_draw flag after drawing
+    fn clear_needs_draw(&mut self) {
+        // Default: no-op
     }
 }
 

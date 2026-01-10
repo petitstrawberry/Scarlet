@@ -9,12 +9,16 @@ use crate::event::{Event, EventKind, MouseButton};
 use crate::state::{State, Binding, ViewRefreshHandle};
 use scarlet_std::string::String;
 use scarlet_std::sync::Arc;
+use scarlet_std::vec::Vec;
+use super::traits::ViewBox;
+use scarlet_std::boxed::Box;
 
 /// Text label view
 pub struct Label {
     text: String,
     color: Color,
     font_size: u32,
+    needs_redraw: bool,
 }
 
 impl Label {
@@ -23,6 +27,7 @@ impl Label {
             text: text.into(),
             color: Color::WHITE,
             font_size: 16,
+            needs_redraw: false,
         }
     }
 
@@ -41,6 +46,7 @@ impl Label {
     /// Update text content
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
+        self.needs_redraw = true;
     }
 }
 
@@ -52,6 +58,113 @@ impl View for Label {
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
         canvas.draw_text_sized(frame.x, frame.y, &self.text, self.color, self.font_size as f32);
+    }
+
+    fn needs_draw(&self) -> bool {
+        self.needs_redraw
+    }
+
+    fn set_needs_draw(&mut self) {
+        self.needs_redraw = true;
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.needs_redraw = false;
+    }
+}
+
+/// Reactive text view (SwiftUI-like `Text`)
+///
+/// This view recomputes its text when any watched `State<T>` changes.
+/// Use the `text!()` / `label!()` macros for ergonomic formatting.
+pub struct Text {
+    formatter: Arc<dyn Fn() -> String + Send + Sync>,
+    color: Color,
+    font_size: u32,
+    refresh_handle: ViewRefreshHandle,
+    cached_text: String,
+}
+
+impl Text {
+    pub fn new<F>(formatter: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        let formatter = Arc::new(formatter);
+        let cached_text = formatter();
+        Self {
+            formatter,
+            color: Color::WHITE,
+            font_size: 16,
+            refresh_handle: ViewRefreshHandle::new(),
+            cached_text,
+        }
+    }
+
+    /// Construct a `Text` using a pre-created refresh handle.
+    ///
+    /// This is used by macros to subscribe multiple states to the same handle.
+    pub fn from_refresh_handle<F>(refresh_handle: ViewRefreshHandle, formatter: F) -> Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        let formatter = Arc::new(formatter);
+        let cached_text = formatter();
+        Self {
+            formatter,
+            color: Color::WHITE,
+            font_size: 16,
+            refresh_handle,
+            cached_text,
+        }
+    }
+
+    /// Watch a state. When it changes, the text is marked dirty.
+    pub fn watch<T>(self, state: State<T>) -> Self {
+        state.subscribe_view(&self.refresh_handle);
+        self
+    }
+
+    pub fn color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
+    }
+
+    pub fn font_size(mut self, size: u32) -> Self {
+        self.font_size = size;
+        self
+    }
+}
+
+impl View for Text {
+    fn layout(&mut self, _available: Size) -> Size {
+        if self.refresh_handle.take_dirty() {
+            self.cached_text = (self.formatter)();
+        }
+        let (w, h) = measure_text_sized(&self.cached_text, self.font_size as f32);
+        Size::new(w, h)
+    }
+
+    fn draw(&self, canvas: &mut Canvas, frame: Rect) {
+        canvas.draw_text_sized(
+            frame.x,
+            frame.y,
+            &self.cached_text,
+            self.color,
+            self.font_size as f32,
+        );
+    }
+
+    fn needs_draw(&self) -> bool {
+        self.refresh_handle.is_dirty()
+    }
+
+    fn set_needs_draw(&mut self) {
+        self.refresh_handle.mark_dirty();
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
     }
 }
 
@@ -142,11 +255,38 @@ impl<T: Clone + 'static> View for ReactiveLabel<T> {
     fn set_needs_draw(&mut self) {
         self.refresh_handle.mark_dirty();
     }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
+    }
 }
 
 /// Button view with click action
+pub enum ButtonLabel {
+    Text(String),
+    View(ViewBox),
+}
+
+impl From<String> for ButtonLabel {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for ButtonLabel {
+    fn from(value: &str) -> Self {
+        Self::Text(value.into())
+    }
+}
+
+impl<V: View + 'static> From<V> for ButtonLabel {
+    fn from(value: V) -> Self {
+        Self::View(Box::new(value))
+    }
+}
+
 pub struct Button<F: FnMut() + 'static> {
-    label: String,
+    label: ButtonLabel,
     on_click: F,
     background: Color,
     text_color: Color,
@@ -154,10 +294,12 @@ pub struct Button<F: FnMut() + 'static> {
     padding: u32,
     is_hovered: bool,
     is_pressed: bool,
+    label_size: Size,
+    needs_redraw: bool,
 }
 
 impl<F: FnMut() + 'static> Button<F> {
-    pub fn new(label: impl Into<String>, on_click: F) -> Self {
+    pub fn new(label: impl Into<ButtonLabel>, on_click: F) -> Self {
         Self {
             label: label.into(),
             on_click,
@@ -167,6 +309,8 @@ impl<F: FnMut() + 'static> Button<F> {
             padding: 12,
             is_hovered: false,
             is_pressed: false,
+            label_size: Size::ZERO,
+            needs_redraw: false,
         }
     }
 
@@ -215,10 +359,17 @@ impl<F: FnMut() + 'static> Button<F> {
 
 impl<F: FnMut() + 'static> View for Button<F> {
     fn layout(&mut self, _available: Size) -> Size {
-        let (text_width, text_height) = measure_text_sized(&self.label, 16.0);
+        let inner_available = Size::new(u32::MAX, u32::MAX);
+        self.label_size = match &mut self.label {
+            ButtonLabel::Text(text) => {
+                let (w, h) = measure_text_sized(text, 16.0);
+                Size::new(w, h)
+            }
+            ButtonLabel::View(v) => v.layout(inner_available),
+        };
         Size::new(
-            text_width + self.padding * 2,
-            text_height + self.padding * 2,
+            self.label_size.width + self.padding * 2,
+            self.label_size.height + self.padding * 2,
         )
     }
 
@@ -234,10 +385,18 @@ impl<F: FnMut() + 'static> View for Button<F> {
         };
         canvas.draw_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, border_color);
 
-        // Draw text centered
-        let text_x = frame.x + self.padding as i32;
-        let text_y = frame.y + self.padding as i32;
-        canvas.draw_text(text_x, text_y, &self.label, self.text_color);
+        // Draw label
+        let label_x = frame.x + self.padding as i32;
+        let label_y = frame.y + self.padding as i32;
+        match &self.label {
+            ButtonLabel::Text(text) => {
+                canvas.draw_text(label_x, label_y, text, self.text_color);
+            }
+            ButtonLabel::View(v) => {
+                let label_frame = Rect::new(label_x, label_y, self.label_size.width, self.label_size.height);
+                v.draw(canvas, label_frame);
+            }
+        }
     }
 
     fn on_event(&mut self, event: &mut Event, frame: Rect) -> bool {
@@ -245,11 +404,17 @@ impl<F: FnMut() + 'static> View for Button<F> {
             EventKind::MouseMove => {
                 let was_hovered = self.is_hovered;
                 self.is_hovered = frame.contains(event.x(), event.y());
-                was_hovered != self.is_hovered
+                if was_hovered != self.is_hovered {
+                    self.needs_redraw = true;
+                    true
+                } else {
+                    false
+                }
             }
             EventKind::MouseDown { button: MouseButton::Left } => {
                 if frame.contains(event.x(), event.y()) {
                     self.is_pressed = true;
+                    self.needs_redraw = true;
                     true
                 } else {
                     false
@@ -258,6 +423,7 @@ impl<F: FnMut() + 'static> View for Button<F> {
             EventKind::MouseUp { button: MouseButton::Left } => {
                 if self.is_pressed {
                     self.is_pressed = false;
+                    self.needs_redraw = true;
                     if frame.contains(event.x(), event.y()) {
                         (self.on_click)();
                     }
@@ -268,6 +434,62 @@ impl<F: FnMut() + 'static> View for Button<F> {
             }
             _ => false,
         }
+    }
+
+    fn children(&self) -> Vec<(&dyn View, Rect)> {
+        match &self.label {
+            ButtonLabel::View(v) => {
+                let child_frame = Rect::new(self.padding as i32, self.padding as i32, self.label_size.width, self.label_size.height);
+                let mut out = Vec::new();
+                out.push((v.as_ref() as &dyn View, child_frame));
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn children_mut(&mut self) -> Vec<(&mut dyn View, Rect)> {
+        match &mut self.label {
+            ButtonLabel::View(v) => {
+                let child_frame = Rect::new(self.padding as i32, self.padding as i32, self.label_size.width, self.label_size.height);
+                let mut out = Vec::new();
+                out.push((v.as_mut() as &mut dyn View, child_frame));
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&dyn View, Rect) -> bool) {
+        if let ButtonLabel::View(v) = &self.label {
+            let child_frame = Rect::new(self.padding as i32, self.padding as i32, self.label_size.width, self.label_size.height);
+            let _ = visitor(v.as_ref() as &dyn View, child_frame);
+        }
+    }
+
+    fn visit_children_mut(&mut self, visitor: &mut dyn FnMut(&mut dyn View, Rect) -> bool) {
+        if let ButtonLabel::View(v) = &mut self.label {
+            let child_frame = Rect::new(self.padding as i32, self.padding as i32, self.label_size.width, self.label_size.height);
+            let _ = visitor(v.as_mut() as &mut dyn View, child_frame);
+        }
+    }
+
+    fn needs_draw(&self) -> bool {
+        if self.needs_redraw {
+            return true;
+        }
+        match &self.label {
+            ButtonLabel::View(v) => v.needs_draw(),
+            _ => false,
+        }
+    }
+
+    fn set_needs_draw(&mut self) {
+        self.needs_redraw = true;
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.needs_redraw = false;
     }
 }
 
@@ -420,7 +642,8 @@ impl View for RectView {
 ///
 /// let text = State::new(String::from(""));
 ///
-/// TextField::new("Enter text...", text.binding())
+/// // State can be passed directly (no .binding() needed)
+/// TextField::new("Enter text...", text)
 /// ```
 pub struct TextField {
     binding: Binding<String>,
@@ -437,7 +660,8 @@ pub struct TextField {
 }
 
 impl TextField {
-    pub fn new(placeholder: impl Into<String>, binding: Binding<String>) -> Self {
+    pub fn new(placeholder: impl Into<String>, binding: impl Into<Binding<String>>) -> Self {
+        let binding = binding.into();
         let cached_text = binding.get();
         let cursor_pos = cached_text.len();
         Self {
@@ -571,6 +795,10 @@ impl View for TextField {
     fn set_needs_draw(&mut self) {
         self.refresh_handle.mark_dirty();
     }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
+    }
 }
 
 /// CheckBox - boolean toggle control with two-way binding
@@ -582,7 +810,8 @@ impl View for TextField {
 ///
 /// let checked = State::new(false);
 ///
-/// CheckBox::new("Enable feature", checked.binding())
+/// // State can be passed directly (no .binding() needed)
+/// CheckBox::new("Enable feature", checked)
 /// ```
 pub struct CheckBox {
     binding: Binding<bool>,
@@ -594,9 +823,9 @@ pub struct CheckBox {
 }
 
 impl CheckBox {
-    pub fn new(label: impl Into<String>, binding: Binding<bool>) -> Self {
+    pub fn new(label: impl Into<String>, binding: impl Into<Binding<bool>>) -> Self {
         Self {
-            binding,
+            binding: binding.into(),
             label: label.into(),
             check_color: Color::rgb(50, 150, 255),
             label_color: Color::BLACK,
@@ -692,6 +921,10 @@ impl View for CheckBox {
     fn set_needs_draw(&mut self) {
         self.refresh_handle.mark_dirty();
     }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
+    }
 }
 
 /// Slider - value selection control with two-way binding
@@ -703,7 +936,8 @@ impl View for CheckBox {
 ///
 /// let value = State::new(0.5f32);
 ///
-/// Slider::new(0.0, 1.0, value.binding())
+/// // State can be passed directly (no .binding() needed)
+/// Slider::new(0.0, 1.0, value)
 /// ```
 pub struct Slider {
     binding: Binding<f32>,
@@ -716,9 +950,9 @@ pub struct Slider {
 }
 
 impl Slider {
-    pub fn new(min: f32, max: f32, binding: Binding<f32>) -> Self {
+    pub fn new(min: f32, max: f32, binding: impl Into<Binding<f32>>) -> Self {
         Self {
-            binding,
+            binding: binding.into(),
             min,
             max,
             track_color: Color::rgb(200, 200, 200),
@@ -835,6 +1069,10 @@ impl View for Slider {
     fn set_needs_draw(&mut self) {
         self.refresh_handle.mark_dirty();
     }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
+    }
 }
 
 /// ProgressBar - progress indicator with reactive state
@@ -924,6 +1162,10 @@ impl View for ProgressBar {
     fn set_needs_draw(&mut self) {
         self.refresh_handle.mark_dirty();
     }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
+    }
 }
 
 /// Toggle - switch control with two-way binding
@@ -935,7 +1177,8 @@ impl View for ProgressBar {
 ///
 /// let enabled = State::new(false);
 ///
-/// Toggle::new(enabled.binding())
+/// // State can be passed directly (no .binding() needed)
+/// Toggle::new(enabled)
 /// ```
 pub struct Toggle {
     binding: Binding<bool>,
@@ -947,9 +1190,9 @@ pub struct Toggle {
 }
 
 impl Toggle {
-    pub fn new(binding: Binding<bool>) -> Self {
+    pub fn new(binding: impl Into<Binding<bool>>) -> Self {
         Self {
-            binding,
+            binding: binding.into(),
             on_color: Color::rgb(50, 200, 100),
             off_color: Color::rgb(180, 180, 180),
             thumb_color: Color::WHITE,
@@ -1054,5 +1297,9 @@ impl View for Toggle {
 
     fn set_needs_draw(&mut self) {
         self.refresh_handle.mark_dirty();
+    }
+
+    fn clear_needs_draw(&mut self) {
+        self.refresh_handle.take_dirty();
     }
 }

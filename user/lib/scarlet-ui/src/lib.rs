@@ -140,10 +140,71 @@ pub use view::{
     Window,
     VStack, HStack, ZStack, Padding, Center,
     // Basic views
-    Label, Button, Spacer, RectView,
+    Label, Text, Button, Spacer, RectView,
     // Reactive controls (all use Binding<T> or State<T>)
     ReactiveLabel, TextField, CheckBox, Slider, ProgressBar, Toggle,
 };
+
+/// Create a reactive `Text` view with `format!`-style syntax.
+///
+/// All arguments must be `State<T>` (or a type that provides `.get()` and `.subscribe_view()`).
+///
+/// Examples:
+/// ```no_run
+/// # use scarlet_ui::{State, text};
+/// let counter = State::new(1);
+/// let v = text!("Count: {}", counter);
+/// ```
+#[macro_export]
+macro_rules! text {
+    ($text:expr $(,)?) => {
+        $crate::Label::new($text)
+    };
+    ($fmt:literal, $s1:expr $(,)?) => {{
+        let handle = $crate::ViewRefreshHandle::new();
+        let s1 = $s1;
+        s1.subscribe_view(&handle);
+        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get()))
+    }};
+    ($fmt:literal, $s1:expr, $s2:expr $(,)?) => {{
+        let handle = $crate::ViewRefreshHandle::new();
+        let s1 = $s1;
+        let s2 = $s2;
+        s1.subscribe_view(&handle);
+        s2.subscribe_view(&handle);
+        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get(), s2.get()))
+    }};
+    ($fmt:literal, $s1:expr, $s2:expr, $s3:expr $(,)?) => {{
+        let handle = $crate::ViewRefreshHandle::new();
+        let s1 = $s1;
+        let s2 = $s2;
+        let s3 = $s3;
+        s1.subscribe_view(&handle);
+        s2.subscribe_view(&handle);
+        s3.subscribe_view(&handle);
+        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get(), s2.get(), s3.get()))
+    }};
+    ($fmt:literal, $s1:expr, $s2:expr, $s3:expr, $s4:expr $(,)?) => {{
+        let handle = $crate::ViewRefreshHandle::new();
+        let s1 = $s1;
+        let s2 = $s2;
+        let s3 = $s3;
+        let s4 = $s4;
+        s1.subscribe_view(&handle);
+        s2.subscribe_view(&handle);
+        s3.subscribe_view(&handle);
+        s4.subscribe_view(&handle);
+        $crate::Text::from_refresh_handle(handle, move || format!($fmt, s1.get(), s2.get(), s3.get(), s4.get()))
+    }};
+}
+
+/// Alias for `text!()` to match the "Label(...)" mental model.
+#[macro_export]
+macro_rules! label {
+    ($($tt:tt)*) => {
+        $crate::text!($($tt)*)
+    };
+}
 
 // Modifier re-exports
 pub use modifiers::{ViewModifier, CornerRadius, Border, Background, RoundedBorder};

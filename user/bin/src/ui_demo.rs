@@ -1,12 +1,11 @@
-//! UI Demo - Demonstrates scarlet-ui reactive state management
+//! UI Demo - ScarletUI Reactive State Demo
 //!
 //! This demo showcases:
 //! - Reactive State<T> with automatic UI updates
-//! - Two-way Binding<T> for controls
+//! - Direct State passing (no .binding() needed)
 //! - Timer-based automatic updates
 //! - ReactiveLabel for auto-updating text
-//! - All controls with proper rounded corners
-//! - View modifiers and styling
+//! - Rounded corners on all controls
 
 #![no_std]
 #![no_main]
@@ -15,8 +14,8 @@ extern crate scarlet_std as std;
 
 use core::time::Duration;
 use scarlet_ui::{
-    Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar,
-    ReactiveLabel, RectView, Slider, Spacer, State, TextField, Timer, Toggle, VStack, Window,
+    Application, Button, Center, CheckBox, Color, HStack, Label, Padding, ProgressBar, RectView,
+    Slider, Spacer, State, Text, TextField, Timer, Toggle, VStack, Window, label,
 };
 use std::{format, println, string::String};
 
@@ -24,7 +23,6 @@ use std::{format, println, string::String};
 pub extern "C" fn main() -> i32 {
     println!("[ui_demo] Starting ScarletUI Reactive Demo");
 
-    // Create application
     let mut app = match Application::new() {
         Ok(a) => a,
         Err(e) => {
@@ -32,89 +30,66 @@ pub extern "C" fn main() -> i32 {
             return 1;
         }
     };
-    println!("[ui_demo] Connected to SWS");
 
     app.set_terminate_after_last_window_closed(true);
     let handle = app.handle();
 
     // ========================================================================
-    // Reactive State - all UI automatically updates when these change
+    // Reactive State - UI auto-updates when values change
     // ========================================================================
 
-    // Counter with ReactiveLabel
     let counter = State::new(0i32);
-
-    // Progress bar state (auto-increments via timer)
     let progress = State::new(0.0f32);
-
-    // Text input state (two-way binding)
-    let text_input = State::new(String::from(""));
-
-    // CheckBox states
+    let text_input = State::new(String::new());
     let feature_a = State::new(true);
     let feature_b = State::new(false);
-
-    // Slider state
     let slider_value = State::new(0.5f32);
-
-    // Toggle states
     let toggle1 = State::new(true);
     let toggle2 = State::new(false);
 
-    // ========================================================================
-    // Timer - automatically updates progress and logs state
-    // ========================================================================
-
-    let progress_timer = progress.clone();
-    let counter_timer = counter.clone();
+    // Timer - auto-increment progress (100ms intervals)
+    let progress_t = progress.clone();
+    let counter_t = counter.clone();
     Timer::periodic(Duration::from_millis(100), move || {
-        // Auto-increment progress
-        let new_progress = (progress_timer.get() + 0.01).min(1.0);
-        if new_progress >= 1.0 {
-            progress_timer.set(0.0);
-            // Also increment counter when progress resets
-            counter_timer.set(counter_timer.get() + 1);
+        let p = progress_t.get() + 0.01;
+        if p >= 1.0 {
+            progress_t.set(0.0);
+            counter_t.update(|c| *c += 1);
         } else {
-            progress_timer.set(new_progress);
+            progress_t.set(p);
         }
     });
 
-    // ========================================================================
-    // Clone states for button callbacks
-    // ========================================================================
-
+    // Button callbacks
     let counter_reset = counter.clone();
     let counter_inc = counter.clone();
     let progress_reset = progress.clone();
-
-    // ========================================================================
-    // Build UI with reactive bindings
-    // ========================================================================
-
     let popup_handle = handle.clone();
 
-    let window = Window::new("ScarletUI Reactive Demo", 650, 700)
-        .min_size(650, 700)
+    // ========================================================================
+    // Build UI - State passed directly to controls (no .binding())
+    // ========================================================================
+
+    let window = Window::new("ScarletUI Reactive Demo", 650, 720)
+        .min_size(650, 720)
         .background(Color::rgb(245, 245, 250))
         .content(
             Padding::new(
                 VStack::new()
                     .spacing(16)
-                    // Title
+                    // Header
                     .child(
                         Label::new("🎨 ScarletUI Reactive Gallery")
                             .color(Color::rgb(40, 40, 50))
                             .font_size(28),
                     )
                     .child(
-                        Label::new("State<T> & Binding<T> Demo")
+                        Label::new("State<T> auto-binds to controls")
                             .color(Color::GRAY)
                             .font_size(14),
                     )
                     .child(Spacer::new().min_length(8))
-                    // --------------------------------------------------------
-                    // Reactive Counter - ReactiveLabel auto-updates
-                    // --------------------------------------------------------
+                    // Counter - ReactiveLabel auto-updates
                     .child(
                         VStack::new()
                             .spacing(8)
@@ -124,33 +99,27 @@ pub extern "C" fn main() -> i32 {
                                     .font_size(14),
                             )
                             .child(
-                                ReactiveLabel::new(counter.clone(), |count| {
-                                    format!("Count: {}", count)
-                                })
-                                .color(Color::rgb(50, 150, 255))
-                                .font_size(24),
+                                label!("Count: {}", counter.clone())
+                                    .color(Color::rgb(50, 150, 255))
+                                    .font_size(24),
                             )
                             .child(
                                 HStack::new()
                                     .spacing(8)
                                     .child(Button::new("Reset", move || {
                                         counter_reset.set(0);
-                                        println!("[ui_demo] Counter reset");
                                     }))
                                     .child(Button::new("+1", move || {
-                                        counter_inc.set(counter_inc.get() + 1);
-                                        println!("[ui_demo] Counter: {}", counter_inc.get());
+                                        counter_inc.update(|c| *c += 1);
                                     })),
                             ),
                     )
-                    // --------------------------------------------------------
-                    // Progress Bar - reacts to State<f32>
-                    // --------------------------------------------------------
+                    // Progress - auto-updates via timer
                     .child(
                         VStack::new()
                             .spacing(8)
                             .child(
-                                Label::new("Auto Progress (resets at 100%):")
+                                Label::new("Auto Progress:")
                                     .color(Color::TEXT)
                                     .font_size(14),
                             )
@@ -164,9 +133,11 @@ pub extern "C" fn main() -> i32 {
                                 HStack::new()
                                     .spacing(8)
                                     .child(
-                                        ReactiveLabel::new(progress.clone(), |p| {
-                                            format!("{:.0}%", p * 100.0)
+                                        Text::new({
+                                            let progress = progress.clone();
+                                            move || format!("{:.0}%", progress.get() * 100.0)
                                         })
+                                        .watch(progress.clone())
                                         .color(Color::GRAY)
                                         .font_size(12),
                                     )
@@ -176,86 +147,61 @@ pub extern "C" fn main() -> i32 {
                                     })),
                             ),
                     )
-                    // --------------------------------------------------------
-                    // TextField with Binding
-                    // --------------------------------------------------------
+                    // TextField - State passed directly
                     .child(
                         VStack::new()
                             .spacing(8)
+                            .child(Label::new("TextField:").color(Color::TEXT).font_size(14))
                             .child(
-                                Label::new("TextField (with Binding):")
-                                    .color(Color::TEXT)
-                                    .font_size(14),
-                            )
-                            .child(
-                                TextField::new("Enter your name...", text_input.binding())
-                                    .corner_radius(6),
+                                TextField::new("Type here...", text_input.clone()).corner_radius(6),
                             ),
                     )
-                    // --------------------------------------------------------
-                    // CheckBoxes with Binding
-                    // --------------------------------------------------------
+                    // CheckBox - State passed directly
                     .child(
                         VStack::new()
                             .spacing(8)
-                            .child(
-                                Label::new("CheckBox (with Binding):")
-                                    .color(Color::TEXT)
-                                    .font_size(14),
-                            )
+                            .child(Label::new("CheckBox:").color(Color::TEXT).font_size(14))
                             .child(
                                 HStack::new()
                                     .spacing(16)
-                                    .child(CheckBox::new("Feature A", feature_a.binding()))
-                                    .child(CheckBox::new("Feature B", feature_b.binding())),
+                                    .child(CheckBox::new("Feature A", feature_a.clone()))
+                                    .child(CheckBox::new("Feature B", feature_b.clone())),
                             ),
                     )
-                    // --------------------------------------------------------
-                    // Slider with Binding + ReactiveLabel
-                    // --------------------------------------------------------
+                    // Slider - State passed directly
                     .child(
                         VStack::new()
                             .spacing(8)
+                            .child(Label::new("Slider:").color(Color::TEXT).font_size(14))
+                            .child(Slider::new(0.0, 1.0, slider_value.clone()))
                             .child(
-                                Label::new("Slider (with Binding):")
-                                    .color(Color::TEXT)
-                                    .font_size(14),
-                            )
-                            .child(Slider::new(0.0, 1.0, slider_value.binding()))
-                            .child(
-                                ReactiveLabel::new(slider_value.clone(), |v| {
-                                    format!("Value: {:.2}", v)
+                                Text::new({
+                                    let slider_value = slider_value.clone();
+                                    move || format!("Value: {:.2}", slider_value.get())
                                 })
+                                .watch(slider_value.clone())
                                 .color(Color::GRAY)
                                 .font_size(12),
                             ),
                     )
-                    // --------------------------------------------------------
-                    // Toggle with Binding
-                    // --------------------------------------------------------
+                    // Toggle - State passed directly
                     .child(
                         VStack::new()
                             .spacing(8)
-                            .child(
-                                Label::new("Toggle (with Binding):")
-                                    .color(Color::TEXT)
-                                    .font_size(14),
-                            )
+                            .child(Label::new("Toggle:").color(Color::TEXT).font_size(14))
                             .child(
                                 HStack::new()
                                     .spacing(16)
-                                    .child(Toggle::new(toggle1.binding()))
-                                    .child(Toggle::new(toggle2.binding())),
+                                    .child(Toggle::new(toggle1.clone()))
+                                    .child(Toggle::new(toggle2.clone())),
                             ),
                     )
-                    // --------------------------------------------------------
-                    // RectViews with corner radius
-                    // --------------------------------------------------------
+                    // RectViews with corner_radius
                     .child(
                         VStack::new()
                             .spacing(8)
                             .child(
-                                Label::new("RectView with corner_radius:")
+                                Label::new("Rounded Corners:")
                                     .color(Color::TEXT)
                                     .font_size(14),
                             )
@@ -288,37 +234,38 @@ pub extern "C" fn main() -> i32 {
                                         RectView::new(Color::rgb(255, 200, 50))
                                             .width(60)
                                             .height(60)
-                                            .corner_radius(30), // Circle!
+                                            .corner_radius(30),
                                     )
                                     .child(Spacer::new()),
                             ),
                     )
                     .child(Spacer::new())
-                    // --------------------------------------------------------
-                    // Action buttons
-                    // --------------------------------------------------------
+                    // Buttons
                     .child(Center::new(
                         HStack::new()
                             .spacing(12)
                             .child(Button::new("Popup", move || {
-                                println!("[ui_demo] Popup clicked");
                                 popup_handle.request_popup();
                             }))
-                            .child(Button::new("Info", || {
-                                println!("[ui_demo] All controls use State<T>/Binding<T>!");
+                            .child(Button::new(label!("Info (count={})", counter.clone()), {
+                                let counter = counter.clone();
+                                move || {
+                                    println!(
+                                        "[ui_demo] All controls use State<T> directly! count={}",
+                                        counter.get()
+                                    );
+                                }
                             })),
                     )),
             )
             .all(20),
         );
 
-    // Add window
     if let Err(e) = app.add_window(window) {
         println!("[ui_demo] Failed to add window: {}", e);
         return 1;
     }
-    println!("[ui_demo] Window created - reactive state is live!");
+    println!("[ui_demo] Window created");
 
-    // Run event loop
     app.run();
 }
