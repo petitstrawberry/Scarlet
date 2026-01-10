@@ -293,7 +293,11 @@ pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
 fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     if let Some(frames) = pending.get_mut(&window_id) {
-        core::mem::take(frames)
+        if frames.is_empty() {
+            Vec::new() // Already empty, no reallocation needed
+        } else {
+            core::mem::take(frames)
+        }
     } else {
         Vec::new()
     }
@@ -304,7 +308,11 @@ fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
     let mut pending = PENDING_INPUT_EVENTS.lock();
 
     if let Some(events) = pending.get_mut(&window_id) {
-        core::mem::take(events)
+        if events.is_empty() {
+            Vec::new() // Already empty, no reallocation needed
+        } else {
+            core::mem::take(events)
+        }
     } else {
         Vec::new()
     }

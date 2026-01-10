@@ -680,18 +680,14 @@ impl Application {
     fn dispatch_event_to_view(view: &mut dyn View, mut event: Event, frame: Rect, route_all: bool) {
         // Phase 1: CAPTURE (root → target)
         if view.on_event_capture(&mut event, frame) {
-            view.set_needs_draw();
             return;
         }
         if event.is_stopped() {
-            view.set_needs_draw();
             return;
         }
         
         // Phase 2: BUBBLE (target → root)
-        if Self::dispatch_bubble(view, &mut event, frame, route_all) || event.is_stopped() {
-            view.set_needs_draw();
-        }
+        let _ = Self::dispatch_bubble(view, &mut event, frame, route_all);
     }
 
     /// Dispatch event in bubble phase recursively
@@ -729,6 +725,12 @@ impl Application {
         }
         
         // Then handle on this view
-        view.on_event(event, frame)
+        let handled = view.on_event(event, frame);
+        if handled || event.is_stopped() {
+            // Mark only the view that actually handled the event as dirty.
+            // This keeps compositor damage regions small.
+            view.set_needs_draw();
+        }
+        handled
     }
 }

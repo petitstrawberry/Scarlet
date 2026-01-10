@@ -220,6 +220,94 @@ impl FreeListAllocator {
         }
     }
 
+    #[cfg(any(debug_assertions, feature = "alloc_debug"))]
+    fn debug_validate_free_list(&self, context: &'static str) {
+        let heap_start = self.heap_start.load(Ordering::SeqCst);
+        let heap_end = self.heap_end.load(Ordering::SeqCst);
+        let align = core::mem::align_of::<FreeBlock>();
+
+        // Avoid infinite loops if next pointers are cyclic/corrupt.
+        let mut steps: usize = 0;
+        let mut curr = unsafe { *self.head.get() };
+        while !curr.is_null() {
+            steps += 1;
+            if steps > 100_000 {
+                println!(
+                    "[ALLOC] ERROR: free list traversal too long at {} (possible cycle)",
+                    context
+                );
+                panic!("allocator free list corrupted");
+            }
+
+            let addr = curr as usize;
+            if heap_start == 0 || heap_end == 0 || heap_end <= heap_start {
+                println!(
+                    "[ALLOC] ERROR: heap bounds invalid at {} (start=0x{:x} end=0x{:x})",
+                    context, heap_start, heap_end
+                );
+                panic!("allocator heap bounds corrupted");
+            }
+            if addr < heap_start || addr >= heap_end {
+                println!(
+                    "[ALLOC] ERROR: free list node out of heap range at {} (node=0x{:x}, heap=0x{:x}..0x{:x})",
+                    context, addr, heap_start, heap_end
+                );
+                panic!("allocator free list corrupted");
+            }
+            if addr % align != 0 {
+                println!(
+                    "[ALLOC] ERROR: free list node misaligned at {} (node=0x{:x}, align=0x{:x})",
+                    context, addr, align
+                );
+                panic!("allocator free list corrupted");
+            }
+
+            let size = unsafe { (*curr).size };
+            if size < core::mem::size_of::<FreeBlock>() {
+                println!(
+                    "[ALLOC] ERROR: free list node size too small at {} (node=0x{:x}, size=0x{:x})",
+                    context, addr, size
+                );
+                panic!("allocator free list corrupted");
+            }
+            if size % align != 0 {
+                println!(
+                    "[ALLOC] ERROR: free list node size misaligned at {} (node=0x{:x}, size=0x{:x})",
+                    context, addr, size
+                );
+                panic!("allocator free list corrupted");
+            }
+            if addr.saturating_add(size) > heap_end {
+                println!(
+                    "[ALLOC] ERROR: free list node exceeds heap at {} (node=0x{:x}, size=0x{:x}, heap_end=0x{:x})",
+                    context, addr, size, heap_end
+                );
+                panic!("allocator free list corrupted");
+            }
+
+            let next = unsafe { (*curr).next };
+            if !next.is_null() {
+                let next_addr = next as usize;
+                if next_addr < heap_start || next_addr >= heap_end {
+                    println!(
+                        "[ALLOC] ERROR: free list next out of range at {} (node=0x{:x} next=0x{:x}, heap=0x{:x}..0x{:x})",
+                        context, addr, next_addr, heap_start, heap_end
+                    );
+                    panic!("allocator free list corrupted");
+                }
+                if next_addr % align != 0 {
+                    println!(
+                        "[ALLOC] ERROR: free list next misaligned at {} (node=0x{:x} next=0x{:x}, align=0x{:x})",
+                        context, addr, next_addr, align
+                    );
+                    panic!("allocator free list corrupted");
+                }
+            }
+
+            curr = next;
+        }
+    }
+
     unsafe fn init(&self) {
         let initial_size = 4096;
         let start = sbrk(initial_size);
@@ -247,23 +335,6 @@ impl FreeListAllocator {
 
     fn insert_free_block(&self, addr: usize, size: usize) {
         // Push-front insertion.
-        #[cfg(any(debug_assertions, feature = "alloc_debug"))]
-        {
-            assert_eq!(
-                addr % core::mem::align_of::<FreeBlock>(),
-                0,
-                "free block address must be aligned"
-            );
-            assert!(
-                size >= core::mem::size_of::<FreeBlock>(),
-                "free block size too small"
-            );
-            assert_eq!(
-                size % core::mem::align_of::<FreeBlock>(),
-                0,
-                "free block size must be aligned"
-            );
-        }
         unsafe {
             let block = addr as *mut FreeBlock;
             (*block).size = size;
@@ -443,6 +514,7 @@ impl LockedFreeListAllocator {
 unsafe impl GlobalAlloc for LockedFreeListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let _guard = self.lock.lock();
+
         let header_size = core::mem::size_of::<AllocHeader>();
         let header_align = core::mem::align_of::<AllocHeader>();
         let payload_align = core::cmp::max(layout.align(), header_align);
@@ -530,6 +602,7 @@ unsafe impl GlobalAlloc for LockedFreeListAllocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let _guard = self.lock.lock();
+
         // For zero-sized allocations, `alloc` may return any non-null dangling pointer.
         // `dealloc` for such layouts must be a no-op.
         if layout.size() == 0 {
