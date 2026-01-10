@@ -1,8 +1,13 @@
 # Scarlet Window Server (SWS) IPC Protocol
 
-This document describes the wire protocol used between the Scarlet Window Server (`sws`) and clients (e.g. `sws_client`).
+This document describes the wire protocol used between the Scarlet Window Server (`sws`) and clients.
 
-The canonical implementation is in `user/bin/src/sws/protocol.rs` and is shared by both server and clients via the `userprogram::sws_protocol` module.
+The canonical implementation is the `sws_protocol` crate located at `user/lib/sws_protocol`.
+
+Client-side reference implementations:
+
+- Low-level client library: `sws-client` (crate name `sws_client`) in `user/lib/sws-client`
+- High-level UI toolkit: `scarlet-ui` in `user/lib/scarlet-ui`
 
 ## Transport
 
@@ -99,9 +104,11 @@ Payload (12 bytes):
 | Offset | Size | Field       | Type | Notes |
 |--------|------|-------------|------|-------|
 | 0      | 4    | `window_id` | u32  | Window ID allocated by server |
-| 4      | 8    | `shm_size`  | u64  | Currently informational; shared memory is a future feature |
+| 4      | 8    | `shm_size`  | u64  | Size (bytes) of the window's shared-memory buffer |
 
 `shm_size` is a fixed-width `u64` to keep the protocol stable across architectures.
+
+After `WINDOW_CREATED`, the server sends the shared-memory handle out-of-band via handle passing (SCM_RIGHTS-style capability transfer). See `sws_protocol::send_shm_handle` / `sws_protocol::recv_shm_handle`.
 
 #### `WINDOW_DESTROYED` (type = 11)
 

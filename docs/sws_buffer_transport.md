@@ -1,4 +1,4 @@
-# SWS Buffer Transport Plan (Post Handle-Passing)
+# SWS Buffer Transport Plan (Shared Memory + Handle Passing)
 
 This document describes the planned evolution of Scarlet Window Server (SWS) buffer transport.
 
@@ -7,8 +7,9 @@ It is intentionally forward-looking and **does not** require pixel payloads to b
 ## Current State (Today)
 
 - SWS IPC is a framed, little-endian protocol documented in `docs/sws_ipc_protocol.md`.
-- `UPDATE_BUFFER` is treated as a **damage notification only** (no pixel payload).
-- This keeps Create/Destroy correctness testable while deferring zero-copy rendering.
+- Window pixel buffers are provided via **shared memory**.
+- The server transfers the SHM handle to the client via handle passing.
+- `UPDATE_BUFFER` is treated as a **damage notification only** (no pixel payload is sent over the socket).
 
 ## Goal
 
@@ -16,17 +17,14 @@ It is intentionally forward-looking and **does not** require pixel payloads to b
 - Keep the protocol **stable and portable** across architectures (no `usize` on the wire).
 - Keep ownership and access control **capability-based** (no global shared-memory names).
 
-## Dependency: Handle Passing
+## Handle Passing
 
-True zero-copy requires passing a reference/capability for a shared-memory object from one process to another.
+Zero-copy buffer sharing is implemented via handle passing:
 
-This document assumes a forthcoming capability/handle passing mechanism (tracked in PR #286) that enables:
-
-- Creating a shared-memory object (server-side or client-side).
-- Transferring a handle/capability to the peer.
-- Mapping the shared-memory into the receiver’s address space.
-
-The exact handle encoding is **intentionally abstract** here until the handle-passing API is finalized.
+- Server allocates a shared-memory object for the window buffer.
+- Server sends `WINDOW_CREATED { window_id, shm_size }` on the socket.
+- Server transfers the SHM handle out-of-band (SCM_RIGHTS-style).
+- Client maps the handle and draws directly into the buffer.
 
 ## Transport Modes
 

@@ -102,6 +102,7 @@ This interoperability is possible because all ABIs share the same underlying ker
 - **Dynamic Linking**: Native dynamic linker support for shared libraries and position-independent executables
 - **Advanced VFS**: Modern virtual filesystem with ext2, FAT32, overlay, bind mount, and device file support
 - **Graphics Support**: Framebuffer device support with graphics hardware abstraction
+- **Windowing / UI (in progress)**: SWS protocol + client libraries - [Protocol](docs/sws_ipc_protocol.md), [sws-client](docs/sws_client.md), [scarlet-ui](docs/scarlet_ui.md)
 - **System Integration**: TTY devices, interrupt handling, and comprehensive device management
 - **Task Management**: Full task lifecycle with environment variables and IPC pipes
 - **Event System**: Advanced IPC with event-driven communication and synchronization
