@@ -60,6 +60,18 @@ name = "socket_pair"
 path = "src/socket_pair.rs"
 
 [[bin]]
+name = "window_server"
+path = "src/window_server.rs"
+
+[[bin]]
+name = "sws"
+path = "src/sws/main.rs"
+
+[[bin]]
+name = "sws_client"
+path = "src/sws_client.rs"
+
+[[bin]]
 name = "container_demo"
 path = "src/container_demo.rs"
 
@@ -68,6 +80,13 @@ name = "socket_handle_transfer_demo"
 path = "src/socket_handle_transfer_demo.rs"
 test = false
 
+[[bin]]
+name = "ui_demo"
+path = "src/ui_demo.rs"
+
 [dependencies]
-scarlet_std = { path = "../lib/std" }
+scarlet_std = { path = "../lib/std", features = ["alloc_debug"] }
 framebuffer = { path = "../lib/framebuffer" }
+sws_protocol = { path = "../lib/sws_protocol" }
+sws-client = { path = "../lib/sws-client" }
+scarlet-ui = { path = "../lib/scarlet-ui" }

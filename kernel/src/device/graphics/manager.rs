@@ -45,7 +45,11 @@ pub struct FramebufferResource {
     pub config: FramebufferConfig,
     /// Physical memory address of the framebuffer
     pub physical_addr: usize,
-    /// Size of the framebuffer in bytes
+    /// Size of the allocated framebuffer memory in bytes (page-aligned).
+    /// This is the actual allocated size, which may be larger than the logical
+    /// framebuffer size (config.size()) due to page alignment requirements.
+    /// Use this size for memory mapping operations.
+    /// For the logical pixel data size, use config.size() instead.
     pub size: usize,
     /// ID of the created /dev/fbX character device (if any)
     pub created_char_device_id: RwLock<Option<usize>>,
@@ -199,7 +203,11 @@ impl GraphicsManager {
         let physical_addr = graphics_device.get_framebuffer_address()?;
 
         // Calculate framebuffer size
-        let size = config.size();
+        // The logical size is what the pixels actually use
+        let logical_size = config.size();
+        // The physical size must be page-aligned for memory mapping
+        let physical_size = (logical_size + crate::environment::PAGE_SIZE - 1)
+            & !(crate::environment::PAGE_SIZE - 1);
 
         // Generate logical name (fb0, fb1, etc.)
         let mut framebuffers = self.framebuffers.lock();
@@ -210,13 +218,13 @@ impl GraphicsManager {
         let logical_name = format!("fb{}", map.len());
         drop(framebuffers);
 
-        // Create framebuffer resource
+        // Create framebuffer resource with page-aligned physical size
         let resource = Arc::new(FramebufferResource::new(
             device_id,
             logical_name.clone(),
             config,
             physical_addr,
-            size,
+            physical_size,
         ));
 
         // Store the resource
@@ -616,7 +624,9 @@ mod tests {
         assert_eq!(fb.config.width, 800);
         assert_eq!(fb.config.height, 600);
         assert_eq!(fb.physical_addr, 0x90000000);
-        assert_eq!(fb.size, 800 * 600 * 4);
+        let page_aligned_size = (800 * 600 * 4 + crate::environment::PAGE_SIZE - 1)
+            & !(crate::environment::PAGE_SIZE - 1);
+        assert_eq!(fb.size, page_aligned_size);
     }
 
     #[test_case]

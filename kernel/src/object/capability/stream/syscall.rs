@@ -38,33 +38,22 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
-    // Check if this is a socket that supports blocking reads
-    use crate::network::local::LocalSocket;
-    use crate::object::KernelObject;
-
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-
-    let bytes_read = if let KernelObject::Socket(socket_obj) = &kernel_obj {
-        let socket_ptr = alloc::sync::Arc::as_ptr(socket_obj);
-        let local_socket = unsafe { &*(socket_ptr as *const LocalSocket) };
-
-        match local_socket.read_blocking(buffer, task.get_id(), trapframe) {
-            Ok(n) => n,
-            Err(_) => usize::MAX,
-        }
-    } else {
-        let stream = match kernel_obj.as_stream() {
-            Some(stream) => stream,
-            None => return usize::MAX,
-        };
-
-        match stream.read(buffer) {
-            Ok(n) => n,
-            Err(_) => usize::MAX,
-        }
+    // Check if object supports StreamOps
+    let stream = match kernel_obj.as_stream() {
+        Some(stream) => stream,
+        None => return usize::MAX, // Object doesn't support stream operations
     };
 
-    bytes_read
+    // Perform read operation (may block)
+    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
+    match stream.read(buffer) {
+        Ok(n) => n,
+        Err(super::StreamError::WouldBlock) => {
+            // Return EAGAIN error code (negative value indicates error)
+            (-(11i32)) as usize
+        }
+        Err(_) => usize::MAX,
+    }
 }
 
 /// System call for writing to a KernelObject with StreamOps capability

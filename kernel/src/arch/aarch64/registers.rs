@@ -25,4 +25,16 @@ impl IntRegisters {
         // AArch64 syscall return value: X0
         self.reg[0] = value;
     }
+
+    pub fn set_arg(&mut self, index: usize, value: usize) {
+        // AArch64 syscall arguments: X0-X7
+        if index < 8 {
+            self.reg[index] = value;
+        }
+    }
+
+    pub fn get_arg(&self, index: usize) -> usize {
+        // AArch64 syscall arguments: X0-X7
+        if index < 8 { self.reg[index] } else { 0 }
+    }
 }

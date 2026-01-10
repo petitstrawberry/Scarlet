@@ -33,7 +33,10 @@ use super::{
 };
 use crate::ipc::StreamIpcOps;
 use crate::object::KernelObject;
-use crate::object::capability::{CloneOps, StreamError, StreamOps};
+use crate::object::capability::{
+    CloneOps, ControlOps, ReadyInterest, ReadySet, SelectWaitOutcome, Selectable, StreamError,
+    StreamOps,
+};
 use crate::sync::Waker;
 
 /// Maximum buffer size per socket (64 KB)
@@ -119,6 +122,9 @@ pub struct LocalSocket {
     /// Queue of handles (KernelObjects) received from peer
     /// This allows passing file descriptors / kernel objects between tasks
     handle_queue: RwLock<VecDeque<KernelObject>>,
+
+    /// Nonblocking I/O flag
+    nonblocking: RwLock<bool>,
 }
 
 impl LocalSocket {
@@ -162,6 +168,7 @@ impl LocalSocket {
             handle_waker: Waker::new_interruptible("socket_handle"),
             handle_queue: RwLock::new(VecDeque::new()),
             self_weak: RwLock::new(Weak::new()),
+            nonblocking: RwLock::new(false),
         }
     }
 
@@ -287,6 +294,7 @@ impl LocalSocket {
             handle_waker: Waker::new_interruptible("socket_handle"),
             handle_queue: RwLock::new(VecDeque::new()),
             self_weak: RwLock::new(Weak::new()),
+            nonblocking: RwLock::new(false),
         });
 
         // Create peer socket (client side)
@@ -307,6 +315,7 @@ impl LocalSocket {
             handle_waker: Waker::new_interruptible("socket_handle"),
             handle_queue: RwLock::new(VecDeque::new()),
             self_weak: RwLock::new(Weak::new()),
+            nonblocking: RwLock::new(false),
         });
 
         Self::init_self_weak(&local_socket);
@@ -317,73 +326,6 @@ impl LocalSocket {
         *peer_socket.peer_socket.write() = Some(Arc::downgrade(&local_socket));
 
         (local_socket, peer_socket)
-    }
-
-    /// Blocking read operation
-    ///
-    /// This method blocks the calling task until data is available.
-    pub fn read_blocking(
-        &self,
-        buffer: &mut [u8],
-        task_id: usize,
-        trapframe: &mut crate::arch::Trapframe,
-    ) -> Result<usize, StreamError> {
-        loop {
-            {
-                let read_buf_arc = self.read_buffer.read();
-                let mut read_data = read_buf_arc.data.write();
-
-                if !read_data.is_empty() {
-                    let bytes_to_read = buffer.len().min(read_data.len());
-                    for i in 0..bytes_to_read {
-                        buffer[i] = read_data.pop_front().unwrap();
-                    }
-                    // Clear reading_task since we're done reading
-                    *read_buf_arc.reading_task.write() = None;
-                    return Ok(bytes_to_read);
-                }
-
-                // Check if socket is closed (peer shutdown)
-                // Return 0 to indicate EOF (not an error)
-                let my_state = *self.state.read();
-                if my_state == SocketState::Closed {
-                    // crate::println!("[LocalSocket] read_blocking: self is Closed, returning EOF");
-                    return Ok(0);
-                }
-
-                // Check if peer is closed (they called shutdown)
-                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
-                    if let Some(peer) = peer_weak.upgrade() {
-                        let peer_state = *peer.state.read();
-                        if peer_state == SocketState::Closed {
-                            // crate::println!(
-                            //     "[LocalSocket] read_blocking: peer is Closed, returning EOF"
-                            // );
-                            return Ok(0); // Peer closed, return EOF
-                        }
-                    } else {
-                        // crate::println!("[LocalSocket] read_blocking: peer dropped, returning EOF");
-                        return Ok(0); // Peer dropped, treat as EOF
-                    }
-                }
-
-                // Check if this read buffer has been closed by peer's shutdown()
-                if *read_buf_arc.closed.read() {
-                    // crate::println!(
-                    //     "[LocalSocket] read_blocking: read_buffer marked closed, returning EOF"
-                    // );
-                    return Ok(0);
-                }
-
-                // Register this task as waiting to read
-                *read_buf_arc.reading_task.write() = Some(task_id);
-            } // Release lock
-
-            // No data available, block the task
-            self.read_waker.wait(task_id, trapframe);
-            // crate::println!("[LocalSocket] read_blocking: woken up, checking again...");
-            // When woken, loop back to check for data or shutdown
-        }
     }
 
     /// Blocking handle receive operation
@@ -433,24 +375,103 @@ impl LocalSocket {
 
 impl StreamOps for LocalSocket {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        let read_buf_arc = self.read_buffer.read();
-        let mut read_data = read_buf_arc.data.write();
+        use crate::task::mytask;
 
-        if read_data.is_empty() {
-            // Check if socket is still connected
-            if *self.state.read() != SocketState::Connected {
-                return Err(StreamError::Closed);
+        // Debug: count read attempts
+        static READ_ATTEMPT_COUNTER: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let attempt = READ_ATTEMPT_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+        loop {
+            {
+                let read_buf_arc = self.read_buffer.read();
+                let mut read_data = read_buf_arc.data.write();
+                let is_nonblocking = *self.nonblocking.read();
+                let has_data = !read_data.is_empty();
+
+                // // Log every 100 attempts or first 5 attempts
+                // if attempt < 5 || attempt % 100 == 0 {
+                //     crate::println!(
+                //         "[LocalSocket::read] self={:p} attempt={} nonblocking={} has_data={} data_len={}",
+                //         self as *const _,
+                //         attempt,
+                //         is_nonblocking,
+                //         has_data,
+                //         read_data.len()
+                //     );
+                // }
+
+                if !read_data.is_empty() {
+                    let bytes_to_read = buffer.len().min(read_data.len());
+                    for i in 0..bytes_to_read {
+                        buffer[i] = read_data.pop_front().unwrap();
+                    }
+                    // Clear reading_task since we're done reading
+                    *read_buf_arc.reading_task.write() = None;
+
+                    // if attempt < 5 || attempt % 100 == 0 {
+                    //     crate::println!(
+                    //         "[LocalSocket::read] attempt={} returning {} bytes",
+                    //         attempt,
+                    //         bytes_to_read
+                    //     );
+                    // }
+                    return Ok(bytes_to_read);
+                }
+            } // Release locks before checking nonblocking/EOF
+
+            // Check nonblocking mode before blocking
+            if *self.nonblocking.read() {
+                // // Nonblocking mode: return WouldBlock error immediately
+                // if attempt < 5 || attempt % 100 == 0 {
+                //     crate::println!(
+                //         "[LocalSocket::read] attempt={} returning WouldBlock",
+                //         attempt
+                //     );
+                // }
+                return Err(StreamError::WouldBlock);
             }
-            // Would block if buffer is empty and socket is connected
-            return Err(StreamError::WouldBlock);
-        }
 
-        let bytes_to_read = buffer.len().min(read_data.len());
-        for i in 0..bytes_to_read {
-            buffer[i] = read_data.pop_front().unwrap();
-        }
+            {
+                let read_buf_arc = self.read_buffer.read();
 
-        Ok(bytes_to_read)
+                // Check if socket is closed (peer shutdown)
+                // Return 0 to indicate EOF (not an error)
+                let my_state = *self.state.read();
+                if my_state == SocketState::Closed {
+                    return Ok(0);
+                }
+
+                // Check if peer is closed (they called shutdown)
+                if let Some(peer_weak) = self.peer_socket.read().as_ref() {
+                    if let Some(peer) = peer_weak.upgrade() {
+                        let peer_state = *peer.state.read();
+                        if peer_state == SocketState::Closed {
+                            return Ok(0); // Peer closed, return EOF
+                        }
+                    } else {
+                        return Ok(0); // Peer dropped, treat as EOF
+                    }
+                }
+
+                // Check if this read buffer has been closed by peer's shutdown()
+                if *read_buf_arc.closed.read() {
+                    return Ok(0);
+                }
+
+                // Register this task as waiting to read
+                if let Some(task) = mytask() {
+                    *read_buf_arc.reading_task.write() = Some(task.get_id());
+                    drop(read_buf_arc);
+
+                    // Block the task
+                    self.read_waker.wait(task.get_id(), task.get_trapframe());
+                } else {
+                    return Err(StreamError::WouldBlock);
+                }
+            } // Release lock
+            // When woken, loop back to check for data or shutdown
+        }
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
@@ -619,6 +640,7 @@ impl SocketControl for LocalSocket {
             handle_waker: Waker::new_interruptible("socket_handle"),
             handle_queue: RwLock::new(VecDeque::new()),
             self_weak: RwLock::new(Weak::new()),
+            nonblocking: RwLock::new(false),
         });
 
         Self::init_self_weak(&server_conn);
@@ -759,14 +781,174 @@ impl SocketObject for LocalSocket {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn as_selectable(&self) -> Option<&dyn Selectable> {
+        Some(self)
+    }
+
+    fn as_control_ops(&self) -> Option<&dyn crate::object::capability::ControlOps> {
+        Some(self)
+    }
 }
 
-impl CloneOps for LocalSocket {
-    fn custom_clone(&self) -> KernelObject {
-        // Socket cloning creates a new unconnected socket with the same type/protocol
-        // This is similar to dup() behavior for sockets in UNIX - creates a new independent socket
-        // rather than sharing the connection state
-        KernelObject::Socket(Arc::new(LocalSocket::new(self.socket_type, self.protocol)))
+impl Selectable for LocalSocket {
+    fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        let mut ready = ReadySet::none();
+
+        let state = *self.state.read();
+
+        match state {
+            SocketState::Listening => {
+                // Listening sockets: readable when backlog has connections
+                if interest.read {
+                    let backlog = self.backlog.read();
+                    ready.read = !backlog.is_empty();
+                }
+                // Listening sockets are always writable (not applicable)
+                if interest.write {
+                    ready.write = false;
+                }
+            }
+            SocketState::Connected => {
+                // Connected sockets: readable when data available
+                if interest.read {
+                    let read_buffer = self.read_buffer.read();
+                    let data = read_buffer.data.read();
+                    let closed = *read_buffer.closed.read();
+                    ready.read = !data.is_empty() || closed;
+                }
+                // Connected sockets: writable when peer buffer not full
+                if interest.write {
+                    if let Some(peer_buffer) = self.peer_read_buffer.read().as_ref() {
+                        let data = peer_buffer.data.read();
+                        let closed = *peer_buffer.closed.read();
+                        ready.write = data.len() < MAX_BUFFER_SIZE && !closed;
+                    } else {
+                        ready.write = false;
+                    }
+                }
+            }
+            _ => {
+                // Unconnected/Bound/other: not ready
+                ready.read = false;
+                ready.write = false;
+            }
+        }
+
+        ready
+    }
+
+    fn wait_until_ready(
+        &self,
+        interest: ReadyInterest,
+        trapframe: &mut crate::arch::Trapframe,
+        _timeout_ticks: Option<u64>,
+    ) -> SelectWaitOutcome {
+        // Check if already ready
+        let current = self.current_ready(interest);
+        if (interest.read && current.read) || (interest.write && current.write) {
+            return SelectWaitOutcome::Ready;
+        }
+
+        let state = *self.state.read();
+
+        // Get current task ID
+        let task_id = {
+            use crate::arch::get_cpu;
+            use crate::sched::scheduler::get_scheduler;
+            let cpu_id = get_cpu().get_cpuid();
+            get_scheduler().get_current_task_id(cpu_id).unwrap_or(0)
+        };
+
+        // Wait based on state and interest
+        // Note: timeout is not yet implemented - always blocks until ready
+        match state {
+            SocketState::Listening if interest.read => {
+                // Wait for incoming connections
+                self.accept_waker.wait(task_id, trapframe);
+            }
+            SocketState::Connected if interest.read => {
+                // Wait for data to arrive
+                self.read_waker.wait(task_id, trapframe);
+            }
+            SocketState::Connected if interest.write => {
+                // For write readiness, treat as immediately ready (optimistic)
+                // Most sockets are writable most of the time
+                return SelectWaitOutcome::Ready;
+            }
+            _ => {
+                // Other states: immediately return as not ready
+                return SelectWaitOutcome::Ready;
+            }
+        }
+
+        // After waking, consider it ready
+        // TODO: properly check timeout and return TimedOut if needed
+        SelectWaitOutcome::Ready
+    }
+
+    fn set_nonblocking(&self, enabled: bool) {
+        crate::println!(
+            "[LocalSocket::set_nonblocking] self={:p} enabled={}",
+            self as *const _,
+            enabled
+        );
+        *self.nonblocking.write() = enabled;
+        let verify = *self.nonblocking.read();
+        crate::println!(
+            "[LocalSocket::set_nonblocking] self={:p} after write, read back={}",
+            self as *const _,
+            verify
+        );
+    }
+
+    fn is_nonblocking(&self) -> bool {
+        let value = *self.nonblocking.read();
+        crate::println!(
+            "[LocalSocket::is_nonblocking] self={:p} returning={}",
+            self as *const _,
+            value
+        );
+        value
+    }
+}
+
+/// Control command IDs for socket operations
+const SOCKET_CMD_SET_NONBLOCKING: u32 = 1;
+const SOCKET_CMD_GET_NONBLOCKING: u32 = 2;
+
+impl ControlOps for LocalSocket {
+    fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
+        crate::println!("[LocalSocket::control] command={} arg={}", command, arg);
+        match command {
+            SOCKET_CMD_SET_NONBLOCKING => {
+                let enabled = arg != 0;
+                crate::println!("[LocalSocket::control] Setting nonblocking={}", enabled);
+                self.set_nonblocking(enabled);
+                let verify = self.is_nonblocking();
+                crate::println!("[LocalSocket::control] Verified nonblocking={}", verify);
+                Ok(0)
+            }
+            SOCKET_CMD_GET_NONBLOCKING => {
+                let is_nonblocking = self.is_nonblocking();
+                crate::println!(
+                    "[LocalSocket::control] Getting nonblocking={}",
+                    is_nonblocking
+                );
+                Ok(if is_nonblocking { 1 } else { 0 })
+            }
+            _ => {
+                crate::println!("[LocalSocket::control] Unknown command");
+                Err("Unknown control command")
+            }
+        }
+    }
+
+    fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
+        alloc::vec![
+            (SOCKET_CMD_SET_NONBLOCKING, "Set non-blocking mode"),
+            (SOCKET_CMD_GET_NONBLOCKING, "Get non-blocking mode"),
+        ]
     }
 }
 

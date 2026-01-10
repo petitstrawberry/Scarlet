@@ -61,6 +61,8 @@ pub enum ErrorKind {
     TimedOut,
     /// This operation was interrupted
     Interrupted,
+    /// This operation would block
+    WouldBlock,
     /// This operation is unsupported on this platform
     Unsupported,
     /// An error returned when an operation could not be completed because an "end of file" was reached prematurely
@@ -87,6 +89,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::InvalidData => write!(f, "invalid data"),
             ErrorKind::TimedOut => write!(f, "timed out"),
             ErrorKind::Interrupted => write!(f, "operation interrupted"),
+            ErrorKind::WouldBlock => write!(f, "operation would block"),
             ErrorKind::Unsupported => write!(f, "operation not supported"),
             ErrorKind::UnexpectedEof => write!(f, "unexpected end of file"),
             ErrorKind::WriteZero => write!(f, "write zero"),

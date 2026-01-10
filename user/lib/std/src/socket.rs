@@ -24,7 +24,7 @@
 
 use crate::handle::Handle;
 use crate::handle::RawHandle;
-use crate::syscall::{Syscall, syscall0, syscall1};
+use crate::syscall::{Syscall, syscall0, syscall1, syscall3};
 
 pub use crate::handle::capability::ShutdownHow;
 
@@ -71,13 +71,13 @@ impl Socket {
     /// let socket = Socket::new().unwrap();
     /// ```
     pub fn new() -> Result<Self> {
-        let handle = syscall0(Syscall::SocketCreate);
-        if handle == usize::MAX {
+        let raw_handle = syscall0(Syscall::SocketCreate);
+        if raw_handle == usize::MAX {
             return Err(SocketError::SyscallFailed);
         }
 
-        let handle =
-            unsafe { Handle::from_raw(handle as i32) }.map_err(|_| SocketError::SyscallFailed)?;
+        let handle = unsafe { Handle::from_raw(raw_handle as i32) }
+            .map_err(|_| SocketError::SyscallFailed)?;
         Ok(Socket { handle })
     }
 
@@ -302,4 +302,101 @@ impl Socket {
             .as_stream()
             .map_err(|_| SocketError::InvalidHandle)
     }
+
+    /// Set non-blocking mode for this socket
+    ///
+    /// When enabled, read operations will return immediately with WouldBlock error
+    /// if no data is available, instead of blocking.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - true to enable non-blocking mode, false to disable
+    ///
+    /// # Returns
+    ///
+    /// Ok on success, or an error if the system call fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let socket = Socket::new().unwrap();
+    /// socket.set_nonblocking(true).unwrap();
+    /// ```
+    pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
+        const SOCKET_CMD_SET_NONBLOCKING: u32 = 1;
+        let result = syscall3(
+            Syscall::HandleControl,
+            self.handle.as_raw() as usize,
+            SOCKET_CMD_SET_NONBLOCKING as usize,
+            if enabled { 1 } else { 0 },
+        );
+        if result == usize::MAX {
+            return Err(SocketError::SyscallFailed);
+        }
+        Ok(())
+    }
+
+    /// Get the non-blocking mode of this socket
+    ///
+    /// # Returns
+    ///
+    /// Ok(true) if non-blocking mode is enabled, Ok(false) otherwise
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let socket = Socket::new().unwrap();
+    /// socket.set_nonblocking(true).unwrap();
+    /// assert!(socket.is_nonblocking().unwrap());
+    /// ```
+    pub fn is_nonblocking(&self) -> Result<bool> {
+        const SOCKET_CMD_GET_NONBLOCKING: u32 = 2;
+        let result = syscall3(
+            Syscall::HandleControl,
+            self.handle.as_raw() as usize,
+            SOCKET_CMD_GET_NONBLOCKING as usize,
+            0,
+        );
+        if result == usize::MAX {
+            return Err(SocketError::SyscallFailed);
+        }
+        Ok(result != 0)
+    }
 }
+
+impl crate::io::Write for Socket {
+    fn write(&mut self, buf: &[u8]) -> crate::io::Result<usize> {
+        let stream = self.handle.as_stream().map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream")
+        })?;
+        stream
+            .write(buf)
+            .map_err(|_| crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to write"))
+    }
+
+    fn flush(&mut self) -> crate::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl crate::io::Read for Socket {
+    fn read(&mut self, buf: &mut [u8]) -> crate::io::Result<usize> {
+        let stream = self.handle.as_stream().map_err(|_| {
+            crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to get stream")
+        })?;
+        stream.read(buf).map_err(|e| {
+            use crate::handle::capability::StreamError;
+            match e {
+                StreamError::WouldBlock => {
+                    crate::io::Error::new(crate::io::ErrorKind::WouldBlock, "Would block")
+                }
+                StreamError::EndOfStream => {
+                    crate::io::Error::new(crate::io::ErrorKind::UnexpectedEof, "End of stream")
+                }
+                _ => crate::io::Error::new(crate::io::ErrorKind::Other, "Failed to read"),
+            }
+        })
+    }
+}
+
+// Handle's Drop implementation will automatically close the socket

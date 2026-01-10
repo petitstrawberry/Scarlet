@@ -174,7 +174,8 @@ impl AbiModule for ScarletAbi {
                 task.text_size = 0;
                 task.data_size = 0;
                 task.stack_size = 0;
-                task.brk = None;
+                task.brk
+                    .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
                 // Create Scarlet-specific loading strategy
                 let strategy = LoadStrategy {
@@ -458,6 +459,22 @@ impl AbiModule for ScarletAbi {
             Err(e) => {
                 crate::println!("Failed to bind mount /dev for Scarlet: {}", e.message);
                 return Err("Failed to bind mount /dev for Scarlet");
+            }
+        }
+
+        // Bind moutt /tmp for temporary files
+        match create_dir_if_not_exists(target_vfs, "/tmp") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to create /tmp directory for Scarlet: {}", e.message);
+                return Err("Failed to create /tmp directory for Scarlet");
+            }
+        }
+        match target_vfs.bind_mount_from(base_vfs, "/tmp", "/tmp") {
+            Ok(()) => {}
+            Err(e) => {
+                crate::println!("Failed to bind mount /tmp for Scarlet: {}", e.message);
+                return Err("Failed to bind mount /tmp for Scarlet");
             }
         }
 

@@ -496,19 +496,29 @@ impl VirtualMemoryManager {
     pub fn find_unmapped_area(&self, size: usize, alignment: usize) -> Option<usize> {
         let aligned_size = (size + alignment - 1) & !(alignment - 1);
         let g = self.inner.read();
-        let mut search_addr = g.mmap_base;
-        // Simple first-fit algorithm
-        for (_start, memory_map) in g.memmap.range(g.mmap_base..) {
+        let mut search_addr = (g.mmap_base + alignment - 1) & !(alignment - 1);
+
+        // If there is a mapping that starts before (or at) search_addr but still covers it,
+        // we must skip past it. This prevents returning an address inside an existing map.
+        if let Some((_, prev_map)) = g.memmap.range(..=search_addr).next_back() {
+            if prev_map.vmarea.end >= search_addr {
+                search_addr = prev_map.vmarea.end + 1;
+                search_addr = (search_addr + alignment - 1) & !(alignment - 1);
+            }
+        }
+
+        // Simple first-fit algorithm from the adjusted search address
+        for (_start, memory_map) in g.memmap.range(search_addr..) {
             // Check if there's enough space before this memory map
             if search_addr + aligned_size <= memory_map.vmarea.start {
                 return Some(search_addr);
             }
 
             // Move search point past this memory map
-            search_addr = memory_map.vmarea.end + 1;
-
-            // Align the search address
-            search_addr = (search_addr + alignment - 1) & !(alignment - 1);
+            if memory_map.vmarea.end >= search_addr {
+                search_addr = memory_map.vmarea.end + 1;
+                search_addr = (search_addr + alignment - 1) & !(alignment - 1);
+            }
         }
         drop(g);
         // Check if there's space after the last memory map
@@ -966,13 +976,37 @@ mod tests {
         assert!(addr2.is_some());
         assert!(addr2.unwrap() > 0x50000fff);
 
+        // Regression: if a mapping starts before mmap_base but overlaps it,
+        // find_unmapped_area must not return an address inside that mapping.
+        manager.set_mmap_base(0x60000000);
+        let overlapping_base_map = VirtualMemoryMap::new(
+            crate::vm::vmem::MemoryArea {
+                start: 0x90000000,
+                end: 0x9001ffff,
+            },
+            crate::vm::vmem::MemoryArea {
+                start: 0x5fff0000,
+                end: 0x6000ffff,
+            },
+            0o644,
+            false,
+            None,
+        );
+        manager.add_memory_map(overlapping_base_map).unwrap();
+        let addr3 = manager.find_unmapped_area(size, alignment).unwrap();
+        assert!(addr3 >= 0x60010000);
+
         // Test memory statistics
         let (total_maps, total_size, gaps) = manager.get_memory_stats();
-        assert_eq!(total_maps, 1);
-        assert_eq!(total_size, PAGE_SIZE);
-        assert_eq!(gaps, 0); // No gaps with single map
+        assert_eq!(total_maps, 2);
+        // map1: 1 page (0x50000000-0x50000fff)
+        // overlapping_base_map: 32 pages (0x5fff0000-0x6000ffff)
+        // Total: 33 pages
+        assert_eq!(total_size, PAGE_SIZE * 33);
+        // These two maps are not adjacent, so there is 1 gap between them
+        assert_eq!(gaps, 1);
 
-        // Add another non-adjacent map to create a gap
+        // Add another non-adjacent map to create another gap
         let map2 = VirtualMemoryMap::new(
             crate::vm::vmem::MemoryArea {
                 start: 0x80002000,
@@ -989,9 +1023,11 @@ mod tests {
         manager.add_memory_map(map2).unwrap();
 
         let (total_maps, total_size, gaps) = manager.get_memory_stats();
-        assert_eq!(total_maps, 2);
-        assert_eq!(total_size, PAGE_SIZE * 2);
-        assert_eq!(gaps, 1); // One gap between memory maps
+        assert_eq!(total_maps, 3);
+        // map1: 1 page, map2: 1 page, overlapping_base_map: 32 pages = 34 pages total
+        assert_eq!(total_size, PAGE_SIZE * 34);
+        // Gaps: between map1 and map2 (1), between map2 and overlapping_base_map (2)
+        assert_eq!(gaps, 2);
 
         // Test memory map coalescing (should fail due to non-adjacent physical addresses)
         let coalesced = manager.coalesce_memory_maps();

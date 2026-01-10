@@ -7,11 +7,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all user library code"
-dependencies = ["fmt-std", "fmt-framebuffer"]
+dependencies = ["fmt-std", "fmt-framebuffer", "fmt-sws-protocol"]
 
 [tasks.fmt-check]
 description = "Check formatting for all user library code"
-dependencies = ["fmt-std-check", "fmt-framebuffer-check"]
+dependencies = ["fmt-std-check", "fmt-framebuffer-check", "fmt-sws-protocol-check"]
 
 [tasks.fmt-std-check]
 description = "Check formatting for user library std code"
@@ -22,6 +22,12 @@ args = ["fmt", "--", "--check"]
 [tasks.fmt-framebuffer-check]
 description = "Check formatting for user library framebuffer code"
 cwd = "framebuffer"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-sws-protocol-check]
+description = "Check formatting for user library sws_protocol code"
+cwd = "sws_protocol"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
@@ -37,6 +43,12 @@ cwd = "framebuffer"
 command = "cargo"
 args = ["fmt"]
 
+[tasks.fmt-sws-protocol]
+description = "Format user library sws_protocol code"
+cwd = "sws_protocol"
+command = "cargo"
+args = ["fmt"]
+
 [tasks.build-userlib]
 description = "Build all user libraries (default: debug)"
 dependencies = ["build-userlib-debug"]
@@ -44,55 +56,62 @@ dependencies = ["build-userlib-debug"]
 [tasks.build-userlib-debug]
 description = "Build all user libraries in debug mode"
 script = [
-    "cd std && cargo build",
-    "cd ../framebuffer && cargo build"
+    "cd std && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-release]
 description = "Build all user libraries in release mode"
 script = [
-    "cd std && cargo build --release",
-    "cd ../framebuffer && cargo build --release"
+    "cd std && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../framebuffer && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --release --target ../../targets/riscv64gc-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-debug-aarch64]
 description = "Build all user libraries for AArch64 in debug mode"
 script = [
     "cd std && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
+    "cd ../framebuffer && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --target ../../targets/aarch64-unknown-scarlet-elf.json"
 ]
 
 [tasks.build-userlib-release-aarch64]
 description = "Build all user libraries for AArch64 in release mode"
 script = [
     "cd std && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
-    "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
+    "cd ../framebuffer && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json",
+    "cd ../sws_protocol && cargo build --release --target ../../targets/aarch64-unknown-scarlet-elf.json"
 ]
 
 [tasks.clean]
 description = "Clean all user library build artifacts"
 script = [
     "cd std && cargo clean",
-    "cd ../framebuffer && cargo clean"
+    "cd ../framebuffer && cargo clean",
+    "cd ../sws_protocol && cargo clean"
 ]
 
 [tasks.test]
 description = "Test all user libraries"
 script = [
     "cd std && cargo test",
-    "cd ../framebuffer && cargo test"
+    "cd ../framebuffer && cargo test",
+    "cd ../sws_protocol && cargo test"
 ]
 
 [tasks.doc]
 description = "Generate documentation for all user libraries"
 script = [
     "cd std && cargo doc --no-deps",
-    "cd ../framebuffer && cargo doc --no-deps"
+    "cd ../framebuffer && cargo doc --no-deps",
+    "cd ../sws_protocol && cargo doc --no-deps"
 ]
 
 [tasks.clippy]
 description = "Run clippy for all user libraries"
-dependencies = ["clippy-std", "clippy-framebuffer"]
+dependencies = ["clippy-std", "clippy-framebuffer", "clippy-sws-protocol"]
 
 [tasks.clippy-std]
 description = "Run clippy for user library std code"
@@ -103,5 +122,11 @@ args = ["clippy", "--", "-D", "warnings"]
 [tasks.clippy-framebuffer]
 description = "Run clippy for user library framebuffer code"
 cwd = "framebuffer"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.clippy-sws-protocol]
+description = "Run clippy for user library sws_protocol code"
+cwd = "sws_protocol"
 command = "cargo"
 args = ["clippy", "--", "-D", "warnings"]

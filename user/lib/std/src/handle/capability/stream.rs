@@ -18,6 +18,8 @@ pub enum StreamError {
     InvalidHandle,
     /// End of stream reached
     EndOfStream,
+    /// Operation would block (non-blocking I/O)
+    WouldBlock,
     /// Input/output error
     IoError,
     /// Permission denied
@@ -30,8 +32,16 @@ pub enum StreamError {
 
 impl StreamError {
     pub fn from_syscall_result(result: usize) -> Result<usize, Self> {
+        // Check for negative error codes (stored as large usize values)
         if result == usize::MAX {
             Err(StreamError::SystemError(-1)) // Generic error
+        } else if result > (isize::MAX as usize) {
+            // Negative value stored as usize indicates errno
+            let errno = -(result as isize) as i32;
+            match errno {
+                11 => Err(StreamError::WouldBlock), // EAGAIN
+                _ => Err(StreamError::SystemError(errno)),
+            }
         } else {
             Ok(result)
         }

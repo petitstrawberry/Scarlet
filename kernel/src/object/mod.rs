@@ -232,10 +232,9 @@ impl KernelObject {
                 Some(cloneable)
             }
             #[cfg(feature = "network")]
-            KernelObject::Socket(socket) => {
-                // SocketObject implements CloneOps
-                let cloneable: &dyn CloneOps = socket.as_ref();
-                Some(cloneable)
+            KernelObject::Socket(_) => {
+                // Sockets don't implement CloneOps, use Arc::clone directly
+                None
             }
             KernelObject::EventChannel(event_channel) => {
                 // EventChannel implements CloneOps
@@ -267,9 +266,9 @@ impl KernelObject {
                 None
             }
             #[cfg(feature = "network")]
-            KernelObject::Socket(_) => {
-                // Sockets don't provide control operations
-                None
+            KernelObject::Socket(socket) => {
+                // Try to get control operations through SocketObject trait
+                socket.as_control_ops()
             }
             KernelObject::EventChannel(_) => {
                 // Event channels don't provide control operations

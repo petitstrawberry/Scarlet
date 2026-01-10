@@ -517,7 +517,8 @@ impl AbiModule for LinuxRiscv64Abi {
                 task.text_size = 0;
                 task.data_size = 0;
                 task.stack_size = 0;
-                task.brk = None;
+                task.brk
+                    .store(usize::MAX, core::sync::atomic::Ordering::SeqCst);
 
                 // Load ELF using Linux-compatible method with dynamic linking support
                 match analyze_and_load_elf_with_strategy(
