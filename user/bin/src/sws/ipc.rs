@@ -181,8 +181,16 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
 fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), FrameIoError> {
     use std::io::Write;
 
-    let frame = protocol::encode_frame(msg_type, payload);
-    write_all(socket, &frame)?;
+    // Write header + payload directly to avoid allocating a temporary Vec.
+    let header = protocol::MessageHeader {
+        msg_type,
+        payload_size: payload.len() as u32,
+    };
+    let header_bytes = header.to_le_bytes();
+    write_all(socket, &header_bytes)?;
+    if !payload.is_empty() {
+        write_all(socket, payload)?;
+    }
     socket.flush().map_err(|_| FrameIoError::Io)?;
     Ok(())
 }
@@ -222,14 +230,7 @@ pub fn push_ipc_event(event: IpcEvent) {
 /// Get all pending events from the queue
 pub fn pop_all_ipc_events() -> Vec<IpcEvent> {
     let mut queue = EVENT_QUEUE.lock();
-    let mut events = Vec::new();
-    // Drain all events from queue (moves ownership)
-    while let Some(event) = queue.pop() {
-        events.push(event);
-    }
-    // Reverse to restore original order (pop removes from end)
-    events.reverse();
-    events
+    core::mem::take(&mut *queue)
 }
 
 /// Register a window for input event routing
@@ -292,9 +293,7 @@ pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
 fn pop_pending_server_frames(window_id: u32) -> Vec<PendingServerFrame> {
     let mut pending = PENDING_SERVER_FRAMES.lock();
     if let Some(frames) = pending.get_mut(&window_id) {
-        let result = frames.clone();
-        frames.clear();
-        result
+        core::mem::take(frames)
     } else {
         Vec::new()
     }
@@ -305,9 +304,7 @@ fn pop_pending_input_events(window_id: u32) -> Vec<PendingInputEvent> {
     let mut pending = PENDING_INPUT_EVENTS.lock();
 
     if let Some(events) = pending.get_mut(&window_id) {
-        let result = events.clone();
-        events.clear();
-        result
+        core::mem::take(events)
     } else {
         Vec::new()
     }

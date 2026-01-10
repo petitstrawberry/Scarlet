@@ -318,6 +318,11 @@ impl Application {
     /// and drawing automatically.
     pub fn run(&mut self) -> ! {
         let mut last_time_ms = 0u64;
+
+        // Scratch buffers to avoid per-frame heap allocations.
+        let mut scratch_surface_ids: Vec<u32> = Vec::new();
+        let mut scratch_move_surface_ids: Vec<u32> = Vec::new();
+        let mut scratch_dirty_rects: Vec<Rect> = Vec::new();
         
         loop {
             // Get current time in milliseconds (approximate)
@@ -333,11 +338,8 @@ impl Application {
             // 1. Dispatch socket I/O
             let _ = self.connection.dispatch();
 
-            // 2. Drain all pending events without O(n^2) shifting
-            let events: Vec<SwsEvent> = self.connection.drain_events();
-
-            // 3. Process drained events
-            for sws_event in events.iter().copied() {
+            // 2. Process all pending events without allocating a Vec.
+            while let Some(sws_event) = self.connection.poll_event() {
                 self.handle_sws_event(sws_event);
             }
 
@@ -353,42 +355,31 @@ impl Application {
             // 4. Handle close requests (send DESTROY_WINDOW to SWS)
             // Window is dropped when removed from self.windows, but the protocol-level
             // destroy must be sent explicitly via sws-client.
-            let mut close_surface_ids: Vec<u32> = Vec::new();
+            scratch_surface_ids.clear();
             for managed in &self.windows {
                 if managed.window.is_close_requested() {
-                    close_surface_ids.push(managed.surface_id);
+                    scratch_surface_ids.push(managed.surface_id);
                 }
             }
-            for surface_id in close_surface_ids {
+            for surface_id in scratch_surface_ids.drain(..) {
                 // If the surface is already gone (e.g. server-side destroyed), ignore.
-                let _ = self.connection.destroy_surface(surface_id);
-            }
-
-            // 4b. Handle move requests (send REQUEST_MOVE_WINDOW to SWS)
-            let mut move_surface_ids: Vec<u32> = Vec::new();
-            for i in 0..self.windows.len() {
-                if self.windows[i].window.take_move_requested() {
-                    move_surface_ids.push(self.windows[i].surface_id);
-                }
-            }
-            for surface_id in move_surface_ids {
-                let _ = self.connection.request_move_window(surface_id);
-            }
-
-            // 5. Drop closed windows (and destroy their surfaces)
-            let mut closed_surface_ids: Vec<u32> = Vec::new();
-            for w in &self.windows {
-                if w.window.is_close_requested() {
-                    closed_surface_ids.push(w.surface_id);
-                }
-            }
-            for surface_id in closed_surface_ids {
                 let _ = self.connection.destroy_surface(surface_id);
                 if self.popup_surface_id == Some(surface_id) {
                     self.popup_surface_id = None;
                 }
             }
             self.windows.retain(|w| !w.window.is_close_requested());
+
+            // 4b. Handle move requests (send REQUEST_MOVE_WINDOW to SWS)
+            scratch_move_surface_ids.clear();
+            for i in 0..self.windows.len() {
+                if self.windows[i].window.take_move_requested() {
+                    scratch_move_surface_ids.push(self.windows[i].surface_id);
+                }
+            }
+            for surface_id in scratch_move_surface_ids.drain(..) {
+                let _ = self.connection.request_move_window(surface_id);
+            }
 
             if self.windows.is_empty() && self.should_terminate_after_last_window_closed() {
                 self.terminate();
@@ -420,10 +411,10 @@ impl Application {
                     did_draw = true;
                 } else {
                     // Collect dirty rects from subviews
-                    let mut dirty_rects = Vec::new();
-                    Self::collect_dirty_rects(&managed.window, full_frame, &mut dirty_rects);
+                    scratch_dirty_rects.clear();
+                    Self::collect_dirty_rects(&managed.window, full_frame, &mut scratch_dirty_rects);
                     
-                    if !dirty_rects.is_empty() {
+                    if !scratch_dirty_rects.is_empty() {
                         // Redraw the whole window (since we can't easily do partial view draws)
                         // but only commit the dirty region
                         if let Some(surface) = self.connection.surface_mut(managed.surface_id) {
@@ -436,15 +427,24 @@ impl Application {
                         Self::clear_all_needs_draw(&mut managed.window, full_frame);
                         
                         // Commit only the dirty region
-                        if let Some(dirty_rect) = Self::union_rects(&dirty_rects) {
-                            let x = dirty_rect.x.max(0) as u32;
-                            let y = dirty_rect.y.max(0) as u32;
-                            let _ = self.connection.commit_region(
-                                managed.surface_id,
-                                x, y,
-                                dirty_rect.width,
-                                dirty_rect.height,
-                            );
+                        if let Some(dirty_rect) = Self::union_rects(&scratch_dirty_rects) {
+                            // Clamp damage to the surface bounds and never send empty regions.
+                            let x0 = dirty_rect.x.max(0);
+                            let y0 = dirty_rect.y.max(0);
+                            let x1 = (dirty_rect.x.saturating_add(dirty_rect.width as i32))
+                                .min(width as i32);
+                            let y1 = (dirty_rect.y.saturating_add(dirty_rect.height as i32))
+                                .min(height as i32);
+
+                            if x1 > x0 && y1 > y0 {
+                                let _ = self.connection.commit_region(
+                                    managed.surface_id,
+                                    x0 as u32,
+                                    y0 as u32,
+                                    (x1 - x0) as u32,
+                                    (y1 - y0) as u32,
+                                );
+                            }
                         }
                         did_draw = true;
                     }
@@ -452,7 +452,7 @@ impl Application {
             }
 
             // 7. Avoid a busy loop when idle.
-            if events.is_empty() && !did_draw {
+            if !self.connection.has_events() && !did_draw {
                 let _ = scarlet_std::thread::sleep(Duration::from_millis(1));
             }
         }

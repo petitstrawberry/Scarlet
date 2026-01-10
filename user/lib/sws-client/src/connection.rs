@@ -51,7 +51,7 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-fn read_frame(socket: &mut Socket) -> Result<(u32, Vec<u8>), Error> {
+fn read_frame_into(socket: &mut Socket, payload: &mut Vec<u8>) -> Result<u32, Error> {
     let mut header_bytes = [0u8; protocol::MessageHeader::SIZE];
     read_exact(socket, &mut header_bytes)?;
     let header = protocol::MessageHeader::from_le_bytes(header_bytes);
@@ -61,20 +61,28 @@ fn read_frame(socket: &mut Socket) -> Result<(u32, Vec<u8>), Error> {
         return Err(Error::ProtocolError);
     }
 
-    let mut payload = Vec::new();
+    payload.clear();
     if payload_len > 0 {
         payload.resize(payload_len, 0);
-        read_exact(socket, &mut payload)?;
+        read_exact(socket, payload)?;
     }
 
-    Ok((header.msg_type, payload))
+    Ok(header.msg_type)
 }
 
 fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), Error> {
     use scarlet_std::io::Write;
 
-    let frame = protocol::encode_frame(msg_type, payload);
-    write_all(socket, &frame)?;
+    // Write header + payload directly to avoid allocating a temporary Vec.
+    let header = protocol::MessageHeader {
+        msg_type,
+        payload_size: payload.len() as u32,
+    };
+    let header_bytes = header.to_le_bytes();
+    write_all(socket, &header_bytes)?;
+    if !payload.is_empty() {
+        write_all(socket, payload)?;
+    }
     socket.flush().map_err(|_| Error::IoError)?;
     Ok(())
 }
@@ -88,6 +96,7 @@ pub struct Connection {
     surfaces: BTreeMap<u32, Surface>,
     pending_events: Vec<Event>,
     pending_head: usize,
+    read_payload: Vec<u8>,
 }
 
 impl Connection {
@@ -113,6 +122,7 @@ impl Connection {
             surfaces: BTreeMap::new(),
             pending_events: Vec::new(),
             pending_head: 0,
+            read_payload: Vec::new(),
         })
     }
 
@@ -136,10 +146,11 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let (msg_type, payload) = read_frame(&mut self.socket).map_err(|_| Error::ReceiveFailed)?;
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
 
-        let response =
-            protocol::parse_server_message(msg_type, &payload).map_err(|_| Error::InvalidResponse)?;
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
 
         let (surface_id, _shm_size) = match response {
             ServerMessage::WindowCreated {
@@ -393,9 +404,10 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let (msg_type, payload) = read_frame(&mut self.socket).map_err(|_| Error::ReceiveFailed)?;
-        let response =
-            protocol::parse_server_message(msg_type, &payload).map_err(|_| Error::InvalidResponse)?;
+        let msg_type =
+            read_frame_into(&mut self.socket, &mut self.read_payload).map_err(|_| Error::ReceiveFailed)?;
+        let response = protocol::parse_server_message(msg_type, &self.read_payload)
+            .map_err(|_| Error::InvalidResponse)?;
 
         let (window_id, _shm_size, new_w, new_h) = match response {
             ServerMessage::WindowResized {
@@ -452,9 +464,9 @@ impl Connection {
         }
 
         loop {
-            match read_frame(&mut self.socket) {
-                Ok((msg_type, payload)) => {
-                    if let Ok(msg) = protocol::parse_server_message(msg_type, &payload) {
+            match read_frame_into(&mut self.socket, &mut self.read_payload) {
+                Ok(msg_type) => {
+                    if let Ok(msg) = protocol::parse_server_message(msg_type, &self.read_payload) {
                         match msg {
                             ServerMessage::InputEvent {
                                 window_id,

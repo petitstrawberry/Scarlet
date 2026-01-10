@@ -40,6 +40,8 @@ struct TimerEntry {
 
 static NEXT_TIMER_ID: Mutex<u64> = Mutex::new(1);
 
+static MAIN_THREAD_QUEUE: Mutex<Vec<Box<dyn FnOnce() + Send>>> = Mutex::new(Vec::new());
+
 fn next_timer_id() -> u64 {
     let mut id = NEXT_TIMER_ID.lock();
     let current = *id;
@@ -129,14 +131,12 @@ impl Timer {
 /// This should be called periodically by the application event loop.
 pub fn process_timers(current_time_ms: u64) {
     let mut timers = TIMERS.lock();
-    
-    // Remove cancelled timers
-    timers.retain(|t| !t.cancelled);
-    
-    // Process active timers
-    let mut to_remove = Vec::new();
-    
-    for (idx, timer) in timers.iter_mut().enumerate() {
+
+    // Process active timers and mark one-shot timers for removal.
+    for timer in timers.iter_mut() {
+        if timer.cancelled {
+            continue;
+        }
         if timer.last_tick == 0 {
             timer.last_tick = current_time_ms;
             continue;
@@ -150,17 +150,15 @@ pub fn process_timers(current_time_ms: u64) {
             (timer.callback)();
             
             if timer.one_shot {
-                to_remove.push(idx);
+                timer.cancelled = true;
             } else {
                 timer.last_tick = current_time_ms;
             }
         }
     }
-    
-    // Remove one-shot timers that have fired
-    for idx in to_remove.into_iter().rev() {
-        timers.remove(idx);
-    }
+
+    // Remove cancelled and fired one-shot timers.
+    timers.retain(|t| !t.cancelled);
 }
 
 /// Schedule a callback to run on the main thread
@@ -182,9 +180,6 @@ pub fn schedule_on_main_thread<F>(callback: F)
 where
     F: FnOnce() + Send + 'static,
 {
-    static MAIN_THREAD_QUEUE: Mutex<Vec<Box<dyn FnOnce() + Send>>> = 
-        Mutex::new(Vec::new());
-    
     MAIN_THREAD_QUEUE.lock().push(Box::new(callback));
 }
 
@@ -192,14 +187,13 @@ where
 ///
 /// This should be called by the event loop on the main thread.
 pub fn process_main_thread_queue() {
-    static MAIN_THREAD_QUEUE: Mutex<Vec<Box<dyn FnOnce() + Send>>> = 
-        Mutex::new(Vec::new());
-    
     let mut queue = MAIN_THREAD_QUEUE.lock();
-    let callbacks: Vec<_> = queue.drain(..).collect();
-    drop(queue); // Release lock before executing callbacks
-    
-    for callback in callbacks {
+
+    // Move the queue out to execute callbacks without holding the lock.
+    let mut callbacks = core::mem::take(&mut *queue);
+    drop(queue);
+
+    for callback in callbacks.drain(..) {
         callback();
     }
 }
