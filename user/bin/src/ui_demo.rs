@@ -45,8 +45,8 @@ pub extern "C" fn main() -> i32 {
     let popup_handle = handle.clone();
     let follow_handle = handle.clone();
     let resize_handle = handle.clone();
-    let window = Window::new("UI Demo", 420, 300)
-        .min_size(420, 300)
+    let window = Window::new("UI Demo", 500, 300)
+        .min_size(500, 300)
         .max_size(1024, 768)
         .background(Color::WHITE)
         .content(
@@ -54,7 +54,7 @@ pub extern "C" fn main() -> i32 {
                 VStack::new()
                     // Title
                     .child(
-                        Label::new("Hello, Scarlet UI!")
+                        Label::new("ScarletUIの世界からこんにちは！")
                             .color(Color::TEXT)
                             .font_size(40),
                     )

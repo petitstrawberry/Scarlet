@@ -18,7 +18,9 @@ pub struct Surface {
     /// Shared memory backing the pixel buffer
     shm: SharedMemory,
     /// Mapped buffer pointer
-    buffer: &'static mut [u8],
+    buffer_ptr: *mut u8,
+    /// Mapped buffer length in bytes
+    buffer_len: usize,
     /// Whether the surface has uncommitted changes
     dirty: bool,
 }
@@ -31,19 +33,24 @@ impl Surface {
         height: u32,
         shm: SharedMemory,
     ) -> Result<Self, Error> {
-        let (buffer, _addr) = Self::map_shm(&shm, width, height)?;
+        let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
 
         Ok(Self {
             id,
             width,
             height,
             shm,
-            buffer,
+            buffer_ptr,
+            buffer_len,
             dirty: false,
         })
     }
 
-    fn map_shm(shm: &SharedMemory, width: u32, height: u32) -> Result<(&'static mut [u8], usize), Error> {
+    fn map_shm(
+        shm: &SharedMemory,
+        width: u32,
+        height: u32,
+    ) -> Result<(*mut u8, usize, usize), Error> {
         let buffer_size = (width * height * 4) as usize;
 
         let addr = shm
@@ -59,16 +66,16 @@ impl Surface {
             )
             .map_err(|_| Error::ShmMapFailed)?;
 
-        let buffer = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, buffer_size) };
-        Ok((buffer, addr))
+        Ok((addr as *mut u8, buffer_size, addr))
     }
 
     pub(crate) fn remap(&mut self, width: u32, height: u32, shm: SharedMemory) -> Result<(), Error> {
-        let (buffer, _addr) = Self::map_shm(&shm, width, height)?;
+        let (buffer_ptr, buffer_len, _addr) = Self::map_shm(&shm, width, height)?;
         self.width = width;
         self.height = height;
         self.shm = shm;
-        self.buffer = buffer;
+        self.buffer_ptr = buffer_ptr;
+        self.buffer_len = buffer_len;
         self.dirty = true;
         Ok(())
     }
@@ -94,7 +101,7 @@ impl Surface {
     /// Get read-only access to the pixel buffer
     #[inline]
     pub fn buffer(&self) -> &[u8] {
-        self.buffer
+        unsafe { core::slice::from_raw_parts(self.buffer_ptr as *const u8, self.buffer_len) }
     }
 
     /// Get mutable access to the pixel buffer
@@ -103,7 +110,7 @@ impl Surface {
     #[inline]
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         self.dirty = true;
-        self.buffer
+        unsafe { core::slice::from_raw_parts_mut(self.buffer_ptr, self.buffer_len) }
     }
 
     /// Execute a closure with mutable access to the buffer
@@ -115,7 +122,8 @@ impl Surface {
         F: FnOnce(&mut [u8], u32, u32) -> R,
     {
         self.dirty = true;
-        f(self.buffer, self.width, self.height)
+        let buf = unsafe { core::slice::from_raw_parts_mut(self.buffer_ptr, self.buffer_len) };
+        f(buf, self.width, self.height)
     }
 
     /// Check if surface has uncommitted changes
@@ -136,10 +144,10 @@ impl Surface {
         }
         let offset = ((y * self.width + x) * 4) as usize;
         Some((
-            self.buffer[offset],     // B
-            self.buffer[offset + 1], // G
-            self.buffer[offset + 2], // R
-            self.buffer[offset + 3], // A
+            self.buffer()[offset],     // B
+            self.buffer()[offset + 1], // G
+            self.buffer()[offset + 2], // R
+            self.buffer()[offset + 3], // A
         ))
     }
 
@@ -149,16 +157,17 @@ impl Surface {
             return;
         }
         let offset = ((y * self.width + x) * 4) as usize;
-        self.buffer[offset] = b;
-        self.buffer[offset + 1] = g;
-        self.buffer[offset + 2] = r;
-        self.buffer[offset + 3] = a;
+        let buf = self.buffer_mut();
+        buf[offset] = b;
+        buf[offset + 1] = g;
+        buf[offset + 2] = r;
+        buf[offset + 3] = a;
         self.dirty = true;
     }
 
     /// Fill entire surface with a color (BGRA)
     pub fn fill(&mut self, b: u8, g: u8, r: u8, a: u8) {
-        for chunk in self.buffer.chunks_exact_mut(4) {
+        for chunk in self.buffer_mut().chunks_exact_mut(4) {
             chunk[0] = b;
             chunk[1] = g;
             chunk[2] = r;
