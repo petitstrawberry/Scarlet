@@ -15,9 +15,7 @@
 extern crate scarlet_std as std;
 
 use scarlet_ui::{
-    Application, Window, Color,
-    VStack, HStack, Padding, Center,
-    Label, Button, RectView, Spacer,
+    Application, Button, Center, Color, HStack, Label, Padding, RectView, Spacer, VStack, Window,
 };
 use std::println;
 
@@ -44,37 +42,44 @@ pub extern "C" fn main() -> i32 {
                     // Title
                     .child(Label::new("Hello, Scarlet UI!").color(Color::TEXT))
                     .child(Label::new("View-based Architecture Demo").color(Color::GRAY))
-                    
                     // Spacing
                     .child(Spacer::new())
-                    
                     // Colored boxes in a row
                     .child(
                         HStack::new()
-                            .child(RectView::new(Color::rgb(255, 100, 100)).width(80).height(50))
-                            .child(RectView::new(Color::rgb(100, 255, 100)).width(80).height(50))
-                            .child(RectView::new(Color::rgb(100, 100, 255)).width(80).height(50))
+                            .child(
+                                RectView::new(Color::rgb(255, 100, 100))
+                                    .width(80)
+                                    .height(50),
+                            )
+                            .child(
+                                RectView::new(Color::rgb(100, 255, 100))
+                                    .width(80)
+                                    .height(50),
+                            )
+                            .child(
+                                RectView::new(Color::rgb(100, 100, 255))
+                                    .width(80)
+                                    .height(50),
+                            ),
                     )
-                    
                     // Spacing
                     .child(Spacer::new())
-                    
                     // Interactive buttons
-                    .child(
-                        Center::new(
-                            HStack::new()
-                                .child(Button::new("Click Me", || {
-                                    println!("[ui_demo] Button 1 clicked!");
-                                }))
-                                .child(Button::new("Exit", || {
-                                    println!("[ui_demo] Exit button clicked!");
-                                    // Note: Close request will be handled by window
-                                }))
-                        )
-                    )
-            ).all(20)  // 20px padding on all sides
+                    .child(Center::new(
+                        HStack::new()
+                            .child(Button::new("Click Me", || {
+                                println!("[ui_demo] Button 1 clicked!");
+                            }))
+                            .child(Button::new("Exit", || {
+                                println!("[ui_demo] Exit button clicked!");
+                                // Note: Close request will be handled by window
+                            })),
+                    )),
+            )
+            .all(20), // 20px padding on all sides
         );
-    
+
     // Add window to application
     if let Err(e) = app.add_window(window) {
         println!("[ui_demo] Failed to add window: {}", e);
