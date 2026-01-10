@@ -916,14 +916,14 @@ impl View for CheckBox {
             for i in 0..3 {
                 for j in 0..5 {
                     canvas.put_pixel(
-                        frame.x + 5 + j,
+                        frame.x + 4 + j,
                         box_y + 10 + j - i,
                         self.check_color,
                     );
                 }
                 for j in 0..8 {
                     canvas.put_pixel(
-                        frame.x + 10 + j,
+                        frame.x + 8 + j,
                         box_y + 14 - j - i,
                         self.check_color,
                     );
