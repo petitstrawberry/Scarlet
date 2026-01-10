@@ -1,5 +1,6 @@
 #[macro_use]
 mod macros;
+mod cgroup;
 mod errno;
 mod fs;
 mod futex;
@@ -9,6 +10,7 @@ mod proc;
 mod signal;
 mod socket;
 mod time;
+mod unshare;
 
 // pub mod drivers;
 
@@ -952,6 +954,7 @@ syscall_table! {
     GetSockname = 204 => socket::sys_getsockname,
     SetSockopt = 208 => socket::sys_setsockopt,
     GetSockopt = 209 => socket::sys_getsockopt,
+    Unshare = 97 => unshare::sys_unshare,
     RenameAt2 = 276 => fs::sys_renameat2,
     Membarrier = 283 => proc::sys_membarrier,
 }
