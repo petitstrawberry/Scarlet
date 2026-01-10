@@ -77,12 +77,20 @@ impl View for Label {
 ///
 /// This view recomputes its text when any watched `State<T>` changes.
 /// Use the `text!()` / `label!()` macros for ergonomic formatting.
+///
+/// Includes throttling to reduce flicker during rapid state changes.
 pub struct Text {
     formatter: Arc<dyn Fn() -> String + Send + Sync>,
     color: Color,
     font_size: u32,
     refresh_handle: ViewRefreshHandle,
     cached_text: String,
+    /// Frame counter for throttling
+    frame_counter: u32,
+    /// Last frame when text was updated
+    last_update_frame: u32,
+    /// Minimum frames between updates (0 = no throttling)
+    throttle_frames: u32,
 }
 
 impl Text {
@@ -98,6 +106,9 @@ impl Text {
             font_size: 16,
             refresh_handle: ViewRefreshHandle::new(),
             cached_text,
+            frame_counter: 0,
+            last_update_frame: 0,
+            throttle_frames: 0,
         }
     }
 
@@ -116,6 +127,9 @@ impl Text {
             font_size: 16,
             refresh_handle,
             cached_text,
+            frame_counter: 0,
+            last_update_frame: 0,
+            throttle_frames: 0,
         }
     }
 
@@ -134,12 +148,31 @@ impl Text {
         self.font_size = size;
         self
     }
+    
+    /// Set throttling to reduce update frequency.
+    /// 
+    /// `frames` is the minimum number of frames between updates.
+    /// Use this for rapidly changing values like sliders or timers.
+    pub fn throttle(mut self, frames: u32) -> Self {
+        self.throttle_frames = frames;
+        self
+    }
 }
 
 impl View for Text {
     fn layout(&mut self, _available: Size) -> Size {
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        
         if self.refresh_handle.take_dirty() {
-            self.cached_text = (self.formatter)();
+            // Check throttling
+            let frames_since_update = self.frame_counter.wrapping_sub(self.last_update_frame);
+            if self.throttle_frames == 0 || frames_since_update >= self.throttle_frames {
+                self.cached_text = (self.formatter)();
+                self.last_update_frame = self.frame_counter;
+            } else {
+                // Re-mark as dirty to update later
+                self.refresh_handle.mark_dirty();
+            }
         }
         let (w, h) = measure_text_sized(&self.cached_text, self.font_size as f32);
         Size::new(w, h)
@@ -954,6 +987,12 @@ pub struct Slider {
     track_color: Color,
     thumb_color: Color,
     is_dragging: bool,
+    /// Pending value during drag - only committed on mouse up or periodically
+    pending_value: Option<f32>,
+    /// Last time we committed the value (for throttling during drag)
+    last_commit_frame: u32,
+    /// Frame counter for throttling
+    frame_counter: u32,
     refresh_handle: ViewRefreshHandle,
 }
 
@@ -966,6 +1005,9 @@ impl Slider {
             track_color: Color::rgb(200, 200, 200),
             thumb_color: Color::rgb(50, 150, 255),
             is_dragging: false,
+            pending_value: None,
+            last_commit_frame: 0,
+            frame_counter: 0,
             refresh_handle: ViewRefreshHandle::new(),
         }
     }
@@ -992,7 +1034,26 @@ impl Slider {
             let position = (mouse_x - track_start).max(0).min(track_width as i32) as f32;
             let ratio = position / track_width;
             let new_value = self.min + ratio * (self.max - self.min);
-            self.binding.set(new_value.clamp(self.min, self.max));
+            let clamped = new_value.clamp(self.min, self.max);
+            
+            // Store pending value instead of immediately committing
+            self.pending_value = Some(clamped);
+            
+            // Throttle: only commit every 3 frames during drag to reduce flicker
+            self.frame_counter = self.frame_counter.wrapping_add(1);
+            if self.frame_counter.wrapping_sub(self.last_commit_frame) >= 3 {
+                self.commit_pending_value();
+            }
+            
+            // Always mark self as dirty for immediate visual feedback
+            self.refresh_handle.mark_dirty();
+        }
+    }
+    
+    fn commit_pending_value(&mut self) {
+        if let Some(value) = self.pending_value.take() {
+            self.binding.set(value);
+            self.last_commit_frame = self.frame_counter;
         }
     }
 }
@@ -1003,7 +1064,11 @@ impl View for Slider {
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        let value = self.binding.get().clamp(self.min, self.max);
+        // Use pending value during drag for immediate visual feedback,
+        // fall back to binding value otherwise
+        let value = self.pending_value
+            .unwrap_or_else(|| self.binding.get())
+            .clamp(self.min, self.max);
         
         let track_height = 4;
         let thumb_radius = 8;
@@ -1061,6 +1126,8 @@ impl View for Slider {
             EventKind::MouseUp { button: MouseButton::Left } => {
                 if self.is_dragging {
                     self.is_dragging = false;
+                    // Commit any pending value on mouse up
+                    self.commit_pending_value();
                     true
                 } else {
                     false
@@ -1071,7 +1138,7 @@ impl View for Slider {
     }
 
     fn needs_draw(&self) -> bool {
-        self.refresh_handle.is_dirty()
+        self.refresh_handle.is_dirty() || self.pending_value.is_some()
     }
 
     fn set_needs_draw(&mut self) {
@@ -1084,6 +1151,9 @@ impl View for Slider {
 }
 
 /// ProgressBar - progress indicator with reactive state
+///
+/// Features smooth animation interpolation to reduce flicker during
+/// rapid value changes.
 ///
 /// # Example
 ///
@@ -1101,12 +1171,17 @@ pub struct ProgressBar {
     corner_radius: u32,
     height: u32,
     refresh_handle: ViewRefreshHandle,
+    /// Current displayed value (for smooth animation)
+    display_value: f32,
+    /// Whether animation is enabled
+    animate: bool,
 }
 
 impl ProgressBar {
     pub fn new(state: State<f32>) -> Self {
         let refresh_handle = ViewRefreshHandle::new();
         state.subscribe_view(&refresh_handle);
+        let initial = state.get().clamp(0.0, 1.0);
         Self {
             state,
             track_color: Color::rgb(230, 230, 230),
@@ -1114,6 +1189,8 @@ impl ProgressBar {
             corner_radius: 4,
             height: 16,
             refresh_handle,
+            display_value: initial,
+            animate: true,
         }
     }
 
@@ -1140,15 +1217,40 @@ impl ProgressBar {
         self.height = height;
         self
     }
+    
+    /// Disable animation (instant updates)
+    pub fn no_animation(mut self) -> Self {
+        self.animate = false;
+        self
+    }
 }
 
 impl View for ProgressBar {
     fn layout(&mut self, available: Size) -> Size {
+        // Update display value with interpolation
+        let target = self.state.get().clamp(0.0, 1.0);
+        
+        if self.animate {
+            // Lerp towards target (smooth animation)
+            // Use a fast lerp factor for responsive feel
+            let diff = target - self.display_value;
+            if diff.abs() < 0.001 {
+                self.display_value = target;
+            } else {
+                // Move 30% of the way each frame
+                self.display_value += diff * 0.3;
+                // Keep refreshing until we reach target
+                self.refresh_handle.mark_dirty();
+            }
+        } else {
+            self.display_value = target;
+        }
+        
         Size::new(available.width.max(100), self.height)
     }
 
     fn draw(&self, canvas: &mut Canvas, frame: Rect) {
-        let progress = self.state.get().clamp(0.0, 1.0);
+        let progress = self.display_value;
         
         // Draw track with rounded corners
         canvas.fill_rounded_rect(frame.x, frame.y, frame.width, frame.height, self.corner_radius, self.track_color);
