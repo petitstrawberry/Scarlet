@@ -8,10 +8,49 @@
 //! - `sws-client`: Low-level connection and protocol handling
 //! - `scarlet-ui` (this crate): High-level UI toolkit with View-based components
 //!
+//! # Features
+//!
+//! ## Core View System
+//!
+//! - Declarative view composition
+//! - Automatic layout management
+//! - Two-phase event handling (capture and bubble)
+//! - Window decorations with modern design
+//!
+//! ## Layout Containers
+//!
+//! Build complex layouts using:
+//! - [`VStack`] - Vertical stack
+//! - [`HStack`] - Horizontal stack
+//! - [`ZStack`] - Overlay stack
+//! - [`Padding`] - Add padding
+//! - [`Center`] - Center content
+//! - [`Spacer`] - Flexible spacing
+//!
+//! ## Control Widgets
+//!
+//! - [`Label`] - Text display
+//! - [`Button`] - Interactive button
+//! - [`TextField`] - Text input
+//! - [`CheckBox`] - Boolean toggle
+//! - [`Slider`] - Value selection
+//! - [`ProgressBar`] - Progress indicator
+//! - [`Toggle`] - Switch control
+//!
+//! ## View Modifiers
+//!
+//! Apply styles using the [`ViewModifier`] trait:
+//! - `corner_radius()` - Rounded corners
+//! - `border()` - Border styling
+//! - `background_color()` - Background color
+//!
 //! # Example
 //!
 //! ```no_run
-//! use scarlet_ui::{Application, Window, VStack, Label, Button, Padding, Color};
+//! use scarlet_ui::{
+//!     Application, Window, VStack, HStack, Label, Button, 
+//!     CheckBox, Slider, Padding, Color, ViewModifier,
+//! };
 //!
 //! fn main() {
 //!     let mut app = Application::new().expect("Failed to connect");
@@ -19,15 +58,38 @@
 //!     // Scarlet UI loads its default vector font from rootfs.
 //!     // Make sure `/system/scarlet/fonts/Mplus1-Regular.ttf` exists in the image.
 //!     
-//!     let window = Window::new("Demo", 400, 300)
-//!         .background(Color::DARK_GRAY)
+//!     let window = Window::new("Demo", 600, 400)
+//!         .background(Color::rgb(245, 245, 250))
 //!         .content(
 //!             Padding::new(
 //!                 VStack::new()
-//!                     .child(Label::new("Hello, Scarlet!"))
-//!                     .child(Button::new("Click Me", || {
-//!                         // Handle click
-//!                     }))
+//!                     .spacing(16)
+//!                     .child(
+//!                         Label::new("Welcome to ScarletUI!")
+//!                             .color(Color::TEXT)
+//!                             .font_size(32)
+//!                     )
+//!                     .child(
+//!                         CheckBox::new("Enable feature", true)
+//!                             .on_toggle(|checked| {
+//!                                 println!("Feature enabled: {}", checked);
+//!                             })
+//!                     )
+//!                     .child(
+//!                         Slider::new(0.5, 0.0, 1.0)
+//!                             .on_change(|value| {
+//!                                 println!("Value: {:.2}", value);
+//!                             })
+//!                     )
+//!                     .child(HStack::new()
+//!                         .spacing(12)
+//!                         .child(Button::new("OK", || {
+//!                             println!("OK clicked");
+//!                         }))
+//!                         .child(Button::new("Cancel", || {
+//!                             println!("Cancel clicked");
+//!                         }))
+//!                     )
 //!             ).all(20)
 //!         );
 //!     
@@ -35,6 +97,15 @@
 //!     app.run(); // Framework takes over - never returns
 //! }
 //! ```
+//!
+//! # Design Philosophy
+//!
+//! Scarlet UI follows SwiftUI-inspired design principles:
+//!
+//! 1. **Declarative** - Describe what you want, not how to build it
+//! 2. **Composable** - Build complex UIs from simple components
+//! 3. **Type-safe** - Leverage Rust's type system
+//! 4. **Efficient** - Minimal allocations, `no_std` compatible
 
 #![no_std]
 

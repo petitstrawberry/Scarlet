@@ -1,13 +1,29 @@
 //! View modifiers for styling and composition
 //!
-//! Modifiers enable SwiftUI-style method chaining for view customization:
+//! Modifiers enable SwiftUI-style method chaining for view customization.
+//! Each modifier wraps a view and adds visual styling or behavior.
+//!
+//! # Example
+//!
 //! ```no_run
-//! Label::new("Hello")
+//! use scarlet_ui::{Label, Color, ViewModifier};
+//!
+//! let styled_label = Label::new("Hello")
 //!     .corner_radius(8)
-//!     .padding(10)
-//!     .background(Color::BLUE)
 //!     .border(2, Color::WHITE)
+//!     .background_color(Color::BLUE);
 //! ```
+//!
+//! # Available Modifiers
+//!
+//! - [`CornerRadius`] - Adds rounded corners to a view
+//! - [`Border`] - Adds a border around a view
+//! - [`Background`] - Sets a background color for a view
+//!
+//! # Creating Custom Modifiers
+//!
+//! To create a custom modifier, implement the [`View`] trait and wrap
+//! the child view in a struct that applies your custom rendering or layout.
 
 use crate::graphics::{Canvas, Rect};
 use crate::view::{Size, View};
