@@ -702,9 +702,13 @@ impl Compositor {
         // Check if window uses SHM or Vec buffer
         if let Some(shm_addr) = window.shm_mapped_addr {
             // SHM-backed window: read from mapped memory
-            let buffer_size = (window.width as usize)
-                .saturating_mul(window.height as usize)
-                .saturating_mul(4);
+            let buffer_size = if window.shm_size != 0 {
+                window.shm_size
+            } else {
+                (window.width as usize)
+                    .saturating_mul(window.height as usize)
+                    .saturating_mul(4)
+            };
 
             // Create slice from mapped address
             let window_buffer =
@@ -1325,6 +1329,7 @@ impl Compositor {
                 height,
                 shm,
                 shm_mapped_addr,
+                shm_size,
             } => {
                 println!(
                     "[Compositor] Client {} creating window #{} ({}x{})",
@@ -1347,6 +1352,7 @@ impl Compositor {
                         height,
                         shm_obj,
                         shm_mapped_addr,
+                        shm_size,
                     ) {
                         Ok(_) => {
                             println!("[Compositor] Window #{} with SHM created", window_id);
@@ -1483,6 +1489,7 @@ impl Compositor {
                 height,
                 shm,
                 shm_mapped_addr,
+                shm_size,
             } => {
                 println!(
                     "[Compositor] Resizing window #{} to {}x{} (shm_mapped=0x{:x?})",
@@ -1495,6 +1502,7 @@ impl Compositor {
                         height,
                         shm,
                         shm_mapped_addr,
+                        shm_size,
                     ) {
                         self.full_redraw_needed = true;
                     }

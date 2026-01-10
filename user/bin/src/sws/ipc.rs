@@ -654,6 +654,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             height,
                             shm: Some(shm),
                             shm_mapped_addr,
+                            shm_size: buffer_size as usize,
                         });
                     }
                     Err(e) => {
@@ -829,6 +830,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             height,
                             shm: Some(shm),
                             shm_mapped_addr: Some(mapped_addr),
+                            shm_size: buffer_size as usize,
                         });
                     }
                     Err(_) => {
@@ -883,6 +885,8 @@ pub enum IpcEvent {
         /// Shared memory for the window buffer (server-allocated)
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
+        /// Size of the SHM mapping in bytes.
+        shm_size: usize,
     },
     /// Client requested to destroy a window
     DestroyWindow { client_id: usize, window_id: u32 },
@@ -923,5 +927,7 @@ pub enum IpcEvent {
         height: u32,
         shm: Option<SharedMemory>,
         shm_mapped_addr: Option<usize>,
+        /// Size of the SHM mapping in bytes.
+        shm_size: usize,
     },
 }

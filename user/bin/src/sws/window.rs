@@ -1,5 +1,6 @@
 //! Window management module
 
+use std::handle::capability::memory_mapping::flags as mmap_flags;
 use std::ipc::{SharedMemory, permissions};
 use std::vec::Vec;
 use std::{print, println};
@@ -84,6 +85,8 @@ pub struct Window {
     pub shm: Option<SharedMemory>,
     /// Mapped address of the shared memory (for server-side access)
     pub shm_mapped_addr: Option<usize>,
+    /// Size of the SHM mapping in bytes (0 when not SHM-backed).
+    pub shm_size: usize,
 }
 
 #[allow(dead_code)]
@@ -105,6 +108,7 @@ impl Window {
             buffer: None,
             shm: None,
             shm_mapped_addr: None,
+            shm_size: 0,
         }
     }
 
@@ -129,6 +133,7 @@ impl Window {
             buffer: Some(buffer),
             shm: None,
             shm_mapped_addr: None,
+            shm_size: 0,
         }
     }
 
@@ -150,7 +155,13 @@ impl Window {
             .as_memory_mapping()
             .map_err(|_| "SharedMemory does not support mapping")?;
         let mapped_addr = mapper
-            .mmap(0, buffer_size, permissions::READ_WRITE, 0, 0)
+            .mmap(
+                0,
+                buffer_size,
+                permissions::READ_WRITE,
+                mmap_flags::SHARED,
+                0,
+            )
             .map_err(|_| "Failed to mmap shared memory")?;
 
         println!(
@@ -173,12 +184,17 @@ impl Window {
             buffer: None,
             shm: Some(shm),
             shm_mapped_addr: Some(mapped_addr),
+            shm_size: buffer_size,
         })
     }
 
     /// Get buffer size in bytes
     pub fn buffer_size(&self) -> usize {
-        (self.width * self.height * 4) as usize
+        if self.shm_size != 0 {
+            self.shm_size
+        } else {
+            (self.width * self.height * 4) as usize
+        }
     }
 
     /// Set window title
@@ -307,6 +323,7 @@ impl WindowManager {
         height: u32,
         shm: SharedMemory,
         shm_mapped_addr: Option<usize>,
+        shm_size: usize,
     ) -> Result<WindowId, &'static str> {
         if id >= self.next_window_id {
             self.next_window_id = id + 1;
@@ -332,6 +349,7 @@ impl WindowManager {
             buffer: None,   // No Vec buffer
             shm: Some(shm),
             shm_mapped_addr,
+            shm_size,
         };
         self.windows.push(window);
 
@@ -653,14 +671,17 @@ impl WindowManager {
         height: u32,
         shm: SharedMemory,
         shm_mapped_addr: Option<usize>,
+        shm_size: usize,
     ) -> bool {
         if let Some(w) = self.get_window_mut(id) {
-            let (width, height) = w.size_limits.clamp(width, height);
-            w.width = width;
-            w.height = height;
+            // IMPORTANT: Do not clamp here. The SHM buffer was already allocated
+            // for the provided width/height by the IPC thread.
+            w.width = width.max(1);
+            w.height = height.max(1);
             w.buffer = None;
             w.shm = Some(shm);
             w.shm_mapped_addr = shm_mapped_addr;
+            w.shm_size = shm_size;
             true
         } else {
             false
