@@ -53,6 +53,17 @@ pub struct Application {
     last_mouse: Point,
 }
 
+impl Drop for Application {
+    fn drop(&mut self) {
+        // Best-effort cleanup: ensure protocol-level destroy is sent for all managed surfaces.
+        // Drop cannot fail, so we ignore errors (e.g. already destroyed).
+        for managed in &self.windows {
+            let _ = self.connection.destroy_surface(managed.surface_id);
+        }
+        self.windows.clear();
+    }
+}
+
 impl Application {
     /// Create a new application and connect to SWS
     pub fn new() -> Result<Self, &'static str> {
@@ -129,11 +140,25 @@ impl Application {
             for sws_event in events {
                 self.handle_sws_event(sws_event);
             }
-            
-            // 4. Check for close requests and handle them
+
+            // 4. Handle close requests (send DESTROY_WINDOW to SWS)
+            // Window is dropped when removed from self.windows, but the protocol-level
+            // destroy must be sent explicitly via sws-client.
+            let mut close_surface_ids: Vec<u32> = Vec::new();
+            for managed in &self.windows {
+                if managed.window.is_close_requested() {
+                    close_surface_ids.push(managed.surface_id);
+                }
+            }
+            for surface_id in close_surface_ids {
+                // If the surface is already gone (e.g. server-side destroyed), ignore.
+                let _ = self.connection.destroy_surface(surface_id);
+            }
+
+            // 5. Drop closed windows
             self.windows.retain(|w| !w.window.is_close_requested());
             
-            // 5. Layout and draw windows
+            // 6. Layout and draw windows
             for i in 0..self.windows.len() {
                 let managed = &mut self.windows[i];
                 let size = Size::new(managed.window.width(), managed.window.height());
@@ -182,12 +207,8 @@ impl Application {
                 }
             }
             SwsEvent::SurfaceDestroyed { surface_id } => {
-                // Mark window for removal
-                for managed in &mut self.windows {
-                    if managed.surface_id == surface_id {
-                        // Window will be cleaned up
-                    }
-                }
+                // Server destroyed the surface; drop the corresponding window.
+                self.windows.retain(|w| w.surface_id != surface_id);
             }
             SwsEvent::Error { code: _ } => {
                 // Handle error
