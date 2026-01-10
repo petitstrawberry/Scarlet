@@ -81,12 +81,12 @@ pub extern "C" fn main() -> i32 {
                     .child(
                         Label::new("ScarletUI Reactive Gallery")
                             .color(Color::rgb(40, 40, 50))
-                            .font_size(28),
+                            .font_size(40),
                     )
                     .child(
                         Label::new("ScarletUIの世界からこんにちは！ This demo showcases reactive State<T> usage.")
                             .color(Color::GRAY)
-                            .font_size(14),
+                            .font_size(20),
                     )
                     .child(Spacer::new().min_length(8))
                     // Counter - ReactiveLabel auto-updates
@@ -155,9 +155,14 @@ pub extern "C" fn main() -> i32 {
                         // TextField - State passed directly
                         HStack::new()
                             .spacing(16)
-                            .child(Label::new("TextField:").color(Color::TEXT).font_size(14))
                             .child(
-                                TextField::new("Type here...", text_input.clone()).corner_radius(6),
+                                VStack::new()
+                                    .spacing(8)
+                                .child(Label::new("TextField:").color(Color::TEXT).font_size(14)
+                                )
+                                .child(
+                                    TextField::new("Type here...", text_input.clone()).corner_radius(6),
+                                )
                             )
                             .child(
                             // CheckBox - State passed directly
