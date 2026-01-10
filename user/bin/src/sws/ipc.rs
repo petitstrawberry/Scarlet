@@ -65,23 +65,103 @@ enum FrameIoError {
     Protocol,
 }
 
-fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), FrameIoError> {
-    use std::io::Read;
+/// Non-blocking framed-message reader.
+///
+/// With non-blocking sockets, reads can return `WouldBlock` after consuming
+/// *some* bytes. If we drop that partial progress and restart from a fresh
+/// header read, the stream becomes desynchronized and subsequent frames are
+/// mis-parsed (e.g., intermittent 0x0 damage rectangles).
+struct FrameReader {
+    header: [u8; protocol::MessageHeader::SIZE],
+    header_filled: usize,
+    header_parsed: bool,
 
-    let mut filled = 0;
-    while filled < buf.len() {
-        match socket.read(&mut buf[filled..]) {
-            Ok(0) => return Err(FrameIoError::Disconnected),
-            Ok(n) => filled += n,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    return Err(FrameIoError::WouldBlock);
-                }
-                return Err(FrameIoError::Io);
-            }
+    msg_type: u32,
+    payload_len: usize,
+    payload: Vec<u8>,
+    payload_filled: usize,
+}
+
+impl FrameReader {
+    fn new() -> Self {
+        Self {
+            header: [0u8; protocol::MessageHeader::SIZE],
+            header_filled: 0,
+            header_parsed: false,
+            msg_type: 0,
+            payload_len: 0,
+            payload: Vec::new(),
+            payload_filled: 0,
         }
     }
-    Ok(())
+
+    fn reset(&mut self) {
+        self.header_filled = 0;
+        self.header_parsed = false;
+        self.msg_type = 0;
+        self.payload_len = 0;
+        self.payload.clear();
+        self.payload_filled = 0;
+    }
+
+    /// Poll for the next complete frame.
+    ///
+    /// - `Ok(Some((msg_type, payload)))` when a full frame is assembled
+    /// - `Ok(None)` when no complete frame is available yet
+    /// - `Err(..)` on disconnect / I/O / protocol error
+    fn poll(&mut self, socket: &mut Socket) -> Result<Option<(u32, Vec<u8>)>, FrameIoError> {
+        use std::io::Read;
+
+        // Read header.
+        while self.header_filled < self.header.len() {
+            match socket.read(&mut self.header[self.header_filled..]) {
+                Ok(0) => return Err(FrameIoError::Disconnected),
+                Ok(n) => self.header_filled += n,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        return Ok(None);
+                    }
+                    return Err(FrameIoError::Io);
+                }
+            }
+        }
+
+        // Parse header once.
+        if !self.header_parsed {
+            let header = protocol::MessageHeader::from_le_bytes(self.header);
+            let payload_len = header.payload_size as usize;
+            if payload_len > protocol::MAX_PAYLOAD_SIZE {
+                self.reset();
+                return Err(FrameIoError::Protocol);
+            }
+            self.msg_type = header.msg_type;
+            self.payload_len = payload_len;
+            if payload_len > 0 {
+                self.payload.resize(payload_len, 0);
+            }
+            self.header_parsed = true;
+        }
+
+        // Read payload.
+        while self.payload_filled < self.payload_len {
+            match socket.read(&mut self.payload[self.payload_filled..]) {
+                Ok(0) => return Err(FrameIoError::Disconnected),
+                Ok(n) => self.payload_filled += n,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        return Ok(None);
+                    }
+                    return Err(FrameIoError::Io);
+                }
+            }
+        }
+
+        // Complete.
+        let msg_type = self.msg_type;
+        let payload = core::mem::take(&mut self.payload);
+        self.reset();
+        Ok(Some((msg_type, payload)))
+    }
 }
 
 fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
@@ -96,25 +176,6 @@ fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
         }
     }
     Ok(())
-}
-
-fn read_frame(socket: &mut Socket) -> Result<(u32, Vec<u8>), FrameIoError> {
-    let mut header_bytes = [0u8; protocol::MessageHeader::SIZE];
-    read_exact(socket, &mut header_bytes)?;
-    let header = protocol::MessageHeader::from_le_bytes(header_bytes);
-
-    let payload_len = header.payload_size as usize;
-    if payload_len > protocol::MAX_PAYLOAD_SIZE {
-        return Err(FrameIoError::Protocol);
-    }
-
-    let mut payload = Vec::new();
-    if payload_len > 0 {
-        payload.resize(payload_len, 0);
-        read_exact(socket, &mut payload)?;
-    }
-
-    Ok((header.msg_type, payload))
 }
 
 fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), FrameIoError> {
@@ -420,6 +481,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
     // Debug: loop counter for periodic logging
     let mut loop_count: u64 = 0;
 
+    let mut frame_reader = FrameReader::new();
+
     println!("[ClientThread {}] Entering main loop", client_id);
 
     loop {
@@ -507,22 +570,16 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         //     );
         // }
 
-        let (msg_type, payload) = match read_frame(&mut socket) {
-            Ok(v) => {
+        let (msg_type, payload) = match frame_reader.poll(&mut socket) {
+            Ok(Some(v)) => {
                 println!(
                     "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
                     client_id, loop_count, v.0
                 );
                 v
             }
-            Err(FrameIoError::WouldBlock) => {
-                // Non-blocking read returned no data, loop back to check events
-                // if loop_count <= 5 || should_log {
-                //     println!(
-                //         "[ClientThread {}] Loop #{}: read_frame returned WouldBlock",
-                //         client_id, loop_count
-                //     );
-                // }
+            Ok(None) => {
+                // No complete frame available yet; keep looping so we can deliver input events.
                 continue;
             }
             Err(FrameIoError::Disconnected) => {
