@@ -53,7 +53,11 @@ pub extern "C" fn main() -> i32 {
             Padding::new(
                 VStack::new()
                     // Title
-                    .child(Label::new("Hello, Scarlet UI!").color(Color::TEXT))
+                    .child(
+                        Label::new("Hello, Scarlet UI!")
+                            .color(Color::TEXT)
+                            .font_size(40),
+                    )
                     .child(Label::new("View-based Architecture Demo").color(Color::GRAY))
                     // Spacing
                     .child(Spacer::new())
