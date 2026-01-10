@@ -48,6 +48,6 @@ impl Widget for Label {
         // Labels are typically not clickable, but provide bounds for consistency
         let width = (self.text.len() * 8) as u32;
         let rect = Rect::new(self.x, self.y, width, 8);
-        rect.contains(point)
+        rect.contains_point(point)
     }
 }

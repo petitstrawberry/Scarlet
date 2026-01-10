@@ -1,6 +1,6 @@
 //! Window with Client-Side Decorations (CSD)
 
-use crate::{Canvas, Color, Point, Rect};
+use crate::{Canvas, Color, Rect};
 use scarlet_std::vec::Vec;
 use sws_client::Connection;
 
@@ -88,10 +88,7 @@ impl Window {
         let mut canvas = Canvas::new(self.buffer, self.width, self.height);
 
         // Draw titlebar
-        canvas.fill_rect(
-            Rect::new(0, 0, self.width, TITLEBAR_HEIGHT),
-            Color::TITLEBAR,
-        );
+        canvas.fill_rect(0, 0, self.width, TITLEBAR_HEIGHT, Color::TITLEBAR);
 
         // Draw title text
         let title_str = core::str::from_utf8(&self.title).unwrap_or("");
@@ -106,10 +103,7 @@ impl Window {
             Color::LIGHT_GRAY
         };
 
-        canvas.fill_rect(
-            Rect::new(close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE),
-            close_color,
-        );
+        canvas.fill_rect(close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE, close_color);
 
         // Draw X mark
         for i in 0..CLOSE_BUTTON_SIZE {
@@ -122,10 +116,7 @@ impl Window {
         }
 
         // Draw borders
-        canvas.draw_rect(
-            Rect::new(0, 0, self.width, self.height),
-            Color::BORDER,
-        );
+        canvas.draw_rect(0, 0, self.width, self.height, Color::BORDER);
     }
 
     /// Update mouse position and check for hover effects
@@ -139,7 +130,7 @@ impl Window {
         let close_rect = Rect::new(close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE);
 
         let was_hovered = self.close_button_hovered;
-        self.close_button_hovered = close_rect.contains(Point::new(x, y));
+        self.close_button_hovered = close_rect.contains(x, y);
 
         if was_hovered != self.close_button_hovered {
             // Redraw decorations if hover state changed
@@ -152,7 +143,7 @@ impl Window {
         let close_x = (self.width - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN) as i32;
         let close_y = CLOSE_BUTTON_MARGIN as i32;
         let close_rect = Rect::new(close_x, close_y, CLOSE_BUTTON_SIZE, CLOSE_BUTTON_SIZE);
-        close_rect.contains(Point::new(x, y))
+        close_rect.contains(x, y)
     }
 
     /// Update mouse position

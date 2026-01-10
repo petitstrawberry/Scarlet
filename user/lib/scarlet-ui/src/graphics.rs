@@ -10,6 +10,9 @@ pub struct Point {
 }
 
 impl Point {
+    /// The origin point (0, 0)
+    pub const ZERO: Self = Self { x: 0, y: 0 };
+
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
@@ -34,11 +37,15 @@ impl Rect {
         }
     }
 
-    pub fn contains(&self, point: Point) -> bool {
-        point.x >= self.x
-            && point.x < self.x + self.width as i32
-            && point.y >= self.y
-            && point.y < self.y + self.height as i32
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x
+            && x < self.x + self.width as i32
+            && y >= self.y
+            && y < self.y + self.height as i32
+    }
+
+    pub fn contains_point(&self, point: Point) -> bool {
+        self.contains(point.x, point.y)
     }
 }
 
@@ -73,13 +80,13 @@ impl<'a> Canvas<'a> {
     }
 
     /// Fill a rectangle with a solid color
-    pub fn fill_rect(&mut self, rect: Rect, color: Color) {
+    pub fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
         let bgra = color.to_bgra();
 
-        for y in 0..rect.height {
-            for x in 0..rect.width {
-                let px = rect.x + x as i32;
-                let py = rect.y + y as i32;
+        for dy in 0..height {
+            for dx in 0..width {
+                let px = x + dx as i32;
+                let py = y + dy as i32;
 
                 if px < 0 || px >= self.width as i32 || py < 0 || py >= self.height as i32 {
                     continue;
@@ -93,19 +100,29 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Fill a Rect with a solid color
+    pub fn fill(&mut self, rect: Rect, color: Color) {
+        self.fill_rect(rect.x, rect.y, rect.width, rect.height, color);
+    }
+
     /// Draw a rectangle outline
-    pub fn draw_rect(&mut self, rect: Rect, color: Color) {
+    pub fn draw_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
         // Top and bottom edges
-        for x in 0..rect.width {
-            self.put_pixel(rect.x + x as i32, rect.y, color);
-            self.put_pixel(rect.x + x as i32, rect.y + rect.height as i32 - 1, color);
+        for dx in 0..width {
+            self.put_pixel(x + dx as i32, y, color);
+            self.put_pixel(x + dx as i32, y + height as i32 - 1, color);
         }
 
         // Left and right edges
-        for y in 0..rect.height {
-            self.put_pixel(rect.x, rect.y + y as i32, color);
-            self.put_pixel(rect.x + rect.width as i32 - 1, rect.y + y as i32, color);
+        for dy in 0..height {
+            self.put_pixel(x, y + dy as i32, color);
+            self.put_pixel(x + width as i32 - 1, y + dy as i32, color);
         }
+    }
+
+    /// Draw a Rect outline
+    pub fn stroke(&mut self, rect: Rect, color: Color) {
+        self.draw_rect(rect.x, rect.y, rect.width, rect.height, color);
     }
 
     /// Draw a simple 8x8 character (ASCII only, very basic)

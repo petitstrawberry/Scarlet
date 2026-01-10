@@ -71,10 +71,10 @@ impl Widget for Button {
         };
 
         // Fill button background
-        canvas.fill_rect(self.rect, bg_color);
+        canvas.fill(self.rect, bg_color);
 
         // Draw border
-        canvas.draw_rect(self.rect, Color::BORDER);
+        canvas.stroke(self.rect, Color::BORDER);
 
         // Draw label text (centered)
         let label_str = core::str::from_utf8(&self.label).unwrap_or("");
@@ -95,6 +95,6 @@ impl Widget for Button {
     }
 
     fn contains(&self, point: Point) -> bool {
-        self.rect.contains(point)
+        self.rect.contains_point(point)
     }
 }
