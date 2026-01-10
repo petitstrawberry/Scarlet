@@ -2,13 +2,145 @@
 
 use std::println;
 
-use ab_glyph::{point, Font, FontRef, Glyph, InvalidFont, PxScale, ScaleFont};
+use ab_glyph::{point, Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont};
 use crate::Color;
 
 extern crate scarlet_std as std;
 extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GlyphKey {
+    codepoint: u32,
+    size_px: u16,
+}
+
+struct GlyphMask {
+    key: GlyphKey,
+    width: u32,
+    height: u32,
+    origin_x: i32,
+    origin_y: i32,
+    mask: Box<[u8]>,
+}
+
+struct GlyphCacheState {
+    entries: Vec<GlyphMask>,
+    next_evict: usize,
+}
+
+impl GlyphCacheState {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            next_evict: 0,
+        }
+    }
+}
+
+// Keep this modest; UI text tends to reuse glyphs.
+const GLYPH_CACHE_CAP: usize = 256;
+
+static GLYPH_CACHE: std::sync::Mutex<GlyphCacheState> =
+    std::sync::Mutex::new(GlyphCacheState::new());
+
+#[inline]
+fn floor_i32(v: f32) -> i32 {
+    let i = v as i32;
+    if (i as f32) > v {
+        i - 1
+    } else {
+        i
+    }
+}
+
+#[inline]
+fn ceil_i32(v: f32) -> i32 {
+    let i = v as i32;
+    if (i as f32) < v {
+        i + 1
+    } else {
+        i
+    }
+}
+
+fn glyph_cache_get_or_rasterize(
+    scaled: &PxScaleFont<&FontRef<'static>>,
+    ch: char,
+) -> Option<(i32, i32, u32, u32, *const u8)> {
+    let key = GlyphKey {
+        codepoint: ch as u32,
+        size_px: scaled.scale.y as u16,
+    };
+
+    let mut cache = GLYPH_CACHE.lock();
+    if let Some(found) = cache.entries.iter().find(|e| e.key == key) {
+        return Some((
+            found.origin_x,
+            found.origin_y,
+            found.width,
+            found.height,
+            found.mask.as_ptr(),
+        ));
+    }
+
+    // Rasterize at a stable origin where the baseline is y=0.
+    // The draw path already positions each glyph at its caret baseline.
+    let glyph_id = scaled.glyph_id(ch);
+    let glyph: Glyph = glyph_id.with_scale_and_position(scaled.scale, point(0.0, 0.0));
+    let outlined = scaled.font.outline_glyph(glyph)?;
+    let bounds = outlined.px_bounds();
+
+    let min_x = floor_i32(bounds.min.x);
+    let min_y = floor_i32(bounds.min.y);
+    let max_x = ceil_i32(bounds.max.x);
+    let max_y = ceil_i32(bounds.max.y);
+
+    let width = (max_x - min_x).max(0) as u32;
+    let height = (max_y - min_y).max(0) as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let mut mask = alloc::vec![0u8; (width as usize) * (height as usize)];
+    outlined.draw(|gx, gy, coverage| {
+        let idx = (gy as usize) * (width as usize) + (gx as usize);
+        if idx < mask.len() {
+            let a = (coverage * 255.0) as u8;
+            if a > mask[idx] {
+                mask[idx] = a;
+            }
+        }
+    });
+
+    let entry = GlyphMask {
+        key,
+        width,
+        height,
+        origin_x: min_x,
+        origin_y: min_y,
+        mask: mask.into_boxed_slice(),
+    };
+
+    if cache.entries.len() < GLYPH_CACHE_CAP {
+        cache.entries.push(entry);
+        let last = cache.entries.last().unwrap();
+        Some((
+            last.origin_x,
+            last.origin_y,
+            last.width,
+            last.height,
+            last.mask.as_ptr(),
+        ))
+    } else {
+        let idx = cache.next_evict % GLYPH_CACHE_CAP;
+        cache.next_evict = cache.next_evict.wrapping_add(1);
+        cache.entries[idx] = entry;
+        let e = &cache.entries[idx];
+        Some((e.origin_x, e.origin_y, e.width, e.height, e.mask.as_ptr()))
+    }
+}
 
 // Rootfs-provided default font (MPLUS_FONTS, OFL-1.1).
 const DEFAULT_FONT_PATH: &str = "/fonts/Mplus1-Regular.ttf";
@@ -268,18 +400,24 @@ impl<'a> Canvas<'a> {
             }
 
             let glyph_id = scaled.glyph_id(ch);
-            let glyph: Glyph = glyph_id.with_scale_and_position(scale, point(caret_x, caret_y));
-
-            if let Some(outlined) = font.outline_glyph(glyph) {
-                let bounds = outlined.px_bounds();
-                // Avoid f32::{floor,ceil} in no_std; truncation is acceptable for now.
-                let origin_x = bounds.min.x as i32;
-                let origin_y = bounds.min.y as i32;
-                outlined.draw(|gx, gy, coverage| {
-                    let px = origin_x + gx as i32;
-                    let py = origin_y + gy as i32;
-                    self.put_pixel_alpha(px, py, color, coverage);
-                });
+            if let Some((ox, oy, w, h, ptr)) = glyph_cache_get_or_rasterize(&scaled, ch) {
+                // Position this glyph at the current caret baseline.
+                let base_x = caret_x as i32;
+                let base_y = caret_y as i32;
+                let mask = unsafe { core::slice::from_raw_parts(ptr, (w as usize) * (h as usize)) };
+                for gy in 0..h {
+                    let row = (gy as usize) * (w as usize);
+                    for gx in 0..w {
+                        let a = mask[row + gx as usize];
+                        if a == 0 {
+                            continue;
+                        }
+                        let alpha = (a as f32) / 255.0;
+                        let px = base_x + ox + gx as i32;
+                        let py = base_y + oy + gy as i32;
+                        self.put_pixel_alpha(px, py, color, alpha);
+                    }
+                }
             }
 
             caret_x += scaled.h_advance(glyph_id);
