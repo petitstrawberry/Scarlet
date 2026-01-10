@@ -9,6 +9,67 @@ use scarlet_std::socket::Socket;
 use scarlet_std::vec::Vec;
 use sws_protocol::{self as protocol, ServerMessage};
 
+fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), Error> {
+    use scarlet_std::io::Read;
+
+    let mut filled = 0;
+    while filled < buf.len() {
+        match socket.read(&mut buf[filled..]) {
+            Ok(0) => return Err(Error::Disconnected),
+            Ok(n) => filled += n,
+            Err(e) => {
+                if e.kind() == scarlet_std::io::ErrorKind::WouldBlock {
+                    return Err(Error::WouldBlock);
+                }
+                return Err(Error::IoError);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), Error> {
+    use scarlet_std::io::Write;
+
+    let mut written = 0;
+    while written < buf.len() {
+        match socket.write(&buf[written..]) {
+            Ok(0) => return Err(Error::Disconnected),
+            Ok(n) => written += n,
+            Err(_) => return Err(Error::IoError),
+        }
+    }
+    Ok(())
+}
+
+fn read_frame(socket: &mut Socket) -> Result<(u32, Vec<u8>), Error> {
+    let mut header_bytes = [0u8; protocol::MessageHeader::SIZE];
+    read_exact(socket, &mut header_bytes)?;
+    let header = protocol::MessageHeader::from_le_bytes(header_bytes);
+
+    let payload_len = header.payload_size as usize;
+    if payload_len > protocol::MAX_PAYLOAD_SIZE {
+        return Err(Error::ProtocolError);
+    }
+
+    let mut payload = Vec::new();
+    if payload_len > 0 {
+        payload.resize(payload_len, 0);
+        read_exact(socket, &mut payload)?;
+    }
+
+    Ok((header.msg_type, payload))
+}
+
+fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), Error> {
+    use scarlet_std::io::Write;
+
+    let frame = protocol::encode_frame(msg_type, payload);
+    write_all(socket, &frame)?;
+    socket.flush().map_err(|_| Error::IoError)?;
+    Ok(())
+}
+
 /// Connection to the Scarlet Window Server
 ///
 /// This manages the socket connection, surfaces, and event dispatch.
@@ -50,8 +111,13 @@ impl Connection {
     /// The returned Surface can be drawn to immediately.
     pub fn create_surface(&mut self, width: u32, height: u32) -> Result<u32, Error> {
         // Send CreateWindow request
-        protocol::write_create_window(&mut self.socket, width, height)
-            .map_err(|_| Error::SendFailed)?;
+        let payload = protocol::payload_create_window(width, height);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::CREATE_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
 
         // Block until we receive the response
         // Temporarily set blocking mode for synchronous create
@@ -59,8 +125,7 @@ impl Connection {
             .set_nonblocking(false)
             .map_err(|_| Error::SocketConfig)?;
 
-        let (msg_type, payload) =
-            protocol::read_frame(&mut self.socket).map_err(|_| Error::ReceiveFailed)?;
+        let (msg_type, payload) = read_frame(&mut self.socket).map_err(|_| Error::ReceiveFailed)?;
 
         let response =
             protocol::parse_server_message(msg_type, &payload).map_err(|_| Error::InvalidResponse)?;
@@ -73,9 +138,11 @@ impl Connection {
             _ => return Err(Error::InvalidResponse),
         };
 
-        // Receive SHM handle
-        let shm_handle =
-            protocol::recv_shm_handle(&self.socket).map_err(|_| Error::ShmHandleFailed)?;
+        // Receive SHM handle (out-of-band)
+        let shm_handle = self
+            .socket
+            .recv_handle()
+            .map_err(|_| Error::ShmHandleFailed)?;
 
         let shm =
             SharedMemory::from_handle(shm_handle).map_err(|_| Error::ShmHandleFailed)?;
@@ -98,8 +165,13 @@ impl Connection {
             return Err(Error::SurfaceNotFound);
         }
 
-        protocol::write_destroy_window(&mut self.socket, surface_id)
-            .map_err(|_| Error::SendFailed)?;
+        let payload = protocol::payload_destroy_window(surface_id);
+        write_frame(
+            &mut self.socket,
+            protocol::client_msg::DESTROY_WINDOW,
+            &payload,
+        )
+        .map_err(|_| Error::SendFailed)?;
 
         Ok(())
     }
@@ -121,13 +193,17 @@ impl Connection {
         let surface = self.surfaces.get_mut(&surface_id).ok_or(Error::SurfaceNotFound)?;
 
         if surface.is_dirty() {
-            protocol::write_update_buffer(
-                &mut self.socket,
+            let payload = protocol::payload_update_buffer(
                 surface_id,
                 0,
                 0,
                 surface.width(),
                 surface.height(),
+            );
+            write_frame(
+                &mut self.socket,
+                protocol::client_msg::UPDATE_BUFFER,
+                &payload,
             )
             .map_err(|_| Error::SendFailed)?;
 
@@ -151,7 +227,7 @@ impl Connection {
         let mut count = 0;
 
         loop {
-            match protocol::read_frame(&mut self.socket) {
+            match read_frame(&mut self.socket) {
                 Ok((msg_type, payload)) => {
                     if let Ok(msg) = protocol::parse_server_message(msg_type, &payload) {
                         match msg {
@@ -183,8 +259,8 @@ impl Connection {
                         }
                     }
                 }
-                Err(protocol::ProtocolError::IoWouldBlock) => break,
-                Err(protocol::ProtocolError::IoDisconnected) => return Err(Error::Disconnected),
+                Err(Error::WouldBlock) => break,
+                Err(Error::Disconnected) => return Err(Error::Disconnected),
                 Err(_) => return Err(Error::IoError),
             }
         }

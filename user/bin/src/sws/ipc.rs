@@ -10,6 +10,75 @@ use std::vec::Vec;
 use sws_protocol as protocol;
 use sws_protocol::ClientMessageRef;
 
+#[derive(Debug)]
+enum FrameIoError {
+    WouldBlock,
+    Disconnected,
+    Io,
+    Protocol,
+}
+
+fn read_exact(socket: &mut Socket, buf: &mut [u8]) -> Result<(), FrameIoError> {
+    use std::io::Read;
+
+    let mut filled = 0;
+    while filled < buf.len() {
+        match socket.read(&mut buf[filled..]) {
+            Ok(0) => return Err(FrameIoError::Disconnected),
+            Ok(n) => filled += n,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    return Err(FrameIoError::WouldBlock);
+                }
+                return Err(FrameIoError::Io);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_all(socket: &mut Socket, buf: &[u8]) -> Result<(), FrameIoError> {
+    use std::io::Write;
+
+    let mut written = 0;
+    while written < buf.len() {
+        match socket.write(&buf[written..]) {
+            Ok(0) => return Err(FrameIoError::Disconnected),
+            Ok(n) => written += n,
+            Err(_) => return Err(FrameIoError::Io),
+        }
+    }
+    Ok(())
+}
+
+fn read_frame(socket: &mut Socket) -> Result<(u32, Vec<u8>), FrameIoError> {
+    let mut header_bytes = [0u8; protocol::MessageHeader::SIZE];
+    read_exact(socket, &mut header_bytes)?;
+    let header = protocol::MessageHeader::from_le_bytes(header_bytes);
+
+    let payload_len = header.payload_size as usize;
+    if payload_len > protocol::MAX_PAYLOAD_SIZE {
+        return Err(FrameIoError::Protocol);
+    }
+
+    let mut payload = Vec::new();
+    if payload_len > 0 {
+        payload.resize(payload_len, 0);
+        read_exact(socket, &mut payload)?;
+    }
+
+    Ok((header.msg_type, payload))
+}
+
+fn write_frame(socket: &mut Socket, msg_type: u32, payload: &[u8]) -> Result<(), FrameIoError> {
+    use std::io::Write;
+
+    let frame = protocol::encode_frame(msg_type, payload);
+    write_all(socket, &frame)?;
+    socket.flush().map_err(|_| FrameIoError::Io)?;
+    Ok(())
+}
+
 /// Input event to be sent to a client
 #[derive(Debug, Clone)]
 pub struct PendingInputEvent {
@@ -276,13 +345,15 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 //     window_id
                 // );
                 for event in events {
-                    if let Err(e) = protocol::write_input_event(
-                        &mut socket,
+                    let payload = protocol::payload_input_event(
                         event.time,
                         event.type_,
                         event.code,
                         event.value,
-                    ) {
+                    );
+                    if let Err(e) =
+                        write_frame(&mut socket, protocol::server_msg::INPUT_EVENT, &payload)
+                    {
                         println!(
                             "[ClientThread {}] Failed to send input event to window {}: {:?}",
                             client_id, window_id, e
@@ -325,7 +396,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
         //     );
         // }
 
-        let (msg_type, payload) = match protocol::read_frame(&mut socket) {
+        let (msg_type, payload) = match read_frame(&mut socket) {
             Ok(v) => {
                 println!(
                     "[ClientThread {}] Loop #{}: read_frame SUCCESS (msg_type={})",
@@ -333,7 +404,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 );
                 v
             }
-            Err(protocol::ProtocolError::IoWouldBlock) => {
+            Err(FrameIoError::WouldBlock) => {
                 // Non-blocking read returned no data, loop back to check events
                 // if loop_count <= 5 || should_log {
                 //     println!(
@@ -343,7 +414,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                 // }
                 continue;
             }
-            Err(protocol::ProtocolError::IoDisconnected) => {
+            Err(FrameIoError::Disconnected) => {
                 println!("[ClientThread {}] Client disconnected", client_id);
                 break;
             }
@@ -449,7 +520,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
                             "[ClientThread {}] Sending SHM handle for window {}",
                             client_id, window_id
                         );
-                        if let Err(e) = protocol::send_shm_handle(&socket, shm.as_handle()) {
+                        if let Err(e) = socket.send_handle(shm.as_handle()) {
                             println!(
                                 "[ClientThread {}] Failed to send SHM handle: {:?}",
                                 client_id, e
@@ -531,7 +602,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket) {
 
 /// Send WindowCreated message
 fn send_window_created(socket: &mut Socket, window_id: u32, shm_size: u64) {
-    if let Err(e) = protocol::write_window_created(socket, window_id, shm_size) {
+    let payload = protocol::payload_window_created(window_id, shm_size);
+    if let Err(e) = write_frame(socket, protocol::server_msg::WINDOW_CREATED, &payload) {
         println!(
             "[IpcServer] Failed to send WindowCreated: {:?} (window_id={}, shm_size={})",
             e, window_id, shm_size

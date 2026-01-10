@@ -17,10 +17,6 @@
 
 extern crate scarlet_std as std;
 
-use std::handle::Handle;
-use std::io::{Read, Write};
-use std::println;
-use std::socket::Socket;
 use std::vec::Vec;
 
 /// Maximum payload we accept from the socket.
@@ -76,12 +72,6 @@ impl MessageHeader {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
-    /// The remote side closed the connection.
-    IoDisconnected,
-    /// I/O operation would block (non-blocking socket).
-    IoWouldBlock,
-    /// Any other I/O failure.
-    IoError,
     /// Frame payload is too large.
     PayloadTooLarge,
     /// Malformed payload for the given message type.
@@ -90,73 +80,18 @@ pub enum ProtocolError {
     UnknownMessageType,
 }
 
-fn read_exact<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), ProtocolError> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => return Err(ProtocolError::IoDisconnected),
-            Ok(n) => filled += n,
-            Err(e) => {
-                // Check if error is WouldBlock
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    return Err(ProtocolError::IoWouldBlock);
-                }
-                return Err(ProtocolError::IoError);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_all<W: Write>(writer: &mut W, buf: &[u8]) -> Result<(), ProtocolError> {
-    let mut written = 0;
-    while written < buf.len() {
-        match writer.write(&buf[written..]) {
-            Ok(0) => return Err(ProtocolError::IoDisconnected),
-            Ok(n) => written += n,
-            Err(_) => return Err(ProtocolError::IoError),
-        }
-    }
-    Ok(())
-}
-
-/// Read one framed message.
-pub fn read_frame<R: Read>(reader: &mut R) -> Result<(u32, Vec<u8>), ProtocolError> {
-    let mut header_bytes = [0u8; MessageHeader::SIZE];
-    read_exact(reader, &mut header_bytes)?;
-    let header = MessageHeader::from_le_bytes(header_bytes);
-
-    let payload_len = header.payload_size as usize;
-    if payload_len > MAX_PAYLOAD_SIZE {
-        return Err(ProtocolError::PayloadTooLarge);
-    }
-
-    let mut payload = Vec::new();
-    if payload_len > 0 {
-        payload.resize(payload_len, 0);
-        read_exact(reader, &mut payload)?;
-    }
-
-    Ok((header.msg_type, payload))
-}
-
-/// Write one framed message.
-pub fn write_frame<W: Write>(
-    writer: &mut W,
-    msg_type: u32,
-    payload: &[u8],
-) -> Result<(), ProtocolError> {
+/// Encode a full framed message (header + payload) into a single buffer.
+///
+/// This is a protocol-only helper; actual I/O is implemented by server/client code.
+pub fn encode_frame(msg_type: u32, payload: &[u8]) -> Vec<u8> {
     let header = MessageHeader {
         msg_type,
         payload_size: payload.len() as u32,
     };
-    let header_bytes = header.to_le_bytes();
-    write_all(writer, &header_bytes)?;
-    if !payload.is_empty() {
-        write_all(writer, payload)?;
-    }
-    writer.flush().map_err(|_| ProtocolError::IoError)?;
-    Ok(())
+    let mut out = Vec::new();
+    out.extend_from_slice(&header.to_le_bytes());
+    out.extend_from_slice(payload);
+    out
 }
 
 /// Borrowed client->server messages (payload may be borrowed).
@@ -343,103 +278,77 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
     }
 }
 
-/// Convenience: client->server CreateWindow.
-pub fn write_create_window<W: Write>(
-    writer: &mut W,
-    width: u32,
-    height: u32,
-) -> Result<(), ProtocolError> {
+/// Build payload for client->server `CREATE_WINDOW`.
+pub fn payload_create_window(width: u32, height: u32) -> [u8; 8] {
     let mut payload = [0u8; 8];
     payload[0..4].copy_from_slice(&width.to_le_bytes());
     payload[4..8].copy_from_slice(&height.to_le_bytes());
-    write_frame(writer, client_msg::CREATE_WINDOW, &payload)
+    payload
 }
 
-/// Convenience: client->server DestroyWindow.
-pub fn write_destroy_window<W: Write>(writer: &mut W, window_id: u32) -> Result<(), ProtocolError> {
-    let payload = window_id.to_le_bytes();
-    write_frame(writer, client_msg::DESTROY_WINDOW, &payload)
+/// Build payload for client->server `DESTROY_WINDOW`.
+pub fn payload_destroy_window(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
 }
 
-/// Convenience: client->server UpdateBuffer (damage notification).
-pub fn write_update_buffer<W: Write>(
-    writer: &mut W,
-    window_id: u32,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-) -> Result<(), ProtocolError> {
+/// Build payload for client->server `SET_WINDOW_TITLE`.
+pub fn payload_set_window_title(window_id: u32, title: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&window_id.to_le_bytes());
+    out.extend_from_slice(&(title.len() as u32).to_le_bytes());
+    out.extend_from_slice(title);
+    out
+}
+
+/// Build payload for client->server `UPDATE_BUFFER` (damage notification).
+pub fn payload_update_buffer(window_id: u32, x: i32, y: i32, width: u32, height: u32) -> [u8; 20] {
     let mut payload = [0u8; 20];
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4..8].copy_from_slice(&x.to_le_bytes());
     payload[8..12].copy_from_slice(&y.to_le_bytes());
     payload[12..16].copy_from_slice(&width.to_le_bytes());
     payload[16..20].copy_from_slice(&height.to_le_bytes());
-    write_frame(writer, client_msg::UPDATE_BUFFER, &payload)
+    payload
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowCreated {
-    pub window_id: u32,
-    pub shm_size: u64,
+/// Build payload for client->server `REQUEST_MOVE_WINDOW`.
+pub fn payload_request_move_window(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
 }
 
-/// Convenience: server->client WindowCreated.
-pub fn write_window_created<W: Write>(
-    writer: &mut W,
-    window_id: u32,
-    shm_size: u64,
-) -> Result<(), ProtocolError> {
+/// Build payload for client->server `MOVE_WINDOW`.
+pub fn payload_move_window(window_id: u32, x: i32, y: i32) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[0..4].copy_from_slice(&window_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&x.to_le_bytes());
+    payload[8..12].copy_from_slice(&y.to_le_bytes());
+    payload
+}
+
+/// Build payload for server->client `WINDOW_CREATED`.
+pub fn payload_window_created(window_id: u32, shm_size: u64) -> [u8; 12] {
     let mut payload = [0u8; 12];
     payload[0..4].copy_from_slice(&window_id.to_le_bytes());
     payload[4..12].copy_from_slice(&shm_size.to_le_bytes());
-    write_frame(writer, server_msg::WINDOW_CREATED, &payload)
+    payload
 }
 
-/// Convenience: read and parse one WindowCreated.
-pub fn read_window_created<R: Read>(reader: &mut R) -> Result<WindowCreated, ProtocolError> {
-    let (msg_type, payload) = read_frame(reader)?;
-    match parse_server_message(msg_type, &payload)? {
-        ServerMessage::WindowCreated {
-            window_id,
-            shm_size,
-        } => Ok(WindowCreated {
-            window_id,
-            shm_size,
-        }),
-        _ => Err(ProtocolError::UnknownMessageType),
-    }
+/// Build payload for server->client `WINDOW_DESTROYED`.
+pub fn payload_window_destroyed(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
 }
 
-/// Convenience: server->client InputEvent.
-pub fn write_input_event<W: Write>(
-    writer: &mut W,
-    time: u64,
-    type_: u16,
-    code: u16,
-    value: i32,
-) -> Result<(), ProtocolError> {
+/// Build payload for server->client `INPUT_EVENT`.
+pub fn payload_input_event(time: u64, type_: u16, code: u16, value: i32) -> [u8; 16] {
     let mut payload = [0u8; 16];
     payload[0..8].copy_from_slice(&time.to_le_bytes());
     payload[8..10].copy_from_slice(&type_.to_le_bytes());
     payload[10..12].copy_from_slice(&code.to_le_bytes());
     payload[12..16].copy_from_slice(&value.to_le_bytes());
-    write_frame(writer, server_msg::INPUT_EVENT, &payload)
+    payload
 }
 
-/// Send a shared memory handle over the socket (out-of-band, after WINDOW_CREATED).
-///
-/// This uses Socket::send_handle() for SCM_RIGHTS-style handle transfer.
-pub fn send_shm_handle(socket: &Socket, handle: &Handle) -> Result<(), ProtocolError> {
-    socket
-        .send_handle(handle)
-        .map_err(|_| ProtocolError::IoError)
-}
-
-/// Receive a shared memory handle over the socket (out-of-band, after WINDOW_CREATED).
-///
-/// This uses Socket::recv_handle() for SCM_RIGHTS-style handle transfer.
-pub fn recv_shm_handle(socket: &Socket) -> Result<Handle, ProtocolError> {
-    socket.recv_handle().map_err(|_| ProtocolError::IoError)
+/// Build payload for server->client `ERROR`.
+pub fn payload_error(code: u32) -> [u8; 4] {
+    code.to_le_bytes()
 }

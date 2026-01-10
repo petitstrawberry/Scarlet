@@ -60,11 +60,7 @@ impl Error {
 
 impl From<sws_protocol::ProtocolError> for Error {
     fn from(e: sws_protocol::ProtocolError) -> Self {
-        match e {
-            sws_protocol::ProtocolError::IoWouldBlock => Error::WouldBlock,
-            sws_protocol::ProtocolError::IoDisconnected => Error::Disconnected,
-            sws_protocol::ProtocolError::IoError => Error::IoError,
-            _ => Error::ProtocolError,
-        }
+        let _ = e;
+        Error::ProtocolError
     }
 }
